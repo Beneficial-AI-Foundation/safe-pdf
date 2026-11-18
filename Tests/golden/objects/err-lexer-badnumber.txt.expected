@@ -1,0 +1,2 @@
+error
+malformed at 3: lexer: SafePdf.LexErrorKind.badNumber
