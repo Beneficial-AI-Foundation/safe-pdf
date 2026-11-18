@@ -11,8 +11,16 @@ shell code finds objects by a linear token scan: it lexes from offset 0 with
 `Core.Lex.next`, and wherever the token stream reads `int n`, `int g`, keyword `obj` it calls
 `SafePdf.parseIndirectAt` at the start of the `n` token. On success it resumes after
 `endobj` (so stream data is skipped); on failure it records the error and resumes after the
-`obj` keyword. A lexer error skips one byte. Every step advances at least one byte, and the
-loop carries fuel `bytes.size + 1`.
+`obj` keyword, except that a failed stream object (`<< … >> stream`) resumes after the next
+`endstream` (or at end of input if there is none), so binary stream data is never lexed
+(task 1.14: lexing binary data with unbalanced `(` is quadratic, since each unterminated
+literal string runs to the end of the input and the scan then skips one byte). A lexer error
+skips one byte. Every step advances at least one byte, and the loop carries fuel
+`bytes.size + 1`.
+
+**Indirect `/Length`.** A second pass re-parses the objects that failed with `unsupported:
+indirect /Length` through `Core.Xref.Length.parseIndirectResolved`, with the scanned headers
+(last header per object number) standing in for the cross-reference table.
 
 Later definitions of the same `(num, gen)` win (incremental updates): only the last
 occurrence of each pair is shown unless `--all` is given.
@@ -52,6 +60,39 @@ structure Found where
 /-- The bytes of the keyword `obj`. -/
 def objKeyword : List UInt8 := [111, 98, 106]
 
+/-- Does `pat` occur in `bytes` at offset `i`? -/
+def matchesAt (bytes : ByteArray) (i : Nat) : List UInt8 → Bool
+  | [] => true
+  | b :: rest => bytes[i]? == some b && matchesAt bytes (i + 1) rest
+
+/-- First offset `≥ i` where `pat` occurs, searching at most `fuel` offsets. -/
+def findFrom (bytes : ByteArray) (pat : List UInt8) : Nat → Nat → Option Nat
+  | 0, _ => none
+  | fuel + 1, i =>
+    if i ≥ bytes.size then none
+    else if matchesAt bytes i pat then some i
+    else findFrom bytes pat fuel (i + 1)
+
+/-- The bytes of the keyword `endstream`. -/
+def endstreamKeyword : List UInt8 := [101, 110, 100, 115, 116, 114, 101, 97, 109]
+
+/-- Where to resume after a failed object whose header ended at `p3`. If the object is a
+stream (`<< … >> stream`), its data must not be lexed (binary data with unbalanced `(` makes
+every lexer attempt run to the end of the input, which is quadratic): resume after the next
+`endstream`, or at the end of the input if there is none. Otherwise resume at `p3`. -/
+def resumeAfterError (limits : Limits) (bytes : ByteArray) (p3 : Nat) : Nat :=
+  match SafePdf.parseObjectAt limits bytes p3 with
+  | .ok (.dict _, r) =>
+    match Core.Lex.next bytes r with
+    | .ok (some (.keyword kw, r2)) =>
+      if kw == Core.ObjParse.kwStream then
+        match findFrom bytes endstreamKeyword (bytes.size + 1) r2 with
+        | some i => i + endstreamKeyword.length
+        | none => bytes.size
+      else p3
+    | _ => p3
+  | _ => p3
+
 /-- Linear scan for `n g obj` headers from `pos`, with `fuel` steps (each advances at least
 one byte). -/
 def scan (limits : Limits) (bytes : ByteArray) : Nat → Nat → Array Found → Array Found
@@ -84,12 +125,50 @@ def scan (limits : Limits) (bytes : ByteArray) : Nat → Nat → Array Found →
           scan limits bytes fuel (max p4 (pos + 1))
             (acc.push { num := n, gen := g, offset := start, outcome := .ok io })
         | .error e =>
-          scan limits bytes fuel (max p3 (pos + 1))
+          scan limits bytes fuel (max (resumeAfterError limits bytes p3) (pos + 1))
             (acc.push { num := n, gen := g, offset := start, outcome := .err e })
 
-/-- All `n g obj` headers in `bytes`, in file order. -/
+/-- A cross-reference substitute built from the scan: for each object number, the generation
+and offset of its last header in file order, sorted by object number. -/
+def headerTable (fs : Array Found) : Array (Nat × Nat × Nat) :=
+  let indexed := (List.range fs.size).zip fs.toList
+  -- Stable sort by object number; within a number, file order is kept.
+  let sorted := indexed.mergeSort fun a b => a.2.num ≤ b.2.num
+  let rec lasts : List (Nat × Found) → List (Nat × Nat × Nat)
+    | [] => []
+    | [a] => [(a.2.num, a.2.gen, a.2.offset)]
+    | a :: b :: rest =>
+      if a.2.num == b.2.num then lasts (b :: rest)
+      else (a.2.num, a.2.gen, a.2.offset) :: lasts (b :: rest)
+  (lasts sorted).toArray
+
+/-- Lookup in a `headerTable` by binary search. -/
+def tableLookup (t : Array (Nat × Nat × Nat)) (n : Nat) : Option Core.Xref.XrefEntry :=
+  if t.isEmpty then none else
+  match t.binSearch (n, 0, 0) (fun a b => a.1 < b.1) with
+  | some (_, g, off) => some (.inUse off g)
+  | none => none
+
+/-- Re-parse an object that failed only because its stream `/Length` is indirect, resolving
+the reference through the scanned header table (`Core.Xref.Length.parseIndirectResolved`). -/
+def resolveFound (limits : Limits) (bytes : ByteArray) (t : Array (Nat × Nat × Nat))
+    (f : Found) : Found :=
+  match f.outcome with
+  | .err (.unsupported what) =>
+    if what == "indirect /Length" then
+      match Core.Xref.Length.parseIndirectResolved (tableLookup t) limits bytes t.size f.offset
+      with
+      | .ok (io, _) => { f with outcome := .ok io }
+      | .error e => { f with outcome := .err e }
+    else f
+  | _ => f
+
+/-- All `n g obj` headers in `bytes`, in file order. Streams with an indirect `/Length` are
+resolved in a second pass against the offsets of all headers found. -/
 def discover (limits : Limits) (bytes : ByteArray) : Array Found :=
-  scan limits bytes (bytes.size + 1) 0 #[]
+  let found := scan limits bytes (bytes.size + 1) 0 #[]
+  let t := headerTable found
+  found.map (resolveFound limits bytes t)
 
 /-- Keep only the last occurrence of each `(num, gen)`, preserving file order. -/
 def lastOnly (fs : Array Found) : List Found :=
