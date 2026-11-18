@@ -198,6 +198,8 @@ Feature tiers from the product side: **Tier 0** = most papers won't display with
   differential-test runner against `qpdf`/`mutool`/pdf.js (structure + text, later pixels).
 - Corpus acquisition: ~2k arXiv PDFs across years/engines, SafeDocs evaluation corpus,
   pdf-association test files, Bogk & Schöpl DoS file.
+- Inspector skeleton (`Shell/Inspect`): the unverified debug CLI of the MVP / visibility
+  track (see §6, after the phases); each later phase adds a view.
 - **Milestone M0**: CI green; fuzzer runs; corpus catalogued.
 
 ### Phase 1 — Lexer and object model
@@ -248,7 +250,8 @@ Feature tiers from the product side: **Tier 0** = most papers won't display with
   this is what makes C6 provable).
 - Interpreter state transitions specified as an inductive relation; impl proven against it.
 - **M5**: operator coverage report ≥ 99% of corpus ops; interpreter never fails on corpus
-  (unknown operators skipped per spec, logged).
+  (unknown operators skipped per spec, logged); inspector exports pages as **SVG rendered
+  from the DisplayList** — the first visible pages, two phases before the rasterizer.
 
 ### Phase 6 — Fonts and text extraction
 The biggest engineering item.
@@ -274,7 +277,8 @@ The biggest engineering item.
   (target: median page < 100 ms compiled).
 
 ### Phase 8 — Viewer shell + annotations
-- Shell: open/render/scroll/zoom/rotate, selection & copy (from C3 structures), search,
+- Shell: a **native desktop app** (decided, §8) — open/render/scroll/zoom/rotate, selection &
+  copy (from C3 structures), search,
   outline panel, link activation (URI links: click-through with the real target shown — no
   auto-navigation).
 - Display existing annotations via appearance streams (`/AP`) — reuses the interpreter.
@@ -286,6 +290,30 @@ The biggest engineering item.
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
 optional content groups, tagged-PDF reading order, accessibility export.
+
+### MVP / visibility track
+
+The full viewer lands at M8, but every milestone ships a visible artifact through the
+**inspector**: an unverified debug tool (shell code, outside `Core/`) that grows one view per
+phase, so progress can be seen — and the plan adjusted from feedback — long before Phase 8.
+
+| After | Visible artifact |
+|---|---|
+| M0 | Inspector skeleton; corpus dashboard (§7.4) |
+| M1 | Pretty-printed object tree of any PDF, diffable against `qpdf --json` |
+| M2 | Xref resolution trace, revision history, repair-path report on real files |
+| M3 | Decoded-stream viewer (the raw content streams of real papers) |
+| M4 | Page-tree + outline browser; encrypted files open |
+| M5 | **SVG export of the DisplayList** — recognizably rendered pages two phases early (paths exact; glyphs as positioned boxes until M6) |
+| M6 | Extracted-text browser; text layer overlaid on the SVG |
+| M7 | Real raster output replaces the SVG approximation |
+
+**Vertical-slice demo (optional, after M2):** a thin cut through Phases 4–7 — minimal page
+tree, text + path operators only, standard-14 metrics, SVG output — fed with corpus files
+pre-decompressed by `mutool clean -d` / `qpdf --qdf`, so it needs no filters yet. Value: real
+rendered pages shortly after M2, and early exercise of the `DisplayList` type (de-risks the
+M5 interface freeze). Rules: it lives outside `Core/`, the §3 / §7.5 hygiene rules are not
+weakened for it, and it is deleted piecewise as the verified phases replace it.
 
 ### Parallelism
 
@@ -323,6 +351,11 @@ Proofs show we meet *our* spec; testing shows our spec matches the *world*.
 - Strict/repair two-parser architecture (Caradoc pattern) with conservativity proof.
 - One DisplayList feeding both raster and text (makes C6 structural).
 - Rational-arithmetic geometric model as proof reference; float implementation tested.
+- The viewer shell is a **native desktop app**, not a webapp: Lean compiles to native code
+  via C, so the verified core links directly into any toolkit with a C FFI. A web shell would
+  need either server-side parsing (reintroducing the network boundary the threat model
+  avoids) or an immature Lean→WASM target. Browser-rendered SVG dumps remain fine as a
+  *development* inspector view — the core never runs in a browser.
 
 **Open — revisit at the marked milestone:**
 - *Inflate performance in Lean* (M3): if proven-Lean inflate is too slow on big scanned PDFs,
@@ -331,7 +364,8 @@ Proofs show we meet *our* spec; testing shows our spec matches the *world*.
 - *Rasterizer performance* (M7): compiled Lean should manage; fallback is coarser
   tiling/caching in the shell, never moving raster logic out of the core.
 - *How much crypto to trust* (M4): AES from vetted C (sandboxed) vs Lean implementation.
-- *GUI toolkit for the shell* (M8): anything; the shell is unverified and replaceable.
+- *GUI toolkit for the shell* (M8): native app decided (above); the toolkit itself is still
+  open — GTK, Qt, Tauri, SDL all work via C FFI; the shell is unverified and replaceable.
 - *Proof-effort budget*: which C-properties get full mechanization vs property-based testing
   first with proofs retrofitted (C3 is the likeliest to stage this way).
 
@@ -368,7 +402,7 @@ safe-pdf/
     Spec/                      -- denotational specs + the theorems
     Repair.lean                -- lenient path (total, conservative)
     Quarantine/                -- FFI decoders + revalidation proofs
-    Shell/                     -- unverified viewer
+    Shell/                     -- unverified native viewer + inspector (MVP track)
   Tests/
     golden/  fuzz/  adversarial/  differential/
   docs/
@@ -377,7 +411,8 @@ safe-pdf/
 
 ## 11. Immediate next steps
 
-1. Phase 0: `lake init`, CI with the proof-hygiene checks, pull the first corpus slice.
+1. Phase 0: `lake init`, CI with the proof-hygiene checks, pull the first corpus slice,
+   inspector skeleton.
 2. Reproduce the Bogk & Schöpl cyclic-xref file; check it hangs/crashes stock tools; commit
    it to `Tests/adversarial/`.
 3. Phase 1 lexer: write `Spec/Lex.lean` (denotational) before `Core/Lex.lean` — the first
