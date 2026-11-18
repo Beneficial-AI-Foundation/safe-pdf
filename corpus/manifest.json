@@ -1,0 +1,1186 @@
+{
+ "version": 1,
+ "entries": [
+  {
+   "id": "arxiv-0704.0001",
+   "url": "https://arxiv.org/pdf/0704.0001",
+   "sha256": "d1ffcb036713b48e7e0ff8ca76184f19ff6fb0be62e4c4aa8864fa4a54414806",
+   "size": 1647343,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2007,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-0712.3572",
+   "url": "https://arxiv.org/pdf/0712.3572",
+   "sha256": "e76ab18f252b66039fb613a9e701a103eb6f69a6e9c4aefd3014f136c5b09384",
+   "size": 385204,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2007,
+    "producer": "pdfTeX-1.40.4",
+    "embedded": [
+     "Ghostscript"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-0801.0001",
+   "url": "https://arxiv.org/pdf/0801.0001",
+   "sha256": "d40fa01c7ec45ad228221ca26873dbc7234f4058aae2ae1a0942fe04cb5806ce",
+   "size": 151022,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2008,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-0805.0004",
+   "url": "https://arxiv.org/pdf/0805.0004",
+   "sha256": "d2d79bfd75eb7dca13ebc91b2b09a1339a00cce041cbb580870fb1505249196c",
+   "size": 2104833,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2008,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-0812.0001",
+   "url": "https://arxiv.org/pdf/0812.0001",
+   "sha256": "e675616c4c86b6ebd9ed40a5744fee508ed95a3c5474e62cf373d7d6a431cf8f",
+   "size": 484250,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2008,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-0903.0001",
+   "url": "https://arxiv.org/pdf/0903.0001",
+   "sha256": "d2c7fb010d056f14da9caf6c00001e425dede6d081013496edbc9003eb65031a",
+   "size": 233708,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2009,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-0905.0002",
+   "url": "https://arxiv.org/pdf/0905.0002",
+   "sha256": "ac996b26bf9687510004e24bbee1e8b031a00e3c3d3452a0956d66e9d628fab8",
+   "size": 591308,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2009,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1003.0001",
+   "url": "https://arxiv.org/pdf/1003.0001",
+   "sha256": "e01eb4f4523c19d1a0eba374417b5a99e7ae4ee9f5747cabe53d0666d70d6253",
+   "size": 614960,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2010,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1008.0003",
+   "url": "https://arxiv.org/pdf/1008.0003",
+   "sha256": "ecbe9296d244cf23d326f2c7c2295ab2b1665473622f0774d3d5fd3ab8d0c63c",
+   "size": 918327,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2010,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "gnuplot 4.2 patchlevel 0"
+  },
+  {
+   "id": "arxiv-1101.00001",
+   "url": "https://arxiv.org/pdf/1101.00001",
+   "sha256": "401c2ac235cc9967653c0de6bb9a1ff4028ca78f9c72b84cd4b928313dd953a4",
+   "size": 1161428,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2011,
+    "producer": "GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.98 Copyright 2009 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-1105.2345",
+   "url": "https://arxiv.org/pdf/1105.2345",
+   "sha256": "cf422232d6b3a229c8a8d02acc6fddd5016f99e6c6657dafd73864d7b52ee383",
+   "size": 554721,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2011,
+    "producer": "GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.98 Copyright 2009 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-1207.7214",
+   "url": "https://arxiv.org/pdf/1207.7214",
+   "sha256": "e038215492b06a5f79bab24098c0004c75b0588f99724d8ea2345a6ece0bd53b",
+   "size": 737631,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2012,
+    "producer": "GPL Ghostscript 10.01.2",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1207.7235",
+   "url": "https://arxiv.org/pdf/1207.7235",
+   "sha256": "b24f67a66b6756d48474b6c8df8d0ce723f61ffa154cbe662312698f6f801dc2",
+   "size": 1849727,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2012,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "Ghostscript",
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1212.00001",
+   "url": "https://arxiv.org/pdf/1212.00001",
+   "sha256": "6ab63b7e769d32f451bf146c9618d91ef6dad25d2fe9ffe0aa8fd17043090970",
+   "size": 201931,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2012,
+    "producer": "GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.991 Copyright 2011 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-1301.3781",
+   "url": "https://arxiv.org/pdf/1301.3781",
+   "sha256": "a44d7e22d2005752271c9cc1929c6462d4c8270916b063977992a883e3a54362",
+   "size": 228716,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2013,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "LibreOffice"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1303.5076",
+   "url": "https://arxiv.org/pdf/1303.5076",
+   "sha256": "a9230af9b0d3b12cf12dbdcb5437db7c65dd6e237a2b95b84bd0ee1b05cd0c49",
+   "size": 18853109,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2013,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "Ghostscript",
+     "Quartz",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1406.2661",
+   "url": "https://arxiv.org/pdf/1406.2661",
+   "sha256": "ff5819e3a7b713c3bd3107b7de3d51fe0a347aa5d8444f0efdcf2345ef0a8b63",
+   "size": 530482,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2014,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "TeX"
+  },
+  {
+   "id": "arxiv-1409.0003",
+   "url": "https://arxiv.org/pdf/1409.0003",
+   "sha256": "5db997f102cfec8a6a7307c4d66bf73ddb8f00764d7be5b57bee29318900c335",
+   "size": 443793,
+   "source": "arxiv",
+   "category": {
+    "engine": "unknown",
+    "year": 2014,
+    "producer": "unknown",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed"
+  },
+  {
+   "id": "arxiv-1409.0473",
+   "url": "https://arxiv.org/pdf/1409.0473",
+   "sha256": "84801c8410da51b449d379d2fa4939a416123f2c93991077a680f863026022a7",
+   "size": 444482,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2014,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "cairo",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1409.1556",
+   "url": "https://arxiv.org/pdf/1409.1556",
+   "sha256": "83728f9efc21081792902b4c17a4657022d1e4a92ec81655c2427f4ef0755e50",
+   "size": 200010,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2014,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.08",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1412.6980",
+   "url": "https://arxiv.org/pdf/1412.6980",
+   "sha256": "eab9c73ae2ceda884b94830bda99312254bac4806f6c9f045cbab90721ecda31",
+   "size": 584641,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2014,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1502.03167",
+   "url": "https://arxiv.org/pdf/1502.03167",
+   "sha256": "bdc69e0b568f41d8d3181cc9077a461f58fcdd1c70c9f49efe60a05ee6109655",
+   "size": 173548,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2015,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.08",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1503.02531",
+   "url": "https://arxiv.org/pdf/1503.02531",
+   "sha256": "74e6689115c539db499f9d6153edecb364059926fd45402454f8210442444c5a",
+   "size": 106630,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2015,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.08",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1505.00001",
+   "url": "https://arxiv.org/pdf/1505.00001",
+   "sha256": "81424a333f71d87f2488534b3f69d6a8412d6e7733badb7e79639734887c5895",
+   "size": 773726,
+   "source": "arxiv",
+   "category": {
+    "engine": "Word",
+    "year": 2015,
+    "producer": "Microsoft® Word 2013",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Microsoft® Word 2013"
+  },
+  {
+   "id": "arxiv-1512.03385",
+   "url": "https://arxiv.org/pdf/1512.03385",
+   "sha256": "1e0651b6810ecba34a3dbc5b5b0209226f889004607c1f203540a48d64e5a93a",
+   "size": 819383,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2015,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "Acrobat"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1602.03837",
+   "url": "https://arxiv.org/pdf/1602.03837",
+   "sha256": "e5e864c23d015b69be17e5b5d51b5b462d2829353a867513414b6728f54589c4",
+   "size": 935476,
+   "source": "arxiv",
+   "category": {
+    "engine": "Acrobat",
+    "year": 2016,
+    "producer": "Acrobat Distiller 11.0 (Windows)",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Arbortext Advanced Print Publisher 9.1.405/W Unicode"
+  },
+  {
+   "id": "arxiv-1603.04467",
+   "url": "https://arxiv.org/pdf/1603.04467",
+   "sha256": "49fb080dd2dddb433478c4000b71d23c1391056d79cc16fadcba01819e3fba3c",
+   "size": 992339,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2016,
+    "producer": "pdfTeX-1.40.12",
+    "embedded": [
+     "cairo"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1706.00001",
+   "url": "https://arxiv.org/pdf/1706.00001",
+   "sha256": "50e7bd70b16e93bd5e23e33d680ec236b72e33110abda2e263d0fc39ad7db163",
+   "size": 914505,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2017,
+    "producer": "pdfTeX-1.40.17",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1706.03762",
+   "url": "https://arxiv.org/pdf/1706.03762",
+   "sha256": "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697",
+   "size": 2215244,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2017,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-1711.05101",
+   "url": "https://arxiv.org/pdf/1711.05101",
+   "sha256": "9d5af48931e773d6983d167e15c06ef594475b751c1f263827f5ed3c7a00d0d8",
+   "size": 6063896,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2017,
+    "producer": "pdfTeX-1.40.17",
+    "embedded": [
+     "cairo",
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1807.06209",
+   "url": "https://arxiv.org/pdf/1807.06209",
+   "sha256": "8e172730faf07c9f4ff3fdcc7043f76ed67df6f76066d47df30d693025b6ce77",
+   "size": 9317371,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2018,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "Ghostscript",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-1808.00001",
+   "url": "https://arxiv.org/pdf/1808.00001",
+   "sha256": "e410837e360038991e3629404fecec21b6fde29dcf542ef7262f3e153fd0dd00",
+   "size": 1715160,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2018,
+    "producer": "pdfTeX-1.40.17",
+    "embedded": [
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1810.04805",
+   "url": "https://arxiv.org/pdf/1810.04805",
+   "sha256": "5692a5514787a8c6727b4ff3b726a3385798bc68e12138d1d4af83947e2acf6e",
+   "size": 775166,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2018,
+    "producer": "pdfTeX-1.40.17",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1904.00001",
+   "url": "https://arxiv.org/pdf/1904.00001",
+   "sha256": "4ef25359fb83d642cd92a98ee7c25dd311c95044dad9b07c951f3185a8089711",
+   "size": 227883,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2019,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-1912.01703",
+   "url": "https://arxiv.org/pdf/1912.01703",
+   "sha256": "b47fb010f6872701d6d3bdd8270497be700c9961e2ec2cac2b08a154a43d81f2",
+   "size": 380838,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2019,
+    "producer": "pdfTeX-1.40.17",
+    "embedded": [
+     "Ghostscript"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-2005.14165",
+   "url": "https://arxiv.org/pdf/2005.14165",
+   "sha256": "97fd272f1fdfc18677462d0292f5fbf26ca86b4d1b485c2dba03269b643a0e83",
+   "size": 6768044,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2020,
+    "producer": "pdfTeX-1.40.17",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-2006.00001",
+   "url": "https://arxiv.org/pdf/2006.00001",
+   "sha256": "2953182d332d1495b8bdb6ea3f90c9531d56a773c07405375c18cfdcbebdda4d",
+   "size": 1104358,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2020,
+    "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-2006.11239",
+   "url": "https://arxiv.org/pdf/2006.11239",
+   "sha256": "aee5e07a802e8dfd2a386374c94fd61d1d056cb7e1e0fec4f28e8120ff5d8505",
+   "size": 10267274,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2020,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2010.11929",
+   "url": "https://arxiv.org/pdf/2010.11929",
+   "sha256": "8ce7b83971a14508ca711a27c875c9b6914c4f6767cf3150fb1ca6c07aa056d6",
+   "size": 3743814,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2020,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "Ghostscript",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2106.09685",
+   "url": "https://arxiv.org/pdf/2106.09685",
+   "sha256": "e9a0d3128767db616085dc0f4e6e455e672e89af823e8ed1282793682787395a",
+   "size": 1609513,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2021,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "matplotlib",
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2111.00001",
+   "url": "https://arxiv.org/pdf/2111.00001",
+   "sha256": "3324d2c29b06a2dede98a72e584fb863b1ac0df667af6c5f1af1b2cb2c9fd6d3",
+   "size": 1432835,
+   "source": "arxiv",
+   "category": {
+    "engine": "Word",
+    "year": 2021,
+    "producer": "Microsoft® Word for Microsoft 365",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Microsoft® Word for Microsoft 365"
+  },
+  {
+   "id": "arxiv-2112.10752",
+   "url": "https://arxiv.org/pdf/2112.10752",
+   "sha256": "46ede043a8dc07ca1f0f445620523fe1ad8b2436bd83856a3835612a47e9f79e",
+   "size": 40842586,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2021,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2201.11903",
+   "url": "https://arxiv.org/pdf/2201.11903",
+   "sha256": "7d9f878c23b460e4566aa4ec9201b1abfb3b8faefb2b1356e411cb90fef72a12",
+   "size": 891773,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2022,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "Quartz"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2203.02155",
+   "url": "https://arxiv.org/pdf/2203.02155",
+   "sha256": "c1984bb50a5b90fddb895fdc3a0f72e5bc977148c9f63ef6040cbe7a3e1f0d98",
+   "size": 1797405,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2022,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "Quartz",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2209.00001",
+   "url": "https://arxiv.org/pdf/2209.00001",
+   "sha256": "5568a65cc3313c07b6f6063e03047fabf8d96a463fd39a0cc38059e5be878d97",
+   "size": 787645,
+   "source": "arxiv",
+   "category": {
+    "engine": "Word",
+    "year": 2022,
+    "producer": "Adobe PDF Library 20.6.66",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Acrobat PDFMaker 20 for Word"
+  },
+  {
+   "id": "arxiv-2210.00002",
+   "url": "https://arxiv.org/pdf/2210.00002",
+   "sha256": "2a60bfc69dce9ebb0c1a8e918fc1e235c6c8c1589039e21a0b8c7b3906bfbce9",
+   "size": 10663311,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2022,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2302.13971",
+   "url": "https://arxiv.org/pdf/2302.13971",
+   "sha256": "2e663675ae36ad12adb2f5a05281bac2747ecf8d23d92bedd9f937a89fee7136",
+   "size": 726566,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2023,
+    "producer": "pdfTeX-1.40.21",
+    "embedded": [
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2303.08774",
+   "url": "https://arxiv.org/pdf/2303.08774",
+   "sha256": "c33a66dadca2388d7b172d6293b00dc32b71110c6f38fafe0d41112e61be7774",
+   "size": 5245564,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2023,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "LuaTeX",
+     "cairo",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2304.00001",
+   "url": "https://arxiv.org/pdf/2304.00001",
+   "sha256": "03b0b1b154975a5b063ad5ec1f22e7e3182525539ee01f84f80786f894d3410f",
+   "size": 780021,
+   "source": "arxiv",
+   "category": {
+    "engine": "Word",
+    "year": 2023,
+    "producer": "Microsoft® Word 2016",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Microsoft® Word 2016"
+  },
+  {
+   "id": "arxiv-2307.09288",
+   "url": "https://arxiv.org/pdf/2307.09288",
+   "sha256": "1df284ce95f783002074bfe8f21d47c646b396ceb1736ea3ec0ea212fc070d91",
+   "size": 13661300,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2023,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "Chrome/Skia",
+     "Quartz",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2308.00001",
+   "url": "https://arxiv.org/pdf/2308.00001",
+   "sha256": "e5985794262a0efa390488c4d632416b7ce3c1e5de0e6537d85dff3c4b425a31",
+   "size": 410211,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2023,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "Quartz"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2401.00001",
+   "url": "https://arxiv.org/pdf/2401.00001",
+   "sha256": "3b8271a5103c0ae1a279301c49d0a588a3a732a3de35347240e16dfcf06d5acd",
+   "size": 5810238,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2024,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2402.00003",
+   "url": "https://arxiv.org/pdf/2402.00003",
+   "sha256": "14d065a257c41388be2285f8d57dd41ee2aa56c4b9b2bf00eb611c0ce1470c9a",
+   "size": 681781,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2024,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "Ghostscript"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2405.00001",
+   "url": "https://arxiv.org/pdf/2405.00001",
+   "sha256": "a09599480afaf2c027a37ac6b398ce1367a240fa645fc2b8fa8f03dc3e4fc2f9",
+   "size": 734456,
+   "source": "arxiv",
+   "category": {
+    "engine": "Acrobat",
+    "year": 2024,
+    "producer": "Adobe Acrobat Pro 11.0.3",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Adobe Acrobat Pro 11.0.3"
+  },
+  {
+   "id": "arxiv-2412.19437",
+   "url": "https://arxiv.org/pdf/2412.19437",
+   "sha256": "812a3fd645c80725354de9d831a6785503007a60681461407f64e97305fa9330",
+   "size": 1887366,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2024,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "Quartz",
+     "cairo",
+     "matplotlib",
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2501.12948",
+   "url": "https://arxiv.org/pdf/2501.12948",
+   "sha256": "b191b0a365a64b4ab2791d117069ed17a2933d03554a662ced58b37df52018f4",
+   "size": 5034998,
+   "source": "arxiv",
+   "category": {
+    "engine": "other",
+    "year": 2025,
+    "producer": "pikepdf 8.15.1",
+    "embedded": [
+     "Quartz",
+     "cairo",
+     "matplotlib"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "arXiv GenPDF (tex2pdf:57610bf)"
+  },
+  {
+   "id": "arxiv-2504.00001",
+   "url": "https://arxiv.org/pdf/2504.00001",
+   "sha256": "6826b8e18a88c741e57c894e46340254910e0f379063aa404eddf2ce70bb32c6",
+   "size": 376119,
+   "source": "arxiv",
+   "category": {
+    "engine": "pdfTeX",
+    "year": 2025,
+    "producer": "pdfTeX-1.40.25",
+    "embedded": [
+     "other"
+    ]
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref"
+  },
+  {
+   "id": "arxiv-2507.00001",
+   "url": "https://arxiv.org/pdf/2507.00001",
+   "sha256": "e972640c7b20baa0708a15bfa5a3cb5cb05877969f0683c8c70265c07ac9f80d",
+   "size": 660233,
+   "source": "arxiv",
+   "category": {
+    "engine": "other",
+    "year": 2025,
+    "producer": "pikepdf 8.15.1",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "arXiv GenPDF (tex2pdf:a6404ea)"
+  },
+  {
+   "id": "arxiv-2508.00001",
+   "url": "https://arxiv.org/pdf/2508.00001",
+   "sha256": "d20fb6f0def94b03ab40db0df6098bb45bcdd51ecae5ea39c978bd997dabc23c",
+   "size": 275310,
+   "source": "arxiv",
+   "category": {
+    "engine": "other",
+    "year": 2025,
+    "producer": "pikepdf 8.15.1",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "arXiv GenPDF (tex2pdf:)"
+  },
+  {
+   "id": "arxiv-2511.00001",
+   "url": "https://arxiv.org/pdf/2511.00001",
+   "sha256": "84c8959da7898bf0ce4c184e09ba44dccfe1e3989a7f448f04c351cc19c72c98",
+   "size": 705625,
+   "source": "arxiv",
+   "category": {
+    "engine": "other",
+    "year": 2025,
+    "producer": "pikepdf 8.15.1",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "arXiv GenPDF (tex2pdf:e76afa9)"
+  },
+  {
+   "id": "arxiv-2512.00001",
+   "url": "https://arxiv.org/pdf/2512.00001",
+   "sha256": "fd84e4d1a18222c6c76ce7dc0a1bb0f5c786a40024dfa2317e4b482357cae066",
+   "size": 285879,
+   "source": "arxiv",
+   "category": {
+    "engine": "Chrome/Skia",
+    "year": 2025,
+    "producer": "Skia/PDF m140 Google Docs Renderer",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed"
+  },
+  {
+   "id": "arxiv-2601.00001",
+   "url": "https://arxiv.org/pdf/2601.00001",
+   "sha256": "5a0bfc88deffa0b7020f3f0d73477aaf194473c40cdc3cde5058e3830ae13a4e",
+   "size": 2484870,
+   "source": "arxiv",
+   "category": {
+    "engine": "Chrome/Skia",
+    "year": 2026,
+    "producer": "Skia/PDF m136 Google Docs Renderer",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "Adobe Acrobat (64-bit) 25.1.20693"
+  },
+  {
+   "id": "arxiv-2602.00001",
+   "url": "https://arxiv.org/pdf/2602.00001",
+   "sha256": "438ee3b0ed3e2029023ce1b163d1d71d670a31be41382b1ccffa9c4e7fd0e033",
+   "size": 544434,
+   "source": "arxiv",
+   "category": {
+    "engine": "other",
+    "year": 2026,
+    "producer": "pikepdf 8.15.1",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "arXiv GenPDF (tex2pdf:57610bf)"
+  },
+  {
+   "id": "arxiv-2603.00001",
+   "url": "https://arxiv.org/pdf/2603.00001",
+   "sha256": "cabaa2144534805d7b63dcbe89db27af958a09ee7dd4d1cca976e8d7c7281a25",
+   "size": 444075,
+   "source": "arxiv",
+   "category": {
+    "engine": "other",
+    "year": 2026,
+    "producer": "pikepdf 8.15.1",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "arXiv GenPDF (tex2pdf:a6404ea)"
+  },
+  {
+   "id": "arxiv-astro-ph_0603449",
+   "url": "https://arxiv.org/pdf/astro-ph/0603449",
+   "sha256": "ced5d0bc0ab0f96e00a0b3e9b395d8f130a6c67adbc7de2b5901790135f6d111",
+   "size": 1274183,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2006,
+    "producer": "GPL Ghostscript 10.01.2",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.95a Copyright 2005 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-astro-ph_9805201",
+   "url": "https://arxiv.org/pdf/astro-ph/9805201",
+   "sha256": "5edf2da6f5ff6438649e818e82ea86c7a168fbe1294fa165a252f9640b24e039",
+   "size": 883303,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 1998,
+    "producer": "GPL Ghostscript 10.01.2",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed"
+  },
+  {
+   "id": "arxiv-astro-ph_9812133",
+   "url": "https://arxiv.org/pdf/astro-ph/9812133",
+   "sha256": "e00cbd6601586401cad761b8accd3172b34131a55a0e471ec35e1293b02f932c",
+   "size": 599440,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 1998,
+    "producer": "GPL Ghostscript 10.01.2",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.86 Copyright 1999 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-cond-mat_0410550",
+   "url": "https://arxiv.org/pdf/cond-mat/0410550",
+   "sha256": "eae1b7c8c60ca6ef036aff539b8ea91f21d3129ecae8ce70f3f89c44a95d69f7",
+   "size": 330382,
+   "source": "arxiv",
+   "category": {
+    "engine": "Acrobat",
+    "year": 2004,
+    "producer": "Acrobat Distiller 6.0.1 (Windows)",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "PScript5.dll Version 5.2"
+  },
+  {
+   "id": "arxiv-cs_0410012",
+   "url": "https://arxiv.org/pdf/cs/0410012",
+   "sha256": "840d4cfd3fe8f1bf7bb72b0187aabbec52faec01e42ad1a771cf392fb9d9ead5",
+   "size": 449311,
+   "source": "arxiv",
+   "category": {
+    "engine": "Acrobat",
+    "year": 2004,
+    "producer": "Acrobat Distiller 6.0 (Windows)",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "PScript5.dll Version 5.2"
+  },
+  {
+   "id": "arxiv-gr-qc_0507012",
+   "url": "https://arxiv.org/pdf/gr-qc/0507012",
+   "sha256": "0594f5c2198289486be0689d6bcd457767851608e035de406b34c56958149199",
+   "size": 107220,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2005,
+    "producer": "GPL Ghostscript GIT PRERELEASE 9.22",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.86 Copyright 1999 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-hep-th_9711200",
+   "url": "https://arxiv.org/pdf/hep-th/9711200",
+   "sha256": "b711c300aac9a8c93d84451675554da8829d4b7d3c1ae23cdd16e94523975f06",
+   "size": 246327,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 1997,
+    "producer": "GPL Ghostscript 10.01.2",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.86 Copyright 1999 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-math_0211159",
+   "url": "https://arxiv.org/pdf/math/0211159",
+   "sha256": "945e278613c45ea1ab617b28c3095783d0e68958dc0546dfcfa9b42b9674fbe1",
+   "size": 325949,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 2002,
+    "producer": "GPL Ghostscript 10.01.2",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.86 Copyright 1999 Radical Eye Software"
+  },
+  {
+   "id": "arxiv-math_0303109",
+   "url": "https://arxiv.org/pdf/math/0303109",
+   "sha256": "6290421ec45e459a16a5ecad86d1162eecfed9f2c2646c7b2728f0503de8f706",
+   "size": 274776,
+   "source": "arxiv",
+   "category": {
+    "engine": "dvips+ghostscript",
+    "year": 2003,
+    "producer": "dvips + GPL Ghostscript SVN PRE-RELEASE 8.62",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "LaTeX with hyperref package"
+  },
+  {
+   "id": "arxiv-quant-ph_9508027",
+   "url": "https://arxiv.org/pdf/quant-ph/9508027",
+   "sha256": "96ba03bbfa27ea6a9ab5f1795cb62166948a6de4d8da84f9f43044bb5ab58838",
+   "size": 315663,
+   "source": "arxiv",
+   "category": {
+    "engine": "Ghostscript",
+    "year": 1995,
+    "producer": "GPL Ghostscript GIT PRERELEASE 9.08",
+    "embedded": []
+   },
+   "license": "arXiv submission; copyright remains with authors; fetched by URL, never redistributed",
+   "creator": "dvips(k) 5.86 Copyright 1999 Radical Eye Software"
+  }
+ ]
+}
