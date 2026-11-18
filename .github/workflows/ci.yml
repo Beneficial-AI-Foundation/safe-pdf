@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+          restore-keys: |
+            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
+            lean-${{ runner.os }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+          "$HOME/.elan/bin/lean" --version
+          "$HOME/.elan/bin/lake" --version
+
+      - name: Lint Python scripts
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: |
+          find scripts Tests -name '*.py' -print0 | xargs -0 -r python3 -m py_compile
+
+      - name: Build library and inspector
+        run: lake build
+
+      - name: Build test and fuzz executables
+        run: lake build tests fuzz
+
+      - name: Tests
+        run: lake exe tests
+
+      - name: Proof hygiene guard
+        run: scripts/check-hygiene.sh
+
+      - name: Adversarial corpus is up to date
+        run: python3 -I Tests/adversarial/generate.py --check
+
+      - name: Fuzz smoke
+        run: scripts/fuzz.sh
