@@ -180,3 +180,13 @@ import SafePdf
 #print axioms SafePdf.Core.Filter.Predictor.unfilterRow_spec
 #print axioms SafePdf.Core.Filter.Predictor.unfilterRowSpec_none
 #print axioms SafePdf.Core.Filter.Predictor.unfilterRow_eq_specGo
+
+-- Phase 2, task 2.4a: xref streams in the chain walk (SafePdf/Spec/XrefTerm.lean)
+#print axioms SafePdf.Spec.XrefTerm.step_calls_le
+#print axioms SafePdf.Spec.XrefTerm.step_ok
+#print axioms SafePdf.Spec.XrefTerm.walk_calls_le
+#print axioms SafePdf.Spec.XrefTerm.walk_ok
+#print axioms SafePdf.Spec.XrefTerm.parseSection_of_table
+#print axioms SafePdf.Spec.XrefTerm.PrevStep.of_table
+#print axioms SafePdf.Spec.XrefTerm.parseSection_of_stream
+#print axioms SafePdf.Spec.XrefTerm.PrevStep.of_stream

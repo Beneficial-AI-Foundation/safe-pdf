@@ -6,7 +6,9 @@ import SafePdf.Core.Xref.Chain
 Plan.md §5.2 (first bullet), §4 S2/S3/S6, §6 Phase 2 (exit M2); ISO 32000-2 §7.5.5–7.5.6;
 Bogk & Schöpl 2014.
 
-Theorems about `Core.Xref.Chain` (task 2.2):
+Theorems about `Core.Xref.Chain` (task 2.2; generalized by 2.4a from classic tables to
+*sections*: a classic table or an xref stream, `Chain.parseSection`, with hybrid files'
+`/XRefStm` streams parsed in the same step and counted as visited offsets):
 
 * **S2 totality.** `loadChain` is a total function, accepted by Lean with the measure
   `bytes.size - visited.length` (unvisited offsets, bounded by the file length); no `partial`,
@@ -14,15 +16,17 @@ Theorems about `Core.Xref.Chain` (task 2.2):
 * **Structure of a success.** The revision offsets are pairwise distinct
   (`loadChain_offsets_nodup`) and inside the input (`loadChain_offsets_lt`); there are at most
   `bytes.size` and at most `limits.maxRevisions` of them (`loadChain_length_le`); and the `/Prev`
-  path from the `startxref` offset ends in a table without `/Prev` (`loadChain_ok_reach`).
-* **Cycle rejection.** `PrevStep limits bytes o o'` says "the table at `o` parses and its
-  trailer's `/Prev` is `o'`". If a `PrevStep` path from the `startxref` offset reaches an
-  offset that lies on a `PrevStep` cycle, `loadChain` returns an error
+  path from the `startxref` offset ends in a section without `/Prev` (`loadChain_ok_reach`).
+* **Cycle rejection.** `PrevStep limits bytes o o'` says "the section at `o` (table or
+  stream) parses and its trailer's `/Prev` is `o'`". It contains the 2.2 relation on classic
+  tables (`PrevStep.of_table`) and the xref-stream steps (`PrevStep.of_stream`).
+  If a `PrevStep` path from the `startxref` offset reaches an offset that lies on a `PrevStep` cycle, `loadChain` returns an error
   (`loadChain_cycle_rejected`). This covers cycles of every length, including the 1-cycle
   (`/Prev` = own offset) and the 2-cycle of `Tests/adversarial/xref-prev-{self,cycle}.pdf`,
-  whose concrete `"xref /Prev cycle"` errors are checked by `#guard` in `Core.Xref.Chain`.
-* **S3 work bound.** `loadChainCounted` returns the number of `parseXrefTable` calls next to
-  the result; it is at most `bytes.size` and at most `limits.maxRevisions`
+  whose concrete `"xref /Prev cycle"` errors are checked by `#guard` in `Core.Xref.Chain`
+  (as is an xref stream whose `/Prev` is its own offset).
+* **S3 work bound.** `loadChainCounted` returns the number of section parses (tables, xref
+  streams and `/XRefStm` streams) next to the result; it is at most `bytes.size` and at most `limits.maxRevisions`
   (`loadChainCounted_calls_le`), and equals the number of revisions on success.
 * **S6 preview.** `mergeChain` keeps, per object number, the entry of the newest revision
   that has one (`mergeChain_lookup`).
@@ -34,13 +38,52 @@ open SafePdf SafePdf.Core.Xref SafePdf.Core.Xref.Chain
 
 /-! ## The `/Prev` relation -/
 
-/-- One `/Prev` step: the classic table at `o` parses and its trailer's `/Prev` is `o'`. -/
+/-- One `/Prev` step: the section at `o` (classic table or xref stream, `parseSection`)
+parses and its trailer's `/Prev` is `o'`. -/
 def PrevStep (limits : Limits) (bytes : ByteArray) (o o' : Nat) : Prop :=
-  ∃ sec tr r, parseXrefTable limits bytes o = .ok (sec, tr, r) ∧ tr.prev? = some o'
+  ∃ sec tr, parseSection limits bytes o = .ok (sec, tr) ∧ tr.prev? = some o'
 
-/-- The table at `o` parses and its trailer has no `/Prev`: the oldest revision. -/
+/-- The section at `o` parses and its trailer has no `/Prev`: the oldest revision. -/
 def Terminal (limits : Limits) (bytes : ByteArray) (o : Nat) : Prop :=
-  ∃ sec tr r, parseXrefTable limits bytes o = .ok (sec, tr, r) ∧ tr.prev? = none
+  ∃ sec tr, parseSection limits bytes o = .ok (sec, tr) ∧ tr.prev? = none
+
+/-- A classic table that parses is a section: the 2.2 relation (tables only) is contained in
+`PrevStep`, so every 2.2 cycle is still a `PrevStep` cycle. -/
+theorem parseSection_of_table {limits : Limits} {bytes : ByteArray} {o : Nat}
+    {sec : XrefSection} {tr : Trailer} {r : Nat}
+    (h : parseXrefTable limits bytes o = .ok (sec, tr, r)) :
+    parseSection limits bytes o = .ok (sec, tr) := by
+  have hm : matchAt bytes o kwXref = true := by
+    unfold parseXrefTable at h
+    split at h
+    · rename_i hc
+      simp only [Bool.and_eq_true] at hc
+      exact hc.1
+    · simp at h
+  unfold parseSection
+  simp only [hm, ↓reduceIte, h]
+
+/-- A 2.2 `/Prev` step (classic table) is a `PrevStep`. -/
+theorem PrevStep.of_table {limits : Limits} {bytes : ByteArray} {o o' : Nat}
+    {sec : XrefSection} {tr : Trailer} {r : Nat}
+    (h : parseXrefTable limits bytes o = .ok (sec, tr, r)) (hp : tr.prev? = some o') :
+    PrevStep limits bytes o o' :=
+  ⟨sec, tr, parseSection_of_table h, hp⟩
+
+/-- An xref stream that parses at an offset not holding `xref` is a section. -/
+theorem parseSection_of_stream {limits : Limits} {bytes : ByteArray} {o : Nat}
+    {sec : XrefSection} {tr : Trailer} (hk : matchAt bytes o kwXref = false)
+    (h : Stream.parseXrefStream limits bytes o = .ok (sec, tr)) :
+    parseSection limits bytes o = .ok (sec, tr) := by
+  unfold parseSection
+  simp only [hk, Bool.false_eq_true, ↓reduceIte, h]
+
+/-- An xref-stream `/Prev` step is a `PrevStep`. -/
+theorem PrevStep.of_stream {limits : Limits} {bytes : ByteArray} {o o' : Nat}
+    {sec : XrefSection} {tr : Trailer} (hk : matchAt bytes o kwXref = false)
+    (h : Stream.parseXrefStream limits bytes o = .ok (sec, tr)) (hp : tr.prev? = some o') :
+    PrevStep limits bytes o o' :=
+  ⟨sec, tr, parseSection_of_stream hk h, hp⟩
 
 /-- Reflexive-transitive closure of `PrevStep`: a `/Prev` path from `o` to `t`. -/
 inductive PrevReach (limits : Limits) (bytes : ByteArray) : Nat → Nat → Prop
@@ -50,25 +93,25 @@ inductive PrevReach (limits : Limits) (bytes : ByteArray) : Nat → Nat → Prop
   | step {o o' t : Nat} : PrevStep limits bytes o o' → PrevReach limits bytes o' t →
       PrevReach limits bytes o t
 
-/-- `PrevStep` is deterministic: a table has at most one `/Prev`. -/
+/-- `PrevStep` is deterministic: a section has at most one `/Prev`. -/
 theorem PrevStep.det {limits : Limits} {bytes : ByteArray} {o a b : Nat}
     (ha : PrevStep limits bytes o a) (hb : PrevStep limits bytes o b) : a = b := by
-  obtain ⟨s1, t1, r1, h1, p1⟩ := ha
-  obtain ⟨s2, t2, r2, h2, p2⟩ := hb
+  obtain ⟨s1, t1, h1, p1⟩ := ha
+  obtain ⟨s2, t2, h2, p2⟩ := hb
   rw [h1] at h2
   simp only [Except.ok.injEq, Prod.mk.injEq] at h2
-  obtain ⟨-, rfl, -⟩ := h2
+  obtain ⟨-, rfl⟩ := h2
   rw [p1] at p2
   exact Option.some.inj p2
 
-/-- A terminal table has no `/Prev` step. -/
+/-- A terminal section has no `/Prev` step. -/
 theorem Terminal.not_step {limits : Limits} {bytes : ByteArray} {o o' : Nat}
     (ht : Terminal limits bytes o) (hs : PrevStep limits bytes o o') : False := by
-  obtain ⟨s1, t1, r1, h1, p1⟩ := ht
-  obtain ⟨s2, t2, r2, h2, p2⟩ := hs
+  obtain ⟨s1, t1, h1, p1⟩ := ht
+  obtain ⟨s2, t2, h2, p2⟩ := hs
   rw [h1] at h2
   simp only [Except.ok.injEq, Prod.mk.injEq] at h2
-  obtain ⟨-, rfl, -⟩ := h2
+  obtain ⟨-, rfl⟩ := h2
   rw [p1] at p2
   cases p2
 
@@ -80,7 +123,7 @@ theorem PrevReach.tail {limits : Limits} {bytes : ByteArray} {o t t' : Nat}
   | refl o => exact .step hs (.refl t')
   | step h1 _ ih => exact .step h1 (ih hs)
 
-/-- No terminal table is reachable from an offset `o` on a `/Prev` cycle
+/-- No terminal section is reachable from an offset `o` on a `/Prev` cycle
 (`o → o1 →* o`): by determinism the path from `o` never leaves the cycle. -/
 theorem not_terminal_of_cycle {limits : Limits} {bytes : ByteArray} {o t : Nat}
     (hr : PrevReach limits bytes o t) (ht : Terminal limits bytes t) :
@@ -96,36 +139,132 @@ theorem not_terminal_of_cycle {limits : Limits} {bytes : ByteArray} {o t : Nat}
     | refl => exact ih ht hox (.refl _)
     | step hxy hyo => exact ih ht hxy (hyo.tail hox)
 
+/-! ## One step -/
+
+/-- Work bound of one step: its section parses (0, 1 or 2) are at most the number of
+unvisited offsets and at most the remaining revision budget. -/
+theorem step_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
+    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (step limits bytes off visited hnd).2 ≤ bytes.size - visited.length ∧
+      (step limits bytes off visited hnd).2 ≤ limits.maxRevisions - visited.length := by
+  unfold step
+  split
+  · rename_i hoff
+    split
+    · simp
+    · rename_i hmem
+      have h1 := length_lt_of_fresh hnd hlt hoff hmem
+      split
+      · simp
+      · rename_i hmax
+        split
+        · simp; omega
+        · split
+          · simp; omega
+          · split
+            · rename_i s _ hs
+              split
+              · simp; omega
+              · rename_i hsm
+                split
+                · simp; omega
+                · rename_i hmax2
+                  -- `s` and `off` are both fresh: two more offsets below `bytes.size`
+                  have h2 := length_le_of_nodup_of_lt (l := s :: off :: visited)
+                    (n := bytes.size)
+                    (by
+                      simp only [List.nodup_cons, List.mem_cons, not_or]
+                      exact ⟨⟨fun h => hsm (Or.inl h), fun h => hsm (Or.inr h)⟩, hmem, hnd⟩)
+                    (by
+                      intro x hx
+                      simp only [List.mem_cons] at hx
+                      rcases hx with rfl | rfl | hx
+                      · exact hs
+                      · exact hoff
+                      · exact hlt x hx)
+                  simp only [List.length_cons] at h2
+                  split
+                  · simp; omega
+                  · simp; omega
+            · simp; omega
+  · simp
+
+/-- What a successful step guarantees: one parse per revision, the revision budget is
+respected, and the section at `off` parses with the returned `/Prev`. -/
+theorem step_ok {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
+    {hnd : visited.Nodup} {so : StepOk bytes visited} {k : Nat}
+    (h : step limits bytes off visited hnd = (.ok so, k)) :
+    k = so.revs.length ∧ so.revs.length + visited.length ≤ limits.maxRevisions ∧
+      ∃ sec tr, parseSection limits bytes off = .ok (sec, tr) ∧ so.prev? = tr.prev? := by
+  unfold step at h
+  split at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · rename_i hmax
+        split at h
+        · simp at h
+        · rename_i sec tr hp
+          split at h
+          · simp only [Prod.mk.injEq, Except.ok.injEq] at h
+            obtain ⟨rfl, rfl⟩ := h
+            exact ⟨rfl, by simp; omega, sec, tr, hp, rfl⟩
+          · split at h
+            · split at h
+              · simp at h
+              · split at h
+                · simp at h
+                · rename_i hmax2
+                  split at h
+                  · simp at h
+                  · simp only [Prod.mk.injEq, Except.ok.injEq] at h
+                    obtain ⟨rfl, rfl⟩ := h
+                    exact ⟨rfl, by simp; omega, sec, tr, hp, rfl⟩
+            · simp at h
+  · simp at h
+
 /-! ## The loop -/
 
-/-- Work bound of the loop: the number of `parseXrefTable` calls is at most the number of
-unvisited offsets, and at most the remaining revision budget. -/
+/-- Work bound of the loop: the number of section parses is at most the number of unvisited
+offsets, and at most the remaining revision budget. -/
 theorem walk_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
     (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
     (walk limits bytes off visited hnd hlt).2 ≤ bytes.size - visited.length ∧
       (walk limits bytes off visited hnd hlt).2 ≤ limits.maxRevisions - visited.length := by
   fun_induction walk limits bytes off visited hnd hlt with
-  | case1 => simp
-  | case2 => simp
-  | case3 off visited hnd hlt hoff hmem hmax e hp =>
-    have := length_lt_of_fresh hnd hlt hoff hmem
-    simp; omega
-  | case4 off visited hnd hlt hoff hmem hmax sec tr r hp hprev =>
-    have := length_lt_of_fresh hnd hlt hoff hmem
-    simp; omega
-  | case5 off visited hnd hlt hoff hmem hmax sec tr r hp p hprev e k hw ih =>
-    have := length_lt_of_fresh hnd hlt hoff hmem
+  | case1 off visited hnd hlt e k hs =>
+    have := step_calls_le limits bytes off visited hnd hlt
+    rw [hs] at this
+    simpa using this
+  | case2 off visited hnd hlt so k hs hp =>
+    have := step_calls_le limits bytes off visited hnd hlt
+    rw [hs] at this
+    simpa using this
+  | case3 off visited hnd hlt so k hs p hp e k' hw ih =>
+    obtain ⟨hk, hlen, -⟩ := step_ok hs
+    have hb := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+      rcases List.mem_append.mp hx with hx | hx
+      · exact so.lt x hx
+      · exact hlt x hx)
     rw [hw] at ih
-    simp at ih ⊢; omega
-  | case6 off visited hnd hlt hoff hmem hmax sec tr r hp p hprev revs k hw ih =>
-    have := length_lt_of_fresh hnd hlt hoff hmem
+    simp only [List.length_append, List.length_map] at ih hb
+    simp only
+    omega
+  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+    obtain ⟨hk, hlen, -⟩ := step_ok hs
+    have hb := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+      rcases List.mem_append.mp hx with hx | hx
+      · exact so.lt x hx
+      · exact hlt x hx)
     rw [hw] at ih
-    simp at ih ⊢; omega
-  | case7 => simp
+    simp only [List.length_append, List.length_map] at ih hb
+    simp only
+    omega
 
 /-- What a successful run of the loop from `off` guarantees: the revision offsets are
 distinct, inside the input and not previously visited; the revision budget is respected;
-there is one parse per revision; and the `/Prev` path from `off` ends in a terminal table. -/
+there is one parse per revision; and the `/Prev` path from `off` ends in a terminal section. -/
 theorem walk_ok (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
     (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) {revs : List Revision}
     (h : (walk limits bytes off visited hnd hlt).1 = .ok revs) :
@@ -137,38 +276,39 @@ theorem walk_ok (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : Lis
   revert revs
   fun_induction walk limits bytes off visited hnd hlt with
   | case1 => simp
-  | case2 => simp
-  | case3 => simp
-  | case4 off visited hnd hlt hoff hmem hmax sec tr r hp hprev =>
+  | case2 off visited hnd hlt so k hs hp =>
     intro revs h
     simp only [Except.ok.injEq] at h
     subst h
-    refine ⟨by simp, ?_, by simp; omega, rfl, off, .refl off, sec, tr, r, hp, hprev⟩
-    simp only [List.map_cons, List.map_nil, List.mem_singleton, Revision.offset]
-    intro o ho
-    subst ho
-    exact ⟨hoff, hmem⟩
-  | case5 off visited hnd hlt hoff hmem hmax sec tr r hp p hprev e k hw ih => simp
-  | case6 off visited hnd hlt hoff hmem hmax sec tr r hp p hprev revs' k hw ih =>
+    obtain ⟨hk, hlen, sec, tr, hsec, hprev⟩ := step_ok hs
+    have hnd' := List.nodup_append.mp so.nodup
+    refine ⟨hnd'.1, fun o ho => ⟨so.lt o ho, fun hv => hnd'.2.2 o ho o hv rfl⟩, hlen, hk,
+      off, .refl off, sec, tr, hsec, ?_⟩
+    rw [← hprev, hp]
+  | case3 => simp
+  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
     intro revs h
     simp only [Except.ok.injEq] at h
     subst h
     rw [hw] at ih
-    obtain ⟨hnd', hmem', hlen, hk, t, hreach, hterm⟩ := ih rfl
-    refine ⟨?_, ?_, ?_, ?_, t, .step ⟨sec, tr, r, hp, hprev⟩ hreach, hterm⟩
-    · simp only [List.map_cons, List.nodup_cons]
-      refine ⟨fun hin => ?_, hnd'⟩
-      exact (hmem' _ hin).2 List.mem_cons_self
-    · simp only [List.map_cons, List.mem_cons]
-      intro o ho
-      rcases ho with rfl | ho
-      · exact ⟨hoff, hmem⟩
-      · have := hmem' o ho
-        exact ⟨this.1, fun hv => this.2 (List.mem_cons_of_mem _ hv)⟩
-    · simp at hlen ⊢; omega
-    · simp only at hk
-      simp [hk]
-  | case7 => simp
+    obtain ⟨hnd2, hmem2, hlen2, hk2, t, hreach, hterm⟩ := ih rfl
+    obtain ⟨hk, hlen, sec, tr, hsec, hprev⟩ := step_ok hs
+    have hnd' := List.nodup_append.mp so.nodup
+    refine ⟨?_, ?_, ?_, ?_, t, .step ⟨sec, tr, hsec, by rw [← hprev, hp]⟩ hreach, hterm⟩
+    · rw [List.map_append, List.nodup_append]
+      refine ⟨hnd'.1, hnd2, fun a ha b hb hab => ?_⟩
+      subst hab
+      exact (hmem2 a hb).2 (List.mem_append_left _ ha)
+    · intro o ho
+      rw [List.map_append, List.mem_append] at ho
+      rcases ho with ho | ho
+      · exact ⟨so.lt o ho, fun hv => hnd'.2.2 o ho o hv rfl⟩
+      · have := hmem2 o ho
+        exact ⟨this.1, fun hv => this.2 (List.mem_append_right _ hv)⟩
+    · simp only [List.length_append, List.length_map] at hlen2 ⊢
+      omega
+    · simp only [List.length_append] at hk2 ⊢
+      omega
 
 /-! ## Headline theorems -/
 
@@ -231,7 +371,7 @@ theorem loadChain_length_le {limits : Limits} {bytes : ByteArray} {revs : List R
   simp only [List.length_map] at this
   exact ⟨this, h3⟩
 
-/-- On success the `/Prev` path from the `startxref` offset ends in a table without `/Prev`. -/
+/-- On success the `/Prev` path from the `startxref` offset ends in a section without `/Prev`. -/
 theorem loadChain_ok_reach {limits : Limits} {bytes : ByteArray} {revs : List Revision}
     (h : loadChain limits bytes = .ok revs) :
     ∃ start, findStartxref bytes = .ok start ∧
@@ -240,7 +380,7 @@ theorem loadChain_ok_reach {limits : Limits} {bytes : ByteArray} {revs : List Re
   exact ⟨start, hs, h5⟩
 
 /-- **(d) Cycle rejection** (Bogk & Schöpl 2014). If the `/Prev` path from the `startxref`
-offset reaches an offset `o` that lies on a `/Prev` cycle (`o → o1 →* o`, every table on it
+offset reaches an offset `o` that lies on a `/Prev` cycle (`o → o1 →* o`, every section on it
 parsing), then `loadChain` fails. Cycles of every length are covered, the 1-cycle
 (`o1 = o`) included. -/
 theorem loadChain_cycle_rejected {limits : Limits} {bytes : ByteArray} {start o o1 : Nat}
@@ -271,9 +411,9 @@ where
         subst this
         exact ih hbt hterm hstep hback
 
-/-- **(e) Work bound** (S3). `loadChain` makes at most `bytes.size` calls of
-`parseXrefTable`, and at most `limits.maxRevisions`; the count is returned by `loadChainCounted`,
-whose first component is `loadChain`. -/
+/-- **(e) Work bound** (S3). `loadChain` makes at most `bytes.size` section parses (classic
+tables, xref streams and `/XRefStm` streams), and at most `limits.maxRevisions`; the
+count is returned by `loadChainCounted`, whose first component is `loadChain`. -/
 theorem loadChainCounted_calls_le (limits : Limits) (bytes : ByteArray) :
     (loadChainCounted limits bytes).2 ≤ bytes.size ∧
       (loadChainCounted limits bytes).2 ≤ limits.maxRevisions := by
