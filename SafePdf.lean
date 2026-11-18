@@ -17,3 +17,7 @@ import SafePdf.Spec.RoundTrip
 import SafePdf.Spec.ObjEquiv
 import SafePdf.Spec.RoundTripCore
 import SafePdf.Core.Xref
+import SafePdf.Core.Xref.Chain
+import SafePdf.Spec.XrefTerm
+import SafePdf.Core.Xref.Length
+import SafePdf.Repair
