@@ -2,6 +2,7 @@
 
 Maintained by `/next-wave`. The orchestrator is the only writer of this file.
 Parallel limit: 4
+Usage gate: 95%
 Design document: Plan.md
 
 ## How to read this file
@@ -66,6 +67,7 @@ Plan.md §6 Phase 1, §5.1. Exit: **M1**: object-level round-trip `parse (print 
 | 1.11 | Property tests vs `qpdf --json` object dumps on corpus (extends `Tests/differential/`) | 1.5, 0.7, 0.8 | `Tests/differential/objects.py` | new | done (2026-11-18) |
 | 1.12 | Inspector view `objects`: pretty-printed object tree, diffable against `qpdf --json` | 1.7, 0.10 | `SafePdf/Shell/Views/Objects.lean`, `SafePdf/Shell/Inspect.lean` | wt | done (2026-11-18) |
 | 1.13 | M1 evidence in CI: job `differential-objects` on `ubuntu-24.04` (qpdf ≥ 11 for JSON v2; pin/assert version), build `inspect`, restore the corpus from an Actions cache keyed on `corpus/manifest.json` (fetch once with `scripts/corpus/fetch.py` when missing), run `Tests/differential/run.py --comparator objects` over corpus + `Tests/adversarial/minimal-valid.pdf`; triage every disagreement (our bug / their bug / spec ambiguity → `docs/deviations-from-spec.md`) | 1.11, 1.12 | `.github/workflows/ci.yml`, `docs/deviations-from-spec.md`, `Tests/differential/` | wt | done (2026-11-18) |
+| 1.14 | Fix CI `differential-objects` failure: `inspect --view objects --json` timed out (> 60 s) on `corpus/files/arxiv-2307.09288.pdf` (13.7 MB). Profile with a short time budget (find whether the Shell scan, the lexer re-lexing, `parseIndirect`, or the O(n²) dict duplicate check dominates), fix the hot spot without weakening any theorem (Core changes must keep their proofs), re-run the corpus locally with per-file times ≤ 10 s | 1.13 | `SafePdf/Shell/Views/Objects.lean`, `SafePdf/Core/ObjParse.lean`, `SafePdf/Core/Lex.lean` | wt | todo |
 Exit criterion checked: [ ]
 
 ## Phase 2 — File structure: xref, trailer, revisions ★
@@ -78,9 +80,9 @@ Plan.md §6 Phase 2, §5.2, §5.4. Exit: **M2**: 99% of corpus opens (strict or 
 | 2.4 | Xref streams + object streams (needs Flate + PNG predictors — co-develop with 3.1/3.2); rank argument for containers | 2.2, 3.1, 3.2 | `SafePdf/Core/Xref/Stream.lean` | new | todo |
 | 2.5 | Unambiguity S6: newest-revision-wins, one winner per object id; hybrid `/XRefStm` | 2.2, 2.4 | `SafePdf/Spec/Unambiguous.lean` | new | todo |
 | 2.6 | Repair path `SafePdf/Repair.lean` (offset-tolerant `N 0 obj` scan), totality + bound proofs | 2.1 | `SafePdf/Repair.lean` | new | done (2026-11-18) |
-| 2.7 | Adversarial regression: all `Tests/adversarial/` files rejected in bounded time | 2.2, 2.3, 0.9 | `Tests/Adversarial.lean` | wt | todo |
+| 2.7 | Adversarial regression: all `Tests/adversarial/` files rejected in bounded time | 2.2, 2.3, 0.9 | `Tests/Adversarial.lean` | wt | done (2026-11-18) |
 | 2.8 | Inspector views: xref trace, revision history, repair report | 2.5, 2.6 | `SafePdf/Shell/Views/Xref.lean` | wt | todo |
-| 2.9 | Move local limits into `SafePdf/Core/Limits.lean`: `maxRevisions` (2.2, 4096) with new `LimitKind.revisions`, repair `failBudget` (2.6, 256) as `maxRepairFailures`; update Chain/Repair/theorems to use them | 2.2, 2.6 | `SafePdf/Core/Limits.lean`, `SafePdf/Core/Error.lean`, `SafePdf/Core/Xref/Chain.lean`, `SafePdf/Spec/XrefTerm.lean`, `SafePdf/Repair.lean` | wt | todo |
+| 2.9 | Move local limits into `SafePdf/Core/Limits.lean`: `maxRevisions` (2.2, 4096) with new `LimitKind.revisions`, repair `failBudget` (2.6, 256) as `maxRepairFailures`; update Chain/Repair/theorems to use them | 2.2, 2.6 | `SafePdf/Core/Limits.lean`, `SafePdf/Core/Error.lean`, `SafePdf/Core/Xref/Chain.lean`, `SafePdf/Spec/XrefTerm.lean`, `SafePdf/Repair.lean` | wt | done (2026-11-18) |
 | 2.10 | Refactor duplication: split `ObjParse.parseIndirect` into public `parseHeader` + body taking a `Dict → Except Error Nat` length resolver; move `tokenAt_pos` into `Core/Lex.lean`, `parseStreamBody_ok`/`expectKeyword_pos` into ObjParse; make `Xref/Length.lean` and `Repair.lean` use them (Repair jumps over indirect-/Length streams via 2.3 resolution) | 2.3, 2.6, 2.9 | `SafePdf/Core/ObjParse.lean`, `SafePdf/Core/Lex.lean`, `SafePdf/Core/Xref/Length.lean`, `SafePdf/Repair.lean` | wt | todo |
 Exit criterion checked: [ ]
 
@@ -88,8 +90,8 @@ Exit criterion checked: [ ]
 Plan.md §6 Phase 3. Exit: **M3**: decompression-bomb suite (nested streams, 10⁶:1 ratios) all rejected within limits.
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
-| 3.1 | FlateDecode (inflate) in Lean, output ≤ limit or error, totality | 1.1 | `SafePdf/Core/Filter/Flate.lean` | new | todo |
-| 3.2 | PNG predictors with output-length law | 1.1 | `SafePdf/Core/Filter/Predictor.lean` | new | todo |
+| 3.1 | FlateDecode (inflate) in Lean, output ≤ limit or error, totality | 1.1 | `SafePdf/Core/Filter/Flate.lean` | new | done (2026-11-18) |
+| 3.2 | PNG predictors with output-length law | 1.1 | `SafePdf/Core/Filter/Predictor.lean` | new | done (2026-11-18) |
 | 3.3 | ASCIIHex, ASCII85, RunLength (fully proven) | 1.1 | `SafePdf/Core/Filter/Ascii.lean`, `SafePdf/Core/Filter/RunLength.lean` | new | todo |
 | 3.4 | LZW (totality + bounds) | 1.1 | `SafePdf/Core/Filter/LZW.lean` | new | todo |
 | 3.5 | Filter pipeline + DCT/JPX/JBIG2 placeholder (S7) | 3.1, 3.2, 3.3, 3.4 | `SafePdf/Core/Filter.lean` | new | todo |
@@ -205,6 +207,13 @@ Exit criterion checked: [ ]
 * CI job `differential-objects` (1.13) on ubuntu-24.04 with apt qpdf (asserts ≥ 11), corpus cached on manifest hash, debug step printing qpdf/inspector heads, `run.py --min-compared 20`; artifact via upload-artifact v4.6.2 `ea165f8d65b6e75b540449e92b4886f43607fa02`. **First run not yet seen** — the next wave must read it, fix comparator assumptions, triage into `docs/deviations-from-spec.md`, then check M1.
 * Permission: a subagent brief asking to push/delete temporary remote branches to iterate on CI was refused by the permission classifier (wave 10). Keep subagents local; the orchestrator pushes only phase branches and reads CI in the next wave.
 * v4.36: no `List.Nodup.subperm` (use `List.Nodup.length_le_of_subset`); `Option.noConfusion` on `none = some _` fails → `cases`; `<+` not available unqualified → `List.Sublist`; `(d, ·)` inside `.map` doesn't parse → `fun r => (d, r)`; `parseStreamBody` has a `let` → `dsimp only at h` before `split` (2.2, 2.3, 2.6).
+* **First qpdf comparison run** (CI run 44402582274, wave 11): 74 files, 73 with objects compared; 55,870 / 55,902 objects agree; 9,912 qpdf-only (object streams); 287 our errors (not yet triaged — mostly indirect `/Length` streams, expected until the resolved parser is wired into the view); 32 disagreements, all `/Group N 0 R` → free object N ⇒ D-001 `dangling-ref-null` in `docs/deviations-from-spec.md` (comparator now warns instead); 1 error: inspector timeout on arxiv-2307.09288 (13.7 MB) → task 1.14.
+* Flate (3.1): `Core.Filter.Flate` — output buffer `Out limit := {b : ByteArray // b.size ≤ limit}` makes the bound structural; puff-style canonical Huffman (`counts`/`symbols`, bit-by-bit `decodeGo`, fuel 15); `inflate`, `inflateAt` (returns bit pos), `zlibDecode … (checkAdler := true)`, `flateDecode limits`; `set_option maxRecDepth 4000 in` needed for `codes`. Interpreted speed: ~0.34 MB/s Huffman-heavy, ~2.9 MB/s back-ref-heavy, ~5 MB/s stored — compiled speed unmeasured (Plan §8 open question). Work-bound theorem (c) NOT proved (follow-up). 40 KB hex vectors live in the Core file (move to Tests later). Use zlib's 32-code fixed distance table (puff's 30 is incomplete and `build` rejects it).
+* Predictors (3.2): `Core.Filter.Predictor` — `Params.ofDict` (Table 10 defaults, `/Colors` ≤ 32, `/Columns` ≤ 2^24), shared `unfilterByte` for spec and impl, `decodePng_size` (exact length law), `decode_size_le` (output ≤ input, so no new limit); partial rows are strict errors; TIFF 2 for bpc 8/16 only.
+* Adversarial suite (2.7): `Tests/Adversarial.lean` (suite `adversarial`) with an expectations table + 141 deterministic mutations of the cyclic files; `SAFEPDF_ADV_VERBOSE=1` prints every result; all calls < 5 ms compiled. Tighten `length-mutual`/`objstm-*` rows to real cycle errors when 2.4 lands.
+* Limits (2.9): `Limits.maxRevisions := 4096` (→ `limitExceeded .revisions`), `Limits.maxRepairFailures := 256`; theorems restated over the fields.
+* v4.36 (wave 11): `Subtype.property _` fails higher-order unification on subtype-valued results — wrap in an `Except` helper and project; a `let i := …` inside a termination-checked body yields copies `omega` treats as unrelated — inline it; `bs[k]? = bs.data[k]?` for ByteArray isn't closed by `simp` — use `getElem?_pos`/`getElem?_neg`; `ite_eq_left_of_eq_true` replaces deprecated `if_pos`.
+* Usage gate: the loop checks `mcp__ccd_session_mgmt__get_usage` before each wave (gate 95%); at 100% of the 5-hour window it waits for the reset (wave 11 integration was deferred across one reset).
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -214,6 +223,7 @@ Exit criterion checked: [ ]
 * 2026-11-18 (1.4/1.5) — A reference `n g R` with out-of-range numbers (n < 1 or g > 65535) is an error in the strict path, never a fallback to integers (lenient readers differ; repair path may relax). A lexer error inside the 2-token reference lookahead is an error.
 * 2026-11-18 (2.2/2.6) — Local resource constants pending move into `Limits` (task 2.9): `maxRevisions := 4096` (revision-chain cap, reported as `limitExceeded .objects` for now) and repair `failBudget := 256` (failed parse attempts before the repair scan stops parsing). Accepted provisionally: they keep S3 bounds explicit and proven; the budget bounds attempts, not bytes per attempt.
 * 2026-11-18 (1.13) — New CI dependency: apt `qpdf` on `ubuntu-24.04` (11.x, version asserted ≥ 11, not hash-pinned) for the differential job only; plus `actions/upload-artifact` v4.6.2 pinned by SHA. The trusted build job is unchanged.
+* 2026-11-18 (wave 11) — Pulled 3.1 (Flate) and 3.2 (PNG predictors) from phase 3 ahead of the next-phase rule: they block 2.4 (xref streams), and Plan.md §6 Phase 2 says xref streams "need Flate + PNG predictors from Phase 3 — co-develop". They land on the current phase branch.
 
 ## Blocked / questions for the human
 * 2026-11-18 (1.11) — **`qpdf` is not installed** on the dev machine, and M1's third clause needs "property tests vs `qpdf --json` object dumps on corpus". Options: (a) the human runs `brew install qpdf` locally (adds a system tool — your call); (b) run the qpdf comparison in CI (`apt-get install qpdf` on ubuntu-latest, pinned version) on a corpus slice fetched in CI or on `Tests/adversarial` + golden inputs only. The loop will implement the comparator so it works in either setup and pick (b) for evidence unless told otherwise.
@@ -231,3 +241,4 @@ Exit criterion checked: [ ]
 * 2026-11-18 — wave 8 (phase 1, PR #2): 1.7, 1.8, 1.9, 1.10 done (printer + spec round trip; object parser ≡ spec; proof-patterns doc; fuzz/golden wiring) + orchestrator `Spec/RoundTripCore.lean` (**M1 `parseObject (print o) = o` proved**); 86 theorems axiom-checked; commit "wave 8: 1.7 1.8 1.9 1.10 — printer, round trip, parser equivalence, proof patterns, fuzz/golden wiring"
 * 2026-11-18 — wave 9 (phase 1, PR #2): 1.11, 1.12, 2.1 done (qpdf object comparator, offline-tested only; inspector `objects` view; classic xref table + trailer, pulled from phase 2); added 1.13 (run the qpdf comparison in CI on the corpus) as the remaining M1 step; 97 theorems axiom-checked; commit "wave 9: 1.11 1.12 2.1 — qpdf comparator, objects view, classic xref"
 * 2026-11-18 — wave 10 (phase 1, PR #2): 1.13 done (qpdf CI job written; first run pending), 2.2 (**`/Prev` chain termination + cycle rejection proved**), 2.3 (indirect /Length), 2.6 (repair) done; first 1.13 brief refused by the permission classifier (remote temp branches) and re-scoped to local-only; added 2.9 (limits into `Limits`) and 2.10 (ObjParse refactor); 123 theorems axiom-checked; commit "wave 10: 1.13 2.2 2.3 2.6 — qpdf CI job, /Prev termination, indirect /Length, repair"
+* 2026-11-18 — wave 11 (phase 1, PR #2): 2.7, 2.9, 3.1, 3.2 done (adversarial suite + 141 mutations; limits into `Limits`; Flate decoder with output-bound proof; PNG/TIFF predictors with length law; 3.1/3.2 pulled from phase 3 for xref streams); first qpdf CI run triaged (D-001 dangling-ref-null; comparator rule added); added 1.14 (inspector timeout on a 13.7 MB file); 137 theorems axiom-checked; commit "wave 11: 2.7 2.9 3.1 3.2 — adversarial suite, limits, Flate, predictors"

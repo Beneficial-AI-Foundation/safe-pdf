@@ -35,4 +35,24 @@ entry is a bug in the comparator.
 
 ## Entries
 
-None yet. To be filled after the first CI run of `differential-objects`.
+### D-001: dangling-ref-null — reference to a free object
+
+- Classification: deliberate difference (normalization of an object-level dump)
+- Found by: `objects` comparator on arxiv-1303.5076, arxiv-1412.6980, arxiv-2010.11929
+  (32 objects), 2026-11-18, CI run 44402582274
+- Reference tool and version: qpdf from ubuntu-24.04 apt (11.x)
+- Spec reference: ISO 32000-2:2020 §7.3.10 ("An indirect reference to an undefined
+  object shall not be considered an error … it shall be treated as a reference to the
+  null object")
+- Observed: page dictionaries contain `/Group N 0 R` where object N is marked free in the
+  cross-reference stream (e.g. arxiv-1412.6980: object 342 is xref type 0; page objects
+  340, 375, … reference it). Ours prints `"/Group": "342 0 R"` (the syntactic value);
+  qpdf resolves the reference to null and drops the key.
+- Reading chosen and rationale: the object-level dump (Phase 1) reports syntax, not
+  resolved values; resolution to null belongs to the document layer (Phase 4), which
+  will treat such references as null per §7.3.10.
+- Comparator handling: `Tests/differential/objects.py:diff` — a dictionary entry whose
+  value on our side is a reference `N G R`, absent on the qpdf side, where qpdf has no
+  object `N G`, counts as a warning `dangling-ref-null`, not a disagreement.
+- Status: accepted
+
