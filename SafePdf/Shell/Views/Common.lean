@@ -57,6 +57,7 @@ def renderLimitKind : LimitKind → String
   | .xobjectDepth => "XObject nesting depth"
   | .gstateDepth => "graphics-state nesting depth"
   | .opsPerPage => "operators per page"
+  | .revisions => "xref revision count"
 
 /-- Human-readable rendering of a core `Error`. -/
 def renderError : Error → String
