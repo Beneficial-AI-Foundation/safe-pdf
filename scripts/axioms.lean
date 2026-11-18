@@ -130,3 +130,35 @@ import SafePdf
 #print axioms SafePdf.Core.Xref.parseXrefTable_nodup
 #print axioms SafePdf.Core.Xref.parseXrefTable_pos
 #print axioms SafePdf.Core.Xref.findStartxref_lt
+
+-- Phase 2, task 2.2: /Prev chain termination (SafePdf/Spec/XrefTerm.lean)
+#print axioms SafePdf.Spec.XrefTerm.loadChain_terminates
+#print axioms SafePdf.Spec.XrefTerm.loadChain_offsets_nodup
+#print axioms SafePdf.Spec.XrefTerm.loadChain_offsets_lt
+#print axioms SafePdf.Spec.XrefTerm.loadChain_length_le
+#print axioms SafePdf.Spec.XrefTerm.loadChain_ok_reach
+#print axioms SafePdf.Spec.XrefTerm.loadChain_cycle_rejected
+#print axioms SafePdf.Spec.XrefTerm.loadChainCounted_calls_le
+#print axioms SafePdf.Spec.XrefTerm.mergeChain_lookup
+#print axioms SafePdf.Core.Xref.Chain.length_lt_of_fresh
+#print axioms SafePdf.Core.Xref.Chain.mergeTwo_sorted
+
+-- Phase 2, task 2.3: indirect /Length (SafePdf/Core/Xref/Length.lean)
+#print axioms SafePdf.Core.Xref.Length.resolveLength_calls_le
+#print axioms SafePdf.Core.Xref.Length.resolveLength_self
+#print axioms SafePdf.Core.Xref.Length.lengthDict_self
+#print axioms SafePdf.Core.Xref.Length.parseIndirectResolved_pos
+#print axioms SafePdf.Core.Xref.Length.parseIndirectResolved_data
+
+-- Phase 2, task 2.6: repair path (SafePdf/Repair.lean)
+#print axioms SafePdf.Repair.scanAttempts_le
+#print axioms SafePdf.Repair.scanFailures_le
+#print axioms SafePdf.Repair.scanObjects_length_le
+#print axioms SafePdf.Repair.scanObjects_header
+#print axioms SafePdf.Repair.scanObjects_offset_lt
+#print axioms SafePdf.Repair.scanObjects_sorted
+#print axioms SafePdf.Repair.scanObjects_keys_nodup
+#print axioms SafePdf.Repair.repair_ok
+#print axioms SafePdf.Repair.repair_offset_lt
+#print axioms SafePdf.Repair.repair_length_le
+#print axioms SafePdf.Repair.repair_keys_nodup
