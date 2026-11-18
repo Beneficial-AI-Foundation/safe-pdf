@@ -21,7 +21,7 @@ Design document: Plan.md
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
-| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | awaiting-ci |
+| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
 | 1 | `phase-1-lexer-objects` | `phase-0-infra` | — | none |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | — | none |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
@@ -192,3 +192,4 @@ Exit criterion checked: [ ]
 * 2026-11-18 — wave 3 (phase 0, PR #1): 0.3, 0.6, 0.8, 0.9 done (hygiene guard; parse stub + fuzz driver; 74-PDF arXiv corpus; 9 adversarial PDFs); none returned; commit "wave 3: 0.3 0.6 0.8 0.9 — hygiene guard, fuzzer, corpus, adversarial seeds"
 * 2026-11-18 — wave 4 (phase 0, PR #1): 0.4, 0.5, 0.7, 0.10 done (CI workflow; golden harness + `Tests` lib in lakefile; differential runner; inspector with view registry); none returned; commit "wave 4: 0.4 0.5 0.7 0.10 — CI, golden tests, differential runner, inspector"
 * 2026-11-18 — wave 5 (phase 0, PR #1): 0.11, 1.1 done (corpus dashboard; object model with 30 theorems); none returned; phase 0 exit criterion ticked; commit "wave 5: 0.11 1.1 — corpus dashboard, object model"
+* 2026-11-18 — phase 0 milestone: PR #1 marked ready for review (CI green on cf2daba)
