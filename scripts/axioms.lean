@@ -46,3 +46,26 @@ import SafePdf
 #print axioms SafePdf.PdfObject.Canonical.of_mem_dict
 #print axioms SafePdf.PdfObject.Canonical.keys_nodup
 #print axioms SafePdf.PdfObject.realOf_canonical
+
+-- Phase 1, task 1.2: lexer spec (SafePdf/Spec/Lex.lean)
+#print axioms SafePdf.Spec.Lex.skipWs_length_le
+#print axioms SafePdf.Spec.Lex.skipComment_length_le
+#print axioms SafePdf.Spec.Lex.regularRun_snd_length_le
+#print axioms SafePdf.Spec.Lex.litBody_length_lt
+#print axioms SafePdf.Spec.Lex.hexBody_length_le
+#print axioms SafePdf.Spec.Lex.nextAt_consumes
+#print axioms SafePdf.Spec.Lex.next_consumes
+#print axioms SafePdf.Spec.Lex.nextAt_nil
+#print axioms SafePdf.Spec.Lex.next_eq_none_of_skipWs_nil
+#print axioms SafePdf.Spec.Lex.next_white
+#print axioms SafePdf.Spec.Lex.skipComment_append
+#print axioms SafePdf.Spec.Lex.skipWs_comment
+#print axioms SafePdf.Spec.Lex.next_comment
+
+-- Phase 1, task 1.3: tokenizer (SafePdf/Core/Lex.lean)
+#print axioms SafePdf.Core.Lex.next_pos
+#print axioms SafePdf.Core.Lex.litStr_bounds
+#print axioms SafePdf.Core.Lex.hexStr_bounds
+#print axioms SafePdf.Core.Lex.nameRun_bounds
+#print axioms SafePdf.Core.Lex.readRun_bounds
+#print axioms SafePdf.Core.Lex.lt_escapeAt
