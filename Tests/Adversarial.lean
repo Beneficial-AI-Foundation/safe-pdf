@@ -157,19 +157,20 @@ def expectations : String → List (String × Expect)
     [("loadChain", .ok), ("repair", .ok),
      ("parseIndirectAt obj 4", .err),
      ("parseIndirectResolved obj 4", .errMsg "cyclic /Length")]
-  -- The file uses an xref stream: loadChain fails ("expected xref keyword") until task 2.4,
-  -- and object 6 lives in an object stream, so resolving object 4's /Length through the
-  -- repaired section fails as well. Encoded as "any error" until 2.4 makes the cycle visible.
+  -- The file's xref stream is structurally valid, so loadChain succeeds since task 2.4a;
+  -- the attack is the /Length cycle 4 → 6 (in object stream 5) → stream 5 → 4, which only
+  -- appears when objects are resolved: resolving object 4's /Length must fail.
   | "length-mutual.pdf" =>
-    [("loadChain", .err), ("repair", .ok),
+    [("loadChain", .ok), ("repair", .ok),
      ("parseIndirectAt obj 4", .err), ("parseIndirectAt obj 5", .err),
      ("parseIndirectResolved obj 4", .err)]
   -- Structure-level attacks for Phases 4/5 (page tree, XObject nesting): for now only
   -- termination of loadChain/repair within the bounds is checked (no rows needed).
   | "pages-kids-cycle.pdf" => []
   | "xobject-recursive.pdf" => []
-  -- xref stream (task 2.4): any error for now
-  | "objstm-self-container.pdf" => [("loadChain", .err), ("repair", .ok)]
+  -- xref stream whose entry places object 5 in object stream 5 (task 2.4a rejects it)
+  | "objstm-self-container.pdf" =>
+    [("loadChain", .errMsg "own object stream"), ("repair", .ok)]
   -- the 100,000-deep array must hit the depth limit, not the native stack
   | "deep-nesting.pdf" =>
     [("loadChain", .ok), ("repair", .ok),

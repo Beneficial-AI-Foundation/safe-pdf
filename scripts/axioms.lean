@@ -190,3 +190,18 @@ import SafePdf
 #print axioms SafePdf.Spec.XrefTerm.PrevStep.of_table
 #print axioms SafePdf.Spec.XrefTerm.parseSection_of_stream
 #print axioms SafePdf.Spec.XrefTerm.PrevStep.of_stream
+
+-- Phase 2, task 2.4b: object streams (SafePdf/Core/Xref/ObjStm.lean)
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_offsets_sorted
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_bounds
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_first_le
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_nums_pos
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_nums_nodup
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_count_le
+#print axioms SafePdf.Core.Xref.ObjStm.getObject_depth
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_depth
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_no_recursion
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_rank
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_self
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_nested
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_work

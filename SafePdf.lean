@@ -24,3 +24,4 @@ import SafePdf.Repair
 import SafePdf.Core.Filter.Flate
 import SafePdf.Core.Filter.Predictor
 import SafePdf.Core.Xref.Stream
+import SafePdf.Core.Xref.ObjStm
