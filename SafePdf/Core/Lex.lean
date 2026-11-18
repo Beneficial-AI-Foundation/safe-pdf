@@ -36,8 +36,8 @@ escapes, which are consumed, never re-read).
 
 All payload accumulators are reversed lists (`b :: acc`), finished with `List.reverse`.
 
-Proven: `next_pos` (a returned position is strictly after the input position and at most
-the input size) and its helper bounds.
+Proven: `tokenAt_pos` and `next_pos` (a returned position is strictly after the input
+position and at most the input size) and their helper bounds.
 -/
 
 namespace SafePdf.Core.Lex
@@ -390,13 +390,10 @@ theorem runToken_ok {p : Nat} {r : List UInt8 × Nat} {t : Token} {q : Nat}
   simp only [runToken] at h
   split at h <;> simp_all
 
-/-- **Progress.** A token returned by `next bytes pos` ends strictly after `pos` and within
-the input. -/
-theorem next_pos (bytes : ByteArray) (pos : Nat) (t : Token) (pos' : Nat)
-    (h : next bytes pos = .ok (some (t, pos'))) : pos < pos' ∧ pos' ≤ bytes.size := by
-  have hp := le_skipWs bytes pos false
-  unfold next at h
-  generalize skipWs bytes pos false = p at h hp
+/-- **Progress** of `tokenAt`: a token lexed at `p` ends strictly after `p` and within the
+input (the `skipWs`-free part of `next_pos`). -/
+theorem tokenAt_pos (bytes : ByteArray) (p : Nat) (t : Token) (q : Nat)
+    (h : tokenAt bytes p = .ok (some (t, q))) : p < q ∧ q ≤ bytes.size := by
   unfold tokenAt at h
   by_cases hlt : p < bytes.size
   · rw [dite_eq_left hlt] at h
@@ -422,6 +419,14 @@ theorem next_pos (bytes : ByteArray) (pos : Nat) (t : Token) (pos' : Nat)
               omega))
   · rw [dite_eq_right hlt] at h
     simp at h
+
+/-- **Progress.** A token returned by `next bytes pos` ends strictly after `pos` and within
+the input. -/
+theorem next_pos (bytes : ByteArray) (pos : Nat) (t : Token) (pos' : Nat)
+    (h : next bytes pos = .ok (some (t, pos'))) : pos < pos' ∧ pos' ≤ bytes.size := by
+  have hp := le_skipWs bytes pos false
+  have := tokenAt_pos bytes _ t pos' h
+  omega
 
 /-! ## Whole-input lexing -/
 

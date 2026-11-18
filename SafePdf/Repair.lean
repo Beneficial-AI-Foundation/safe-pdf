@@ -1,4 +1,5 @@
 import SafePdf.Core.Xref
+import SafePdf.Core.Xref.Length
 
 /-!
 # Repair path: rebuilding a cross-reference table by scanning
@@ -25,6 +26,12 @@ document built from it is flagged `repaired := true` (S7, by the caller).
   or not its object parses (strict validation downstream decides).
 * R2'. At most `limits.maxRepairFailures` (default 256) attempts may fail; after that,
   headers are still recorded but no longer parsed. The same budget applies to the trailer scan.
+* R2''. When `parseIndirect` fails only because a stream `/Length` is indirect
+  (`unsupported "indirect /Length"`), the same attempt retries once with
+  `Core.Xref.Length.parseIndirectResolved` against `headerTable` (the newest header per object
+  number, from a parse-free byte scan of the whole file; fuel = the table size). So a stream
+  with an indirect `/Length` is jumped over too, and fake headers inside its data are not
+  reported. The retry is charged to the same attempt (task 2.10).
 * R3. The last occurrence of each object number wins (later = newer in incremental files):
   the hits are collected newest first, stably sorted by object number, and the first of each
   run is kept (`keepAsc`). The result is capped at `limits.maxObjects` entries.
@@ -42,8 +49,10 @@ document built from it is flagged `repaired := true` (S7, by the caller).
 ## Bounds (S2, S3)
 
 All loops recurse on `bytes.size - p` with strict progress (S2). The scan makes at most one
-`parseIndirect` attempt per header, at strictly increasing positions, so at most `bytes.size`
-attempts (`scanAttempts_le`), of which at most `limits.maxRepairFailures` fail
+attempt (`attempt`: a `parseIndirect`, plus at most one indirect-`/Length` retry, R2'') per
+header, at strictly increasing positions, so at most `bytes.size` attempts
+(`scanAttempts_le`; the retry is charged to the attempt it belongs to, so the bound keeps its
+constant), of which at most `limits.maxRepairFailures` fail
 (`scanFailures_le`); it reports at most `min maxObjects bytes.size` objects
 (`scanObjects_length_le`), each at a genuine header inside the input (`scanObjects_header`,
 `scanObjects_offset_lt`), with distinct object numbers (`scanObjects_keys_nodup`).
@@ -53,7 +62,12 @@ bytes it then jumps over, so successes cost `O(bytes.size)` in total; a failed a
 read to the end of the input without moving the scan, so failures cost
 `O(limits.maxRepairFailures · bytes.size)`; everything else is `O(1)` per byte plus an
 `O(k log k)` sort of the `k ≤ bytes.size` hits. Without the budget, `k` headers inside one
-unterminated string would cost `O(k · bytes.size)`.
+unterminated string would cost `O(k · bytes.size)`. A retry (R2'') costs one more parse of
+the stream object plus at most `t` parses of `/Length` objects, `t` the header-table size
+(`Core.Xref.Length.resolveLength_calls_le`); the table itself is built once, lazily (a
+`Thunk`, only when some retry needs it), in `O(bytes.size + k log k)`. A failed retry counts
+as a failure against the budget; successful retries are not otherwise budgeted, so a file of
+many streams sharing one long `/Length` chain costs up to `O(k · t)` length-object parses.
 
 ## Conservativity (C4), to be stated with task 2.5
 
@@ -108,6 +122,58 @@ def headerAt (bytes : ByteArray) (p : Nat) : Option (Nat × Nat) :=
   | none => none
   | some (num, e1) => headerTail bytes num e1
 
+/-! ## Header table for indirect `/Length` (R2'') -/
+
+/-- Order hits by object number (stable: equal numbers keep their order). -/
+def keyLe (a b : Nat × Nat × Nat) : Bool := decide (a.1 ≤ b.1)
+
+/-- Keep a hit only if its object number is at least `b`, then raise the bound past it. On a
+list sorted by object number this keeps the first hit of each number. -/
+def keepAsc : List (Nat × Nat × Nat) → Nat → List (Nat × Nat × Nat)
+  | [], _ => []
+  | x :: xs, b => if b ≤ x.1 then x :: keepAsc xs (x.1 + 1) else keepAsc xs b
+
+/-- Every header `(num, gen, offset)` at a boundary from `p` on, onto `acc` (newest first). A
+plain byte scan: nothing is parsed, so headers inside stream data are included. -/
+def headerLoop (bytes : ByteArray) (p : Nat) (acc : List (Nat × Nat × Nat)) :
+    List (Nat × Nat × Nat) :=
+  if _h : p < bytes.size then
+    if boundaryAt bytes p then
+      match headerAt bytes p with
+      | some (num, gen) => headerLoop bytes (p + 1) ((num, gen, p) :: acc)
+      | none => headerLoop bytes (p + 1) acc
+    else headerLoop bytes (p + 1) acc
+  else acc
+termination_by bytes.size - p
+
+/-- The newest header per object number, ascending by object number: the table an indirect
+`/Length` is resolved against during the scan (as the inspector's objects view does). -/
+def headerTable (bytes : ByteArray) : Array (Nat × Nat × Nat) :=
+  (keepAsc ((headerLoop bytes 0 []).mergeSort keyLe) 1).toArray
+
+/-- Lookup of an object number in a `headerTable` (binary search), as an in-use entry. -/
+def tableLookup (t : Array (Nat × Nat × Nat)) (n : Nat) : Option XrefEntry :=
+  match t.binSearch (n, 0, 0) (fun a b => a.1 < b.1) with
+  | some (_, g, off) => some (.inUse off g)
+  | none => none
+
+/-- One parse attempt at header offset `p` (R2, R2''): `ObjParse.parseIndirect`; if it fails
+only because a stream `/Length` is indirect, one retry with
+`Core.Xref.Length.parseIndirectResolved` against the header table `tbl` (fuel: the table
+size). Returns the end of the object on success. The retry is part of the same attempt. -/
+def attempt (limits : Limits) (bytes : ByteArray) (tbl : Thunk (Array (Nat × Nat × Nat)))
+    (p : Nat) : Option Nat :=
+  match ObjParse.parseIndirect limits bytes p with
+  | .ok (_, r) => some r
+  | .error (.unsupported what) =>
+    if what == "indirect /Length" then
+      match Xref.Length.parseIndirectResolved (tableLookup tbl.get) limits bytes tbl.get.size p
+      with
+      | .ok (_, r) => some r
+      | .error _ => none
+    else none
+  | .error _ => none
+
 /-! ## The scan (R2) -/
 
 /-! At most `limits.maxRepairFailures` `parseIndirect` (and trailer `parseObject`) attempts may
@@ -120,27 +186,28 @@ string). -/
 /-- The scan loop from `p`. `acc` holds the hits `(num, gen, offset)` found so far, newest
 first; `n` counts the `parseIndirect` attempts and `fails` the failed ones. Returns the hits,
 the attempts and the failures. -/
-def scanLoop (limits : Limits) (bytes : ByteArray) (p : Nat) (acc : List (Nat × Nat × Nat))
-    (n fails : Nat) : List (Nat × Nat × Nat) × Nat × Nat :=
+def scanLoop (limits : Limits) (bytes : ByteArray) (tbl : Thunk (Array (Nat × Nat × Nat)))
+    (p : Nat) (acc : List (Nat × Nat × Nat)) (n fails : Nat) : List (Nat × Nat × Nat) × Nat × Nat :=
   if _h : p < bytes.size then
     if boundaryAt bytes p then
       match headerAt bytes p with
       | some (num, gen) =>
         if fails < limits.maxRepairFailures then
-          match ObjParse.parseIndirect limits bytes p with
-          | .ok (_, r) =>
-            scanLoop limits bytes (max r (p + 1)) ((num, gen, p) :: acc) (n + 1) fails
-          | .error _ => scanLoop limits bytes (p + 1) ((num, gen, p) :: acc) (n + 1) (fails + 1)
-        else scanLoop limits bytes (p + 1) ((num, gen, p) :: acc) n fails
-      | none => scanLoop limits bytes (p + 1) acc n fails
-    else scanLoop limits bytes (p + 1) acc n fails
+          match attempt limits bytes tbl p with
+          | some r =>
+            scanLoop limits bytes tbl (max r (p + 1)) ((num, gen, p) :: acc) (n + 1) fails
+          | none =>
+            scanLoop limits bytes tbl (p + 1) ((num, gen, p) :: acc) (n + 1) (fails + 1)
+        else scanLoop limits bytes tbl (p + 1) ((num, gen, p) :: acc) n fails
+      | none => scanLoop limits bytes tbl (p + 1) acc n fails
+    else scanLoop limits bytes tbl (p + 1) acc n fails
   else (acc, n, fails)
 termination_by bytes.size - p
 
 /-- The raw scan: every header hit (newest first), the number of `parseIndirect` attempts and
 the number of failed attempts. -/
 def scanRaw (limits : Limits) (bytes : ByteArray) : List (Nat × Nat × Nat) × Nat × Nat :=
-  scanLoop limits bytes 0 [] 0 0
+  scanLoop limits bytes (Thunk.mk fun _ => headerTable bytes) 0 [] 0 0
 
 /-- **Work measure.** The number of `parseIndirect` attempts the scan makes. -/
 def scanAttempts (limits : Limits) (bytes : ByteArray) : Nat :=
@@ -151,15 +218,6 @@ def scanFailures (limits : Limits) (bytes : ByteArray) : Nat :=
   (scanRaw limits bytes).2.2
 
 /-! ## Newest wins (R3) -/
-
-/-- Order hits by object number (stable: equal numbers keep their order). -/
-def keyLe (a b : Nat × Nat × Nat) : Bool := decide (a.1 ≤ b.1)
-
-/-- Keep a hit only if its object number is at least `b`, then raise the bound past it. On a
-list sorted by object number this keeps the first hit of each number. -/
-def keepAsc : List (Nat × Nat × Nat) → Nat → List (Nat × Nat × Nat)
-  | [], _ => []
-  | x :: xs, b => if b ≤ x.1 then x :: keepAsc xs (x.1 + 1) else keepAsc xs b
 
 /-- **Entry point.** The `(num, gen, offset)` of every `num gen obj` header found by the
 repair scan, the newest per object number, ascending by object number, at most
@@ -352,17 +410,18 @@ def repair (limits : Limits) (bytes : ByteArray) : Except Error (XrefSection × 
 /-- Loop invariant of `scanLoop`: at most one hit per remaining byte; at most one attempt
 per hit; the failure count never passes `limits.maxRepairFailures`; every new hit is a header
 at an offset inside the input. -/
-theorem scanLoop_spec (limits : Limits) (bytes : ByteArray) (p : Nat)
-    (acc : List (Nat × Nat × Nat)) (n fails : Nat) :
-    (scanLoop limits bytes p acc n fails).1.length ≤ acc.length + (bytes.size - p) ∧
-    (scanLoop limits bytes p acc n fails).2.1 + acc.length ≤
-      n + (scanLoop limits bytes p acc n fails).1.length ∧
+theorem scanLoop_spec (limits : Limits) (bytes : ByteArray)
+    (tbl : Thunk (Array (Nat × Nat × Nat))) (p : Nat) (acc : List (Nat × Nat × Nat))
+    (n fails : Nat) :
+    (scanLoop limits bytes tbl p acc n fails).1.length ≤ acc.length + (bytes.size - p) ∧
+    (scanLoop limits bytes tbl p acc n fails).2.1 + acc.length ≤
+      n + (scanLoop limits bytes tbl p acc n fails).1.length ∧
     (fails ≤ limits.maxRepairFailures →
-      (scanLoop limits bytes p acc n fails).2.2 ≤ limits.maxRepairFailures) ∧
-    ∀ x ∈ (scanLoop limits bytes p acc n fails).1,
+      (scanLoop limits bytes tbl p acc n fails).2.2 ≤ limits.maxRepairFailures) ∧
+    ∀ x ∈ (scanLoop limits bytes tbl p acc n fails).1,
       x ∈ acc ∨ (x.2.2 < bytes.size ∧ headerAt bytes x.2.2 = some (x.1, x.2.1)) := by
-  fun_induction scanLoop limits bytes p acc n fails
-  case case1 p acc n fails h _ num gen hh _ _ r _ ih =>
+  fun_induction scanLoop limits bytes tbl p acc n fails
+  case case1 p acc n fails h _ num gen hh _ r _ ih =>
     obtain ⟨ih1, ih2, ih3, ih4⟩ := ih
     simp only [List.length_cons] at ih1 ih2
     refine ⟨by omega, by omega, ih3, ?_⟩
@@ -372,7 +431,7 @@ theorem scanLoop_spec (limits : Limits) (bytes : ByteArray) (p : Nat)
       · exact Or.inr ⟨h, hh⟩
       · exact Or.inl hx
     · exact Or.inr hx
-  case case2 p acc n fails h _ num gen hh hf _ _ ih =>
+  case case2 p acc n fails h _ num gen hh hf _ ih =>
     obtain ⟨ih1, ih2, ih3, ih4⟩ := ih
     simp only [List.length_cons] at ih1 ih2
     refine ⟨by omega, by omega, fun _ => ih3 (by omega), ?_⟩
@@ -405,7 +464,7 @@ theorem scanLoop_spec (limits : Limits) (bytes : ByteArray) (p : Nat)
 /-- **(b)** `scanObjects` reports at most `min limits.maxObjects bytes.size` objects. -/
 theorem scanObjects_length_le (limits : Limits) (bytes : ByteArray) :
     (scanObjects limits bytes).length ≤ min limits.maxObjects bytes.size := by
-  obtain ⟨h1, _, _, _⟩ := scanLoop_spec limits bytes 0 [] 0 0
+  obtain ⟨h1, _, _, _⟩ := scanLoop_spec limits bytes (Thunk.mk fun _ => headerTable bytes) 0 [] 0 0
   simp only [List.length_nil] at h1
   have hk := (keepAsc_sublist ((scanRaw limits bytes).1.mergeSort keyLe) 1).length_le
   rw [List.length_mergeSort] at hk
@@ -422,7 +481,7 @@ theorem scanObjects_header (limits : Limits) (bytes : ByteArray) :
   intro x hx
   have hm := (keepAsc_sublist _ 1).subset (List.mem_of_mem_take hx)
   rw [List.mem_mergeSort] at hm
-  obtain ⟨_, _, _, h3⟩ := scanLoop_spec limits bytes 0 [] 0 0
+  obtain ⟨_, _, _, h3⟩ := scanLoop_spec limits bytes (Thunk.mk fun _ => headerTable bytes) 0 [] 0 0
   rcases h3 x hm with h | h
   · simp at h
   · exact h
@@ -431,7 +490,7 @@ theorem scanObjects_header (limits : Limits) (bytes : ByteArray) :
 one per header, at strictly increasing positions). -/
 theorem scanAttempts_le (limits : Limits) (bytes : ByteArray) :
     scanAttempts limits bytes ≤ bytes.size := by
-  obtain ⟨h1, h2, _, _⟩ := scanLoop_spec limits bytes 0 [] 0 0
+  obtain ⟨h1, h2, _, _⟩ := scanLoop_spec limits bytes (Thunk.mk fun _ => headerTable bytes) 0 [] 0 0
   unfold scanAttempts scanRaw
   simp only [List.length_nil] at h1 h2
   omega
@@ -439,7 +498,7 @@ theorem scanAttempts_le (limits : Limits) (bytes : ByteArray) :
 /-- **(e) Work bound.** At most `limits.maxRepairFailures` of those attempts fail. -/
 theorem scanFailures_le (limits : Limits) (bytes : ByteArray) :
     scanFailures limits bytes ≤ limits.maxRepairFailures := by
-  obtain ⟨_, _, h3, _⟩ := scanLoop_spec limits bytes 0 [] 0 0
+  obtain ⟨_, _, h3, _⟩ := scanLoop_spec limits bytes (Thunk.mk fun _ => headerTable bytes) 0 [] 0 0
   unfold scanFailures scanRaw
   exact h3 (Nat.zero_le _)
 
@@ -615,6 +674,35 @@ private def fakeInStream (len : Nat) : String :=
 -- with a wrong /Length the stream does not parse, so the scan looks inside (documented
 -- limitation: only parseable objects are jumped over)
 #guard (scanObjects Limits.default (fakeInStream 99).toUTF8).map (·.1) == [1, 2, 9]
+
+/-- `fakeInStream`, but the stream's `/Length` is `3 0 R`, defined after the stream as
+`3 0 obj <len> endobj`; `lenRef` is the reference written in the stream dictionary. -/
+private def fakeInIndirect (lenRef : String) (len : Nat) : String :=
+  "%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n" ++
+  s!"2 0 obj\n<< /Length {lenRef} >>\nstream\n" ++
+  "\x00\x01\n9 0 obj\n(x)\nendobj\n\x7f" ++
+  s!"\nendstream\nendobj\n3 0 obj\n{len}\nendobj\n"
+
+-- R2'': parseIndirect alone rejects the stream (indirect /Length) ...
+#guard (match ObjParse.parseIndirect Limits.default (fakeInIndirect "3 0 R" 23).toUTF8 45 with
+  | .error (.unsupported w) => w == "indirect /Length"
+  | _ => false)
+-- ... the retry resolves `3 0 R` through the header table, so the stream is jumped over and
+-- the fake `9 0 obj` inside its data is no longer reported (task 2.10)
+#guard (scanObjects Limits.default (fakeInIndirect "3 0 R" 23).toUTF8).map (·.1) == [1, 2, 3]
+-- the retry is charged to the attempt it belongs to: 3 attempts for 3 real headers, none failed
+#guard scanAttempts Limits.default (fakeInIndirect "3 0 R" 23).toUTF8 == 3
+#guard scanFailures Limits.default (fakeInIndirect "3 0 R" 23).toUTF8 == 0
+-- a wrong resolved length, or a self-referential /Length (Bogk), still fails: the scan looks
+-- inside, and the failed retry counts as one failure
+#guard (scanObjects Limits.default (fakeInIndirect "3 0 R" 99).toUTF8).map (·.1) == [1, 2, 3, 9]
+#guard (scanObjects Limits.default (fakeInIndirect "2 0 R" 23).toUTF8).map (·.1) == [1, 2, 3, 9]
+#guard scanFailures Limits.default (fakeInIndirect "2 0 R" 23).toUTF8 == 1
+-- the header table: newest header per object number, fake headers included
+#guard (headerTable (fakeInIndirect "3 0 R" 23).toUTF8).toList.map (·.1) == [1, 2, 3, 9]
+#guard tableLookup (headerTable (fakeInIndirect "3 0 R" 23).toUTF8) 3 ==
+  some (.inUse ((fakeInIndirect "3 0 R" 23).utf8ByteSize - 18) 0)
+#guard tableLookup (headerTable (fakeInIndirect "3 0 R" 23).toUTF8) 4 == none
 
 -- incremental update: object 3 redefined after the first %%EOF; the newest definition wins
 #guard rp (minimalBytes ++ ("3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n" ++
