@@ -1,12 +1,13 @@
 import SafePdf.Shell.Views.Common
 import SafePdf.Shell.Views.Summary
+import SafePdf.Shell.Views.Objects
 
 /-!
 # Inspector (unverified shell, Plan.md §6 MVP / visibility track)
 
 The debug CLI that shows what the parser sees, one view at a time:
 
-    inspect [--json] [--view NAME] <file>... [view]
+    inspect [--json] [--all] [--view NAME] <file>... [view]
     inspect --list-views
     inspect --help
 
@@ -31,7 +32,7 @@ open SafePdf.Shell
 
 /-- The view registry. Later phases append `objects`, `xref`, `streams`, `pages`, `svg`, ... -/
 def views : List View :=
-  [ Views.Summary.view ]
+  [ Views.Summary.view, Views.Objects.view ]
 
 /-- The view used when none is named. -/
 def defaultView : String := "summary"
@@ -42,12 +43,13 @@ def findView (name : String) : Option View :=
 
 /-- Usage text. -/
 def usage : String :=
-  "usage: inspect [--json] [--view NAME] <file>... [view]
+  "usage: inspect [--json] [--all] [--view NAME] <file>... [view]
        inspect --list-views
        inspect --help
 
 Runs a view (default: summary) on each file. Options:
   --json         machine-readable output (one JSON object per file, one line each)
+  --all          show superseded definitions too (objects view)
   --view NAME    select a view explicitly
   --list-views   list available views
   --help         show this text
@@ -63,6 +65,7 @@ def viewListing : String :=
 /-- Parsed command line. -/
 structure Args where
   json : Bool := false
+  all : Bool := false
   help : Bool := false
   listViews : Bool := false
   view : Option String := none
@@ -72,6 +75,7 @@ structure Args where
 def parseArgs : List String → Args → Except String Args
   | [], a => .ok { a with positionals := a.positionals.reverse }
   | "--json" :: rest, a => parseArgs rest { a with json := true }
+  | "--all" :: rest, a => parseArgs rest { a with all := true }
   | "--help" :: rest, a => parseArgs rest { a with help := true }
   | "-h" :: rest, a => parseArgs rest { a with help := true }
   | "--list-views" :: rest, a => parseArgs rest { a with listViews := true }
@@ -170,7 +174,7 @@ def run (argv : List String) : IO UInt32 := do
   let some view := findView viewName
     | IO.eprintln s!"inspect: unknown view '{viewName}'; available views:\n{viewListing}"
       return 2
-  let cfg : Config := { json := args.json }
+  let cfg : Config := { json := args.json, all := args.all }
   let mut code : UInt32 := 0
   let mut first := true
   for path in files do
