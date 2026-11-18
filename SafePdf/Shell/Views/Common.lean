@@ -18,6 +18,8 @@ namespace SafePdf.Shell
 structure Config where
   /-- Emit machine-readable JSON instead of text (views that support it). -/
   json : Bool := false
+  /-- Views that deduplicate (e.g. `objects`) show every occurrence instead. -/
+  all : Bool := false
   /-- Resource limits passed to the parser. -/
   limits : Limits := Limits.default
 
