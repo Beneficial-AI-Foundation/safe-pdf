@@ -1,4 +1,5 @@
 import SafePdf.Core.Xref
+import SafePdf.Core.Xref.Stream
 
 /-!
 # The `/Prev` chain of incremental updates
@@ -6,36 +7,55 @@ import SafePdf.Core.Xref
 Plan.md §5.2 (first bullet), §4 S2/S3/S6, §6 Phase 2; ISO 32000-2 §7.5.5 (trailer `/Prev`)
 and §7.5.6 (incremental updates); Bogk & Schöpl 2014 (cyclic `/Prev` chains hang readers).
 
-Task 2.2. A file updated incrementally has one cross-reference section per revision; the
-trailer of each points with `/Prev` at the byte offset of the previous section. `loadChain`
-starts at the `startxref` offset (`Core.Xref.findStartxref`), parses the classic table there
-(`Core.Xref.parseXrefTable`) and follows `/Prev` until a trailer has none, newest revision
-first. `mergeChain` folds the revisions into one section in which the newest entry wins per
-object number (S6 preview; the full unambiguity theorem is task 2.5).
+Task 2.2, extended by 2.4a. A file updated incrementally has one cross-reference section per
+revision; the trailer of each points with `/Prev` at the byte offset of the previous section.
+`loadChain` starts at the `startxref` offset (`Core.Xref.findStartxref`), parses the section
+there (`parseSection`: a classic table, `Core.Xref.parseXrefTable`, if the bytes are `xref`,
+otherwise an xref stream, `Core.Xref.Stream.parseXrefStream`) and follows `/Prev` until a
+trailer has none, newest revision first. `mergeChain` folds the revisions into one section in
+which the newest entry wins per object number (S6 preview; the full unambiguity theorem is
+task 2.5).
+
+## Hybrid files (ISO 32000-2 §7.5.8.4)
+
+A classic table whose trailer has `/XRefStm` is followed by the xref stream at that offset
+*within the same step*: the revisions list gets the table, then the stream, then whatever
+the table's `/Prev` leads to. Since `mergeChain` lets the earlier revision win, an object is
+looked up first in the table, then in its `/XRefStm` stream, then in the older sections.
+This is the search order of §7.5.8.4 ("the entries in the table first, then the
+cross-reference stream, then `/Prev`"): the table wins over its own stream (as in pdf.js and
+MuPDF), and the stream supplies the objects the table omits (typically those in object
+streams). The stream's own `/Prev` and `/XRefStm`, and `/XRefStm` in an xref stream's
+dictionary, are ignored. An `/XRefStm` offset counts as visited exactly like a `/Prev`
+offset: it must be inside the input, not visited before (else `"xref /XRefStm cycle"`) and
+within the revision budget.
 
 ## Termination by the visited set (Plan.md §5.2)
 
 The loop `walk` carries the list `visited` of offsets already parsed, together with the
-proofs that it is duplicate-free and that every element is `< bytes.size`. Before following
-an offset `off` it checks `off < bytes.size` (else `Error.malformed`, `/Prev` offsets are not
+proofs that it is duplicate-free and that every element is `< bytes.size`. Each round runs
+`step`, which checks `off < bytes.size` (else `Error.malformed`, `/Prev` offsets are not
 range-checked by 2.1) and `off ∉ visited` (else `Error.malformed off "xref /Prev cycle"`):
-**a revisited offset is an error, not a loop**. The measure is `bytes.size - visited.length`,
-the number of unvisited offsets; it strictly decreases because a duplicate-free list of
-naturals below `n` with one more fresh element below `n` has length `< n`
-(`length_lt_of_fresh`, from `length_le_of_nodup_of_lt`). No `partial`, no fuel.
+**a revisited offset is an error, not a loop**; for a hybrid table it checks the `/XRefStm`
+offset the same way against `off :: visited`. `step` returns its revisions in a `StepOk`
+whose fields prove that the new offsets are fresh, distinct and inside the input, and that
+there is at least one. The measure is `bytes.size - visited.length`, the number of unvisited
+offsets; it strictly decreases because a duplicate-free list of naturals below `n` has length
+`≤ n` (`length_le_of_nodup_of_lt`) and every round adds at least one offset. No `partial`,
+no fuel.
 
-Independently the chain length is bounded by `limits.maxRevisions` (default 4096,
-`SafePdf.Limits`), whose excess yields `Error.limitExceeded .revisions`.
+Independently the number of sections parsed is bounded by `limits.maxRevisions` (default
+4096, `SafePdf.Limits`), whose excess yields `Error.limitExceeded .revisions`; an `/XRefStm`
+stream counts as a revision.
 
-`walk` also returns the number of `parseXrefTable` calls it made (the count is incremented
-exactly where `parseXrefTable` is invoked), so that `Spec.XrefTerm` can state the work bound.
+`walk` also returns the number of section parses (tables and streams) it made, so that
+`Spec.XrefTerm` can state the work bound.
 
 ## Not done here
 
-* `/XRefStm` (hybrid files, §7.5.8.4) is not followed: xref streams are task 2.4; 2.5 will
-  merge the hybrid stream between a section and its `/Prev`.
-* Object numbers are not checked against `/Size` (task 2.5).
-* `/Prev` pointing at an xref *stream* is an error here (`expected xref keyword`); 2.4/2.6.
+* Object numbers of classic tables are not checked against `/Size` (task 2.5); xref streams
+  check theirs (`Core.Xref.Stream`, XS4).
+* Repair when a `/Prev` or `/XRefStm` offset is off by a few bytes (task 2.6).
 -/
 
 namespace SafePdf.Core.Xref.Chain
@@ -69,46 +89,125 @@ theorem length_lt_of_fresh {visited : List Nat} {n off : Nat} (hnd : visited.Nod
 /-! ## Loading the chain -/
 
 /-- One revision of the file: its cross-reference section, its trailer, and the byte offset
-of its `xref` keyword. -/
+of its `xref` keyword (classic table) or of its `n g obj` (xref stream). -/
 abbrev Revision := XrefSection × Trailer × Nat
 
 /-- The byte offset of a revision's section. -/
 def Revision.offset (r : Revision) : Nat := r.2.2
 
-/-- Follow the `/Prev` chain from `off`. `visited` holds the offsets parsed so far (newest
-first), duplicate-free and inside the input. Returns the revisions from `off` on, newest
-first, and the number of `parseXrefTable` calls made.
+/-- The cross-reference section at `o`: a classic table if the bytes at `o` are `xref`,
+otherwise an xref stream (ISO 32000-2 §7.5.4, §7.5.8). -/
+def parseSection (limits : Limits) (bytes : ByteArray) (o : Nat) :
+    Except Error (XrefSection × Trailer) :=
+  if matchAt bytes o kwXref then
+    match parseXrefTable limits bytes o with
+    | .ok (sec, tr, _) => .ok (sec, tr)
+    | .error e => .error e
+  else Stream.parseXrefStream limits bytes o
 
-Errors: `off ≥ bytes.size` (malformed), `off ∈ visited` (malformed, `"xref /Prev cycle"`),
-more than `limits.maxRevisions` revisions (`limitExceeded .revisions`), or a parse error. -/
-def walk (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
-    Except Error (List Revision) × Nat :=
+/-- The `/XRefStm` offset of a hybrid file (§7.5.8.4): only a classic table's trailer has
+one; an xref stream's own `/XRefStm` key is ignored. -/
+def hybridStm (bytes : ByteArray) (o : Nat) (tr : Trailer) : Option Nat :=
+  if matchAt bytes o kwXref then tr.xrefStm? else none
+
+/-- The successful result of one step of the walk from the visited list `visited`: the
+revisions parsed (the section, then its `/XRefStm` stream if any), the `/Prev` to follow, and
+the invariants the walk needs: the new offsets are fresh, distinct and inside the input. -/
+structure StepOk (bytes : ByteArray) (visited : List Nat) where
+  /-- The revisions of this step, newest first (1 or 2). -/
+  revs : List Revision
+  /-- The section's `/Prev`. -/
+  prev? : Option Nat
+  /-- The new offsets, followed by the old ones, are distinct. -/
+  nodup : (revs.map Revision.offset ++ visited).Nodup
+  /-- The new offsets lie inside the input. -/
+  lt : ∀ x ∈ revs.map Revision.offset, x < bytes.size
+  /-- At least one revision was parsed. -/
+  ne : revs ≠ []
+
+/-- One step of the walk at `off`: check `off` (inside the input, not visited, revision
+budget), parse the section there, and for a hybrid file's classic table also the `/XRefStm`
+stream (under the same checks, `off` counting as visited). Returns the step result and the
+number of section parses made (0, 1 or 2). The stream's own `/Prev` is not followed: the
+chain continues with the table's `/Prev`. -/
+def step (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
+    (hnd : visited.Nodup) :
+    Except Error (StepOk bytes visited) × Nat :=
   if hoff : off < bytes.size then
     if hmem : off ∈ visited then (.error (.malformed off "xref /Prev cycle"), 0)
     else if limits.maxRevisions ≤ visited.length then (.error (.limitExceeded .revisions), 0)
     else
-      match parseXrefTable limits bytes off with
+      match parseSection limits bytes off with
       | .error e => (.error e, 1)
-      | .ok (sec, tr, _) =>
-        match tr.prev? with
-        | none => (.ok [(sec, tr, off)], 1)
-        | some p =>
-          match walk limits bytes p (off :: visited) (List.nodup_cons.2 ⟨hmem, hnd⟩)
-              (fun x hx => by
-                rcases List.mem_cons.mp hx with rfl | hx
-                · exact hoff
-                · exact hlt x hx) with
-          | (.error e, k) => (.error e, k + 1)
-          | (.ok revs, k) => (.ok ((sec, tr, off) :: revs), k + 1)
+      | .ok (sec, tr) =>
+        match hybridStm bytes off tr with
+        | none =>
+          (.ok ⟨[(sec, tr, off)], tr.prev?,
+            by simp only [List.map_cons, List.map_nil, Revision.offset, List.cons_append,
+              List.nil_append, List.nodup_cons]; exact ⟨hmem, hnd⟩,
+            by simp only [List.map_cons, List.map_nil, Revision.offset, List.mem_singleton]
+               intro x hx; subst hx; exact hoff,
+            by simp⟩, 1)
+        | some s =>
+          if hs : s < bytes.size then
+            if hsm : s = off ∨ s ∈ visited then (.error (.malformed s "xref /XRefStm cycle"), 1)
+            else if limits.maxRevisions ≤ visited.length + 1 then
+              (.error (.limitExceeded .revisions), 1)
+            else
+              match Stream.parseXrefStream limits bytes s with
+              | .error e => (.error e, 2)
+              | .ok (sec2, tr2) =>
+                (.ok ⟨[(sec, tr, off), (sec2, tr2, s)], tr.prev?, by
+                    simp only [List.map_cons, List.map_nil, Revision.offset, List.cons_append,
+                      List.nil_append, List.nodup_cons, List.mem_cons, not_or]
+                    exact ⟨⟨fun h => hsm (Or.inl h.symm), hmem⟩,
+                      ⟨fun h => hsm (Or.inr h), hnd⟩⟩, by
+                    simp only [List.map_cons, List.map_nil, Revision.offset, List.mem_cons,
+                      List.not_mem_nil, or_false]
+                    intro x hx
+                    rcases hx with rfl | rfl
+                    · exact hoff
+                    · exact hs, by simp⟩, 2)
+          else (.error (.malformed s "xref /XRefStm offset beyond end of input"), 1)
   else (.error (.malformed off "xref /Prev offset beyond end of input"), 0)
+
+/-- Follow the chain from `off`. `visited` holds the offsets parsed so far (newest first),
+duplicate-free and inside the input. Each round runs one `step` (the section at `off` and,
+for a hybrid file, its `/XRefStm` stream), then follows the section's `/Prev` with the new
+offsets added to `visited`. Returns the revisions from `off` on, newest first (a hybrid
+table is immediately followed by its `/XRefStm` stream), and the number of section parses
+(tables and streams) made.
+
+Errors: an offset `≥ bytes.size` (malformed), an offset already visited (malformed,
+`"xref /Prev cycle"` resp. `"xref /XRefStm cycle"`), more than `limits.maxRevisions`
+revisions (`limitExceeded .revisions`), or a parse error. -/
+def walk (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
+    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    Except Error (List Revision) × Nat :=
+  match step limits bytes off visited hnd with
+  | (.error e, k) => (.error e, k)
+  | (.ok so, k) =>
+    match so.prev? with
+    | none => (.ok so.revs, k)
+    | some p =>
+      match walk limits bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (fun x hx => by
+            rcases List.mem_append.mp hx with hx | hx
+            · exact so.lt x hx
+            · exact hlt x hx) with
+      | (.error e, k') => (.error e, k' + k)
+      | (.ok rest, k') => (.ok (so.revs ++ rest), k' + k)
 termination_by bytes.size - visited.length
 decreasing_by
-  have := length_lt_of_fresh hnd hlt hoff hmem
-  simp only [List.length_cons]
+  have h1 := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+    rcases List.mem_append.mp hx with hx | hx
+    · exact so.lt x hx
+    · exact hlt x hx)
+  have h2 : 0 < so.revs.length := List.length_pos_iff.mpr so.ne
+  simp only [List.length_append, List.length_map] at h1 ⊢
   omega
 
-/-- `loadChain` with the number of `parseXrefTable` calls made. -/
+/-- `loadChain` with the number of section parses (tables and streams) made. -/
 def loadChainCounted (limits : Limits) (bytes : ByteArray) :
     Except Error (List Revision) × Nat :=
   match findStartxref bytes with
@@ -371,7 +470,136 @@ private def twoRevisions : ByteArray :=
   (.inl "malformed@9999: xref /Prev offset beyond end of input", 1)
 #guard lc (minimalValid ++ ("xref\n0 1\n0000000000 65535 f \ntrailer\n" ++
     "<< /Size 6 /Prev 10 >>\nstartxref\n587\n%%EOF\n").toUTF8) ==
-  (.inl "malformed@10: expected xref keyword", 2)
+  (.inl "malformed@10: expected an xref keyword or an xref stream object", 2)
+/-! ### Xref streams (task 2.4a) -/
+
+/-- `Tests/adversarial/objstm-self-container.pdf` (378 bytes): an uncompressed xref stream
+(`/W [1 4 2]`) whose entry for object 5 says it lies in object stream 5. -/
+private def objstmSelf : ByteArray :=
+  "%PDF-1.7\n%".toUTF8 ++
+  ByteArray.mk #[226, 227, 207, 211] ++
+  ("\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n" ++
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n" ++
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 5 0 R /Resources << >> >>\n" ++
+    "endobj\n4 0 obj\n<< /Type /XRef /Size 6 /W [1 4 2] /Root 1 0 R /Length 42 >>\nstream\n").toUTF8 ++
+  ByteArray.mk #[0, 0, 0, 0, 0, 255, 255, 1, 0, 0, 0, 15, 0, 0, 1, 0, 0, 0] ++
+  "@".toUTF8 ++
+  ByteArray.mk #[0, 0, 1, 0, 0, 0] ++
+  "y".toUTF8 ++
+  ByteArray.mk #[0, 0, 1, 0, 0, 0, 223, 0, 0, 2, 0, 0, 0, 5, 0, 0] ++
+  "\nendstream\nendobj\nstartxref\n223\n%%EOF\n".toUTF8
+
+/-- `Tests/adversarial/length-mutual.pdf` (550 bytes): an uncompressed xref stream
+(`/W [1 4 2]`) at 381; object 6 lies in object stream 5. -/
+private def lengthMutual : ByteArray :=
+  "%PDF-1.7\n%".toUTF8 ++
+  ByteArray.mk #[226, 227, 207, 211] ++
+  ("\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n" ++
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n" ++
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>\n" ++
+    "endobj\n4 0 obj\n<<  /Length 6 0 R >>\nstream\n0 0 m 10 10 l S\nendstream\nendobj\n" ++
+    "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 4 0 R >>\nstream\n6 0 15\nendstream\n" ++
+    "endobj\n7 0 obj\n<< /Type /XRef /Size 8 /W [1 4 2] /Root 1 0 R /Length 56 >>\nstream\n").toUTF8 ++
+  ByteArray.mk #[0, 0, 0, 0, 0, 255, 255, 1, 0, 0, 0, 15, 0, 0, 1, 0, 0, 0] ++
+  "@".toUTF8 ++
+  ByteArray.mk #[0, 0, 1, 0, 0, 0] ++
+  "y".toUTF8 ++
+  ByteArray.mk #[0, 0, 1, 0, 0, 0, 225, 0, 0, 1, 0, 0, 1] ++
+  "&".toUTF8 ++
+  ByteArray.mk #[0, 0, 2, 0, 0, 0, 5, 0, 0, 1, 0, 0, 1] ++
+  "}".toUTF8 ++
+  ByteArray.mk #[0, 0] ++
+  "\nendstream\nendobj\nstartxref\n381\n%%EOF\n".toUTF8
+
+#guard objstmSelf.size == 378 && fnv objstmSelf == 770663905
+#guard lengthMutual.size == 550 && fnv lengthMutual == 3220438046
+-- the self-containing object stream entry is a structural error of the xref stream
+#guard lc objstmSelf == (.inl "malformed@223: xref stream: object 5 lies in its own object stream", 1)
+-- length-mutual: the xref loads (the /Length cycle is found later, when resolving)
+#guard lc lengthMutual == (.inr [381], 1)
+#guard lk lengthMutual 6 == some (.compressed 5 0)
+#guard lk lengthMutual 4 == some (.inUse 225 0)
+#guard (match loadChain Limits.default lengthMutual with
+  | .ok revs => (mergeChain revs).entries.map Prod.fst == [0, 1, 2, 3, 4, 5, 6, 7]
+  | .error _ => false)
+
+/-- An xref stream object `n 0 obj` with dictionary extras and raw rows. -/
+private def xstm (n : Nat) (extra : String) (rows : List UInt8) : ByteArray :=
+  (s!"{n} 0 obj\n<< /Type /XRef {extra} /Length {rows.length} >>\nstream\n").toUTF8 ++
+    ByteArray.mk rows.toArray ++ "\nendstream\nendobj\n".toUTF8
+
+/-- A file of header, `body` and a `startxref` pointing at `sx`. -/
+private def withStartxref (body : ByteArray) (sx : Nat) : ByteArray :=
+  "%PDF-1.7\n".toUTF8 ++ body ++ s!"startxref\n{sx}\n%%EOF\n".toUTF8
+
+/-- Flate + PNG-Up (`/Predictor 12 /Columns 5`) rows for objects 0–3 of `/W [1 3 1]`
+(generated with Python's `zlib`, task 2.4a): free; at 15; at 64; in object stream 9. -/
+private def flatePng : List UInt8 :=
+  [120, 156, 99, 98, 0, 130, 255, 76, 140, 12, 12, 252, 140, 76, 64, 166, 33, 3, 136, 125,
+   146, 1, 0, 23, 140, 2, 20]
+
+/-- A one-revision file whose xref stream at 9 is Flate-compressed with a PNG predictor. -/
+private def flateFile : ByteArray :=
+  withStartxref (xstm 9 ("/Size 10 /Index [0 4] /W [1 3 1] /Root 1 0 R /Filter /FlateDecode " ++
+    "/DecodeParms << /Predictor 12 /Columns 5 >>") flatePng) 9
+
+#guard lc flateFile == (.inr [9], 1)
+#guard lk flateFile 2 == some (.inUse 64 0)
+#guard lk flateFile 3 == some (.compressed 9 0)
+
+/-- An xref stream at 9 whose `/Prev` is its own offset. -/
+private def streamPrevSelf : ByteArray :=
+  withStartxref (xstm 1 "/Size 2 /Prev 9 /W [1 1 0]" [0, 0, 1, 0]) 9
+
+#guard lc streamPrevSelf == (.inl "malformed@9: xref /Prev cycle", 1)
+
+/-- Two stream revisions: the older at 9, the newer (object 1 moved) with `/Prev 9`. -/
+private def twoStreams : ByteArray :=
+  let s1 := xstm 1 "/Size 2 /W [1 1 0]" [0, 0, 1, 0]
+  withStartxref (s1 ++ xstm 2 "/Size 3 /Index [1 2] /Prev 9 /W [1 1 0]" [1, 40, 1, 9])
+    (9 + s1.size)
+
+#guard lc twoStreams == (.inr [93, 9], 2)
+#guard lk twoStreams 1 == some (.inUse 40 0)
+#guard lk twoStreams 0 == some (.free 0 0)
+-- a /W width of 9 and a decoded-length mismatch are errors in the chain as well
+#guard lc (withStartxref (xstm 1 "/Size 1 /W [1 9 0]" [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]) 9) ==
+  (.inl "unsupported:xref stream /W field width above 8", 1)
+#guard lc (withStartxref (xstm 1 "/Size 2 /W [1 1 0]" [1, 0, 1]) 9) ==
+  (.inl "malformed@9: xref stream data has 3 bytes, expected 4", 1)
+
+/-! ### Hybrid files (§7.5.8.4) -/
+
+/-- The `/XRefStm` stream of the hybrid test file (object 6 at 587): object 3 at 15
+(overridden by the table) and object 7 in object stream 4. -/
+private def hybStm : ByteArray :=
+  xstm 6 "/Size 8 /Index [3 1 7 1] /W [1 2 1]" [1, 0, 15, 0, 2, 0, 4, 0]
+
+/-- An incremental update of `minimal-valid.pdf` in hybrid form: the table at `t` lists
+object 3 at 121 and points with `/XRefStm` at `hybStm` (at `stm`) and `/Prev` at 404. -/
+private def hybridAt (stm : Nat) : ByteArray :=
+  let t := minimalValid.size + hybStm.size
+  minimalValid ++ hybStm ++ (s!"xref\n0 1\n0000000000 65535 f \n3 1\n0000000121 00000 n \n" ++
+    s!"trailer\n<< /Size 8 /Root 1 0 R /Prev 404 /XRefStm {stm} >>\nstartxref\n{t}\n%%EOF\n").toUTF8
+
+/-- The hybrid file proper. -/
+private def hybrid : ByteArray := hybridAt minimalValid.size
+
+#guard hybStm.size == 105
+-- table, then its /XRefStm stream, then /Prev: three parses
+#guard lc hybrid == (.inr [692, 587, 404], 3)
+-- the table wins over its /XRefStm stream; the stream supplies what the table lacks
+#guard lk hybrid 3 == some (.inUse 121 0)
+#guard lk hybrid 7 == some (.compressed 4 0)
+#guard lk hybrid 5 == some (.inUse 334 0)
+-- /XRefStm pointing at the table itself, at the /Prev table, beyond the end of input
+#guard lc (hybridAt 692) == (.inl "malformed@692: xref /XRefStm cycle", 1)
+#guard lc (hybridAt 404) ==
+  (.inl "malformed@404: expected an xref keyword or an xref stream object", 2)
+#guard lc (hybridAt 99999) == (.inl "malformed@99999: xref /XRefStm offset beyond end of input", 1)
+-- the revision cap counts the /XRefStm stream
+#guard lcl { maxRevisions := 2 } hybrid == (.inl "limit:SafePdf.LimitKind.revisions", 2)
+#guard lcl { maxRevisions := 1 } hybrid == (.inl "limit:SafePdf.LimitKind.revisions", 1)
 -- no startxref: no parse at all
 #guard lc "%PDF-1.7\n".toUTF8 == (.inl "malformed@9: startxref not found", 0)
 
