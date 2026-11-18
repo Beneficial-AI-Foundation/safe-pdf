@@ -23,8 +23,8 @@ document built from it is flagged `repaired := true` (S7, by the caller).
   past `endobj` (so the data of a stream that parses is never scanned for headers), otherwise
   it resumes at `p + 1`. Either way the next position is `> p`. A header is recorded whether
   or not its object parses (strict validation downstream decides).
-* R2'. At most `failBudget` (256) attempts may fail; after that, headers are still recorded
-  but no longer parsed. The same budget applies to the trailer scan.
+* R2'. At most `limits.maxRepairFailures` (default 256) attempts may fail; after that,
+  headers are still recorded but no longer parsed. The same budget applies to the trailer scan.
 * R3. The last occurrence of each object number wins (later = newer in incremental files):
   the hits are collected newest first, stably sorted by object number, and the first of each
   run is kept (`keepAsc`). The result is capped at `limits.maxObjects` entries.
@@ -43,17 +43,17 @@ document built from it is flagged `repaired := true` (S7, by the caller).
 
 All loops recurse on `bytes.size - p` with strict progress (S2). The scan makes at most one
 `parseIndirect` attempt per header, at strictly increasing positions, so at most `bytes.size`
-attempts (`scanAttempts_le`), of which at most `failBudget` fail (`scanFailures_le`); it
-reports at most `min maxObjects bytes.size` objects (`scanObjects_length_le`), each at a
-genuine header inside the input (`scanObjects_header`, `scanObjects_offset_lt`), with distinct
-object numbers (`scanObjects_keys_nodup`).
+attempts (`scanAttempts_le`), of which at most `limits.maxRepairFailures` fail
+(`scanFailures_le`); it reports at most `min maxObjects bytes.size` objects
+(`scanObjects_length_le`), each at a genuine header inside the input (`scanObjects_header`,
+`scanObjects_offset_lt`), with distinct object numbers (`scanObjects_keys_nodup`).
 
 Time (S3, informal; the cost model is not formalized): a successful attempt reads only the
 bytes it then jumps over, so successes cost `O(bytes.size)` in total; a failed attempt may
 read to the end of the input without moving the scan, so failures cost
-`O(failBudget · bytes.size)`; everything else is `O(1)` per byte plus an `O(k log k)` sort of
-the `k ≤ bytes.size` hits. Without the budget, `k` headers inside one unterminated string
-would cost `O(k · bytes.size)`.
+`O(limits.maxRepairFailures · bytes.size)`; everything else is `O(1)` per byte plus an
+`O(k log k)` sort of the `k ≤ bytes.size` hits. Without the budget, `k` headers inside one
+unterminated string would cost `O(k · bytes.size)`.
 
 ## Conservativity (C4), to be stated with task 2.5
 
@@ -110,12 +110,12 @@ def headerAt (bytes : ByteArray) (p : Nat) : Option (Nat × Nat) :=
 
 /-! ## The scan (R2) -/
 
-/-- At most this many `parseIndirect` (and trailer `parseObject`) attempts may fail during one
-scan; afterwards headers are still recorded but no longer parsed (R2'). A failed attempt may
-read up to the end of the input without moving the scan forward, so this budget is what makes
-the worst-case time `O(bytes.size · failBudget)` instead of quadratic in the number of headers
-(e.g. thousands of headers nested inside one unterminated string). -/
-def failBudget : Nat := 256
+/-! At most `limits.maxRepairFailures` `parseIndirect` (and trailer `parseObject`) attempts may
+fail during one scan; afterwards headers are still recorded but no longer parsed (R2'). A
+failed attempt may read up to the end of the input without moving the scan forward, so this
+budget is what makes the worst-case time `O(bytes.size · limits.maxRepairFailures)` instead of
+quadratic in the number of headers (e.g. thousands of headers nested inside one unterminated
+string). -/
 
 /-- The scan loop from `p`. `acc` holds the hits `(num, gen, offset)` found so far, newest
 first; `n` counts the `parseIndirect` attempts and `fails` the failed ones. Returns the hits,
@@ -126,7 +126,7 @@ def scanLoop (limits : Limits) (bytes : ByteArray) (p : Nat) (acc : List (Nat ×
     if boundaryAt bytes p then
       match headerAt bytes p with
       | some (num, gen) =>
-        if fails < failBudget then
+        if fails < limits.maxRepairFailures then
           match ObjParse.parseIndirect limits bytes p with
           | .ok (_, r) =>
             scanLoop limits bytes (max r (p + 1)) ((num, gen, p) :: acc) (n + 1) fails
@@ -170,12 +170,12 @@ def scanObjects (limits : Limits) (bytes : ByteArray) : List (Nat × Nat × Nat)
 /-! ## Trailers (R4) -/
 
 /-- Scan for `trailer` dictionaries from `p`; `acc` newest first. A dictionary that parses is
-jumped over; at most `failBudget` attempts may fail (as in `scanLoop`). -/
+jumped over; at most `limits.maxRepairFailures` attempts may fail (as in `scanLoop`). -/
 def trailerLoop (limits : Limits) (bytes : ByteArray) (p : Nat) (acc : List Dict)
     (fails : Nat) : List Dict :=
   if _h : p < bytes.size then
     if boundaryAt bytes p && Xref.matchAt bytes p Xref.kwTrailer && endOk bytes (p + 7) &&
-        decide (fails < failBudget) then
+        decide (fails < limits.maxRepairFailures) then
       match ObjParse.parseObject limits bytes (p + 7) with
       | .ok (.dict d, r) => trailerLoop limits bytes (max r (p + 1)) (d :: acc) fails
       | _ => trailerLoop limits bytes (p + 1) acc (fails + 1)
@@ -350,14 +350,15 @@ def repair (limits : Limits) (bytes : ByteArray) : Except Error (XrefSection × 
 /-! ## Bounds of the scan loop -/
 
 /-- Loop invariant of `scanLoop`: at most one hit per remaining byte; at most one attempt
-per hit; the failure count never passes `failBudget`; every new hit is a header at an offset
-inside the input. -/
+per hit; the failure count never passes `limits.maxRepairFailures`; every new hit is a header
+at an offset inside the input. -/
 theorem scanLoop_spec (limits : Limits) (bytes : ByteArray) (p : Nat)
     (acc : List (Nat × Nat × Nat)) (n fails : Nat) :
     (scanLoop limits bytes p acc n fails).1.length ≤ acc.length + (bytes.size - p) ∧
     (scanLoop limits bytes p acc n fails).2.1 + acc.length ≤
       n + (scanLoop limits bytes p acc n fails).1.length ∧
-    (fails ≤ failBudget → (scanLoop limits bytes p acc n fails).2.2 ≤ failBudget) ∧
+    (fails ≤ limits.maxRepairFailures →
+      (scanLoop limits bytes p acc n fails).2.2 ≤ limits.maxRepairFailures) ∧
     ∀ x ∈ (scanLoop limits bytes p acc n fails).1,
       x ∈ acc ∨ (x.2.2 < bytes.size ∧ headerAt bytes x.2.2 = some (x.1, x.2.1)) := by
   fun_induction scanLoop limits bytes p acc n fails
@@ -435,9 +436,9 @@ theorem scanAttempts_le (limits : Limits) (bytes : ByteArray) :
   simp only [List.length_nil] at h1 h2
   omega
 
-/-- **(e) Work bound.** At most `failBudget` of those attempts fail. -/
+/-- **(e) Work bound.** At most `limits.maxRepairFailures` of those attempts fail. -/
 theorem scanFailures_le (limits : Limits) (bytes : ByteArray) :
-    scanFailures limits bytes ≤ failBudget := by
+    scanFailures limits bytes ≤ limits.maxRepairFailures := by
   obtain ⟨_, _, h3, _⟩ := scanLoop_spec limits bytes 0 [] 0 0
   unfold scanFailures scanRaw
   exact h3 (Nat.zero_le _)
@@ -637,12 +638,16 @@ private def nestedStrings (k : Nat) : ByteArray :=
   ((List.replicate k "1 0 obj (").foldl (· ++ ·) "").toUTF8
 
 -- R2': headers inside an unterminated string. Every attempt fails (and would read to the
--- end); after failBudget failures the scan stops parsing but still records headers
+-- end); after limits.maxRepairFailures failures the scan stops parsing but still records headers
 #guard scanAttempts Limits.default (nestedStrings 300) == 256
 #guard scanFailures Limits.default (nestedStrings 300) == 256
 #guard (scanRaw Limits.default (nestedStrings 300)).1.length == 300
 -- below the budget every header is attempted
 #guard scanAttempts Limits.default (nestedStrings 10) == 10
+-- the budget is `limits.maxRepairFailures`
+#guard scanAttempts { maxRepairFailures := 3 } (nestedStrings 10) == 3
+#guard (scanRaw { maxRepairFailures := 3 } (nestedStrings 10)).1.length == 10
+#guard scanAttempts { maxRepairFailures := 0 } (nestedStrings 10) == 0
 
 -- the object cap: limits.maxObjects keeps the lowest object numbers
 #guard rp minimalBytes { maxObjects := 2 } ==

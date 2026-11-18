@@ -13,7 +13,7 @@ Theorems about `Core.Xref.Chain` (task 2.2):
   no fuel. `loadChain_terminates` records this.
 * **Structure of a success.** The revision offsets are pairwise distinct
   (`loadChain_offsets_nodup`) and inside the input (`loadChain_offsets_lt`); there are at most
-  `bytes.size` and at most `maxRevisions` of them (`loadChain_length_le`); and the `/Prev`
+  `bytes.size` and at most `limits.maxRevisions` of them (`loadChain_length_le`); and the `/Prev`
   path from the `startxref` offset ends in a table without `/Prev` (`loadChain_ok_reach`).
 * **Cycle rejection.** `PrevStep limits bytes o o'` says "the table at `o` parses and its
   trailer's `/Prev` is `o'`". If a `PrevStep` path from the `startxref` offset reaches an
@@ -22,7 +22,7 @@ Theorems about `Core.Xref.Chain` (task 2.2):
   (`/Prev` = own offset) and the 2-cycle of `Tests/adversarial/xref-prev-{self,cycle}.pdf`,
   whose concrete `"xref /Prev cycle"` errors are checked by `#guard` in `Core.Xref.Chain`.
 * **S3 work bound.** `loadChainCounted` returns the number of `parseXrefTable` calls next to
-  the result; it is at most `bytes.size` and at most `maxRevisions`
+  the result; it is at most `bytes.size` and at most `limits.maxRevisions`
   (`loadChainCounted_calls_le`), and equals the number of revisions on success.
 * **S6 preview.** `mergeChain` keeps, per object number, the entry of the newest revision
   that has one (`mergeChain_lookup`).
@@ -103,7 +103,7 @@ unvisited offsets, and at most the remaining revision budget. -/
 theorem walk_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
     (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
     (walk limits bytes off visited hnd hlt).2 ≤ bytes.size - visited.length ∧
-      (walk limits bytes off visited hnd hlt).2 ≤ maxRevisions - visited.length := by
+      (walk limits bytes off visited hnd hlt).2 ≤ limits.maxRevisions - visited.length := by
   fun_induction walk limits bytes off visited hnd hlt with
   | case1 => simp
   | case2 => simp
@@ -131,7 +131,7 @@ theorem walk_ok (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : Lis
     (h : (walk limits bytes off visited hnd hlt).1 = .ok revs) :
     (revs.map Revision.offset).Nodup ∧
       (∀ o ∈ revs.map Revision.offset, o < bytes.size ∧ o ∉ visited) ∧
-      revs.length + visited.length ≤ maxRevisions ∧
+      revs.length + visited.length ≤ limits.maxRevisions ∧
       (walk limits bytes off visited hnd hlt).2 = revs.length ∧
       ∃ t, PrevReach limits bytes off t ∧ Terminal limits bytes t := by
   revert revs
@@ -193,7 +193,7 @@ theorem loadChain_ok {limits : Limits} {bytes : ByteArray} {revs : List Revision
     ∃ start, findStartxref bytes = .ok start ∧
       (revs.map Revision.offset).Nodup ∧
       (∀ o ∈ revs.map Revision.offset, o < bytes.size) ∧
-      revs.length ≤ maxRevisions ∧
+      revs.length ≤ limits.maxRevisions ∧
       (loadChainCounted limits bytes).2 = revs.length ∧
       ∃ t, PrevReach limits bytes start t ∧ Terminal limits bytes t := by
   unfold loadChain loadChainCounted at h
@@ -222,10 +222,10 @@ theorem loadChain_offsets_lt {limits : Limits} {bytes : ByteArray} {revs : List 
   exact h2
 
 /-- **(c)** On success there are at most `bytes.size` revisions (distinct offsets inside the
-input) and at most `maxRevisions`. -/
+input) and at most `limits.maxRevisions`. -/
 theorem loadChain_length_le {limits : Limits} {bytes : ByteArray} {revs : List Revision}
     (h : loadChain limits bytes = .ok revs) :
-    revs.length ≤ bytes.size ∧ revs.length ≤ maxRevisions := by
+    revs.length ≤ bytes.size ∧ revs.length ≤ limits.maxRevisions := by
   obtain ⟨_, _, h1, h2, h3, _⟩ := loadChain_ok h
   have := length_le_of_nodup_of_lt h1 h2
   simp only [List.length_map] at this
@@ -272,11 +272,11 @@ where
         exact ih hbt hterm hstep hback
 
 /-- **(e) Work bound** (S3). `loadChain` makes at most `bytes.size` calls of
-`parseXrefTable`, and at most `maxRevisions`; the count is returned by `loadChainCounted`,
+`parseXrefTable`, and at most `limits.maxRevisions`; the count is returned by `loadChainCounted`,
 whose first component is `loadChain`. -/
 theorem loadChainCounted_calls_le (limits : Limits) (bytes : ByteArray) :
     (loadChainCounted limits bytes).2 ≤ bytes.size ∧
-      (loadChainCounted limits bytes).2 ≤ maxRevisions := by
+      (loadChainCounted limits bytes).2 ≤ limits.maxRevisions := by
   unfold loadChainCounted
   split
   · simp
