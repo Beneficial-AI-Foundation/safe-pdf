@@ -39,6 +39,11 @@ grammar (rules G1–G6 below) is the one the object grammar spec `SafePdf/Spec/O
   them: when they do not form `g R`, the integer is returned with the position just after it,
   and the caller lexes those tokens again. A lexer error inside the lookahead is an error
   (rule "a lexer error anywhere is an error").
+* Indirect objects: `parseIndirect` = `parseHeader` (`n g obj`, range checks) then
+  `parseIndirectBody` = `parseIndirectBodyWith streamLength`. The body is parametric in a
+  `LengthResolver` (dictionary, error offset ↦ data length) so `Core.Xref.Length` and
+  `Repair` reuse it with an indirect-`/Length` resolver; the framing lemmas
+  (`parseStreamBodyWith_ok`, `parseIndirectBodyWith_ok`) hold for every resolver.
 * Recursion depth is bounded by the fuel (each nesting level is one `parseObjTok` frame plus
   one loop frame), so a 100 000-deep `[[[…` fails cleanly with `limitExceeded .objectDepth`.
 
@@ -241,7 +246,8 @@ def skipEol (bytes : ByteArray) (p : Nat) : Nat :=
   else p
 
 /-- The stream length from the stream dictionary: a direct non-negative integer `/Length`.
-An indirect `/Length` is unsupported here (resolved in Phase 2). -/
+An indirect `/Length` is unsupported here; callers that can resolve it pass their own
+`LengthResolver` (`Core.Xref.Length`, `Repair`). -/
 def streamLength (d : Dict) (at_ : Nat) : Except Error Nat :=
   match Dict.lookup d nameLength with
   | some (.int l) =>
@@ -249,6 +255,10 @@ def streamLength (d : Dict) (at_ : Nat) : Except Error Nat :=
   | some (.ref _ _) => .error (.unsupported "indirect /Length")
   | some _ => .error (.malformed at_ "/Length is not an integer")
   | none => .error (.malformed at_ "missing /Length")
+
+/-- How a stream's data length is obtained from its dictionary; the `Nat` is the offset used
+in error messages (just after the `stream` keyword). The default is `streamLength`. -/
+abbrev LengthResolver := Dict → Nat → Except Error Nat
 
 /-- After `endobj` is expected at `pos`: the position after it. -/
 def expectKeyword (bytes : ByteArray) (pos : Nat) (kw : List UInt8) (msg : String) :
@@ -258,14 +268,15 @@ def expectKeyword (bytes : ByteArray) (pos : Nat) (kw : List UInt8) (msg : Strin
   | .ok (some (.keyword k, q)) => if k = kw then .ok q else .error (errAt bytes pos msg)
   | .ok _ => .error (errAt bytes pos msg)
 
-/-- The stream body after the `stream` keyword ending at `p`, with dictionary `d`: EOL, exactly
-`/Length` data bytes, optional EOL, `endstream`, `endobj`. Returns the stream and the position
-after `endobj`. -/
-def parseStreamBody (bytes : ByteArray) (p : Nat) (d : Dict) : Except Error (Stream × Nat) :=
+/-- The stream body after the `stream` keyword ending at `p`, with dictionary `d` and length
+resolver `len`: EOL, exactly `len d p` data bytes, optional EOL, `endstream`, `endobj`.
+Returns the stream (dictionary `d` as written) and the position after `endobj`. -/
+def parseStreamBodyWith (len : LengthResolver) (bytes : ByteArray) (p : Nat) (d : Dict) :
+    Except Error (Stream × Nat) :=
   match streamDataStart bytes p with
   | none => .error (.malformed p "stream keyword not followed by CR LF or LF")
   | some s =>
-    match streamLength d p with
+    match len d p with
     | .error e => .error e
     | .ok len =>
       if s + len ≤ bytes.size then
@@ -281,9 +292,14 @@ def parseStreamBody (bytes : ByteArray) (p : Nat) (d : Dict) : Except Error (Str
         | .ok _ => .error (.malformed e "expected endstream")
       else .error (.malformed s "stream data extends past end of input")
 
-/-- After `n g obj` (ending at `p`): the body, then `endobj`, or a stream. -/
-def parseIndirectBody (limits : Limits) (bytes : ByteArray) (p : Nat) :
-    Except Error (IndirectBody × Nat) :=
+/-- The stream body with a direct `/Length` only (`parseStreamBodyWith streamLength`). -/
+def parseStreamBody (bytes : ByteArray) (p : Nat) (d : Dict) : Except Error (Stream × Nat) :=
+  parseStreamBodyWith streamLength bytes p d
+
+/-- After `n g obj` (ending at `p`): the body, then `endobj`, or a stream whose length comes
+from `len`. -/
+def parseIndirectBodyWith (len : LengthResolver) (limits : Limits) (bytes : ByteArray)
+    (p : Nat) : Except Error (IndirectBody × Nat) :=
   match parseObject limits bytes p with
   | .error e => .error e
   | .ok (o, r) =>
@@ -294,18 +310,21 @@ def parseIndirectBody (limits : Limits) (bytes : ByteArray) (p : Nat) :
       else if k = kwStream then
         match o with
         | .dict d =>
-          match parseStreamBody bytes r2 d with
+          match parseStreamBodyWith len bytes r2 d with
           | .ok (s, r3) => .ok (.stream s, r3)
           | .error e => .error e
         | _ => .error (errAt bytes r "stream without a dictionary")
       else .error (errAt bytes r "expected endobj or stream")
     | .ok _ => .error (errAt bytes r "expected endobj or stream")
 
-/-- **Entry point.** The indirect object `n g obj … endobj` (or a stream object) starting at
-the next token at or after `pos`, with `n ≥ 1` and `0 ≤ g ≤ 65535`. Returns it and the
-position after `endobj`. -/
-def parseIndirect (limits : Limits) (bytes : ByteArray) (pos : Nat) :
-    Except Error (IndirectObject × Nat) :=
+/-- After `n g obj` (ending at `p`): the body with a direct `/Length` only. -/
+def parseIndirectBody (limits : Limits) (bytes : ByteArray) (p : Nat) :
+    Except Error (IndirectBody × Nat) :=
+  parseIndirectBodyWith streamLength limits bytes p
+
+/-- The header `n g obj` at the next token at or after `pos`, with `n ≥ 1` and
+`0 ≤ g ≤ 65535`. Returns `n`, `g` and the position after `obj`. -/
+def parseHeader (bytes : ByteArray) (pos : Nat) : Except Error (Int × Int × Nat) :=
   match Lex.next bytes pos with
   | .ok (some (.int n, q1)) =>
     match Lex.next bytes q1 with
@@ -313,10 +332,7 @@ def parseIndirect (limits : Limits) (bytes : ByteArray) (pos : Nat) :
       match Lex.next bytes q2 with
       | .ok (some (.keyword k, q3)) =>
         if k = kwObj then
-          if refOk n g then
-            match parseIndirectBody limits bytes q3 with
-            | .ok (b, r) => .ok (⟨n.toNat, g.toNat, b⟩, r)
-            | .error e => .error e
+          if refOk n g then .ok (n, g, q3)
           else .error (errAt bytes pos "bad object number")
         else .error (errAt bytes q2 "expected obj")
       | .error e => .error (lexErr e)
@@ -325,6 +341,19 @@ def parseIndirect (limits : Limits) (bytes : ByteArray) (pos : Nat) :
     | .ok _ => .error (errAt bytes q1 "expected generation number")
   | .error e => .error (lexErr e)
   | .ok _ => .error (errAt bytes pos "expected object number")
+
+/-- **Entry point.** The indirect object `n g obj … endobj` (or a stream object) starting at
+the next token at or after `pos`: the header (`parseHeader`, `n ≥ 1`, `0 ≤ g ≤ 65535`), then
+the body with a direct stream `/Length` (`parseIndirectBody`). Returns it and the position
+after `endobj`. -/
+def parseIndirect (limits : Limits) (bytes : ByteArray) (pos : Nat) :
+    Except Error (IndirectObject × Nat) :=
+  match parseHeader bytes pos with
+  | .error e => .error e
+  | .ok (n, g, q) =>
+    match parseIndirectBody limits bytes q with
+    | .ok (b, r) => .ok (⟨n.toNat, g.toNat, b⟩, r)
+    | .error e => .error e
 
 /-! ## Progress -/
 
@@ -456,6 +485,152 @@ input. -/
 theorem parseObject_pos {limits : Limits} {bytes : ByteArray} {pos : Nat} {o : PdfObject}
     {r : Nat} (h : parseObject limits bytes pos = .ok (o, r)) : pos < r ∧ r ≤ bytes.size :=
   parseObj_pos h
+
+/-! ## Progress and framing of indirect objects -/
+
+/-- **Progress** of the header. -/
+theorem parseHeader_pos {bytes : ByteArray} {pos : Nat} {n g : Int} {q : Nat}
+    (h : parseHeader bytes pos = .ok (n, g, q)) : pos < q ∧ q ≤ bytes.size := by
+  unfold parseHeader at h
+  split at h
+  · rename_i n0 q1 h1
+    have p1 := Lex.next_pos _ _ _ _ h1
+    split at h
+    · rename_i g0 q2 h2
+      have p2 := Lex.next_pos _ _ _ _ h2
+      split at h
+      · rename_i k q3 h3
+        have p3 := Lex.next_pos _ _ _ _ h3
+        split at h
+        · split at h
+          · simp only [Except.ok.injEq, Prod.mk.injEq] at h
+            omega
+          · simp at h
+        · simp at h
+      · simp at h
+      · simp at h
+    · simp at h
+    · simp at h
+  · simp at h
+  · simp at h
+
+/-- `streamDataStart` is strictly after the keyword end. -/
+theorem streamDataStart_lt {bytes : ByteArray} {p s : Nat}
+    (h : streamDataStart bytes p = some s) : p < s := by
+  unfold streamDataStart at h
+  split at h
+  · split at h <;> simp at h; omega
+  · split at h <;> simp at h; omega
+
+/-- `skipEol` does not move backwards. -/
+theorem le_skipEol (bytes : ByteArray) (p : Nat) : p ≤ skipEol bytes p := by
+  unfold skipEol
+  split
+  · split <;> omega
+  · split <;> omega
+
+/-- `expectKeyword` moves forward and stays within the input. -/
+theorem expectKeyword_pos {bytes : ByteArray} {pos : Nat} {kw : List UInt8} {msg : String}
+    {r : Nat} (h : expectKeyword bytes pos kw msg = .ok r) :
+    pos < r ∧ r ≤ bytes.size := by
+  unfold expectKeyword at h
+  split at h
+  · simp at h
+  · rename_i k q hq
+    split at h
+    · simp only [Except.ok.injEq] at h
+      subst h
+      exact Lex.next_pos _ _ _ _ hq
+    · simp at h
+  · simp at h
+
+/-- **Stream framing.** A stream body parsed (with any length resolver) after the keyword
+ending at `p` has data `bytes[st, st + len)` with `p < st`, `st + len ≤ bytes.size`, ending
+strictly before the returned position `r ≤ bytes.size`; the dictionary is the one given. -/
+theorem parseStreamBodyWith_ok {len : LengthResolver} {bytes : ByteArray} {p : Nat}
+    {d : Dict} {s : Stream} {r : Nat} (h : parseStreamBodyWith len bytes p d = .ok (s, r)) :
+    ∃ st, p < st ∧ st + s.data.size ≤ bytes.size ∧
+      s.data = bytes.extract st (st + s.data.size) ∧ st + s.data.size < r ∧
+      r ≤ bytes.size ∧ s.dict = d := by
+  unfold parseStreamBodyWith at h
+  split at h
+  · simp at h
+  · rename_i st hst
+    have h1 := streamDataStart_lt hst
+    split at h
+    · simp at h
+    · rename_i l _
+      split at h
+      · rename_i hle
+        have h2 := le_skipEol bytes (st + l)
+        dsimp only at h
+        split at h
+        · rename_i k e2 he2
+          have h3 := Lex.tokenAt_pos _ _ _ _ he2
+          split at h
+          · split at h
+            · rename_i r' hr'
+              have h4 := expectKeyword_pos hr'
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, rfl⟩ := h
+              have hsz : (bytes.extract st (st + l)).size = l := by
+                simp only [ByteArray.size_extract]
+                omega
+              refine ⟨st, h1, ?_, ?_, ?_, h4.2, rfl⟩
+              · simp only [hsz]; omega
+              · simp only [hsz]
+              · simp only [hsz]; omega
+            · simp at h
+          · simp at h
+        · simp at h
+        · simp at h
+      · simp at h
+
+/-- **Stream framing** with a direct `/Length` (an instance of `parseStreamBodyWith_ok`). -/
+theorem parseStreamBody_ok {bytes : ByteArray} {p : Nat} {d : Dict} {s : Stream} {r : Nat}
+    (h : parseStreamBody bytes p d = .ok (s, r)) :
+    ∃ st, p < st ∧ st + s.data.size ≤ bytes.size ∧
+      s.data = bytes.extract st (st + s.data.size) ∧ st + s.data.size < r ∧
+      r ≤ bytes.size ∧ s.dict = d :=
+  parseStreamBodyWith_ok h
+
+/-- Progress and stream framing of `parseIndirectBodyWith` (any length resolver). -/
+theorem parseIndirectBodyWith_ok {len : LengthResolver} {limits : Limits} {bytes : ByteArray}
+    {p : Nat} {b : IndirectBody} {r : Nat}
+    (h : parseIndirectBodyWith len limits bytes p = .ok (b, r)) :
+    p < r ∧ r ≤ bytes.size ∧
+      ∀ s, b = .stream s → ∃ st, p < st ∧ st + s.data.size ≤ bytes.size ∧
+        s.data = bytes.extract st (st + s.data.size) := by
+  unfold parseIndirectBodyWith at h
+  split at h
+  · simp at h
+  · rename_i o r1 h1
+    have p1 := parseObject_pos h1
+    split at h
+    · simp at h
+    · rename_i k r2 h2
+      have p2 := Lex.next_pos _ _ _ _ h2
+      split at h
+      · simp only [Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        refine ⟨by omega, p2.2, ?_⟩
+        intro s hs
+        cases hs
+      · split at h
+        · split at h
+          · split at h
+            · rename_i s0 r3 h3
+              obtain ⟨st, q1, q2, q3, q4, q5, _⟩ := parseStreamBodyWith_ok h3
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h
+              obtain ⟨rfl, rfl⟩ := h
+              refine ⟨by omega, q5, ?_⟩
+              intro s hs
+              cases hs
+              exact ⟨st, by omega, q2, q3⟩
+            · simp at h
+          · simp at h
+        · simp at h
+    · simp at h
 
 /-! ## Depth bound -/
 
@@ -818,6 +993,17 @@ private def opens (n : Nat) : ByteArray := ⟨Array.replicate n 91⟩
 #guard pind "4 0 obj <</Length 7 0 R>> stream\nhello\nendstream endobj" ==
   .inl "unsupported:indirect /Length"
 #guard pind "4 0 obj [1] stream\nhello\nendstream endobj" == .inl "malformed@12"
+-- the header alone, and the body with another length resolver
+#guard (match parseHeader " 4 2 obj x".toUTF8 0 with
+  | .ok (n, g, q) => n == 4 && g == 2 && q == 8
+  | .error _ => false)
+#guard (match parseHeader "0 0 obj".toUTF8 0 with
+  | .error (.malformed 0 _) => true
+  | _ => false)
+#guard (match parseIndirectBodyWith (fun _ _ => .ok 5) Limits.default
+    "<</Length 7 0 R>> stream\nhello\nendstream endobj".toUTF8 0 with
+  | .ok (.stream s, r) => s.data.toList == [104, 101, 108, 108, 111] && r == 47
+  | _ => false)
 
 end Tests
 

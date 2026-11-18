@@ -34,6 +34,9 @@ not depend on how the xref chain is merged (task 2.2).
   stream `/Length` is resolved by L1–L4 with `visiting = [n]` from the start, so a stream whose
   `/Length` refers to itself is rejected at once. The stream's dictionary is kept as written
   (the `/Length` stays a reference); the data is exactly the resolved number of bytes.
+  Header and body are `ObjParse.parseHeader` and `ObjParse.parseIndirectBodyWith` with the
+  resolver `lengthOf` (task 2.10), so the framing rules are exactly those of `parseIndirect`.
+  The resolver runs after the `stream` keyword's EOL is checked (as `streamLength` does).
 
 ## Bounds
 
@@ -49,30 +52,6 @@ namespace SafePdf.Core.Xref.Length
 
 open SafePdf
 open SafePdf.Core.Xref (XrefEntry)
-open SafePdf.Core.ObjParse (errAt lexErr)
-
-/-! ## Indirect object header -/
-
-/-- The header `n g obj` at the next token at or after `pos`, with `n ≥ 1` and
-`0 ≤ g ≤ 65535`. Returns `n`, `g` and the position after `obj`. Same checks and messages as
-the header part of `ObjParse.parseIndirect`. -/
-def parseHeader (bytes : ByteArray) (pos : Nat) : Except Error (Int × Int × Nat) :=
-  match Lex.next bytes pos with
-  | .ok (some (.int n, q1)) =>
-    match Lex.next bytes q1 with
-    | .ok (some (.int g, q2)) =>
-      match Lex.next bytes q2 with
-      | .ok (some (.keyword k, q3)) =>
-        if k = ObjParse.kwObj then
-          if ObjParse.refOk n g then .ok (n, g, q3)
-          else .error (errAt bytes pos "bad object number")
-        else .error (errAt bytes q2 "expected obj")
-      | .error e => .error (lexErr e)
-      | .ok _ => .error (errAt bytes q2 "expected obj")
-    | .error e => .error (lexErr e)
-    | .ok _ => .error (errAt bytes q1 "expected generation number")
-  | .error e => .error (lexErr e)
-  | .ok _ => .error (errAt bytes pos "expected object number")
 
 /-! ## Resolution of an indirect `/Length` -/
 
@@ -80,7 +59,7 @@ def parseHeader (bytes : ByteArray) (pos : Nat) : Except Error (Int × Int × Na
 generation `g`; a stream object is an error (`endobj` expected). One object parse. -/
 def parseLengthObj (limits : Limits) (bytes : ByteArray) (off n g : Nat) :
     Except Error PdfObject :=
-  match parseHeader bytes off with
+  match ObjParse.parseHeader bytes off with
   | .error e => .error e
   | .ok (n', g', q) =>
     if n' = (n : Int) ∧ g' = (g : Int) then
@@ -152,40 +131,27 @@ def lengthDict (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : By
     | .error e => .error e
   | _ => .ok d
 
-/-- After `self g obj` (ending at `p`): the body, then `endobj`, or a stream whose `/Length`
-may be indirect (rule L5). Mirrors `ObjParse.parseIndirectBody`. -/
-def parseBodyResolved (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel self p : Nat) : Except Error (IndirectBody × Nat) :=
-  match ObjParse.parseObject limits bytes p with
+/-- The length resolver of rule L5 for object `self`: the stream data length from `d`
+(an indirect `/Length` resolved through `lengthDict`, then the direct rule
+`ObjParse.streamLength`). Passed to `ObjParse.parseIndirectBodyWith`. -/
+def lengthOf (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
+    (fuel self : Nat) : ObjParse.LengthResolver := fun d at_ =>
+  match lengthDict lookup limits bytes fuel self d with
   | .error e => .error e
-  | .ok (o, r) =>
-    match Lex.next bytes r with
-    | .error e => .error (lexErr e)
-    | .ok (some (.keyword k, r2)) =>
-      if k = ObjParse.kwEndobj then .ok (.obj o, r2)
-      else if k = ObjParse.kwStream then
-        match o with
-        | .dict d =>
-          match lengthDict lookup limits bytes fuel self d with
-          | .error e => .error e
-          | .ok d' =>
-            match ObjParse.parseStreamBody bytes r2 d' with
-            | .ok (s, r3) => .ok (.stream ⟨d, s.data⟩, r3)
-            | .error e => .error e
-        | _ => .error (errAt bytes r "stream without a dictionary")
-      else .error (errAt bytes r "expected endobj or stream")
-    | .ok _ => .error (errAt bytes r "expected endobj or stream")
+  | .ok d' => ObjParse.streamLength d' at_
 
 /-- **Entry point.** The indirect object `n g obj … endobj` (or stream object) at the next
-token at or after `pos`, like `ObjParse.parseIndirect` but resolving an indirect stream
-`/Length` through `resolveLength` with fuel `fuel` (the number of objects) and `visiting =
-[n]` (rule L5). Returns the object and the position after `endobj`. -/
+token at or after `pos`, like `ObjParse.parseIndirect` (same header, `ObjParse.parseHeader`)
+but resolving an indirect stream `/Length` through `resolveLength` with fuel `fuel` (the
+number of objects) and `visiting = [n]` (rule L5, `lengthOf`). Returns the object and the
+position after `endobj`. -/
 def parseIndirectResolved (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel pos : Nat) : Except Error (IndirectObject × Nat) :=
-  match parseHeader bytes pos with
+  match ObjParse.parseHeader bytes pos with
   | .error e => .error e
   | .ok (n, g, q) =>
-    match parseBodyResolved lookup limits bytes fuel n.toNat q with
+    match ObjParse.parseIndirectBodyWith (lengthOf lookup limits bytes fuel n.toNat) limits
+        bytes q with
     | .ok (b, r) => .ok (⟨n.toNat, g.toNat, b⟩, r)
     | .error e => .error e
 
@@ -242,174 +208,6 @@ theorem lengthDict_self (lookup : Nat → Option XrefEntry) (limits : Limits)
   rw [resolveLength_self lookup limits bytes fuel [self] (self, g) (by simp)]
   exact ⟨_, rfl⟩
 
-/-- `Lex.tokenAt` moves forward and stays within the input (the `skipWs`-free part of
-`Lex.next_pos`). -/
-theorem tokenAt_pos (bytes : ByteArray) (p : Nat) (t : Token) (q : Nat)
-    (h : Lex.tokenAt bytes p = .ok (some (t, q))) : p < q ∧ q ≤ bytes.size := by
-  unfold Lex.tokenAt at h
-  by_cases hlt : p < bytes.size
-  · rw [dite_eq_left hlt] at h
-    generalize bytes[p] = b at h
-    unfold Lex.tokenOf at h
-    repeat' split at h
-    all_goals first
-      | (simp at h; done)
-      | (obtain ⟨s, hs⟩ := Lex.liftAt_ok h
-         first
-           | (have := Lex.hexStr_bounds _ _ _ _ _ _ hs; omega)
-           | (have := Lex.nameRun_bounds _ _ _ _ _ hs; omega))
-      | (have hq := Lex.runToken_ok h
-         have := Lex.readRun_bounds bytes (p + 1) [b]
-         omega)
-      | (simp only [Except.ok.injEq, Option.some.injEq, Prod.mk.injEq] at h
-         obtain ⟨-, rfl⟩ := h
-         first
-           | omega
-           | (have := Lex.litStr_bounds _ _ _ _ _ _ ‹Lex.litStr _ _ _ _ = _›; omega)
-           | (have := Lex.lt_size_of_getElem?_eq_some
-                (by simpa using ‹(bytes[p + 1]? == some _) = true›)
-              omega))
-  · rw [dite_eq_right hlt] at h
-    simp at h
-
-/-- **Progress** of the header. -/
-theorem parseHeader_pos {bytes : ByteArray} {pos : Nat} {n g : Int} {q : Nat}
-    (h : parseHeader bytes pos = .ok (n, g, q)) : pos < q ∧ q ≤ bytes.size := by
-  unfold parseHeader at h
-  split at h
-  · rename_i n0 q1 h1
-    have p1 := Lex.next_pos _ _ _ _ h1
-    split at h
-    · rename_i g0 q2 h2
-      have p2 := Lex.next_pos _ _ _ _ h2
-      split at h
-      · rename_i k q3 h3
-        have p3 := Lex.next_pos _ _ _ _ h3
-        split at h
-        · split at h
-          · simp only [Except.ok.injEq, Prod.mk.injEq] at h
-            omega
-          · simp at h
-        · simp at h
-      · simp at h
-      · simp at h
-    · simp at h
-    · simp at h
-  · simp at h
-  · simp at h
-
-/-- `streamDataStart` is strictly after the keyword end. -/
-theorem streamDataStart_lt {bytes : ByteArray} {p s : Nat}
-    (h : ObjParse.streamDataStart bytes p = some s) : p < s := by
-  unfold ObjParse.streamDataStart at h
-  split at h
-  · split at h <;> simp at h; omega
-  · split at h <;> simp at h; omega
-
-/-- `skipEol` does not move backwards. -/
-theorem le_skipEol (bytes : ByteArray) (p : Nat) : p ≤ ObjParse.skipEol bytes p := by
-  unfold ObjParse.skipEol
-  split
-  · split <;> omega
-  · split <;> omega
-
-/-- `expectKeyword` moves forward and stays within the input. -/
-theorem expectKeyword_pos {bytes : ByteArray} {pos : Nat} {kw : List UInt8} {msg : String}
-    {r : Nat} (h : ObjParse.expectKeyword bytes pos kw msg = .ok r) :
-    pos < r ∧ r ≤ bytes.size := by
-  unfold ObjParse.expectKeyword at h
-  split at h
-  · simp at h
-  · rename_i k q hq
-    split at h
-    · simp only [Except.ok.injEq] at h
-      subst h
-      exact Lex.next_pos _ _ _ _ hq
-    · simp at h
-  · simp at h
-
-/-- **Stream framing.** A stream body parsed after the keyword ending at `p` has data
-`bytes[st, st + len)` with `p < st`, `st + len ≤ bytes.size`, ending strictly before the
-returned position `r ≤ bytes.size`; the dictionary is the one given. -/
-theorem parseStreamBody_ok {bytes : ByteArray} {p : Nat} {d : Dict} {s : Stream} {r : Nat}
-    (h : ObjParse.parseStreamBody bytes p d = .ok (s, r)) :
-    ∃ st, p < st ∧ st + s.data.size ≤ bytes.size ∧
-      s.data = bytes.extract st (st + s.data.size) ∧ st + s.data.size < r ∧
-      r ≤ bytes.size ∧ s.dict = d := by
-  unfold ObjParse.parseStreamBody at h
-  split at h
-  · simp at h
-  · rename_i st hst
-    have h1 := streamDataStart_lt hst
-    split at h
-    · simp at h
-    · rename_i len _
-      split at h
-      · rename_i hle
-        have h2 := le_skipEol bytes (st + len)
-        dsimp only at h
-        split at h
-        · rename_i k e2 he2
-          have h3 := tokenAt_pos _ _ _ _ he2
-          split at h
-          · split at h
-            · rename_i r' hr'
-              have h4 := expectKeyword_pos hr'
-              simp only [Except.ok.injEq, Prod.mk.injEq] at h
-              obtain ⟨rfl, rfl⟩ := h
-              have hsz : (bytes.extract st (st + len)).size = len := by
-                simp only [ByteArray.size_extract]
-                omega
-              refine ⟨st, h1, ?_, ?_, ?_, h4.2, rfl⟩
-              · simp only [hsz]; omega
-              · simp only [hsz]
-              · simp only [hsz]; omega
-            · simp at h
-          · simp at h
-        · simp at h
-        · simp at h
-      · simp at h
-
-/-- Progress and stream framing of `parseBodyResolved`. -/
-theorem parseBodyResolved_ok {lookup : Nat → Option XrefEntry} {limits : Limits}
-    {bytes : ByteArray} {fuel self p : Nat} {b : IndirectBody} {r : Nat}
-    (h : parseBodyResolved lookup limits bytes fuel self p = .ok (b, r)) :
-    p < r ∧ r ≤ bytes.size ∧
-      ∀ s, b = .stream s → ∃ st, p < st ∧ st + s.data.size ≤ bytes.size ∧
-        s.data = bytes.extract st (st + s.data.size) := by
-  unfold parseBodyResolved at h
-  split at h
-  · simp at h
-  · rename_i o r1 h1
-    have p1 := ObjParse.parseObject_pos h1
-    split at h
-    · simp at h
-    · rename_i k r2 h2
-      have p2 := Lex.next_pos _ _ _ _ h2
-      split at h
-      · simp only [Except.ok.injEq, Prod.mk.injEq] at h
-        obtain ⟨rfl, rfl⟩ := h
-        refine ⟨by omega, p2.2, ?_⟩
-        intro s hs
-        cases hs
-      · split at h
-        · split at h
-          · split at h
-            · simp at h
-            · split at h
-              · rename_i d' s0 r3 h3
-                obtain ⟨st, q1, q2, q3, q4, q5, _⟩ := parseStreamBody_ok h3
-                simp only [Except.ok.injEq, Prod.mk.injEq] at h
-                obtain ⟨rfl, rfl⟩ := h
-                refine ⟨by omega, q5, ?_⟩
-                intro s hs
-                cases hs
-                exact ⟨st, by omega, q2, q3⟩
-              · simp at h
-          · simp at h
-        · simp at h
-    · simp at h
-
 /-- **Progress** of `parseIndirectResolved`: the object ends strictly after `pos` and within
 the input. -/
 theorem parseIndirectResolved_pos {lookup : Nat → Option XrefEntry} {limits : Limits}
@@ -420,10 +218,10 @@ theorem parseIndirectResolved_pos {lookup : Nat → Option XrefEntry} {limits : 
   split at h
   · simp at h
   · rename_i n g q hq
-    have p1 := parseHeader_pos hq
+    have p1 := ObjParse.parseHeader_pos hq
     split at h
     · rename_i b r' hb
-      have p2 := parseBodyResolved_ok hb
+      have p2 := ObjParse.parseIndirectBodyWith_ok hb
       simp only [Except.ok.injEq, Prod.mk.injEq] at h
       obtain ⟨-, rfl⟩ := h
       exact ⟨by omega, p2.2.1⟩
@@ -442,10 +240,10 @@ theorem parseIndirectResolved_data {lookup : Nat → Option XrefEntry} {limits :
   split at h
   · simp at h
   · rename_i n g q hq
-    have p1 := parseHeader_pos hq
+    have p1 := ObjParse.parseHeader_pos hq
     split at h
     · rename_i b r' hb
-      have p2 := parseBodyResolved_ok hb
+      have p2 := ObjParse.parseIndirectBodyWith_ok hb
       simp only [Except.ok.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, -⟩ := h
       obtain ⟨st, h1, h2, h3⟩ := p2.2.2 s hs
