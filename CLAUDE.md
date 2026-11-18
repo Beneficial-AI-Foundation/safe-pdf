@@ -35,7 +35,7 @@ well under a minute and needs no cache sharing.
 
 * `SafePdf.lean` — umbrella imports of every module under `SafePdf/` (except `Shell/`).
 * `Tests/Main.lean` — the `suites` list of test suites.
-* `lakefile.toml` — targets and options.
+* `lakefile.toml` — targets and options. Every module under `Tests/` belongs to lib `Tests` via `globs = ["Tests.+"]`, so new test modules need no lakefile line.
 * `progress.md` — the ledger (orchestrator only).
 
 ## Layout (Plan.md §10)

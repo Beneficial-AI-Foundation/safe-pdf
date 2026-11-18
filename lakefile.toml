@@ -9,6 +9,10 @@ relaxedAutoImplicit = false
 [[lean_lib]]
 name = "SafePdf"
 
+[[lean_lib]]
+name = "Tests"
+globs = ["Tests.+"]
+
 [[lean_exe]]
 name = "inspect"
 root = "SafePdf.Shell.Main"
