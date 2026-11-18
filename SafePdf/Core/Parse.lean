@@ -1,13 +1,18 @@
 import SafePdf.Core.Error
 import SafePdf.Core.Limits
+import SafePdf.Core.ObjParse
 
 /-!
 # Parse entry point (Plan.md §6 Phase 0, §7 item 1)
 
 The single entry point `parse : ByteArray → Except Error Document` that the fuzzer, the
 inspector and later the viewer call. In Phase 0 it is a stub: it checks the input size
-against `Limits.maxInputBytes` and looks for the `%PDF-x.y` header. Later phases replace
-`Document` with the real object model (Phase 1) and file structure (Phase 2).
+against `Limits.maxInputBytes` and looks for the `%PDF-x.y` header. `Document` is a stub that
+Phase 2 (file structure: xref, trailer, object resolution) replaces.
+
+Phase 1 adds object-level entry points used by the fuzzer and the golden tests:
+`parseObjectAt` (one direct object, `Core.ObjParse.parseObject`) and `parseIndirectAt`
+(one indirect object or stream, `Core.ObjParse.parseIndirect`). Both are thin delegations.
 
 Pure and total, within the `Core/` rules of CLAUDE.md (forbidden constructs). Every loop is
 structurally recursive on a list or on an explicit fuel argument; the header search is
@@ -87,5 +92,19 @@ def parseWith (limits : Limits) (bytes : ByteArray) : Except Error Document :=
 /-- Parse `bytes` under `Limits.default`. The fuzzing entry point (Plan.md §6 Phase 0). -/
 def parse (bytes : ByteArray) : Except Error Document :=
   parseWith Limits.default bytes
+
+/-- Parse one direct object starting at the next token at or after `pos`, nesting at most
+`limits.maxObjectDepth`. Returns the object and the position after its last token.
+Delegates to `Core.ObjParse.parseObject`. -/
+def parseObjectAt (limits : Limits) (bytes : ByteArray) (pos : Nat) :
+    Except Error (PdfObject × Nat) :=
+  Core.ObjParse.parseObject limits bytes pos
+
+/-- Parse one indirect object `n g obj … endobj` (or a stream object) starting at the next
+token at or after `pos`. Returns it and the position after `endobj`.
+Delegates to `Core.ObjParse.parseIndirect`. -/
+def parseIndirectAt (limits : Limits) (bytes : ByteArray) (pos : Nat) :
+    Except Error (IndirectObject × Nat) :=
+  Core.ObjParse.parseIndirect limits bytes pos
 
 end SafePdf
