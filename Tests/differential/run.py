@@ -9,7 +9,8 @@ both, and compares.  Outcomes per (comparator, file):
   agree | disagree | skipped (reason) | error
 A missing reference tool or an unimplemented inspector view is a skip, never
 a failure.  Exit status 1 only if a comparator that actually ran produced a
-disagreement or an error.
+disagreement or an error, or if --min-compared N is given and fewer than N
+files had at least one object compared by the `objects` comparator.
 """
 import argparse
 import fnmatch
@@ -68,7 +69,8 @@ class Comparator:
     reference: Callable[[str], str]        # file -> reference dump
     normalize: Callable[[str], str] = lambda s: s.strip()
     compare: Callable[[str, str], bool] = lambda a, b: a == b
-    # Optional whole-file check: (path) -> (status, detail); may raise Skip.
+    # Optional whole-file check: (path) -> (status, detail[, stats]); may raise
+    # Skip.  `stats` (a dict of ints) is summed per comparator.
     custom: Optional[Callable[[str], tuple]] = None
 
     def missing_tool(self) -> Optional[str]:
@@ -138,13 +140,13 @@ def short_diff(a: str, b: str, n: int = 160) -> str:
 
 
 def check(comp: Comparator, path: str):
-    """Returns (status, detail)."""
+    """Returns (status, detail) or (status, detail, stats)."""
     missing = comp.missing_tool()
     if missing:
         return "skipped", "tool missing: %s" % missing
     if comp.custom:
         try:
-            return comp.custom(path)
+            return tuple(comp.custom(path))
         except Skip as e:
             return "skipped", str(e)
         except Exception as e:  # noqa: BLE001
@@ -171,6 +173,9 @@ def main(argv=None) -> int:
     ap.add_argument("--files", help="glob (relative to cwd) selecting files; overrides --corpus")
     ap.add_argument("--limit", type=int, help="use at most N files")
     ap.add_argument("--json", metavar="OUT", help="write full results as JSON")
+    ap.add_argument("--min-compared", type=int, default=0, metavar="N",
+                    help="fail unless at least N files had >= 1 object compared by the "
+                         "objects comparator (default 0 = no minimum)")
     args = ap.parse_args(argv)
 
     names = args.comparator or list(COMPARATORS)
@@ -193,13 +198,24 @@ def main(argv=None) -> int:
     results = []
     counts = {n: {"agree": 0, "disagree": 0, "skipped": 0, "error": 0} for n in names}
     skip_reasons = {n: set() for n in names}
+    stats = {n: {} for n in names}
+    files_compared = {n: 0 for n in names}
     for f in files:
         for n in names:
-            st, detail = check(COMPARATORS[n], f)
+            res = check(COMPARATORS[n], f)
+            st, detail = res[0], res[1]
+            extra = res[2] if len(res) > 2 else {}
             counts[n][st] += 1
             if st == "skipped":
                 skip_reasons[n].add(detail)
-            results.append({"comparator": n, "file": f, "status": st, "detail": detail})
+            for k, v in extra.items():
+                stats[n][k] = stats[n].get(k, 0) + v
+            if extra.get("compared", 0) > 0:
+                files_compared[n] += 1
+            r = {"comparator": n, "file": f, "status": st, "detail": detail}
+            if extra:
+                r["stats"] = extra
+            results.append(r)
 
     bad = False
     for n in names:
@@ -209,15 +225,29 @@ def main(argv=None) -> int:
             extra = "  [skipped (%s)]" % "; ".join(sorted(skip_reasons[n]))
         print("%-8s agree=%d disagree=%d skipped=%d error=%d%s" %
               (n, c["agree"], c["disagree"], c["skipped"], c["error"], extra))
+        if stats[n]:
+            print("%-8s totals: %s; files with >=1 object compared: %d" % (
+                n, " ".join("%s=%d" % kv for kv in sorted(stats[n].items())), files_compared[n]))
         if c["disagree"] or c["error"]:
             bad = True
     for r in results:
         if r["status"] in ("disagree", "error"):
             print("%s %s %s: %s" % (r["status"].upper(), r["comparator"], r["file"], r["detail"]))
 
+    if args.min_compared > 0:
+        got = files_compared.get("objects", 0)
+        if "objects" not in names:
+            print("FAIL --min-compared %d: the objects comparator was not selected" % args.min_compared)
+            bad = True
+        elif got < args.min_compared:
+            print("FAIL --min-compared %d: only %d file(s) had >= 1 object compared by 'objects'"
+                  % (args.min_compared, got))
+            bad = True
+
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump({"counts": counts, "results": results}, fh, indent=1)
+            json.dump({"counts": counts, "stats": stats, "files_compared": files_compared,
+                       "min_compared": args.min_compared, "results": results}, fh, indent=1)
     return 1 if bad else 0
 
 

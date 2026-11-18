@@ -67,3 +67,120 @@ jobs:
 
       - name: Fuzz smoke
         run: scripts/fuzz.sh
+
+  # Phase 1 exit M1 clause 3: object-level differential test against
+  # `qpdf --json=2` over the corpus (Tests/differential/objects.py).
+  # Fails on disagreements or comparator errors, and if fewer than
+  # --min-compared corpus files had any object compared; qpdf-only objects
+  # (object-stream members until Phase 2/3) are reported, not failures.
+  differential-objects:
+    # ubuntu-24.04 ships qpdf 11.x (JSON v2); 22.04's qpdf 10.6 lacks it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install qpdf (>= 11 required for JSON v2)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qpdf
+          qpdf --version
+          major="$(qpdf --version | sed -n '1s/^qpdf version \([0-9][0-9]*\)\..*/\1/p')"
+          if [ -z "$major" ] || [ "$major" -lt 11 ]; then
+            echo "::error::qpdf >= 11 required (JSON v2); got: $(qpdf --version | head -n1)"
+            exit 1
+          fi
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+          restore-keys: |
+            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
+            lean-${{ runner.os }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+          "$HOME/.elan/bin/lean" --version
+          "$HOME/.elan/bin/lake" --version
+
+      - name: Build library and inspector
+        run: lake build
+
+      # actions/cache v4.2.0.  The manifest pins every file by SHA-256 + size.
+      - name: Cache corpus files
+        id: corpus-cache
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: corpus/files
+          key: corpus-${{ hashFiles('corpus/manifest.json') }}
+
+      - name: Fetch corpus (cache miss; about 4 min, polite rate limit)
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        run: python3 -I scripts/corpus/fetch.py
+
+      - name: Verify corpus hashes (no network when all files are present)
+        run: python3 -I scripts/corpus/fetch.py
+
+      # Debug aid for the first runs: lets a later wave fix comparator
+      # assumptions (objects.py docstring, UNVERIFIED items) from the log.
+      - name: Debug - heads of qpdf and inspector output for one corpus file
+        if: always()
+        continue-on-error: true
+        run: |
+          f="$(find corpus/files -maxdepth 1 -name '*.pdf' 2>/dev/null | sort | head -n1 || true)"
+          if [ -z "$f" ]; then echo "no corpus file present"; exit 0; fi
+          echo "file: $f"
+          echo "--- qpdf --json=2 --json-key=qpdf --decode-level=none (first 3000 bytes) ---"
+          { qpdf --json=2 --json-key=qpdf --decode-level=none "$f" || echo "(qpdf exit $?)"; } | head -c 3000 || true
+          echo
+          echo "--- qpdf --json=2 without --json-key (first 1500 bytes) ---"
+          { qpdf --json=2 "$f" || echo "(qpdf exit $?)"; } | head -c 1500 || true
+          echo
+          echo "--- inspect --view objects --json (first 3000 bytes) ---"
+          { .lake/build/bin/inspect --view objects --json "$f" || echo "(inspect exit $?)"; } | head -c 3000 || true
+          echo
+          echo "--- inspect summary line ---"
+          { .lake/build/bin/inspect --view objects --json "$f" || true; } | grep '"summary"' | head -c 1000 || true
+
+      - name: Objects comparison on the corpus
+        run: |
+          set -o pipefail
+          python3 -I Tests/differential/run.py --comparator objects \
+            --json differential-objects.json --min-compared 20 \
+            2>&1 | tee differential-objects.log
+
+      - name: Objects comparison on minimal-valid.pdf
+        if: always()
+        run: |
+          set -o pipefail
+          python3 -I Tests/differential/run.py --comparator objects \
+            --files 'Tests/adversarial/minimal-valid.pdf' \
+            --json differential-objects-minimal.json --min-compared 1 \
+            2>&1 | tee differential-objects-minimal.log
+
+      # actions/upload-artifact v4.6.2
+      - name: Upload comparison results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: differential-objects
+          path: |
+            differential-objects.json
+            differential-objects.log
+            differential-objects-minimal.json
+            differential-objects-minimal.log
+          if-no-files-found: warn
+          retention-days: 30
