@@ -205,3 +205,20 @@ import SafePdf
 #print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_self
 #print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_nested
 #print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_work
+
+-- Phase 2, task 2.5: unambiguity S6 (SafePdf/Spec/Unambiguous.lean)
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_of_ok
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_eq_error_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_eq_some_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_eq_none_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_winner_unique
+#print axioms SafePdf.Spec.Unambiguous.mergeChain_keys_nodup
+#print axioms SafePdf.Spec.Unambiguous.mergeChain_mem_unique
+#print axioms SafePdf.Spec.Unambiguous.lookupEntry_mergeChain_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_of_cons
+#print axioms SafePdf.Spec.Unambiguous.loadChain_update
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_update
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_hybrid_table
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_hybrid_stream
+#print axioms SafePdf.Spec.Unambiguous.checkSize_ok_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_lt_size
