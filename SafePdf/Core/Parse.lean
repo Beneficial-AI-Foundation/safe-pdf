@@ -1,14 +1,18 @@
 import SafePdf.Core.Error
 import SafePdf.Core.Limits
 import SafePdf.Core.ObjParse
+import SafePdf.Core.Open
 
 /-!
 # Parse entry point (Plan.md §6 Phase 0, §7 item 1)
 
 The single entry point `parse : ByteArray → Except Error Document` that the fuzzer, the
-inspector and later the viewer call. In Phase 0 it is a stub: it checks the input size
-against `Limits.maxInputBytes` and looks for the `%PDF-x.y` header. `Document` is a stub that
-Phase 2 (file structure: xref, trailer, object resolution) replaces.
+inspector and later the viewer call. It checks the input size against
+`Limits.maxInputBytes`, looks for the `%PDF-x.y` header (within the first 1024 bytes, version
+recorded), then opens the document with `Core.Open.openFile` (Phase 2, task 2.11: strict xref
+chain, else the repair path, flagged `repaired`; Plan.md §5.4). The `Document` records the
+header data and the opened document (`Core.Open.OpenDoc`), through which objects are
+resolved.
 
 Phase 1 adds object-level entry points used by the fuzzer and the golden tests:
 `parseObjectAt` (one direct object, `Core.ObjParse.parseObject`) and `parseIndirectAt`
@@ -21,7 +25,7 @@ bounded by `headerWindow` and each version component by `maxVersionDigits`.
 
 namespace SafePdf
 
-/-- Placeholder document produced by the Phase 0 stub parser. -/
+/-- A parsed document: header data and the opened cross-reference structure. -/
 structure Document where
   /-- Byte offset of the `%PDF-` header (`0` for a well-formed file). -/
   headerOffset : Nat
@@ -29,7 +33,28 @@ structure Document where
   version : Option (Nat × Nat)
   /-- Length of the input in bytes. -/
   byteLength : Nat
-  deriving Repr, Inhabited
+  /-- The opened document (merged xref, trailer); objects resolve through
+  `Core.Open.OpenDoc.getObject`. -/
+  doc : Core.Open.OpenDoc
+  /-- `/Root` of the trailer: the catalog reference `(num, gen)`, validated to resolve to a
+  dictionary (`Core.Open.openFile_root`). -/
+  root : Nat × Nat
+
+namespace Document
+
+/-- `true` iff the document was opened by the repair path (Plan.md §4 S7). -/
+def repaired (d : Document) : Bool := d.doc.repaired
+
+/-- Number of xref sections in the strict chain (`0` when repaired). -/
+def revisions (d : Document) : Nat := d.doc.revisions
+
+/-- Number of cross-reference entries (including free ones). -/
+def objectCount (d : Document) : Nat := d.doc.objectCount
+
+/-- Whether the trailer has `/Encrypt` (strings and streams stay encrypted until Phase 4). -/
+def encrypted (d : Document) : Bool := d.doc.trailer.encrypted
+
+end Document
 
 namespace Parse
 
@@ -76,8 +101,8 @@ def readVersion (bytes : ByteArray) (i : Nat) : Option (Nat × Nat) :=
 
 end Parse
 
-/-- Parse `bytes` under explicit resource limits. Phase 0 stub: checks the input size and the
-`%PDF-x.y` header and returns a placeholder `Document`. -/
+/-- Parse `bytes` under explicit resource limits: the input size, the `%PDF-x.y` header,
+then `Core.Open.openFile` (strict, else repaired). -/
 def parseWith (limits : Limits) (bytes : ByteArray) : Except Error Document :=
   if bytes.size > limits.maxInputBytes then
     .error (.limitExceeded .inputBytes)
@@ -85,9 +110,17 @@ def parseWith (limits : Limits) (bytes : ByteArray) : Except Error Document :=
     match Parse.findHeader bytes with
     | none => .error (.malformed 0 "missing %PDF header")
     | some off =>
-      .ok { headerOffset := off
-            version := Parse.readVersion bytes (off + Parse.headerMagic.length)
-            byteLength := bytes.size }
+      match Core.Open.openFile limits bytes with
+      | .error e => .error e
+      | .ok d =>
+        match d.trailer.root? with
+        | none => .error (.malformed 0 "trailer has no /Root")
+        | some root =>
+          .ok { headerOffset := off
+                version := Parse.readVersion bytes (off + Parse.headerMagic.length)
+                byteLength := bytes.size
+                doc := d
+                root }
 
 /-- Parse `bytes` under `Limits.default`. The fuzzing entry point (Plan.md §6 Phase 0). -/
 def parse (bytes : ByteArray) : Except Error Document :=

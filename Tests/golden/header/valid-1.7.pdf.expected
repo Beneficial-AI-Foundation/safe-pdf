@@ -1,4 +1,2 @@
-ok
-headerOffset: 0
-version: 1.7
-byteLength: 41
+error
+malformed at 41: startxref not found

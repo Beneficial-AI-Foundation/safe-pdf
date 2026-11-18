@@ -1,6 +1,7 @@
 import SafePdf.Shell.Views.Common
 import SafePdf.Shell.Views.Summary
 import SafePdf.Shell.Views.Objects
+import SafePdf.Shell.Views.Resolve
 
 /-!
 # Inspector (unverified shell, Plan.md §6 MVP / visibility track)
@@ -32,7 +33,7 @@ open SafePdf.Shell
 
 /-- The view registry. Later phases append `objects`, `xref`, `streams`, `pages`, `svg`, ... -/
 def views : List View :=
-  [ Views.Summary.view, Views.Objects.view ]
+  [ Views.Summary.view, Views.Objects.view, Views.Resolve.view ]
 
 /-- The view used when none is named. -/
 def defaultView : String := "summary"
