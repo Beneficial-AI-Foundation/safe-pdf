@@ -162,3 +162,21 @@ import SafePdf
 #print axioms SafePdf.Repair.repair_offset_lt
 #print axioms SafePdf.Repair.repair_length_le
 #print axioms SafePdf.Repair.repair_keys_nodup
+
+-- Phase 3, task 3.1: FlateDecode (SafePdf/Core/Filter/Flate.lean)
+#print axioms SafePdf.Core.Filter.Flate.inflate_size_le
+#print axioms SafePdf.Core.Filter.Flate.zlibDecode_size_le
+#print axioms SafePdf.Core.Filter.Flate.flateDecode_size_le
+#print axioms SafePdf.Core.Filter.Flate.copyBack_size
+
+-- Phase 3, task 3.2: PNG/TIFF predictors (SafePdf/Core/Filter/Predictor.lean)
+#print axioms SafePdf.Core.Filter.Predictor.decodePng_exact
+#print axioms SafePdf.Core.Filter.Predictor.decodePng_size
+#print axioms SafePdf.Core.Filter.Predictor.decodePng_size_le
+#print axioms SafePdf.Core.Filter.Predictor.decodeTiff2_size
+#print axioms SafePdf.Core.Filter.Predictor.decodeTiff2_exact
+#print axioms SafePdf.Core.Filter.Predictor.decode_size
+#print axioms SafePdf.Core.Filter.Predictor.decode_size_le
+#print axioms SafePdf.Core.Filter.Predictor.unfilterRow_spec
+#print axioms SafePdf.Core.Filter.Predictor.unfilterRowSpec_none
+#print axioms SafePdf.Core.Filter.Predictor.unfilterRow_eq_specGo
