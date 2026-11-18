@@ -21,7 +21,7 @@ Design document: Plan.md
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
-| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | draft |
+| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | awaiting-ci |
 | 1 | `phase-1-lexer-objects` | `phase-0-infra` | — | none |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | — | none |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
