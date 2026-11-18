@@ -12,3 +12,7 @@ import SafePdf.Core.Lex
 import SafePdf.Spec.Object
 import SafePdf.Core.ObjParse
 import SafePdf.Spec.LexEquiv
+import SafePdf.Core.Print
+import SafePdf.Spec.RoundTrip
+import SafePdf.Spec.ObjEquiv
+import SafePdf.Spec.RoundTripCore

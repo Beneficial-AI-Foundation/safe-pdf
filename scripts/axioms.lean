@@ -97,3 +97,23 @@ import SafePdf
 #print axioms SafePdf.Spec.LexEquiv.parseNumber_eq
 #print axioms SafePdf.Spec.LexEquiv.skipWs_rest
 #print axioms SafePdf.Spec.LexEquiv.readRun_eq
+
+-- Phase 1, task 1.7: printer + round trip (SafePdf/Spec/RoundTrip.lean)
+#print axioms SafePdf.Spec.RoundTrip.lexAll_print
+#print axioms SafePdf.Spec.RoundTrip.parse_printTokens
+#print axioms SafePdf.Spec.RoundTrip.roundTrip_spec
+#print axioms SafePdf.Spec.RoundTrip.roundTrip_core
+#print axioms SafePdf.Spec.RoundTrip.roundTrip_core_spec
+
+-- Phase 1, task 1.8: object parser equivalence, C5 (SafePdf/Spec/ObjEquiv.lean)
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_ok_iff
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_error_iff
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_ok_iff_lexAll
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_error_iff_lexAll
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_of_spec_full
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_of_spec_full_size
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_of_parses_full
+#print axioms SafePdf.Spec.ObjEquiv.lexFrom_of_lexAll
+
+-- Phase 1, M1 headline: parseObject (print o) = o (SafePdf/Spec/RoundTripCore.lean)
+#print axioms SafePdf.Spec.RoundTripCore.parseObject_print
