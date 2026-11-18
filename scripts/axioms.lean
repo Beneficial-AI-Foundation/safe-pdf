@@ -222,3 +222,14 @@ import SafePdf
 #print axioms SafePdf.Spec.Unambiguous.resolveEntry_hybrid_stream
 #print axioms SafePdf.Spec.Unambiguous.checkSize_ok_iff
 #print axioms SafePdf.Spec.Unambiguous.resolveEntry_lt_size
+-- Phase 2, task 2.11: opening documents (SafePdf/Core/Open.lean)
+#print axioms SafePdf.Core.Open.validate_eq
+#print axioms SafePdf.Core.Open.validate_root
+#print axioms SafePdf.Core.Open.repairOpen_repaired
+#print axioms SafePdf.Core.Open.openFile_repaired
+#print axioms SafePdf.Core.Open.openFile_strict
+#print axioms SafePdf.Core.Open.openFile_root
+#print axioms SafePdf.Core.Open.parseIndirectResolved_depth
+#print axioms SafePdf.Core.Open.getObject_depth
+#print axioms SafePdf.Core.Open.getObject_work
+#print axioms SafePdf.Core.Open.getObject_length_calls_le

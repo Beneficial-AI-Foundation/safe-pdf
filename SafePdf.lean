@@ -26,3 +26,4 @@ import SafePdf.Core.Filter.Predictor
 import SafePdf.Core.Xref.Stream
 import SafePdf.Core.Xref.ObjStm
 import SafePdf.Spec.Unambiguous
+import SafePdf.Core.Open
