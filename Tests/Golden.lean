@@ -1,4 +1,5 @@
 import SafePdf
+import Tests.ObjRender
 
 /-!
 # Golden-file test harness (Plan.md §6 Phase 0, §7 item 1)
@@ -48,9 +49,25 @@ def renderHeader (bytes : ByteArray) : String :=
   | .ok d => formatDocument d
   | .error e => formatError e
 
+/-- Renderer for the `objects` suite: one direct object from offset 0 under `Limits.default`
+(`SafePdf.parseObjectAt`), then the end position. -/
+def renderObjects (bytes : ByteArray) : String :=
+  match SafePdf.parseObjectAt Limits.default bytes 0 with
+  | .ok (o, r) => "ok\n" ++ ObjRender.unlines (ObjRender.renderObj 0 "" o) ++ s!"end: {r}\n"
+  | .error e => formatError e
+
+/-- Renderer for the `indirect` suite: one indirect object or stream from offset 0 under
+`Limits.default` (`SafePdf.parseIndirectAt`), then the end position. -/
+def renderIndirect (bytes : ByteArray) : String :=
+  match SafePdf.parseIndirectAt Limits.default bytes 0 with
+  | .ok (io, r) => "ok\n" ++ ObjRender.unlines (ObjRender.renderIndirect io) ++ s!"end: {r}\n"
+  | .error e => formatError e
+
 /-- Registry of golden suites: suite name (= directory under `Tests/golden/`) and renderer. -/
 def renderers : List (String × (ByteArray → String)) :=
-  [ ("header", renderHeader) ]
+  [ ("header", renderHeader),
+    ("objects", renderObjects),
+    ("indirect", renderIndirect) ]
 
 /-- Whether `path` is a golden input (not an expected file, a note, or a hidden file). -/
 def isInput (path : System.FilePath) : Bool :=

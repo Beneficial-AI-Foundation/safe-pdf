@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fuzz smoke campaign (Plan.md §6 Phase 0): build the `fuzz` executable and run a short,
-# deterministic campaign against `SafePdf.parse`. Extra arguments are passed to the fuzzer
+# deterministic campaign against the parser entry points (`SafePdf.parse`, `parseObjectAt`,
+# `parseIndirectAt`, `Core.Lex.lexAll`). Extra arguments are passed to the fuzzer
 # and override the defaults below (later flags win), e.g. `scripts/fuzz.sh --iters 100000`.
 # Seed directories Tests/adversarial and corpus are used when present.
 set -euo pipefail

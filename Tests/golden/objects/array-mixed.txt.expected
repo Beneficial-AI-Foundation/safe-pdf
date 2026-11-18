@@ -1,0 +1,12 @@
+ok
+array (7)
+  int 1
+  ref 2 0 R
+  dict (2)
+    /A: string (1) <78>
+    /B: string (2) <00ff>
+  name /N#20
+  real -35e-1
+  bool true
+  null
+end: 53
