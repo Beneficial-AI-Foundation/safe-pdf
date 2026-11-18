@@ -187,8 +187,10 @@ def show(c):
     return "stream"
 
 
-# Object ids present on the qpdf side, set by compare() for the dangling-ref rule.
+# Object ids present on the qpdf side, and those whose qpdf value is null (free or
+# undefined objects that qpdf still lists), set by compare() for the dangling-ref rule.
 QPDF_KEYS = None
+QPDF_NULLS = set()
 
 
 def diff(a, b, path, out, warn):
@@ -226,7 +228,7 @@ def diff(a, b, path, out, warn):
             if k not in b[1]:
                 v = a[1][k]
                 if (isinstance(v, tuple) and v[0] == "ref" and QPDF_KEYS is not None
-                        and (v[1], v[2]) not in QPDF_KEYS):
+                        and ((v[1], v[2]) not in QPDF_KEYS or (v[1], v[2]) in QPDF_NULLS)):
                     # Dangling reference (target free/undefined) means null (ISO 32000-2
                     # 7.3.10); qpdf resolves it to null and drops the entry.  See
                     # docs/deviations-from-spec.md "dangling-ref-null".
@@ -290,8 +292,10 @@ def qpdf_entry_value(e):
 def compare(ours_text, qpdf_text):
     ours, errors, _ = load_ours(ours_text)
     qobjs = load_qpdf(qpdf_text)
-    global QPDF_KEYS
+    global QPDF_KEYS, QPDF_NULLS
     QPDF_KEYS = set(qobjs)
+    QPDF_NULLS = {k for k, e in qobjs.items() if isinstance(e, dict) and "value" in e
+                  and e["value"] is None}
     rep = {"compared": 0, "agree": 0, "disagree": 0, "ours_only": 0,
            "qpdf_only": 0, "our_errors": len(errors), "warnings": [],
            "disagreements": [], "ours_only_ids": [], "bad_inputs": []}

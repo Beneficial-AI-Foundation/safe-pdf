@@ -53,6 +53,7 @@ entry is a bug in the comparator.
   will treat such references as null per §7.3.10.
 - Comparator handling: `Tests/differential/objects.py:diff` — a dictionary entry whose
   value on our side is a reference `N G R`, absent on the qpdf side, where qpdf has no
-  object `N G`, counts as a warning `dangling-ref-null`, not a disagreement.
+  object `N G` or lists it with value `null` (qpdf keeps free objects as `null` in its
+  JSON — seen in CI run 44410513896), counts as a warning `dangling-ref-null`, not a disagreement.
 - Status: accepted
 
