@@ -1,0 +1,10 @@
+{"version": 2, "parameters": {"decodelevel": "none"}, "qpdf": [
+ {"jsonversion": 2, "pdfversion": "1.4", "pushedinheritedpageresources": false, "calledgetallpages": false, "maxobjectid": 8},
+ {"obj:1 0 R": {"value": {"/Type": "/Catalog", "/Pages": "2 0 R"}},
+  "obj:2 0 R": {"value": {"/Type": "/Pages", "/Kids": ["3 0 R"], "/Count": 1}},
+  "obj:3 0 R": {"value": {"/Type": "/Page", "/Parent": "2 0 R", "/MediaBox": [0, 0, 612, 792.5], "/Resources": {"/Font": {"/F1": "4 0 R"}}, "/Title": "u:Hello"}},
+  "obj:4 0 R": {"value": {"/Type": "/Font", "/BaseFont": "/A B"}},
+  "obj:5 0 R": {"stream": {"dict": {"/Filter": "/FlateDecode"}}},
+  "obj:6 0 R": {"value": null},
+  "obj:7 0 R": {"value": "u:in an object stream"},
+  "trailer": {"value": {"/Root": "1 0 R", "/Size": 9}}}]}

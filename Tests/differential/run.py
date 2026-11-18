@@ -68,6 +68,8 @@ class Comparator:
     reference: Callable[[str], str]        # file -> reference dump
     normalize: Callable[[str], str] = lambda s: s.strip()
     compare: Callable[[str, str], bool] = lambda a, b: a == b
+    # Optional whole-file check: (path) -> (status, detail); may raise Skip.
+    custom: Optional[Callable[[str], tuple]] = None
 
     def missing_tool(self) -> Optional[str]:
         for t in self.tools:
@@ -91,6 +93,24 @@ def _norm_ours_size(s: str) -> str:
     return m.group(1)
 
 
+def _load_objects_module():
+    # python -I removes this directory from sys.path: load by file path.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "objects_cmp", os.path.join(os.path.dirname(os.path.abspath(__file__)), "objects.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _objects_check(path: str):
+    mod = _load_objects_module()
+    try:
+        return mod.check_file(INSPECT, path)
+    except mod.Skip as e:
+        raise Skip(str(e))
+
+
 def _placeholder(tool_argv):
     def ref(path):
         return run_tool([a.replace("{file}", path) for a in tool_argv])
@@ -101,8 +121,7 @@ COMPARATORS = {
     c.name: c for c in [
         Comparator("size", [], None, _ref_size),
         # Placeholders: normalizers are identity until the views exist.
-        Comparator("objects", ["qpdf"], "objects",
-                   _placeholder(["qpdf", "--json", "{file}"])),
+        Comparator("objects", ["qpdf"], "objects", lambda p: "", custom=_objects_check),
         Comparator("pages", ["mutool"], "pages",
                    _placeholder(["mutool", "info", "{file}"])),
         Comparator("text", ["pdftotext"], "text",
@@ -123,6 +142,13 @@ def check(comp: Comparator, path: str):
     missing = comp.missing_tool()
     if missing:
         return "skipped", "tool missing: %s" % missing
+    if comp.custom:
+        try:
+            return comp.custom(path)
+        except Skip as e:
+            return "skipped", str(e)
+        except Exception as e:  # noqa: BLE001
+            return "error", "%s: %s" % (type(e).__name__, e)
     try:
         ours = our_dump(path, comp.view)
         ref = comp.reference(path)
