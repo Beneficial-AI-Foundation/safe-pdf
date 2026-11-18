@@ -16,13 +16,13 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
-(empty)
+* 1.2 (new) · 1.3 (new) — shared `SafePdf/Core/Token.lean` written by the orchestrator first
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
 | 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
-| 1 | `phase-1-lexer-objects` | `phase-0-infra` | — | none |
+| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | draft |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | — | none |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
 | 4 | `phase-4-document` | `phase-3-filters` | — | none |
@@ -54,8 +54,8 @@ Plan.md §6 Phase 1, §5.1. Exit: **M1**: object-level round-trip `parse (print 
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
 | 1.1 | Object model `SafePdf/Core/Object.lean`: the 8 object types (null, bool, int, real, string, name, array, dict, stream, ref) as an inductive with well-founded size | 0.1 | `SafePdf/Core/Object.lean` | new | done (2026-11-18) |
-| 1.2 | Denotational lexer spec `SafePdf/Spec/Lex.lean`: tokens, whitespace/EOL/comments, literal strings with escapes + balanced parens, hex strings, names with `#xx`, numbers in spec ranges | 1.1 | `SafePdf/Spec/Lex.lean` | new | todo |
-| 1.3 | Efficient tokenizer `SafePdf/Core/Lex.lean` over `ByteArray`, total (structural/termination on position), no backtracking | 1.1 | `SafePdf/Core/Lex.lean` | new | todo |
+| 1.2 | Denotational lexer spec `SafePdf/Spec/Lex.lean`: tokens, whitespace/EOL/comments, literal strings with escapes + balanced parens, hex strings, names with `#xx`, numbers in spec ranges | 1.1 | `SafePdf/Spec/Lex.lean` | new | doing (2026-11-18) |
+| 1.3 | Efficient tokenizer `SafePdf/Core/Lex.lean` over `ByteArray`, total (structural/termination on position), no backtracking | 1.1 | `SafePdf/Core/Lex.lean` | new | doing (2026-11-18) |
 | 1.4 | Object grammar spec `SafePdf/Spec/Object.lean` (`ObjSpec : List Token → PdfObject → Prop` + executable spec) and unambiguity lemma | 1.2 | `SafePdf/Spec/Object.lean` | new | todo |
 | 1.5 | Efficient object parser `SafePdf/Core/ObjParse.lean` (arrays, dicts, refs `n g R`, nesting depth limit from `Limits`) | 1.3 | `SafePdf/Core/ObjParse.lean` | new | todo |
 | 1.6 | Lexer equivalence proof `SafePdf/Spec/LexEquiv.lean`: `Core.lex bytes = Spec.lex bytes` (C5) | 1.2, 1.3 | `SafePdf/Spec/LexEquiv.lean` | new | todo |
