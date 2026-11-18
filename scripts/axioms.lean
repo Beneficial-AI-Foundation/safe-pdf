@@ -117,3 +117,16 @@ import SafePdf
 
 -- Phase 1, M1 headline: parseObject (print o) = o (SafePdf/Spec/RoundTripCore.lean)
 #print axioms SafePdf.Spec.RoundTripCore.parseObject_print
+
+-- Phase 2, task 2.1: classic xref table + trailer (SafePdf/Core/Xref.lean)
+#print axioms SafePdf.Core.Xref.entryAt_eq
+#print axioms SafePdf.Core.Xref.header_pos
+#print axioms SafePdf.Core.Xref.entries_ok
+#print axioms SafePdf.Core.Xref.sections_ok
+#print axioms SafePdf.Core.Xref.XrefSection.keys_nodup
+#print axioms SafePdf.Core.Xref.parseXrefTable_inUse_lt
+#print axioms SafePdf.Core.Xref.parseXrefTable_gen_le
+#print axioms SafePdf.Core.Xref.parseXrefTable_length_le
+#print axioms SafePdf.Core.Xref.parseXrefTable_nodup
+#print axioms SafePdf.Core.Xref.parseXrefTable_pos
+#print axioms SafePdf.Core.Xref.findStartxref_lt
