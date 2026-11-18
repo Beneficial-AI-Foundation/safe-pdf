@@ -69,3 +69,31 @@ import SafePdf
 #print axioms SafePdf.Core.Lex.nameRun_bounds
 #print axioms SafePdf.Core.Lex.readRun_bounds
 #print axioms SafePdf.Core.Lex.lt_escapeAt
+
+-- Phase 1, task 1.4: object grammar spec (SafePdf/Spec/Object.lean)
+#print axioms SafePdf.Spec.Object.parse_eq_ok_iff
+#print axioms SafePdf.Spec.Object.parse_isError_iff
+#print axioms SafePdf.Spec.Object.Parses.unique
+#print axioms SafePdf.Spec.Object.Parses.depth_le
+#print axioms SafePdf.Spec.Object.parse_depth_le
+#print axioms SafePdf.Spec.Object.Parses.length_lt
+#print axioms SafePdf.Spec.Object.parse_length_lt
+#print axioms SafePdf.Spec.Object.Parses.canonical
+
+-- Phase 1, task 1.5: object parser (SafePdf/Core/ObjParse.lean)
+#print axioms SafePdf.Core.ObjParse.parseObject_pos
+#print axioms SafePdf.Core.ObjParse.parseObject_depth
+#print axioms SafePdf.Core.ObjParse.parseObject_dict_keys_nodup
+#print axioms SafePdf.Core.ObjParse.parseObj_pos
+#print axioms SafePdf.Core.ObjParse.parseObj_depth
+
+-- Phase 1, task 1.6: lexer equivalence, C5 (SafePdf/Spec/LexEquiv.lean)
+#print axioms SafePdf.Spec.LexEquiv.next_eq
+#print axioms SafePdf.Spec.LexEquiv.lexAll_eq
+#print axioms SafePdf.Spec.LexEquiv.tokenAt_eq
+#print axioms SafePdf.Spec.LexEquiv.litStr_eq
+#print axioms SafePdf.Spec.LexEquiv.hexStr_eq
+#print axioms SafePdf.Spec.LexEquiv.nameRun_eq
+#print axioms SafePdf.Spec.LexEquiv.parseNumber_eq
+#print axioms SafePdf.Spec.LexEquiv.skipWs_rest
+#print axioms SafePdf.Spec.LexEquiv.readRun_eq

@@ -9,3 +9,6 @@ import SafePdf.Core.Object
 import SafePdf.Core.Token
 import SafePdf.Spec.Lex
 import SafePdf.Core.Lex
+import SafePdf.Spec.Object
+import SafePdf.Core.ObjParse
+import SafePdf.Spec.LexEquiv
