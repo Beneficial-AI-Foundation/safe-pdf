@@ -5,6 +5,7 @@ corpus (Plan.md section 7, item 1). Stdlib only; run with `python3 -I`.
 
     python3 -I Tests/differential/run.py [--comparator NAME]... [--corpus DIR]
                                          [--files GLOB] [--limit N] [--json OUT]
+                                         [--min-compared N]
 
 Defaults: all comparators, `corpus/files` (git-ignored; a missing or empty
 directory reports 0 files and exits 0). `--files` overrides `--corpus`.
@@ -27,7 +28,9 @@ later).
 Outcomes per file: agree, disagree, `skipped (tool missing: qpdf)`,
 `skipped (view not implemented)`, error. Missing tools and unimplemented views
 are never failures. Exit status is 1 only for disagreements or errors in
-comparators that actually ran.
+comparators that actually ran, or when `--min-compared N` (default 0) is given
+and fewer than N files had at least one object compared by `objects` (guards
+CI against a run that silently compared nothing).
 
 Note: `size` currently extracts the first `<N> bytes` from the inspector's
 default view; it will move to a dedicated view once the inspector CLI settles.
@@ -62,3 +65,10 @@ compressed object-stream members until Phase 2/3), our-errors. Exit 1 only on
 disagreement. qpdf >= 11 required (JSON v2); the comparator is skipped when
 qpdf is missing, the view is not implemented, or qpdf fails on the file.
 Unverified qpdf-format assumptions are listed in the `objects.py` docstring.
+
+CI: job `differential-objects` in `.github/workflows/ci.yml` (ubuntu-24.04,
+apt qpdf >= 11) fetches/verifies the corpus, prints qpdf and inspector output
+heads for one file (debug), runs `objects` over the corpus with
+`--min-compared 20` and over `Tests/adversarial/minimal-valid.pdf` with
+`--min-compared 1`, and uploads the JSON results and logs as the artifact
+`differential-objects`.

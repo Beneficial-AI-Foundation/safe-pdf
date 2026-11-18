@@ -358,7 +358,7 @@ def run_qpdf(path):
 
 
 def check_file(inspect, path):
-    """Returns (status, detail) for run.py."""
+    """Returns (status, detail, stats) for run.py; stats = the integer counts."""
     if shutil.which("qpdf") is None:
         raise Skip("tool missing: qpdf")
     try:
@@ -366,7 +366,8 @@ def check_file(inspect, path):
     except Bad as e:
         return "error", str(e)
     text = format_report(rep)
-    return ("disagree" if rep["disagree"] else "agree"), text
+    stats = {k: v for k, v in rep.items() if isinstance(v, int) and not isinstance(v, bool)}
+    return ("disagree" if rep["disagree"] else "agree"), text, stats
 
 
 def main(argv=None):
