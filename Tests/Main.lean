@@ -1,5 +1,6 @@
 import SafePdf
 import Tests.Golden
+import Tests.Adversarial
 
 /-!
 # Test runner
@@ -19,7 +20,8 @@ def suites : List Suite :=
   [ { name := "smoke", run := do
         let l := SafePdf.Limits.default
         return if l.maxXObjectDepth == 32 then 0 else 1 },
-    { name := "golden", run := SafePdf.Tests.Golden.run } ]
+    { name := "golden", run := SafePdf.Tests.Golden.run },
+    { name := "adversarial", run := SafePdf.Tests.Adversarial.run } ]
 
 end SafePdf.Tests
 
