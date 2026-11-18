@@ -24,9 +24,8 @@ the number of unvisited offsets; it strictly decreases because a duplicate-free 
 naturals below `n` with one more fresh element below `n` has length `< n`
 (`length_lt_of_fresh`, from `length_le_of_nodup_of_lt`). No `partial`, no fuel.
 
-Independently the chain length is bounded by the local constant `maxRevisions` (4096), whose
-excess yields `Error.limitExceeded .objects` (no dedicated `LimitKind` exists yet; the
-orchestrator may move the constant into `Limits`).
+Independently the chain length is bounded by `limits.maxRevisions` (default 4096,
+`SafePdf.Limits`), whose excess yields `Error.limitExceeded .revisions`.
 
 `walk` also returns the number of `parseXrefTable` calls it made (the count is incremented
 exactly where `parseXrefTable` is invoked), so that `Spec.XrefTerm` can state the work bound.
@@ -76,22 +75,18 @@ abbrev Revision := XrefSection × Trailer × Nat
 /-- The byte offset of a revision's section. -/
 def Revision.offset (r : Revision) : Nat := r.2.2
 
-/-- Upper bound on the number of revisions followed (in addition to the visited-set bound
-`bytes.size`). A local constant; candidate for `SafePdf.Limits`. -/
-def maxRevisions : Nat := 4096
-
 /-- Follow the `/Prev` chain from `off`. `visited` holds the offsets parsed so far (newest
 first), duplicate-free and inside the input. Returns the revisions from `off` on, newest
 first, and the number of `parseXrefTable` calls made.
 
 Errors: `off ≥ bytes.size` (malformed), `off ∈ visited` (malformed, `"xref /Prev cycle"`),
-more than `maxRevisions` revisions (`limitExceeded .objects`), or a parse error. -/
+more than `limits.maxRevisions` revisions (`limitExceeded .revisions`), or a parse error. -/
 def walk (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
     (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
     Except Error (List Revision) × Nat :=
   if hoff : off < bytes.size then
     if hmem : off ∈ visited then (.error (.malformed off "xref /Prev cycle"), 0)
-    else if maxRevisions ≤ visited.length then (.error (.limitExceeded .objects), 0)
+    else if limits.maxRevisions ≤ visited.length then (.error (.limitExceeded .revisions), 0)
     else
       match parseXrefTable limits bytes off with
       | .error e => (.error e, 1)
@@ -238,6 +233,12 @@ private def lc (b : ByteArray) : Sum String (List Nat) × Nat :=
   | (.ok revs, k) => (.inr (revs.map Revision.offset), k)
   | (.error e, k) => (.inl (errS e), k)
 
+/-- Test helper: `lc` under explicit limits. -/
+private def lcl (limits : Limits) (b : ByteArray) : Sum String (List Nat) × Nat :=
+  match loadChainCounted limits b with
+  | (.ok revs, k) => (.inr (revs.map Revision.offset), k)
+  | (.error e, k) => (.inl (errS e), k)
+
 /-- Test helper: look up object `n` in the merged chain of `b`. -/
 private def lk (b : ByteArray) (n : Nat) : Option XrefEntry :=
   match loadChain Limits.default b with
@@ -354,6 +355,10 @@ private def twoRevisions : ByteArray :=
 #guard twoRevisions.size == 775
 #guard lc twoRevisions == (.inr [658, 404], 2)
 #guard lk twoRevisions 3 == some (.inUse 587 0)
+-- the revision cap is `limits.maxRevisions`: excess is `limitExceeded .revisions`
+#guard lcl { maxRevisions := 2 } twoRevisions == (.inr [658, 404], 2)
+#guard lcl { maxRevisions := 1 } twoRevisions == (.inl "limit:SafePdf.LimitKind.revisions", 1)
+#guard lcl { maxRevisions := 0 } twoRevisions == (.inl "limit:SafePdf.LimitKind.revisions", 0)
 #guard lk twoRevisions 4 == some (.inUse 247 0)
 #guard lk twoRevisions 0 == some (.free 0 65535)
 #guard lk twoRevisions 6 == none

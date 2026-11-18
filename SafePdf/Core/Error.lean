@@ -17,6 +17,8 @@ inductive LimitKind where
   | xobjectDepth
   | gstateDepth
   | opsPerPage
+  /-- Length of the xref `/Prev` chain (`Limits.maxRevisions`). -/
+  | revisions
   deriving Repr, DecidableEq, Inhabited
 
 /-- Errors produced by the verified core. -/
