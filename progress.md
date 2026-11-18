@@ -16,7 +16,7 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
-* 1.2 (new) · 1.3 (new) — shared `SafePdf/Core/Token.lean` written by the orchestrator first
+(empty)
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -54,8 +54,8 @@ Plan.md §6 Phase 1, §5.1. Exit: **M1**: object-level round-trip `parse (print 
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
 | 1.1 | Object model `SafePdf/Core/Object.lean`: the 8 object types (null, bool, int, real, string, name, array, dict, stream, ref) as an inductive with well-founded size | 0.1 | `SafePdf/Core/Object.lean` | new | done (2026-11-18) |
-| 1.2 | Denotational lexer spec `SafePdf/Spec/Lex.lean`: tokens, whitespace/EOL/comments, literal strings with escapes + balanced parens, hex strings, names with `#xx`, numbers in spec ranges | 1.1 | `SafePdf/Spec/Lex.lean` | new | doing (2026-11-18) |
-| 1.3 | Efficient tokenizer `SafePdf/Core/Lex.lean` over `ByteArray`, total (structural/termination on position), no backtracking | 1.1 | `SafePdf/Core/Lex.lean` | new | doing (2026-11-18) |
+| 1.2 | Denotational lexer spec `SafePdf/Spec/Lex.lean`: tokens, whitespace/EOL/comments, literal strings with escapes + balanced parens, hex strings, names with `#xx`, numbers in spec ranges | 1.1 | `SafePdf/Spec/Lex.lean` | new | done (2026-11-18) |
+| 1.3 | Efficient tokenizer `SafePdf/Core/Lex.lean` over `ByteArray`, total (structural/termination on position), no backtracking | 1.1 | `SafePdf/Core/Lex.lean` | new | done (2026-11-18) |
 | 1.4 | Object grammar spec `SafePdf/Spec/Object.lean` (`ObjSpec : List Token → PdfObject → Prop` + executable spec) and unambiguity lemma | 1.2 | `SafePdf/Spec/Object.lean` | new | todo |
 | 1.5 | Efficient object parser `SafePdf/Core/ObjParse.lean` (arrays, dicts, refs `n g R`, nesting depth limit from `Limits`) | 1.3 | `SafePdf/Core/ObjParse.lean` | new | todo |
 | 1.6 | Lexer equivalence proof `SafePdf/Spec/LexEquiv.lean`: `Core.lex bytes = Spec.lex bytes` (C5) | 1.2, 1.3 | `SafePdf/Spec/LexEquiv.lean` | new | todo |
@@ -176,6 +176,10 @@ Exit criterion checked: [ ]
 * v4.36: `deriving DecidableEq` fails on nested inductives (`List T` fields) — hand-write from a mutual Boolean `beq` + soundness/reflexivity proofs (as in `Core/Object.lean`). `deriving BEq`/`Repr` work. `ByteArray` has `DecidableEq` but no `Repr`. Mutual structural recursion through `List`/`List (A × T)` needs no `termination_by` (1.1).
 * v4.36: `decide` gets stuck on `String.toUTF8` — use `#guard` or literal byte lists; `if_false` deprecated → `ite_false`; `simp [f]` in case branches may leave `x ≤ max x y` → `Nat.le_max_left` (1.1).
 * Dashboard (0.11): `python3 -I scripts/corpus/dashboard.py [--compare docs/dashboard.json [--write]]`; compare re-runs the inspector and exits 1 on regressions; `docs/dashboard.json` changes every run (timings/date), so use `--compare`, not diff. Regenerate `docs/dashboard.md` at each milestone.
+* Lexer contract (wave 6): `SafePdf/Core/Token.lean` (orchestrator-owned) fixes `Token`, `LexError {offset, kind}` and the `next` signatures; Spec `Spec.Lex.next : List UInt8 → Except LexError (Option (Token × List UInt8))` (offsets relative), Core `Core.Lex.next : ByteArray → Nat → …(Token × Nat)` (offsets absolute). Name errors: leftmost problem decides the kind. A randomized differential check (61,500 input/position pairs, 0 disagreements) ran at integration; 1.6 should keep it as a test.
+* Spec lexer structure (1.2): `next l = nextAt (l.length - (skipWs l).length) (skipWs l)`; helpers `skipWs/skipComment` (mutual structural), `regularRun`, `lexNumber` (decides the whole run after the fact), `litBody` (well-founded, `termination_by l.length`, depth counts extra opens from 0), `hexBody` + `packNibbles`, `decodeName`. Spec `lexAll` offsets are relative to its input.
+* Core lexer structure (1.3): `next bytes pos = tokenAt bytes (skipWs bytes pos false)`; scanners `readRun`, `litStr` (depth from 1, ends on `)` at depth ≤ 1, escapes via `escapeAt`/`octalAt`), `hexStr` (pending high nibble), `nameRun`; all accumulators are reversed lists; `next_pos` gives progress. `lexAll` ≈ 1.9 MB/s interpreted (#eval).
+* v4.36 proofs: nested `match bs with | c :: cs => match cs …` breaks structural recursion → `termination_by` + named matches (`match h : …`, name `_h` if unused); `if_pos/if_neg/dif_pos/dif_neg` deprecated (use `simp`, `dite_eq_left/right`); `split at h` fails behind `let` — pass the scrutinee as a function parameter; `getElem?_neg` works for `ByteArray`; `fun_induction` IH names unreliable → `rename_i` (1.2, 1.3).
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -193,3 +197,4 @@ Exit criterion checked: [ ]
 * 2026-11-18 — wave 4 (phase 0, PR #1): 0.4, 0.5, 0.7, 0.10 done (CI workflow; golden harness + `Tests` lib in lakefile; differential runner; inspector with view registry); none returned; commit "wave 4: 0.4 0.5 0.7 0.10 — CI, golden tests, differential runner, inspector"
 * 2026-11-18 — wave 5 (phase 0, PR #1): 0.11, 1.1 done (corpus dashboard; object model with 30 theorems); none returned; phase 0 exit criterion ticked; commit "wave 5: 0.11 1.1 — corpus dashboard, object model"
 * 2026-11-18 — phase 0 milestone: PR #1 marked ready for review (CI green on cf2daba)
+* 2026-11-18 — wave 6 (phase 1, PR #2): 1.2, 1.3 done (lexer spec, 13 theorems; tokenizer, `next_pos` progress); shared `Core/Token.lean` written by orchestrator; Core vs Spec agree on 61,500 random cases; commit "wave 6: 1.2 1.3 — lexer spec and tokenizer"

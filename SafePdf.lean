@@ -7,3 +7,5 @@ import SafePdf.Core.Error
 import SafePdf.Core.Parse
 import SafePdf.Core.Object
 import SafePdf.Core.Token
+import SafePdf.Spec.Lex
+import SafePdf.Core.Lex
