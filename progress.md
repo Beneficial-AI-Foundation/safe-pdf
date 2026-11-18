@@ -21,7 +21,7 @@ Design document: Plan.md
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
-| 0 | `phase-0-infra` | `origin/main` | — | none |
+| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | draft |
 | 1 | `phase-1-lexer-objects` | `phase-0-infra` | — | none |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | — | none |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
@@ -156,3 +156,4 @@ Exit criterion checked: [ ]
 ## Blocked / questions for the human
 
 ## Log (append-only; one line per integrated wave)
+* 2026-11-18 — wave 0 (phase 0, PR #1): ledger bootstrapped from Plan.md; draft PR opened; commit "wave 0: ledger"
