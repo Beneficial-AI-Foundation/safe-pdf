@@ -37,7 +37,7 @@ Plan.md §6 Phase 0, §3 rule 3, §7, §10. Exit: **M0**: CI green; fuzzer runs;
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
 | 0.1 | Lake scaffold: `lean-toolchain` (pin `leanprover/lean4:v4.36.0`), `lakefile.toml` declaring lib `SafePdf`, exes `inspect`, `tests`, `fuzz`; stub roots `SafePdf.lean`, `SafePdf/Core/Limits.lean` (limit record, §10), `SafePdf/Core/Error.lean`, `SafePdf/Shell/Inspect.lean` + `Main` stubs, `Tests/Main.lean`, `Tests/Fuzz/Main.lean`; record dependency decision (no Mathlib to start) | — | `lean-toolchain`, `lakefile.toml`, `SafePdf.lean`, `SafePdf/`, `Tests/Main.lean`, `Tests/Fuzz/Main.lean` | solo | done (2026-11-18) |
-| 0.2 | `CLAUDE.md`: build/test/guard/single-file-check commands, concurrent-build rule, shared registries, conventions (§3 rules, §7.5), attribution | 0.1 | `CLAUDE.md` | solo | todo |
+| 0.2 | `CLAUDE.md`: build/test/guard/single-file-check commands, concurrent-build rule, shared registries, conventions (§3 rules, §7.5), attribution | 0.1 | `CLAUDE.md` | solo | done (2026-11-18) |
 | 0.3 | Proof-hygiene guard `scripts/check-hygiene.sh`: grep `Core/` (and `Spec/`) for `partial`, `unsafe`, `panic!`, `get!`/`!` indexing, `sorry`; `#print axioms` check over top-level theorems listed in `scripts/axioms.lean` allowing only `propext`/`Classical.choice`/`Quot.sound` | 0.1 | `scripts/check-hygiene.sh`, `scripts/axioms.lean` | new | todo |
 | 0.4 | CI `.github/workflows/ci.yml`: elan install, cache `.lake`, `lake build`, `lake exe tests`, hygiene guard, short fuzz smoke run | 0.1, 0.3 | `.github/workflows/ci.yml` | new | todo |
 | 0.5 | Golden-file test harness: `Tests/Golden.lean` runner (input → expected output files under `Tests/golden/`), wired into `Tests/Main.lean` | 0.1 | `Tests/Golden.lean`, `Tests/golden/`, `Tests/Main.lean` | wt | todo |
@@ -150,7 +150,7 @@ Exit criterion checked: [ ]
 * `qpdf`, `mutool`, `pdftotext` are not installed on the dev machine (2026-11-18); differential scripts must skip cleanly when absent.
 * Installed Lean toolchains: v4.31.0, v4.35.0, v4.36.0 (elan 4.2.4).
 * Lake layout (0.1): exes `inspect` (root `SafePdf.Shell.Main`), `tests` (`Tests.Main`), `fuzz` (`Tests.Fuzz.Main`); `lake build` builds lib `SafePdf` + `inspect`; tests/fuzz need `lake build tests fuzz`. Shared registries: `SafePdf.lean` (umbrella imports), `Tests/Main.lean` (`suites` list), `lakefile.toml`.
-* No `CLAUDE.md` yet (task 0.2): until it exists, assume concurrent builds in one checkout are NOT safe.
+* Single-file check `lake env lean <file>` (0.2) takes ~0.2 s and only sees modules already built in the main checkout; new files importing other unbuilt new files cannot be checked this way.
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -161,3 +161,4 @@ Exit criterion checked: [ ]
 ## Log (append-only; one line per integrated wave)
 * 2026-11-18 — wave 0 (phase 0, PR #1): ledger bootstrapped from Plan.md; draft PR opened; commit "wave 0: ledger"
 * 2026-11-18 — wave 1 (phase 0, PR #1): 0.1 done (Lake scaffold, builds; `lake exe tests` passes smoke suite); commit "wave 1: 0.1 — Lake scaffold"
+* 2026-11-18 — wave 2 (phase 0, PR #1): 0.2 done (CLAUDE.md: commands, build-isolation rule, registries, conventions); commit "wave 2: 0.2 — CLAUDE.md"
