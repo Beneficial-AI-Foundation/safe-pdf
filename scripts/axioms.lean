@@ -307,3 +307,33 @@ import SafePdf
 -- decoding split into SafePdf/Core/Xref/ObjStmDecode.lean, same names)
 #print axioms SafePdf.Core.Xref.Length.containerLength_calls_le
 #print axioms SafePdf.Core.Xref.Length.resolveLength_container_cycle
+-- Phase 3, task 3.5: filter pipeline (SafePdf/Core/Filter.lean)
+#print axioms SafePdf.Core.Filter.decodeStream_size_le
+#print axioms SafePdf.Core.Filter.decodeStream_nil
+#print axioms SafePdf.Core.Filter.applyStages_image
+#print axioms SafePdf.Core.Filter.decodeStream_image
+#print axioms SafePdf.Core.Filter.decodeStream_unknown
+#print axioms SafePdf.Core.Filter.decodeStream_unknown_name
+#print axioms SafePdf.Core.Filter.decodeOne_size_le
+#print axioms SafePdf.Core.Filter.applyStages_size_le
+#print axioms SafePdf.Core.Filter.parseChain_length_le
+#print axioms SafePdf.Core.Filter.produced_le
+#print axioms SafePdf.Core.Filter.produced_le_maxFilters
+-- Phase 3, task 3.8: deflate encoder and Flate round trip (SafePdf/Core/Filter/Deflate.lean)
+#print axioms SafePdf.Core.Filter.Deflate.inflate_deflateStored
+#print axioms SafePdf.Core.Filter.Deflate.zlibDecode_zlibStored
+#print axioms SafePdf.Core.Filter.Deflate.adler32_lt
+-- Phase 4, task 4.1: catalog and page tree (SafePdf/Core/Doc.lean)
+#print axioms SafePdf.Core.Doc.cropBox_sub_media
+#print axioms SafePdf.Core.Doc.foldl_merge_mediaBox
+#print axioms SafePdf.Core.Doc.foldl_merge_rotate
+#print axioms SafePdf.Core.Doc.popLive_cycle
+#print axioms SafePdf.Core.Doc.loop_cycle
+#print axioms SafePdf.Core.Doc.visitNode_visited
+#print axioms SafePdf.Core.Doc.walk_visits_le
+#print axioms SafePdf.Core.Doc.walk_no_repeat
+#print axioms SafePdf.Core.Doc.walk_pages_le
+#print axioms SafePdf.Core.Doc.ofOpen_pages_le
+#print axioms SafePdf.Core.Doc.ofOpen_pages_nodup
+-- Phase 4, task 4.3a: crypto primitives (SafePdf/Core/Crypt/)
+#print axioms SafePdf.Core.Crypt.Md5.md5_size
