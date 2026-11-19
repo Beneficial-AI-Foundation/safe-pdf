@@ -4,7 +4,10 @@
 Runs the already-built inspector (`.lake/build/bin/inspect --json FILE`, ONE process per
 file so wall time is per-file; parseMs comes from the inspector itself) over every
 manifest entry whose PDF is present in corpus/files/, and writes docs/dashboard.md and
-docs/dashboard.json.
+docs/dashboard.json. Since task 2.11 it also runs `inspect --json --view resolve FILE`
+(a second process) to check that every in-use object resolves, and reports how files
+open: strict, repaired, or failed. Every inspector process is wrapped in `timeout 20`
+(when the `timeout` command exists) and killed after 20 s regardless.
 
   --corpus DIR      corpus directory (manifest.json + files/), default <repo>/corpus
   --inspector PATH  default <repo>/.lake/build/bin/inspect
@@ -12,16 +15,24 @@ docs/dashboard.json.
   --out-md PATH / --out-json PATH   default docs/dashboard.md / docs/dashboard.json
   --compare OLD.json  run, print regressions vs OLD (ok before, not ok now), exit 1 if any.
                       Does not write outputs unless --write is also given.
-  --milestone TEXT  inspector milestone label (default M0)
+  --milestone TEXT  inspector milestone label (default M2)
+  --no-resolve      skip the per-file object-resolution run
 Never opens PDFs with anything but the inspector. Exit 0 unless --compare finds regressions.
 """
-import argparse, datetime, fnmatch, json, os, statistics, subprocess, sys, time
+import argparse, datetime, fnmatch, json, os, shutil, statistics, subprocess, sys, time
+
+TIMEOUT_S = 20
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MILESTONE_NOTE = {
     "M0": "M0: the inspector's parse is a header check only (`%PDF-x.y` found near the start), "
           "so '% opens' is trivially high and says nothing about real parsing ability. "
           "Later milestones diff against this file's JSON.",
+    "M2": "M2 (task 2.11): 'opens' means the xref chain loads (strict) or the repair scan "
+          "rebuilds it (repaired), and /Root resolves to a dictionary. 'Objects resolve' "
+          "fetches every in-use xref entry (classic offsets and object-stream members) with "
+          "getObject; it does not decode content streams, fonts or images, and encrypted "
+          "files' strings and streams are not decrypted (Phase 4).",
 }
 
 
@@ -47,15 +58,46 @@ def bucket(year):
 BUCKET_ORDER = ["<2005", "2005-2009", "2010-2014", "2015-2019", "2020+", "unknown"]
 
 
+def wrap(cmd):
+    t = shutil.which("timeout")
+    return [t, str(TIMEOUT_S)] + cmd if t else cmd
+
+
+def run_resolve(inspector, path):
+    """Per-file object resolution (`--view resolve`); a dict of counts or an error."""
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run(wrap([inspector, "--json", "--view", "resolve", path]),
+                           capture_output=True, text=True, timeout=TIMEOUT_S + 5)
+    except Exception as e:
+        return dict(resolve_error="resolve run failed: %s" % e, resolve_wall_ms=None)
+    wall = round((time.perf_counter() - t0) * 1000, 3)
+    if r.returncode == 124:
+        return dict(resolve_error="resolve timed out after %d s" % TIMEOUT_S, resolve_wall_ms=wall)
+    line = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    try:
+        j = json.loads(line)
+    except ValueError:
+        return dict(resolve_error="unparseable resolve output (rc=%d)" % r.returncode, resolve_wall_ms=wall)
+    if "resolvedOk" not in j:
+        return dict(resolve_wall_ms=wall)  # did not open; the summary row has the error
+    return dict(resolve_wall_ms=wall, in_use=j["inUse"], compressed=j["compressed"],
+                resolved_ok=j["resolvedOk"], resolve_errors=j["resolveErrors"],
+                first_resolve_errors=j.get("firstErrors", []), resolve_ms=j.get("resolveMs"))
+
+
 def run_one(inspector, path):
     t0 = time.perf_counter()
     try:
-        r = subprocess.run([inspector, "--json", path], capture_output=True, text=True, timeout=120)
+        r = subprocess.run(wrap([inspector, "--json", path]), capture_output=True, text=True,
+                           timeout=TIMEOUT_S + 5)
     except Exception as e:
         return dict(ok=False, error="inspector failed to run: %s" % e, rc=-1, version=None,
                     parse_ms=None, wall_ms=(time.perf_counter() - t0) * 1000)
     wall = (time.perf_counter() - t0) * 1000
-    base = dict(rc=r.returncode, wall_ms=round(wall, 3), version=None, parse_ms=None)
+    base = dict(rc=r.returncode, wall_ms=round(wall, 3), version=None, parse_ms=None, open="failed")
+    if r.returncode == 124:
+        return dict(base, ok=False, error="timed out after %d s" % TIMEOUT_S)
     if r.returncode == 2:  # usage / IO error: an error row, not a crash
         msg = (r.stderr.strip().splitlines() or ["usage/IO error"])[0]
         return dict(base, ok=False, error=msg)
@@ -69,7 +111,9 @@ def run_one(inspector, path):
     if not ok and not err:
         err = "inspector exit code %d" % r.returncode
     return dict(base, ok=ok, error=None if ok else err, version=j.get("version"),
-                parse_ms=j.get("parseMs"), header_offset=j.get("headerOffset"))
+                parse_ms=j.get("parseMs"), header_offset=j.get("headerOffset"),
+                open=j.get("open", "strict" if ok else "failed"), revisions=j.get("revisions"),
+                objects=j.get("objects"), encrypted=j.get("encrypted"))
 
 
 def pct(n, d):
@@ -87,7 +131,22 @@ def summarize(rows):
     nok = sum(1 for r in rows if r["ok"])
     pm = [r["parse_ms"] for r in rows if r["parse_ms"] is not None]
     wm = [r["wall_ms"] for r in rows if r["wall_ms"] is not None]
+    mode = lambda m: sum(1 for r in rows if r.get("open") == m)
+    rp = lambda k: round(100.0 * k / n, 2) if n else None
+    resolved = [r for r in rows if r.get("resolved_ok") is not None]
+    fetched = sum(r["resolved_ok"] + r["resolve_errors"] for r in resolved)
+    rok = sum(r["resolved_ok"] for r in resolved)
+    rw = [r["resolve_wall_ms"] for r in rows if r.get("resolve_wall_ms") is not None]
+    nstrict, nrep = mode("strict"), mode("repaired")
     return dict(files=n, opened=nok, pct_opens=None if n == 0 else round(100.0 * nok / n, 2),
+                strict=nstrict, repaired=nrep, failed=n - nstrict - nrep,
+                pct_strict=rp(nstrict), pct_repaired=rp(nrep), pct_failed=rp(n - nstrict - nrep),
+                encrypted=sum(1 for r in rows if r.get("encrypted")),
+                objects_fetched=fetched, objects_resolved=rok,
+                pct_objects_resolved=round(100.0 * rok / fetched, 4) if fetched else None,
+                files_all_resolve=sum(1 for r in resolved if r["resolve_errors"] == 0),
+                files_resolve_checked=len(resolved),
+                wall_ms_max=max(wm) if wm else None, resolve_wall_ms_max=max(rw) if rw else None,
                 parse_ms_median=statistics.median(pm) if pm else None, parse_ms_p95=p95(pm),
                 wall_ms_median=statistics.median(wm) if wm else None, wall_ms_p95=p95(wm),
                 total_bytes=sum(r["bytes"] for r in rows))
@@ -115,23 +174,37 @@ def render_md(data):
          "## Headline", "",
          "| metric | value |", "|---|---|",
          "| files | %d |" % s["files"],
-         "| opens | %d (%s) |" % (s["opened"], pct(s["opened"], s["files"])),
+         "| opens (strict or repaired) | %d (%s) |" % (s["opened"], pct(s["opened"], s["files"])),
+         "| open: strict | %d (%s) |" % (s["strict"], pct(s["strict"], s["files"])),
+         "| open: repaired | %d (%s) |" % (s["repaired"], pct(s["repaired"], s["files"])),
+         "| open: failed | %d (%s) |" % (s["failed"], pct(s["failed"], s["files"])),
+         "| encrypted (opened; strings/streams not decrypted) | %d |" % s["encrypted"],
+         "| in-use objects resolved (`--view resolve`) | %d / %d (%s) |" % (
+             s["objects_resolved"], s["objects_fetched"],
+             "n/a" if s["pct_objects_resolved"] is None else "%.3f%%" % s["pct_objects_resolved"]),
+         "| files whose in-use objects all resolve | %d / %d |" % (s["files_all_resolve"], s["files_resolve_checked"]),
          "| parse time, median (inspector `parseMs`) | %s ms |" % f(s["parse_ms_median"]),
          "| parse time, p95 | %s ms |" % f(s["parse_ms_p95"]),
          "| wall time per process, median | %s ms |" % f(s["wall_ms_median"], 1),
          "| wall time per process, p95 | %s ms |" % f(s["wall_ms_p95"], 1),
+         "| wall time per process, max (summary / resolve) | %s / %s ms |" % (
+             f(s["wall_ms_max"], 1), f(s["resolve_wall_ms_max"], 1)),
          "| total size | %.1f MB |" % (s["total_bytes"] / 1e6), ""]
     rows = data["files"]
 
     def table(title, groups, order):
-        out = ["## " + title, "", "| group | files | opens | % opens | median parse ms | MB |", "|---|---|---|---|---|---|"]
+        out = ["## " + title, "",
+               "| group | files | opens | % opens | strict | repaired | failed | objects resolved | median parse ms | MB |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
         for k in order:
             if k not in groups: continue
             gs = summarize(groups[k])
-            out.append("| %s | %d | %d | %s | %s | %.1f |" % (
+            out.append("| %s | %d | %d | %s | %d | %d | %d | %s | %s | %.1f |" % (
                 k, gs["files"], gs["opened"], pct(gs["opened"], gs["files"]),
+                gs["strict"], gs["repaired"], gs["failed"],
+                pct(gs["objects_resolved"], gs["objects_fetched"]),
                 f(gs["parse_ms_median"]), gs["total_bytes"] / 1e6))
-        if len(out) == 4: out.append("| (none) | 0 | 0 | n/a | n/a | 0.0 |")
+        if len(out) == 4: out.append("| (none) | 0 | 0 | n/a | 0 | 0 | 0 | n/a | n/a | 0.0 |")
         return out + [""]
 
     ge = group(rows, lambda r: r["engine"])
@@ -144,7 +217,23 @@ def render_md(data):
         L += ["| file | error |", "|---|---|"]
         L += ["| %s | %s |" % (r["id"], str(r["error"]).replace("|", "\\|")) for r in fails]
     else:
-        L.append("None. (Expected at M0: only the header is checked.)")
+        L.append("None.")
+    L += ["", "## Repaired files", ""]
+    rep_rows = [r for r in rows if r.get("open") == "repaired"]
+    L += (["| file |", "|---|"] + ["| %s |" % r["id"] for r in rep_rows]) if rep_rows else ["None."]
+    L += ["", "## Object-resolution failures", ""]
+    bad = [r for r in rows if r.get("resolve_errors") or r.get("resolve_error")]
+    if bad:
+        L += ["| file | errors / fetched | first errors |", "|---|---|---|"]
+        for r in bad:
+            if r.get("resolve_error"):
+                L.append("| %s | n/a | %s |" % (r["id"], r["resolve_error"].replace("|", "\\|")))
+                continue
+            fe = "; ".join("%d %d: %s" % (e["num"], e["gen"], e["error"]) for e in r["first_resolve_errors"])
+            L.append("| %s | %d / %d | %s |" % (r["id"], r["resolve_errors"],
+                     r["in_use"] + r["compressed"], fe.replace("|", "\\|")))
+    else:
+        L.append("None.")
     return "\n".join(L) + "\n"
 
 
@@ -176,7 +265,8 @@ def main():
     ap.add_argument("--out-json", default=os.path.join(ROOT, "docs", "dashboard.json"))
     ap.add_argument("--compare")
     ap.add_argument("--write", action="store_true")
-    ap.add_argument("--milestone", default="M0")
+    ap.add_argument("--milestone", default="M2")
+    ap.add_argument("--no-resolve", action="store_true")
     a = ap.parse_args()
 
     entries = []
@@ -198,6 +288,8 @@ def main():
     for e, p in todo:
         cat = e.get("category", {})
         res = run_one(a.inspector, p)
+        if res["ok"] and not a.no_resolve:
+            res.update(run_resolve(a.inspector, p))
         rows.append(dict(id=e["id"], bytes=os.path.getsize(p), engine=cat.get("engine", "unknown"),
                          year=cat.get("year"), producer=cat.get("producer"), **res))
     data = dict(

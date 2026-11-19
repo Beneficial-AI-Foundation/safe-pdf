@@ -33,7 +33,9 @@ def formatDocument (d : Document) : String :=
   let v := match d.version with
     | some (major, minor) => s!"{major}.{minor}"
     | none => "none"
-  s!"ok\nheaderOffset: {d.headerOffset}\nversion: {v}\nbyteLength: {d.byteLength}\n"
+  s!"ok\nheaderOffset: {d.headerOffset}\nversion: {v}\nbyteLength: {d.byteLength}\n" ++
+    s!"open: {if d.repaired then "repaired" else "strict"}\nrevisions: {d.revisions}\n" ++
+    s!"objects: {d.objectCount}\nroot: {d.root.1} {d.root.2}\n"
 
 /-- Render a parse `Error` as stable, line-oriented text. -/
 def formatError (e : Error) : String :=
@@ -43,7 +45,8 @@ def formatError (e : Error) : String :=
     | .unsupported what => s!"unsupported: {what}"
   s!"error\n{body}\n"
 
-/-- Renderer for the `header` suite: the result of the Phase 0 `SafePdf.parse` stub. -/
+/-- Renderer for the `header` suite: the result of `SafePdf.parse` (header check, then
+`Core.Open.openFile`). -/
 def renderHeader (bytes : ByteArray) : String :=
   match SafePdf.parse bytes with
   | .ok d => formatDocument d
