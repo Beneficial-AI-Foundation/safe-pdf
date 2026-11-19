@@ -57,3 +57,26 @@ entry is a bug in the comparator.
   JSON — seen in CI run 44410513896), counts as a warning `dangling-ref-null`, not a disagreement.
 - Status: accepted
 
+### D-002: shared-or-cyclic-page-tree — a page-tree node reached twice
+
+- Classification: deliberate difference (we reject what the reference tool repairs)
+- Found by: `pages` comparator design (task 4.4) on the fixture
+  `Tests/golden/pages/shared.pdf` / `Tests/differential/fixtures/pages_shared.*`,
+  2026-11-19. Not observed on the 74-file corpus (every corpus file opens: 0 page-tree
+  errors in a local run of the `pages` view).
+- Reference tool and version: qpdf 11.x (behaviour from its documentation and source:
+  a page object reached a second time in `/Kids` is replaced by a copy). Not yet
+  confirmed by a CI run.
+- Spec reference: ISO 32000-2:2020 §7.7.3.2 (the page tree is a tree: every page and
+  intermediate node has exactly one `/Parent`).
+- Observed: ours `reference cycle … page tree /Kids cycle` (`Core.Doc` rule W2: the page
+  list must consist of distinct objects, which is what `ofOpen_pages_nodup` proves);
+  qpdf lists the shared page twice (the second time as a new object).
+- Reading chosen and rationale: a node with two parents violates §7.7.3.2; duplicating it
+  would make two pages share one object (and its annotations, by identity), so the core
+  rejects the file instead, the same way as a true `/Kids` cycle.
+- Comparator handling: `Tests/differential/pages.py:compare` — when our `pages` view
+  reports an error containing `reference cycle`, the file is classified `known` (not a
+  disagreement), whatever qpdf lists; `run.py` counts it separately and prints it as
+  `KNOWN`.
+- Status: accepted

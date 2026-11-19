@@ -1,0 +1,222 @@
+{
+  "version": 2,
+  "parameters": {
+    "decodelevel": "none"
+  },
+  "pages": [
+    {
+      "contents": [],
+      "images": [],
+      "label": {
+        "/S": "/r"
+      },
+      "object": "4 0 R",
+      "outlines": [],
+      "pageposfrom1": 1
+    },
+    {
+      "contents": [],
+      "images": [],
+      "label": {
+        "/S": "/r"
+      },
+      "object": "5 0 R",
+      "outlines": [],
+      "pageposfrom1": 2
+    },
+    {
+      "contents": [],
+      "images": [],
+      "label": {
+        "/P": "u:A-",
+        "/S": "/D",
+        "/St": 5
+      },
+      "object": "6 0 R",
+      "outlines": [],
+      "pageposfrom1": 3
+    },
+    {
+      "contents": [],
+      "images": [],
+      "label": {
+        "/P": "u:A-",
+        "/S": "/D",
+        "/St": 5
+      },
+      "object": "7 0 R",
+      "outlines": [],
+      "pageposfrom1": 4
+    },
+    {
+      "contents": [],
+      "images": [],
+      "label": null,
+      "object": "11 0 R",
+      "outlines": [],
+      "pageposfrom1": 5
+    }
+  ],
+  "qpdf": [
+    {
+      "jsonversion": 2,
+      "pdfversion": "1.7",
+      "pushedinheritedpageresources": false,
+      "calledgetallpages": true,
+      "maxobjectid": 10
+    },
+    {
+      "obj:1 0 R": {
+        "value": {
+          "/Type": "/Catalog",
+          "/Pages": "2 0 R",
+          "/PageLabels": {
+            "/Nums": [
+              0,
+              {
+                "/S": "/r"
+              },
+              2,
+              {
+                "/S": "/D",
+                "/P": "u:A-",
+                "/St": 5
+              }
+            ]
+          }
+        }
+      },
+      "obj:2 0 R": {
+        "value": {
+          "/Type": "/Pages",
+          "/Kids": [
+            "3 0 R",
+            "99 0 R",
+            "7 0 R"
+          ],
+          "/Count": 6
+        }
+      },
+      "obj:3 0 R": {
+        "value": {
+          "/Type": "/Pages",
+          "/Parent": "2 0 R",
+          "/Kids": [
+            "4 0 R",
+            "5 0 R",
+            "6 0 R"
+          ],
+          "/Count": 3,
+          "/MediaBox": [
+            595.2760,
+            841.89,
+            0,
+            0
+          ],
+          "/Rotate": -90
+        }
+      },
+      "obj:4 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "3 0 R",
+          "/Annots": [
+            "8 0 R",
+            "9 0 R",
+            "10 0 R"
+          ]
+        }
+      },
+      "obj:5 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "3 0 R",
+          "/CropBox": [
+            0,
+            0,
+            300,
+            400
+          ],
+          "/Rotate": 180
+        }
+      },
+      "obj:6 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "3 0 R",
+          "/CropBox": [
+            1000,
+            1000,
+            2000,
+            2000
+          ],
+          "/Rotate": 45
+        }
+      },
+      "obj:7 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "2 0 R",
+          "/Rotate": 0
+        }
+      },
+      "obj:8 0 R": {
+        "value": {
+          "/Type": "/Annot",
+          "/Subtype": "/Link",
+          "/Rect": [
+            10,
+            10,
+            50,
+            50
+          ],
+          "/Dest": [
+            "7 0 R",
+            "/Fit"
+          ]
+        }
+      },
+      "obj:9 0 R": {
+        "value": {
+          "/Type": "/Annot",
+          "/Subtype": "/Link",
+          "/Rect": [
+            60,
+            60,
+            10,
+            10
+          ],
+          "/A": {
+            "/S": "/URI",
+            "/URI": "u:http://x"
+          }
+        }
+      },
+      "obj:10 0 R": {
+        "value": {
+          "/Type": "/Annot",
+          "/Subtype": "/Text",
+          "/Rect": [
+            0,
+            0,
+            1,
+            1
+          ],
+          "/Contents": "u:note"
+        }
+      },
+      "trailer": {
+        "value": {
+          "/Root": "1 0 R",
+          "/Size": 11
+        }
+      },
+      "obj:11 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "2 0 R"
+        }
+      }
+    }
+  ]
+}
