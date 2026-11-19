@@ -107,32 +107,47 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   (`Length.resolveLength_calls_le`). That `parseIndirectResolved` runs at most one
   `resolveLength` is by inspection of `Length.lengthDict` (it is not instrumented).
 
-## Budgeted opening and sessions (task 3.13, Plan.md §3 S3)
+## Budgeted opening and sessions (tasks 3.13, 4.5, Plan.md §4 S3)
 
 `openFileB limits budget bytes` is `openFile` with the decodes it performs charged against a
 `Filter.Budget`: the xref streams of the chain (`Chain.loadChainB`) and the object-stream
-decode of the root validation (`validateB` → `getObjectB` → `ObjStm.fetchCompressedB`).
-`OpenDoc.getObjectB` fetches with a budget and an `ObjStm.Cache`, so each object stream is
-decoded (and charged) once per cache. `Session` bundles a document, its budget and its cache;
-`Session.open` starts from `Budget.init limits`. The unbudgeted functions above are unchanged.
+decodes of the root validation (`validateB` → `getObjectB`). `OpenDoc.getObjectB` fetches with
+a budget and an `ObjStm.Cache`: an object in an object stream through
+`ObjStm.fetchCompressedB` (each container decoded and charged once per cache), a plain object
+through `Length.parseIndirectResolvedB` (task 4.5: the object streams decoded while resolving
+an indirect `/Length`, rule L6, are charged too, on every resolution: they are not cached).
+`Session` bundles a document, its budget and its cache; `Session.open` starts from
+`Budget.init limits`. The unbudgeted functions above are unchanged.
 
 * `openFileB_le`, `getObjectB_le`, `Session.getObject_le`: the budget never grows.
-* `getObjectB_cost`, `validateB_cost`, `strictOpenB_eq`: a fetch costs at most one
-  `decodeAllowance`; the strict open at most `maxRevisions + 1` of them.
+* `getObjectB_cost`, `validateB_cost`: a fetch costs at most `(objectCount + 1) · allowance`
+  (one `/Length` resolution of at most `objectCount` decodes, one container decode).
 * `openFileB_strict`, `openFileB_cycle`, `openFileB_loadChain_cycle`, `openFileB_root`,
   `openFileB_repaired`: rules P1–P5 for the budgeted path.
-* `getObjectB_eq`, `openFileB_eq`, `Session.getObject_eq`, `Session.open_eq`: **with enough
-  budget left the budgeted functions return exactly what the unbudgeted ones return**
-  (`(maxRevisions + 2) · decodeAllowance` to open, one `decodeAllowance` per fetch), and the
-  cache stays exact (`ObjStm.CacheExact`). No monotonicity of the decoders is needed
+* **Budget large enough ⇒ same result**, with an exact cache (`ObjStm.CacheExact`, which
+  stays exact): `getObjectB_eq_post`, `validateB_eq_post`, `Session.getObject_eq`
+  (a-posteriori: one `allowance` left *after* the call), `getObjectB_eq`, `validateB_eq`,
+  `Session.getObject_eq_pre` (a-priori: `(objectCount + 2)` allowances before);
+  `strictOpenB_eq`, `repairOpenB_eq`, `openFileB_eq`, `Session.open_eq`
+  (`maxRevisions · decodeAllowance` before, for the chain, and one `decodeAllowance` left
+  after, for the root validations). No monotonicity of the decoders is needed
   (`Filter.decodeStreamB_eq`).
-* `getObjectB_depth`: depth bound.
+* *Restated by task 4.5* (not weakened silently): before, a fetch cost one allowance and the
+  equalities assumed one allowance (`(maxRevisions + 2)` to open) *before* the call; that no
+  longer holds once the `/Length` decodes are charged, since their number is bounded only by
+  the size of the cross-reference section. The a-priori forms now carry the `objectCount`
+  factor, the open-level forms an a-posteriori condition, and `strictOpenB_eq` lost its cost
+  conjunct.
+* `getObjectB_depth`: depth bound. `openFileB_bytes`, `Session.open_bytes`: the document is
+  one of the input.
 
-**Not charged** (bounded per call only): object-stream decodes made while resolving an
-indirect `/Length` that lives in an object stream (`Length.resolveLength`, rule L6, inside
-`Length.parseIndirectResolved`, also for a container's own `/Length`): at most
-`d.objectCount` decodes per fetch (`Length.resolveLength_calls_le`), each allocating at most
-`maxFilters · maxDecodedStreamBytes` bytes. Charging them needs a budgeted `Length` resolver.
+**Not cached**: a container decoded during a `/Length` resolution is not put into the
+session's cache (a cached decode was read with another visiting list and fuel, and reusing it
+could turn a `/Length` cycle or fuel exhaustion into a success); it is charged again by every
+resolution that needs it. Each resolution is bounded by `objectCount` decodes
+(`Length.resolveLengthB_calls_le`) and every decode is charged, so the total stays within the
+document budget.
+
 -/
 
 namespace SafePdf.Core.Open
@@ -612,6 +627,22 @@ theorem parseIndirectResolved_depth {pre : Xref.ObjStm.Pre} {lookup : Nat → Op
       exact parseIndirectBodyWith_depth hb
     · cases h
 
+/-- `Length.parseIndirectWith` returns bodies within the depth limit, for every resolver (so
+also `Length.parseIndirectResolvedB`, `Length.parseIndirectResolvedB_with`). -/
+theorem parseIndirectWith_depth {lenF : Nat → ObjParse.LengthResolver} {limits : Limits}
+    {bytes : ByteArray} {pos : Nat} {io : IndirectObject} {r : Nat}
+    (h : Xref.Length.parseIndirectWith lenF limits bytes pos = .ok (io, r)) :
+    bodyDepth io.body ≤ limits.maxObjectDepth := by
+  unfold Xref.Length.parseIndirectWith at h
+  split at h
+  · cases h
+  · split at h
+    · rename_i b r' hb
+      cases h
+      exact parseIndirectBodyWith_depth hb
+    · cases h
+
+
 /-- **Decryption preserves depth** (task 4.3b): `decrypt` changes only string bytes and
 stream data. -/
 theorem decrypt_depth {d : OpenDoc} {num gen : Nat} {b b' : IndirectBody}
@@ -692,61 +723,141 @@ open SafePdf.Core.Xref.ObjStm (Cache CacheExact)
 def OpenDoc.allowance (d : OpenDoc) (limits : Limits) : Nat :=
   Core.Xref.Chain.decodeAllowance limits d.bytes
 
-/-- **Budgeted object resolution** (rules G1–G4, task 3.13): an object in an object stream is
-fetched by `ObjStm.fetchCompressedB` (container decode charged, decoded once per cache);
-anything else as by `getObject`. Returns the result, the budget and the cache. -/
+/-- **Budgeted object resolution** (rules G1–G4, tasks 3.13, 4.5): an object in an object
+stream is fetched by `ObjStm.fetchCompressedB` (container decode charged, decoded once per
+cache); a plain object is parsed by `Length.parseIndirectResolvedB`, so the object streams
+decoded while resolving an indirect `/Length` (rule L6) are charged too (task 4.5); free and
+absent objects are `null` as in `getObject`. Returns the result, the budget and the cache. -/
 def OpenDoc.getObjectB (d : OpenDoc) (limits : Limits) (budget : Budget) (cache : Cache)
     (num gen : Nat) : (Except Error IndirectBody) × Budget × Cache :=
   match d.lookup num with
+  | some (.inUse off g) =>
+    if g = gen then
+      match Xref.Length.parseIndirectResolvedB d.lookup limits d.bytes d.objectCount off d.pre
+          budget with
+      | (.error e, b) => (.error e, b, cache)
+      | (.ok (io, _), b) =>
+        (if io.num = num ∧ io.gen = gen then d.decrypt num gen io.body
+         else .error (.malformed off
+          s!"object header {io.num} {io.gen} does not match the xref entry {num} {gen}"), b, cache)
+    else (.ok nullBody, budget, cache)
   | some (.compressed _ _) =>
     if gen = 0 then
-      let r := Xref.ObjStm.fetchCompressedB d.pre d.lookup limits d.bytes d.objectCount num budget cache
+      let r := Xref.ObjStm.fetchCompressedB d.pre d.lookup limits d.bytes d.objectCount num
+        budget cache
       (r.1.map IndirectBody.obj, r.2.1, r.2.2)
     else (.ok nullBody, budget, cache)
   | _ => (d.getObject limits num gen, budget, cache)
 
 /-- `getObjectB` never increases the budget. -/
 theorem getObjectB_le (d : OpenDoc) (limits : Limits) (budget : Budget) (cache : Cache)
-    (num gen : Nat) : (d.getObjectB limits budget cache num gen).2.1.remaining ≤ budget.remaining := by
+    (num gen : Nat) :
+    (d.getObjectB limits budget cache num gen).2.1.remaining ≤ budget.remaining := by
   unfold OpenDoc.getObjectB
   split
+  · rename_i off g _
+    split
+    · have h := Xref.Length.parseIndirectResolvedB_le d.lookup limits d.bytes d.objectCount
+        off d.pre budget
+      rcases hp : Xref.Length.parseIndirectResolvedB d.lookup limits d.bytes d.objectCount off
+        d.pre budget with ⟨r0, b0⟩
+      rw [hp] at h
+      rcases r0 with e | ⟨io, r⟩ <;> exact h
+    · exact Nat.le_refl _
   · split
     · exact Xref.ObjStm.fetchCompressedB_le _ _ _ _ _ _ _ _
     · exact Nat.le_refl _
   · exact Nat.le_refl _
 
-/-- **Cost of one fetch**: at most `d.allowance limits` (one container decode). -/
+/-- **Cost of one fetch**: at most `(d.objectCount + 1) · d.allowance limits` (an indirect
+`/Length` resolution, at most `objectCount` decodes, and one container decode). *Restated by
+task 4.5*: it was one allowance while the `/Length` decodes were not charged. -/
 theorem getObjectB_cost (d : OpenDoc) (limits : Limits) (budget : Budget) (cache : Cache)
     (num gen : Nat) : budget.remaining ≤ (d.getObjectB limits budget cache num gen).2.1.remaining +
-      d.allowance limits := by
-  unfold OpenDoc.getObjectB OpenDoc.allowance Core.Xref.Chain.decodeAllowance
+      (d.objectCount + 1) * d.allowance limits := by
+  unfold OpenDoc.getObjectB
   split
+  · rename_i off g _
+    split
+    · have h := Xref.Length.parseIndirectResolvedB_cost d.lookup limits d.bytes d.objectCount
+        off d.pre budget
+      have hk : d.objectCount * Xref.Length.allowance limits d.bytes ≤
+          (d.objectCount + 1) * d.allowance limits := by
+        rw [Nat.succ_mul]; exact Nat.le_add_right _ _
+      rcases hp : Xref.Length.parseIndirectResolvedB d.lookup limits d.bytes d.objectCount off
+        d.pre budget with ⟨r0, b0⟩
+      rw [hp] at h
+      rcases r0 with e | ⟨io, r⟩ <;> (simp only at h ⊢; omega)
+    · exact Nat.le_add_right _ _
   · split
     · exact Xref.ObjStm.fetchCompressedB_cost _ _ _ _ _ _ _ _
     · exact Nat.le_add_right _ _
   · exact Nat.le_add_right _ _
 
-/-- **Budget large enough ⇒ same object** (task 3.13): with an exact cache and at least
-`d.allowance limits` left, `getObjectB` returns exactly what `getObject` returns and the cache
-stays exact. -/
-theorem getObjectB_eq {d : OpenDoc} {limits : Limits} {budget : Budget} {cache : Cache}
+/-- **Budget left ⇒ same object** (tasks 3.13, 4.5; a-posteriori form): with an exact cache,
+if at least `d.allowance limits` is left after the fetch, `getObjectB` returned exactly what
+`getObject` returns and the cache stays exact. -/
+theorem getObjectB_eq_post {d : OpenDoc} {limits : Limits} {budget : Budget} {cache : Cache}
     {num gen : Nat} (hc : CacheExact d.pre d.lookup limits d.bytes d.objectCount cache)
-    (h : d.allowance limits ≤ budget.remaining) :
+    (h : d.allowance limits ≤ (d.getObjectB limits budget cache num gen).2.1.remaining) :
     (d.getObjectB limits budget cache num gen).1 = d.getObject limits num gen ∧
-    CacheExact d.pre d.lookup limits d.bytes d.objectCount (d.getObjectB limits budget cache num gen).2.2 := by
+    CacheExact d.pre d.lookup limits d.bytes d.objectCount
+      (d.getObjectB limits budget cache num gen).2.2 := by
+  revert h
   unfold OpenDoc.getObjectB
   split
+  · rename_i off g hl
+    split
+    · rename_i hg
+      have heq := fun hA => Xref.Length.parseIndirectResolvedB_eq (lookup := d.lookup)
+        (limits := limits) (bytes := d.bytes) (fuel := d.objectCount) (pos := off)
+        (pre := d.pre) (budget := budget) hA
+      rcases hp : Xref.Length.parseIndirectResolvedB d.lookup limits d.bytes d.objectCount off
+        d.pre budget with ⟨r0, b0⟩
+      rw [hp] at heq
+      simp only at heq
+      intro hA
+      have hA' : Xref.Length.allowance limits d.bytes ≤ b0.remaining := by
+        rcases r0 with e | ⟨io, r⟩ <;> exact hA
+      have he := heq hA'
+      refine ⟨?_, by rcases r0 with e | ⟨io, r⟩ <;> exact hc⟩
+      simp only [OpenDoc.getObject, OpenDoc.getObjectTrace, hl, hg, ↓reduceIte, ← he]
+      rcases r0 with e | ⟨io, r⟩
+      · rfl
+      · simp only
+        split <;> rfl
+    · rename_i hg
+      intro _
+      refine ⟨?_, hc⟩
+      simp [OpenDoc.getObject, OpenDoc.getObjectTrace, hl, hg]
   · rename_i c i hl
     split
     · rename_i hg
-      obtain ⟨he, hc'⟩ := Xref.ObjStm.fetchCompressedB_eq (num := num) hc h
+      intro hA
+      obtain ⟨he, hc'⟩ := Xref.ObjStm.fetchCompressedB_eq_post (num := num) hc hA
       refine ⟨?_, hc'⟩
       simp only [OpenDoc.getObject, OpenDoc.getObjectTrace, hl, hg, ↓reduceIte, he]
       rfl
     · rename_i hg
+      intro _
       refine ⟨?_, hc⟩
       simp [OpenDoc.getObject, OpenDoc.getObjectTrace, hl, hg]
-  · exact ⟨rfl, hc⟩
+  · exact fun _ => ⟨rfl, hc⟩
+
+/-- **Budget large enough ⇒ same object** (a-priori form, *restated by task 4.5*): with an
+exact cache and at least `(d.objectCount + 2) · d.allowance limits` before the fetch (it was
+one allowance before task 4.5 charged the `/Length` decodes), `getObjectB` returns exactly
+what `getObject` returns and the cache stays exact. -/
+theorem getObjectB_eq {d : OpenDoc} {limits : Limits} {budget : Budget} {cache : Cache}
+    {num gen : Nat} (hc : CacheExact d.pre d.lookup limits d.bytes d.objectCount cache)
+    (h : (d.objectCount + 2) * d.allowance limits ≤ budget.remaining) :
+    (d.getObjectB limits budget cache num gen).1 = d.getObject limits num gen ∧
+    CacheExact d.pre d.lookup limits d.bytes d.objectCount
+      (d.getObjectB limits budget cache num gen).2.2 := by
+  apply getObjectB_eq_post hc
+  have := getObjectB_cost d limits budget cache num gen
+  rw [show d.objectCount + 2 = (d.objectCount + 1) + 1 by omega, Nat.succ_mul] at h
+  omega
 
 /-- **Depth bound** for `getObjectB`. -/
 theorem getObjectB_depth {d : OpenDoc} {limits : Limits} {budget : Budget} {cache : Cache}
@@ -755,9 +866,25 @@ theorem getObjectB_depth {d : OpenDoc} {limits : Limits} {budget : Budget} {cach
   unfold OpenDoc.getObjectB at h
   split at h
   · split at h
+    · rcases hp : Xref.Length.parseIndirectResolvedB d.lookup limits d.bytes d.objectCount _
+        d.pre budget with ⟨r0, b0⟩
+      rw [hp] at h
+      rcases r0 with e | ⟨io, r⟩
+      · cases h
+      · simp only at h
+        split at h
+        · rw [decrypt_depth h]
+          obtain ⟨lenF, he⟩ := Xref.Length.parseIndirectResolvedB_with d.lookup limits d.bytes
+            d.objectCount _ d.pre budget
+          rw [hp] at he
+          simp only at he
+          exact parseIndirectWith_depth he.symm
+        · cases h
+    · cases h; simp [nullBody, bodyDepth, PdfObject.depth]
+  · split at h
     · simp only at h
-      cases hf : (Xref.ObjStm.fetchCompressedB d.pre d.lookup limits d.bytes d.objectCount num budget
-          cache).1 with
+      cases hf : (Xref.ObjStm.fetchCompressedB d.pre d.lookup limits d.bytes d.objectCount num
+          budget cache).1 with
       | error e => rw [hf] at h; cases h
       | ok o =>
         rw [hf] at h
@@ -787,9 +914,11 @@ theorem validateB_le (limits : Limits) (budget : Budget) (cache : Cache) (d : Op
   · exact Nat.le_refl _
   · exact getObjectB_le _ _ _ _ _ _
 
-/-- Cost of `validateB`: at most one fetch. -/
+/-- Cost of `validateB`: at most one fetch, `(d.objectCount + 1) · d.allowance limits`
+(*restated by task 4.5*, `getObjectB_cost`). -/
 theorem validateB_cost (limits : Limits) (budget : Budget) (cache : Cache) (d : OpenDoc) :
-    budget.remaining ≤ (validateB limits budget cache d).2.1.remaining + d.allowance limits := by
+    budget.remaining ≤ (validateB limits budget cache d).2.1.remaining +
+      (d.objectCount + 1) * d.allowance limits := by
   unfold validateB
   split
   · exact Nat.le_add_right _ _
@@ -822,20 +951,35 @@ theorem validateB_root {limits : Limits} {budget : Budget} {cache : Cache} {d d'
     · cases h
     · cases h
 
-/-- Budget large enough ⇒ `validateB` is `validate`, and the cache stays exact. -/
-theorem validateB_eq {limits : Limits} {budget : Budget} {cache : Cache} {d : OpenDoc}
+/-- Budget left ⇒ `validateB` is `validate` (a-posteriori form, task 4.5): with an exact cache
+and at least `d.allowance limits` left after the validation, and the cache stays exact. -/
+theorem validateB_eq_post {limits : Limits} {budget : Budget} {cache : Cache} {d : OpenDoc}
     (hc : CacheExact d.pre d.lookup limits d.bytes d.objectCount cache)
-    (h : d.allowance limits ≤ budget.remaining) :
+    (h : d.allowance limits ≤ (validateB limits budget cache d).2.1.remaining) :
     (validateB limits budget cache d).1 = validate limits d ∧
     CacheExact d.pre d.lookup limits d.bytes d.objectCount (validateB limits budget cache d).2.2 := by
+  revert h
   unfold validateB validate
   split
-  · exact ⟨rfl, hc⟩
+  · exact fun _ => ⟨rfl, hc⟩
   · rename_i n g hr
-    obtain ⟨he, hc'⟩ := getObjectB_eq (num := n) (gen := g) hc h
+    intro h
+    obtain ⟨he, hc'⟩ := getObjectB_eq_post (num := n) (gen := g) hc h
     refine ⟨?_, hc'⟩
     simp only
     rw [he]
+
+/-- Budget large enough ⇒ `validateB` is `validate`, and the cache stays exact (a-priori
+form, *restated by task 4.5*: `(d.objectCount + 2) · d.allowance limits`, was one allowance). -/
+theorem validateB_eq {limits : Limits} {budget : Budget} {cache : Cache} {d : OpenDoc}
+    (hc : CacheExact d.pre d.lookup limits d.bytes d.objectCount cache)
+    (h : (d.objectCount + 2) * d.allowance limits ≤ budget.remaining) :
+    (validateB limits budget cache d).1 = validate limits d ∧
+    CacheExact d.pre d.lookup limits d.bytes d.objectCount (validateB limits budget cache d).2.2 := by
+  apply validateB_eq_post hc
+  have := validateB_cost limits budget cache d
+  rw [show d.objectCount + 2 = (d.objectCount + 1) + 1 by omega, Nat.succ_mul] at h
+  omega
 
 /-- The budgeted strict path (rules P1, P2): `Chain.loadChainB`, `checkSize`, merge,
 `validateB` (with an empty cache). Returns the result, the budget and the cache. -/
@@ -1072,104 +1216,118 @@ theorem cacheExact_nil (d : OpenDoc) (limits : Limits) :
     CacheExact d.pre d.lookup limits d.bytes d.objectCount [] :=
   Xref.ObjStm.cacheExact_nil _ _ _ _ _
 
-/-- Budget large enough ⇒ `strictOpenB` is `strictOpen`; it costs at most
-`(maxRevisions + 1) · decodeAllowance`, and its cache is exact for the document. -/
+/-- Budget large enough ⇒ `strictOpenB` is `strictOpen` (*restated by task 4.5*): with
+`maxRevisions · decodeAllowance` before (the chain, `Chain.loadChainB_eq`) and one
+`decodeAllowance` left after (the root validation, `validateB_eq_post`), the result is
+`strictOpen`'s and the cache is exact for the document. (Before task 4.5 the hypothesis was
+`(maxRevisions + 1) · decodeAllowance` before, and the cost conclusion `≤ (maxRevisions + 1) ·
+decodeAllowance` is dropped: a root validation may now also pay up to `objectCount` `/Length`
+decodes, `validateB_cost`.) -/
 theorem strictOpenB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
-    (h : (limits.maxRevisions + 1) * Core.Xref.Chain.decodeAllowance limits bytes ≤
-      budget.remaining) :
+    (hK : limits.maxRevisions * Core.Xref.Chain.decodeAllowance limits bytes ≤ budget.remaining)
+    (hf : Core.Xref.Chain.decodeAllowance limits bytes ≤
+      (strictOpenB limits budget bytes).2.1.remaining) :
     (strictOpenB limits budget bytes).1 = strictOpen limits bytes ∧
-    budget.remaining ≤ (strictOpenB limits budget bytes).2.1.remaining +
-      (limits.maxRevisions + 1) * Core.Xref.Chain.decodeAllowance limits bytes ∧
     ∀ d, (strictOpenB limits budget bytes).1 = .ok d →
       CacheExact d.pre d.lookup limits d.bytes d.objectCount (strictOpenB limits budget bytes).2.2 := by
-  have hK : limits.maxRevisions * Core.Xref.Chain.decodeAllowance limits bytes ≤
-      budget.remaining := by
-    rw [Nat.succ_mul] at h; omega
+  revert hf
   have he := Core.Xref.Chain.loadChainB_eq hK
-  have hc := Core.Xref.Chain.loadChainB_cost limits budget bytes
   unfold strictOpenB strictOpen
   rcases hl : Core.Xref.Chain.loadChainB limits budget bytes with ⟨r1, b1⟩
-  rw [hl] at he hc
-  simp only at he hc
+  rw [hl] at he
+  simp only at he
   rw [← he]
-  rw [Nat.succ_mul] at h ⊢
   rcases r1 with e | revs
-  · refine ⟨rfl, by simp only; omega, fun d hd => by cases hd⟩
+  · exact fun _ => ⟨rfl, fun d hd => by cases hd⟩
   · simp only
     split
-    · refine ⟨rfl, by simp only; omega, fun d hd => by cases hd⟩
+    · exact fun _ => ⟨rfl, fun d hd => by cases hd⟩
     · split
-      · refine ⟨rfl, by simp only; omega, fun d hd => by cases hd⟩
+      · exact fun _ => ⟨rfl, fun d hd => by cases hd⟩
       · rename_i d hd
+        intro hf
         have hbytes : d.bytes = bytes := by
           unfold ofChain at hd; split at hd
           · cases hd
           · obtain ⟨c, rfl⟩ := withCrypt_ok hd; rfl
-        have hal : d.allowance limits ≤ b1.remaining := by
-          unfold OpenDoc.allowance; rw [hbytes]; omega
-        obtain ⟨hv, hcx⟩ := validateB_eq (cacheExact_nil d limits) hal
-        have hvc := validateB_cost limits b1 [] d
-        refine ⟨hv, ?_, fun d' hd' => ?_⟩
-        · unfold OpenDoc.allowance at hvc; rw [hbytes] at hvc; omega
-        · have := validateB_eq_self hd'
-          subst this
-          exact hcx
+        have hal : d.allowance limits ≤ (validateB limits b1 [] d).2.1.remaining := by
+          unfold OpenDoc.allowance; rw [hbytes]; exact hf
+        obtain ⟨hv, hcx⟩ := validateB_eq_post (cacheExact_nil d limits) hal
+        refine ⟨hv, fun d' hd' => ?_⟩
+        have := validateB_eq_self hd'
+        subst this
+        exact hcx
 
-/-- Budget large enough ⇒ `repairOpenB` is `repairOpen`, and its cache is exact for the
+/-- Budget left ⇒ `repairOpenB` is `repairOpen` (*restated by task 4.5*: one
+`decodeAllowance` left after the repair path, was one before), and its cache is exact for the
 document. -/
 theorem repairOpenB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
-    (h : Core.Xref.Chain.decodeAllowance limits bytes ≤ budget.remaining) :
+    (h : Core.Xref.Chain.decodeAllowance limits bytes ≤
+      (repairOpenB limits budget bytes).2.1.remaining) :
     (repairOpenB limits budget bytes).1 = repairOpen limits bytes ∧
     ∀ d, (repairOpenB limits budget bytes).1 = .ok d →
       CacheExact d.pre d.lookup limits d.bytes d.objectCount (repairOpenB limits budget bytes).2.2 := by
+  revert h
   unfold repairOpenB repairOpen
   split
-  · exact ⟨rfl, fun d hd => by cases hd⟩
+  · exact fun _ => ⟨rfl, fun d hd => by cases hd⟩
   · rename_i sec tr _
     split
-    · exact ⟨rfl, fun d hd => by cases hd⟩
+    · exact fun _ => ⟨rfl, fun d hd => by cases hd⟩
     · rename_i d0 hw
+      intro h
       have hb : d0.bytes = bytes := by obtain ⟨c, rfl⟩ := withCrypt_ok hw; rfl
-      have hal : d0.allowance limits ≤ budget.remaining := by
+      have hal : d0.allowance limits ≤ (validateB limits budget [] d0).2.1.remaining := by
         unfold OpenDoc.allowance; rw [hb]; exact h
-      obtain ⟨hv, hcx⟩ := validateB_eq (cacheExact_nil d0 limits) hal
+      obtain ⟨hv, hcx⟩ := validateB_eq_post (cacheExact_nil d0 limits) hal
       refine ⟨hv, fun d hd => ?_⟩
       have := validateB_eq_self hd
       subst this
       exact hcx
 
-/-- **Budget large enough ⇒ same document** (task 3.13): with at least
-`(maxRevisions + 2) · decodeAllowance limits bytes` left (the chain, the strict root
-validation and the repaired root validation), `openFileB` returns exactly what `openFile`
+/-- **Budget large enough ⇒ same document** (tasks 3.13, 4.5): with at least
+`maxRevisions · decodeAllowance limits bytes` before (the chain) and one `decodeAllowance` left
+after (the root validations, a-posteriori), `openFileB` returns exactly what `openFile`
 returns, and the cache it returns is exact for the document (so later `getObjectB` calls with
-enough budget return what `getObject` returns, `getObjectB_eq`). -/
+enough budget return what `getObject` returns, `getObjectB_eq_post`). *Restated by task
+4.5*: the hypothesis was `(maxRevisions + 2) · decodeAllowance` before; with the `/Length`
+decodes of a root validation charged, a budget fixed in advance would have to depend on the
+size of the cross-reference section, so the validations are covered a-posteriori. -/
 theorem openFileB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
-    (h : (limits.maxRevisions + 2) * Core.Xref.Chain.decodeAllowance limits bytes ≤
-      budget.remaining) :
+    (hK : limits.maxRevisions * Core.Xref.Chain.decodeAllowance limits bytes ≤ budget.remaining)
+    (hf : Core.Xref.Chain.decodeAllowance limits bytes ≤
+      (openFileB limits budget bytes).2.1.remaining) :
     (openFileB limits budget bytes).1 = openFile limits bytes ∧
     ∀ d, (openFileB limits budget bytes).1 = .ok d →
       CacheExact d.pre d.lookup limits d.bytes d.objectCount (openFileB limits budget bytes).2.2 := by
-  have h2 : (limits.maxRevisions + 2) * Core.Xref.Chain.decodeAllowance limits bytes =
-      (limits.maxRevisions + 1) * Core.Xref.Chain.decodeAllowance limits bytes +
-        Core.Xref.Chain.decodeAllowance limits bytes := by
-    rw [show limits.maxRevisions + 2 = (limits.maxRevisions + 1) + 1 by omega, Nat.succ_mul]
-  have h1 : (limits.maxRevisions + 1) * Core.Xref.Chain.decodeAllowance limits bytes ≤
-      budget.remaining := by omega
-  obtain ⟨he, hc, hx⟩ := strictOpenB_eq h1
+  have hs := strictOpenB_eq (bytes := bytes) hK
+  revert hf
   unfold openFileB openFile
-  rcases hs : strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
-  rw [hs] at he hc hx
-  simp only at he hc hx
-  rw [← he]
+  rcases hso : strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
+  rw [hso] at hs
+  simp only at hs
   rcases r1 with e | d
   · simp only
     split
-    · exact ⟨rfl, fun d hd => by cases hd⟩
-    · have hb1 : Core.Xref.Chain.decodeAllowance limits bytes ≤ b1.remaining := by omega
-      obtain ⟨hre, hrx⟩ := repairOpenB_eq (bytes := bytes) hb1
-      rcases hr : repairOpenB limits b1 bytes with ⟨r2, b2, c2⟩
-      rw [hr] at hre hrx
-      simp only at hre hrx
+    · rename_i hfin
+      intro hf
+      obtain ⟨he, -⟩ := hs hf
+      rw [← he]
+      simp only [hfin, ↓reduceIte]
+      exact ⟨trivial, fun d hd => by cases hd⟩
+    · rename_i hfin
+      have hr := repairOpenB_eq (limits := limits) (budget := b1) (bytes := bytes)
+      have hrle := repairOpenB_le limits b1 bytes
+      rcases hr' : repairOpenB limits b1 bytes with ⟨r2, b2, c2⟩
+      rw [hr'] at hr hrle
+      simp only at hr hrle
+      intro hf
+      have hf2 : Core.Xref.Chain.decodeAllowance limits bytes ≤ b2.remaining := by
+        rcases r2 with e' | d' <;> exact hf
+      obtain ⟨he, -⟩ := hs (by omega)
+      rw [← he]
+      simp only [hfin, Bool.false_eq_true, ↓reduceIte]
+      obtain ⟨hre, hrx⟩ := hr hf2
       rw [← hre]
       rcases r2 with e' | d'
       · exact ⟨rfl, fun d hd => by cases hd⟩
@@ -1177,7 +1335,10 @@ theorem openFileB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
         simp only [Except.ok.injEq] at hd
         subst hd
         exact hrx d' rfl
-  · exact ⟨rfl, fun d' hd' => by
+  · intro hf
+    obtain ⟨he, hx⟩ := hs hf
+    rw [← he]
+    exact ⟨rfl, fun d' hd' => by
       simp only [Except.ok.injEq] at hd'
       subst hd'
       exact hx d rfl⟩
@@ -1221,10 +1382,22 @@ theorem Session.getObject_le (s : Session) (limits : Limits) (num gen : Nat) :
 def Session.Exact (s : Session) (limits : Limits) : Prop :=
   CacheExact s.doc.pre s.doc.lookup limits s.doc.bytes s.doc.objectCount s.cache
 
-/-- **A session fetch is `getObject`** when the session is exact and at least one decode's
-worth of budget is left; the session stays exact. -/
+/-- **A session fetch is `getObject`** (a-posteriori form, *restated by task 4.5*; it was
+"one allowance left before"): when the session is exact and at least one decode's worth of
+budget is left after the fetch, the fetch returned `getObject`'s result; the session stays
+exact. -/
 theorem Session.getObject_eq {s : Session} {limits : Limits} {num gen : Nat}
-    (hx : s.Exact limits) (h : s.doc.allowance limits ≤ s.budget.remaining) :
+    (hx : s.Exact limits)
+    (h : s.doc.allowance limits ≤ (s.getObject limits num gen).2.budget.remaining) :
+    (s.getObject limits num gen).1 = s.doc.getObject limits num gen ∧
+    (s.getObject limits num gen).2.Exact limits :=
+  getObjectB_eq_post hx h
+
+/-- **A session fetch is `getObject`** (a-priori form): when the session is exact and at
+least `(objectCount + 2) · allowance` is left before the fetch. -/
+theorem Session.getObject_eq_pre {s : Session} {limits : Limits} {num gen : Nat}
+    (hx : s.Exact limits)
+    (h : (s.doc.objectCount + 2) * s.doc.allowance limits ≤ s.budget.remaining) :
     (s.getObject limits num gen).1 = s.doc.getObject limits num gen ∧
     (s.getObject limits num gen).2.Exact limits :=
   getObjectB_eq hx h
@@ -1233,30 +1406,95 @@ theorem Session.getObject_eq {s : Session} {limits : Limits} {num gen : Nat}
 theorem Session.ofDoc_exact (limits : Limits) (d : OpenDoc) : (Session.ofDoc limits d).Exact limits :=
   cacheExact_nil d limits
 
-/-- **Opening a session with the default budget**: whenever the full budget covers
-`(maxRevisions + 2) · decodeAllowance`, `Session.open` opens exactly the document `openFile`
-opens, and the session is exact. -/
+/-- **Opening a session** (*restated by task 4.5*): whenever the full budget covers
+`maxRevisions · decodeAllowance` (the chain), a session that `Session.open` opens with at least
+one `decodeAllowance` left holds exactly the document `openFile` opens, and is exact; and when
+`openFileB` from the full budget fails with one `decodeAllowance` left, `openFile` fails with
+the same error. (It was: `(maxRevisions + 2) · decodeAllowance ≤ maxDecodedTotalBytes`, no
+condition after; see `openFileB_eq`.) -/
 theorem Session.open_eq {limits : Limits} {bytes : ByteArray}
-    (h : (limits.maxRevisions + 2) * Core.Xref.Chain.decodeAllowance limits bytes ≤
+    (h : limits.maxRevisions * Core.Xref.Chain.decodeAllowance limits bytes ≤
       limits.maxDecodedTotalBytes) :
-    (∀ s, Session.open limits bytes = .ok s → openFile limits bytes = .ok s.doc ∧ s.Exact limits) ∧
-    (∀ e, Session.open limits bytes = .error e → openFile limits bytes = .error e) := by
-  obtain ⟨he, hx⟩ := openFileB_eq (budget := Budget.init limits) (bytes := bytes) h
+    (∀ s, Session.open limits bytes = .ok s →
+      Core.Xref.Chain.decodeAllowance limits bytes ≤ s.budget.remaining →
+      openFile limits bytes = .ok s.doc ∧ s.Exact limits) ∧
+    (∀ e, (openFileB limits (Budget.init limits) bytes).1 = .error e →
+      Core.Xref.Chain.decodeAllowance limits bytes ≤
+        (openFileB limits (Budget.init limits) bytes).2.1.remaining →
+      openFile limits bytes = .error e) := by
+  have he := openFileB_eq (budget := Budget.init limits) (bytes := bytes) h
   unfold Session.open
   rcases ho : openFileB limits (Budget.init limits) bytes with ⟨r, b, c⟩
-  rw [ho] at he hx
-  simp only at he hx
+  rw [ho] at he
+  simp only at he
   rcases r with e | d
-  · refine ⟨fun s hs => ?_, fun e' he' => ?_⟩
+  · refine ⟨fun s hs => ?_, fun e' he' hb => ?_⟩
     · simp only at hs; cases hs
     · simp only [Except.error.injEq] at he'
       subst he'
-      exact he.symm
-  · refine ⟨fun s hs => ?_, fun e' he' => ?_⟩
+      exact (he hb).1.symm
+  · refine ⟨fun s hs hb => ?_, fun e' he' => ?_⟩
     · simp only [Except.ok.injEq] at hs
       subst hs
-      exact ⟨he.symm, hx d rfl⟩
+      obtain ⟨h1, h2⟩ := he hb
+      exact ⟨h1.symm, h2 d rfl⟩
     · simp only at he'; cases he'
+
+/-- A document opened by `openFileB` is a document of the input. -/
+theorem openFileB_bytes {limits : Limits} {budget : Budget} {bytes : ByteArray} {d : OpenDoc}
+    (h : (openFileB limits budget bytes).1 = .ok d) : d.bytes = bytes := by
+  unfold openFileB at h
+  rcases hs : strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
+  rw [hs] at h
+  rcases r1 with e | d0
+  · simp only at h
+    split at h
+    · cases h
+    · rcases hr : repairOpenB limits b1 bytes with ⟨r2, b2, c2⟩
+      rw [hr] at h
+      rcases r2 with e' | d1
+      · cases h
+      · simp only [Except.ok.injEq] at h
+        subst h
+        have hr1 : (repairOpenB limits b1 bytes).1 = .ok d1 := by rw [hr]
+        obtain ⟨_, _, -, hw, -⟩ := repairOpenB_ok hr1
+        obtain ⟨c, rfl⟩ := withCrypt_ok hw
+        rfl
+  · simp only [Except.ok.injEq] at h
+    subst h
+    unfold strictOpenB at hs
+    rcases hl : Core.Xref.Chain.loadChainB limits budget bytes with ⟨r0, b0⟩
+    rw [hl] at hs
+    rcases r0 with e | revs
+    · cases hs
+    · simp only at hs
+      split at hs
+      · cases hs
+      · split at hs
+        · cases hs
+        · rename_i d2 hd
+          have hv := congrArg Prod.fst hs
+          simp only at hv
+          have := validateB_eq_self hv
+          subst this
+          unfold ofChain at hd
+          split at hd
+          · cases hd
+          · obtain ⟨c, rfl⟩ := withCrypt_ok hd
+            rfl
+
+/-- The document of a session opened by `Session.open` is a document of the input. -/
+theorem Session.open_bytes {limits : Limits} {bytes : ByteArray} {s : Session}
+    (h : Session.open limits bytes = .ok s) : s.doc.bytes = bytes := by
+  unfold Session.open at h
+  rcases hf : openFileB limits (Budget.init limits) bytes with ⟨r, b, c⟩
+  rw [hf] at h
+  rcases r with e | d
+  · cases h
+  · simp only [Except.ok.injEq] at h
+    subst h
+    exact openFileB_bytes (by rw [hf])
+
 
 /-! ## Tests -/
 

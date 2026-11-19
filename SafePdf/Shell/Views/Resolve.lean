@@ -4,12 +4,16 @@ import SafePdf.Shell.Views.Summary
 /-!
 # `resolve` view (task 2.11)
 
-Resolves every in-use cross-reference entry of an opened document with
-`Core.Open.OpenDoc.getObject` (classic `inUse` entries with their generation, object-stream
-`compressed` entries with generation 0) and reports how many succeed, how many fail, and the
-first few errors. Free entries are counted but not fetched (they resolve to `null` by
-definition). This is the corpus dashboard's "all in-use objects resolve" check
-(Plan.md §6 Phase 2, milestone M2).
+Resolves every in-use cross-reference entry of an opened document (classic `inUse` entries
+with their generation, object-stream `compressed` entries with generation 0) and reports how
+many succeed, how many fail, and the first few errors. Since task 4.5 the fetches go through
+`Core.Open.Session.getObject`, threading the session the document was opened in
+(`SafePdf.Document.session`): every object-stream decode (each container once, cached) and
+every `/Length` resolution through an object stream is charged to the one document budget
+(`Limits.maxDecodedTotalBytes`); with enough budget the results are those of
+`Core.Open.OpenDoc.getObject` (`Core.Open.Session.getObject_eq`). Free entries are counted
+but not fetched (they resolve to `null` by definition). This is the corpus dashboard's "all
+in-use objects resolve" check (Plan.md §6 Phase 2, milestone M2).
 -/
 
 namespace SafePdf.Shell.Views.Resolve
@@ -44,14 +48,17 @@ def Counts.record (c : Counts) (num gen : Nat) (r : Except Error IndirectBody) :
              firstErrors := if c.firstErrors.length < maxListed
                then (num, gen, renderError e) :: c.firstErrors else c.firstErrors }
 
-/-- Resolve every in-use entry of `d`. -/
+/-- Resolve every in-use entry of `d`, in the document's session (one budget, one cache). -/
 def resolveAll (limits : Limits) (d : Document) : Counts :=
-  d.doc.index.foldl (init := {}) fun c (num, e) =>
+  (d.doc.index.foldl (init := (({} : Counts), d.session)) fun (c, s) (num, e) =>
     match e with
-    | .free _ _ => { c with free := c.free + 1 }
-    | .inUse _ g => ({ c with inUse := c.inUse + 1 }).record num g (d.doc.getObject limits num g)
+    | .free _ _ => ({ c with free := c.free + 1 }, s)
+    | .inUse _ g =>
+      let (r, s) := s.getObject limits num g
+      (({ c with inUse := c.inUse + 1 }).record num g r, s)
     | .compressed _ _ =>
-      ({ c with compressed := c.compressed + 1 }).record num 0 (d.doc.getObject limits num 0)
+      let (r, s) := s.getObject limits num 0
+      (({ c with compressed := c.compressed + 1 }).record num 0 r, s)).1
 
 /-- Text form. -/
 def text (i : Input) (c : Option Counts) (nanos : Nat) : List String :=
@@ -85,7 +92,7 @@ def json (i : Input) (c : Option Counts) (nanos : Nat) : String :=
 /-- The `resolve` view. -/
 def view : View where
   name := "resolve"
-  description := "fetch every in-use xref entry with getObject; counts ok/error, first errors"
+  description := "fetch every in-use xref entry (budgeted session); counts ok/error, first errors"
   run cfg i := do
     let (c, nanos) ← match i.result with
       | .ok d => do
