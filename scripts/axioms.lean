@@ -302,3 +302,8 @@ import SafePdf
 #print axioms SafePdf.Core.Filter.LZW.expand_ok
 #print axioms SafePdf.Core.Filter.LZW.step_wf
 #print axioms SafePdf.Core.Filter.LZW.init_wf
+
+-- Phase 2, task 2.14: /Length through object streams (SafePdf/Core/Xref/Length.lean;
+-- decoding split into SafePdf/Core/Xref/ObjStmDecode.lean, same names)
+#print axioms SafePdf.Core.Xref.Length.containerLength_calls_le
+#print axioms SafePdf.Core.Xref.Length.resolveLength_container_cycle
