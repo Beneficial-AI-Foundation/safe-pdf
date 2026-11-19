@@ -289,3 +289,16 @@ import SafePdf
 #print axioms SafePdf.Core.Open.strictOpen_ok
 #print axioms SafePdf.Core.Open.checkSize_ok
 #print axioms SafePdf.Core.Open.strictOpen_lt_size
+-- Phase 3, task 3.4: LZWDecode (SafePdf/Core/Filter/LZW.lean)
+#print axioms SafePdf.Core.Filter.LZW.lzwDecode_size_le
+#print axioms SafePdf.Core.Filter.LZW.lzwDecode_fuel_enough
+#print axioms SafePdf.Core.Filter.LZW.loop_fuel_irrel
+#print axioms SafePdf.Core.Filter.LZW.codeWidth_ge
+#print axioms SafePdf.Core.Filter.LZW.codeWidth_le
+#print axioms SafePdf.Core.Filter.LZW.addEntry_size_le
+#print axioms SafePdf.Core.Filter.LZW.addEntry_wf
+#print axioms SafePdf.Core.Filter.LZW.addEntry_size_ge
+#print axioms SafePdf.Core.Filter.LZW.addEntry_size_eq
+#print axioms SafePdf.Core.Filter.LZW.expand_ok
+#print axioms SafePdf.Core.Filter.LZW.step_wf
+#print axioms SafePdf.Core.Filter.LZW.init_wf
