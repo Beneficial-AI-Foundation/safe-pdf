@@ -1,6 +1,5 @@
 import SafePdf.Core.Xref
-import SafePdf.Core.Filter.Flate
-import SafePdf.Core.Filter.Predictor
+import SafePdf.Core.Filter
 
 /-!
 # Cross-reference streams
@@ -28,11 +27,16 @@ data is a table of fixed-width binary rows. Its dictionary doubles as the traile
   (subsections: first object number, count); absent means `[0 Size]`. Every subsection must
   lie below `/Size` (`s + c ≤ Size`); the total count must be `≤ limits.maxObjects`
   (else `limitExceeded .objects`).
-* XS5. `/Filter` is absent, `/FlateDecode` or `[/FlateDecode]`; other filters are
-  `unsupported`. With Flate, the data is inflated (`Filter.Flate.flateDecode`, output bounded
-  by `limits.maxDecodedStreamBytes`) and then the predictor of `/DecodeParms`
-  (`Filter.Predictor.Params.ofDict`, a dictionary or a one-element array) is undone. Without a
-  filter, `/DecodeParms` is ignored.
+* XS5. The data is decoded by the filter pipeline `Filter.decodeStream` (task 3.9, via
+  `Filter.decodeBytes`): any chain of the byte filters of ISO 32000-2 §7.4 with their
+  `/DecodeParms` (predictors included), at most `limits.maxFilters` filters
+  (`limitExceeded .filters`), every stage bounded by `limits.maxDecodedStreamBytes`. Without a
+  filter, `/DecodeParms` is ignored. Two further rules for xref streams:
+  - an image codec (`/DCTDecode`, …) is `malformed`: the data is a binary table;
+  - a `/Crypt` filter, even `/Identity`, is `malformed`: ISO 32000-2 §7.6.2 states that
+    cross-reference streams shall not be encrypted, so a crypt filter on one has no meaning.
+  An indirect `/Filter` or `/DecodeParms` is `unsupported` (as in `Filter`; §7.5.8.2 requires
+  every entry of an xref stream dictionary to be direct, and nothing is resolved here).
 * XS6. The decoded length must equal `(Σ counts) × (w1 + w2 + w3)` exactly.
 * XS7. Each row is three big-endian unsigned fields. A zero-width field reads as 0, except
   that a zero-width type field means type 1 (§7.5.8.3). Type 0 → `free f2 f3`; type 1 →
@@ -67,12 +71,6 @@ def nameXRef : Name := Name.ofString "XRef"
 def nameW : Name := Name.ofString "W"
 /-- Key `/Index`. -/
 def nameIndex : Name := Name.ofString "Index"
-/-- Key `/Filter`. -/
-def nameFilter : Name := Name.ofString "Filter"
-/-- Name `FlateDecode`. -/
-def nameFlate : Name := Name.ofString "FlateDecode"
-/-- Key `/DecodeParms`. -/
-def nameDecodeParms : Name := Name.ofString "DecodeParms"
 
 /-- The widest supported `/W` field, in bytes. -/
 def maxFieldWidth : Nat := 8
@@ -117,35 +115,27 @@ def index (d : Dict) (size at_ : Nat) : Except Error (List (Nat × Nat)) :=
     | none => .error (.malformed at_ "xref stream /Index is not pairs of non-negative integers")
   | some _ => .error (.malformed at_ "xref stream /Index is not an array")
 
-/-- `/Filter` (XS5): whether the data is Flate-compressed. -/
-def isFlate (d : Dict) (at_ : Nat) : Except Error Bool :=
-  match d.get? nameFilter with
-  | none => .ok false
-  | some (.array []) => .ok false
-  | some (.name n) =>
-    if n = nameFlate then .ok true else .error (.unsupported "xref stream filter other than /FlateDecode")
-  | some (.array [.name n]) =>
-    if n = nameFlate then .ok true else .error (.unsupported "xref stream filter other than /FlateDecode")
-  | some (.array _) => .error (.unsupported "xref stream with a filter chain")
-  | some _ => .error (.malformed at_ "xref stream /Filter is not a name")
-
-/-- `/DecodeParms` (XS5): the predictor parameters (defaults when absent). -/
-def params (d : Dict) (at_ : Nat) : Except Error Filter.Predictor.Params :=
-  match d.get? nameDecodeParms with
-  | none => Filter.Predictor.Params.ofDict []
-  | some (.dict p) => Filter.Predictor.Params.ofDict p
-  | some (.array [.dict p]) => Filter.Predictor.Params.ofDict p
-  | some (.array [.null]) => Filter.Predictor.Params.ofDict []
-  | some _ => .error (.malformed at_ "xref stream /DecodeParms is not a dictionary")
-
-/-- The decoded data of the stream (XS5). -/
+/-- The decoded data of the stream (XS5): the filter pipeline, with no `/Crypt` stage and no
+image codec. -/
 def decodeData (limits : Limits) (d : Dict) (raw : ByteArray) (at_ : Nat) :
-    Except Error ByteArray := do
-  if ← isFlate d at_ then
-    let p ← params d at_
-    let inflated ← Filter.Flate.flateDecode limits raw
-    Filter.Predictor.decode p inflated
-  else .ok raw
+    Except Error ByteArray :=
+  match Filter.parseChain limits d with
+  | .error e => .error e
+  | .ok stages =>
+    if stages.any Filter.Stage.isCrypt then
+      .error (.malformed at_ "xref stream with a /Crypt filter (xref streams are not encrypted)")
+    else Filter.decodeBytes limits d raw (.malformed at_ "xref stream with an image filter")
+
+/-- The decoded data of an xref stream is within `limits.maxDecodedStreamBytes`. -/
+theorem decodeData_size_le {limits : Limits} {d : Dict} {raw : ByteArray} {at_ : Nat}
+    {out : ByteArray} (h : decodeData limits d raw at_ = .ok out) :
+    out.size ≤ limits.maxDecodedStreamBytes := by
+  unfold decodeData at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · exact Filter.decodeBytes_size_le h
 
 /-! ## Rows -/
 
@@ -299,9 +289,21 @@ private def xs (pre : String) (extra : String) (rowBytes : List UInt8) : ByteArr
 #guard ps ("1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 0] /Length 2 0 R >>\nstream\n".toUTF8 ++
     ByteArray.mk #[1, 0] ++ "\nendstream\nendobj\n".toUTF8) 0 ==
   .inl "unsupported:indirect /Length"
--- unsupported filter
-#guard ps (xs "" "/Size 1 /W [1 1 0] /Filter /LZWDecode" [1, 0]) 0 ==
-  .inl "unsupported:xref stream filter other than /FlateDecode"
+-- filters go through the pipeline (task 3.9): ASCIIHex rows `00 05`, also chained twice
+#guard ps (xs "" "/Size 2 /W [0 1 0] /Filter /ASCIIHexDecode" [48, 48, 48, 53, 62]) 0 ==
+  .inr ([(0, .inUse 0 0), (1, .inUse 5 0)], none)
+#guard ps (xs "" "/Size 2 /W [0 1 0] /Filter [/AHx /AHx]"
+    (Filter.Ascii.asciiHexEncode (Filter.Ascii.asciiHexEncode
+      (ByteArray.mk #[0, 5]))).data.toList) 0 ==
+  .inr ([(0, .inUse 0 0), (1, .inUse 5 0)], none)
+-- an image codec, a /Crypt filter (even /Identity), an unknown filter, too many filters
+#guard ps (xs "" "/Size 1 /W [1 1 0] /Filter /DCTDecode" [1, 0]) 0 ==
+  .inl "malformed@0: xref stream with an image filter"
+#guard ps (xs "" "/Size 1 /W [1 1 0] /Filter /Crypt" [1, 0]) 0 ==
+  .inl "malformed@0: xref stream with a /Crypt filter (xref streams are not encrypted)"
+#guard ps (xs "" "/Size 1 /W [1 1 0] /Filter /Foo" [1, 0]) 0 == .inl "unsupported:filter /Foo"
+#guard ps (xs "" "/Size 1 /W [1 1 0] /Filter [/AHx /AHx /AHx /AHx /AHx /AHx /AHx /AHx /AHx]"
+    [1, 0]) 0 == .inl "limit:SafePdf.LimitKind.filters"
 
 /-- A Flate + PNG-Up (`/Predictor 12 /Columns 5`) xref stream generated with Python's `zlib`
 (scratch script, task 2.4a): rows `[0 0 0 0 255]`, `[1 0 0 15 0]`, `[1 0 0 64 0]`,
