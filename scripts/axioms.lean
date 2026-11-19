@@ -364,3 +364,5 @@ import SafePdf
 #print axioms SafePdf.Spec.FlateWork.flateDecodeW_fst
 #print axioms SafePdf.Spec.FlateWork.flateDecodeW_steps_le
 #print axioms SafePdf.Spec.FlateWork.flateDecodeW_steps_le_of_ok
+-- Phase 3, task 3.12: LZW step errors are limit errors
+#print axioms SafePdf.Core.Filter.LZW.step_error
