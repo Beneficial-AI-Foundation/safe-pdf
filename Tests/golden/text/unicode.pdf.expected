@@ -1,0 +1,121 @@
+--- text
+file:       input
+open:       strict
+pages:      3
+--- page 1: 12 chars, 10 glyphs, 1 U+FFFD, 0 warnings
+Héfi中
+0123 �
+--- glyphs page 1 (item seq x y width size text)
+0 0 72 700 10.108 14 "H"
+0 1 82.108 700 7.784 14 "é"
+0 2 89.892 700 7.784 14 "fi"
+0 3 97.676 700 14 14 "中"
+1 0 72 680 7.784 14 "0"
+1 1 79.784 680 7.784 14 "1"
+1 2 87.568 680 7.784 14 "2"
+1 3 95.352 680 7.784 14 "3"
+1 4 103.136 680 3.892 14 " "
+2 0 107.028 680 5.6 14 "�"
+--- page 2: 36 chars, 34 glyphs, 0 U+FFFD, 0 warnings
+Rotated ninety same line
+Upside down
+--- glyphs page 2 (item seq x y width size text)
+0 0 300 100 8.664 12 "R"
+0 1 300 108.664 6.672 12 "o"
+0 2 300 115.336 3.336 12 "t"
+0 3 300 118.672 6.672 12 "a"
+0 4 300 125.344 3.336 12 "t"
+0 5 300 128.68 6.672 12 "e"
+0 6 300 135.352 6.672 12 "d"
+0 7 300 142.024 3.336 12 " "
+0 8 300 145.36 6.672 12 "n"
+0 9 300 152.032 2.664 12 "i"
+0 10 300 154.696 6.672 12 "n"
+0 11 300 161.368 6.672 12 "e"
+0 12 300 168.04 3.336 12 "t"
+0 13 300 171.376 6 12 "y"
+1 0 300 300 6 12 "s"
+1 1 300 306 6.672 12 "a"
+1 2 300 312.672 9.996 12 "m"
+1 3 300 322.668 6.672 12 "e"
+1 4 300 329.34 3.336 12 " "
+1 5 300 332.676 2.664 12 "l"
+1 6 300 335.34 2.664 12 "i"
+1 7 300 338.004 6.672 12 "n"
+1 8 300 344.676 6.672 12 "e"
+2 0 400 700 8.664 12 "U"
+2 1 391.336 700 6.672 12 "p"
+2 2 384.664 700 6 12 "s"
+2 3 378.664 700 2.664 12 "i"
+2 4 376 700 6.672 12 "d"
+2 5 369.328 700 6.672 12 "e"
+2 6 362.656 700 3.336 12 " "
+2 7 359.32 700 6.672 12 "d"
+2 8 352.648 700 6.672 12 "o"
+2 9 345.976 700 8.664 12 "w"
+2 10 337.312 700 6.672 12 "n"
+--- page 3: 0 chars, 0 glyphs, 0 U+FFFD, 0 warnings, error: malformed input at byte 0: zlib: unknown compression method
+--- glyphs page 3 (item seq x y width size text)
+total:      3 page(s), 48 chars, 44 glyphs, 1 U+FFFD, 0 warnings, 1 page error(s)
+--- json
+{"page": 1, "chars": 12, "glyphs": 10, "replacement": 1, "warnings": 0, "error": null, "text": "Héfi中\n0123 �"}
+{"page": 2, "chars": 36, "glyphs": 34, "replacement": 0, "warnings": 0, "error": null, "text": "Rotated ninety same line\nUpside down"}
+{"page": 3, "chars": 0, "glyphs": 0, "replacement": 0, "warnings": 0, "error": "malformed input at byte 0: zlib: unknown compression method", "text": ""}
+{"summary": {"path": "input", "open": "strict", "pages": 3, "extracted": 3, "chars": 48, "glyphs": 44, "replacement": 1, "warnings": 0, "errors": 1}}
+--- json page 1 glyphs
+{"page": 1, "chars": 12, "glyphs": 10, "replacement": 1, "warnings": 0, "error": null, "text": "Héfi中\n0123 �", "glyphList": [[0, 0, 72, 700, 10.108, 14, "H"], [0, 1, 82.108, 700, 7.784, 14, "é"], [0, 2, 89.892, 700, 7.784, 14, "fi"], [0, 3, 97.676, 700, 14, 14, "中"], [1, 0, 72, 680, 7.784, 14, "0"], [1, 1, 79.784, 680, 7.784, 14, "1"], [1, 2, 87.568, 680, 7.784, 14, "2"], [1, 3, 95.352, 680, 7.784, 14, "3"], [1, 4, 103.136, 680, 3.892, 14, " "], [2, 0, 107.028, 680, 5.6, 14, "�"]]}
+{"summary": {"path": "input", "open": "strict", "pages": 3, "extracted": 1, "chars": 12, "glyphs": 10, "replacement": 1, "warnings": 0, "errors": 0}}
+--- page out of range
+(none)
+--- svg overlay page 1
+<g data-overlay="text">
+<rect x="72" y="697.2" width="10.108" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="0" data-text="H"/>
+<rect x="82.108" y="697.2" width="7.784" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="1" data-text="é"/>
+<rect x="89.892" y="697.2" width="7.784" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="2" data-text="fi"/>
+<rect x="97.676" y="697.2" width="14" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="3" data-text="中"/>
+<rect x="72" y="677.2" width="7.784" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="0" data-text="0"/>
+<rect x="79.784" y="677.2" width="7.784" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="1" data-text="1"/>
+<rect x="87.568" y="677.2" width="7.784" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="2" data-text="2"/>
+<rect x="95.352" y="677.2" width="7.784" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="3" data-text="3"/>
+<rect x="103.136" y="677.2" width="3.892" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="4" data-text=" "/>
+<rect x="107.028" y="677.2" width="5.6" height="14" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="0" data-text="�"/>
+</g>
+--- svg overlay page 2
+<g data-overlay="text">
+<rect x="290.4" y="100" width="12" height="8.664" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="0" data-text="R"/>
+<rect x="290.4" y="108.664" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="1" data-text="o"/>
+<rect x="290.4" y="115.336" width="12" height="3.336" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="2" data-text="t"/>
+<rect x="290.4" y="118.672" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="3" data-text="a"/>
+<rect x="290.4" y="125.344" width="12" height="3.336" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="4" data-text="t"/>
+<rect x="290.4" y="128.68" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="5" data-text="e"/>
+<rect x="290.4" y="135.352" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="6" data-text="d"/>
+<rect x="290.4" y="142.024" width="12" height="3.336" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="7" data-text=" "/>
+<rect x="290.4" y="145.36" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="8" data-text="n"/>
+<rect x="290.4" y="152.032" width="12" height="2.664" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="9" data-text="i"/>
+<rect x="290.4" y="154.696" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="10" data-text="n"/>
+<rect x="290.4" y="161.368" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="11" data-text="e"/>
+<rect x="290.4" y="168.04" width="12" height="3.336" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="12" data-text="t"/>
+<rect x="290.4" y="171.376" width="12" height="6" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="13" data-text="y"/>
+<rect x="290.4" y="300" width="12" height="6" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="0" data-text="s"/>
+<rect x="290.4" y="306" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="1" data-text="a"/>
+<rect x="290.4" y="312.672" width="12" height="9.996" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="2" data-text="m"/>
+<rect x="290.4" y="322.668" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="3" data-text="e"/>
+<rect x="290.4" y="329.34" width="12" height="3.336" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="4" data-text=" "/>
+<rect x="290.4" y="332.676" width="12" height="2.664" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="5" data-text="l"/>
+<rect x="290.4" y="335.34" width="12" height="2.664" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="6" data-text="i"/>
+<rect x="290.4" y="338.004" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="7" data-text="n"/>
+<rect x="290.4" y="344.676" width="12" height="6.672" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="8" data-text="e"/>
+<rect x="391.336" y="690.4" width="8.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="0" data-text="U"/>
+<rect x="384.664" y="690.4" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="1" data-text="p"/>
+<rect x="378.664" y="690.4" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="2" data-text="s"/>
+<rect x="376" y="690.4" width="2.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="3" data-text="i"/>
+<rect x="369.328" y="690.4" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="4" data-text="d"/>
+<rect x="362.656" y="690.4" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="5" data-text="e"/>
+<rect x="359.32" y="690.4" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="6" data-text=" "/>
+<rect x="352.648" y="690.4" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="7" data-text="d"/>
+<rect x="345.976" y="690.4" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="8" data-text="o"/>
+<rect x="337.312" y="690.4" width="8.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="9" data-text="w"/>
+<rect x="330.64" y="690.4" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="10" data-text="n"/>
+</g>
+--- svg overlay page 3
+<!-- text overlay: malformed input at byte 0: zlib: unknown compression method -->

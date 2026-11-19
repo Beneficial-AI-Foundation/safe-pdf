@@ -1,0 +1,93 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 8 0 R 10 0 R] /Count 3 /MediaBox [0 0 612 792] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /T0 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 93 >>
+stream
+BT /T0 14 Tf 72 700 Td <0001000200030004> Tj
+0 -20 Td <00100011001200130006> Tj <0005> Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /TestCID /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestCID /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 /W [1 [722 556 556 1000 400 278] 16 25 556] >>
+endobj
+7 0 obj
+<< /Length 441 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+5 beginbfchar
+<0001> <0048>
+<0002> <00E9>
+<0003> <FB01>
+<0004> <4E2D>
+<0006> <0020>
+endbfchar
+1 beginbfrange
+<0010> <0019> <0030>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 9 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> >> >> >>
+endobj
+9 0 obj
+<< /Length 161 >>
+stream
+BT /F1 12 Tf 0 1 -1 0 300 100 Tm (Rotated ninety) Tj ET
+BT /F1 12 Tf 0 1 -1 0 300 300 Tm (same line) Tj ET
+BT /F1 12 Tf -1 0 0 -1 400 700 Tm (Upside down) Tj ET
+
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 21 /Filter /FlateDecode >>
+stream
+this is not zlib data
+endstream
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000152 00000 n 
+0000000254 00000 n 
+0000000397 00000 n 
+0000000529 00000 n 
+0000000731 00000 n 
+0000001223 00000 n 
+0000001401 00000 n 
+0000001613 00000 n 
+0000001678 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R >>
+startxref
+1771
+%%EOF

@@ -11,7 +11,8 @@ A missing reference tool or an unimplemented inspector view is a skip, never
 a failure.  Exit status 1 only if a comparator that actually ran produced a
 disagreement or an error, or if --min-compared N is given and, for each of the
 selected `objects` / `pages` comparators, fewer than N files had at least one
-object (page) compared.
+object (page) compared, or if --min-similarity X is given and the `text`
+comparator's corpus-wide similarity is below X.
 """
 import argparse
 import fnmatch
@@ -151,14 +152,51 @@ def _pages_check(path: str):
         raise Skip(str(e))
 
 
+TEXT_FOLD = True   # set from --no-fold in main()
+_TEXT_MODULE = None
+
+
+def _load_text_module():
+    # Loaded once: the module collects every compared page in `PAGES`.
+    global _TEXT_MODULE
+    if _TEXT_MODULE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "text_cmp", os.path.join(os.path.dirname(os.path.abspath(__file__)), "text.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _TEXT_MODULE = mod
+    return _TEXT_MODULE
+
+
+def _text_check(path: str):
+    mod = _load_text_module()
+    try:
+        return mod.check_file(INSPECT, path, TEXT_FOLD)
+    except mod.Skip as e:
+        raise Skip(str(e))
+
+
+def text_summary(stats: dict, min_similarity: Optional[float]):
+    """Corpus-wide text report: (lines, similarity or None, failed)."""
+    if not stats.get("pages", 0):
+        return ["text     no page compared"], None, False
+    maxlen = stats.get("maxlen", 0)
+    sim = 1.0 if maxlen == 0 else 1 - stats.get("dist", 0) / maxlen
+    lines = ["text     corpus similarity (character-weighted, 1 - sum lev / sum max len): %.4f "
+             "over %d page(s), %d exact" % (sim, stats["pages"], stats.get("pages_exact", 0))]
+    mod = _TEXT_MODULE
+    if mod is not None and mod.PAGES:
+        lines.append("text     worst pages:")
+        lines += mod.worst_lines(mod.PAGES, 10)
+    fail = min_similarity is not None and sim < min_similarity
+    if fail:
+        lines.append("FAIL --min-similarity %.4f: corpus similarity %.4f" % (min_similarity, sim))
+    return lines, sim, fail
+
+
 # Comparators whose stats carry a "compared" count checked by --min-compared.
 MIN_COMPARED = ("objects", "pages")
-
-
-def _placeholder(tool_argv):
-    def ref(path):
-        return run_tool([a.replace("{file}", path) for a in tool_argv])
-    return ref
 
 
 COMPARATORS = {
@@ -170,8 +208,8 @@ COMPARATORS = {
         Comparator("streams", [], "streams", lambda p: "", custom=_streams_check),
         # Page count, refs, MediaBox, CropBox, Rotate vs qpdf (pages.py).
         Comparator("pages", ["qpdf"], "pages", lambda p: "", custom=_pages_check),
-        Comparator("text", ["pdftotext"], "text",
-                   _placeholder(["pdftotext", "-layout", "{file}", "-"])),
+        # Page text vs poppler's pdftotext, normalized edit distance (text.py).
+        Comparator("text", ["pdftotext"], "text", lambda p: "", custom=_text_check),
     ]
 }
 # Comparator-specific normalization of OUR dump (applied before compare).
@@ -223,9 +261,15 @@ def main(argv=None) -> int:
     ap.add_argument("--min-compared", type=int, default=0, metavar="N",
                     help="fail unless at least N files had >= 1 object (page) compared by "
                          "each selected objects / pages comparator (default 0 = no minimum)")
+    ap.add_argument("--min-similarity", type=float, default=None, metavar="X",
+                    help="text comparator: fail when the corpus-wide character-weighted "
+                         "similarity is below X (default: report only)")
+    ap.add_argument("--no-fold", action="store_true",
+                    help="text comparator: do not fold dashes and quotes")
     args = ap.parse_args(argv)
 
-    global STREAMS_PER_FILE
+    global STREAMS_PER_FILE, TEXT_FOLD
+    TEXT_FOLD = not args.no_fold
     STREAMS_PER_FILE = args.per_file if args.per_file is not None else (0 if args.files else 20)
     names = args.comparator or list(COMPARATORS)
     for n in names:
@@ -286,6 +330,20 @@ def main(argv=None) -> int:
         if r["status"] in ("disagree", "error"):
             print("%s %s %s: %s" % (r["status"].upper(), r["comparator"], r["file"], r["detail"]))
 
+    text_report = None
+    if "text" in names:
+        lines, sim, fail = text_summary(stats["text"], args.min_similarity)
+        for ln in lines:
+            print(ln)
+        bad = bad or fail
+        mod = _TEXT_MODULE
+        text_report = {
+            "similarity": sim, "min_similarity": args.min_similarity,
+            "worst_pages": [] if mod is None else [
+                {"similarity": t[0], "file": t[1], "page": t[2], "lev": t[3], "maxlen": t[4],
+                 "excerpt": t[5]}
+                for t in sorted(mod.PAGES, key=lambda t: (t[0], -t[4]))[:50] if t[3] > 0]}
+
     if args.min_compared > 0:
         checked = [n for n in names if n in MIN_COMPARED]
         if not checked:
@@ -301,8 +359,11 @@ def main(argv=None) -> int:
 
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump({"counts": counts, "stats": stats, "files_compared": files_compared,
-                       "min_compared": args.min_compared, "results": results}, fh, indent=1)
+            out = {"counts": counts, "stats": stats, "files_compared": files_compared,
+                   "min_compared": args.min_compared, "results": results}
+            if text_report is not None:
+                out["text"] = text_report
+            json.dump(out, fh, indent=1)
     return 1 if bad else 0
 
 

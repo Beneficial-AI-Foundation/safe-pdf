@@ -84,11 +84,17 @@ jobs:
       # actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install qpdf (>= 11 required for JSON v2)
+      - name: Install qpdf (>= 11 required for JSON v2) and poppler-utils (pdftotext)
         run: |
           sudo apt-get update
-          sudo apt-get install -y qpdf
+          sudo apt-get install -y qpdf poppler-utils
           qpdf --version
+          # pdftotext prints its version on stderr.
+          pdftotext -v 2>&1 | head -n1
+          if ! pdftotext -v 2>&1 | grep -qi 'pdftotext version'; then
+            echo "::error::pdftotext (poppler-utils) not usable"
+            exit 1
+          fi
           major="$(qpdf --version | sed -n '1s/^qpdf version \([0-9][0-9]*\)\..*/\1/p')"
           if [ -z "$major" ] || [ "$major" -lt 11 ]; then
             echo "::error::qpdf >= 11 required (JSON v2); got: $(qpdf --version | head -n1)"
@@ -180,6 +186,17 @@ jobs:
             --json differential-pages.json --min-compared 20 \
             2>&1 | tee differential-pages.log
 
+      # Task 6.6 / M6: page text vs pdftotext, normalized edit distance.
+      # Reports the corpus similarity; no threshold yet (the M6 98% is
+      # evaluated from this log / JSON).
+      - name: Text comparison on the corpus
+        if: always()
+        run: |
+          set -o pipefail
+          python3 -I Tests/differential/run.py --comparator text \
+            --json differential-text.json \
+            2>&1 | tee differential-text.log
+
       # actions/upload-artifact v4.6.2
       - name: Upload comparison results
         if: always()
@@ -193,5 +210,7 @@ jobs:
             differential-objects-minimal.log
             differential-pages.json
             differential-pages.log
+            differential-text.json
+            differential-text.log
           if-no-files-found: warn
           retention-days: 30

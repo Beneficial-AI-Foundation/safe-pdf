@@ -1,0 +1,4 @@
+Something else entirely on page one.
+No match here.
+A second page pdftotext sees.
+
