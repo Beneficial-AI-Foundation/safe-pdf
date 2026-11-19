@@ -17,7 +17,6 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
-* 3.6b (wt) — wave 18; 3.12, 3.10, 3.11 integrated
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -103,7 +102,7 @@ Plan.md §6 Phase 3. Exit: **M3**: decompression-bomb suite (nested streams, 10�
 | 3.5 | Filter pipeline + DCT/JPX/JBIG2 placeholder (S7) | 3.1, 3.2, 3.3, 3.4 | `SafePdf/Core/Filter.lean` | new | done (2026-11-19) |
 | 3.6 | Decompression-bomb suite + differential vs zlib | 3.5 | `Tests/adversarial/bombs/`, `Tests/Bombs.lean` | wt | split (into 3.6a, 3.6b) |
 | 3.6a | M3 decompression-bomb suite: generated bombs (Flate 10⁶:1 via `Deflate`/stdlib zlib, nested Flate→Flate, LZW KwKwK chains, RunLength 128:1, ASCII85 `z` runs, 8-deep filter chains, predictor amplification, an object stream that is a bomb, an xref stream that is a bomb) as PDFs + raw streams under `Tests/adversarial/bombs/` from a deterministic stdlib-only generator with `--check`; suite `Tests/Bombs.lean` asserting each is rejected with `limitExceeded` within a time bound through `Filter.decodeStream`, `openFile`/`getObject` where applicable | 3.5, 3.8 | `Tests/adversarial/bombs/`, `Tests/Bombs.lean`, `Tests/Main.lean` | wt | done (2026-11-19) |
-| 3.6b | Differential vs zlib on the corpus: decode every Flate stream with our decoder (via 3.7's view) and with Python `zlib`, compare bytes; report mismatches and timing | 3.7 | `Tests/differential/streams.py`, `Tests/differential/run.py` | wt | doing (2026-11-19) |
+| 3.6b | Differential vs zlib on the corpus: decode every Flate stream with our decoder (via 3.7's view) and with Python `zlib`, compare bytes; report mismatches and timing | 3.7 | `Tests/differential/streams.py`, `Tests/differential/run.py` | wt | done (2026-11-19) |
 | 3.7 | Inspector view: decoded-stream viewer | 3.5 | `SafePdf/Shell/Views/Streams.lean` | wt | done (2026-11-19) |
 | 3.8 | Flate correctness via round trip (Plan §6 Phase 3): a small Lean deflate encoder (stored + fixed-Huffman blocks, optional LZ77 with bounded window) in `SafePdf/Core/Filter/Deflate.lean`; theorem or exhaustive property test that `inflate (deflate bs) = bs` (stored blocks proved; fixed-Huffman at least property-tested on random data via a `Tests/` suite); and close the Flate work-bound gap (steps ≤ c·(input bits + output)) if feasible | 3.1 | `SafePdf/Core/Filter/Deflate.lean`, `Tests/FlateRoundTrip.lean` | new | done (2026-11-19) |
 | 3.8b | Flate work bound (S3): a counted twin of `decodeGo`/`codes`/`stored`/`readLengths`/`readDynamic`/`blocks` in `Flate.lean` whose first component is the real decoder, and a proof that steps ≤ c·(input bits + output) (3.8 obstacle: needs unfolding Flate's definitions in place) | 3.1 | `SafePdf/Core/Filter/Flate.lean` | wt | done (2026-11-19) |
@@ -290,6 +289,7 @@ Exit criterion checked: [ ]
 * Inflate speed (3.11): 9-bit lookup table in `Huffman` (`table`, proof field `table_ok`, entries defined by the bit-by-bit loop `decodeGoB`/`tableEntry`), `decodeSym_eq : decodeSym … = decodeGo …` (slow decoder stays the spec); GMP-free `readBits` (`twoPow` table, `* 2` instead of `<<<`); Adler-32 as tail loop `adlerGo` (`adler32_eq_foldl`). Compiled MiB/s before → after: text 4.5 → 78, zeros 82 → 330, stored 111 → 418. `lake exe tests` 42 s → 16 s. Bench: `scripts/bench-flate.sh [--reps N] file.z…` (links with `leanc -O3` into `.lake/bench/`, no lakefile change).
 * Compiled `Nat <<<` and `Nat ^` go through GMP even for small values (malloc/free per op) — use `*` by constants, a power table, or `>>>`; profile with macOS `sample`.
 * `omega` can hit `maxRecDepth` with constants ~10⁴ across several hypotheses — `set_option maxRecDepth 200000 in`; `lake env lean` refuses files outside the package root unless `--root=<dir>`.
+* zlib differential (3.6b): `python3 -I Tests/differential/run.py --comparator streams [--files 'corpus/files/X*.pdf'] [--per-file N]` (`--files` is a glob relative to cwd); plain `[FlateDecode]` streams without `/DecodeParms` only; raw bytes located by scanning `N G obj … stream` and taking the view's raw length; size check for every stream + byte compare for a sample (`--per-file`, default 20 — a full corpus run takes ~35 min, one inspector process per sampled stream). Corpus (pre-3.11 decoder): 12,748 plain-Flate streams, 1,476 byte-compared (111 MB), 0 disagreements, 0 size mismatches; 43 streams with trailing bytes after the zlib end decode identically. Offline mode: `streams.py --ours F --raw F`.
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -343,3 +343,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — wave 18 part 1 (phase 3, PR #4): 3.12 done (LZW bombs 150–300 s → ≈ 2.5 s; shared-buffer copy fixed); bombs default bound 60 s → 10 s; commit "wave 18 (part 1): 3.12 — LZW output buffer kept unshared"
 * 2026-11-19 — wave 18 part 2 (phase 3, PR #4): 3.10 done (document-wide decoded-bytes budget for on-demand decoding, `decodeAllB_total`); added 3.13 (charge xref/object-stream decodes); commit "wave 18 (part 2): 3.10 — document decode budget"
 * 2026-11-19 — wave 18 part 3 (phase 3, PR #4): 3.11 done (table-driven inflate proved equal to the bit-by-bit spec; text 4.5 → 78 MiB/s; work-bound constants raised, see Decisions); commit "wave 18 (part 3): 3.11 — table-driven inflate"
+* 2026-11-19 — wave 18 part 4 (phase 3, PR #4): 3.6b done (zlib differential: 0 mismatches on 12,748 corpus Flate streams; spot-checked again after 3.11); phase 3 left: 3.13; commit "wave 18 (part 4): 3.6b — zlib differential"
