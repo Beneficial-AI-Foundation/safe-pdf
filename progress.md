@@ -23,7 +23,7 @@ Design document: Plan.md
 |---|---|---|---|---|
 | 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
 | 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | awaiting-ci |
-| 2 | `phase-2-xref` | `phase-1-lexer-objects` | — | none |
+| 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | draft |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
 | 4 | `phase-4-document` | `phase-3-filters` | — | none |
 | 5 | `phase-5-content` | `phase-4-document` | — | none |
