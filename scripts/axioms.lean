@@ -430,6 +430,21 @@ import SafePdf
 #print axioms SafePdf.Spec.PageTree.ofOpen_page_inherit
 #print axioms SafePdf.Spec.PageTree.openDoc_page_inherit
 
+-- Phase 4, task 4.1c: unique root-to-page paths; cycle error kind (SafePdf/Spec/Doc.lean)
+#print axioms SafePdf.Spec.PageTree.loop_forest
+#print axioms SafePdf.Spec.PageTree.walk_descends_unique
+#print axioms SafePdf.Spec.PageTree.ofOpen_descends_unique
+#print axioms SafePdf.Spec.PageTree.ofOpen_page_path_unique
+#print axioms SafePdf.Spec.PageTree.openDoc_page_path_unique
+#print axioms SafePdf.Spec.PageTree.loop_ok_or_cycle
+#print axioms SafePdf.Spec.PageTree.walk_ok_or_cycle
+#print axioms SafePdf.Spec.PageTree.walk_cycle_error
+#print axioms SafePdf.Spec.PageTree.walk_shared_error
+#print axioms SafePdf.Spec.PageTree.ofOpen_cycle_error_kind
+#print axioms SafePdf.Spec.PageTree.openDoc_cycle_error_kind
+#print axioms SafePdf.Spec.PageTree.ofOpen_shared_error
+#print axioms SafePdf.Spec.PageTree.openDoc_shared_error
+
 -- Phase 3, task 3.13: structural decodes charged against the document budget
 -- (SafePdf/Core/Filter/Structural.lean, Core/Xref/Chain.lean, Core/Xref/ObjStm.lean, Core/Open.lean)
 #print axioms SafePdf.Core.Filter.capped_of_le
