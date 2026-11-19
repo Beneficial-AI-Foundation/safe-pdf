@@ -577,3 +577,12 @@ import SafePdf
 #print axioms SafePdf.Core.Crypt.markApplied_depth
 #print axioms SafePdf.Core.Open.openFile_final
 #print axioms SafePdf.Core.Open.openFile_repair_encryption
+-- Phase 5, task 5.3: interpreter transition spec (SafePdf/Spec/Content.lean)
+#print axioms SafePdf.Spec.Content.step_iff_exec
+#print axioms SafePdf.Spec.Content.exec_step
+#print axioms SafePdf.Spec.Content.step_det
+#print axioms SafePdf.Spec.Content.step_total
+#print axioms SafePdf.Spec.Content.steps_det
+#print axioms SafePdf.Spec.Content.steps_iff_runOps
+#print axioms SafePdf.Spec.Content.interp_steps
+#print axioms SafePdf.Spec.Content.interp_items_of_steps
