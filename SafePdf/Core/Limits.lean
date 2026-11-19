@@ -43,6 +43,26 @@ structure Limits where
   `maxFilters · maxDecodedStreamBytes` bytes (`Core.Filter.produced_le_maxFilters`). Excess
   yields `Error.limitExceeded .filters`. -/
   maxFilters : Nat := 8
+  /-- Maximum number of `/CharStrings` entries in one embedded font program (Plan.md §6
+  Phase 6; task 6.3, `Core.Font.Type1.parse`). Real Type 1 fonts have a few hundred glyphs
+  (CJK-free); the cap bounds the per-font charstring work at `maxFontGlyphs · glyphFuel`
+  steps. Excess yields `Error.limitExceeded .fontGlyphs`. -/
+  maxFontGlyphs : Nat := 4096
+  /-- Upper bound (exclusive) on subroutine indices in one embedded font program's `/Subrs`
+  (task 6.3). The subroutine table is allocated with `max index + 1` entries, so the cap bounds
+  that allocation. Excess yields `Error.limitExceeded .fontSubrs`. -/
+  maxFontSubrs : Nat := 32768
+  /-- Maximum number of operators and operands one glyph's charstring program may execute,
+  subroutine calls included (task 6.3, `Core.Font.Type1.evalGlyph`). A glyph that runs out is
+  **rejected** (listed in `Font1.rejected`, its advance unknown), not fatal to the font, so no
+  `LimitKind` corresponds to it (like `maxRepairFailures`). -/
+  glyphFuel : Nat := 20000
+  /-- Maximum number of form XObject expansions per page (Plan.md §5.2; task 5.2b,
+  `Core.Content.Run`). Bounds "billion laughs" form trees that are acyclic and within
+  `maxXObjectDepth` but fan out exponentially. Further form `Do`s are skipped with a warning
+  (the page still renders what it has, as for `maxOpsPerPage` truncation), so no `LimitKind`
+  corresponds to it. -/
+  maxFormsPerPage : Nat := 100000
   deriving Repr, Inhabited
 
 namespace Limits
