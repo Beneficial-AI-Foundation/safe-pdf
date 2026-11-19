@@ -563,3 +563,9 @@ import SafePdf
 #print axioms SafePdf.Core.Open.repairOpen_ok
 #print axioms SafePdf.Core.Open.repairOpenB_ok
 #print axioms SafePdf.Core.Open.openFile_setup_final
+-- Phase 5, task 5.2a: content tokenizer and interpreter core
+#print axioms SafePdf.Core.Content.interp_items_le
+#print axioms SafePdf.Core.Content.interpBytes_items_le
+#print axioms SafePdf.Core.Content.runOps_stack_bounded
+#print axioms SafePdf.Core.Content.Ops.tokenize_ops_le
+#print axioms SafePdf.Core.Content.Ops.tokenize_ops_le_max
