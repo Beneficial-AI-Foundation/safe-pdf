@@ -40,3 +40,4 @@ import SafePdf.Spec.Unambiguous
 import SafePdf.Spec.PrefixStable
 import SafePdf.Core.Open
 import SafePdf.Core.Doc
+import SafePdf.Spec.Doc
