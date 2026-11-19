@@ -909,6 +909,7 @@ private def summ (r : Except Error (PdfObject × Nat)) : Sum String (PdfObject �
   | .error (.malformed o _) => .inl s!"malformed@{o}"
   | .error (.limitExceeded k) => .inl s!"limit:{reprStr k}"
   | .error (.unsupported w) => .inl s!"unsupported:{w}"
+  | .error (.cycle o _) => .inl s!"cycle@{o}"
 
 /-- Test helper: `parseObject` with default limits on a string, from position 0. -/
 private def po (s : String) : Sum String (PdfObject × Nat) :=
@@ -928,6 +929,7 @@ private def pind (s : String) : Sum String (Nat × Nat × String × Nat) :=
   | .error (.malformed o _) => .inl s!"malformed@{o}"
   | .error (.limitExceeded k) => .inl s!"limit:{reprStr k}"
   | .error (.unsupported w) => .inl s!"unsupported:{w}"
+  | .error (.cycle o _) => .inl s!"cycle@{o}"
 
 /-- Test helper: a name. -/
 private def nm (s : String) : Name := Name.ofString s

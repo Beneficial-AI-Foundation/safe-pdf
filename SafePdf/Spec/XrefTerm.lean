@@ -1,4 +1,5 @@
 import SafePdf.Core.Xref.Chain
+import SafePdf.Core.Open
 
 /-!
 # Termination and cycle rejection of `/Prev` chain resolution
@@ -24,7 +25,14 @@ Theorems about `Core.Xref.Chain` (task 2.2; generalized by 2.4a from classic tab
   (`loadChain_cycle_rejected`). This covers cycles of every length, including the 1-cycle
   (`/Prev` = own offset) and the 2-cycle of `Tests/adversarial/xref-prev-{self,cycle}.pdf`,
   whose concrete `"xref /Prev cycle"` errors are checked by `#guard` in `Core.Xref.Chain`
-  (as is an xref stream whose `/Prev` is its own offset).
+  (as is an xref stream whose `/Prev` is its own offset). The error kind is not pinned there
+  (a hybrid `/XRefStm` stream may fail to parse first, a long tail may hit the revision limit).
+* **Cycle errors** (task 2.13, M2). A revisited offset is `Error.cycle` (`step_revisited`).
+  If every section on the path from `startxref` is `Endless` (parses, has a `/Prev`, is not
+  hybrid), `loadChain` fails with `Error.cycle` or, only when `limits.maxRevisions` is below
+  the input size, `limitExceeded .revisions` (`loadChain_endless`); for inputs within the
+  budget it is `Error.cycle` (`loadChain_endless_cycle`), and then `Core.Open.openFile`
+  returns that error without trying repair (`openFile_endless`).
 * **S3 work bound.** `loadChainCounted` returns the number of section parses (tables, xref
   streams and `/XRefStm` streams) next to the result; it is at most `bytes.size` and at most `limits.maxRevisions`
   (`loadChainCounted_calls_le`), and equals the number of revisions on success.
@@ -410,6 +418,136 @@ where
         have := hab.det hab'
         subst this
         exact ih hbt hterm hstep hback
+
+/-! ## Cycle errors are `Error.cycle` (task 2.13) -/
+
+/-- **A revisited offset is a cycle error.** One step at an offset inside the input that was
+already visited fails with `Error.cycle off "xref /Prev cycle"` and parses nothing. -/
+theorem step_revisited {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
+    (hnd : visited.Nodup) (hoff : off < bytes.size) (hmem : off ∈ visited) :
+    step limits bytes off visited hnd = (.error (.cycle off "xref /Prev cycle"), 0) := by
+  unfold step
+  simp only [hoff, hmem, dite_true]
+
+/-- The offset `x` lies on an endless `/Prev` path in a non-hybrid way: it is inside the
+input, its section parses, has no `/XRefStm` stream (`hybridStm`) and has a `/Prev`. -/
+def Endless (limits : Limits) (bytes : ByteArray) (x : Nat) : Prop :=
+  x < bytes.size ∧ ∃ sec tr y, parseSection limits bytes x = .ok (sec, tr) ∧
+    hybridStm bytes x tr = none ∧ tr.prev? = some y
+
+/-- A failing step at an `Endless` offset fails with a cycle, or with the revision limit when
+the limit is below the input size (the visited offsets are distinct and inside the input, so
+a smaller input cannot exhaust the budget). -/
+theorem step_error_endless {limits : Limits} {bytes : ByteArray} {off : Nat}
+    {visited : List Nat} {hnd : visited.Nodup} (hlt : ∀ x ∈ visited, x < bytes.size)
+    {e : Error} {k : Nat}
+    (hend : Endless limits bytes off) (h : step limits bytes off visited hnd = (.error e, k)) :
+    e.isCycle = true ∨
+      (e = .limitExceeded .revisions ∧ limits.maxRevisions < bytes.size) := by
+  obtain ⟨hoff, sec, tr, y, hp, hh, -⟩ := hend
+  unfold step at h
+  simp only [hoff, dite_true] at h
+  split at h
+  · simp only [Prod.mk.injEq] at h
+    obtain ⟨h, -⟩ := h
+    cases h
+    exact Or.inl rfl
+  · rename_i hmem
+    split at h
+    · rename_i hmax
+      simp only [Prod.mk.injEq] at h
+      obtain ⟨h, -⟩ := h
+      cases h
+      have := length_lt_of_fresh hnd hlt hoff hmem
+      exact Or.inr ⟨rfl, by omega⟩
+    · rw [hp] at h
+      simp only [hh] at h
+      cases h
+
+/-- **Endless chains end in a cycle error.** If every offset reachable from `off` by `/Prev`
+steps is `Endless` (no section terminates the chain, none is hybrid), `walk` fails with a
+cycle error (`Error.cycle`) or, when the cycle is reached only after more than
+`limits.maxRevisions` revisions, with `limitExceeded .revisions`. -/
+theorem walk_endless (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
+    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size)
+    (hend : ∀ x, PrevReach limits bytes off x → Endless limits bytes x) :
+    ∃ e, (walk limits bytes off visited hnd hlt).1 = .error e ∧
+      (e.isCycle = true ∨
+        (e = .limitExceeded .revisions ∧ limits.maxRevisions < bytes.size)) := by
+  revert hend
+  fun_induction walk limits bytes off visited hnd hlt with
+  | case1 off visited hnd hlt e k hs =>
+    intro hend
+    exact ⟨e, rfl, step_error_endless hlt (hend off (.refl off)) hs⟩
+  | case2 off visited hnd hlt so k hs hp =>
+    intro hend
+    obtain ⟨-, -, sec, tr, hsec, hprev⟩ := step_ok hs
+    obtain ⟨-, sec', tr', y, hsec', -, hy⟩ := hend off (.refl off)
+    rw [hsec] at hsec'
+    simp only [Except.ok.injEq, Prod.mk.injEq] at hsec'
+    obtain ⟨-, rfl⟩ := hsec'
+    rw [hp, hy] at hprev
+    cases hprev
+  | case3 off visited hnd hlt so k hs p hp e k' hw ih =>
+    intro _
+    exact ⟨e, rfl, by
+      obtain ⟨e', he', hc⟩ := ih (fun x hx => by
+        obtain ⟨-, -, sec, tr, hsec, hprev⟩ := step_ok hs
+        exact ‹∀ x, PrevReach limits bytes off x → Endless limits bytes x› x
+          (.step ⟨sec, tr, hsec, by rw [← hprev, hp]⟩ hx))
+      rw [hw] at he'
+      cases he'
+      exact hc⟩
+  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+    intro hend
+    obtain ⟨e', he', -⟩ := ih (fun x hx => by
+      obtain ⟨-, -, sec, tr, hsec, hprev⟩ := step_ok hs
+      exact hend x (.step ⟨sec, tr, hsec, by rw [← hprev, hp]⟩ hx))
+    rw [hw] at he'
+    cases he'
+
+/-- **(d′) Cycles are reported as cycles** (task 2.13). If every offset on the `/Prev` path
+from the `startxref` offset is `Endless` — the Bogk & Schöpl situation: a `/Prev` path that
+never reaches a section without `/Prev`, so it must revisit an offset — then `loadChain`
+fails with `Error.cycle` or, for a path of more than `limits.maxRevisions` distinct sections
+(possible only if `limits.maxRevisions < bytes.size`), with `limitExceeded .revisions`.
+With `Core.Open.openFile_loadChain_cycle`, a cycle error here is what `openFile` returns. (Hybrid sections are excluded: an `/XRefStm` stream on the
+path may fail to parse first, which is a parse error, not a cycle.) -/
+theorem loadChain_endless {limits : Limits} {bytes : ByteArray} {start : Nat}
+    (hs : findStartxref bytes = .ok start)
+    (hend : ∀ x, PrevReach limits bytes start x → Endless limits bytes x) :
+    ∃ e, loadChain limits bytes = .error e ∧
+      (e.isCycle = true ∨
+        (e = .limitExceeded .revisions ∧ limits.maxRevisions < bytes.size)) := by
+  unfold loadChain loadChainCounted
+  rw [hs]
+  exact walk_endless limits bytes start [] List.nodup_nil
+    (fun _ hx => absurd hx List.not_mem_nil) hend
+
+/-- **Within the revision budget a cycle is `Error.cycle`.** If, moreover, the input has at
+most `limits.maxRevisions` bytes (so every set of distinct offsets fits the budget; the
+default budget is 4096), `loadChain`'s error is a cycle error. -/
+theorem loadChain_endless_cycle {limits : Limits} {bytes : ByteArray} {start : Nat}
+    (hs : findStartxref bytes = .ok start)
+    (hend : ∀ x, PrevReach limits bytes start x → Endless limits bytes x)
+    (hbudget : bytes.size ≤ limits.maxRevisions) :
+    ∃ e, loadChain limits bytes = .error e ∧ e.isCycle = true := by
+  obtain ⟨e, he, hc⟩ := loadChain_endless hs hend
+  refine ⟨e, he, ?_⟩
+  rcases hc with hc | ⟨-, hlt⟩
+  · exact hc
+  · omega
+
+/-- **M2: endless `/Prev` chains are rejected by `openFile`** (task 2.13). Under the
+hypotheses of `loadChain_endless_cycle`, `Core.Open.openFile` fails with a cycle error: the
+repair path is not tried (`Core.Open.openFile_loadChain_cycle`). -/
+theorem openFile_endless {limits : Limits} {bytes : ByteArray} {start : Nat}
+    (hs : findStartxref bytes = .ok start)
+    (hend : ∀ x, PrevReach limits bytes start x → Endless limits bytes x)
+    (hbudget : bytes.size ≤ limits.maxRevisions) :
+    ∃ e, Core.Open.openFile limits bytes = .error e ∧ e.isCycle = true := by
+  obtain ⟨e, he, hc⟩ := loadChain_endless_cycle hs hend hbudget
+  exact ⟨e, Core.Open.openFile_loadChain_cycle he hc, hc⟩
 
 /-- **(e) Work bound** (S3). `loadChain` makes at most `bytes.size` section parses (classic
 tables, xref streams and `/XRefStm` streams), and at most `limits.maxRevisions`; the

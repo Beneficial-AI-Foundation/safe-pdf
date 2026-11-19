@@ -731,6 +731,7 @@ private def errS : Error → String
   | .malformed o _ => s!"malformed@{o}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o _ => s!"cycle@{o}"
 
 /-- Test helper: `parseXrefTable` summarised as (entries, /Size, /Root, /Prev, end). -/
 private def pxl (lim : Limits) (b : ByteArray) (pos : Nat) :

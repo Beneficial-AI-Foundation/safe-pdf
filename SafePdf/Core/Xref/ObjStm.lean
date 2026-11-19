@@ -40,8 +40,9 @@ one and `fetchCompressed` is not recursive at all (`fetchCompressed_no_recursion
   only white space or comments may follow it in its slice: objects in object streams are
   direct objects (no `n g obj` wrapper, no `stream`), generation implicitly 0.
 * O6. `fetchCompressed lookup limits bytes fuel num`: the entry of `num` must be
-  `compressed c idx` with `c ≠ num`; the entry of `c` must be `inUse off 0` (a compressed
-  container is "nested", an error); the object at `off` is parsed with
+  `compressed c idx` with `c ≠ num` (else `Error.cycle`); the entry of `c` must be
+  `inUse off 0` (a compressed container is "nested", an error: `Error.cycle` when it is
+  `compressed num _`, the two-object cycle, else `malformed`); the object at `off` is parsed with
   `Length.parseIndirectResolved` (indirect `/Length` resolved with `fuel`), its header must be
   `c 0` and its body a stream; it is decoded by O1–O4; `findObject os num` must equal `idx`
   (the xref index and the stream header agree); then O5 with `k = idx`.
@@ -56,7 +57,8 @@ errors use offset 0, container errors the container's file offset.
   `decodeObjStm_nums_nodup`, `decodeObjStm_first_le`, `decodeObjStm_count_le`.
 * `getObject_depth`, `fetchCompressed_depth`: depth at most `limits.maxObjectDepth`.
 * `fetchCompressed_self`, `fetchCompressed_nested`: a self-container or a compressed
-  container is an error.
+  container is an error; `fetchCompressed_self_cycle`, `fetchCompressed_mutual_cycle`: for a
+  self-container and for two object streams containing each other it is `Error.cycle`.
 * `fetchCompressed_no_recursion`, `fetchCompressed_rank`: success implies the chain
   `num ↦ compressed c ↦ inUse off 0` with `c ≠ num` (rank 1 → rank 0).
 * `fetchCompressed_work`: at most one container parse and one decode
@@ -293,7 +295,7 @@ def fetchCompressedTrace (lookup : Nat → Option XrefEntry) (limits : Limits) (
     (fuel num : Nat) : Trace :=
   match lookup num with
   | some (.compressed c idx) =>
-    if c = num then ⟨0, 0, .error (.malformed 0 s!"object {num} is its own object stream")⟩
+    if c = num then ⟨0, 0, .error (.cycle 0 s!"object {num} is its own object stream")⟩
     else
       match lookup c with
       | some (.inUse off g) =>
@@ -315,8 +317,10 @@ def fetchCompressedTrace (lookup : Nat → Option XrefEntry) (limits : Limits) (
             else ⟨1, 0, .error (.malformed off
               "object header does not match the cross-reference entry")⟩
         else ⟨0, 0, .error (.malformed off s!"object stream {c} has a non-zero generation")⟩
-      | some (.compressed _ _) =>
-        ⟨0, 0, .error (.malformed 0 s!"object stream {c} is itself in an object stream")⟩
+      | some (.compressed c' _) =>
+        ⟨0, 0, .error (if c' = num then
+          .cycle 0 s!"object streams {num} and {c} contain each other"
+          else .malformed 0 s!"object stream {c} is itself in an object stream")⟩
       | some (.free _ _) => ⟨0, 0, .error (.malformed 0 s!"object stream {c} is free")⟩
       | none => ⟨0, 0, .error (.malformed 0 s!"object stream {c} is not in the xref")⟩
   | _ => ⟨0, 0, .error (.malformed 0 s!"object {num} is not in an object stream")⟩
@@ -480,6 +484,24 @@ theorem fetchCompressed_self (lookup : Nat → Option XrefEntry) (limits : Limit
     ∃ e, fetchCompressed lookup limits bytes fuel num = .error e := by
   simp [fetchCompressed, fetchCompressedTrace, h]
 
+/-- **Self-container is a cycle** (task 2.13): the error of `fetchCompressed_self` is
+`Error.cycle`. -/
+theorem fetchCompressed_self_cycle (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel num idx : Nat) (h : lookup num = some (.compressed num idx)) :
+    fetchCompressed lookup limits bytes fuel num =
+      .error (.cycle 0 s!"object {num} is its own object stream") := by
+  simp [fetchCompressed, fetchCompressedTrace, h]
+
+/-- **Two object streams containing each other are a cycle** (task 2.13): `num` lies in
+`c ≠ num` and `c` lies in `num`. -/
+theorem fetchCompressed_mutual_cycle (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel num c idx idx' : Nat)
+    (h : lookup num = some (.compressed c idx)) (hc : lookup c = some (.compressed num idx'))
+    (hne : c ≠ num) :
+    fetchCompressed lookup limits bytes fuel num =
+      .error (.cycle 0 s!"object streams {num} and {c} contain each other") := by
+  simp [fetchCompressed, fetchCompressedTrace, h, hc, hne]
+
 /-- **Nested container**: a container that is itself in an object stream is an error. -/
 theorem fetchCompressed_nested (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel num c idx c' idx' : Nat)
@@ -516,6 +538,7 @@ private def errS : Error → String
   | .malformed o m => s!"malformed@{o}:{m}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o w => s!"cycle@{o}:{w}"
 
 /-- Test helper: a stream from string keys. -/
 private def mkSt (d : List (String × PdfObject)) (data : ByteArray) : Stream :=
@@ -651,6 +674,9 @@ private def lookup20 : Nat → Option XrefEntry :=
 #guard fc lookup20 file20 13 == .inl "malformed@0:object 13 is not at index 1 of object stream 20"
 -- nested container: 30 is in 31, which is itself in 20
 #guard fc lookup20 file20 30 == .inl "malformed@0:object stream 31 is itself in an object stream"
+-- two object streams containing each other: a cycle (task 2.13)
+#guard fc (mkLookup [(50, .compressed 51 0), (51, .compressed 50 0)]) file20 50 ==
+  .inl "cycle@0:object streams 50 and 51 contain each other"
 -- container header mismatch: entry 41 points at `20 0 obj`
 #guard fc lookup20 file20 40 ==
   .inl "malformed@0:object header does not match the cross-reference entry"
@@ -691,7 +717,7 @@ private def selfContainerLookup : Nat → Option XrefEntry :=
 
 #guard selfContainerPdf.size == 378
 #guard fc selfContainerLookup selfContainerPdf 5 ==
-  .inl "malformed@0:object 5 is its own object stream"
+  .inl "cycle@0:object 5 is its own object stream"
 #guard (fetchCompressedTrace selfContainerLookup Limits.default selfContainerPdf 6 5).parses == 0
 -- pointing object 5 at the xref stream instead: a container that is not /Type /ObjStm
 #guard fc (mkLookup [(4, .inUse 223 0), (5, .compressed 4 0)]) selfContainerPdf 5 ==
