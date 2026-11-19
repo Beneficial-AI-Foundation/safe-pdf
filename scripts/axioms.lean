@@ -366,3 +366,23 @@ import SafePdf
 #print axioms SafePdf.Spec.FlateWork.flateDecodeW_steps_le_of_ok
 -- Phase 3, task 3.12: LZW step errors are limit errors
 #print axioms SafePdf.Core.Filter.LZW.step_error
+-- Phase 3, task 3.10: document-wide decoded-bytes budget (SafePdf/Core/Filter.lean, Doc.lean)
+#print axioms SafePdf.Core.Filter.applyStagesB_le
+#print axioms SafePdf.Core.Filter.applyStagesB_nobyte
+#print axioms SafePdf.Core.Filter.applyStagesB_ok
+#print axioms SafePdf.Core.Filter.decodeStreamB_le
+#print axioms SafePdf.Core.Filter.decodeStreamB_charge
+#print axioms SafePdf.Core.Filter.decodeStreamB_size_le
+#print axioms SafePdf.Core.Filter.decodeStreamB_exhausted
+#print axioms SafePdf.Core.Filter.decodeAllB_total
+#print axioms SafePdf.Core.Filter.decodeAllB_init
+#print axioms SafePdf.Core.Doc.decodeBodyB_le
+#print axioms SafePdf.Core.Doc.decodeBodyB_charge
+#print axioms SafePdf.Core.Doc.Doc.decodeStreamOf_le
+#print axioms SafePdf.Core.Doc.Doc.decodeStreamOf_charge
+#print axioms SafePdf.Core.Doc.Doc.decodeStreamOf_size_le
+#print axioms SafePdf.Core.Doc.contentData_ok
+#print axioms SafePdf.Core.Doc.Doc.decodeRefsB_le
+#print axioms SafePdf.Core.Doc.Doc.decodeRefsB_total
+#print axioms SafePdf.Core.Doc.Doc.decodeContentsB_le
+#print axioms SafePdf.Core.Doc.Doc.decodeContentsB_total

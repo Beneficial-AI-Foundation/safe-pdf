@@ -52,10 +52,36 @@ the standard filters. This module parses that chain (`parseChain`) and runs it
   itself reads (object streams, cross-reference streams; `Core.Xref.ObjStm`,
   `Core.Xref.Stream`): an image-codec result is an error chosen by the caller.
 
-Per-document accounting against `Limits.maxDecodedTotalBytes` is **not** done here: this
-module decodes one stream. The aggregate bound it does give is `produced_le`: the bytes
+`decodeStream` decodes one stream. The aggregate bound it gives is `produced_le`: the bytes
 allocated by all stages of one chain are at most `(number of stages) · maxDecodedStreamBytes`,
 so at most `limits.maxFilters · maxDecodedStreamBytes` (`produced_le_maxFilters`).
+
+## Document-wide accounting (task 3.10)
+
+`decodeStreamB limits budget d raw : (Except Error Decoded) × Budget` is the budgeted entry
+point: `Budget.remaining` is what is left of `limits.maxDecodedTotalBytes`
+(`Budget.init limits`). The budget is returned **also on failure** (so the signature is a
+pair, not `Except Error (Decoded × Budget)`): a failed attempt is charged too, since it may
+have allocated bytes before failing; otherwise many streams that each inflate to just under
+the per-stream limit and then fail (say, on the Adler-32) would cost unbounded work.
+
+* B1. Each byte stage runs under the per-stream cap `min maxDecodedStreamBytes remaining`
+  (`capped`) and is **charged its output**, intermediate stages included (they are
+  allocated). `/Crypt /Identity` passes its input through and is charged it as well
+  (conservative).
+* B2. A failing byte stage is charged its cap (`failCharge`: the most it may have allocated);
+  a failing `/Crypt` check allocates nothing and is free. Chain-parse errors (`parseChain`)
+  are free: nothing is decoded.
+* B3. A chain with no byte stage (no filter, or only an image codec) is charged its output,
+  the raw bytes, so every returned byte is charged (`decodeStreamB_charge`).
+* B4. Errors: a stage that hits a cap equal to the remaining budget (when that is below
+  `maxDecodedStreamBytes`) reports `Error.limitExceeded .decodedTotalBytes` (`budgetErr`),
+  as does an output larger than the remaining budget; the per-stream limit, when it is the
+  binding one, still reports `.decodedStreamBytes`.
+* B5. Charging is not refunded: the budget only decreases (`decodeStreamB_le`).
+
+Which decodes of a document go through the budget is stated in `Core.Doc` (module doc,
+"Decoded-bytes accounting").
 
 ## Theorems
 
@@ -70,6 +96,12 @@ so at most `limits.maxFilters · maxDecodedStreamBytes` (`produced_le_maxFilters
   `Error.limitExceeded .filters`.
 * `parseChain_crypt_first`: a parsed chain has `/Crypt` at most as its first stage.
 * `decodeBytes_size_le`: the structural-stream entry point keeps the per-stream bound.
+* `decodeStreamB_le`: the budget never grows; `decodeStreamB_charge`: a successful result's
+  bytes plus the budget left are at most the budget before (`decodeStreamB_exhausted`: with
+  nothing left only empty outputs succeed); `decodeStreamB_size_le`: the per-stream bound.
+* `decodeAllB_total`: over any sequence of budgeted decodes (`decodeAllB`), the bytes of all
+  successful results plus the budget left are at most the initial budget;
+  `decodeAllB_init`: from `Budget.init`, at most `limits.maxDecodedTotalBytes`.
 -/
 
 namespace SafePdf.Core.Filter
@@ -650,6 +682,257 @@ theorem produced_le_maxFilters {limits : Limits} {strict : Bool} {d : Dict}
   Nat.le_trans (produced_le limits strict stages b)
     (Nat.mul_le_mul_right _ (parseChain_length_le h))
 
+/-! ## Document-wide accounting (task 3.10, S3)
+
+The budgeted entry point `decodeStreamB` threads a `Budget` (bytes still allowed under
+`limits.maxDecodedTotalBytes`) through one decode and returns it, charged, **also on
+failure**: a failed attempt may have allocated bytes too (rules B1–B5 in the module doc). -/
+
+/-- What is left of the document-wide decoded-bytes budget (S3). Start from `Budget.init`. -/
+structure Budget where
+  /-- Bytes that may still be decoded. -/
+  remaining : Nat
+  deriving Repr, DecidableEq, Inhabited
+
+/-- The full budget of a document: `limits.maxDecodedTotalBytes`. -/
+def Budget.init (limits : Limits) : Budget := ⟨limits.maxDecodedTotalBytes⟩
+
+/-- The total-budget error. -/
+def totalErr : Error := .limitExceeded .decodedTotalBytes
+
+/-- The limits for one budgeted stage: the per-stream cap lowered to the remaining budget. -/
+def capped (limits : Limits) (rem : Nat) : Limits :=
+  { limits with maxDecodedStreamBytes := min limits.maxDecodedStreamBytes rem }
+
+/-- Report a per-stream limit hit as a total-budget hit when the budget was the binding cap
+(B4). -/
+def budgetErr (limits : Limits) (rem : Nat) (e : Error) : Error :=
+  match e with
+  | .limitExceeded .decodedStreamBytes =>
+    if rem < limits.maxDecodedStreamBytes then totalErr else e
+  | _ => e
+
+/-- The charge of a failed byte stage (B2): its cap (it may have allocated that much before
+failing), except `/Crypt`, which allocates nothing. -/
+def failCharge (limits : Limits) (rem : Nat) (f : ByteFilter) : Nat :=
+  if f = .crypt then 0 else min limits.maxDecodedStreamBytes rem
+
+/-- Whether a stage is a byte filter. -/
+def Stage.isByte (s : Stage) : Bool :=
+  match s.kind with
+  | .byte _ => true
+  | .image _ => false
+
+/-- Whether a chain has a byte stage. -/
+def hasByte (stages : List Stage) : Bool := stages.any Stage.isByte
+
+/-- `applyStages` with the budget `rem` threaded through (B1, B2): each byte stage runs
+under `capped limits rem` and is charged its output; a failing byte stage is charged
+`failCharge`. Returns the result and the remaining budget. Structural on the list. -/
+def applyStagesB (limits : Limits) (strict : Bool) : List Stage → Nat → ByteArray →
+    Except Error Decoded × Nat
+  | [], rem, b =>
+    (if b.size ≤ limits.maxDecodedStreamBytes then .ok (.data b) else .error limitErr, rem)
+  | ⟨.image c, p⟩ :: [], rem, b =>
+    (if b.size ≤ limits.maxDecodedStreamBytes then .ok (.image c p b) else .error limitErr,
+      rem)
+  | ⟨.image _, _⟩ :: _ :: _, rem, _ => (.error (.unsupported "a filter after an image codec"), rem)
+  | ⟨.byte f, p⟩ :: rest, rem, b =>
+    match decodeOne (capped limits rem) strict f p b with
+    | .error e => (.error (budgetErr limits rem e), rem - failCharge limits rem f)
+    | .ok o =>
+      if o.size ≤ rem then applyStagesB limits strict rest (rem - o.size) o
+      else (.error totalErr, rem)
+
+/-- **Budgeted entry point** (task 3.10). Decode like `decodeStream`, charging the bytes
+produced against `budget` (rules B1–B5). Returns the result and the charged budget, also on
+failure. -/
+def decodeStreamB (limits : Limits) (budget : Budget) (d : Dict) (raw : ByteArray)
+    (strict : Bool := true) : (Except Error Decoded) × Budget :=
+  match parseChain limits d with
+  | .error e => (.error e, budget)
+  | .ok stages =>
+    if hasByte stages then
+      let p := applyStagesB limits strict stages budget.remaining raw
+      (p.1, ⟨p.2⟩)
+    else
+      match applyStages limits strict stages raw with
+      | .error e => (.error e, budget)
+      | .ok r =>
+        if r.bytes.size ≤ budget.remaining then (.ok r, ⟨budget.remaining - r.bytes.size⟩)
+        else (.error totalErr, budget)
+
+/-- Budgeted decoding of a sequence of streams (dictionary, raw data), threading the budget
+from one to the next. -/
+def decodeAllB (limits : Limits) (strict : Bool) :
+    Budget → List (Dict × ByteArray) → List (Except Error Decoded) × Budget
+  | b, [] => ([], b)
+  | b, (d, raw) :: xs =>
+    let p := decodeStreamB limits b d raw strict
+    let q := decodeAllB limits strict p.2 xs
+    (p.1 :: q.1, q.2)
+
+/-- Size of a successful result's bytes, `0` for an error. -/
+def okSize : Except Error Decoded → Nat
+  | .ok r => r.bytes.size
+  | .error _ => 0
+
+/-- The budget never grows in `applyStagesB`. -/
+theorem applyStagesB_le (limits : Limits) (strict : Bool) :
+    (stages : List Stage) → (rem : Nat) → (b : ByteArray) →
+    (applyStagesB limits strict stages rem b).2 ≤ rem
+  | [], rem, b => by simp [applyStagesB]
+  | ⟨.image _, _⟩ :: [], rem, b => by simp [applyStagesB]
+  | ⟨.image _, _⟩ :: _ :: _, rem, _ => by simp [applyStagesB]
+  | ⟨.byte f, p⟩ :: rest, rem, b => by
+    cases ho : decodeOne (capped limits rem) strict f p b with
+    | error e => simp only [applyStagesB, ho]; exact Nat.sub_le _ _
+    | ok o =>
+      simp only [applyStagesB, ho]
+      by_cases hs : o.size ≤ rem
+      · simp only [hs, ↓reduceIte]
+        have := applyStagesB_le limits strict rest (rem - o.size) o
+        omega
+      · simp only [hs, ↓reduceIte]; exact Nat.le_refl _
+
+/-- Without a byte stage, a successful `applyStagesB` returns its input bytes. -/
+theorem applyStagesB_nobyte (limits : Limits) (strict : Bool) :
+    (stages : List Stage) → (rem : Nat) → (b : ByteArray) → (r : Decoded) →
+    hasByte stages = false → (applyStagesB limits strict stages rem b).1 = .ok r →
+    r.bytes = b
+  | [], rem, b, r, _, h => by
+    simp only [applyStagesB] at h
+    split at h
+    · simp only [Except.ok.injEq] at h; subst h; rfl
+    · cases h
+  | ⟨.image _, _⟩ :: [], rem, b, r, _, h => by
+    simp only [applyStagesB] at h
+    split at h
+    · simp only [Except.ok.injEq] at h; subst h; rfl
+    · cases h
+  | ⟨.image _, _⟩ :: _ :: _, rem, _, r, _, h => by simp [applyStagesB] at h
+  | ⟨.byte _, _⟩ :: _, _, _, _, hb, _ => by simp [hasByte, Stage.isByte] at hb
+
+/-- **Charge law** of `applyStagesB`: a success is within the per-stream limit, and when a
+byte stage ran, its bytes were charged. -/
+theorem applyStagesB_ok (limits : Limits) (strict : Bool) :
+    (stages : List Stage) → (rem : Nat) → (b : ByteArray) → (r : Decoded) →
+    (applyStagesB limits strict stages rem b).1 = .ok r →
+    r.bytes.size ≤ limits.maxDecodedStreamBytes ∧
+    (hasByte stages = true → r.bytes.size + (applyStagesB limits strict stages rem b).2 ≤ rem)
+  | [], rem, b, r, h => by
+    refine ⟨?_, fun hb => by simp [hasByte] at hb⟩
+    simp only [applyStagesB] at h
+    split at h
+    · simp only [Except.ok.injEq] at h; subst h; assumption
+    · cases h
+  | ⟨.image _, _⟩ :: [], rem, b, r, h => by
+    refine ⟨?_, fun hb => by simp [hasByte, Stage.isByte] at hb⟩
+    simp only [applyStagesB] at h
+    split at h
+    · simp only [Except.ok.injEq] at h; subst h; assumption
+    · cases h
+  | ⟨.image _, _⟩ :: _ :: _, rem, _, r, h => by simp [applyStagesB] at h
+  | ⟨.byte f, p⟩ :: rest, rem, b, r, h => by
+    cases ho : decodeOne (capped limits rem) strict f p b with
+    | error e => simp [applyStagesB, ho] at h
+    | ok o =>
+      by_cases hs : o.size ≤ rem
+      · simp only [applyStagesB, ho, hs, ↓reduceIte] at h ⊢
+        have ih := applyStagesB_ok limits strict rest (rem - o.size) o r h
+        refine ⟨ih.1, fun _ => ?_⟩
+        cases hr : hasByte rest
+        · have heq := applyStagesB_nobyte limits strict rest (rem - o.size) o r hr h
+          have hle := applyStagesB_le limits strict rest (rem - o.size) o
+          rw [heq]; omega
+        · have := ih.2 hr; omega
+      · simp [applyStagesB, ho, hs] at h
+
+/-- **Budget monotone**: `decodeStreamB` never increases the budget. -/
+theorem decodeStreamB_le (limits : Limits) (budget : Budget) (d : Dict) (raw : ByteArray)
+    (strict : Bool) : (decodeStreamB limits budget d raw strict).2.remaining ≤ budget.remaining := by
+  unfold decodeStreamB
+  split
+  · exact Nat.le_refl _
+  · split
+    · exact applyStagesB_le limits strict _ _ raw
+    · split
+      · exact Nat.le_refl _
+      · split
+        · exact Nat.sub_le _ _
+        · exact Nat.le_refl _
+
+/-- **Charge law** (S3): a successful `decodeStreamB` returns bytes that were charged: their
+size plus the remaining budget is at most the budget before the call. -/
+theorem decodeStreamB_charge {limits : Limits} {budget : Budget} {d : Dict} {raw : ByteArray}
+    {strict : Bool} {r : Decoded} (h : (decodeStreamB limits budget d raw strict).1 = .ok r) :
+    r.bytes.size + (decodeStreamB limits budget d raw strict).2.remaining ≤ budget.remaining := by
+  cases hp : parseChain limits d with
+  | error e => simp [decodeStreamB, hp] at h
+  | ok stages =>
+    cases hb : hasByte stages with
+    | true =>
+      simp only [decodeStreamB, hp, hb, ↓reduceIte] at h ⊢
+      exact (applyStagesB_ok limits strict stages budget.remaining raw r h).2 hb
+    | false =>
+      cases hr : applyStages limits strict stages raw with
+      | error e => simp [decodeStreamB, hp, hb, hr] at h
+      | ok r' =>
+        by_cases hs : r'.bytes.size ≤ budget.remaining
+        · simp only [decodeStreamB, hp, hb, hr, hs, Bool.false_eq_true, ↓reduceIte,
+            Except.ok.injEq] at h ⊢
+          subst h; omega
+        · simp [decodeStreamB, hp, hb, hr, hs] at h
+
+/-- **Per-stream bound** for the budgeted entry point. -/
+theorem decodeStreamB_size_le {limits : Limits} {budget : Budget} {d : Dict} {raw : ByteArray}
+    {strict : Bool} {r : Decoded} (h : (decodeStreamB limits budget d raw strict).1 = .ok r) :
+    r.bytes.size ≤ limits.maxDecodedStreamBytes := by
+  unfold decodeStreamB at h
+  split at h
+  · cases h
+  · split at h
+    · exact (applyStagesB_ok limits strict _ _ raw r h).1
+    · split at h
+      · cases h
+      · rename_i r' hr
+        split at h
+        · simp only [Except.ok.injEq] at h; subst h
+          exact applyStages_size_le limits strict _ raw _ hr
+        · cases h
+
+/-- **Exhausted budget**: with nothing left, only empty outputs succeed. -/
+theorem decodeStreamB_exhausted {limits : Limits} {budget : Budget} {d : Dict}
+    {raw : ByteArray} {strict : Bool} {r : Decoded} (h0 : budget.remaining = 0)
+    (h : (decodeStreamB limits budget d raw strict).1 = .ok r) : r.bytes.size = 0 := by
+  have := decodeStreamB_charge h
+  omega
+
+/-- **Document-wide bound** (S3): over any sequence of budgeted decodes, the bytes of all
+successful results plus the budget left are at most the initial budget. -/
+theorem decodeAllB_total (limits : Limits) (strict : Bool) :
+    (b : Budget) → (xs : List (Dict × ByteArray)) →
+    ((decodeAllB limits strict b xs).1.map okSize).sum +
+      (decodeAllB limits strict b xs).2.remaining ≤ b.remaining
+  | b, [] => by simp [decodeAllB]
+  | b, (d, raw) :: xs => by
+    have ih := decodeAllB_total limits strict (decodeStreamB limits b d raw strict).2 xs
+    simp only [decodeAllB, List.map_cons, List.sum_cons]
+    cases hr : (decodeStreamB limits b d raw strict).1 with
+    | error e =>
+      have := decodeStreamB_le limits b d raw strict
+      simp only [okSize]; omega
+    | ok r =>
+      have := decodeStreamB_charge hr
+      simp only [okSize]; omega
+
+/-- **Document-wide bound from the start**: decoding any sequence of streams from
+`Budget.init limits` yields at most `limits.maxDecodedTotalBytes` bytes of results. -/
+theorem decodeAllB_init (limits : Limits) (strict : Bool) (xs : List (Dict × ByteArray)) :
+    ((decodeAllB limits strict (Budget.init limits) xs).1.map okSize).sum ≤
+      limits.maxDecodedTotalBytes :=
+  Nat.le_trans (Nat.le_add_right _ _) (decodeAllB_total limits strict (Budget.init limits) xs)
+
 /-! ## Tests -/
 
 section Tests
@@ -825,6 +1108,54 @@ private def pngParms : PdfObject := .dict [(K "Predictor", .int 12), (K "Columns
 #guard isLimit (decodeStream (tiny 150) [(K "Filter", .array [N "RL", N "RL"])]
   (B [129, 129, 128]))
 #guard isLimit (decodeStream (tiny 4) [(K "Filter", N "RL")] (B [251, 0, 128]))
+
+
+-- Document-wide budget (task 3.10).
+/-- Summary of a budgeted result: output bytes or the error kind, and the budget left. -/
+private def sb (p : (Except Error Decoded) × Budget) : String :=
+  let r := match p.1 with
+    | .ok d => s!"ok {d.bytes.data.toList}"
+    | .error (.limitExceeded k) => s!"limit {reprStr k}"
+    | .error _ => "err"
+  s!"{r} rem={p.2.remaining}"
+
+/-- An `/ASCIIHexDecode` stream dictionary. -/
+private def hexD : Dict := [(K "Filter", N "AHx")]
+/-- 7 raw bytes `414243>`, decoding to `ABC` under `hexD`. -/
+private def hexRaw : ByteArray := "414243>".toUTF8
+
+-- Budget exactly hit: 3 decoded bytes from a budget of 3.
+#guard sb (decodeStreamB dl ⟨3⟩ hexD hexRaw) == "ok [65, 66, 67] rem=0"
+-- A single stream over the remaining budget: the total-budget error, charged its cap (2).
+#guard sb (decodeStreamB dl ⟨2⟩ hexD hexRaw) ==
+  "limit SafePdf.LimitKind.decodedTotalBytes rem=0"
+-- The per-stream limit binds first: reported as such.
+#guard sb (decodeStreamB (tiny 2) ⟨100⟩ hexD hexRaw) ==
+  "limit SafePdf.LimitKind.decodedStreamBytes rem=98"
+-- No filter: the raw bytes are charged too (B3).
+#guard sb (decodeStreamB dl ⟨5⟩ [] (B [1, 2, 3])) == "ok [1, 2, 3] rem=2"
+#guard sb (decodeStreamB dl ⟨2⟩ [] (B [1, 2, 3])) ==
+  "limit SafePdf.LimitKind.decodedTotalBytes rem=2"
+-- Parse errors are free.
+#guard sb (decodeStreamB dl ⟨5⟩ [(K "Filter", N "Foo")] (B [])) == "err rem=5"
+-- Unsupported /Crypt allocates nothing: not charged.
+#guard sb (decodeStreamB dl ⟨5⟩ [(K "Filter", N "Crypt"),
+  (K "DecodeParms", .dict [(K "Name", N "StdCF")])] (B [1])) == "err rem=5"
+-- A failing Flate stage is charged its cap.
+#guard sb (decodeStreamB dl ⟨50⟩ [(K "Filter", N "Fl")] (B [1, 2, 3])) == "err rem=0"
+-- Intermediate stages are charged: a doubly hex-encoded byte charges the first stage's
+-- output (its single hex encoding) plus the final byte.
+#guard sb (decodeStreamB dl ⟨10⟩ [(K "Filter", .array [N "AHx", N "AHx"])]
+  (Ascii.asciiHexEncode (Ascii.asciiHexEncode (B [0x42])))) ==
+  s!"ok [66] rem={10 - (Ascii.asciiHexEncode (B [0x42])).size - 1}"
+-- Many small streams exhausting a tiny total budget of 10: three fit, then the rest fail.
+#guard (decodeAllB dl true ⟨10⟩ (List.replicate 5 (hexD, hexRaw))).1.map
+  (fun r => match r with
+    | .ok _ => "ok"
+    | .error (.limitExceeded .decodedTotalBytes) => "total"
+    | .error _ => "err") == ["ok", "ok", "ok", "total", "total"]
+#guard (decodeAllB dl true ⟨10⟩ (List.replicate 5 (hexD, hexRaw))).2.remaining == 0
+#guard ((decodeAllB dl true ⟨10⟩ (List.replicate 5 (hexD, hexRaw))).1.map okSize).sum == 9
 
 end Tests
 

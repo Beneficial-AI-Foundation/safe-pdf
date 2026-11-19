@@ -62,6 +62,41 @@ so `Doc.getPage` is total and trivial.
 Encrypted documents: page-tree keys are names, numbers, references and arrays, which are not
 encrypted, so the walk works before string/stream decryption exists (task 4.3b).
 
+## Decoded-bytes accounting (task 3.10, Plan.md §4 S3)
+
+Streams decoded on demand go through `Filter.decodeStreamB`, which charges a `Filter.Budget`
+(start: `Filter.Budget.init limits` = `limits.maxDecodedTotalBytes`; rules B1–B5 of
+`Core.Filter`). The caller threads the budget through every access of the document (page
+contents, and later fonts, images, forms), so the decoded bytes of all of them together stay
+within `maxDecodedTotalBytes` or end in `Error.limitExceeded .decodedTotalBytes`.
+
+* D1. `Doc.decodeStreamOf doc limits budget n g` fetches object `n g` and decodes it under
+  the budget; a non-stream is `malformed`. A failed fetch charges nothing.
+* D2. `/Filter` and `/DecodeParms` are resolved one level first (`resolveStreamDict`: the
+  value, or each element of an array; a reference to a stream is `malformed`), since
+  `Filter.decodeStream` rejects references.
+* D3. `Doc.decodeContentsB doc limits budget page`: the page's `/Contents` (a stream, an array
+  of streams, or a reference to such an array; ISO 32000-2 §7.7.3.3) decoded in order and
+  returned as separate parts (not concatenated: no extra copy). A reference to a missing
+  object is skipped (as W3); a content stream ending in an image codec is `malformed`.
+
+**Not charged yet** (each is bounded per stream, but not against the document budget;
+threading the budget through `Open.getObject` and `Xref.Chain.loadChain` changes many
+signatures and theorems and is left to a follow-up task):
+
+* Cross-reference streams at open time (`loadChain`): at most `limits.maxRevisions` sections
+  are parsed (an `/XRefStm` counts as one), each decoded once, each allocating at most
+  `maxFilters · maxDecodedStreamBytes` (`Filter.produced_le_maxFilters`). Total
+  `≤ maxRevisions · maxFilters · maxDecodedStreamBytes`.
+* Object streams inside `Open.getObject` (the page-tree walk, `resolve`, the fetches of
+  D1–D3 themselves): one `getObject` performs at most one top-level object-stream decode
+  (`Open.getObject_work`), plus at most `objectCount` container parses while resolving an
+  indirect `/Length` (`Open.getObject_length_calls_le`), each of which may decode one object
+  stream. So each `getObject` allocates at most
+  `(objectCount + 1) · maxFilters · maxDecodedStreamBytes` in object-stream decoding; the
+  page-tree walk performs `O(objectCount)` `getObject` calls (rule W6; stated, not proven).
+  Decoded object streams are not cached, so this is the bound per call, not per document.
+
 ## Theorems
 
 * Totality: by construction (structural recursion on fuel and on the stack).
@@ -75,6 +110,11 @@ encrypted, so the walk works before string/stream decryption exists (task 4.3b).
 * `foldl_merge_mediaBox`, `foldl_merge_rotate`: the inherited value is the nearest one along
   the path; `mkPage_mediaBox`.
 * `cropBox_sub_media`: every page's CropBox lies inside its MediaBox.
+* Budget (task 3.10): `Doc.decodeStreamOf_le`, `Doc.decodeRefsB_le`, `Doc.decodeContentsB_le`
+  (the budget never grows); `Doc.decodeStreamOf_charge` (a decoded stream's size plus the
+  budget left is at most the budget before); `Doc.decodeStreamOf_size_le` (per-stream bound);
+  `Doc.decodeRefsB_total`, `Doc.decodeContentsB_total` (the decoded parts plus the budget
+  left are at most the budget before).
 -/
 
 set_option autoImplicit false
@@ -505,6 +545,273 @@ def openDoc (limits : Limits) (bytes : ByteArray) : Except Error Doc :=
   | .error e => .error e
   | .ok d => ofOpen limits d
 
+/-! ## Decoded streams under the document budget (task 3.10) -/
+
+open SafePdf.Core.Filter (Budget Decoded okSize)
+
+/-- Resolve one `/Filter` or `/DecodeParms` reference (rule D2): a direct object is kept; a
+reference to a stream is `malformed`. -/
+def resolveParamRef (d : OpenDoc) (limits : Limits) : PdfObject → Except Error PdfObject
+  | .ref n g =>
+    match d.getObject limits n g with
+    | .error e => .error e
+    | .ok (.obj o) => .ok o
+    | .ok (.stream _) =>
+      .error (.malformed (offsetOf d n) "/Filter or /DecodeParms refers to a stream")
+  | o => .ok o
+
+/-- Resolve a `/Filter` or `/DecodeParms` value one level (rule D2): the value itself, or
+each element of an array. -/
+def resolveParam (d : OpenDoc) (limits : Limits) : PdfObject → Except Error PdfObject
+  | .array items =>
+    match items.mapM (resolveParamRef d limits) with
+    | .error e => .error e
+    | .ok xs => .ok (.array xs)
+  | o => resolveParamRef d limits o
+
+/-- A stream dictionary with `/Filter` and `/DecodeParms` resolved one level (rule D2). -/
+def resolveStreamDict (d : OpenDoc) (limits : Limits) (sd : Dict) : Except Error Dict :=
+  sd.mapM fun (kv : Name × PdfObject) =>
+    if kv.1 = Name.ofString "Filter" ∨ kv.1 = Name.ofString "DecodeParms" then
+      match resolveParam d limits kv.2 with
+      | .error e => .error e
+      | .ok v => .ok (kv.1, v)
+    else .ok kv
+
+/-- Decode a fetched body under the budget (rule D1): a stream is decoded by
+`Filter.decodeStreamB` after rule D2; anything else is `malformed` (offset `off`). -/
+def decodeBodyB (d : OpenDoc) (limits : Limits) (budget : Budget) (off : Nat) :
+    IndirectBody → (Except Error Decoded) × Budget
+  | .stream s =>
+    match resolveStreamDict d limits s.dict with
+    | .error e => (.error e, budget)
+    | .ok sd => Filter.decodeStreamB limits budget sd s.data
+  | .obj _ => (.error (.malformed off "not a stream"), budget)
+
+/-- **Budgeted stream access** (task 3.10). Fetch object `n g` and decode it as a stream,
+charging `budget` (rule D1). -/
+def Doc.decodeStreamOf (doc : Doc) (limits : Limits) (budget : Budget) (n g : Nat) :
+    (Except Error Decoded) × Budget :=
+  match doc.file.getObject limits n g with
+  | .error e => (.error e, budget)
+  | .ok b => decodeBodyB doc.file limits budget (offsetOf doc.file n) b
+
+/-- The bytes of a content stream: an image-codec result is `malformed` (rule D3). -/
+def contentData (off : Nat) : Except Error Decoded → Except Error ByteArray
+  | .error e => .error e
+  | .ok (.data b) => .ok b
+  | .ok (.image _ _ _) => .error (.malformed off "content stream with an image filter")
+
+/-- Decode a `/Contents` array (rule D3), threading the budget. A reference to a missing
+object (`null`) is skipped; a non-reference element is `malformed`. -/
+def Doc.decodeRefsB (doc : Doc) (limits : Limits) :
+    Budget → List PdfObject → (Except Error (List ByteArray)) × Budget
+  | b, [] => (.ok [], b)
+  | b, .ref n g :: os =>
+    match doc.file.getObject limits n g with
+    | .error e => (.error e, b)
+    | .ok (.obj .null) => doc.decodeRefsB limits b os
+    | .ok body =>
+      match contentData (offsetOf doc.file n)
+          (decodeBodyB doc.file limits b (offsetOf doc.file n) body).1 with
+      | .error e => (.error e, (decodeBodyB doc.file limits b (offsetOf doc.file n) body).2)
+      | .ok bs =>
+        match doc.decodeRefsB limits
+            (decodeBodyB doc.file limits b (offsetOf doc.file n) body).2 os with
+        | (.error e, q) => (.error e, q)
+        | (.ok bss, q) => (.ok (bs :: bss), q)
+  | b, _ :: _ =>
+    (.error (.malformed 0 "/Contents array element is not an indirect reference"), b)
+
+/-- **Budgeted page contents** (rule D3): the decoded content streams of a page, in order,
+not concatenated (the content lexer of phase 5 reads across them). -/
+def Doc.decodeContentsB (doc : Doc) (limits : Limits) (budget : Budget) (page : Page) :
+    (Except Error (List ByteArray)) × Budget :=
+  match page.contents with
+  | none => (.ok [], budget)
+  | some (.array items) => doc.decodeRefsB limits budget items
+  | some (.ref n g) =>
+    match doc.file.getObject limits n g with
+    | .error e => (.error e, budget)
+    | .ok (.obj .null) => (.ok [], budget)
+    | .ok (.obj (.array items)) => doc.decodeRefsB limits budget items
+    | .ok body =>
+      match contentData (offsetOf doc.file n)
+          (decodeBodyB doc.file limits budget (offsetOf doc.file n) body).1 with
+      | .error e => (.error e, (decodeBodyB doc.file limits budget (offsetOf doc.file n) body).2)
+      | .ok bs => (.ok [bs], (decodeBodyB doc.file limits budget (offsetOf doc.file n) body).2)
+  | some _ =>
+    (.error (.malformed (offsetOf doc.file page.num) "/Contents is not a stream or an array"),
+      budget)
+
+/-- The budget never grows in `decodeBodyB`. -/
+theorem decodeBodyB_le (d : OpenDoc) (limits : Limits) (budget : Budget) (off : Nat)
+    (body : IndirectBody) :
+    (decodeBodyB d limits budget off body).2.remaining ≤ budget.remaining := by
+  unfold decodeBodyB
+  split
+  · split
+    · exact Nat.le_refl _
+    · exact Filter.decodeStreamB_le _ _ _ _ _
+  · exact Nat.le_refl _
+
+/-- **Charge law** of `decodeBodyB`. -/
+theorem decodeBodyB_charge {d : OpenDoc} {limits : Limits} {budget : Budget} {off : Nat}
+    {body : IndirectBody} {r : Decoded} (h : (decodeBodyB d limits budget off body).1 = .ok r) :
+    r.bytes.size + (decodeBodyB d limits budget off body).2.remaining ≤ budget.remaining := by
+  unfold decodeBodyB at h ⊢
+  split at h
+  · rename_i s
+    cases hs : resolveStreamDict d limits s.dict with
+    | error e => simp [hs] at h
+    | ok sd =>
+      simp only [hs] at h ⊢
+      exact Filter.decodeStreamB_charge h
+  · cases h
+
+/-- **Budget monotone**: `Doc.decodeStreamOf` never increases the budget. -/
+theorem Doc.decodeStreamOf_le (doc : Doc) (limits : Limits) (budget : Budget) (n g : Nat) :
+    (doc.decodeStreamOf limits budget n g).2.remaining ≤ budget.remaining := by
+  unfold Doc.decodeStreamOf
+  split
+  · exact Nat.le_refl _
+  · exact decodeBodyB_le _ _ _ _ _
+
+/-- **Charge law** (S3): a stream decoded by `Doc.decodeStreamOf` was charged its size. -/
+theorem Doc.decodeStreamOf_charge {doc : Doc} {limits : Limits} {budget : Budget} {n g : Nat}
+    {r : Decoded} (h : (doc.decodeStreamOf limits budget n g).1 = .ok r) :
+    r.bytes.size + (doc.decodeStreamOf limits budget n g).2.remaining ≤ budget.remaining := by
+  unfold Doc.decodeStreamOf at h ⊢
+  split at h
+  · cases h
+  · rename_i b hb
+    exact decodeBodyB_charge h
+
+/-- **Per-stream bound** for `Doc.decodeStreamOf`. -/
+theorem Doc.decodeStreamOf_size_le {doc : Doc} {limits : Limits} {budget : Budget}
+    {n g : Nat} {r : Decoded} (h : (doc.decodeStreamOf limits budget n g).1 = .ok r) :
+    r.bytes.size ≤ limits.maxDecodedStreamBytes := by
+  unfold Doc.decodeStreamOf at h
+  split at h
+  · cases h
+  · unfold decodeBodyB at h
+    split at h
+    · split at h
+      · cases h
+      · exact Filter.decodeStreamB_size_le h
+    · cases h
+
+/-- `contentData` keeps the bytes of a data result. -/
+theorem contentData_ok {off : Nat} {r : Except Error Decoded} {bs : ByteArray}
+    (h : contentData off r = .ok bs) : ∃ d, r = .ok d ∧ d.bytes = bs := by
+  unfold contentData at h
+  split at h
+  · cases h
+  · simp only [Except.ok.injEq] at h; subst h; exact ⟨_, rfl, rfl⟩
+  · cases h
+
+/-- The budget never grows in `Doc.decodeRefsB`. -/
+theorem Doc.decodeRefsB_le (doc : Doc) (limits : Limits) :
+    (b : Budget) → (items : List PdfObject) →
+    (doc.decodeRefsB limits b items).2.remaining ≤ b.remaining
+  | b, [] => by simp [Doc.decodeRefsB]
+  | b, .ref n g :: os => by
+    have hbody := fun body => decodeBodyB_le doc.file limits b (offsetOf doc.file n) body
+    unfold Doc.decodeRefsB
+    split
+    · exact Nat.le_refl _
+    · exact Doc.decodeRefsB_le doc limits b os
+    · rename_i body _ _
+      have h1 := hbody body
+      split
+      · exact h1
+      · have h2 := Doc.decodeRefsB_le doc limits
+          (decodeBodyB doc.file limits b (offsetOf doc.file n) body).2 os
+        split <;> rename_i hq <;> rw [hq] at h2 <;> dsimp only at h2 ⊢ <;> omega
+  | b, .null :: _ | b, .bool _ :: _ | b, .int _ :: _ | b, .real _ :: _ | b, .string _ :: _
+  | b, .name _ :: _ | b, .array _ :: _ | b, .dict _ :: _ => by simp [Doc.decodeRefsB]
+
+/-- **Document-wide bound for content arrays**: the decoded parts plus the budget left are
+at most the budget before. -/
+theorem Doc.decodeRefsB_total (doc : Doc) (limits : Limits) :
+    (b : Budget) → (items : List PdfObject) → (parts : List ByteArray) →
+    (doc.decodeRefsB limits b items).1 = .ok parts →
+    (parts.map ByteArray.size).sum + (doc.decodeRefsB limits b items).2.remaining ≤ b.remaining
+  | b, [], parts, h => by
+    simp only [Doc.decodeRefsB, Except.ok.injEq] at h ⊢; subst h; simp
+  | b, .ref n g :: os, parts, h => by
+    unfold Doc.decodeRefsB at h ⊢
+    split at h
+    · cases h
+    · rename_i hg
+      exact Doc.decodeRefsB_total doc limits b os parts h
+    · rename_i body hnull hg
+      split at h
+      · cases h
+      · rename_i bs hc
+        split at h
+        · cases h
+        · rename_i bss q hq
+          simp only [Except.ok.injEq] at h; subst h
+          obtain ⟨dd, hdd, hbs⟩ := contentData_ok hc
+          have h1 := decodeBodyB_charge hdd
+          have h2 := Doc.decodeRefsB_total doc limits _ os bss (by rw [hq])
+          rw [hq] at h2
+          rw [hbs] at h1
+          simp only [List.map_cons, List.sum_cons]
+          dsimp only at h2 ⊢
+          omega
+  | b, .null :: _, _, h | b, .bool _ :: _, _, h | b, .int _ :: _, _, h
+  | b, .real _ :: _, _, h | b, .string _ :: _, _, h | b, .name _ :: _, _, h
+  | b, .array _ :: _, _, h | b, .dict _ :: _, _, h => by simp [Doc.decodeRefsB] at h
+
+/-- The budget never grows in `Doc.decodeContentsB`. -/
+theorem Doc.decodeContentsB_le (doc : Doc) (limits : Limits) (budget : Budget) (page : Page) :
+    (doc.decodeContentsB limits budget page).2.remaining ≤ budget.remaining := by
+  unfold Doc.decodeContentsB
+  split
+  · exact Nat.le_refl _
+  · exact Doc.decodeRefsB_le _ _ _ _
+  · split
+    · exact Nat.le_refl _
+    · exact Nat.le_refl _
+    · exact Doc.decodeRefsB_le _ _ _ _
+    · rename_i n _ _ _ body _ _ _
+      have := decodeBodyB_le doc.file limits budget (offsetOf doc.file n) body
+      split <;> exact this
+  · exact Nat.le_refl _
+
+/-- **Document-wide bound for a page's contents** (S3): the decoded content streams plus the
+budget left are at most the budget before. Threading the budget through every page access
+of a document from `Budget.init limits` therefore decodes at most
+`limits.maxDecodedTotalBytes` bytes of content in total. -/
+theorem Doc.decodeContentsB_total {doc : Doc} {limits : Limits} {budget : Budget} {page : Page}
+    {parts : List ByteArray} (h : (doc.decodeContentsB limits budget page).1 = .ok parts) :
+    (parts.map ByteArray.size).sum + (doc.decodeContentsB limits budget page).2.remaining ≤
+      budget.remaining := by
+  unfold Doc.decodeContentsB at h ⊢
+  split at h
+  · simp only [Except.ok.injEq] at h; subst h; simp
+  · exact Doc.decodeRefsB_total doc limits budget _ parts h
+  · rename_i n g hc
+    split at h
+    · cases h
+    · simp only [Except.ok.injEq] at h; subst h
+      rename_i hg
+      simp
+    · rename_i items hg
+      exact Doc.decodeRefsB_total doc limits budget items parts h
+    · rename_i body hn ha hg
+      split at h
+      · cases h
+      · rename_i bs hcd
+        simp only [Except.ok.injEq] at h; subst h
+        obtain ⟨dd, hdd, hbs⟩ := contentData_ok hcd
+        have := decodeBodyB_charge hdd
+        rw [hbs] at this
+        simpa using this
+  · cases h
+
 /-! ## Theorems -/
 
 /-- **CropBox inside MediaBox** (§14.11.2). -/
@@ -849,6 +1156,58 @@ private def threePages : ByteArray := mkPdf [
 -- /Pages pointing at the catalog: an unexpected /Type.
 #guard summary (mkPdf ["<< /Type /Catalog /Pages 1 0 R >>"]) ==
   "err page tree node 1 has an unexpected /Type"
+
+
+/-- Two pages with content streams: page 1 has `[4 0 R 5 0 R 6 0 R]` (`ABC` in hex, `DEF` in
+hex with an indirect `/Filter`, raw `xyz`); page 2 has `/Contents 8 0 R`, an array holding a
+dangling reference and `4 0 R`. Object 7 is the name `/ASCIIHexDecode`. -/
+private def contentPdf : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R 9 0 R] /Count 2 /MediaBox [0 0 612 792] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R 6 0 R] >>",
+  "<< /Length 7 /Filter /AHx >>\nstream\n414243>\nendstream",
+  "<< /Length 7 /Filter 7 0 R >>\nstream\n444546>\nendstream",
+  "<< /Length 3 >>\nstream\nxyz\nendstream",
+  "/ASCIIHexDecode",
+  "[20 0 R 4 0 R]",
+  "<< /Type /Page /Parent 2 0 R /Contents 8 0 R >>"]
+
+/-- Test helper: bytes as (Latin-1) text. -/
+private def asText (b : ByteArray) : String :=
+  String.ofList (b.data.toList.map fun (u : UInt8) => Char.ofNat u.toNat)
+
+/-- Test helper: decode page `i`'s contents under budget `rem`; parts as strings, or the
+error kind, and the budget left. -/
+private def pc (i rem : Nat) : String :=
+  match openDoc Limits.default contentPdf with
+  | .error _ => "open failed"
+  | .ok doc =>
+    match doc.pages.toList[i]? with
+    | none => "no page"
+    | some p =>
+      let r := doc.decodeContentsB Limits.default ⟨rem⟩ p
+      let s := match r.1 with
+        | .ok parts =>
+          s!"ok {parts.map asText}"
+        | .error (.limitExceeded k) => s!"limit {reprStr k}"
+        | .error (.malformed _ m) => s!"err {m}"
+        | .error _ => "err"
+      s!"{s} rem={r.2.remaining}"
+
+-- Budget exactly hit by the three parts (3 + 3 + 3).
+#guard pc 0 9 == "ok [ABC, DEF, xyz] rem=0"
+-- The raw third part does not fit what is left (2 of 8).
+#guard pc 0 8 == "limit SafePdf.LimitKind.decodedTotalBytes rem=2"
+-- The second part's decoder hits the remaining budget (1) and is charged it.
+#guard pc 0 4 == "limit SafePdf.LimitKind.decodedTotalBytes rem=0"
+-- Indirect /Contents array with a dangling reference (skipped).
+#guard pc 1 100 == "ok [ABC] rem=97"
+-- `decodeStreamOf` on a non-stream object.
+#guard (match openDoc Limits.default contentPdf with
+  | .ok doc => match (doc.decodeStreamOf Limits.default ⟨10⟩ 7 0).1 with
+    | .error (.malformed _ "not a stream") => true
+    | _ => false
+  | .error _ => false)
 
 end Tests
 
