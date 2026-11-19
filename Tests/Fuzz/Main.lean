@@ -4,7 +4,7 @@ import SafePdf
 # Fuzz driver (Plan.md §6 Phase 0, §7 items 2–3)
 
 Calls every parser entry point on generated inputs and reports outcomes per entry point:
-`SafePdf.parse` (header stub), `SafePdf.parseObjectAt` at offset 0 and at a pseudo-random
+`SafePdf.parse` (opens the file, task 2.11), `SafePdf.parseObjectAt` at offset 0 and at a pseudo-random
 offset (`Limits.default`) and at offset 0 with `maxObjectDepth := 8`,
 `SafePdf.parseIndirectAt` at offset 0, and `Core.Lex.lexAll`. Deterministic: all
 randomness comes from a SplitMix64 generator seeded by `--seed`, so a campaign (and any
