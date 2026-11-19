@@ -15,8 +15,18 @@ references: §9.4.4 (glyph positioning), §9.6–9.7 (simple and composite fonts
 
 ## Fonts (`FontInfo`, `loadFonts`)
 
-Every entry of the page's `/Resources /Font` (plus, one level deep, the `/Font` entries of the
-page's form XObjects for names the page does not define) becomes a `FontInfo`:
+Fonts are identified by their **object** (task 6.7a), as the runner records it in
+`FontRef.id` (`Core.Content.Run`): the font table (`FontTable`) is keyed by `FontKey`, the
+indirect reference of the font dictionary, or, for a direct dictionary, the resource name in
+the resources of its owner (the page, or the form XObject whose own `/Resources` hold it). So
+a form whose `/F1` differs from the page's `/F1` gets its own metrics and Unicode map, a font
+object shared under several names or by several forms is parsed once, and an ExtGState
+`/Font` (`gs`) is found by its reference. `loadFonts` collects the `/Font` and ExtGState
+`/Font` entries of the page's resources and, through the page's form XObjects recursively, of
+every form with its own `/Resources` (at most `maxFormFonts` resource dictionaries, each form
+once, at most `maxFormFonts` XObjects inspected per dictionary). A name a form's own resources
+do not define falls back to the page's font of that name (`FontTable.get`; sloppy producers
+rely on it). Every collected font object becomes a `FontInfo`:
 
 * **Code splitting** (`SplitKind`): one byte for simple fonts; two bytes for Type0 with
   `Identity-H`/`-V`; for other Type0 fonts the `codespacerange` of an embedded `/Encoding` CMap,
@@ -184,11 +194,31 @@ def FontInfo.unknown : FontInfo :=
 
 instance : Inhabited FontInfo := ⟨FontInfo.unknown⟩
 
-/-- Fonts by resource name. -/
-abbrev FontTable := List (Name × FontInfo)
+/-- The key of a font in a page's font table (see the module doc): the font dictionary's
+indirect object, or a resource name in the resources of `owner` (`FontId.res`). -/
+inductive FontKey where
+  /-- Font dictionary object `num gen`. -/
+  | obj (num gen : Nat)
+  /-- Entry `name` of the `/Font` resources of `owner` (0: the page; else a form object). -/
+  | res (owner : Nat) (name : Name)
+  deriving DecidableEq, Repr, Inhabited
 
-/-- The font of a resource name (`FontInfo.unknown` when absent). -/
-def FontTable.get (t : FontTable) (n : Name) : FontInfo := (t.lookup n).getD FontInfo.unknown
+/-- The table key of a font reference (its `FontId`, with its name for `.res`). -/
+def fontKey (f : FontRef) : FontKey :=
+  match f.id with
+  | .ref n g => .obj n g
+  | .res o => .res o f.name
+
+/-- Fonts by key; a referenced font is also listed under its resource names (`.res`), so the
+fallback of `get` finds page fonts by name. -/
+abbrev FontTable := List (FontKey × FontInfo)
+
+/-- The font of a font reference: by its key, else (a name a form's resources do not define)
+the page's font of that name, else `FontInfo.unknown`. -/
+def FontTable.get (t : FontTable) (f : FontRef) : FontInfo :=
+  match t.lookup (fontKey f) with
+  | some fi => fi
+  | none => (t.lookup (.res 0 f.name)).getD FontInfo.unknown
 
 /-- Whether word spacing applies to a code (§9.3.3: the single-byte code 32). -/
 def isSpaceCode (c : List UInt8) : Bool := c == [32]
@@ -208,7 +238,7 @@ def endTx (fi : FontInfo) (ts : TextState) (size : Fixed) (tx : Fixed) (cs : Lis
 def advanceFn (t : FontTable) (ts : TextState) (bs : List UInt8) : Fixed :=
   match ts.font with
   | some f =>
-    let fi := t.get f.name
+    let fi := t.get f
     endTx fi ts f.size Fixed.zero (fi.split.codes bs)
   | none => Fixed.zero
 
@@ -372,11 +402,15 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
         | _ => Fixed.zero),
       simpleUnicode tu sm.encoding, s!"{subtype} {base}{tuDesc}{t1Desc}", Fixed.one⟩, s2)
 
-/-- Maximum number of font resources loaded per page. -/
+/-- Maximum number of font objects loaded per page. -/
 def maxFonts : Nat := 1024
 
-/-- Maximum number of form XObjects whose `/Font` resources are collected per page. -/
+/-- Maximum number of resource dictionaries (page and forms) whose fonts are collected per
+page, and of XObjects inspected per dictionary. -/
 def maxFormFonts : Nat := 64
+
+/-- A font found in resources: its key, every key it is known under, the font object. -/
+abbrev FontEntry := FontKey × List FontKey × PdfObject
 
 /-- The `/Font` entries of a resource dictionary. -/
 def fontEntries {σ : Type} (src : Source σ) (s : σ) (res : Dict) : Dict × σ :=
@@ -384,41 +418,78 @@ def fontEntries {σ : Type} (src : Source σ) (s : σ) (res : Dict) : Dict × σ
   | some o => Run.dictOf src s o
   | none => ([], s)
 
-/-- The `/Font` entries of the page's form XObjects (one level). -/
-def formFontEntries {σ : Type} (src : Source σ) (s : σ) (res : Dict) : Dict × σ :=
+/-- The fonts of the resources `res` of `owner`: its `/Font` entries (a reference is keyed by
+its object and also listed under its name) and the `/Font [ref size]` entries of its
+ExtGState dictionaries. -/
+def resFonts {σ : Type} (src : Source σ) (s : σ) (owner : Nat) (res : Dict) :
+    List FontEntry × σ :=
+  let (fs, s) := fontEntries src s res
+  let named : List FontEntry := fs.map fun (n, o) =>
+    match o with
+    | .ref num g => (.obj num g, [.obj num g, .res owner n], o)
+    | _ => (.res owner n, [.res owner n], o)
+  let (gss, s) := match Dict.get? res (nm "ExtGState") with
+    | some o => Run.dictOf src s o
+    | none => ([], s)
+  let (gsFonts, s) := gss.foldl (fun (acc : List FontEntry × σ) (_, o) =>
+    let (d, s) := Run.dictOf src acc.2 o
+    match Dict.get? d (nm "Font") with
+    | some f =>
+      match Run.resolve src s f with
+      | (.array (.ref num g :: _), s) => (acc.1 ++ [(.obj num g, [.obj num g], .ref num g)], s)
+      | (_, s) => (acc.1, s)
+    | none => (acc.1, s)) ([], s)
+  (named ++ gsFonts, s)
+
+/-- The form XObjects of `res` that have their own `/Resources` (as `Run.formResources`
+decides): object number and resources. At most `maxFormFonts` XObjects are inspected. -/
+def formChildren {σ : Type} (src : Source σ) (s : σ) (res : Dict) : List (Nat × Dict) × σ :=
   match Dict.get? res (nm "XObject") with
   | none => ([], s)
   | some o =>
     let (xs, s) := Run.dictOf src s o
-    (xs.take maxFormFonts).foldl (fun (acc, s) (_, x) =>
+    (xs.take maxFormFonts).foldl (fun (acc : List (Nat × Dict) × σ) (_, x) =>
       match x with
       | .ref n g =>
-        match src.fetch s n g with
+        match src.fetch acc.2 n g with
         | (.ok (.stream st), s1) =>
           if Dict.get? st.dict (nm "Subtype") == some (.name (nm "Form")) then
-            match Dict.get? st.dict (nm "Resources") with
-            | some r =>
-              let (rd, s2) := Run.dictOf src s1 r
-              let (fs, s3) := fontEntries src s2 rd
-              (acc ++ fs, s3)
-            | none => (acc, s1)
-          else (acc, s1)
-        | (_, s1) => (acc, s1)
-      | _ => (acc, s)) ([], s)
+            match Run.formResources src s1 st.dict [] 0 n with
+            | ((rd, ow), s2) => if ow = n ∧ n ≠ 0 then (acc.1 ++ [(n, rd)], s2) else (acc.1, s2)
+          else (acc.1, s1)
+        | (_, s1) => (acc.1, s1)
+      | _ => acc) ([], s)
 
-/-- **Font table of a page**: the page's `/Font` resources, then form fonts under names the
-page does not define; at most `maxFonts`. -/
+/-- Collect fonts breadth-first over a worklist of resource dictionaries (owner, resources),
+each form at most once (`seen`); `fuel` bounds the dictionaries scanned. -/
+def scanFonts {σ : Type} (src : Source σ) :
+    Nat → List (Nat × Dict) → List Nat → List FontEntry → σ → List FontEntry × σ
+  | 0, _, _, acc, s => (acc, s)
+  | _, [], _, acc, s => (acc, s)
+  | f + 1, (owner, res) :: rest, seen, acc, s =>
+    let (es, s) := resFonts src s owner res
+    let (kids, s) := formChildren src s res
+    let (new, seen) := kids.foldl (fun (acc : List (Nat × Dict) × List Nat) (n, d) =>
+      if acc.2.contains n then acc else (acc.1 ++ [(n, d)], n :: acc.2)) ([], seen)
+    scanFonts src f (rest ++ new) seen (acc ++ es) s
+
+/-- **Font table of a page**: every font collected by `scanFonts` from the page's resources
+(owner 0), each font object built once (`buildFont`); at most `maxFonts` objects. -/
 def loadFonts {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict) :
     FontTable × σ :=
-  let (pageFonts, s) := fontEntries src s res
-  let (formFonts, s) := formFontEntries src s res
-  let names := pageFonts.map (·.1)
-  let all := pageFonts ++ formFonts.filter fun (n, _) => !names.contains n
-  let (t, s) := (all.take maxFonts).foldl (fun (acc, s) (n, o) =>
-    if (acc.lookup n).isSome then (acc, s)
-    else
-      let (fi, s') := buildFont limits src s o
-      (acc ++ [(n, fi)], s')) (([] : FontTable), s)
+  let (es, s) := scanFonts src (maxFormFonts + 1) [(0, res)] [] [] s
+  let (t, _, s) := es.foldl (fun (acc : FontTable × Nat × σ) (e : FontEntry) =>
+    let (t, k, s) := acc
+    let (key, keys, o) := e
+    let add (fi : FontInfo) : FontTable :=
+      t ++ (keys.filter fun k' => (t.lookup k').isNone).map fun k' => (k', fi)
+    match t.lookup key with
+    | some fi => (add fi, k, s)
+    | none =>
+      if maxFonts ≤ k then acc
+      else
+        let (fi, s') := buildFont limits src s o
+        (add fi, k + 1, s')) (([] : FontTable), 0, s)
   (t, s)
 
 /-! ## Glyphs -/
@@ -524,7 +595,7 @@ def mkGlyph (fi : FontInfo) (r : GlyphRun) (e : List UInt8 × Fixed × Fixed) : 
 
 /-- The glyphs of the run at display-list index `i`, in show order. -/
 def runGlyphs (fonts : FontTable) (i : Nat) (r : GlyphRun) : List Glyph :=
-  let fi := fonts.get r.font.name
+  let fi := fonts.get r.font
   (layoutParts fi (runTextState r) r.font.size Fixed.zero r.parts).mapIdx fun j e =>
     { mkGlyph fi r e with item := i, seq := j }
 
@@ -584,11 +655,11 @@ strings showed, in order. -/
 theorem runGlyphs_codes (fonts : FontTable) (i : Nat) (r : GlyphRun) :
     ((runGlyphs fonts i r).map Glyph.code).flatten = (strParts r.parts).flatten := by
   have h1 : (runGlyphs fonts i r).map Glyph.code =
-      (layoutParts (fonts.get r.font.name) (runTextState r) r.font.size Fixed.zero r.parts).map (·.1) := by
+      (layoutParts (fonts.get r.font) (runTextState r) r.font.size Fixed.zero r.parts).map (·.1) := by
     apply List.ext_getElem?
     intro k
     simp [runGlyphs, List.getElem?_mapIdx, mkGlyph]
-    cases (layoutParts (fonts.get r.font.name) (runTextState r) r.font.size Fixed.zero r.parts)[k]? <;>
+    cases (layoutParts (fonts.get r.font) (runTextState r) r.font.size Fixed.zero r.parts)[k]? <;>
       rfl
   rw [h1, layoutParts_codes]
   generalize strParts r.parts = l
@@ -683,7 +754,7 @@ def layout (o : Options) (gs : List Glyph) : Array Line × String :=
 
 /-- The text of a page, with everything it was computed from. -/
 structure PageText where
-  /-- The fonts used (by resource name). -/
+  /-- The fonts used (by `FontKey`). -/
   fonts : FontTable
   /-- The display list of the page (the runner's output, fonts' advances applied). -/
   items : DisplayList
@@ -731,8 +802,9 @@ theorem extractPage_items {σ : Type} (limits : Limits) (src : Source σ) (res :
 open SafePdf.Core.Doc
 open SafePdf.Core.Filter (Budget)
 
-/-- Document access for the runner: `OpenDoc.getObject`, stream decoding under the document
-budget (as the inspector's `docSource`). -/
+/-- Document access for the runner: `OpenDoc.getObject`, and stream decoding under the
+document budget (`decodeBodyB`, rules D1–D2, as `Doc.decodeStreamOf` without a second fetch;
+an image codec is an error, rule D3). Shared with the inspector's `svg`/`ops` views. -/
 def docSource (limits : Limits) (doc : Doc) : Source Budget :=
   ⟨fun b n g => (doc.file.getObject limits n g, b),
    fun b n st =>

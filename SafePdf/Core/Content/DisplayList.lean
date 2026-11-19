@@ -25,7 +25,9 @@ displayed" (C6) becomes a property of this one structure.
   clipped-away text (C6).
 * **Glyph runs are unpositioned.** A run records the bytes shown by one `Tj`/`'`/`"`/`TJ`
   (with the `TJ` adjustments), the font reference, the §9.3 parameters, `Tm` at the start of
-  the run and the CTM. Glyph positions need font metrics (Phase 6). Consecutive shows in one
+  the run and the CTM. The font reference identifies the font *object* (`FontId`, task 6.7a:
+  its indirect reference, or the content whose resources hold it), not only its resource name,
+  so a form's `/F1` and the page's `/F1` stay apart. Glyph positions need font metrics (Phase 6). Consecutive shows in one
   text object start where the previous ended, which also needs metrics: 5.2 therefore takes
   the advance computation as a parameter (Phase 6 supplies real widths; a zero-advance stub
   suffices for M5), so `tm` is always the absolute text matrix. `tm` and `ctm` are kept
@@ -84,7 +86,7 @@ inductive TextPart where
 
 /-- One text-showing operation with everything needed to position and paint its glyphs. -/
 structure GlyphRun where
-  /-- Font resource and size (`Tf`). -/
+  /-- Font (resource name, object identity) and size (`Tf`, or an ExtGState `/Font`). -/
   font : FontRef
   /-- `Tm` at the start of the run (text space → user space). -/
   tm : Matrix
@@ -199,7 +201,7 @@ private def sampleSquare : Path :=
      .closePath]⟩
 
 private def sampleRun : GlyphRun :=
-  { font := ⟨Name.ofString "F1", Fixed.ofInt 12⟩, tm := Matrix.translate (Fixed.ofInt 72)
+  { font := { name := Name.ofString "F1", size := Fixed.ofInt 12 }, tm := Matrix.translate (Fixed.ofInt 72)
       (Fixed.ofInt 700), ctm := Matrix.identity, charSpacing := Fixed.zero,
     wordSpacing := Fixed.zero, horizScaling := Fixed.ofInt 100, rise := Fixed.zero,
     renderMode := .fill, parts := [.str "Hi".toUTF8.toList, .adjust (Fixed.ofInt (-250))],

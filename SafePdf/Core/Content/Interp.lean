@@ -442,7 +442,7 @@ def simple (cfg : Config) (c : Core) (op : Op) : Out :=
     match lastN 2 o with
     | some [.name n, sz] =>
       match num? sz with
-      | some s => ok (setText c { c.gs.text with font := some ⟨n, s⟩ })
+      | some s => ok (setText c { c.gs.text with font := some { name := n, size := s } })
       | none => bad c
     | _ => bad c
   | [84, 114] => -- Tr
