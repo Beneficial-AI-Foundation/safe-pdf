@@ -113,6 +113,26 @@ def _objects_check(path: str):
         raise Skip(str(e))
 
 
+STREAMS_PER_FILE = 20   # set from --per-file in main()
+
+
+def _load_streams_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "streams_cmp", os.path.join(os.path.dirname(os.path.abspath(__file__)), "streams.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _streams_check(path: str):
+    mod = _load_streams_module()
+    try:
+        return mod.check_file(INSPECT, path, STREAMS_PER_FILE)
+    except mod.Skip as e:
+        raise Skip(str(e))
+
+
 def _placeholder(tool_argv):
     def ref(path):
         return run_tool([a.replace("{file}", path) for a in tool_argv])
@@ -124,6 +144,8 @@ COMPARATORS = {
         Comparator("size", [], None, _ref_size),
         # Placeholders: normalizers are identity until the views exist.
         Comparator("objects", ["qpdf"], "objects", lambda p: "", custom=_objects_check),
+        # Flate decoder vs Python zlib (stdlib; no external tool needed).
+        Comparator("streams", [], "streams", lambda p: "", custom=_streams_check),
         Comparator("pages", ["mutool"], "pages",
                    _placeholder(["mutool", "info", "{file}"])),
         Comparator("text", ["pdftotext"], "text",
@@ -173,11 +195,16 @@ def main(argv=None) -> int:
     ap.add_argument("--files", help="glob (relative to cwd) selecting files; overrides --corpus")
     ap.add_argument("--limit", type=int, help="use at most N files")
     ap.add_argument("--json", metavar="OUT", help="write full results as JSON")
+    ap.add_argument("--per-file", type=int, default=None, metavar="N",
+                    help="streams comparator: byte-compare at most N streams per file "
+                         "(0 = all; default 20, or all when --files is given)")
     ap.add_argument("--min-compared", type=int, default=0, metavar="N",
                     help="fail unless at least N files had >= 1 object compared by the "
                          "objects comparator (default 0 = no minimum)")
     args = ap.parse_args(argv)
 
+    global STREAMS_PER_FILE
+    STREAMS_PER_FILE = args.per_file if args.per_file is not None else (0 if args.files else 20)
     names = args.comparator or list(COMPARATORS)
     for n in names:
         if n not in COMPARATORS:
