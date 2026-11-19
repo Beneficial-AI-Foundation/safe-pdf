@@ -410,3 +410,22 @@ import SafePdf
 #print axioms SafePdf.Core.Doc.Nav.outline_items_le
 #print axioms SafePdf.Core.Doc.Nav.labelTable_visited_le
 #print axioms SafePdf.Core.Doc.Nav.labelTable_nodup
+
+-- Phase 4, task 4.1b: page-tree end-to-end theorems (SafePdf/Spec/Doc.lean)
+#print axioms SafePdf.Spec.PageTree.foldl_merge_resources
+#print axioms SafePdf.Spec.PageTree.foldl_merge_cropBox
+#print axioms SafePdf.Spec.PageTree.loop_paths
+#print axioms SafePdf.Spec.PageTree.walk_path_nodup
+#print axioms SafePdf.Spec.PageTree.walk_kid_not_ancestor
+#print axioms SafePdf.Spec.PageTree.walk_page_inherit
+#print axioms SafePdf.Spec.PageTree.PageInh.fields
+#print axioms SafePdf.Spec.PageTree.getObject_ne_null_key
+#print axioms SafePdf.Spec.PageTree.popLive_exhausted
+#print axioms SafePdf.Spec.PageTree.loop_fuel_irrelevant
+#print axioms SafePdf.Spec.PageTree.walk_fuel_irrelevant
+#print axioms SafePdf.Spec.PageTree.ofOpen_path_nodup
+#print axioms SafePdf.Spec.PageTree.openDoc_path_nodup
+#print axioms SafePdf.Spec.PageTree.ofOpen_cycle_error
+#print axioms SafePdf.Spec.PageTree.openDoc_cycle_error
+#print axioms SafePdf.Spec.PageTree.ofOpen_page_inherit
+#print axioms SafePdf.Spec.PageTree.openDoc_page_inherit
