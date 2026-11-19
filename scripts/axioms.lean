@@ -343,3 +343,24 @@ import SafePdf
 #print axioms SafePdf.Core.Doc.ofOpen_pages_nodup
 -- Phase 4, task 4.3a: crypto primitives (SafePdf/Core/Crypt/)
 #print axioms SafePdf.Core.Crypt.Md5.md5_size
+-- Phase 3, task 3.8b: Flate work bound (SafePdf/Spec/FlateWork.lean)
+#print axioms SafePdf.Spec.FlateWork.decodeGoW_fst
+#print axioms SafePdf.Spec.FlateWork.codesW_fst
+#print axioms SafePdf.Spec.FlateWork.codesW_bound
+#print axioms SafePdf.Spec.FlateWork.storedW_fst
+#print axioms SafePdf.Spec.FlateWork.storedW_bound
+#print axioms SafePdf.Spec.FlateWork.readLengthsW_fst
+#print axioms SafePdf.Spec.FlateWork.readLengthsW_bound
+#print axioms SafePdf.Spec.FlateWork.readDynamicW_fst
+#print axioms SafePdf.Spec.FlateWork.readDynamicW_bound
+#print axioms SafePdf.Spec.FlateWork.blocksW_fst
+#print axioms SafePdf.Spec.FlateWork.blocksW_bound
+#print axioms SafePdf.Spec.FlateWork.inflateAtW_fst
+#print axioms SafePdf.Spec.FlateWork.inflateAtW_steps_le
+#print axioms SafePdf.Spec.FlateWork.inflateAtW_steps_le_of_ok
+#print axioms SafePdf.Spec.FlateWork.inflateW_fst
+#print axioms SafePdf.Spec.FlateWork.inflateW_steps_le
+#print axioms SafePdf.Spec.FlateWork.zlibDecodeOutW_fst
+#print axioms SafePdf.Spec.FlateWork.flateDecodeW_fst
+#print axioms SafePdf.Spec.FlateWork.flateDecodeW_steps_le
+#print axioms SafePdf.Spec.FlateWork.flateDecodeW_steps_le_of_ok
