@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Text-extraction differential comparator: our `text` view vs poppler's `pdftotext`.
+"""Text-extraction differential comparator: our `text` view vs poppler's `pdftotext`
+(comparator `text`) or MuPDF's `mutool draw -F txt` (comparator `text-mupdf`).
 
 Plan.md section 7 item 1; Phase 6 exit M6 ("text extraction >= 98% similarity vs
 pdfium/MuPDF on corpus (normalized edit distance)"), task 6.6.  Stdlib only
@@ -340,21 +341,33 @@ def run_ours(inspect, path):
     return out
 
 
-def run_ref(path):
-    p = subprocess.run(["pdftotext", "-enc", "UTF-8", path, "-"], capture_output=True,
-                       timeout=TIMEOUT)
+# Reference extractors: name -> (executable, argv builder). Both write UTF-8 text with
+# a form feed after every page, so `load_ref` splits them the same way.
+#   pdftotext: poppler's default "reading order" text (`pdftotext -enc UTF-8 FILE -`).
+#   mupdf:     MuPDF's structured-text output (`mutool draw -q -F txt -o - FILE`).
+REFERENCES = {
+    "pdftotext": ("pdftotext", lambda p: ["pdftotext", "-enc", "UTF-8", p, "-"]),
+    "mupdf": ("mutool", lambda p: ["mutool", "draw", "-q", "-F", "txt", "-o", "-", p]),
+}
+
+
+def run_ref(path, ref="pdftotext"):
+    tool, argv = REFERENCES[ref]
+    p = subprocess.run(argv(path), capture_output=True, timeout=TIMEOUT)
     if p.returncode != 0:
-        raise Skip("pdftotext failed (exit %d): %s" % (
-            p.returncode, p.stderr.decode("utf-8", "replace").strip()[:120]))
+        raise Skip("%s failed (exit %d): %s" % (
+            tool, p.returncode, p.stderr.decode("utf-8", "replace").strip()[:120]))
     return p.stdout.decode("utf-8", "replace")
 
 
-def check_file(inspect, path, fold=True, min_sim=None):
-    """Returns (status, detail, stats) for run.py; records pages in PAGES."""
-    if shutil.which("pdftotext") is None:
-        raise Skip("tool missing: pdftotext")
+def check_file(inspect, path, fold=True, min_sim=None, ref="pdftotext"):
+    """Returns (status, detail, stats) for run.py; records pages in PAGES.
+    `ref` selects the reference extractor (`REFERENCES`: pdftotext or mupdf)."""
+    tool = REFERENCES[ref][0]
+    if shutil.which(tool) is None:
+        raise Skip("tool missing: %s" % tool)
     try:
-        rep = compare(run_ours(inspect, path), run_ref(path), path, fold, min_sim)
+        rep = compare(run_ours(inspect, path), run_ref(path, ref), path, fold, min_sim)
     except Bad as e:
         return "error", str(e), {}
     except subprocess.TimeoutExpired as e:
