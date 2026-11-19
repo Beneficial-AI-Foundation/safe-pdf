@@ -5,6 +5,7 @@ import Tests.XrefViews
 import Tests.FlateRoundTrip
 import Tests.StreamsView
 import Tests.Bombs
+import Tests.PagesView
 
 /-!
 # Test runner
@@ -29,7 +30,8 @@ def suites : List Suite :=
     { name := "xref-views", run := SafePdf.Tests.XrefViews.run },
     { name := "flate-roundtrip", run := SafePdf.Tests.FlateRoundTrip.run },
     { name := "streams-view", run := SafePdf.Tests.StreamsView.run },
-    { name := "bombs", run := SafePdf.Tests.Bombs.run } ]
+    { name := "bombs", run := SafePdf.Tests.Bombs.run },
+    { name := "pages-view", run := SafePdf.Tests.PagesView.run } ]
 
 end SafePdf.Tests
 

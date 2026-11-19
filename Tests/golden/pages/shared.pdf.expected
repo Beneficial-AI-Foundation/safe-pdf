@@ -1,0 +1,12 @@
+--- pages
+file:       input
+open:       strict
+error:      reference cycle at byte 287: page tree /Kids cycle
+--- pages --json
+{"summary": {"path": "input", "open": "strict", "error": "reference cycle at byte 287: page tree /Kids cycle"}}
+--- outline
+file:       input
+open:       strict
+error:      reference cycle at byte 287: page tree /Kids cycle
+--- outline --json
+{"summary": {"path": "input", "open": "strict", "error": "reference cycle at byte 287: page tree /Kids cycle"}}

@@ -19,18 +19,20 @@ our dump (`.lake/build/bin/inspect <file> <view>`) + normalizer + compare.
 |-----------|--------------------------|----------------|-------------|
 | `size`    | `os.path.getsize`        | default        | working     |
 | `objects` | `qpdf --json=2` (>= 11)  | `objects`      | working (needs qpdf; see below) |
-| `pages`   | `mutool info` / qpdf     | `pages`        | placeholder |
+| `pages`   | `qpdf --json=2` (>= 11)  | `pages`        | working (needs qpdf; see below) |
 | `text`    | `pdftotext`              | `text`         | placeholder |
 
 Add one by appending a `Comparator(...)` to `COMPARATORS` in `run.py` (pdf.js
 later).
 
-Outcomes per file: agree, disagree, `skipped (tool missing: qpdf)`,
+Outcomes per file: agree, known (a documented divergence, never a failure),
+disagree, `skipped (tool missing: qpdf)`,
 `skipped (view not implemented)`, error. Missing tools and unimplemented views
 are never failures. Exit status is 1 only for disagreements or errors in
 comparators that actually ran, or when `--min-compared N` (default 0) is given
-and fewer than N files had at least one object compared by `objects` (guards
-CI against a run that silently compared nothing).
+and fewer than N files had at least one object (page) compared by each selected
+`objects` / `pages` comparator (guards CI against a run that silently compared
+nothing).
 
 Note: `size` currently extracts the first `<N> bytes` from the inspector's
 default view; it will move to a dedicated view once the inspector CLI settles.
@@ -96,3 +98,38 @@ zlib-error / size mismatch makes the file `disagree`.
 Fixtures: `fixtures/streams_ok.{raw,ours}` (agree, exit 0),
 `fixtures/streams_diff.ours` + `streams_ok.raw` (last byte differs, exit 1),
 `fixtures/streams_adler.{raw,ours}` (corrupt Adler-32: zlib-error, exit 1).
+
+## `pages` comparator (`pages.py`)
+
+Compares `inspect --view pages --json FILE` (task 4.4: the core page tree,
+`Core.Doc.openDoc`) with `qpdf --json=2 --json-key=pages --json-key=qpdf
+--decode-level=none FILE`. qpdf's `pages` array gives the page count and order
+(object references); qpdf reports no effective boxes, so the script computes
+them from qpdf's raw objects with the core's rules (Core/Doc.lean A1–A6) but by
+walking each page's `/Parent` chain upwards (the core walks `/Kids` downwards):
+one-level resolution of references, a box must be 4 numbers (else absent and
+inheritance continues), corners normalized, missing MediaBox = US Letter (our
+`mediaBoxDefaulted` must then be true), Rotate modulo 360 with non-multiples of
+90 as 0. Our CropBox is already clipped to the MediaBox; qpdf's raw CropBox is
+clipped the same way before comparing (empty intersection = MediaBox).
+Numbers: exact `Decimal`s, tolerance 0 for integers and 1e-9 for reals.
+
+Per file: agree; known (we reject the tree with `reference cycle`: a page shared
+by two parents, which qpdf duplicates, or a `/Kids` cycle — D-002 in
+`docs/deviations-from-spec.md`); disagree with categories `ours-failed`, `count`,
+`ref`, `mediabox`, `cropbox`, `rotate`, `defaulted-flag`; skipped when qpdf is
+missing or fails. Stats: `compared` (pages), `our_pages`, `qpdf_pages`,
+`defaulted`, `known`, `cat_<category>`.
+
+    python3 -I Tests/differential/run.py --comparator pages --min-compared 20
+    python3 -I Tests/differential/pages.py --ours OURS.jsonl --qpdf QPDF.json   # offline
+
+Fixtures (qpdf JSON hand-written from the qpdf 11 manual: qpdf is not installed
+locally; `ours` files are real inspector output for `Tests/golden/pages/*.pdf`):
+`fixtures/pages_tree.{ours.jsonl,qpdf.json}` (inheritance, swapped corners,
+`595.2760` vs `595.276`, clipping, Rotate -90/450/45, defaulted MediaBox; agree,
+exit 0), `pages_tree.ours.jsonl` + `pages_diff.qpdf.json` (count, cropbox and
+rotate disagreements, exit 1), `pages_shared.{ours.jsonl,qpdf.json}` (known,
+exit 0). CI: step "Pages comparison on the corpus" in job `differential-objects`
+(`--min-compared 20`), results in the `differential-objects` artifact as
+`differential-pages.{json,log}`.

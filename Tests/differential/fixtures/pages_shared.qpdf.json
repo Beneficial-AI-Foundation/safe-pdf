@@ -1,0 +1,95 @@
+{
+  "version": 2,
+  "parameters": {
+    "decodelevel": "none"
+  },
+  "pages": [
+    {
+      "contents": [],
+      "images": [],
+      "label": null,
+      "object": "5 0 R",
+      "outlines": [],
+      "pageposfrom1": 1
+    },
+    {
+      "contents": [],
+      "images": [],
+      "label": null,
+      "object": "6 0 R",
+      "outlines": [],
+      "pageposfrom1": 2
+    }
+  ],
+  "qpdf": [
+    {
+      "jsonversion": 2,
+      "pdfversion": "1.7",
+      "pushedinheritedpageresources": false,
+      "calledgetallpages": true,
+      "maxobjectid": 6
+    },
+    {
+      "obj:1 0 R": {
+        "value": {
+          "/Type": "/Catalog",
+          "/Pages": "2 0 R"
+        }
+      },
+      "obj:2 0 R": {
+        "value": {
+          "/Type": "/Pages",
+          "/Kids": [
+            "3 0 R",
+            "4 0 R"
+          ],
+          "/Count": 2,
+          "/MediaBox": [
+            0,
+            0,
+            612,
+            792
+          ]
+        }
+      },
+      "obj:3 0 R": {
+        "value": {
+          "/Type": "/Pages",
+          "/Parent": "2 0 R",
+          "/Kids": [
+            "5 0 R"
+          ],
+          "/Count": 1
+        }
+      },
+      "obj:4 0 R": {
+        "value": {
+          "/Type": "/Pages",
+          "/Parent": "2 0 R",
+          "/Kids": [
+            "6 0 R"
+          ],
+          "/Count": 1
+        }
+      },
+      "obj:5 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "3 0 R"
+        }
+      },
+      "obj:6 0 R": {
+        "value": {
+          "/Type": "/Page",
+          "/Parent": "4 0 R"
+        }
+      },
+      "trailer": {
+        "value": {
+          "/Root": "1 0 R",
+          "/Size": 7
+        }
+      }
+    }
+  ]
+}

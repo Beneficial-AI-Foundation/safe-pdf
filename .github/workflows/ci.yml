@@ -171,6 +171,15 @@ jobs:
             --json differential-objects-minimal.json --min-compared 1 \
             2>&1 | tee differential-objects-minimal.log
 
+      # Task 4.4 / M4: page count, page refs, MediaBox, CropBox, Rotate vs qpdf.
+      - name: Pages comparison on the corpus
+        if: always()
+        run: |
+          set -o pipefail
+          python3 -I Tests/differential/run.py --comparator pages \
+            --json differential-pages.json --min-compared 20 \
+            2>&1 | tee differential-pages.log
+
       # actions/upload-artifact v4.6.2
       - name: Upload comparison results
         if: always()
@@ -182,5 +191,7 @@ jobs:
             differential-objects.log
             differential-objects-minimal.json
             differential-objects-minimal.log
+            differential-pages.json
+            differential-pages.log
           if-no-files-found: warn
           retention-days: 30
