@@ -26,7 +26,7 @@ Design document: Plan.md
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | ready (2026-11-19) |
 | 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | ready (2026-11-19) |
 | 4 | `phase-4-document` | `phase-3-filters` | [#5](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/5) | ready (2026-11-19) |
-| 5 | `phase-5-content` | `phase-4-document` | [#6](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/6) | awaiting-ci |
+| 5 | `phase-5-content` | `phase-4-document` | [#6](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/6) | ready (2026-11-19) |
 | 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | draft |
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | — | none |
 | 8 | `phase-8-shell` | `phase-7-raster` | — | none |
@@ -414,3 +414,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — phase 4 milestone: PR #5 marked ready for review (CI green on 835d4a4)
 * 2026-11-19 — wave 23 part 2 (phase 5, PR #6): 5.2b done (form XObjects with recursion fuel and expansion cap, images, ExtGState, named colour spaces, inline-image abbreviations); **phase 5 exit criterion M5 ticked** (10.4 M ops, 100% covered, 0 failures; SVG export); PR #6 → awaiting-ci; commit "wave 23 (part 2): 5.2b — forms, images, ExtGState; M5"
 * 2026-11-19 — wave 24 (phase 6, PR #7): 6.1 (TrueType parser, 8/8 corpus fonts) and 6.5 (ToUnicode CMaps + text extraction from the DisplayList; C3/C6 theorems; clean page-1 text on arXiv samples) done; added 6.7; commit "wave 24: 6.1 6.5 — TrueType fonts, ToUnicode CMaps, text extraction"
+* 2026-11-19 — phase 5 milestone: PR #6 marked ready for review (CI green on 938f2a6)
