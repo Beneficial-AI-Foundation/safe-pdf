@@ -297,6 +297,34 @@ def bodyDepth : IndirectBody → Nat
   | .obj o => o.depth
   | .stream s => (PdfObject.dict s.dict).depth
 
+/-- `ObjParse.parseIndirectBodyWith` returns bodies within the depth limit, for every length
+resolver (a stream's dictionary is the parsed one, `ObjParse.parseStreamBodyWith_ok`). -/
+theorem parseIndirectBodyWith_depth {len : ObjParse.LengthResolver} {limits : Limits}
+    {bytes : ByteArray} {p : Nat} {b : IndirectBody} {r : Nat}
+    (h : ObjParse.parseIndirectBodyWith len limits bytes p = .ok (b, r)) :
+    bodyDepth b ≤ limits.maxObjectDepth := by
+  unfold ObjParse.parseIndirectBodyWith at h
+  split at h
+  · cases h
+  · rename_i o r1 h1
+    have hd := ObjParse.parseObject_depth h1
+    split at h
+    · cases h
+    · split at h
+      · cases h; exact hd
+      · split at h
+        · split at h
+          · rename_i d _
+            split at h
+            · rename_i s r3 hs
+              cases h
+              obtain ⟨_, _, _, _, _, _, hsd⟩ := ObjParse.parseStreamBodyWith_ok hs
+              simp only [bodyDepth, hsd]; exact hd
+            · cases h
+          · cases h
+        · cases h
+    · cases h
+
 /-- `Length.parseIndirectResolved` returns bodies within the depth limit. -/
 theorem parseIndirectResolved_depth {lookup : Nat → Option XrefEntry} {limits : Limits}
     {bytes : ByteArray} {fuel pos : Nat} {io : IndirectObject} {r : Nat}
@@ -308,25 +336,7 @@ theorem parseIndirectResolved_depth {lookup : Nat → Option XrefEntry} {limits 
   · split at h
     · rename_i b r' hb
       cases h
-      unfold Xref.Length.parseBodyResolved at hb
-      split at hb
-      · cases hb
-      · rename_i o r1 h1
-        have hd := ObjParse.parseObject_depth h1
-        split at hb
-        · cases hb
-        · split at hb
-          · cases hb; exact hd
-          · split at hb
-            · split at hb
-              · split at hb
-                · cases hb
-                · split at hb
-                  · cases hb; exact hd
-                  · cases hb
-              · cases hb
-            · cases hb
-        · cases hb
+      exact parseIndirectBodyWith_depth hb
     · cases h
 
 /-- **Depth bound.** Every body `getObject` returns nests at most `limits.maxObjectDepth`. -/

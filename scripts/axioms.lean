@@ -229,6 +229,7 @@ import SafePdf
 #print axioms SafePdf.Core.Open.openFile_repaired
 #print axioms SafePdf.Core.Open.openFile_strict
 #print axioms SafePdf.Core.Open.openFile_root
+#print axioms SafePdf.Core.Open.parseIndirectBodyWith_depth
 #print axioms SafePdf.Core.Open.parseIndirectResolved_depth
 #print axioms SafePdf.Core.Open.getObject_depth
 #print axioms SafePdf.Core.Open.getObject_work
