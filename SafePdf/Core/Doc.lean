@@ -80,22 +80,13 @@ within `maxDecodedTotalBytes` or end in `Error.limitExceeded .decodedTotalBytes`
   returned as separate parts (not concatenated: no extra copy). A reference to a missing
   object is skipped (as W3); a content stream ending in an image codec is `malformed`.
 
-**Not charged yet** (each is bounded per stream, but not against the document budget;
-threading the budget through `Open.getObject` and `Xref.Chain.loadChain` changes many
-signatures and theorems and is left to a follow-up task):
-
-* Cross-reference streams at open time (`loadChain`): at most `limits.maxRevisions` sections
-  are parsed (an `/XRefStm` counts as one), each decoded once, each allocating at most
-  `maxFilters · maxDecodedStreamBytes` (`Filter.produced_le_maxFilters`). Total
-  `≤ maxRevisions · maxFilters · maxDecodedStreamBytes`.
-* Object streams inside `Open.getObject` (the page-tree walk, `resolve`, the fetches of
-  D1–D3 themselves): one `getObject` performs at most one top-level object-stream decode
-  (`Open.getObject_work`), plus at most `objectCount` container parses while resolving an
-  indirect `/Length` (`Open.getObject_length_calls_le`), each of which may decode one object
-  stream. So each `getObject` allocates at most
-  `(objectCount + 1) · maxFilters · maxDecodedStreamBytes` in object-stream decoding; the
-  page-tree walk performs `O(objectCount)` `getObject` calls (rule W6; stated, not proven).
-  Decoded object streams are not cached, so this is the bound per call, not per document.
+**Charged since task 4.5** (they were bounded per call only): the xref streams at open time
+and the object streams decoded inside `Open.getObject` are charged when the document is opened
+and walked in a session (`openDocS`, `ofSession`, section "Sessions"), and the stream access of
+D1–D3 has session twins `decodeStreamS`, `decodeContentsS` whose fetches are charged as well.
+`ofOpen`, `openDoc`, `Doc.decodeStreamOf`, `Doc.decodeContentsB` stay as they were (the
+theorems of `Spec.Doc` are stated over them); with enough budget left the session functions
+return exactly what they return (`ofSession_eq`, `openDocS_eq`).
 
 ## Theorems
 
@@ -115,6 +106,9 @@ signatures and theorems and is left to a follow-up task):
   budget left is at most the budget before); `Doc.decodeStreamOf_size_le` (per-stream bound);
   `Doc.decodeRefsB_total`, `Doc.decodeContentsB_total` (the decoded parts plus the budget
   left are at most the budget before).
+* Sessions (task 4.5): `Sim` and the `…B_sim` lemmas, `ofSession_le`, `ofSession_eq`,
+  `openDocS_eq`, `decodeStreamS_le`, `decodeStreamS_charge`, `decodeContentsS_total` (section
+  "Sessions").
 -/
 
 set_option autoImplicit false
@@ -1033,6 +1027,966 @@ theorem ofOpen_pages_nodup {limits : Limits} {d : OpenDoc} {doc : Doc}
   rw [hp, List.toList_toArray, List.map_reverse]
   exact hpn.perm (List.reverse_perm _).symm
 
+/-! ## Sessions: one budget for open, walk and decodes (task 4.5)
+
+The functions above fetch with the unbudgeted `OpenDoc.getObject` and stay as they are (the
+theorems of this module and of `Spec.Doc` are stated over them). Their **budgeted twins**
+below fetch with `OpenDoc.getObjectB`, threading a state `BC` (what is left of the document
+budget, and the decoded object streams) exactly like an `Open.Session`:
+
+* S1. `ofOpenB limits d bc` is `ofOpen` with every fetch (root, page-tree nodes, `/Kids`, the
+  four attributes, the root `/Count`) made by `getObjectB` from the state `bc`: object-stream
+  decodes are charged once per container (cached), and `/Length` decodes (rule L6) are charged
+  on every resolution. `ofSession s limits` runs it on a session and returns the session left;
+  `openDocS limits bytes` is `Open.Session.open` followed by `ofSession`, so **one budget and
+  one cache cover opening, the page-tree walk and every later decode**.
+* S2. `decodeStreamS`, `decodeContentsS` are `Doc.decodeStreamOf`, `Doc.decodeContentsB` (rules
+  D1–D3) on a session: the fetches (including those of `/Filter` and `/DecodeParms`, rule D2)
+  and the stream decodes are charged to the session's budget.
+
+Theorems:
+
+* `Sim` packs the two facts proved of every budgeted function: the budget never grows, and
+  **if at least one `OpenDoc.allowance` is left at the end** (a-posteriori) and the cache was
+  exact, the result is the unbudgeted function's and the cache stays exact
+  (`fetchB_sim` from `Open.getObjectB_eq_post`; `resolveB_sim`, `keyB_sim`, `attrsOfB_sim`,
+  `popLiveB_sim`, `visitNodeB_sim`, `loopB_sim`, `declaredCountOfB_sim`, `ofOpenB_sim`).
+* `ofSession_eq`: an exact session whose walk ends with an allowance left returns exactly
+  `ofOpen limits s.doc`; `openDocS_eq`: if the full budget covers `maxRevisions ·
+  decodeAllowance` (the xref chain, as in `Open.Session.open_eq`), a document that `openDocS`
+  opens with an allowance left is exactly the document `openDoc` opens, so every theorem of
+  `Spec.Doc` about `openDoc` applies to it. (Only this direction is stated: when the budget
+  runs out, `openDocS` may fail where `openDoc` succeeds, which is the point of the budget.)
+* `ofSession_le`, `decodeStreamS_le`, `decodeContentsS_le`: the budget never grows;
+  `decodeStreamS_charge`, `decodeContentsS_total`: decoded bytes plus the budget left are at
+  most the budget before.
+-/
+
+open SafePdf.Core.Open (Session)
+open SafePdf.Core.Xref.ObjStm (Cache CacheExact)
+
+/-- The budgeted state threaded through a walk: what is left of the document budget, and the
+decoded object streams (an `Open.Session` without its document). -/
+abbrev BC := Budget × Cache
+
+/-- A state is exact for `d` when its cache holds exact decodes (`ObjStm.CacheExact`). -/
+def Exact (d : OpenDoc) (limits : Limits) (bc : BC) : Prop :=
+  CacheExact d.pre d.lookup limits d.bytes d.objectCount bc.2
+
+/-- **Simulation** of an unbudgeted value `u` by a budgeted computation `x` run from state
+`bc`: the budget never grows, and if `bc` is exact and at least `d.allowance limits` is left
+at the end, the value is `u` and the final state is exact. -/
+def Sim (d : OpenDoc) (limits : Limits) (bc : BC) {α : Type} (x : α × BC) (u : α) : Prop :=
+  x.2.1.remaining ≤ bc.1.remaining ∧
+  (Exact d limits bc → d.allowance limits ≤ x.2.1.remaining → x.1 = u ∧ Exact d limits x.2)
+
+/-- A value computed without fetching simulates itself. -/
+theorem sim_pure {d : OpenDoc} {limits : Limits} {bc : BC} {α : Type} (a : α) :
+    Sim d limits bc (a, bc) a :=
+  ⟨Nat.le_refl _, fun hx _ => ⟨rfl, hx⟩⟩
+
+/-- A budgeted fetch: `OpenDoc.getObjectB` with the state's budget and cache. -/
+def fetchB (d : OpenDoc) (limits : Limits) (bc : BC) (n g : Nat) :
+    (Except Error IndirectBody) × BC :=
+  d.getObjectB limits bc.1 bc.2 n g
+
+/-- `fetchB` simulates `getObject` (`Open.getObjectB_le`, `Open.getObjectB_eq_post`). -/
+theorem fetchB_sim (d : OpenDoc) (limits : Limits) (bc : BC) (n g : Nat) :
+    Sim d limits bc (fetchB d limits bc n g) (d.getObject limits n g) :=
+  ⟨Open.getObjectB_le _ _ _ _ _ _, fun hx h => Open.getObjectB_eq_post hx h⟩
+
+/-- `resolve` with a budgeted fetch (rule A1). -/
+def resolveB (d : OpenDoc) (limits : Limits) (bc : BC) : PdfObject → (Except Error PdfObject) × BC
+  | .ref n g =>
+    let r := fetchB d limits bc n g
+    (match r.1 with
+     | .error e => .error e
+     | .ok (.obj o) => .ok o
+     | .ok (.stream _) => .ok .null, r.2)
+  | o => (.ok o, bc)
+
+/-- `resolveB` simulates `resolve`. -/
+theorem resolveB_sim (d : OpenDoc) (limits : Limits) (bc : BC) (o : PdfObject) :
+    Sim d limits bc (resolveB d limits bc o) (resolve d limits o) := by
+  cases o
+  case ref n g =>
+    obtain ⟨fle, feq⟩ := fetchB_sim d limits bc n g
+    refine ⟨fle, fun hx hA => ?_⟩
+    obtain ⟨h1, h2⟩ := feq hx hA
+    refine ⟨?_, h2⟩
+    simp only [resolveB, resolve]
+    rw [h1]
+    all_goals (rcases d.getObject limits n g with e | (o | s) <;> rfl)
+  all_goals exact sim_pure _
+
+/-- `key` with a budgeted fetch. -/
+def keyB (d : OpenDoc) (limits : Limits) (bc : BC) (nd : Dict) (k : String) :
+    (Except Error PdfObject) × BC :=
+  match Dict.get? nd (Name.ofString k) with
+  | none => (.ok .null, bc)
+  | some o => resolveB d limits bc o
+
+/-- `keyB` simulates `key`. -/
+theorem keyB_sim (d : OpenDoc) (limits : Limits) (bc : BC) (nd : Dict) (k : String) :
+    Sim d limits bc (keyB d limits bc nd k) (key d limits nd k) := by
+  unfold keyB key
+  split
+  · exact sim_pure _
+  · exact resolveB_sim _ _ _ _
+
+/-- Sequencing of budgeted computations that may fail: run `x`, stop on an error, else run
+`f` on its value from the state it left. -/
+def bindB {α β : Type} (x : (Except Error α) × BC) (f : α → BC → (Except Error β) × BC) :
+    (Except Error β) × BC :=
+  match x with
+  | (.error e, b) => (.error e, b)
+  | (.ok a, b) => f a b
+
+/-- `bindB` simulates `Except.bind`. -/
+theorem bindB_sim {d : OpenDoc} {limits : Limits} {bc : BC} {α β : Type}
+    {x : (Except Error α) × BC} {u : Except Error α} {f : α → BC → (Except Error β) × BC}
+    {f' : α → Except Error β} (hx : Sim d limits bc x u)
+    (hf : ∀ a b, Sim d limits b (f a b) (f' a)) :
+    Sim d limits bc (bindB x f) (u.bind f') := by
+  obtain ⟨hle, heq⟩ := hx
+  unfold bindB
+  rcases x with ⟨_ | a, b⟩
+  · refine ⟨hle, fun hx hA => ?_⟩
+    obtain ⟨h1, h2⟩ := heq hx hA
+    subst h1
+    exact ⟨by first | rfl | trivial, h2⟩
+  · obtain ⟨hle2, heq2⟩ := hf a b
+    refine ⟨Nat.le_trans hle2 hle, fun hx hA => ?_⟩
+    obtain ⟨h1, h2⟩ := heq hx (Nat.le_trans hA hle2)
+    subst h1
+    exact heq2 h2 hA
+
+/-- `attrsOf` with budgeted fetches (rules A1, A2). -/
+def attrsOfB (d : OpenDoc) (limits : Limits) (bc : BC) (nd : Dict) :
+    (Except Error Attrs) × BC :=
+  bindB (keyB d limits bc nd "Resources") fun r b1 =>
+  bindB (keyB d limits b1 nd "MediaBox") fun m b2 =>
+  bindB (keyB d limits b2 nd "CropBox") fun c b3 =>
+  bindB (keyB d limits b3 nd "Rotate") fun t b4 =>
+    (.ok { resources := (match r with | .dict x => some x | _ => none),
+           mediaBox := rectOf m, cropBox := rectOf c, rotate := rotateOf t }, b4)
+
+/-- `attrsOfB` simulates `attrsOf`. -/
+theorem attrsOfB_sim (d : OpenDoc) (limits : Limits) (bc : BC) (nd : Dict) :
+    Sim d limits bc (attrsOfB d limits bc nd) (attrsOf d limits nd) := by
+  unfold attrsOfB attrsOf
+  refine bindB_sim (keyB_sim _ _ _ _ _) fun r b1 => ?_
+  refine bindB_sim (keyB_sim _ _ _ _ _) fun m b2 => ?_
+  refine bindB_sim (keyB_sim _ _ _ _ _) fun c b3 => ?_
+  refine bindB_sim (keyB_sim _ _ _ _ _) fun t b4 => ?_
+  exact sim_pure _
+
+/-- `popLive` with budgeted fetches (rules W2, W3). -/
+def popLiveB (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+    List Entry → Nat → BC → (Except Error (Option (Entry × IndirectBody × List Entry) × Nat)) × BC
+  | [], k, bc => (.ok (none, k), bc)
+  | e :: rest, k, bc =>
+    if e.num ∈ visited then (.error (.cycle (offsetOf d e.num) "page tree /Kids cycle"), bc)
+    else
+      let r := fetchB d limits bc e.num e.gen
+      match r.1 with
+      | .error x => (.error x, r.2)
+      | .ok (.obj .null) => popLiveB d limits visited rest (k + 1) r.2
+      | .ok b => (.ok (some (e, b, rest), k), r.2)
+
+/-- `popLiveB` simulates `popLive`. -/
+theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+    (stack : List Entry) → (k : Nat) → (bc : BC) →
+    Sim d limits bc (popLiveB d limits visited stack k bc) (popLive d limits visited stack k)
+  | [], k, bc => sim_pure _
+  | e :: rest, k, bc => by
+    unfold popLiveB popLive
+    by_cases hv : e.num ∈ visited
+    · simp only [hv, ↓reduceIte]
+      exact sim_pure _
+    · simp only [hv, ↓reduceIte]
+      obtain ⟨fle, feq⟩ := fetchB_sim d limits bc e.num e.gen
+      generalize fetchB d limits bc e.num e.gen = R at fle feq ⊢
+      rcases R with ⟨r1, b1⟩
+      have leaf : ∀ (b : IndirectBody), r1 = .ok b → b ≠ .obj .null →
+          Sim d limits bc ((Except.ok (some (e, b, rest), k)), b1)
+            (match d.getObject limits e.num e.gen with
+             | .error x => .error x
+             | .ok (.obj .null) => popLive d limits visited rest (k + 1)
+             | .ok b => .ok (some (e, b, rest), k)) := by
+        intro b hb hn
+        refine ⟨fle, fun hx hA => ?_⟩
+        obtain ⟨h1, h2⟩ := feq hx hA
+        simp only at h1
+        rw [← h1, hb]
+        refine ⟨?_, h2⟩
+        rcases b with o | s
+        · cases o <;> first | rfl | exact absurd rfl hn
+        · rfl
+      rcases r1 with x | (o | s)
+      · refine ⟨fle, fun hx hA => ?_⟩
+        obtain ⟨h1, h2⟩ := feq hx hA
+        simp only at h1
+        rw [← h1]
+        exact ⟨by first | rfl | trivial, h2⟩
+      · cases o
+        case null =>
+          obtain ⟨ple, peq⟩ := popLiveB_sim d limits visited rest (k + 1) b1
+          refine ⟨Nat.le_trans ple fle, fun hx hA => ?_⟩
+          obtain ⟨h1, h2⟩ := feq hx (Nat.le_trans hA ple)
+          simp only at h1
+          rw [← h1]
+          exact peq h2 hA
+        all_goals exact leaf _ rfl (by simp)
+      · exact leaf _ rfl (by simp)
+
+/-- `visitNode` with budgeted fetches (rules W4–W6). -/
+def visitNodeB (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
+    (st : WalkState) (bc : BC) : (Except Error WalkState) × BC :=
+  if limits.maxObjectDepth < e.depth then (.error (.limitExceeded .objectDepth), bc)
+  else
+    match b with
+    | .obj (.dict nd) =>
+      bindB (attrsOfB d limits bc nd) fun own b1 =>
+        match kindOf nd with
+        | .inner =>
+          bindB (keyB d limits b1 nd "Kids") fun ko b2 =>
+            match kidsOf ko with
+            | none => (.error (.malformed (offsetOf d e.num)
+                s!"page tree node {e.num}: /Kids is not an array of references"), b2)
+            | some ks =>
+              (.ok { st with
+                     stack := ks.map (fun r => ⟨r.1, r.2, e.depth + 1, e.inh.merge own⟩) ++
+                       st.stack
+                     visited := e.num :: st.visited }, b2)
+        | .leaf =>
+          (.ok { st with
+                 visited := e.num :: st.visited
+                 pages := mkPage e.num e.gen (e.inh.merge own)
+                   (Dict.get? nd (Name.ofString "Contents")) :: st.pages }, b1)
+        | .bad => (.error (.malformed (offsetOf d e.num)
+            s!"page tree node {e.num} has an unexpected /Type"), b1)
+    | _ => (.error (.malformed (offsetOf d e.num)
+        s!"page tree node {e.num} is not a dictionary"), bc)
+
+/-- **Sequencing simulations**: if `x` simulates `u` and the continuation `y` (run from the
+state `x` left) costs nothing more than what is left after `x`, it suffices to prove the
+continuation's result knowing that `x`'s value is `u` and `x`'s state is exact. -/
+theorem sim_of_eq {d : OpenDoc} {limits : Limits} {bc : BC} {α β : Type} {x : α × BC} {u : α}
+    {y : β × BC} {w : β} (hx : Sim d limits bc x u) (hle : y.2.1.remaining ≤ x.2.1.remaining)
+    (hcont : x.1 = u → Exact d limits x.2 → d.allowance limits ≤ y.2.1.remaining →
+      y.1 = w ∧ Exact d limits y.2) : Sim d limits bc y w :=
+  ⟨Nat.le_trans hle hx.1, fun hxe hA =>
+    let ⟨h1, h2⟩ := hx.2 hxe (Nat.le_trans hA hle)
+    hcont h1 h2 hA⟩
+
+/-- `visitNodeB` simulates `visitNode`. -/
+theorem visitNodeB_sim (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
+    (st : WalkState) (bc : BC) :
+    Sim d limits bc (visitNodeB d limits e b st bc) (visitNode d limits e b st) := by
+  unfold visitNodeB visitNode
+  by_cases hdep : limits.maxObjectDepth < e.depth
+  · simp only [hdep, ↓reduceIte]
+    exact sim_pure _
+  · simp only [hdep, ↓reduceIte]
+    rcases b with o | s
+    · cases o
+      case dict nd =>
+        simp only
+        have ha := attrsOfB_sim d limits bc nd
+        unfold bindB
+        generalize attrsOfB d limits bc nd = X at ha ⊢
+        rcases X with ⟨_ | own, b1⟩
+        · refine sim_of_eq ha (Nat.le_refl _) fun h1 h2 _ => ?_
+          simp only at h1
+          rw [← h1]
+          exact ⟨by first | rfl | trivial, h2⟩
+        · simp only
+          cases hk : kindOf nd
+          · simp only
+            have hkey := keyB_sim d limits b1 nd "Kids"
+            generalize keyB d limits b1 nd "Kids" = Y at hkey ⊢
+            rcases Y with ⟨_ | ko, b2⟩
+            · refine sim_of_eq ha hkey.1 fun h1 h2 hA => ?_
+              simp only at h1
+              rw [← h1]
+              simp only
+              obtain ⟨h3, h4⟩ := hkey.2 h2 hA
+              simp only at h3
+              rw [← h3]
+              exact ⟨by first | rfl | trivial, h4⟩
+            · simp only
+              cases hkid : kidsOf ko
+              all_goals
+                refine sim_of_eq ha hkey.1 fun h1 h2 hA => ?_
+                simp only at h1
+                rw [← h1]
+                simp only
+                obtain ⟨h3, h4⟩ := hkey.2 h2 hA
+                simp only at h3
+                rw [← h3]
+                simp only [hkid]
+                exact ⟨by first | rfl | trivial, h4⟩
+          · refine sim_of_eq ha (Nat.le_refl _) fun h1 h2 _ => ?_
+            simp only at h1
+            rw [← h1]
+            exact ⟨by first | rfl | trivial, h2⟩
+          · refine sim_of_eq ha (Nat.le_refl _) fun h1 h2 _ => ?_
+            simp only at h1
+            rw [← h1]
+            exact ⟨by first | rfl | trivial, h2⟩
+      all_goals exact sim_pure _
+    · exact sim_pure _
+
+/-- `loop` with budgeted fetches (rule W6). -/
+def loopB (d : OpenDoc) (limits : Limits) : Nat → WalkState → BC → (Except Error WalkState) × BC
+  | 0, st, bc =>
+    let r := popLiveB d limits st.visited st.stack st.skipped bc
+    (match r.1 with
+     | .error x => .error x
+     | .ok (none, k) => .ok { st with stack := [], skipped := k }
+     | .ok (some _, _) => .error (.limitExceeded .objects), r.2)
+  | f + 1, st, bc =>
+    let r := popLiveB d limits st.visited st.stack st.skipped bc
+    match r.1 with
+    | .error x => (.error x, r.2)
+    | .ok (none, k) => (.ok { st with stack := [], skipped := k }, r.2)
+    | .ok (some (e, b, rest), k) =>
+      bindB (visitNodeB d limits e b { st with stack := rest, skipped := k } r.2) fun st' b1 =>
+        loopB d limits f st' b1
+
+/-- `loopB` simulates `loop`. -/
+theorem loopB_sim (d : OpenDoc) (limits : Limits) :
+    (fuel : Nat) → (st : WalkState) → (bc : BC) →
+    Sim d limits bc (loopB d limits fuel st bc) (loop d limits fuel st)
+  | 0, st, bc => by
+    unfold loopB loop
+    have hp := popLiveB_sim d limits st.visited st.stack st.skipped bc
+    generalize popLiveB d limits st.visited st.stack st.skipped bc = R at hp ⊢
+    refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_
+    refine ⟨?_, h2⟩
+    rw [← h1]
+    all_goals (rcases R.1 with x | ⟨_ | _, k⟩ <;> rfl)
+  | f + 1, st, bc => by
+    unfold loopB loop
+    have hp := popLiveB_sim d limits st.visited st.stack st.skipped bc
+    generalize popLiveB d limits st.visited st.stack st.skipped bc = R at hp ⊢
+    rcases R with ⟨r1, b1⟩
+    rcases r1 with x | ⟨_ | ⟨e, b, rest⟩, k⟩
+    · refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_
+      simp only at h1
+      rw [← h1]
+      exact ⟨by first | rfl | trivial, h2⟩
+    · refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_
+      simp only at h1
+      rw [← h1]
+      exact ⟨by first | rfl | trivial, h2⟩
+    · simp only
+      unfold bindB
+      have hv := visitNodeB_sim d limits e b { st with stack := rest, skipped := k } b1
+      generalize visitNodeB d limits e b { st with stack := rest, skipped := k } b1 = V at hv ⊢
+      rcases V with ⟨_ | st', b2⟩
+      · refine sim_of_eq hp hv.1 fun h1 h2 hA => ?_
+        simp only at h1
+        rw [← h1]
+        simp only
+        obtain ⟨h3, h4⟩ := hv.2 h2 hA
+        simp only at h3
+        rw [← h3]
+        exact ⟨by first | rfl | trivial, h4⟩
+      · simp only
+        have hl := loopB_sim d limits f st' b2
+        refine sim_of_eq hp (Nat.le_trans hl.1 hv.1) fun h1 h2 hA => ?_
+        simp only at h1
+        rw [← h1]
+        simp only
+        obtain ⟨h3, h4⟩ := hv.2 h2 (Nat.le_trans hA hl.1)
+        simp only at h3
+        rw [← h3]
+        exact hl.2 h4 hA
+
+/-- `walk` with budgeted fetches. -/
+def walkB (d : OpenDoc) (limits : Limits) (n g : Nat) (bc : BC) : (Except Error WalkState) × BC :=
+  loopB d limits d.objectCount (initState n g) bc
+
+/-- `walkB` simulates `walk`. -/
+theorem walkB_sim (d : OpenDoc) (limits : Limits) (n g : Nat) (bc : BC) :
+    Sim d limits bc (walkB d limits n g bc) (walk d limits n g) :=
+  loopB_sim d limits _ _ _
+
+/-- `declaredCountOf` with a budgeted fetch. -/
+def declaredCountOfB (d : OpenDoc) (limits : Limits) (n g : Nat) (bc : BC) : Option Int × BC :=
+  let r := fetchB d limits bc n g
+  (match r.1 with
+   | .ok (.obj (.dict pd)) =>
+     match Dict.get? pd (Name.ofString "Count") with
+     | some (.int c) => some c
+     | _ => none
+   | _ => none, r.2)
+
+/-- `declaredCountOfB` simulates `declaredCountOf`. -/
+theorem declaredCountOfB_sim (d : OpenDoc) (limits : Limits) (n g : Nat) (bc : BC) :
+    Sim d limits bc (declaredCountOfB d limits n g bc) (declaredCountOf d limits n g) := by
+  obtain ⟨fle, feq⟩ := fetchB_sim d limits bc n g
+  refine ⟨fle, fun hx hA => ?_⟩
+  obtain ⟨h1, h2⟩ := feq hx hA
+  refine ⟨?_, h2⟩
+  unfold declaredCountOfB declaredCountOf
+  simp only
+  rw [h1]
+  all_goals
+    rcases d.getObject limits n g with x | (o | s)
+    · rfl
+    · cases o <;> try rfl
+      simp only
+      split <;> rfl
+    · rfl
+
+/-- `ofOpen` with budgeted fetches (rules W1–W7, S1). -/
+def ofOpenB (limits : Limits) (d : OpenDoc) (bc : BC) : (Except Error Doc) × BC :=
+  match d.trailer.root? with
+  | none => (.error (.malformed 0 "trailer has no /Root"), bc)
+  | some (rn, rg) =>
+    let r := fetchB d limits bc rn rg
+    match r.1 with
+    | .error e => (.error e, r.2)
+    | .ok (.obj (.dict cat)) =>
+      match Dict.get? cat (Name.ofString "Pages") with
+      | some (.ref pn pg) =>
+        bindB (walkB d limits pn pg r.2) fun st b1 =>
+          let c := declaredCountOfB d limits pn pg b1
+          (.ok { file := d, catalog := cat, pagesRef := (pn, pg),
+                 pages := st.pages.reverse.toArray,
+                 declaredCount := c.1, skippedKids := st.skipped }, c.2)
+      | _ => (.error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference"),
+          r.2)
+    | .ok _ => (.error (.malformed (offsetOf d rn) "/Root is not a dictionary"), r.2)
+
+/-- `ofOpenB` simulates `ofOpen`. -/
+theorem ofOpenB_sim (limits : Limits) (d : OpenDoc) (bc : BC) :
+    Sim d limits bc (ofOpenB limits d bc) (ofOpen limits d) := by
+  unfold ofOpenB ofOpen
+  split
+  · exact sim_pure _
+  · rename_i rn rg _
+    have hf := fetchB_sim d limits bc rn rg
+    simp only
+    generalize fetchB d limits bc rn rg = R at hf ⊢
+    rcases R with ⟨r1, b1⟩
+    rcases r1 with x | (o | s)
+    · refine sim_of_eq hf (Nat.le_refl _) fun h1 h2 _ => ?_
+      simp only at h1
+      rw [← h1]
+      exact ⟨by first | rfl | trivial, h2⟩
+    · cases o
+      case dict cat =>
+        simp only
+        cases hpg : Dict.get? cat (Name.ofString "Pages")
+        · refine sim_of_eq hf (Nat.le_refl _) fun h1 h2 _ => ?_
+          simp only at h1
+          rw [← h1]
+          simp only [hpg]
+          exact ⟨by first | rfl | trivial, h2⟩
+        · rename_i po
+          cases po
+          case ref pn pg =>
+            simp only
+            unfold bindB
+            have hw := walkB_sim d limits pn pg b1
+            generalize walkB d limits pn pg b1 = W at hw ⊢
+            rcases W with ⟨_ | st, b2⟩
+            · refine sim_of_eq hf hw.1 fun h1 h2 hA => ?_
+              simp only at h1
+              rw [← h1]
+              simp only [hpg]
+              obtain ⟨h3, h4⟩ := hw.2 h2 hA
+              simp only at h3
+              rw [← h3]
+              exact ⟨by first | rfl | trivial, h4⟩
+            · simp only
+              have hc := declaredCountOfB_sim d limits pn pg b2
+              refine sim_of_eq hf (Nat.le_trans hc.1 hw.1) fun h1 h2 hA => ?_
+              simp only at h1
+              rw [← h1]
+              simp only [hpg]
+              obtain ⟨h3, h4⟩ := hw.2 h2 (Nat.le_trans hA hc.1)
+              simp only at h3
+              rw [← h3]
+              obtain ⟨h5, h6⟩ := hc.2 h4 hA
+              refine ⟨?_, h6⟩
+              simp only
+              rw [h5]
+          all_goals
+            refine sim_of_eq hf (Nat.le_refl _) fun h1 h2 _ => ?_
+            simp only at h1
+            rw [← h1]
+            simp only [hpg]
+            exact ⟨by first | rfl | trivial, h2⟩
+      all_goals
+        refine sim_of_eq hf (Nat.le_refl _) fun h1 h2 _ => ?_
+        simp only at h1
+        rw [← h1]
+        exact ⟨by first | rfl | trivial, h2⟩
+    · refine sim_of_eq hf (Nat.le_refl _) fun h1 h2 _ => ?_
+      simp only at h1
+      rw [← h1]
+      exact ⟨by first | rfl | trivial, h2⟩
+
+/-- **Walk the page tree in a session** (S1): `ofOpenB` from the session's budget and cache;
+returns the document and the session left. -/
+def ofSession (s : Session) (limits : Limits) : (Except Error Doc) × Session :=
+  let r := ofOpenB limits s.doc (s.budget, s.cache)
+  (r.1, ⟨s.doc, r.2.1, r.2.2⟩)
+
+/-- `ofSession` never increases the budget and keeps the document. -/
+theorem ofSession_le (s : Session) (limits : Limits) :
+    (ofSession s limits).2.budget.remaining ≤ s.budget.remaining ∧
+    (ofSession s limits).2.doc = s.doc :=
+  ⟨(ofOpenB_sim limits s.doc (s.budget, s.cache)).1, rfl⟩
+
+/-- **A session walk is `ofOpen`** (a-posteriori): an exact session whose walk ends with at
+least `s.doc.allowance limits` left returns exactly `ofOpen limits s.doc`, and stays exact. -/
+theorem ofSession_eq {s : Session} {limits : Limits} (hx : s.Exact limits)
+    (h : s.doc.allowance limits ≤ (ofSession s limits).2.budget.remaining) :
+    (ofSession s limits).1 = ofOpen limits s.doc ∧ (ofSession s limits).2.Exact limits :=
+  (ofOpenB_sim limits s.doc (s.budget, s.cache)).2 hx h
+
+/-- **Budgeted entry point** (S1, task 4.5): open a session (`Open.Session.open`, the full
+`maxDecodedTotalBytes` budget) and walk its page tree in it. Returns the document and the
+session, whose budget and cache the later decodes (`decodeStreamS`, `decodeContentsS`) use. -/
+def openDocS (limits : Limits) (bytes : ByteArray) : Except Error (Doc × Session) :=
+  match Session.open limits bytes with
+  | .error e => .error e
+  | .ok s =>
+    match ofSession s limits with
+    | (.ok doc, s') => .ok (doc, s')
+    | (.error e, _) => .error e
+
+/-- **`openDocS` is `openDoc`** with enough budget (task 4.5): if the full budget covers the
+xref chain (`maxRevisions · decodeAllowance`, as in `Open.Session.open_eq`) and the session
+`openDocS` returns has at least one `decodeAllowance` left, the document is exactly the one
+`openDoc` opens (so the theorems of `Spec.Doc` about `openDoc` apply to it), its `file` is the
+session's document, and the session is exact. -/
+theorem openDocS_eq {limits : Limits} {bytes : ByteArray}
+    (h : limits.maxRevisions * Core.Xref.Chain.decodeAllowance limits bytes ≤
+      limits.maxDecodedTotalBytes)
+    {doc : Doc} {s : Session} (hs : openDocS limits bytes = .ok (doc, s))
+    (hb : Core.Xref.Chain.decodeAllowance limits bytes ≤ s.budget.remaining) :
+    openDoc limits bytes = .ok doc ∧ s.Exact limits := by
+  unfold openDocS at hs
+  rcases ho : Session.open limits bytes with e | s0
+  · rw [ho] at hs; cases hs
+  · rw [ho] at hs
+    simp only at hs
+    have hle := ofSession_le s0 limits
+    have hbytes : s0.doc.bytes = bytes := Open.Session.open_bytes ho
+    rcases hw : ofSession s0 limits with ⟨r, s1⟩
+    rw [hw] at hs hle
+    rcases r with e | doc'
+    · cases hs
+    · simp only [Except.ok.injEq, Prod.mk.injEq] at hs
+      obtain ⟨rfl, rfl⟩ := hs
+      have hb' : s0.doc.allowance limits ≤ (ofSession s0 limits).2.budget.remaining := by
+        rw [hw]; unfold OpenDoc.allowance; rw [hbytes]; exact hb
+      have hb0 : Core.Xref.Chain.decodeAllowance limits bytes ≤ s0.budget.remaining :=
+        Nat.le_trans hb hle.1
+      obtain ⟨ho1, hx0⟩ := (Open.Session.open_eq h).1 s0 ho hb0
+      obtain ⟨he, hx1⟩ := ofSession_eq hx0 hb'
+      rw [hw] at he hx1
+      refine ⟨?_, hx1⟩
+      unfold openDoc
+      rw [ho1]
+      exact he.symm
+
+/-! ### Decoded streams in a session (S2) -/
+
+/-- `resolveParamRef` with a budgeted fetch (rule D2). -/
+def resolveParamRefB (d : OpenDoc) (limits : Limits) (bc : BC) :
+    PdfObject → (Except Error PdfObject) × BC
+  | .ref n g =>
+    let r := fetchB d limits bc n g
+    (match r.1 with
+     | .error e => .error e
+     | .ok (.obj o) => .ok o
+     | .ok (.stream _) =>
+       .error (.malformed (offsetOf d n) "/Filter or /DecodeParms refers to a stream"), r.2)
+  | o => (.ok o, bc)
+
+/-- `resolveParamRefB` never increases the budget. -/
+theorem resolveParamRefB_le (d : OpenDoc) (limits : Limits) (bc : BC) (o : PdfObject) :
+    (resolveParamRefB d limits bc o).2.1.remaining ≤ bc.1.remaining := by
+  cases o
+  case ref n g => exact (fetchB_sim d limits bc n g).1
+  all_goals exact Nat.le_refl _
+
+/-- The elements of a `/Filter` or `/DecodeParms` array, each resolved by
+`resolveParamRefB`, threading the state. -/
+def resolveParamsB (d : OpenDoc) (limits : Limits) :
+    BC → List PdfObject → (Except Error (List PdfObject)) × BC
+  | bc, [] => (.ok [], bc)
+  | bc, o :: os =>
+    bindB (resolveParamRefB d limits bc o) fun v b1 =>
+    bindB (resolveParamsB d limits b1 os) fun vs b2 => (.ok (v :: vs), b2)
+
+/-- `resolveParamsB` never increases the budget. -/
+theorem resolveParamsB_le (d : OpenDoc) (limits : Limits) :
+    (bc : BC) → (os : List PdfObject) →
+    (resolveParamsB d limits bc os).2.1.remaining ≤ bc.1.remaining
+  | bc, [] => Nat.le_refl _
+  | bc, o :: os => by
+    unfold resolveParamsB bindB
+    have h1 := resolveParamRefB_le d limits bc o
+    rcases hr : resolveParamRefB d limits bc o with ⟨_ | v, b1⟩
+    · rw [hr] at h1; exact h1
+    · rw [hr] at h1
+      simp only
+      have h2 := resolveParamsB_le d limits b1 os
+      rcases hr2 : resolveParamsB d limits b1 os with ⟨_ | vs, b2⟩
+      · rw [hr2] at h2; exact Nat.le_trans h2 h1
+      · rw [hr2] at h2; exact Nat.le_trans h2 h1
+
+/-- `resolveParam` with budgeted fetches. -/
+def resolveParamB (d : OpenDoc) (limits : Limits) (bc : BC) :
+    PdfObject → (Except Error PdfObject) × BC
+  | .array items =>
+    bindB (resolveParamsB d limits bc items) fun xs b1 => (.ok (.array xs), b1)
+  | o => resolveParamRefB d limits bc o
+
+/-- `resolveParamB` never increases the budget. -/
+theorem resolveParamB_le (d : OpenDoc) (limits : Limits) (bc : BC) (o : PdfObject) :
+    (resolveParamB d limits bc o).2.1.remaining ≤ bc.1.remaining := by
+  cases o
+  case array items =>
+    have h := resolveParamsB_le d limits bc items
+    simp only [resolveParamB, bindB]
+    rcases hr : resolveParamsB d limits bc items with ⟨_ | xs, b1⟩ <;> (rw [hr] at h; exact h)
+  all_goals exact resolveParamRefB_le _ _ _ _
+
+/-- `resolveStreamDict` with budgeted fetches (rule D2). -/
+def resolveStreamDictB (d : OpenDoc) (limits : Limits) : BC → Dict → (Except Error Dict) × BC
+  | bc, [] => (.ok [], bc)
+  | bc, kv :: rest =>
+    bindB (if kv.1 = Name.ofString "Filter" ∨ kv.1 = Name.ofString "DecodeParms" then
+             bindB (resolveParamB d limits bc kv.2) fun v b => (.ok (kv.1, v), b)
+           else (.ok kv, bc)) fun kv' b1 =>
+    bindB (resolveStreamDictB d limits b1 rest) fun rest' b2 => (.ok (kv' :: rest'), b2)
+
+/-- `resolveStreamDictB` never increases the budget. -/
+theorem resolveStreamDictB_le (d : OpenDoc) (limits : Limits) :
+    (bc : BC) → (sd : Dict) → (resolveStreamDictB d limits bc sd).2.1.remaining ≤ bc.1.remaining
+  | bc, [] => Nat.le_refl _
+  | bc, kv :: rest => by
+    unfold resolveStreamDictB
+    have h1 : (if kv.1 = Name.ofString "Filter" ∨ kv.1 = Name.ofString "DecodeParms" then
+             bindB (resolveParamB d limits bc kv.2) fun v b => (.ok (kv.1, v), b)
+           else ((.ok kv : Except Error (Name × PdfObject)), bc)).2.1.remaining ≤
+           bc.1.remaining := by
+      split
+      · unfold bindB
+        have := resolveParamB_le d limits bc kv.2
+        rcases hr : resolveParamB d limits bc kv.2 with ⟨_ | v, b⟩ <;> (rw [hr] at this; exact this)
+      · exact Nat.le_refl _
+    generalize (if kv.1 = Name.ofString "Filter" ∨ kv.1 = Name.ofString "DecodeParms" then
+             bindB (resolveParamB d limits bc kv.2) fun v b => (.ok (kv.1, v), b)
+           else ((.ok kv : Except Error (Name × PdfObject)), bc)) = X at h1 ⊢
+    unfold bindB
+    rcases X with ⟨_ | kv', b1⟩
+    · exact h1
+    · simp only
+      have h2 := resolveStreamDictB_le d limits b1 rest
+      rcases hr : resolveStreamDictB d limits b1 rest with ⟨_ | rest', b2⟩ <;>
+        (rw [hr] at h2; exact Nat.le_trans h2 h1)
+
+/-- Decode a fetched body in a session state (rule D1): a stream is decoded by
+`Filter.decodeStreamB` from the state's budget after rule D2; anything else is `malformed`. -/
+def decodeBodyS (d : OpenDoc) (limits : Limits) (bc : BC) (off : Nat) :
+    IndirectBody → (Except Error Decoded) × BC
+  | .stream s =>
+    match resolveStreamDictB d limits bc s.dict with
+    | (.error e, b1) => (.error e, b1)
+    | (.ok sd, b1) =>
+      let r := Filter.decodeStreamB limits b1.1 sd s.data
+      (r.1, (r.2, b1.2))
+  | .obj _ => (.error (.malformed off "not a stream"), bc)
+
+/-- `decodeBodyS` never increases the budget. -/
+theorem decodeBodyS_le (d : OpenDoc) (limits : Limits) (bc : BC) (off : Nat)
+    (body : IndirectBody) : (decodeBodyS d limits bc off body).2.1.remaining ≤ bc.1.remaining := by
+  unfold decodeBodyS
+  split
+  · rename_i s
+    have h1 := resolveStreamDictB_le d limits bc s.dict
+    rcases hr : resolveStreamDictB d limits bc s.dict with ⟨_ | sd, b1⟩
+    · rw [hr] at h1; exact h1
+    · rw [hr] at h1
+      exact Nat.le_trans (Filter.decodeStreamB_le _ _ _ _ _) h1
+  · exact Nat.le_refl _
+
+/-- **Charge law** of `decodeBodyS`: a decoded stream's bytes plus the budget left are at most
+the budget before. -/
+theorem decodeBodyS_charge {d : OpenDoc} {limits : Limits} {bc : BC} {off : Nat}
+    {body : IndirectBody} {r : Decoded} (h : (decodeBodyS d limits bc off body).1 = .ok r) :
+    r.bytes.size + (decodeBodyS d limits bc off body).2.1.remaining ≤ bc.1.remaining := by
+  unfold decodeBodyS at h ⊢
+  split at h
+  · rename_i s
+    have h1 := resolveStreamDictB_le d limits bc s.dict
+    rcases hr : resolveStreamDictB d limits bc s.dict with ⟨_ | sd, b1⟩
+    · rw [hr] at h; cases h
+    · rw [hr] at h h1
+      simp only at h ⊢
+      have := Filter.decodeStreamB_charge h
+      dsimp only at h1 this ⊢
+      omega
+  · cases h
+
+/-- **Budgeted stream access in a session** (S2, rule D1): fetch object `n g` with the
+session's budget and cache and decode it as a stream from the same budget. Returns the
+decoded stream and the session left. -/
+def decodeStreamS (s : Session) (limits : Limits) (n g : Nat) :
+    (Except Error Decoded) × Session :=
+  let f := fetchB s.doc limits (s.budget, s.cache) n g
+  let r : (Except Error Decoded) × BC := match f.1 with
+    | .error e => (.error e, f.2)
+    | .ok b => decodeBodyS s.doc limits f.2 (offsetOf s.doc n) b
+  (r.1, ⟨s.doc, r.2.1, r.2.2⟩)
+
+/-- `decodeStreamS` never increases the budget and keeps the document. -/
+theorem decodeStreamS_le (s : Session) (limits : Limits) (n g : Nat) :
+    (decodeStreamS s limits n g).2.budget.remaining ≤ s.budget.remaining ∧
+    (decodeStreamS s limits n g).2.doc = s.doc := by
+  refine ⟨?_, rfl⟩
+  unfold decodeStreamS
+  have h1 := (fetchB_sim s.doc limits (s.budget, s.cache) n g).1
+  rcases hf : fetchB s.doc limits (s.budget, s.cache) n g with ⟨_ | b, bc⟩
+  · rw [hf] at h1; exact h1
+  · rw [hf] at h1
+    exact Nat.le_trans (decodeBodyS_le _ _ _ _ _) h1
+
+/-- **Charge law** (S3) of `decodeStreamS`: the decoded bytes plus the budget left are at
+most the session's budget before. -/
+theorem decodeStreamS_charge {s : Session} {limits : Limits} {n g : Nat} {r : Decoded}
+    (h : (decodeStreamS s limits n g).1 = .ok r) :
+    r.bytes.size + (decodeStreamS s limits n g).2.budget.remaining ≤ s.budget.remaining := by
+  unfold decodeStreamS at h ⊢
+  have h1 := (fetchB_sim s.doc limits (s.budget, s.cache) n g).1
+  rcases hf : fetchB s.doc limits (s.budget, s.cache) n g with ⟨_ | b, bc⟩
+  · rw [hf] at h; cases h
+  · rw [hf] at h h1
+    dsimp only at h h1 ⊢
+    have := decodeBodyS_charge h
+    omega
+
+/-- Decode a `/Contents` array in a session state (rule D3). -/
+def decodeRefsS (d : OpenDoc) (limits : Limits) :
+    BC → List PdfObject → (Except Error (List ByteArray)) × BC
+  | bc, [] => (.ok [], bc)
+  | bc, .ref n g :: os =>
+    let f := fetchB d limits bc n g
+    match f.1 with
+    | .error e => (.error e, f.2)
+    | .ok (.obj .null) => decodeRefsS d limits f.2 os
+    | .ok body =>
+      let r := decodeBodyS d limits f.2 (offsetOf d n) body
+      match contentData (offsetOf d n) r.1 with
+      | .error e => (.error e, r.2)
+      | .ok bs =>
+        match decodeRefsS d limits r.2 os with
+        | (.error e, q) => (.error e, q)
+        | (.ok bss, q) => (.ok (bs :: bss), q)
+  | bc, _ :: _ =>
+    (.error (.malformed 0 "/Contents array element is not an indirect reference"), bc)
+
+/-- **Document-wide bound for content arrays in a session**: the budget never grows, and on
+success the decoded parts plus the budget left are at most the budget before. -/
+theorem decodeRefsS_total (d : OpenDoc) (limits : Limits) :
+    (bc : BC) → (items : List PdfObject) →
+    (decodeRefsS d limits bc items).2.1.remaining ≤ bc.1.remaining ∧
+    ∀ parts, (decodeRefsS d limits bc items).1 = .ok parts →
+      (parts.map ByteArray.size).sum + (decodeRefsS d limits bc items).2.1.remaining ≤
+        bc.1.remaining
+  | bc, [] => ⟨Nat.le_refl _, fun parts h => by
+      simp only [decodeRefsS, Except.ok.injEq] at h ⊢; subst h; simp⟩
+  | bc, .ref n g :: os => by
+    have h0 := (fetchB_sim d limits bc n g).1
+    unfold decodeRefsS
+    generalize fetchB d limits bc n g = F at h0 ⊢
+    rcases F with ⟨f1, fb⟩
+    simp only at h0 ⊢
+    rcases f1 with e | body
+    · exact ⟨h0, fun parts h => by cases h⟩
+    · have hnull : body = .obj .null ∨ body ≠ .obj .null := by
+        by_cases hb : body = .obj .null
+        · exact .inl hb
+        · exact .inr hb
+      rcases hnull with hb | hb
+      · subst hb
+        obtain ⟨r1, r2⟩ := decodeRefsS_total d limits fb os
+        exact ⟨Nat.le_trans r1 h0, fun parts h => Nat.le_trans (r2 parts h) h0⟩
+      · have hdec := fun (bd : IndirectBody) =>
+          decodeBodyS_le d limits fb (offsetOf d n) bd
+        have key : ∀ (bd : IndirectBody), bd = body →
+            (match contentData (offsetOf d n) (decodeBodyS d limits fb (offsetOf d n) bd).1 with
+             | .error e => ((Except.error e : Except Error (List ByteArray)),
+                 (decodeBodyS d limits fb (offsetOf d n) bd).2)
+             | .ok bs =>
+               match decodeRefsS d limits (decodeBodyS d limits fb (offsetOf d n) bd).2 os with
+               | (.error e, q) => (.error e, q)
+               | (.ok bss, q) => (.ok (bs :: bss), q)).2.1.remaining ≤ bc.1.remaining ∧
+            ∀ parts, (match contentData (offsetOf d n)
+                (decodeBodyS d limits fb (offsetOf d n) bd).1 with
+             | .error e => ((Except.error e : Except Error (List ByteArray)),
+                 (decodeBodyS d limits fb (offsetOf d n) bd).2)
+             | .ok bs =>
+               match decodeRefsS d limits (decodeBodyS d limits fb (offsetOf d n) bd).2 os with
+               | (.error e, q) => (.error e, q)
+               | (.ok bss, q) => (.ok (bs :: bss), q)).1 = .ok parts →
+              (parts.map ByteArray.size).sum + (match contentData (offsetOf d n)
+                (decodeBodyS d limits fb (offsetOf d n) bd).1 with
+             | .error e => ((Except.error e : Except Error (List ByteArray)),
+                 (decodeBodyS d limits fb (offsetOf d n) bd).2)
+             | .ok bs =>
+               match decodeRefsS d limits (decodeBodyS d limits fb (offsetOf d n) bd).2 os with
+               | (.error e, q) => (.error e, q)
+               | (.ok bss, q) => (.ok (bs :: bss), q)).2.1.remaining ≤ bc.1.remaining := by
+          intro bd _
+          have h1 := hdec bd
+          generalize hD : decodeBodyS d limits fb (offsetOf d n) bd = D at h1 ⊢
+          rcases hc : contentData (offsetOf d n) D.1 with e | bs
+          · exact ⟨Nat.le_trans h1 h0, fun parts h => by cases h⟩
+          · simp only
+            obtain ⟨dd, hdd, hbs⟩ := contentData_ok hc
+            have hch := decodeBodyS_charge (d := d) (limits := limits) (bc := fb)
+              (off := offsetOf d n) (body := bd) (r := dd) (by rw [hD]; exact hdd)
+            rw [hD] at hch
+            obtain ⟨r1, r2⟩ := decodeRefsS_total d limits D.2 os
+            rcases hq : decodeRefsS d limits D.2 os with ⟨_ | bss, q⟩
+            · rw [hq] at r1
+              exact ⟨Nat.le_trans r1 (Nat.le_trans h1 h0), fun parts h => by cases h⟩
+            · rw [hq] at r1 r2
+              refine ⟨Nat.le_trans r1 (Nat.le_trans h1 h0), fun parts h => ?_⟩
+              simp only [Except.ok.injEq] at h
+              subst h
+              have := r2 bss rfl
+              simp only [List.map_cons, List.sum_cons]
+              rw [← hbs]
+              dsimp only at this hch h1 h0 ⊢
+              omega
+        rcases body with o | st
+        · cases o
+          case null => exact absurd rfl hb
+          all_goals exact key _ rfl
+        · exact key _ rfl
+  | bc, .null :: _ | bc, .bool _ :: _ | bc, .int _ :: _ | bc, .real _ :: _
+  | bc, .string _ :: _ | bc, .name _ :: _ | bc, .array _ :: _ | bc, .dict _ :: _ =>
+    ⟨Nat.le_refl _, fun parts h => by simp [decodeRefsS] at h⟩
+
+/-- One content stream `n` with fetched body `body`, decoded in a session state (rule D3). -/
+def contentPart (d : OpenDoc) (limits : Limits) (bc : BC) (n : Nat) (body : IndirectBody) :
+    (Except Error (List ByteArray)) × BC :=
+  let b := decodeBodyS d limits bc (offsetOf d n) body
+  match contentData (offsetOf d n) b.1 with
+  | .error e => (.error e, b.2)
+  | .ok bs => (.ok [bs], b.2)
+
+/-- `contentPart`: the budget never grows; a decoded part plus the budget left are at most
+the budget before. -/
+theorem contentPart_total (d : OpenDoc) (limits : Limits) (bc : BC) (n : Nat)
+    (body : IndirectBody) :
+    (contentPart d limits bc n body).2.1.remaining ≤ bc.1.remaining ∧
+    ∀ parts, (contentPart d limits bc n body).1 = .ok parts →
+      (parts.map ByteArray.size).sum + (contentPart d limits bc n body).2.1.remaining ≤
+        bc.1.remaining := by
+  unfold contentPart
+  have h1 := decodeBodyS_le d limits bc (offsetOf d n) body
+  have hch0 := fun (dd : Decoded) (hdd : (decodeBodyS d limits bc (offsetOf d n) body).1 = .ok dd) =>
+    decodeBodyS_charge hdd
+  generalize decodeBodyS d limits bc (offsetOf d n) body = D at h1 hch0 ⊢
+  simp only
+  rcases hc : contentData (offsetOf d n) D.1 with e | bs
+  · exact ⟨h1, fun parts h => by cases h⟩
+  · refine ⟨h1, fun parts h => ?_⟩
+    simp only [Except.ok.injEq] at h
+    subst h
+    obtain ⟨dd, hdd, hbs⟩ := contentData_ok hc
+    have hch := hch0 dd hdd
+    simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil]
+    rw [← hbs]
+    omega
+
+/-- A page's `/Contents` decoded in a session state (rule D3). -/
+def decodeContentsBC (d : OpenDoc) (limits : Limits) (bc : BC) (page : Page) :
+    (Except Error (List ByteArray)) × BC :=
+  match page.contents with
+  | none => (.ok [], bc)
+  | some (.array items) => decodeRefsS d limits bc items
+  | some (.ref n g) =>
+    let f := fetchB d limits bc n g
+    match f.1 with
+    | .error e => (.error e, f.2)
+    | .ok (.obj .null) => (.ok [], f.2)
+    | .ok (.obj (.array items)) => decodeRefsS d limits f.2 items
+    | .ok body => contentPart d limits f.2 n body
+  | some _ =>
+    (.error (.malformed (offsetOf d page.num) "/Contents is not a stream or an array"), bc)
+
+/-- `decodeContentsBC`: the budget never grows; the decoded parts plus the budget left are at
+most the budget before. -/
+theorem decodeContentsBC_total (d : OpenDoc) (limits : Limits) (bc : BC) (page : Page) :
+    (decodeContentsBC d limits bc page).2.1.remaining ≤ bc.1.remaining ∧
+    ∀ parts, (decodeContentsBC d limits bc page).1 = .ok parts →
+      (parts.map ByteArray.size).sum + (decodeContentsBC d limits bc page).2.1.remaining ≤
+        bc.1.remaining := by
+  unfold decodeContentsBC
+  rcases page.contents with _ | o
+  · exact ⟨Nat.le_refl _, fun parts h => by
+      simp only [Except.ok.injEq] at h; subst h; simp⟩
+  · cases o
+    case array items => exact decodeRefsS_total d limits bc items
+    case ref n g =>
+      simp only
+      have h0 := (fetchB_sim d limits bc n g).1
+      generalize fetchB d limits bc n g = F at h0 ⊢
+      rcases F with ⟨f1, fb⟩
+      simp only at h0 ⊢
+      have key : ∀ body : IndirectBody,
+          (contentPart d limits fb n body).2.1.remaining ≤ bc.1.remaining ∧
+          ∀ parts, (contentPart d limits fb n body).1 = .ok parts →
+            (parts.map ByteArray.size).sum + (contentPart d limits fb n body).2.1.remaining ≤
+              bc.1.remaining := fun body =>
+        let ⟨c1, c2⟩ := contentPart_total d limits fb n body
+        ⟨Nat.le_trans c1 h0, fun parts h => Nat.le_trans (c2 parts h) h0⟩
+      rcases f1 with e | (o | st)
+      · exact ⟨h0, fun parts h => by cases h⟩
+      · cases o
+        case null =>
+          exact ⟨h0, fun parts h => by simp only [Except.ok.injEq] at h; subst h; simpa using h0⟩
+        case array items =>
+          obtain ⟨r1, r2⟩ := decodeRefsS_total d limits fb items
+          exact ⟨Nat.le_trans r1 h0, fun parts h => Nat.le_trans (r2 parts h) h0⟩
+        all_goals exact key _
+      · exact key _
+    all_goals exact ⟨Nat.le_refl _, fun parts h => by cases h⟩
+
+/-- **Budgeted page contents in a session** (S2, rule D3): the decoded content streams of a
+page, in order, every fetch and decode charged to the session's budget. -/
+def decodeContentsS (s : Session) (limits : Limits) (page : Page) :
+    (Except Error (List ByteArray)) × Session :=
+  let r := decodeContentsBC s.doc limits (s.budget, s.cache) page
+  (r.1, ⟨s.doc, r.2.1, r.2.2⟩)
+
+/-- **Document-wide bound for a page's contents in a session** (S3): the budget never grows,
+the document is kept, and on success the decoded content streams plus the budget left are at
+most the session's budget before. -/
+theorem decodeContentsS_total (s : Session) (limits : Limits) (page : Page) :
+    (decodeContentsS s limits page).2.budget.remaining ≤ s.budget.remaining ∧
+    (decodeContentsS s limits page).2.doc = s.doc ∧
+    ∀ parts, (decodeContentsS s limits page).1 = .ok parts →
+      (parts.map ByteArray.size).sum + (decodeContentsS s limits page).2.budget.remaining ≤
+        s.budget.remaining :=
+  let ⟨h1, h2⟩ := decodeContentsBC_total s.doc limits (s.budget, s.cache) page
+  ⟨h1, rfl, h2⟩
+
 /-! ## Tests -/
 
 section Tests
@@ -1208,6 +2162,45 @@ private def pc (i rem : Nat) : String :=
     | .error (.malformed _ "not a stream") => true
     | _ => false
   | .error _ => false)
+
+/-! ### Sessions (task 4.5) -/
+
+/-- Test helper: open `contentPdf` in a session (`openDocS`) under total budget `rem` and decode
+page `i`'s contents in it (`decodeContentsS`): parts or error kind, and the budget left. -/
+private def pcS (i rem : Nat) : String :=
+  let lim : Limits := { Limits.default with maxDecodedTotalBytes := rem }
+  match openDocS lim contentPdf with
+  | .error _ => "open failed"
+  | .ok (doc, s) =>
+    match doc.pages.toList[i]? with
+    | none => "no page"
+    | some p =>
+      let r := decodeContentsS s lim p
+      let t := match r.1 with
+        | .ok parts => s!"ok {parts.map asText}"
+        | .error (.limitExceeded k) => s!"limit {reprStr k}"
+        | .error (.malformed _ m) => s!"err {m}"
+        | .error _ => "err"
+      s!"{t} rem={r.2.budget.remaining}"
+
+-- Classic xref tables: opening and walking decode nothing, so the session budget is the whole
+-- budget, and the contents are charged exactly as by `decodeContentsB`.
+#guard pcS 0 9 == "ok [ABC, DEF, xyz] rem=0"
+#guard pcS 0 8 == "limit SafePdf.LimitKind.decodedTotalBytes rem=2"
+#guard pcS 1 100 == "ok [ABC] rem=97"
+-- `openDocS` walks the same page tree as `openDoc`.
+#guard (match openDocS Limits.default threePages, openDoc Limits.default threePages with
+  | .ok (d1, s), .ok d2 =>
+    d1.pages.toList.map Page.num == d2.pages.toList.map Page.num &&
+      s.budget.remaining == Limits.default.maxDecodedTotalBytes
+  | _, _ => false)
+-- `decodeStreamS` on a non-stream object.
+#guard (match openDocS Limits.default contentPdf with
+  | .ok (_, s) => match (decodeStreamS s Limits.default 7 0).1 with
+    | .error (.malformed _ "not a stream") => true
+    | _ => false
+  | .error _ => false)
+
 
 end Tests
 

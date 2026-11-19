@@ -28,6 +28,7 @@ import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HEADER = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
+KiB = 1 << 10
 MiB = 1 << 20
 GiB = 1 << 30
 SMALL = 1 * MiB          # the suite's small test limit (Tests/Bombs.lean `smallLimit`)
@@ -234,6 +235,26 @@ def objstm_pdf(root_inside):
     return p.finish(off)
 
 
+def objstm_two_pdf():
+    """Two object streams, 4 and 5 (/FlateDecode), each inflating to 768 KiB plus its header:
+    object 6 lives in 4, object 7 in 5. Each fits the 1 MiB per-stream limit; together (1.5 MiB)
+    they exceed a 1 MiB document budget (task 4.5). The catalog is plain; uncompressed xref
+    stream 8."""
+    p = Pdf()
+    p.add(1, plain_obj(1, CATALOG))
+    p.add(2, plain_obj(2, "<< /Type /Pages /Kids [] /Count 0 >>"))
+    for cont, num in ((4, 6), (5, 7)):
+        head = b"%d 0 " % num
+        data = zfill(768 * KiB, b" ", head + b"null")
+        p.add(cont, stream_obj(cont, "/Type /ObjStm /N 1 /First %d /Filter /FlateDecode"
+                               % len(head), data))
+    types = {n: (1, o, 0) for n, o in p.offs.items()}
+    types[6] = (2, 4, 0)
+    types[7] = (2, 5, 0)
+    off = p.xref_stream(8, 9, types)
+    return p.finish(off)
+
+
 def xref_bomb_pdf():
     """The only xref section is an xref stream (/FlateDecode) inflating to 320 MiB of zeros
     (its /Size 5 and /W [1 4 2] call for 35 bytes). Objects 1-3 are plain and sound."""
@@ -308,6 +329,7 @@ def generate():
             files[name + ".pdf"] = content_pdf(dct, data)
     files["objstm-bomb.pdf"] = objstm_pdf(False)
     files["objstm-bomb-root.pdf"] = objstm_pdf(True)
+    files["objstm-two.pdf"] = objstm_two_pdf()
     files["xref-bomb.pdf"] = xref_bomb_pdf()
     lines = []
     for n in sorted(files):
