@@ -1,0 +1,23 @@
+--- pages
+file:       input
+open:       strict
+pages:      4 (declared /Count 6 (MISMATCH))
+skipped:    1 dangling /Kids reference(s)
+defaulted:  1 page(s) without a MediaBox (US Letter used)
+labels:     2 range(s), 0 warning(s)
+  #0  4 0 R  media [0 0 595.276 841.89]  crop [0 0 595.276 841.89]  rotate 270  label "i"  links 2
+  #1  5 0 R  media [0 0 595.276 841.89]  crop [0 0 300.5 400]  rotate 180  label "ii"  links 0
+  #2  6 0 R  media [0 0 595.276 841.89]  crop [0 0 595.276 841.89]  rotate 0  label "A-5"  links 0
+  #3  7 0 R  media [0 0 612 792] (defaulted)  crop [0 0 612 792]  rotate 90  label "A-6"  links 0
+--- pages --json
+{"index": 0, "num": 4, "gen": 0, "mediaBox": [0, 0, 595.276, 841.89], "cropBox": [0, 0, 595.276, 841.89], "mediaBoxDefaulted": false, "rotate": 270, "label": "i", "links": 2}
+{"index": 1, "num": 5, "gen": 0, "mediaBox": [0, 0, 595.276, 841.89], "cropBox": [0, 0, 300.5, 400], "mediaBoxDefaulted": false, "rotate": 180, "label": "ii", "links": 0}
+{"index": 2, "num": 6, "gen": 0, "mediaBox": [0, 0, 595.276, 841.89], "cropBox": [0, 0, 595.276, 841.89], "mediaBoxDefaulted": false, "rotate": 0, "label": "A-5", "links": 0}
+{"index": 3, "num": 7, "gen": 0, "mediaBox": [0, 0, 612, 792], "cropBox": [0, 0, 612, 792], "mediaBoxDefaulted": true, "rotate": 90, "label": "A-6", "links": 0}
+{"summary": {"path": "input", "open": "strict", "pages": 4, "declaredCount": 6, "countMismatch": true, "skippedKids": 1, "mediaBoxDefaulted": 1, "labelRanges": 2, "labelWarnings": 0, "links": 2}}
+--- outline
+file:       input
+open:       strict
+outline:    0 item(s), max depth 0, 0 warning(s)
+--- outline --json
+{"summary": {"path": "input", "open": "strict", "items": 0, "maxDepth": 0, "warnings": 0}}

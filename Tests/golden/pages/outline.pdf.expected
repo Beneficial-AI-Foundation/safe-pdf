@@ -1,0 +1,33 @@
+--- pages
+file:       input
+open:       strict
+pages:      2 (declared /Count 2)
+skipped:    0 dangling /Kids reference(s)
+defaulted:  0 page(s) without a MediaBox (US Letter used)
+labels:     0 range(s), 0 warning(s)
+  #0  3 0 R  media [0 0 200 100]  crop [0 0 200 100]  rotate 0  label "1"  links 0
+  #1  4 0 R  media [0 0 200 100]  crop [0 0 200 100]  rotate 0  label "2"  links 0
+--- pages --json
+{"index": 0, "num": 3, "gen": 0, "mediaBox": [0, 0, 200, 100], "cropBox": [0, 0, 200, 100], "mediaBoxDefaulted": false, "rotate": 0, "label": "1", "links": 0}
+{"index": 1, "num": 4, "gen": 0, "mediaBox": [0, 0, 200, 100], "cropBox": [0, 0, 200, 100], "mediaBoxDefaulted": false, "rotate": 0, "label": "2", "links": 0}
+{"summary": {"path": "input", "open": "strict", "pages": 2, "declaredCount": 2, "countMismatch": false, "skippedKids": 0, "mediaBoxDefaulted": 0, "labelRanges": 0, "labelWarnings": 0, "links": 0}}
+--- outline
+file:       input
+open:       strict
+outline:    7 item(s), max depth 1, 2 warning(s)
+  - "Chapter 1" -> page 1 /XYZ  [6 0 R]
+    - "Caf\xe9 \x5c s" -> named "intro" -> page 0 /Fit  [7 0 R]
+    - "<utf16:00480069>" -> named "legacy" -> page 0 /FitH  [8 0 R]
+  - "Web" -> action URI  [9 0 R]
+  - "Missing" -> unresolved "nowhere"  [10 0 R]
+  - "Far" -> page index 7 (out of range) /Fit  [11 0 R]
+  - "" -> none  [12 0 R]
+--- outline --json
+{"num": 6, "gen": 0, "depth": 0, "title": "Chapter 1", "count": 2, "target": "dest", "page": 1, "pageRef": "4 0 R", "fit": "XYZ", "name": null}
+{"num": 7, "gen": 0, "depth": 1, "title": "Caf\\xe9 \\x5c s", "count": null, "target": "dest", "page": 0, "pageRef": "3 0 R", "fit": "Fit", "name": "intro"}
+{"num": 8, "gen": 0, "depth": 1, "title": "<utf16:00480069>", "count": null, "target": "dest", "page": 0, "pageRef": "3 0 R", "fit": "FitH", "name": "legacy"}
+{"num": 9, "gen": 0, "depth": 0, "title": "Web", "count": null, "target": "action", "action": "URI"}
+{"num": 10, "gen": 0, "depth": 0, "title": "Missing", "count": null, "target": "unresolved", "name": "nowhere"}
+{"num": 11, "gen": 0, "depth": 0, "title": "Far", "count": null, "target": "dest", "page": null, "pageRef": 7, "fit": "Fit", "name": null}
+{"num": 12, "gen": 0, "depth": 0, "title": "", "count": null, "target": "none"}
+{"summary": {"path": "input", "open": "strict", "items": 7, "maxDepth": 1, "warnings": 2}}
