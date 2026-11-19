@@ -1,0 +1,52 @@
+--- ops
+file:       input
+open:       strict
+pages:      1 (0 with undecodable contents, 0 truncated)
+operators:  34, covered 34 (100.00%), unsupported 0, warned 1
+warnings:   interpreter 1, tokenizer 0
+items:      glyphRun=8 image=1
+  #0  ops 34  covered 34  unsupported 0  warned 1  warnings 1+0  items glyphRun=8 image=1
+histogram:
+  Tj          6  warned 1
+  BT          3  warned 0
+  ET          3  warned 0
+  Tr          3  warned 0
+  Tf          2  warned 0
+  "           1  warned 0
+  '           1  warned 0
+  BI          1  warned 0
+  Q           1  warned 0
+  RG          1  warned 0
+  T*          1  warned 0
+  TJ          1  warned 0
+  TL          1  warned 0
+  Tc          1  warned 0
+  Td          1  warned 0
+  Tm          1  warned 0
+  Ts          1  warned 0
+  Tw          1  warned 0
+  Tz          1  warned 0
+  cm          1  warned 0
+  q           1  warned 0
+  rg          1  warned 0
+--- ops --json
+{"page": 0, "error": null, "parts": 1, "contentBytes": 392, "ops": 34, "covered": 34, "unsupported": 0, "warned": 1, "interpWarnings": 1, "tokWarnings": 0, "truncated": false, "items": {"fillPath": 0, "strokePath": 0, "clip": 0, "glyphRun": 8, "image": 1, "shading": 0, "unsupported": 0}, "unsupportedOps": {}}
+{"summary": {"path": "input", "open": "strict", "pages": 1, "errorPages": 0, "truncatedPages": 0, "ops": 34, "covered": 34, "unsupported": 0, "warned": 1, "interpWarnings": 1, "tokWarnings": 0, "maxPageOps": 34, "items": {"fillPath": 0, "strokePath": 0, "clip": 0, "glyphRun": 8, "image": 1, "shading": 0, "unsupported": 0}, "histogram": {"Tj": {"count": 6, "unsupported": 0, "warned": 1}, "BT": {"count": 3, "unsupported": 0, "warned": 0}, "ET": {"count": 3, "unsupported": 0, "warned": 0}, "Tr": {"count": 3, "unsupported": 0, "warned": 0}, "Tf": {"count": 2, "unsupported": 0, "warned": 0}, "\"": {"count": 1, "unsupported": 0, "warned": 0}, "'": {"count": 1, "unsupported": 0, "warned": 0}, "BI": {"count": 1, "unsupported": 0, "warned": 0}, "Q": {"count": 1, "unsupported": 0, "warned": 0}, "RG": {"count": 1, "unsupported": 0, "warned": 0}, "T*": {"count": 1, "unsupported": 0, "warned": 0}, "TJ": {"count": 1, "unsupported": 0, "warned": 0}, "TL": {"count": 1, "unsupported": 0, "warned": 0}, "Tc": {"count": 1, "unsupported": 0, "warned": 0}, "Td": {"count": 1, "unsupported": 0, "warned": 0}, "Tm": {"count": 1, "unsupported": 0, "warned": 0}, "Ts": {"count": 1, "unsupported": 0, "warned": 0}, "Tw": {"count": 1, "unsupported": 0, "warned": 0}, "Tz": {"count": 1, "unsupported": 0, "warned": 0}, "cm": {"count": 1, "unsupported": 0, "warned": 0}, "q": {"count": 1, "unsupported": 0, "warned": 0}, "rg": {"count": 1, "unsupported": 0, "warned": 0}}}}
+--- consistency
+page 0: ok
+--- svg page 1
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="612" height="792" viewBox="0 0 612 792" data-page="1">
+<rect x="0" y="0" width="612" height="792" fill="white"/>
+<g transform="matrix(1 0 0 -1 0 792)">
+<text transform="matrix(12 0 0 12 72 700) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="rgb(0%,0%,0%)">Hello, world</text>
+<text transform="matrix(12 0 0 12 72 686) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="rgb(0%,0%,0%)">Kernedtext</text>
+<text transform="matrix(12 0 0 12 72 672) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="rgb(0%,0%,0%)">Next line via quote</text>
+<text transform="matrix(12 0 0 12 72 658) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="rgb(0%,0%,0%)">Word &amp; char spacing</text>
+<text transform="matrix(12 0 0 12 72 658) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="rgb(100%,0%,0%)" data-render-mode="stroke">Stroked &lt;text&gt;</text>
+<text transform="matrix(12 0 0 12 72 658) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="none" data-render-mode="invisible">invisible "quoted"</text>
+<text transform="matrix(9.6 0 0 12 72 661) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F1" data-size="12" fill="rgb(0%,0%,0%)">Latin-1: café ©</text>
+<text transform="matrix(19.2 0 0 24 300 503) scale(1 -1)" font-family="sans-serif" font-size="1" xml:space="preserve" data-font="F2" data-size="24" fill="rgb(0%,0%,100%)">Big</text>
+<rect x="0" y="0" width="1" height="1" transform="matrix(50 0 0 20 72 600)" fill="rgb(80%,80%,80%)" data-image="inline"/>
+</g>
+</svg>
