@@ -31,6 +31,13 @@ only the single-file check. A subagent in its own git worktree may build and tes
 there; the project has no Lake dependencies, so a fresh worktree builds from scratch in
 well under a minute and needs no cache sharing.
 
+**Lean MCP server (`lean-lsp`, configured in `.mcp.json`).** It runs `lake serve` in the main
+checkout and can build on demand. Use its read-only tools (`lean_goal`,
+`lean_diagnostic_messages`, `lean_hover_info`, `lean_multi_attempt`, `lean_run_code`, search
+tools) only while no `lake build` runs in the main checkout, and never call `lean_build` there;
+builds stay with the orchestrator. In a worktree the server's `LEAN_PROJECT_PATH` still points
+at the main checkout, so worktree subagents keep using `lake build` / `lake env lean` locally.
+
 ## Shared registries (subagents never edit these; report the lines to add)
 
 * `SafePdf.lean` — umbrella imports of every module under `SafePdf/` (except `Shell/`).

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "lean-lsp": {
+      "type": "stdio",
+      "command": "/opt/homebrew/bin/uvx",
+      "args": ["lean-lsp-mcp"],
+      "env": { "LEAN_PROJECT_PATH": "/Users/pedroabreu/gitprojects/safe-pdf" }
+    }
+  }
+}
