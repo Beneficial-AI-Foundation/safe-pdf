@@ -153,41 +153,48 @@ def _pages_check(path: str):
 
 
 TEXT_FOLD = True   # set from --no-fold in main()
-_TEXT_MODULE = None
+# One text.py module instance per reference extractor, so each comparator keeps its own
+# list of compared pages (`PAGES`) for its worst-pages report.
+_TEXT_MODULES: dict = {}
+# Comparator name -> reference extractor in text.py's REFERENCES.
+TEXT_REFS = {"text": "pdftotext", "text-mupdf": "mupdf"}
 
 
-def _load_text_module():
-    # Loaded once: the module collects every compared page in `PAGES`.
-    global _TEXT_MODULE
-    if _TEXT_MODULE is None:
+def _load_text_module(ref: str = "pdftotext"):
+    if ref not in _TEXT_MODULES:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "text_cmp", os.path.join(os.path.dirname(os.path.abspath(__file__)), "text.py"))
+            "text_cmp_" + ref.replace("-", "_"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "text.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        _TEXT_MODULE = mod
-    return _TEXT_MODULE
+        _TEXT_MODULES[ref] = mod
+    return _TEXT_MODULES[ref]
 
 
-def _text_check(path: str):
-    mod = _load_text_module()
-    try:
-        return mod.check_file(INSPECT, path, TEXT_FOLD)
-    except mod.Skip as e:
-        raise Skip(str(e))
+def _text_checker(ref: str):
+    def check(path: str):
+        mod = _load_text_module(ref)
+        try:
+            return mod.check_file(INSPECT, path, TEXT_FOLD, ref=ref)
+        except mod.Skip as e:
+            raise Skip(str(e))
+    return check
 
 
-def text_summary(stats: dict, min_similarity: Optional[float]):
-    """Corpus-wide text report: (lines, similarity or None, failed)."""
+def text_summary(stats: dict, min_similarity: Optional[float], name: str = "text"):
+    """Corpus-wide text report for comparator `name`: (lines, similarity or None, failed)."""
+    tag = "%-8s" % name
     if not stats.get("pages", 0):
-        return ["text     no page compared"], None, False
+        return ["%s no page compared" % tag], None, False
     maxlen = stats.get("maxlen", 0)
     sim = 1.0 if maxlen == 0 else 1 - stats.get("dist", 0) / maxlen
-    lines = ["text     corpus similarity (character-weighted, 1 - sum lev / sum max len): %.4f "
-             "over %d page(s), %d exact" % (sim, stats["pages"], stats.get("pages_exact", 0))]
-    mod = _TEXT_MODULE
+    lines = ["%s corpus similarity vs %s (character-weighted, 1 - sum lev / sum max len): %.4f "
+             "over %d page(s), %d exact" % (tag, TEXT_REFS[name], sim, stats["pages"],
+                                            stats.get("pages_exact", 0))]
+    mod = _TEXT_MODULES.get(TEXT_REFS[name])
     if mod is not None and mod.PAGES:
-        lines.append("text     worst pages:")
+        lines.append("%s worst pages:" % tag)
         lines += mod.worst_lines(mod.PAGES, 10)
     fail = min_similarity is not None and sim < min_similarity
     if fail:
@@ -209,7 +216,10 @@ COMPARATORS = {
         # Page count, refs, MediaBox, CropBox, Rotate vs qpdf (pages.py).
         Comparator("pages", ["qpdf"], "pages", lambda p: "", custom=_pages_check),
         # Page text vs poppler's pdftotext, normalized edit distance (text.py).
-        Comparator("text", ["pdftotext"], "text", lambda p: "", custom=_text_check),
+        Comparator("text", ["pdftotext"], "text", lambda p: "", custom=_text_checker("pdftotext")),
+        # Page text vs MuPDF's `mutool draw -F txt`, same metric (text.py, ref "mupdf").
+        Comparator("text-mupdf", ["mutool"], "text", lambda p: "",
+                   custom=_text_checker("mupdf")),
     ]
 }
 # Comparator-specific normalization of OUR dump (applied before compare).
@@ -330,14 +340,17 @@ def main(argv=None) -> int:
         if r["status"] in ("disagree", "error"):
             print("%s %s %s: %s" % (r["status"].upper(), r["comparator"], r["file"], r["detail"]))
 
-    text_report = None
-    if "text" in names:
-        lines, sim, fail = text_summary(stats["text"], args.min_similarity)
+    text_reports = {}
+    for tname in ("text", "text-mupdf"):
+        if tname not in names:
+            continue
+        lines, sim, fail = text_summary(stats[tname], args.min_similarity, tname)
         for ln in lines:
             print(ln)
         bad = bad or fail
-        mod = _TEXT_MODULE
-        text_report = {
+        mod = _TEXT_MODULES.get(TEXT_REFS[tname])
+        text_reports[tname] = {
+            "reference": TEXT_REFS[tname],
             "similarity": sim, "min_similarity": args.min_similarity,
             "worst_pages": [] if mod is None else [
                 {"similarity": t[0], "file": t[1], "page": t[2], "lev": t[3], "maxlen": t[4],
@@ -361,8 +374,7 @@ def main(argv=None) -> int:
         with open(args.json, "w") as fh:
             out = {"counts": counts, "stats": stats, "files_compared": files_compared,
                    "min_compared": args.min_compared, "results": results}
-            if text_report is not None:
-                out["text"] = text_report
+            out.update(text_reports)
             json.dump(out, fh, indent=1)
     return 1 if bad else 0
 

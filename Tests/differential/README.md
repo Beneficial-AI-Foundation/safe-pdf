@@ -22,6 +22,7 @@ our dump (`.lake/build/bin/inspect <file> <view>`) + normalizer + compare.
 | `pages`   | `qpdf --json=2` (>= 11)  | `pages`        | working (needs qpdf; see below) |
 | `streams` | Python `zlib`            | `streams`      | working     |
 | `text`    | `pdftotext` (poppler)    | `text`         | working (needs pdftotext; see below) |
+| `text-mupdf` | `mutool draw -F txt` (MuPDF) | `text`    | working (needs mutool; see below) |
 
 Add one by appending a `Comparator(...)` to `COMPARATORS` in `run.py` (pdf.js
 later).
@@ -141,7 +142,10 @@ Compares `inspect --view text --json FILE` (task 6.6: `Core.Text.extractDocPage`
 all pages under one document budget) with poppler's `pdftotext -enc UTF-8 FILE -`
 (reading-order mode, not `-layout`), split into pages on form feeds. Pages are
 paired by index; a page present on one side only is compared with the empty
-string (note `page-count`). Phase 6 exit M6 asks for >= 98% similarity; this
+string (note `page-count`). Comparator `text-mupdf` is the same with MuPDF as the
+reference (`mutool draw -q -F txt -o - FILE`, which also ends every page with a form
+feed); Plan.md names pdfium/MuPDF as the M6 reference, so both are reported.
+Phase 6 exit M6 asks for >= 98% similarity; this
 comparator **reports** the numbers, the threshold is evaluated by the
 orchestrator.
 

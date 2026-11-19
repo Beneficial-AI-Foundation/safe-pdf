@@ -84,10 +84,15 @@ jobs:
       # actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install qpdf (>= 11 required for JSON v2) and poppler-utils (pdftotext)
+      - name: Install qpdf (>= 11 required for JSON v2), poppler-utils (pdftotext) and mupdf-tools (mutool)
         run: |
           sudo apt-get update
-          sudo apt-get install -y qpdf poppler-utils
+          sudo apt-get install -y qpdf poppler-utils mupdf-tools
+          mutool -v 2>&1 | head -n1
+          if ! mutool -v 2>&1 | grep -qi 'mutool version'; then
+            echo "::error::mutool (mupdf-tools) not usable"
+            exit 1
+          fi
           qpdf --version
           # pdftotext prints its version on stderr.
           pdftotext -v 2>&1 | head -n1
@@ -186,14 +191,14 @@ jobs:
             --json differential-pages.json --min-compared 20 \
             2>&1 | tee differential-pages.log
 
-      # Task 6.6 / M6: page text vs pdftotext, normalized edit distance.
-      # Reports the corpus similarity; no threshold yet (the M6 98% is
-      # evaluated from this log / JSON).
+      # Task 6.6 / M6: page text vs pdftotext (poppler) and vs MuPDF (mutool),
+      # normalized edit distance. Reports both corpus similarities; no threshold
+      # yet (the M6 98% is evaluated from this log / JSON).
       - name: Text comparison on the corpus
         if: always()
         run: |
           set -o pipefail
-          python3 -I Tests/differential/run.py --comparator text \
+          python3 -I Tests/differential/run.py --comparator text --comparator text-mupdf \
             --json differential-text.json \
             2>&1 | tee differential-text.log
 
