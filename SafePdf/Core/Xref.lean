@@ -732,6 +732,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o _ => s!"cycle@{o}"
+  | .encryption w => s!"encryption:{w}"
 
 /-- Test helper: `parseXrefTable` summarised as (entries, /Size, /Root, /Prev, end). -/
 private def pxl (lim : Limits) (b : ByteArray) (pos : Nat) :

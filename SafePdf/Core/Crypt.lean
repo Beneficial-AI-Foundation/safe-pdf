@@ -44,13 +44,26 @@ streams) is in `Core.Open`.
   data of `/Type /Metadata` streams when `/EncryptMetadata false`, and stream data whose
   first filter is `/Crypt` naming `/Identity` (the stream's own crypt filter overrides
   `/StmF`; a named non-identity `/Crypt` filter decrypts with that filter's method). Strings
-  in the `/Contents` of signature dictionaries are also unencrypted per §7.6.2; they are not
-  special-cased (signatures are out of scope). Objects inside an object stream are not
+  in the `/Contents` of signature dictionaries are also unencrypted per §7.6.2 (rule C7'').
+* C7''. (Task 4.6.) **Signature dictionaries** (`isSigDict`: `/Type /Sig` or
+  `/DocTimeStamp`, or any dictionary with `/ByteRange`, e.g. a usage-rights `/Perms /UR3`
+  signature): the value of `/Contents` is kept as is (§7.6.2: it is not encrypted; decrypting
+  it fails AES padding, as on USCIS form G-1145). Its other strings are decrypted. A string
+  that fails to decrypt anywhere else is still an error of the whole object (and, for the
+  root, of the open): the encrypted file then fails visibly rather than showing undecrypted
+  or partially decrypted content (decision of task 4.6).
+* C7'. (Task 4.6.) A stream decrypted with its **own** named crypt filter (`ownCrypt`: first
+  filter `/Crypt`, `/Name` not `/Identity`) is returned with that stage's `/DecodeParms`
+  `/Name` set to `/Identity` (`markApplied`): the data no longer needs that filter, and
+  `Core.Filter` (rule F4) then passes it through, while still rejecting a named crypt filter
+  that was not applied. The dictionary's depth is unchanged (`markApplied_depth`). Only a
+  direct `/Filter` and `/DecodeParms` are read for this (as for `streamMethod`). Objects inside an object stream are not
   decrypted again: the object stream's data is (`Core.Open`).
 * C9. Errors of `setup` (unsupported handler or revision, wrong password, malformed
-  dictionary) are tagged (`tagError`, recognized by `isSetupError`), so that `Core.Open`
-  treats them as final instead of trying repair (a repaired trailer may lack `/Encrypt` and
-  the document would open undecrypted).
+  dictionary) are `Error.encryption` (`setupError`, task 4.6: by constructor, never by
+  message text), so that `Core.Open` treats them as final (`Error.isFinal`) instead of
+  trying repair. Errors of decrypting one object (`decryptBytes`, `methodFor` of a stream's
+  own crypt filter) stay `malformed`: they concern that object, not the document.
 * C8. **Permissions are advisory** (S8): `/P` is parsed and kept; nothing is enforced.
   `/Perms` (`/R 5`, `/R 6`) is checked (`State.permsOk`) but a mismatch is not an error.
 
@@ -229,12 +242,12 @@ def parseEncrypt (d : Dict) : Except Error Handler := do
     | some v => pure v.toNat
     | none => pure 0
   unless v = 1 ∨ v = 2 ∨ v = 4 ∨ v = 5 do
-    throw (.unsupported s!"encryption /V {v}")
+    throw (.unsupported s!"/V {v} is not supported")
   let r ← match getInt d "R" with
     | some r => pure r.toNat
     | none => throw (bad "/R is missing")
   unless (v < 5 ∧ 2 ≤ r ∧ r ≤ 4) ∨ (v = 5 ∧ (r = 5 ∨ r = 6)) do
-    throw (.unsupported s!"encryption /V {v} /R {r}")
+    throw (.unsupported s!"/V {v} /R {r} is not supported")
   let p ← match getInt d "P" with
     | some p => pure p
     | none => throw (bad "/P is missing")
@@ -275,21 +288,27 @@ def parseEncrypt (d : Dict) : Except Error Handler := do
 
 /-- The error for a file whose user password is not empty (rule C4). -/
 def wrongPassword : Error :=
-  .unsupported "encryption: non-empty user password (only the empty user password is supported)"
+  .encryption "non-empty user password (only the empty user password is supported)"
 
-/-- **Tag** an error of the encryption setup (rule C9): `malformed` messages start with
-`/Encrypt: `, `unsupported` ones with `encryption: `. Tagged errors are final at open
-(`Core.Open`, rule E2). -/
-def tagError : Error → Error
-  | .malformed o m => .malformed o (if m.startsWith "/Encrypt: " then m else "/Encrypt: " ++ m)
-  | .unsupported w => .unsupported (if w.startsWith "encryption: " then w else "encryption: " ++ w)
+/-- An error of the encryption setup as `Error.encryption` (rule C9, task 4.6): `malformed`
+(with its byte offset when non-zero) and `unsupported` become `encryption`; `encryption`,
+`cycle` and `limitExceeded` are kept (a cycle is final anyway; a limit is not a property of
+the encryption). By constructor only. -/
+def setupError : Error → Error
+  | .malformed o m => .encryption (if o = 0 then m else s!"{m} (byte {o})")
+  | .unsupported w => .encryption w
   | e => e
 
-/-- Whether an error is a tagged encryption-setup error (`tagError`). -/
-def isSetupError : Error → Bool
-  | .malformed _ m => m.startsWith "/Encrypt: "
-  | .unsupported w => w.startsWith "encryption: "
-  | _ => false
+/-- **Setup errors are final** (rule C9): a converted setup error is final
+(`Error.isFinal`: `encryption` or `cycle`) unless it is a resource limit. -/
+theorem setupError_final {e : Error} (hl : ∀ k, e ≠ .limitExceeded k) :
+    (setupError e).isFinal = true := by
+  cases e with
+  | malformed o m => rfl
+  | unsupported w => rfl
+  | encryption w => rfl
+  | cycle o w => rfl
+  | limitExceeded k => exact absurd rfl (hl k)
 
 /-- **Algorithm 2** (`/R 2`–`/R 4`) with the empty user password and the first `/ID` string. -/
 def algorithm2 (h : Handler) (id0 : ByteArray) : ByteArray :=
@@ -384,10 +403,10 @@ structure State where
 trailer dictionary `trailer`: parse, derive the key, check `/Perms`. -/
 def setup (enc trailer : Dict) (encRef : Option (Nat × Nat)) : Except Error State :=
   match parseEncrypt enc with
-  | .error e => .error (tagError e)
+  | .error e => .error (setupError e)
   | .ok h =>
     match deriveKey h (id0Of trailer) with
-    | .error e => .error (tagError e)
+    | .error e => .error (setupError e)
     | .ok key => .ok { handler := h, fileKey := key, encRef, permsOk := permsOk h key }
 
 /-- **Algorithm 1**: the key for object `num gen` under `m` (rule C5). -/
@@ -422,6 +441,19 @@ def decryptBytes (m : Method) (key data : ByteArray) : Except Error ByteArray :=
 
 /-! ## Decrypting objects (rule C7) -/
 
+/-- Whether a dictionary is a **signature dictionary** (ISO 32000-2 §12.8.1, rule C7''): its
+`/Type` is `/Sig` or `/DocTimeStamp`, or it has a `/ByteRange` (usage-rights signatures such
+as `/Perms /UR3` often omit `/Type`). Its `/Contents` string is not encrypted (§7.6.2). -/
+def isSigDict (d : List (Name × PdfObject)) : Bool :=
+  (match Dict.get? d (Name.ofString "Type") with
+    | some (.name t) => t == Name.ofString "Sig" || t == Name.ofString "DocTimeStamp"
+    | _ => false) ||
+  (Dict.get? d (Name.ofString "ByteRange")).isSome
+
+/-- Whether entry key `k` of a dictionary is left as is: `/Contents` of a signature dictionary
+(`sig`, rule C7''). -/
+def keepEntry (sig : Bool) (k : Name) : Bool := sig && k == Name.ofString "Contents"
+
 mutual
 /-- Decrypt every string of an object with `f` (recursively). -/
 def decryptObj (f : List UInt8 → Except Error (List UInt8)) : PdfObject → Except Error PdfObject
@@ -440,7 +472,7 @@ def decryptObj (f : List UInt8 → Except Error (List UInt8)) : PdfObject → Ex
     | .ok ys => .ok (.array ys)
     | .error e => .error e
   | .dict d =>
-    match decryptDict f d with
+    match decryptDict f (isSigDict d) d with
     | .ok d' => .ok (.dict d')
     | .error e => .error e
 
@@ -456,15 +488,16 @@ def decryptList (f : List UInt8 → Except Error (List UInt8)) :
       | .error e => .error e
       | .ok ys => .ok (y :: ys)
 
-/-- `decryptObj` over the values of a dictionary (keys unchanged). -/
-def decryptDict (f : List UInt8 → Except Error (List UInt8)) :
+/-- `decryptObj` over the values of a dictionary (keys unchanged); with `sig` (a signature
+dictionary) the `/Contents` value is kept as is (`keepEntry`, rule C7''). -/
+def decryptDict (f : List UInt8 → Except Error (List UInt8)) (sig : Bool) :
     List (Name × PdfObject) → Except Error (List (Name × PdfObject))
   | [] => .ok []
   | (k, v) :: rest =>
-    match decryptObj f v with
+    match (if keepEntry sig k then .ok v else decryptObj f v) with
     | .error e => .error e
     | .ok v' =>
-      match decryptDict f rest with
+      match decryptDict f sig rest with
       | .error e => .error e
       | .ok rest' => .ok ((k, v') :: rest')
 end
@@ -498,7 +531,7 @@ theorem decryptObj_depth (f : List UInt8 → Except Error (List UInt8)) :
     · rename_i d' hd
       cases h
       simp only [PdfObject.depth]
-      rw [decryptDict_depth f d hd]
+      rw [decryptDict_depth f _ d hd]
     · cases h
 
 /-- Depth preserved over a list. -/
@@ -519,9 +552,9 @@ theorem decryptList_depth (f : List UInt8 → Except Error (List UInt8)) :
         rw [decryptObj_depth f x hy, decryptList_depth f xs hys]
 
 /-- Depth preserved over dictionary values. -/
-theorem decryptDict_depth (f : List UInt8 → Except Error (List UInt8)) :
-    (d : List (Name × PdfObject)) → ∀ {d' : List (Name × PdfObject)}, decryptDict f d = .ok d' →
-      PdfObject.depthDict d' = PdfObject.depthDict d
+theorem decryptDict_depth (f : List UInt8 → Except Error (List UInt8)) (sig : Bool) :
+    (d : List (Name × PdfObject)) → ∀ {d' : List (Name × PdfObject)},
+      decryptDict f sig d = .ok d' → PdfObject.depthDict d' = PdfObject.depthDict d
   | [], _, h => by unfold decryptDict at h; cases h; rfl
   | (k, v) :: rest, _, h => by
     unfold decryptDict at h
@@ -532,8 +565,12 @@ theorem decryptDict_depth (f : List UInt8 → Except Error (List UInt8)) :
       · cases h
       · rename_i rest' hr
         cases h
+        have hvd : v'.depth = v.depth := by
+          by_cases hk : keepEntry sig k = true
+          · simp only [hk, ↓reduceIte, Except.ok.injEq] at hv; rw [hv]
+          · simp only [hk, Bool.false_eq_true, ↓reduceIte] at hv; exact decryptObj_depth f v hv
         simp only [PdfObject.depthDict]
-        rw [decryptObj_depth f v hv, decryptDict_depth f rest hr]
+        rw [hvd, decryptDict_depth f sig rest hr]
 end
 
 /-- The string decryptor of object `num gen`: `/StrF` with the object's key. -/
@@ -581,8 +618,39 @@ def decryptData (st : State) (num gen : Nat) (s : Stream) : Except Error ByteArr
     | .error e => .error e
     | .ok m => decryptBytes m (objectKey m st.fileKey num gen) s.data
 
+/-- Whether `decryptData` applies the stream's **own** named crypt filter (rule C7'): its
+first filter is `/Crypt` with a `/Name` other than `/Identity`, and the data is decrypted
+(not the `/EncryptMetadata false` metadata exception). -/
+def ownCrypt (h : Handler) (d : Dict) : Bool :=
+  !(hasType d "Metadata" ∧ !h.encryptMetadata) &&
+    firstFilter d == some (Name.ofString "Crypt") && cryptName d != Name.ofString "Identity"
+
+/-- One parameter entry: a `/Name` whose value is a name becomes `/Name /Identity`. -/
+def identityEntry (kv : Name × PdfObject) : Name × PdfObject :=
+  match kv.2 with
+  | .name _ => if kv.1 = Name.ofString "Name" then (kv.1, .name (Name.ofString "Identity")) else kv
+  | _ => kv
+
+/-- A crypt filter's parameter dictionary with its `/Name` (a name) set to `/Identity`. -/
+def identityParms (p : Dict) : Dict := p.map identityEntry
+
+/-- The `/DecodeParms` value with the first (the `/Crypt` stage's) parameters made
+`/Identity` (`identityParms`); anything else unchanged. -/
+def appliedParms : PdfObject → PdfObject
+  | .dict p => .dict (identityParms p)
+  | .array (.dict p :: rest) => .array (.dict (identityParms p) :: rest)
+  | o => o
+
+/-- **Mark the stream's own crypt filter as applied** (rule C7', task 4.6): its `/Crypt`
+stage now names `/Identity`, so `Filter` passes the (already decrypted) data through
+instead of rejecting the named crypt filter. -/
+def markApplied (d : Dict) : Dict :=
+  d.map fun kv => if kv.1 = Name.ofString "DecodeParms" then (kv.1, appliedParms kv.2) else kv
+
 /-- **Entry point.** Decrypt the body of object `num gen` (rule C7): not the encryption
-dictionary, not a cross-reference stream; strings everywhere, stream data by `decryptData`. -/
+dictionary, not a cross-reference stream; strings everywhere, stream data by `decryptData`.
+A stream decrypted with its own named crypt filter has that stage marked applied
+(`markApplied`, rule C7'). -/
 def decryptBody (st : State) (num gen : Nat) (b : IndirectBody) : Except Error IndirectBody :=
   if st.encRef = some (num, gen) then .ok b
   else
@@ -591,12 +659,13 @@ def decryptBody (st : State) (num gen : Nat) (b : IndirectBody) : Except Error I
     | .stream s =>
       if hasType s.dict "XRef" then .ok b
       else
-        match decryptDict (stringFn st num gen) s.dict with
+        match decryptDict (stringFn st num gen) (isSigDict s.dict) s.dict with
         | .error e => .error e
         | .ok d' =>
           match decryptData st num gen s with
           | .error e => .error e
-          | .ok data => .ok (.stream ⟨d', data⟩)
+          | .ok data =>
+            .ok (.stream ⟨if ownCrypt st.handler s.dict then markApplied d' else d', data⟩)
 
 /-- **Entry point.** Decrypt the data of object stream `c` (generation 0) before decoding it
 (rule C7; its dictionary is used as is, its members are not decrypted again). -/
@@ -606,6 +675,47 @@ def decryptContainer (st : State) (c : Nat) (s : Stream) : Except Error Stream :
   | .ok data => .ok { s with data }
 
 /-! ## Theorems -/
+
+/-- `identityEntry` keeps the value's depth (a name replaces a name). -/
+theorem identityEntry_depth (kv : Name × PdfObject) :
+    (identityEntry kv).2.depth = kv.2.depth := by
+  unfold identityEntry
+  split
+  · rename_i n h
+    split
+    · simp only [h, PdfObject.depth]
+    · rfl
+  · rfl
+
+/-- `identityParms` keeps the depth. -/
+theorem identityParms_depth : (p : Dict) →
+    PdfObject.depthDict (identityParms p) = PdfObject.depthDict p
+  | [] => rfl
+  | (k, v) :: rest => by
+    have ih := identityParms_depth rest
+    have he := identityEntry_depth (k, v)
+    simp only [identityParms, List.map_cons] at ih ⊢
+    rcases hk : identityEntry (k, v) with ⟨k', v'⟩
+    rw [hk] at he
+    simp only at he
+    simp only [PdfObject.depthDict, he, ih]
+
+/-- `appliedParms` keeps the depth. -/
+theorem appliedParms_depth (o : PdfObject) : (appliedParms o).depth = o.depth := by
+  unfold appliedParms
+  split
+  · simp only [PdfObject.depth, identityParms_depth]
+  · simp only [PdfObject.depth, PdfObject.depthList, identityParms_depth]
+  · rfl
+
+/-- `markApplied` keeps the depth. -/
+theorem markApplied_depth : (d : Dict) →
+    PdfObject.depthDict (markApplied d) = PdfObject.depthDict d
+  | [] => rfl
+  | (k, v) :: rest => by
+    have ih := markApplied_depth rest
+    simp only [markApplied, List.map_cons] at ih ⊢
+    split <;> simp only [PdfObject.depthDict, appliedParms_depth, ih]
 
 /-- **Shape and depth preserved**: a decrypted body has the same kind and the same depth
 (a stream's dictionary depth). -/
@@ -639,7 +749,9 @@ theorem decryptBody_shape {st : State} {num gen : Nat} {b b' : IndirectBody}
           · cases h
             refine .inr ⟨s, _, rfl, rfl, ?_⟩
             simp only [PdfObject.depth]
-            rw [decryptDict_depth _ s.dict hd]
+            split
+            · rw [markApplied_depth, decryptDict_depth _ _ s.dict hd]
+            · rw [decryptDict_depth _ _ s.dict hd]
 
 /-- **Size law**: decryption never makes data longer. -/
 theorem decryptBytes_size_le {m : Method} {key data out : ByteArray}
@@ -742,7 +854,7 @@ private def id0R3 : ByteArray := fromHex "dc51a2a67d2df2d1c9ccd5c6895c1ad3"
   | .error _ => false)
 -- a different /ID: the empty password no longer matches /U
 #guard (match deriveKey hR3 (fromHex "00") with
-  | .error (.unsupported _) => true
+  | .error (.encryption _) => true
   | _ => false)
 -- Algorithm 2.B (R6) with the empty password and with "ab", salt 00 01 … 07
 #guard beqBytes (hash2B .empty (fromHex "0001020304050607") .empty)
@@ -754,6 +866,17 @@ private def id0R3 : ByteArray := fromHex "dc51a2a67d2df2d1c9ccd5c6895c1ad3"
   (fromHex "205d415ca0043cb9e10644804364a2e6")
 -- the /P bytes
 #guard (le32 (-3904)).data == #[0xC0, 0xF0, 0xFF, 0xFF]
+-- rule C7': an applied named crypt filter is marked /Identity; /Identity is not "own"
+private def cryptDict (parms : PdfObject) : Dict :=
+  [(Name.ofString "Filter", .array [.name (Name.ofString "Crypt"), .name (Name.ofString "FlateDecode")]),
+   (Name.ofString "DecodeParms", parms)]
+private def altParms : PdfObject :=
+  .array [.dict [(Name.ofString "Name", .name (Name.ofString "AltCF"))], .null]
+#guard ownCrypt hR3 (cryptDict altParms)
+#guard !ownCrypt hR3 (cryptDict (.array [.dict [(Name.ofString "Name", .name (Name.ofString "Identity"))], .null]))
+#guard !ownCrypt hR3 [(Name.ofString "Filter", .name (Name.ofString "FlateDecode"))]
+#guard cryptName (markApplied (cryptDict altParms)) == Name.ofString "Identity"
+#guard cryptName (cryptDict altParms) == Name.ofString "AltCF"
 -- an AES string round-trip shape: empty decrypts to empty, 5 bytes is an error
 #guard (match decryptBytes .aesv2 (zeros 16) .empty with | .ok b => b.size == 0 | _ => false)
 #guard (match decryptBytes .aesv2 (zeros 16) (zeros 5) with | .error _ => true | _ => false)

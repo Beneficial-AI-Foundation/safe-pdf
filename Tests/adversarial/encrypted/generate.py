@@ -25,6 +25,24 @@ Every file holds:
      (stored unencrypted: the Identity crypt filter overrides /StmF),
   11 (aesv2.pdf only, /EncryptMetadata false) a /Type /Metadata stream stored unencrypted.
 
+Task 4.6 adds variants (build options, see SETUPS):
+  repair-aesv2.pdf        as aesv2.pdf, but startxref points to byte 1: the strict path fails,
+                          the repair path must recover /Encrypt and /ID from the xref stream
+                          dictionary (there is no `trailer` keyword) and decrypt;
+  repair-lost-encrypt.pdf as repair-aesv2.pdf, but /Encrypt 99 0 R names a missing object:
+                          the repaired file must fail with Error.encryption, never open
+                          undecrypted;
+  objstm-length-aesv2.pdf as aesv2.pdf, but the /Length of content stream 4 is 12 0 R, an
+                          integer inside the (encrypted) object stream 7; plus
+                          13 a stream with /Filter [/Crypt /FlateDecode] and the named crypt
+                          filter /AltCF (/CFM /V2, RC4), encrypted with RC4 although /StmF is
+                          AESV2.
+  sig-aesv2.pdf           as aesv2.pdf (/EncryptMetadata true), but the catalog has a
+                          usage-rights signature /Perms << /UR3 << /ByteRange [...]
+                          /Contents <...> /M (...) >> >> without /Type, as on USCIS forms:
+                          /Contents is stored in the clear (ISO 32000-2 §7.6.2; 37 bytes, not
+                          a valid AES ciphertext), /M is encrypted.
+
 Usage:
     python3 -I Tests/adversarial/encrypted/generate.py           # write the PDFs
     python3 -I Tests/adversarial/encrypted/generate.py --check   # verify files on disk
@@ -44,9 +62,16 @@ PAD = bytes.fromhex("28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE645
 TITLE = b"Encrypted title \xe9"
 KIND = b"inside an object stream"
 CONTENT = b"BT /F1 24 Tf 72 700 Td (Hello, encrypted world) Tj ET"
+NAMED_DATA = b"named crypt filter /AltCF: RC4 although /StmF is AESV2"
+SIG_M = b"D:20261119120000Z"
 IDENTITY_DATA = b"identity crypt filter: stored in the clear"
 METADATA = b"<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?><x:xmpmeta xmlns:x='adobe:ns:meta/'/>"
 P_VALUE = -3904
+
+
+def sig_contents():
+    """The clear-text /Contents of the signature dictionary (37 bytes)."""
+    return det_bytes("sig/contents", 37)
 
 
 def det_bytes(label, n):
@@ -260,8 +285,13 @@ class Crypt:
     """One encryption setup: how to encrypt strings and streams of object (num, gen)."""
 
     def __init__(self, name, v, r, bits, method, upw=b"", encrypt_metadata=True,
-                 direct_encrypt=False):
+                 direct_encrypt=False, broken_startxref=False, encrypt_ref=9,
+                 length_in_objstm=False, sig_dict=False):
         self.name, self.v, self.r, self.method = name, v, r, method
+        self.broken_startxref = broken_startxref
+        self.encrypt_ref = encrypt_ref
+        self.length_in_objstm = length_in_objstm
+        self.sig_dict = sig_dict
         self.encrypt_metadata = encrypt_metadata
         self.direct_encrypt = direct_encrypt
         self.n = bits // 8
@@ -278,17 +308,19 @@ class Crypt:
             self.o, self.u, self.oe, self.ue, self.perms = v5_values(
                 r, upw, b"owner", self.key, P_VALUE, encrypt_metadata, name)
 
-    def obj_key(self, num, gen):
-        if self.method == "aesv3":
+    def obj_key(self, num, gen, method=None):
+        method = method or self.method
+        if method == "aesv3":
             return self.key
         m = self.key + struct.pack("<I", num)[:3] + struct.pack("<I", gen)[:2]
-        if self.method == "aesv2":
+        if method == "aesv2":
             m += b"sAlT"
         return hashlib.md5(m).digest()[:min(self.n + 5, 16)]
 
-    def enc(self, num, gen, data):
-        k = self.obj_key(num, gen)
-        if self.method == "rc4":
+    def enc(self, num, gen, data, method=None):
+        method = method or self.method
+        k = self.obj_key(num, gen, method)
+        if method == "rc4":
             return rc4(k, data)
         self.ivn += 1
         iv = det_bytes("%s/iv/%d" % (self.name, self.ivn), 16)
@@ -301,8 +333,10 @@ class Crypt:
             d += b" /Length %d" % (self.n * 8)
         if self.v >= 4:
             cfm = {"rc4": b"/V2", "aesv2": b"/AESV2", "aesv3": b"/AESV3"}[self.method]
-            d += b" /CF << /StdCF << /Type /CryptFilter /CFM %s /AuthEvent /DocOpen /Length %d >> >>" \
-                 b" /StmF /StdCF /StrF /StdCF" % (cfm, self.n)
+            alt = b" /AltCF << /Type /CryptFilter /CFM /V2 /Length %d >>" % self.n \
+                if self.length_in_objstm else b""
+            d += b" /CF << /StdCF << /Type /CryptFilter /CFM %s /AuthEvent /DocOpen /Length %d >>%s >>" \
+                 b" /StmF /StdCF /StrF /StdCF" % (cfm, self.n, alt)
             if not self.encrypt_metadata:
                 d += b" /EncryptMetadata false"
         if self.v == 5:
@@ -325,29 +359,52 @@ def build(c):
         add(n, b"%d 0 obj\n<< %s /Length %d >>\nstream\n" % (n, dict_inner, len(data))
             + data + b"\nendstream\nendobj\n")
 
-    obj(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    if c.sig_dict:
+        obj(1, b"<< /Type /Catalog /Pages 2 0 R /Perms << /UR3 << /Filter /Adobe.PPKLite "
+            b"/SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 10] /Contents %s /M %s >> >> >>"
+            % (hexs(sig_contents()), hexs(c.enc(1, 0, SIG_M))))
+    else:
+        obj(1, b"<< /Type /Catalog /Pages 2 0 R >>")
     obj(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
     obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>")
-    stream(4, b"/Filter /FlateDecode", c.enc(4, 0, zlib.compress(CONTENT, 9)))
+    content4 = c.enc(4, 0, zlib.compress(CONTENT, 9))
+    if c.length_in_objstm:
+        add(4, b"4 0 obj\n<< /Filter /FlateDecode /Length 12 0 R >>\nstream\n"
+            + content4 + b"\nendstream\nendobj\n")
+    else:
+        stream(4, b"/Filter /FlateDecode", content4)
     obj(5, b"<< /Title %s /Producer %s >>" % (hexs(c.enc(5, 0, TITLE)),
                                                hexs(c.enc(5, 0, b"generate.py"))))
     member = b"<< /Kind %s /N 6 >>" % hexs(KIND)
-    header = b"6 0 "
-    objstm_plain = header + member
-    stream(7, b"/Type /ObjStm /N 1 /First %d /Filter /FlateDecode" % len(header),
+    if c.length_in_objstm:
+        member12 = b"%d" % len(content4)
+        header = b"6 0 12 %d " % (len(member) + 1)
+        objstm_plain = header + member + b" " + member12
+        n_objs = 2
+    else:
+        header = b"6 0 "
+        objstm_plain = header + member
+        n_objs = 1
+    stream(7, b"/Type /ObjStm /N %d /First %d /Filter /FlateDecode" % (n_objs, len(header)),
            c.enc(7, 0, zlib.compress(objstm_plain, 9)))
     types = {6: (2, 7, 0)}
+    if c.length_in_objstm:
+        types[12] = (2, 7, 1)
     if c.v >= 4:
         stream(10, b"/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Identity >> null]",
                zlib.compress(IDENTITY_DATA, 9))
     if not c.encrypt_metadata:
         stream(11, b"/Type /Metadata /Subtype /XML", METADATA)
+    if c.length_in_objstm:
+        stream(13, b"/Filter [/Crypt /FlateDecode] /DecodeParms "
+               b"[<< /Type /CryptFilterDecodeParms /Name /AltCF >> null]",
+               c.enc(13, 0, zlib.compress(NAMED_DATA, 9), "rc4"))
     if not c.direct_encrypt:
         obj(9, c.encrypt_dict())
-        enc_entry = b"/Encrypt 9 0 R"
+        enc_entry = b"/Encrypt %d 0 R" % c.encrypt_ref
     else:
         enc_entry = b"/Encrypt " + c.encrypt_dict()
-    size = 12
+    size = 14 if c.length_in_objstm else 12
     # xref stream: object 8, W [1 4 2], uncompressed
     off8 = len(buf)
     offs[8] = off8
@@ -364,7 +421,7 @@ def build(c):
         size, enc_entry, hexs(c.id0), hexs(c.id1))
     buf.extend(b"8 0 obj\n<< %s /Length %d >>\nstream\n" % (d, len(data)) + data
                + b"\nendstream\nendobj\n")
-    buf.extend(b"startxref\n%d\n%%%%EOF\n" % off8)
+    buf.extend(b"startxref\n%d\n%%%%EOF\n" % (1 if c.broken_startxref else off8))
     return bytes(buf)
 
 
@@ -378,6 +435,14 @@ SETUPS = [
     ("aesv3.pdf", dict(v=5, r=6, bits=256, method="aesv3")),
     ("userpw-rc4-128.pdf", dict(v=2, r=3, bits=128, method="rc4", upw=b"secret")),
     ("userpw-aesv3.pdf", dict(v=5, r=6, bits=256, method="aesv3", upw=b"secret")),
+    # task 4.6
+    ("repair-aesv2.pdf", dict(v=4, r=4, bits=128, method="aesv2", encrypt_metadata=False,
+                              broken_startxref=True)),
+    ("repair-lost-encrypt.pdf", dict(v=4, r=4, bits=128, method="aesv2", broken_startxref=True,
+                                     encrypt_ref=99)),
+    ("objstm-length-aesv2.pdf", dict(v=4, r=4, bits=128, method="aesv2",
+                                     length_in_objstm=True)),
+    ("sig-aesv2.pdf", dict(v=4, r=4, bits=128, method="aesv2", sig_dict=True)),
 ]
 
 

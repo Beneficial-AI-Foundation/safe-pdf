@@ -563,3 +563,11 @@ import SafePdf
 #print axioms SafePdf.Core.Open.repairOpen_ok
 #print axioms SafePdf.Core.Open.repairOpenB_ok
 #print axioms SafePdf.Core.Open.openFile_setup_final
+-- Phase 4, task 4.6: encryption follow-ups (Crypt.lean, Open.lean)
+#print axioms SafePdf.Core.Crypt.setupError_final
+#print axioms SafePdf.Core.Crypt.identityEntry_depth
+#print axioms SafePdf.Core.Crypt.identityParms_depth
+#print axioms SafePdf.Core.Crypt.appliedParms_depth
+#print axioms SafePdf.Core.Crypt.markApplied_depth
+#print axioms SafePdf.Core.Open.openFile_final
+#print axioms SafePdf.Core.Open.openFile_repair_encryption

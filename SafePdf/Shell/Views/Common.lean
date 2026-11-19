@@ -66,6 +66,7 @@ def renderError : Error → String
   | .limitExceeded k => s!"resource limit exceeded: {renderLimitKind k}"
   | .unsupported what => s!"unsupported: {what}"
   | .cycle off what => s!"reference cycle at byte {off}: {what}"
+  | .encryption what => s!"encryption: {what}"
 
 /-- Left-pad `s` with `c` to at least `n` characters. -/
 def padLeft (n : Nat) (c : Char) (s : String) : String :=
