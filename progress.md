@@ -23,7 +23,7 @@ Design document: Plan.md
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
 | 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
-| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | awaiting-ci |
+| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | ready (2026-11-19) |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | draft |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
 | 4 | `phase-4-document` | `phase-3-filters` | — | none |
@@ -241,6 +241,7 @@ Exit criterion checked: [ ]
 * `SAFEPDF_GOLDEN_UPDATE=1 lake exe tests` rewrites every golden suite — check `git status` afterwards. Goldens recorded in one worktree can go stale when another task of the same wave changes error rendering; regenerate at integration and review.
 * Byte filters (3.3): `Core.Filter.Ascii` holds a shared byte-machine engine (`run` impl, `runSpec` spec, `run_spec`, `decodeWith_size_le`, `decodeWith_law`) used by `asciiHexDecode`, `ascii85Decode` and `RunLength.runLengthDecode`; each takes `(strict := true)` (lenient: end of input = EOD); bounds out ≤ ⌈in/2⌉, ≤ 4·in, ≤ 128·in; round trips with simple encoders. Engine would read better as `Filter/ByteMachine.lean` (refactor when 3.5 wires the pipeline).
 * v4.36 (3.3): `∀ b : UInt8, P b` by `decide` is fast under `set_option maxRecDepth 100000 in` (bounded `∀ n < 256` over Nat overflows); `rw [lemma _ _ (by omega)]` fails to synthesize — use `?_` then `all_goals first | omega | (simp; omega) | simp`; `omega` fails on nested `/`/`%` — bound the value first, then `Nat.div_eq_of_lt_le`.
+* `gh pr checks N` mixes in runs of the same commit on other branches (e.g. cancelled runs on the next phase branch after a cut) — check `gh run list --commit <sha>` and read the PR branch's own runs.
 * Worktree subagents: Bash commands that `cd` into the main checkout or hold its paths in shell variables are refused; plain absolute paths for read-only access work.
 
 ## Decisions and deviations from the design document
@@ -277,3 +278,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — wave 13 part 2 (phase 1, PR #2): 2.11 done (`openFile`, real `Document`, `--view resolve`, dashboard M2 columns; depth proof re-done against the 2.10 API at merge); corpus 74/74 open, 99.999% objects resolve; added 2.13 (cycle errors must not be repaired, M2 clause 2); commit "wave 13 (part 2): 2.11 — document opening"
 * 2026-11-19 — phase 1 milestone M1 verified (round trip proved, fuzz clean, qpdf 67,473/67,473 agree); PR #2 → awaiting-ci (CI on f99c9d8 running); phase 2 continues on `phase-2-xref`
 * 2026-11-19 — wave 14 part 1 (phase 2, PR #3): 2.8 (inspector xref/revisions/repair views), 2.13 (**cycle errors final: Bogk-style files rejected by `openFile`**, `openFile_cycle`), 3.3 (ASCIIHex/ASCII85/RunLength, fully proven) done; added 2.14 (`/Length` cycle through object streams); corpus 0 regressions; commit "wave 14 (part 1): 2.8 2.13 3.3 — xref views, final cycle errors, ASCII/RunLength filters"
+* 2026-11-19 — phase 1 milestone: PR #2 marked ready for review (CI green on 14e689f, runs 44515147861/44515153520)
