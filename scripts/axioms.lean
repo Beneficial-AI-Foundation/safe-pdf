@@ -386,3 +386,15 @@ import SafePdf
 #print axioms SafePdf.Core.Doc.Doc.decodeRefsB_total
 #print axioms SafePdf.Core.Doc.Doc.decodeContentsB_le
 #print axioms SafePdf.Core.Doc.Doc.decodeContentsB_total
+
+-- Phase 3, task 3.11: table-driven inflate and fast Adler-32 (SafePdf/Core/Filter/Flate.lean)
+#print axioms SafePdf.Core.Filter.Flate.decodeSym_eq
+#print axioms SafePdf.Core.Filter.Flate.decodeGoB_decodeGo
+#print axioms SafePdf.Core.Filter.Flate.decodeGoB_some
+#print axioms SafePdf.Core.Filter.Flate.peek9_bit
+#print axioms SafePdf.Core.Filter.Flate.window_bit
+#print axioms SafePdf.Core.Filter.Flate.twoPow_getD
+#print axioms SafePdf.Core.Filter.Flate.adlerGo_eq_foldl
+#print axioms SafePdf.Core.Filter.Flate.adler32_eq_foldl
+#print axioms SafePdf.Spec.FlateWork.decodeSymW_fst
+#print axioms SafePdf.Core.Filter.Deflate.or4_mod_eight
