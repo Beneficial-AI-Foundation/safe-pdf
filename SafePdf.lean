@@ -54,3 +54,6 @@ import SafePdf.Core.Font.Std14
 import SafePdf.Core.Font.Widths
 import SafePdf.Core.Font.Type1
 import SafePdf.Core.Content.Run
+import SafePdf.Core.Font.TrueType
+import SafePdf.Core.Font.CMap
+import SafePdf.Core.Text
