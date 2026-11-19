@@ -22,6 +22,7 @@ import SafePdf.Spec.XrefTerm
 import SafePdf.Core.Xref.Length
 import SafePdf.Repair
 import SafePdf.Core.Filter.Flate
+import SafePdf.Spec.FlateWork
 import SafePdf.Core.Filter.Predictor
 import SafePdf.Core.Filter.Ascii
 import SafePdf.Core.Filter.RunLength

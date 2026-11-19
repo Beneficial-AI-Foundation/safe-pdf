@@ -37,11 +37,12 @@ A total, bounded decoder for DEFLATE (RFC 1951) and its zlib wrapper (RFC 1950),
 * `readLengths` (dynamic header): `total - lengths.size`; each code-length symbol adds ≥ 1.
 * Huffman decode (≤ 15 bit steps) and back-reference copy (≤ 258 steps): structural.
 
-Work bound (argued, not mechanised): block-loop iterations ≤ `input.size * 8` (each consumes
-≥ 1 bit); literal/length-loop iterations ≤ `limit + #blocks` (each grows the output, or ends
-a block); back-reference copy steps total ≤ `limit`; each symbol decode is ≤ 15 bit steps
-and every dynamic header is ≤ 316 symbols. So total work is
-O(limit + input.size * 8) with small constants.
+Work bound: mechanised in `SafePdf/Spec/FlateWork.lean` (task 3.8b) with counted twins of
+`decodeGo`/`codes`/`stored`/`readLengths`/`readDynamic`/`blocks` whose first component is
+proved equal to the functions here: in every outcome, `flateDecode` takes at most
+`536 · input.size + 3 · limits.maxDecodedStreamBytes + 1923` steps
+(`FlateWork.flateDecodeW_steps_le`), and on success `536 · input.size + 3 · output.size +
+1923` (`FlateWork.flateDecodeW_steps_le_of_ok`). The definitions here are unchanged by it.
 
 ## Zlib semantics followed (and deviations)
 
