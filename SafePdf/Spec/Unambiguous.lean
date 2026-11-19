@@ -623,6 +623,7 @@ private def errS : Error → String
   | .malformed o m => s!"malformed@{o}: {m}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o w => s!"cycle@{o}: {w}"
 
 /-- Test helper: `resolveEntry` under the default limits, errors summarised. -/
 private def rs (b : ByteArray) (n : Nat) : Sum String (Option XrefEntry) :=
@@ -753,7 +754,7 @@ private def overSize : ByteArray :=
 #guard rs hybrid 5 == .inr (some (.inUse 334 0))
 #guard rs hybrid 8 == .inr none
 -- a broken chain: resolution fails with the chain's error
-#guard rs (hybridAt 692) 3 == .inl "malformed@692: xref /XRefStm cycle"
+#guard rs (hybridAt 692) 3 == .inl "cycle@692: xref /XRefStm cycle"
 -- /Size: satisfied by the regular files, violated by an object 6 under /Size 6
 #guard cs minimalValid == .inr () && cs twoRevisions == .inr () && cs hybrid == .inr ()
 #guard offs overSize == some [587, 404]

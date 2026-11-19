@@ -230,10 +230,12 @@ def genInput (g : Rng) (cfg : Config) (seeds : Array ByteArray) : ByteArray × R
 
 /-! ## Entry points under test -/
 
-/-- Outcome class of one call: `0` ok, `1` malformed, `2` limit exceeded, `3` unsupported. -/
+/-- Outcome class of one call: `0` ok, `1` malformed (including a structural cycle,
+`Error.cycle`), `2` limit exceeded, `3` unsupported. -/
 def classify {α : Type} : Except Error α → Nat
   | .ok _ => 0
   | .error (.malformed ..) => 1
+  | .error (.cycle ..) => 1
   | .error (.limitExceeded _) => 2
   | .error (.unsupported _) => 3
 
