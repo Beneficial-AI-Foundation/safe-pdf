@@ -187,20 +187,17 @@ def zlibFixed (bs : ByteArray) (lz77 : Bool := true) : ByteArray :=
 /-! ## Round trip for stored blocks -/
 
 /-- The low three bits of the 32-bit window read by `readBits` are those of its first byte. -/
-theorem or4_and_seven (x0 x1 x2 x3 : Nat) :
-    (x0 ||| (x1 <<< 8) ||| (x2 <<< 16) ||| (x3 <<< 24)) &&& 7 = x0 &&& 7 := by
+theorem or4_mod_eight (x0 x1 x2 x3 : Nat) :
+    (x0 ||| x1 * 256 ||| x2 * 65536 ||| x3 * 16777216) % 8 = x0 % 8 := by
+  rw [show x1 * 256 = x1 <<< 8 by rw [Nat.shiftLeft_eq],
+    show x2 * 65536 = x2 <<< 16 by rw [Nat.shiftLeft_eq],
+    show x3 * 16777216 = x3 <<< 24 by rw [Nat.shiftLeft_eq], show (8 : Nat) = 2 ^ 3 from rfl]
   apply Nat.eq_of_testBit_eq
   intro i
+  simp only [Nat.testBit_mod_two_pow, Nat.testBit_or, Nat.testBit_shiftLeft]
   by_cases hi : i < 3
-  · simp only [Nat.testBit_and, Nat.testBit_or, Nat.testBit_shiftLeft]
-    have h8 : ¬ (i ≥ 8) := by omega
-    have h16 : ¬ (i ≥ 16) := by omega
-    have h24 : ¬ (i ≥ 24) := by omega
-    simp [h8, h16, h24]
-  · have h7 : Nat.testBit 7 i = false :=
-      Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le (by decide : 7 < 2 ^ 3)
-        (Nat.pow_le_pow_right (by decide) (by omega)))
-    simp [Nat.testBit_and, h7]
+  · simp [hi, show ¬ (i ≥ 8) by omega, show ¬ (i ≥ 16) by omega, show ¬ (i ≥ 24) by omega]
+  · simp [hi]
 
 /-- Two little-endian bytes of `n < 65536` recombine to `n`. -/
 theorem le16 (n : Nat) (h : n < 65536) : n % 256 ||| (n / 256 % 256) <<< 8 = n := by
@@ -241,7 +238,7 @@ theorem readBits_storedBlock (pre post chunk : ByteArray) (final : Bool) :
   have h1 : pre.size * 8 + 3 ≤ (pre ++ storedBlock final chunk ++ post).size * 8 := by omega
   simp only [h1, ↓reduceIte, show (3 : Nat) ≤ 24 by decide, Nat.mul_mod_left,
     Nat.shiftRight_zero, Nat.mul_div_cancel _ (by decide : 0 < 8), hb]
-  rw [show (1 <<< 3) - 1 = 7 by decide, or4_and_seven]
+  rw [show twoPow[3]?.getD 0 = 8 from rfl, or4_mod_eight]
   cases final <;> rfl
 
 /-- A stored block decodes to its chunk. -/
@@ -426,17 +423,16 @@ theorem foldl_inv {β : Type} (P : β → Prop) (f : β → UInt8 → β) (init 
 
 /-- Adler-32 fits in 32 bits. -/
 theorem adler32_lt (data : ByteArray) : adler32 data < 2 ^ 32 := by
-  unfold adler32
+  rw [adler32_eq_foldl]
   have hP := foldl_inv (fun st : Nat × Nat => st.1 < 65521 ∧ st.2 < 65521)
-    (fun (st : Nat × Nat) x =>
-      let a := (st.1 + x.toNat) % 65521
-      (a, (st.2 + a) % 65521)) (1, 0) data (by decide)
+    adlerStep (1, 0) data (by decide)
     (fun _ _ _ => ⟨Nat.mod_lt _ (by decide), Nat.mod_lt _ (by decide)⟩)
   split
   rename_i a b heq
   rw [heq] at hP
   simp only at hP
-  omega
+  have h1 : b * 65536 + a < 65521 * 65536 + 65521 := by omega
+  exact Nat.lt_of_lt_of_le h1 (by decide)
 
 /-- **Round trip through zlib, stored blocks**: `zlibDecode` (Adler-32 check on, the strict
 `/FlateDecode` path) undoes `zlibStored` for every input that fits the output limit. -/

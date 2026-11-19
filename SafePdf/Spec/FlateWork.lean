@@ -31,31 +31,40 @@ them).
   not a count: `build` is straight-line code (folds over the `n ≤ 286` lengths and loops of
   15 or 16 steps) and is not twinned. The fixed tables `fixedLit`/`fixedDist` are global
   constants built once, so they cost nothing per block.
+* `tableCost = 5120` per 9-bit lookup table (`Flate.mkTable`, built for the dynamic
+  literal/length and distance codes, not for the code-length code): 512 entries, each one run
+  of `decodeGoB` with fuel 9 plus a store. Also a model. With the table, `decodeSym` replaces
+  up to 9 bit steps by one probe; the count above (one per bit) is kept as its cost model.
+
+Task 3.11 (table-driven decoding) raised the constants of the bound: the two tables of a
+dynamic block add `2 · 5120` to the header cost, which is paid out of its header bits, so the
+per-bit coefficient went from 67 to 420 (per input byte 536 → 3360) and the additive constant
+from 1923 to 12163. The statements are otherwise unchanged.
 
 ## Results
 
 With `N = input.size * 8` (input bits):
 
 * `inflateAtW_steps_le`: in **every** outcome (success, malformed, truncated, limit
-  exceeded), `steps ≤ 67·(N - pos) + 2·limit + 1922`.
+  exceeded), `steps ≤ 420·(N - pos) + 2·limit + 12162`.
 * `inflateAtW_steps_le_of_ok`: on success ending at bit `p`,
-  `steps + 67·(N - p) ≤ 67·(N - pos) + 2·out.size + 1922`, i.e. 67 per bit consumed plus 2 per
+  `steps + 420·(N - p) ≤ 420·(N - pos) + 2·out.size + 12162`, i.e. 420 per bit consumed plus 2 per
   byte produced.
-* `flateDecodeW_steps_le`: `steps ≤ 536·input.size + 3·maxDecodedStreamBytes + 1923`, any
-  outcome; `flateDecodeW_steps_le_of_ok`: `steps ≤ 536·input.size + 3·out.size + 1923`.
+* `flateDecodeW_steps_le`: `steps ≤ 3360·input.size + 3·maxDecodedStreamBytes + 12163`, any
+  outcome; `flateDecodeW_steps_le_of_ok`: `steps ≤ 3360·input.size + 3·out.size + 12163`.
 
 ## Proof: a potential
 
 Every block-level twin satisfies `steps + Φ(after) ≤ Φ(before) + c`, where
-`Φ = 67·(unread bits) + 2·(bytes still allowed)` and `Φ(after) = 0` after an error (`postW`).
-In `codes`, a literal costs `1 + k` steps for a `k`-bit code and lowers `Φ` by `67k + 2`; a
-copy costs `3 + k₁ + k₃ + len` and lowers `Φ` by at least `67(k₁ + k₃) + 2 len`; an error
+`Φ = 420·(unread bits) + 2·(bytes still allowed)` and `Φ(after) = 0` after an error (`postW`).
+In `codes`, a literal costs `1 + k` steps for a `k`-bit code and lowers `Φ` by `420k + 2`; a
+copy costs `3 + k₁ + k₃ + len` and lowers `Φ` by at least `420(k₁ + k₃) + 2 len`; an error
 costs at most `33` (two 15-bit decodes and three more steps). A dynamic header costs at most
-`1887` beyond its bits (`buildCost` of 19, ≤ 286 and ≤ 30 lengths, ≤ 316 repeat steps, 19
-code-length reads, 17 for an error), and reads at least 26 header bits besides the 3-bit
-block header, so a block with a dynamic header pays its constant out of `67·29` potential.
-The coefficient 67 is that amortisation (`⌈(1887 + 33 + 2) / 29⌉`); for stored and fixed
-blocks alone 12 would do. The bound is honest but loose by design: it charges the dynamic
+`12127` beyond its bits (`buildCost` of 19, ≤ 286 and ≤ 30 lengths, two `tableCost`, ≤ 316
+repeat steps, 19 code-length reads, 17 for an error), and reads at least 26 header bits besides the 3-bit
+block header, so a block with a dynamic header pays its constant out of `420·29` potential.
+The coefficient 420 is that amortisation (`⌈(12127 + 33 + 2) / 29⌉`); for stored and fixed
+blocks alone 12 would do (and 67 before the lookup tables). The bound is honest but loose by design: it charges the dynamic
 table construction to the header bits, as the number of blocks is not known in advance.
 -/
 
@@ -80,7 +89,7 @@ def decodeGoW (input : ByteArray) (h : Huffman) :
         | some s => (.ok (s, p + 1), 1)
         | none => (.error (.malformed (p / 8) "flate: internal: Huffman table"), 1)
       else
-        let r := decodeGoW input h fuel (len + 1) (code <<< 1) ((first + count) <<< 1)
+        let r := decodeGoW input h fuel (len + 1) (code * 2) ((first + count) * 2)
           (index + count) (p + 1)
         (r.1, r.2 + 1)
 
@@ -148,15 +157,19 @@ theorem decodeGoW_ok (input : ByteArray) (h : Huffman) (fuel len code first inde
         have := ih _ _ _ _ _ hr
         omega
 
-/-- Counted twin of `decodeSym`. -/
+/-- Counted twin of `decodeSym`. It counts the bits of the code as if decoded bit by bit
+(`decodeGoW`); the real `decodeSym` replaces up to 9 of those bit steps by one table probe
+(and on a fallback does one probe more than counted), so the count is a model of its work
+within a constant factor (task 3.11). -/
 @[inline] def decodeSymW (input : ByteArray) (h : Huffman) (pos : Nat) :
     Except Error (Nat × Nat) × Nat :=
   decodeGoW input h 15 1 0 0 0 pos
 
-/-- The twin computes exactly `decodeSym`. -/
+/-- The twin computes exactly `decodeSym` (via `Flate.decodeSym_eq`: the table-driven decoder
+equals the bit-by-bit one). -/
 theorem decodeSymW_fst (input : ByteArray) (h : Huffman) (pos : Nat) :
     (decodeSymW input h pos).1 = decodeSym input h pos :=
-  decodeGoW_fst ..
+  (decodeGoW_fst ..).trans (decodeSym_eq ..).symm
 
 /-- A symbol decode takes at most 15 steps. -/
 theorem decodeSymW_snd_le (input : ByteArray) (h : Huffman) (pos : Nat) :
@@ -267,10 +280,10 @@ decreasing_by
   all_goals simp only [ByteArray.size_push, copyBack_size]
   all_goals omega
 
-/-- The potential left after a successful block-level call: `67` per unread input bit plus
+/-- The potential left after a successful block-level call: `420` per unread input bit plus
 `2` per byte of output still allowed; `0` after an error. -/
 def postW (N limit : Nat) : Except Error (Out limit × Nat) → Nat
-  | .ok (o, p) => 67 * (N - p) + 2 * (limit - o.1.size)
+  | .ok (o, p) => 420 * (N - p) + 2 * (limit - o.1.size)
   | .error _ => 0
 
 set_option maxRecDepth 4000 in
@@ -280,7 +293,7 @@ theorem codesW_bound (input : ByteArray) (limit : Nat) (lit dist : Huffman) (out
     (pos : Nat) :
     (codesW input limit lit dist out pos).2 +
         postW (input.size * 8) limit (codesW input limit lit dist out pos).1 ≤
-      67 * (input.size * 8 - pos) + 2 * (limit - out.1.size) + 33 := by
+      420 * (input.size * 8 - pos) + 2 * (limit - out.1.size) + 33 := by
   rw [codesW.eq_def]
   dsimp only
   have hk1 := decodeSymW_snd_le input lit pos
@@ -374,7 +387,7 @@ theorem storedW_fst (input : ByteArray) (limit : Nat) (out : Out limit) (pos : N
 /-- **Work of a stored block**: at most the potential before plus `1`. -/
 theorem storedW_bound (input : ByteArray) (limit : Nat) (out : Out limit) (pos : Nat) :
     (storedW input limit out pos).2 + postW (input.size * 8) limit (storedW input limit out pos).1 ≤
-      67 * (input.size * 8 - pos) + 2 * (limit - out.1.size) + 1 := by
+      420 * (input.size * 8 - pos) + 2 * (limit - out.1.size) + 1 := by
   unfold storedW
   dsimp only
   split
@@ -466,18 +479,18 @@ decreasing_by
   all_goals simp only [Array.size_push, Array.size_append, Array.size_replicate]
   all_goals omega
 
-/-- The potential left after a successful `readLengths`: `67` per unread input bit. -/
+/-- The potential left after a successful `readLengths`: `420` per unread input bit. -/
 def postL (N : Nat) : Except Error (Array Nat × Nat) → Nat
-  | .ok (_, p) => 67 * (N - p)
+  | .ok (_, p) => 420 * (N - p)
   | .error _ => 0
 
-/-- **Work of the code-length loop**: the steps plus the potential left are at most `67` per
+/-- **Work of the code-length loop**: the steps plus the potential left are at most `420` per
 input bit, plus one per code length still to read, plus `17`. -/
 theorem readLengthsW_bound (input : ByteArray) (cl : Huffman) (total : Nat) (acc : Array Nat)
     (pos : Nat) :
     (readLengthsW input cl total acc pos).2 +
         postL (input.size * 8) (readLengthsW input cl total acc pos).1 ≤
-      67 * (input.size * 8 - pos) + (total - acc.size) + 17 := by
+      420 * (input.size * 8 - pos) + (total - acc.size) + 17 := by
   rw [readLengthsW.eq_def]
   split
   · simp only [postL]; omega
@@ -510,7 +523,7 @@ theorem readLengthsW_bound (input : ByteArray) (cl : Huffman) (total : Nat) (acc
                   let r' := readLengthsW input cl total (acc ++ Array.replicate n v) p2
                   (r'.1, 2 + k1 + n + r'.2)
                 else (.error (.malformed (pos / 8) "flate: invalid bit length repeat"), 2 + k1)).1 ≤
-              67 * (input.size * 8 - pos) + (total - acc.size) + 17 := by
+              420 * (input.size * 8 - pos) + (total - acc.size) + 17 := by
           intro r hr
           rcases r with _ | ⟨v, n, p2⟩
           · simp only [postL]; omega
@@ -575,6 +588,11 @@ not a mechanised count: `build` is straight-line code made of folds over arrays 
 (at most 286 here) and loops of 15 or 16 steps. -/
 def buildCost (n : Nat) : Nat := 4 * n + 64
 
+/-- Cost charged for one 9-bit lookup table (`Flate.mkTable`): 512 entries, each at most 9 bit
+steps of `decodeGoB` plus one store. A model, like `buildCost`; charged for the dynamic
+literal/length and distance codes (the code-length code is built without a table). -/
+def tableCost : Nat := 5120
+
 /-- Counted twin of `readDynamic`: one step per `readBits` (three header fields, one per
 code-length code length), `buildCost` per table built, and the steps of `readLengthsW`. -/
 def readDynamicW (input : ByteArray) (pos : Nat) :
@@ -606,11 +624,11 @@ def readDynamicW (input : ByteArray) (pos : Nat) :
   if lens[256]?.getD 0 == 0 then
     (.error (.malformed (p4 / 8) "flate: invalid code -- missing end-of-block"), c2 + q.2)
   else
-  let c3 := c2 + q.2 + buildCost (lens.extract 0 (hlit + 257)).size
+  let c3 := c2 + q.2 + buildCost (lens.extract 0 (hlit + 257)).size + tableCost
   match build .litOrDist (lens.extract 0 (hlit + 257)) with
   | .error _ => (.error (.malformed (p4 / 8) "flate: invalid literal/lengths set"), c3)
   | .ok lit =>
-  let c4 := c3 + buildCost (lens.extract (hlit + 257) (hlit + 257 + (hdist + 1))).size
+  let c4 := c3 + buildCost (lens.extract (hlit + 257) (hlit + 257 + (hdist + 1))).size + tableCost
   match build .litOrDist (lens.extract (hlit + 257) (hlit + 257 + (hdist + 1))) with
   | .error _ => (.error (.malformed (p4 / 8) "flate: invalid distances set"), c4)
   | .ok dist => (.ok (lit, dist, p5), c4)
@@ -651,11 +669,11 @@ theorem readDynamicW_fst (input : ByteArray) (pos : Nat) :
   · rfl
   rfl
 
-/-- The potential left after a successful dynamic header: `67` per unread input bit, plus a
-bonus of `67 · 26` for the at least 26 header bits (HLIT, HDIST, HCLEN and at least four
+/-- The potential left after a successful dynamic header: `420` per unread input bit, plus a
+bonus of `420 · 26` for the at least 26 header bits (HLIT, HDIST, HCLEN and at least four
 3-bit code-length code lengths) that were read. -/
 def postD (N : Nat) : Except Error (Huffman × Huffman × Nat) → Nat
-  | .ok (_, _, p) => 67 * (N - p) + 67 * 26
+  | .ok (_, _, p) => 420 * (N - p) + 420 * 26
   | .error _ => 0
 
 /-- Between 4 and 19 code-length code lengths are read. -/
@@ -665,10 +683,11 @@ theorem clOrder_take_length (n : Nat) : 4 ≤ (clOrder.take (n + 4)).length ∧
   omega
 
 /-- **Work of a dynamic header**: steps plus the potential left are at most the potential
-before plus `1887` (= 3 + 19 + `buildCost 19` + 316 + 17 + `buildCost 286` + `buildCost 30`). -/
+before plus `12127` (= 3 + 19 + `buildCost 19` + 316 + 17 + `buildCost 286` + `buildCost 30` +
+2 · `tableCost`). -/
 theorem readDynamicW_bound (input : ByteArray) (pos : Nat) :
     (readDynamicW input pos).2 + postD (input.size * 8) (readDynamicW input pos).1 ≤
-      67 * (input.size * 8 - pos) + 1887 := by
+      420 * (input.size * 8 - pos) + 12127 := by
   unfold readDynamicW
   rcases hb1 : readBits input pos 5 with e | ⟨hlit, p1⟩
   · simp only [postD]; omega
@@ -710,11 +729,11 @@ theorem readDynamicW_bound (input : ByteArray) (pos : Nat) :
   split
   · simp only [postD, buildCost]; omega
   rcases build .litOrDist (lens.extract 0 (hlit + 257)) with e | lit
-  · simp only [postD, buildCost]; omega
+  · simp only [postD, buildCost, tableCost]; omega
   dsimp only
   rcases build .litOrDist (lens.extract (hlit + 257) (hlit + 257 + (hdist + 1))) with e | dist
-  · simp only [postD, buildCost]; omega
-  simp only [postD, buildCost]
+  · simp only [postD, buildCost, tableCost]; omega
+  simp only [postD, buildCost, tableCost]
   omega
 
 /-! ## The block loop and the entry points -/
@@ -800,16 +819,16 @@ def okExtra {α : Type} (k : Nat) : Except Error α → Nat
   | .ok _ => k
   | .error _ => 0
 
-set_option maxRecDepth 4000 in
-/-- **Work of one block body**: at most the potential before plus `1920`; a successful body
-leaves `1721` of that unspent (so it costs at most `199` beyond the bits and bytes it
+set_option maxRecDepth 200000 in
+/-- **Work of one block body**: at most the potential before plus `12160`; a successful body
+leaves `10920` of that unspent (so it costs at most `1240` beyond the bits and bytes it
 consumes). The dynamic case pays for its tables with the bonus of `readDynamicW_bound`. -/
 theorem blockBodyW_bound (input : ByteArray) (limit : Nat) (out : Out limit)
     (pos p1 btype : Nat) :
     (blockBodyW input limit out pos p1 btype).2 +
         postW (input.size * 8) limit (blockBodyW input limit out pos p1 btype).1 +
-        okExtra 1721 (blockBodyW input limit out pos p1 btype).1 ≤
-      67 * (input.size * 8 - p1) + 2 * (limit - out.1.size) + 1920 := by
+        okExtra 10920 (blockBodyW input limit out pos p1 btype).1 ≤
+      420 * (input.size * 8 - p1) + 2 * (limit - out.1.size) + 12160 := by
   unfold blockBodyW
   split
   · have h := storedW_bound input limit out p1
@@ -831,11 +850,11 @@ theorem blockBodyW_bound (input : ByteArray) (limit : Nat) (out : Out limit)
       rcases r with ⟨_ | _, k⟩ <;> simp only [okExtra] at h ⊢ <;> omega
   · simp only [postW, okExtra]; omega
 
-/-- **Work of the block loop**: steps plus the potential left are at most `67` per unread
-input bit, plus `2` per byte of output still allowed, plus `1922`. -/
+/-- **Work of the block loop**: steps plus the potential left are at most `420` per unread
+input bit, plus `2` per byte of output still allowed, plus `12162`. -/
 theorem blocksW_bound (input : ByteArray) (limit : Nat) (out : Out limit) (pos : Nat) :
     (blocksW input limit out pos).2 + postW (input.size * 8) limit (blocksW input limit out pos).1 ≤
-      67 * (input.size * 8 - pos) + 2 * (limit - out.1.size) + 1922 := by
+      420 * (input.size * 8 - pos) + 2 * (limit - out.1.size) + 12162 := by
   rw [blocksW.eq_def]
   rcases hb : readBits input pos 3 with e | ⟨hdr, p1⟩
   · simp only [postW]; omega
@@ -867,21 +886,21 @@ theorem inflateAtW_fst (limit : Nat) (input : ByteArray) (pos : Nat) :
     (inflateAtW limit input pos).1 = inflateAt limit input pos :=
   blocksW_fst ..
 
-/-- **Work bound for raw inflate (S3)**, any outcome: at most `67` steps per input bit from
-`pos`, plus `2` per byte of the output limit, plus `1922`. -/
+/-- **Work bound for raw inflate (S3)**, any outcome: at most `420` steps per input bit from
+`pos`, plus `2` per byte of the output limit, plus `12162`. -/
 theorem inflateAtW_steps_le (limit : Nat) (input : ByteArray) (pos : Nat) :
-    (inflateAtW limit input pos).2 ≤ 67 * (input.size * 8 - pos) + 2 * limit + 1922 := by
+    (inflateAtW limit input pos).2 ≤ 420 * (input.size * 8 - pos) + 2 * limit + 12162 := by
   have h := blocksW_bound input limit ⟨ByteArray.empty, by simp [ByteArray.size_empty]⟩ pos
   simp only [ByteArray.size_empty] at h
   unfold inflateAtW
   omega
 
-/-- **Work bound for raw inflate (S3)**, on success: at most `67` steps per input bit
-consumed, plus `2` per output byte produced, plus `1922`. -/
+/-- **Work bound for raw inflate (S3)**, on success: at most `420` steps per input bit
+consumed, plus `2` per output byte produced, plus `12162`. -/
 theorem inflateAtW_steps_le_of_ok {limit : Nat} {input : ByteArray} {pos p : Nat}
     {out : Out limit} (h : (inflateAtW limit input pos).1 = .ok (out, p)) :
-    (inflateAtW limit input pos).2 + 67 * (input.size * 8 - p) ≤
-      67 * (input.size * 8 - pos) + 2 * out.1.size + 1922 := by
+    (inflateAtW limit input pos).2 + 420 * (input.size * 8 - p) ≤
+      420 * (input.size * 8 - pos) + 2 * out.1.size + 12162 := by
   have hb := blocksW_bound input limit ⟨ByteArray.empty, by simp [ByteArray.size_empty]⟩ pos
   simp only [ByteArray.size_empty] at hb
   unfold inflateAtW at h ⊢
@@ -900,10 +919,10 @@ theorem inflateW_fst (limit : Nat) (input : ByteArray) :
     (inflateW limit input).1 = inflate limit input := by
   simp only [inflateW, inflate, inflateAtW_fst]
 
-/-- **Work bound for raw inflate (S3)**: at most `536` steps per input byte, plus `2` per byte
-of the output limit, plus `1922`. -/
+/-- **Work bound for raw inflate (S3)**: at most `3360` steps per input byte, plus `2` per byte
+of the output limit, plus `12162`. -/
 theorem inflateW_steps_le (limit : Nat) (input : ByteArray) :
-    (inflateW limit input).2 ≤ 536 * input.size + 2 * limit + 1922 := by
+    (inflateW limit input).2 ≤ 3360 * input.size + 2 * limit + 12162 := by
   have := inflateAtW_steps_le limit input 0
   simp only [inflateW]
   omega
@@ -1017,21 +1036,21 @@ theorem flateDecodeW_fst (limits : Limits) (input : ByteArray) (checkAdler : Boo
   simp only [flateDecodeW, flateDecode, zlibDecode, zlibDecodeOutW_fst]
 
 /-- **Work bound for `/FlateDecode` (S3)**, any outcome (success, malformed input, or limit
-exceeded): at most `536` steps per input byte, plus `3` per byte of the output limit, plus
-`1923`. -/
+exceeded): at most `3360` steps per input byte, plus `3` per byte of the output limit, plus
+`12163`. -/
 theorem flateDecodeW_steps_le (limits : Limits) (input : ByteArray) (checkAdler : Bool) :
     (flateDecodeW limits input checkAdler).2 ≤
-      536 * input.size + 3 * limits.maxDecodedStreamBytes + 1923 := by
+      3360 * input.size + 3 * limits.maxDecodedStreamBytes + 12163 := by
   have h1 := (zlibDecodeOutW_snd limits.maxDecodedStreamBytes input checkAdler).1
   have h2 := inflateAtW_steps_le limits.maxDecodedStreamBytes input 16
   simp only [flateDecodeW]
   omega
 
-/-- **Work bound for `/FlateDecode` (S3)**, on success: at most `536` steps per input byte,
-plus `3` per output byte, plus `1923` — linear in input plus output. -/
+/-- **Work bound for `/FlateDecode` (S3)**, on success: at most `3360` steps per input byte,
+plus `3` per output byte, plus `12163` — linear in input plus output. -/
 theorem flateDecodeW_steps_le_of_ok {limits : Limits} {input out : ByteArray}
     {checkAdler : Bool} (h : (flateDecodeW limits input checkAdler).1 = .ok out) :
-    (flateDecodeW limits input checkAdler).2 ≤ 536 * input.size + 3 * out.size + 1923 := by
+    (flateDecodeW limits input checkAdler).2 ≤ 3360 * input.size + 3 * out.size + 12163 := by
   simp only [flateDecodeW] at h ⊢
   rcases hz : (zlibDecodeOutW limits.maxDecodedStreamBytes input checkAdler).1 with e | o
   · rw [hz] at h; cases h
