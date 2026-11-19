@@ -59,6 +59,10 @@ errors use offset 0, container errors the container's file offset.
   `Filter.Budget` and cache decoded containers (`Cache`): `fetchCompressedB_eq` (an exact
   cache and enough budget return what `fetchCompressed` returns), `fetchCompressedB_hit`,
   `_le`, `_cost`, `_depth` (section "Budgeted decoding and the object-stream cache").
+  Task 4.5: the container is parsed with `Length.parseIndirectResolvedB`, so the decodes of
+  its own `/Length` resolution are charged too; `_cost` and `_eq` are restated
+  (`(fuel + 1)`, `(fuel + 2)` allowances), `fetchCompressedB_eq_post` is the a-posteriori
+  form; `decodeObjStmB` moved to `Core.Xref.Length` (same name).
 -/
 
 namespace SafePdf.Core.Xref.ObjStm
@@ -216,80 +220,35 @@ theorem fetchCompressed_depth {pre : Pre} {lookup : Nat → Option XrefEntry} {l
   repeat' split at h
   all_goals first | cases h | exact getObject_depth h
 
-/-! ## Budgeted decoding and the object-stream cache (task 3.13)
+/-! ## Budgeted decoding and the object-stream cache (tasks 3.13, 4.5)
 
-`decodeObjStmB` is `decodeObjStm` with its decode charged against the document budget
-(`Filter.decodeBytesB`). `fetchCompressedB` is `fetchCompressedTrace` with a budget and a
-`Cache` of decoded containers: a container is decoded (and charged) once; later fetches of its
-members reuse the decoded `ObjStm` and cost nothing. Only successful decodes are cached; a
-failed decode is charged again on every attempt (rule B2), which drains the budget, so the
-work stays bounded.
+`decodeObjStmB` (in `Core.Xref.Length` since task 4.5, same name) is `decodeObjStm` with its
+decode charged against the document budget (`Filter.decodeBytesB`). `fetchCompressedB` is
+`fetchCompressedTrace` with a budget and a `Cache` of decoded containers: a container is
+decoded (and charged) once; later fetches of its members reuse the decoded `ObjStm` and cost
+nothing. Only successful decodes are cached; a failed decode is charged again on every attempt
+(rule B2), which drains the budget, so the work stays bounded. Since task 4.5 the container is
+parsed with `Length.parseIndirectResolvedB`, so object streams decoded while resolving the
+container's own indirect `/Length` (rule L6) are charged as well.
 
-* `decodeObjStmB_le`, `decodeObjStmB_cost`, `decodeObjStmB_eq`: never increases the budget;
-  costs at most `(maxFilters + 1) · (maxDecodedStreamBytes + data size)`; with at least that
-  much left, returns what `decodeObjStm` returns.
+* `decodeObjStmB_le`, `decodeObjStmB_cost`, `decodeObjStmB_eq`, `decodeObjStmB_charge`: never
+  increases the budget; costs at most `(maxFilters + 1) · (maxDecodedStreamBytes + data
+  size)`; with at least that much left, returns what `decodeObjStm` returns; charges at least
+  the decoded bytes.
 * `fetchCompressedB_le`, `fetchCompressedB_cost`: never increases the budget; one fetch costs
-  at most `(maxFilters + 1) · (maxDecodedStreamBytes + bytes.size)` (one container decode at
-  most; none on a cache hit, `fetchCompressedB_hit`).
-* `fetchCompressedB_eq`: **the cache returns what `fetchCompressed` would**: if every cached
-  container is the exact decode of the container its number names (`CacheExact`) and the
-  budget covers one decode, `fetchCompressedB` returns exactly `fetchCompressed`'s result and
-  the cache stays exact.
+  at most `(fuel + 1) · Length.allowance` (the container's `/Length` resolution, at most `fuel`
+  decodes, and the container decode; nothing on a cache hit, `fetchCompressedB_hit`).
+  *Restated by task 4.5*: the bound was one allowance while `/Length` decodes were uncharged.
+* `fetchCompressedB_eq_post`: **the cache returns what `fetchCompressed` would**: if every
+  cached container is the exact decode of the container its number names (`CacheExact`) and
+  at least one allowance is left *after* the fetch, `fetchCompressedB` returned exactly
+  `fetchCompressed`'s result and the cache stays exact. `fetchCompressedB_eq`: the same from
+  `(fuel + 2) · allowance` left *before* the fetch (*restated by task 4.5*: it was one
+  allowance before).
 * `fetchCompressedB_depth`: depth bound.
 -/
 
 open SafePdf.Core.Filter (Budget)
-
-/-- `decodeObjStm` with the budget: the decode is `Filter.decodeBytesB` (rules O1–O4). -/
-def decodeObjStmB (limits : Limits) (budget : Budget) (st : Stream) :
-    (Except Error ObjStm) × Budget :=
-  match checkType st.dict, getCount limits st.dict, getFirst st.dict, getExtends st.dict with
-  | .ok (), .ok n, .ok first, .ok ext =>
-    let p := Filter.decodeBytesB limits budget st.dict st.data
-      (.malformed 0 "object stream: image filter")
-    (match p.1 with
-     | .error e => .error e
-     | .ok data =>
-       if first ≤ data.size then
-         match parsePairs (data.extract 0 first) n 0 [] with
-         | .error e => .error e
-         | .ok entries => mkObjStm first ext data entries
-       else .error (.malformed 0 "object stream: /First beyond the decoded data"), p.2)
-  | .error e, _, _, _ => (.error e, budget)
-  | _, .error e, _, _ => (.error e, budget)
-  | _, _, .error e, _ => (.error e, budget)
-  | _, _, _, .error e => (.error e, budget)
-
-/-- `decodeObjStmB` never increases the budget. -/
-theorem decodeObjStmB_le (limits : Limits) (budget : Budget) (st : Stream) :
-    (decodeObjStmB limits budget st).2.remaining ≤ budget.remaining := by
-  unfold decodeObjStmB
-  split
-  · exact Filter.decodeBytesB_le limits budget st.dict st.data
-      (.malformed 0 "object stream: image filter") true
-  all_goals exact Nat.le_refl _
-
-/-- Cost of `decodeObjStmB`: at most one structural decode. -/
-theorem decodeObjStmB_cost (limits : Limits) (budget : Budget) (st : Stream) :
-    budget.remaining ≤ (decodeObjStmB limits budget st).2.remaining +
-      (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + st.data.size) := by
-  unfold decodeObjStmB
-  split
-  · exact Filter.decodeBytesB_cost limits budget st.dict st.data
-      (.malformed 0 "object stream: image filter") true
-  all_goals exact Nat.le_add_right _ _
-
-/-- Budget large enough ⇒ `decodeObjStmB` returns what `decodeObjStm` returns. -/
-theorem decodeObjStmB_eq {limits : Limits} {budget : Budget} {st : Stream}
-    (h : (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + st.data.size) ≤
-      budget.remaining) :
-    (decodeObjStmB limits budget st).1 = decodeObjStm limits st := by
-  unfold decodeObjStmB decodeObjStm decodeData
-  cases h1 : checkType st.dict <;> cases h2 : getCount limits st.dict <;>
-    cases h3 : getFirst st.dict <;> cases h4 : getExtends st.dict <;> simp only
-  rw [Filter.decodeBytesB_eq h]
-  generalize Filter.decodeBytes limits st.dict st.data _ = x
-  cases x <;> rfl
 
 /-- Decoded object streams of one document, by container object number (newest first). -/
 abbrev Cache := List (Nat × ObjStm)
@@ -306,12 +265,13 @@ def selectMember (os : ObjStm) (limits : Limits) (off c num idx : Nat) :
   if findObject os num = some idx then getObject os limits idx
   else .error (.malformed off s!"object {num} is not at index {idx} of object stream {c}")
 
-/-- **Budgeted, cached fetch** (task 3.13): `fetchCompressedTrace` (rule O6) with the
-container decode charged against `budget` (`decodeObjStmB`) and done at most once per
-container: a container found in `cache` is not parsed nor decoded again. Returns the
-result, the budget and the cache (the new decode added). -/
-def fetchCompressedB (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel num : Nat) (budget : Budget) (cache : Cache) :
+/-- **Budgeted, cached fetch** (tasks 3.13, 4.5): `fetchCompressedTrace` (rule O6) with the
+container parsed by `Length.parseIndirectResolvedB` (its `/Length` resolution charged) and its
+decode charged against `budget` (`decodeObjStmB`), done at most once per container: a container
+found in `cache` is not parsed nor decoded again. Returns the result, the budget and the cache
+(the new decode added). -/
+def fetchCompressedB (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel num : Nat) (budget : Budget) (cache : Cache) :
     (Except Error PdfObject) × Budget × Cache :=
   match lookup num with
   | some (.compressed c idx) =>
@@ -323,23 +283,23 @@ def fetchCompressedB (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : L
           match cache.find? c with
           | some os => (selectMember os limits off c num idx, budget, cache)
           | none =>
-            match Length.parseIndirectResolved lookup limits bytes fuel off pre with
-            | .error e => (.error e, budget, cache)
-            | .ok (io, _) =>
+            match Length.parseIndirectResolvedB lookup limits bytes fuel off pre budget with
+            | (.error e, b0) => (.error e, b0, cache)
+            | (.ok (io, _), b0) =>
               if io.num = c ∧ io.gen = 0 then
                 match io.body with
                 | .obj _ =>
-                  (.error (.malformed off "object stream container is not a stream"), budget,
+                  (.error (.malformed off "object stream container is not a stream"), b0,
                     cache)
                 | .stream st0 =>
                   match pre.f c st0 with
-                  | .error e => (.error e, budget, cache)
+                  | .error e => (.error e, b0, cache)
                   | .ok st =>
-                    match decodeObjStmB limits budget st with
+                    match decodeObjStmB limits b0 st with
                     | (.error e, b1) => (.error e, b1, cache)
                     | (.ok os, b1) => (selectMember os limits off c num idx, b1, (c, os) :: cache)
               else (.error (.malformed off
-                "object header does not match the cross-reference entry"), budget, cache)
+                "object header does not match the cross-reference entry"), b0, cache)
         else (.error (.malformed off s!"object stream {c} has a non-zero generation"), budget,
           cache)
       | some (.compressed c' _) =>
@@ -356,57 +316,95 @@ theorem fetchCompressedB_le (pre : Pre) (lookup : Nat → Option XrefEntry) (lim
     (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.1.remaining ≤
       budget.remaining := by
   unfold fetchCompressedB
-  repeat' split
-  all_goals first
-    | exact Nat.le_refl _
-    | (rename_i hd; have := decodeObjStmB_le limits budget ‹_›; rw [hd] at this; exact this)
-    | skip
-
-/-- **Cost of one fetch**: at most one container decode,
-`(maxFilters + 1) · (maxDecodedStreamBytes + bytes.size)`. -/
-theorem fetchCompressedB_cost (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
-    (bytes : ByteArray) (fuel num : Nat) (budget : Budget) (cache : Cache) :
-    budget.remaining ≤ (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.1.remaining +
-      (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + bytes.size) := by
-  have hK : ∀ st : Stream, st.data.size ≤ bytes.size →
-      (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + st.data.size) ≤
-        (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + bytes.size) :=
-    fun st hs => Nat.mul_le_mul_left _ (by omega)
-  unfold fetchCompressedB
   rcases hn : lookup num with _ | (⟨_, _⟩ | ⟨_, _⟩ | ⟨c, idx⟩)
   all_goals simp only
-  all_goals try exact Nat.le_add_right _ _
+  all_goals try exact Nat.le_refl _
   by_cases hcn : c = num
-  · simp only [hcn, ↓reduceIte]; exact Nat.le_add_right _ _
+  · simp only [hcn, ↓reduceIte]; exact Nat.le_refl _
   · simp only [hcn, ↓reduceIte]
     rcases hcl : lookup c with _ | (⟨_, _⟩ | ⟨off, g⟩ | ⟨_, _⟩)
     all_goals simp only
-    all_goals try exact Nat.le_add_right _ _
+    all_goals try exact Nat.le_refl _
     by_cases hg : g = 0
     · simp only [hg, ↓reduceIte]
       rcases hf : cache.find? c with _ | os
       · simp only
-        rcases hp : Length.parseIndirectResolved lookup limits bytes fuel off pre with e | ⟨io, r⟩
-        · exact Nat.le_add_right _ _
+        have hp0 := Length.parseIndirectResolvedB_le lookup limits bytes fuel off pre budget
+        rcases hp : Length.parseIndirectResolvedB lookup limits bytes fuel off pre budget with
+          ⟨r0, b0⟩
+        rw [hp] at hp0
+        simp only at hp0
+        rcases r0 with e | ⟨io, r⟩
+        · exact hp0
         · simp only
           split
           · rcases hb : io.body with o | st0
-            · exact Nat.le_add_right _ _
+            · exact hp0
             · simp only
-              have hd := Length.parseIndirectResolved_data hp hb
               rcases hpre : pre.f c st0 with e | st
-              · exact Nat.le_add_right _ _
-              simp only
-              have hle : st.data.size ≤ bytes.size := by
-                have := pre.le c st0 st hpre; omega
-              have hc := decodeObjStmB_cost limits budget st
-              have hk := hK st hle
-              rcases hds : decodeObjStmB limits budget st with ⟨r1, b1⟩
-              rw [hds] at hc
-              rcases r1 with e | os <;> (simp only at hc ⊢; omega)
-          · exact Nat.le_add_right _ _
-      · exact Nat.le_add_right _ _
-    · simp only [hg, ↓reduceIte]; exact Nat.le_add_right _ _
+              · exact hp0
+              · simp only
+                have hd0 := decodeObjStmB_le limits b0 st
+                rcases hds : decodeObjStmB limits b0 st with ⟨r1, b1⟩
+                rw [hds] at hd0
+                rcases r1 with e | os <;> (simp only at hd0 ⊢; omega)
+          · exact hp0
+      · exact Nat.le_refl _
+    · simp only [hg, ↓reduceIte]; exact Nat.le_refl _
+
+/-- **Cost of one fetch**: at most `(fuel + 1) · Length.allowance` (the container's `/Length`
+resolution and one container decode). *Restated by task 4.5* (it was one allowance while
+the decodes of the `/Length` resolution were not charged). -/
+theorem fetchCompressedB_cost (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel num : Nat) (budget : Budget) (cache : Cache) :
+    budget.remaining ≤
+      (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.1.remaining +
+        (fuel + 1) * Length.allowance limits bytes := by
+  have hK : ∀ st : Stream, st.data.size ≤ bytes.size →
+      (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + st.data.size) ≤
+        Length.allowance limits bytes :=
+    fun st hs => Nat.mul_le_mul_left _ (by omega)
+  rw [Nat.succ_mul]
+  unfold fetchCompressedB
+  rcases hn : lookup num with _ | (⟨_, _⟩ | ⟨_, _⟩ | ⟨c, idx⟩)
+  all_goals simp only
+  all_goals try omega
+  by_cases hcn : c = num
+  · simp only [hcn, ↓reduceIte]; omega
+  · simp only [hcn, ↓reduceIte]
+    rcases hcl : lookup c with _ | (⟨_, _⟩ | ⟨off, g⟩ | ⟨_, _⟩)
+    all_goals simp only
+    all_goals try omega
+    by_cases hg : g = 0
+    · simp only [hg, ↓reduceIte]
+      rcases hf : cache.find? c with _ | os
+      · simp only
+        have hp0 := Length.parseIndirectResolvedB_cost lookup limits bytes fuel off pre budget
+        rcases hp : Length.parseIndirectResolvedB lookup limits bytes fuel off pre budget with
+          ⟨r0, b0⟩
+        rw [hp] at hp0
+        simp only at hp0
+        rcases r0 with e | ⟨io, r⟩
+        · (try simp only); omega
+        · simp only
+          split
+          · rcases hb : io.body with o | st0
+            · (try simp only); omega
+            · simp only
+              have hd := Length.parseIndirectResolvedB_data (by rw [hp]) hb
+              rcases hpre : pre.f c st0 with e | st
+              · (try simp only); omega
+              · simp only
+                have hle : st.data.size ≤ bytes.size := by
+                  have := pre.le c st0 st hpre; omega
+                have hc := decodeObjStmB_cost limits b0 st
+                have hk := hK st hle
+                rcases hds : decodeObjStmB limits b0 st with ⟨r1, b1⟩
+                rw [hds] at hc
+                rcases r1 with e | os <;> (simp only at hc ⊢; omega)
+          · (try simp only); omega
+      · (try simp only); omega
+    · simp only [hg, ↓reduceIte]; omega
 
 /-- **A cache hit costs nothing**: when the container of `num` is cached, the member is
 selected from the cached decode and the budget and the cache are unchanged. -/
@@ -421,85 +419,131 @@ theorem fetchCompressedB_hit {pre : Pre} {lookup : Nat → Option XrefEntry} {li
 /-- **Exact cache**: every cached container `c` is the decode (`decodeObjStm`, unbudgeted) of
 the stream object that the cross-reference entry of `c` points at, read as
 `fetchCompressedTrace` reads it. -/
-def CacheExact (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel : Nat) (cache : Cache) : Prop :=
+def CacheExact (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) (cache : Cache) : Prop :=
   ∀ c os, cache.find? c = some os → ∃ off io r st0 st, lookup c = some (.inUse off 0) ∧
     Length.parseIndirectResolved lookup limits bytes fuel off pre = .ok (io, r) ∧
     io.num = c ∧ io.gen = 0 ∧ io.body = .stream st0 ∧ pre.f c st0 = .ok st ∧
     decodeObjStm limits st = .ok os
 
 /-- The empty cache is exact. -/
-theorem cacheExact_nil (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel : Nat) : CacheExact pre lookup limits bytes fuel [] := by
+theorem cacheExact_nil (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) : CacheExact pre lookup limits bytes fuel [] := by
   intro c os h; simp [Cache.find?] at h
 
-/-- **The cache returns what `fetchCompressed` would** (task 3.13): with an exact cache and at
-least one decode's worth of budget, `fetchCompressedB` returns exactly `fetchCompressed`'s
-result, and the cache stays exact. -/
-theorem fetchCompressedB_eq {pre : Pre} {lookup : Nat → Option XrefEntry} {limits : Limits}
-    {bytes : ByteArray} {fuel num : Nat} {budget : Budget} {cache : Cache}
+/-- **The cache returns what `fetchCompressed` would** (tasks 3.13, 4.5; a-posteriori form):
+with an exact cache, if at least one `Length.allowance` is left after the fetch,
+`fetchCompressedB` returned exactly `fetchCompressed`'s result, and the cache stays exact. -/
+theorem fetchCompressedB_eq_post {pre : Pre} {lookup : Nat → Option XrefEntry}
+    {limits : Limits} {bytes : ByteArray} {fuel num : Nat} {budget : Budget} {cache : Cache}
     (hc : CacheExact pre lookup limits bytes fuel cache)
-    (h : (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + bytes.size) ≤
-      budget.remaining) :
+    (h : Length.allowance limits bytes ≤
+      (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.1.remaining) :
     (fetchCompressedB pre lookup limits bytes fuel num budget cache).1 =
       fetchCompressed pre lookup limits bytes fuel num ∧
-    CacheExact pre lookup limits bytes fuel (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.2 := by
+    CacheExact pre lookup limits bytes fuel
+      (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.2 := by
+  revert h
   unfold fetchCompressedB fetchCompressed fetchCompressedTrace
   rcases hn : lookup num with _ | (⟨_, _⟩ | ⟨_, _⟩ | ⟨c, idx⟩)
   all_goals simp only
-  all_goals try exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+  all_goals try exact fun _ => ⟨by first | rfl | trivial, hc⟩
   by_cases hcn : c = num
-  · simp only [hcn, ↓reduceIte]; exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+  · simp only [hcn, ↓reduceIte]; exact fun _ => ⟨by first | rfl | trivial, hc⟩
   · simp only [hcn, ↓reduceIte]
     rcases hcl : lookup c with _ | (⟨_, _⟩ | ⟨off, g⟩ | ⟨_, _⟩)
     all_goals simp only
-    all_goals try exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+    all_goals try exact fun _ => ⟨by first | rfl | trivial, hc⟩
     by_cases hg : g = 0
     · subst hg
       simp only [↓reduceIte]
       rcases hf : cache.find? c with _ | os
       · simp only
-        rcases hp : Length.parseIndirectResolved lookup limits bytes fuel off pre with e | ⟨io, r⟩
-        · exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+        have heq := fun hA => Length.parseIndirectResolvedB_eq (lookup := lookup)
+          (limits := limits) (bytes := bytes) (fuel := fuel) (pos := off) (pre := pre)
+          (budget := budget) hA
+        rcases hp : Length.parseIndirectResolvedB lookup limits bytes fuel off pre budget with
+          ⟨r0, b0⟩
+        rw [hp] at heq
+        simp only at heq
+        rcases r0 with e | ⟨io, r⟩
+        · intro hA
+          rw [← heq hA]
+          exact ⟨by first | rfl | trivial, hc⟩
         · simp only
           by_cases hh : io.num = c ∧ io.gen = 0
           · simp only [hh, and_self, ↓reduceIte]
             rcases hb : io.body with o | st0
-            · exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+            · intro hA
+              rw [← heq hA]
+              simp only [hh, and_self, ↓reduceIte, hb]
+              exact ⟨by first | rfl | trivial, hc⟩
             · simp only
-              have hd := Length.parseIndirectResolved_data hp hb
+              have hd := Length.parseIndirectResolvedB_data (by rw [hp]) hb
               rcases hpre : pre.f c st0 with e | st
-              · exact ⟨rfl, hc⟩
+              · intro hA
+                rw [← heq hA]
+                simp only [hh, and_self, ↓reduceIte, hb, hpre]
+                exact ⟨by first | rfl | trivial, hc⟩
               simp only
-              have hle : (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + st.data.size) ≤
-                  budget.remaining :=
-                Nat.le_trans (Nat.mul_le_mul_left _ (by have := pre.le c st0 st hpre; omega)) h
-              have he := decodeObjStmB_eq (budget := budget) hle
-              rcases hds : decodeObjStmB limits budget st with ⟨r1, b1⟩
-              rw [hds] at he
-              simp only at he
-              rw [← he]
+              have hd0 := decodeObjStmB_le limits b0 st
+              have hle : ∀ b : Budget, Length.allowance limits bytes ≤ b.remaining →
+                  (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + st.data.size) ≤
+                    b.remaining := fun b hb =>
+                Nat.le_trans (Nat.mul_le_mul_left _ (by have := pre.le c st0 st hpre; omega)) hb
+              have he := fun hA => decodeObjStmB_eq (budget := b0) (hle b0 hA)
+              rcases hds : decodeObjStmB limits b0 st with ⟨r1, b1⟩
+              rw [hds] at he hd0
+              simp only at he hd0
+              intro hA
+              have hA0 : Length.allowance limits bytes ≤ b0.remaining := by
+                rcases r1 with e | os <;> (simp only at hA; omega)
+              rw [← heq hA0]
+              simp only [hh, and_self, ↓reduceIte, hb, hpre]
+              rw [← he hA0]
               rcases r1 with e | os
-              · exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
-              · refine ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), ?_⟩
+              · exact ⟨by first | rfl | trivial, hc⟩
+              · refine ⟨by simp only [selectMember]; split <;> rfl, ?_⟩
                 intro c' os' hf'
                 simp only [Cache.find?] at hf'
                 by_cases hk : c = c'
                 · subst hk
                   simp only [↓reduceIte, Option.some.injEq] at hf'
                   subst hf'
-                  exact ⟨off, io, r, st0, st, hcl, hp, hh.1, hh.2, hb, hpre, he.symm⟩
+                  exact ⟨off, io, r, st0, st, hcl, (heq hA0).symm, hh.1, hh.2, hb, hpre,
+                    (he hA0).symm⟩
                 · simp only [hk, ↓reduceIte] at hf'
                   exact hc c' os' hf'
-          · simp only [hh, ↓reduceIte]; exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+          · simp only [hh, ↓reduceIte]
+            intro hA
+            rw [← heq hA]
+            simp only [hh, ↓reduceIte]
+            exact ⟨by first | rfl | trivial, hc⟩
       · simp only
+        intro _
         obtain ⟨off', io, r, st0, st, hl', hp, hnum, hgen, hb, hpre, hd⟩ := hc c os hf
         rw [hcl] at hl'
         simp only [Option.some.injEq, XrefEntry.inUse.injEq] at hl'
         obtain ⟨rfl, -⟩ := hl'
         simp only [hp, hnum, hgen, and_self, ↓reduceIte, hb, hpre, hd]
-        exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
-    · simp only [hg, ↓reduceIte]; exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
+        exact ⟨by simp only [selectMember]; split <;> rfl, hc⟩
+    · simp only [hg, ↓reduceIte]; exact fun _ => ⟨by first | rfl | trivial, hc⟩
+
+/-- **The cache returns what `fetchCompressed` would** (a-priori form, *restated by task
+4.5*): with an exact cache and at least `(fuel + 2) · Length.allowance` before the fetch,
+`fetchCompressedB` returns exactly `fetchCompressed`'s result, and the cache stays exact. -/
+theorem fetchCompressedB_eq {pre : Pre} {lookup : Nat → Option XrefEntry} {limits : Limits}
+    {bytes : ByteArray} {fuel num : Nat} {budget : Budget} {cache : Cache}
+    (hc : CacheExact pre lookup limits bytes fuel cache)
+    (h : (fuel + 2) * Length.allowance limits bytes ≤ budget.remaining) :
+    (fetchCompressedB pre lookup limits bytes fuel num budget cache).1 =
+      fetchCompressed pre lookup limits bytes fuel num ∧
+    CacheExact pre lookup limits bytes fuel
+      (fetchCompressedB pre lookup limits bytes fuel num budget cache).2.2 := by
+  apply fetchCompressedB_eq_post hc
+  have := fetchCompressedB_cost pre lookup limits bytes fuel num budget cache
+  rw [show fuel + 2 = (fuel + 1) + 1 by omega, Nat.succ_mul] at h
+  omega
 
 /-- **Depth bound** for objects fetched by `fetchCompressedB`. -/
 theorem fetchCompressedB_depth {pre : Pre} {lookup : Nat → Option XrefEntry} {limits : Limits}

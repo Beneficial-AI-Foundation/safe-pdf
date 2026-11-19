@@ -7,10 +7,14 @@ import SafePdf.Shell.Views.Objects
 
 Plan.md §6 Phase 4 (page tree with inheritance, Tier 1 navigation; exit M4 "page count + page
 boxes match `qpdf` on corpus") and the M4 row of the MVP / visibility track ("Page-tree +
-outline browser"). Both views open the document with the verified core
-(`Core.Doc.ofOpen limits d`, which is `Core.Doc.openDoc limits bytes` without parsing the file
-a second time: `openDoc` is `Open.openFile` followed by `ofOpen`, and the inspector's
-`SafePdf.parseWith` already ran `Open.openFile`).
+outline browser"). Both views walk the page tree with the verified core in the session the
+document was opened in (`Core.Doc.ofSession d.session limits`, task 4.5: `Core.Doc.openDocS`
+without parsing the file a second time, since the inspector's `SafePdf.parseWith` already ran
+`Open.Session.open`), so the walk's object-stream and `/Length` decodes are charged to the
+same budget as the open; with enough budget left the document is `Core.Doc.ofOpen`'s
+(`Core.Doc.ofSession_eq`). Not charged: the navigation walks of `Core.Doc.Nav` (page labels,
+links, outline), which fetch with the unbudgeted `OpenDoc.getObject` (each fetch bounded by
+`Open.getObject_work`).
 
 ## `pages`
 
@@ -133,7 +137,7 @@ def countText (doc : Doc) : String :=
 def docOf (limits : Limits) (result : Except Error Document) : Except Error Doc :=
   match result with
   | .error e => .error e
-  | .ok d => ofOpen limits d.doc
+  | .ok d => (ofSession d.session limits).1
 
 /-- Text form of the `pages` view. -/
 def pagesText (path : String) (limits : Limits) (result : Except Error Document) :

@@ -18,8 +18,8 @@ edit the generator and regenerate.
 
 For each raw stream `NAME`: `NAME.bin` (encoded data), `NAME.dict` (its stream dictionary,
 PDF text, no `/Length`) and `NAME.pdf` (one page whose `/Contents`, object 4, is that stream;
-not for the two `control-flate-256m*` streams). Three bombs exist only as PDFs because they
-live in the file structure.
+not for the two `control-flate-256m*` streams). Three bombs (and `objstm-two.pdf`, the document-budget control) exist only as PDFs because
+they live in the file structure.
 
 ## Files
 
@@ -48,4 +48,5 @@ Ratios are decoded size : encoded size of the whole chain. The suite runs every 
 | `control-flate-256m-plus1` | Flate | 260,922 B | 256 MiB + 1 | | `limitExceeded` at both |
 | `objstm-bomb.pdf` | object stream 4, Flate | 326,544 B | 320 MiB (`6 0 null` + spaces) | 1,028:1 | opens strictly; `getObject 6 0` → `limitExceeded` |
 | `objstm-bomb-root.pdf` | as above, the catalog is the compressed object | 326,495 B | 320 MiB | 1,028:1 | `openFile` → `limitExceeded` (strict fails, repair fails the same way, strict error returned) |
+| `objstm-two.pdf` | object streams 4 and 5, Flate | 2,083 B (file) | 2 × 768 KiB (`6 0 null`, `7 0 null` + spaces) | — | task 4.5: with a 1 MiB document budget `Session.getObject 6 0` ok, `7 0` → `limitExceeded decodedTotalBytes`; both ok with the default budget |
 | `xref-bomb.pdf` | the only xref section is a Flate xref stream | 326,424 B | 320 MiB of zeros (35 B expected) | 1,028:1 | `loadChain` → `limitExceeded`; `openFile` → opens via repair (`repaired = true`) |
