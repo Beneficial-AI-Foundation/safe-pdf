@@ -24,7 +24,7 @@ Design document: Plan.md
 | 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
 | 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | ready (2026-11-19) |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | ready (2026-11-19) |
-| 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | awaiting-ci |
+| 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | ready (2026-11-19) |
 | 4 | `phase-4-document` | `phase-3-filters` | [#5](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/5) | draft |
 | 5 | `phase-5-content` | `phase-4-document` | — | none |
 | 6 | `phase-6-fonts-text` | `phase-5-content` | — | none |
@@ -127,6 +127,7 @@ Plan.md §6 Phase 4. Exit: **M4**: page count + page boxes match `qpdf` on corpu
 | 4.4 | Differential page count/boxes vs qpdf; inspector page-tree + outline browser | 4.1, 4.2 | `Tests/differential/pages.py`, `SafePdf/Shell/Views/Pages.lean` | wt | done (2026-11-19) |
 | 4.5 | Finish document-level decode accounting (left by 3.13): budgeted `/Length` resolver (rule L6 object-stream decodes in `Length.resolveLengthAux`/`containerMember`, today ≤ objectCount decodes per fetch uncharged), and switch `Core.Doc.openDoc`/`Core.Parse` and the Shell views to `Open.Session` (`Session.open`, `Session.getObject`) so one budget + object-stream cache covers open, page-tree walk and on-demand decodes; add `Session` cases for `xref-bomb.pdf`, `objstm-bomb*.pdf` to `Tests/Bombs.lean` | 3.13, 4.1 | `SafePdf/Core/Xref/Length.lean`, `SafePdf/Core/Doc.lean`, `SafePdf/Core/Parse.lean`, `SafePdf/Shell/Views/*.lean`, `Tests/Bombs.lean` | wt | todo |
 | 4.6 | Encryption follow-ups from 4.3b: (1) replace message-prefix tagging of setup errors (`Crypt.tagError`/`isSetupError`, prefixes `/Encrypt: `/`encryption: `) with a structured `Error` constructor (e.g. `Error.encryption (what)`), final like `Error.cycle` (rule E2), theorems restated; (2) repair path keeps `/Encrypt` (a repaired encrypted file must decrypt or fail, never open undecrypted); (3) `/Length` resolution through an object stream of an encrypted file decrypts the container (`Length.resolveLength` L6 + `Pre`); (4) non-Identity per-stream `/Crypt` filters accepted by `Filter` after decryption | 4.3b | `SafePdf/Core/Error.lean`, `SafePdf/Core/Crypt.lean`, `SafePdf/Core/Open.lean`, `SafePdf/Repair.lean`, `SafePdf/Core/Xref/Length.lean`, `SafePdf/Core/Filter.lean` | wt | todo |
+| 4.7 | M4 clause "encrypted publisher PDFs open": add real (not generated) encrypted PDFs from publishers to the corpus — find openly downloadable, redistributable encrypted PDFs (e.g. publisher/government documents with an owner password and empty user password; record URL, license note, SHA-256 in `corpus/manifest.json` via `scripts/corpus/fetch.py --add`), at least 5 covering RC4-128 and AES-128/256; dashboard and `pages` comparator must open them (qpdf decrypts with an empty user password too); if none can be found with a clear license, record that as a Blocked question for the human | 4.3b | `corpus/manifest.json`, `docs/corpus.md` | new | todo |
 Exit criterion checked: [ ]
 
 ## Phase 5 — Content-stream interpreter
@@ -369,3 +370,5 @@ Exit criterion checked: [ ]
 * 2026-11-19 — wave 20 part 2 (phase 4, PR #5): 4.1c done (page-tree cycle error kind pinned under `WellFormedTree`; root paths unique); commit "wave 20 (part 2): 4.1c — page-tree theorem gaps"
 * 2026-11-19 — wave 20 part 3 (phase 4, PR #5): 4.4 done (pages/outline views; qpdf pages comparator wired into CI, first real run pending); commit "wave 20 (part 3): 4.4 — pages/outline views, qpdf pages comparator"
 * 2026-11-19 — wave 20 part 4 (phase 4, PR #5): 4.3b done (standard security handler, RC4/AES-128/AES-256, empty user password; 6 generated encrypted files decrypt, 2 password files rejected); added 4.6; commit "wave 20 (part 4): 4.3b — standard security handler"
+* 2026-11-19 — phase 3 milestone: PR #4 marked ready for review (CI green on 2bb3600)
+* 2026-11-19 — M4 clause 1 evidence: CI run 44549209662 (f7b8d7c) `pages` comparator vs qpdf: 74 files agree, 2,023 pages, 0 disagree, 0 known; clause 2 (encrypted publisher PDFs) needs real files → 4.7
