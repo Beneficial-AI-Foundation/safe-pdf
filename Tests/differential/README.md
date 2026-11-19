@@ -72,3 +72,27 @@ heads for one file (debug), runs `objects` over the corpus with
 `--min-compared 20` and over `Tests/adversarial/minimal-valid.pdf` with
 `--min-compared 1`, and uploads the JSON results and logs as the artifact
 `differential-objects`.
+
+## `streams` comparator (`streams.py`)
+
+Compares our FlateDecode output with Python `zlib` (no external tool needed).
+Per PDF: `inspect --view streams --json FILE` lists streams; those whose chain is
+exactly `[FlateDecode]` with no `/DecodeParms` are compared (predictor, other
+filters, resolved indirect `/Filter` are skipped and counted). The script locates
+raw bytes itself (the view has no offset): scan for `N G obj` (newest match
+first), find `>> stream` EOL, take exactly the view's `raw` byte count, accept
+only if `endstream` follows. Every located stream gets a size check (zlib's
+length vs the view's `decoded`); a sample (`--per-file N`, default 20, evenly
+spread, 0 = all; all streams when `--files` is given without `--per-file`) is
+byte-compared using `SAFEPDF_STREAM=N SAFEPDF_STREAM_OUT=tmp inspect --view
+streams FILE`. Categories: agree (sub-count `trailing`), disagree, ours-error
+(we reject, zlib decodes), zlib-error (zlib rejects, e.g. bad Adler-32, or sees
+truncation, we decode), both-error, skipped. Any disagree / ours-error /
+zlib-error / size mismatch makes the file `disagree`.
+
+    python3 -I Tests/differential/run.py --comparator streams [--per-file N] [--files GLOB]
+    python3 -I Tests/differential/streams.py --ours OURS.bin --raw RAW.bin   # offline
+
+Fixtures: `fixtures/streams_ok.{raw,ours}` (agree, exit 0),
+`fixtures/streams_diff.ours` + `streams_ok.raw` (last byte differs, exit 1),
+`fixtures/streams_adler.{raw,ours}` (corrupt Adler-32: zlib-error, exit 1).
