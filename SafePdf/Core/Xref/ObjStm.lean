@@ -36,7 +36,8 @@ O1–O5 (dictionary, filters, header, offsets, objects) are in `Core.Xref.ObjStm
 * O7. (task 4.3b) Before O1–O4, the container stream passes through `pre.f c` (a `Pre`):
   the decryption of an encrypted file's object stream (ISO 32000-2 §7.6.2: the stream is
   encrypted, the objects inside are not encrypted again), `Pre.id` otherwise. A failing pass
-  is the fetch's error.
+  is the fetch's error. (`Pre` is defined in `Core.Xref.ObjStmDecode`, task 4.6, so that
+  `Core.Xref.Length` applies the same pass to a container it decodes, rule L6.)
 
 Error offsets for header and object errors are positions in the *decoded* data; dictionary
 errors use offset 0, container errors the container's file offset.
@@ -67,19 +68,6 @@ open SafePdf.Core.Xref (XrefEntry)
 
 /-! ## Fetching a compressed object (O6) -/
 
-/-- **A container pre-pass** (task 4.3b, rule O7): applied to the container stream of object
-stream `c` before it is decoded — the decryption of an encrypted file's object streams
-(`Core.Open`), the identity otherwise (`Pre.id`). It may fail, and never makes the data
-longer (`le`), so the decode cost bounds stay as they are. -/
-structure Pre where
-  /-- The pass: container number, raw container stream ↦ the stream to decode. -/
-  f : Nat → Stream → Except Error Stream
-  /-- The data never grows. -/
-  le : ∀ c st st', f c st = .ok st' → st'.data.size ≤ st.data.size
-
-/-- The identity pre-pass (unencrypted files). -/
-def Pre.id : Pre := ⟨fun _ st => .ok st, by intro c st st' h; cases h; exact Nat.le_refl _⟩
-
 /-- An instrumented result: container parses and decodes performed, and the result. -/
 structure Trace where
   /-- Number of `Length.parseIndirectResolved` calls on a container. -/
@@ -99,7 +87,7 @@ def fetchCompressedTrace (pre : Pre) (lookup : Nat → Option XrefEntry) (limits
       match lookup c with
       | some (.inUse off g) =>
         if g = 0 then
-          match Length.parseIndirectResolved lookup limits bytes fuel off with
+          match Length.parseIndirectResolved lookup limits bytes fuel off pre with
           | .error e => ⟨1, 0, .error e⟩
           | .ok (io, _) =>
             if io.num = c ∧ io.gen = 0 then
@@ -335,7 +323,7 @@ def fetchCompressedB (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : L
           match cache.find? c with
           | some os => (selectMember os limits off c num idx, budget, cache)
           | none =>
-            match Length.parseIndirectResolved lookup limits bytes fuel off with
+            match Length.parseIndirectResolved lookup limits bytes fuel off pre with
             | .error e => (.error e, budget, cache)
             | .ok (io, _) =>
               if io.num = c ∧ io.gen = 0 then
@@ -398,7 +386,7 @@ theorem fetchCompressedB_cost (pre : Pre) (lookup : Nat → Option XrefEntry) (l
     · simp only [hg, ↓reduceIte]
       rcases hf : cache.find? c with _ | os
       · simp only
-        rcases hp : Length.parseIndirectResolved lookup limits bytes fuel off with e | ⟨io, r⟩
+        rcases hp : Length.parseIndirectResolved lookup limits bytes fuel off pre with e | ⟨io, r⟩
         · exact Nat.le_add_right _ _
         · simp only
           split
@@ -436,7 +424,7 @@ the stream object that the cross-reference entry of `c` points at, read as
 def CacheExact (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
     (fuel : Nat) (cache : Cache) : Prop :=
   ∀ c os, cache.find? c = some os → ∃ off io r st0 st, lookup c = some (.inUse off 0) ∧
-    Length.parseIndirectResolved lookup limits bytes fuel off = .ok (io, r) ∧
+    Length.parseIndirectResolved lookup limits bytes fuel off pre = .ok (io, r) ∧
     io.num = c ∧ io.gen = 0 ∧ io.body = .stream st0 ∧ pre.f c st0 = .ok st ∧
     decodeObjStm limits st = .ok os
 
@@ -471,7 +459,7 @@ theorem fetchCompressedB_eq {pre : Pre} {lookup : Nat → Option XrefEntry} {lim
       simp only [↓reduceIte]
       rcases hf : cache.find? c with _ | os
       · simp only
-        rcases hp : Length.parseIndirectResolved lookup limits bytes fuel off with e | ⟨io, r⟩
+        rcases hp : Length.parseIndirectResolved lookup limits bytes fuel off pre with e | ⟨io, r⟩
         · exact ⟨by first | rfl | trivial | (simp only [selectMember]; split <;> rfl), hc⟩
         · simp only
           by_cases hh : io.num = c ∧ io.gen = 0
@@ -539,6 +527,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}:{w}"
+  | .encryption w => s!"encryption:{w}"
 
 
 /-- Test helper: `fetchCompressed` summarised. -/

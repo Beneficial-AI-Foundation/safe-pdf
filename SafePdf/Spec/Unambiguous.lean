@@ -855,6 +855,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- Test helper: `resolveEntry` under the default limits, errors summarised. -/
 private def rs (b : ByteArray) (n : Nat) : Sum String (Option XrefEntry) :=

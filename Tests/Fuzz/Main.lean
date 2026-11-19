@@ -234,13 +234,15 @@ def genInput (g : Rng) (cfg : Config) (seeds : Array ByteArray) : ByteArray × R
 /-! ## Entry points under test -/
 
 /-- Outcome class of one call: `0` ok, `1` malformed (including a structural cycle,
-`Error.cycle`), `2` limit exceeded, `3` unsupported. -/
+`Error.cycle`), `2` limit exceeded, `3` unsupported (including an encrypted document that
+cannot be decrypted, `Error.encryption`). -/
 def classify {α : Type} : Except Error α → Nat
   | .ok _ => 0
   | .error (.malformed ..) => 1
   | .error (.cycle ..) => 1
   | .error (.limitExceeded _) => 2
   | .error (.unsupported _) => 3
+  | .error (.encryption _) => 3
 
 /-- Limits with a small nesting depth, so the depth limit is hit often. -/
 def shallowLimits : Limits := { maxObjectDepth := 8 }

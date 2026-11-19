@@ -569,3 +569,11 @@ import SafePdf
 #print axioms SafePdf.Core.Content.runOps_stack_bounded
 #print axioms SafePdf.Core.Content.Ops.tokenize_ops_le
 #print axioms SafePdf.Core.Content.Ops.tokenize_ops_le_max
+-- Phase 4, task 4.6: encryption follow-ups (Crypt.lean, Open.lean)
+#print axioms SafePdf.Core.Crypt.setupError_final
+#print axioms SafePdf.Core.Crypt.identityEntry_depth
+#print axioms SafePdf.Core.Crypt.identityParms_depth
+#print axioms SafePdf.Core.Crypt.appliedParms_depth
+#print axioms SafePdf.Core.Crypt.markApplied_depth
+#print axioms SafePdf.Core.Open.openFile_final
+#print axioms SafePdf.Core.Open.openFile_repair_encryption

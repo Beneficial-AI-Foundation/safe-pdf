@@ -236,6 +236,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- Test helper: the entries of the stream at `off`, or the error. -/
 private def ps (b : ByteArray) (off : Nat) : Sum String (List (Nat × XrefEntry) × Option Nat) :=

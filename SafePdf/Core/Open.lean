@@ -26,7 +26,7 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   The result has `repaired := true` (S7) and `revisions := 0` (no xref chain was used).
 * P4. If repair fails too, `openFile` returns the **strict** error: it is the primary
   diagnosis (what is wrong with the file as written); the repair error ("no object found")
-  is usually less informative.
+  is usually less informative. Exception (rule E3): a repair-path `Error.encryption`.
 * P5. **Cycles are final** (and so are encryption-setup errors, rule E2) (task 2.13; §6 Phase 2 M2 "Bogk-style cyclic files all rejected in
   bounded time"): if the strict error is an `Error.cycle` (a revisited `/Prev` or `/XRefStm`
   offset in `Chain.loadChain`, an object in its own object stream in the xref stream or in
@@ -60,20 +60,24 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   empty user password). The encryption dictionary is direct in the trailer or an indirect
   object outside object streams (§7.5.7), fetched raw.
 * E2. A `withCrypt` failure (unsupported handler or revision, non-empty user password,
-  malformed `/Encrypt`) is a tagged error (`Crypt.tagError`) and **final** like a cycle
-  (`finalError`, `openFile_setup_final`): repair is not tried, since a repaired trailer may
-  lack `/Encrypt` (it is synthesized from the catalog when the file has no `trailer` keyword,
-  task 2.10) and the document would open undecrypted. On the repair path the same
-  `withCrypt` runs on the repaired trailer; a repaired trailer without `/Encrypt` opens
-  undecrypted (an encrypted file whose strict path fails for another reason; not addressed).
+  malformed or unresolvable `/Encrypt`) is an `Error.encryption` (`Crypt.setupError`; task
+  4.6 replaced the message-prefix tagging of 4.3b by this constructor) and **final** like a
+  cycle (`Error.isFinal`, `openFile_final`, `openFile_setup_final`): repair is not tried.
+* E3. (Task 4.6.) On the repair path the same `withCrypt` runs on the repaired trailer, which
+  keeps the file's `/Encrypt` and `/ID` (`Repair` rule R4': from the newest `trailer`
+  dictionary or cross-reference stream dictionary that has one, also when the trailer is
+  synthesized). So a repaired encrypted file is decrypted, or fails with `Error.encryption`
+  (e.g. `/Encrypt` names an object the scan did not find); it never opens undecrypted. When
+  both paths fail and the repair path's error is `Error.encryption`, `openFile` reports that
+  error instead of the strict one (`bothFailed`, `openFile_repair_encryption`).
 * G5. `getObject` decrypts what it returns (`OpenDoc.decrypt` → `Crypt.decryptBody`): strings
   everywhere and stream data, except the encryption dictionary, xref streams and the other
   §7.6.2 exceptions (`Core.Crypt`, rule C7). An object in an object stream is not decrypted:
   its container's data is, before decoding (`OpenDoc.pre`, the `ObjStm.Pre` pass, rule O7);
   `getObjectB` / `Session` use the same pass, so they stay equal to `getObject`.
-* Not decrypted: a container decoded while resolving an indirect `/Length` that lives in an
-  object stream (`Length.resolveLength`, rule L6) — such a `/Length` in an encrypted file
-  fails to resolve (an error, never a wrong length).
+* A container decoded while resolving an indirect `/Length` that lives in an object stream
+  (`Length.resolveLength`, rule L6) passes through the same `OpenDoc.pre` (task 4.6), so such
+  a `/Length` in an encrypted file resolves.
 
 ## Theorems
 
@@ -82,6 +86,8 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   the trailer is the newest one (S7: a non-repaired document came from the strict path).
 * `openFile_strict`: when the strict path succeeds, `openFile` returns it (repair never
   overrides a strictly valid file).
+* `openFile_final`, `openFile_setup_final`, `openFile_repair_encryption`: final errors
+  (`Error.isFinal`) skip repair; a repair-path encryption error is reported (rules E2, E3).
 * `openFile_cycle`: when the strict path fails with a cycle error, `openFile` returns that
   error (rule P5); `openFile_loadChain_cycle`: in particular a cycle error of
   `Chain.loadChain`.
@@ -215,7 +221,7 @@ def OpenDoc.getObjectTrace (d : OpenDoc) (limits : Limits) (num gen : Nat) : Tra
   match d.lookup num with
   | some (.inUse off g) =>
     if g = gen then
-      match Xref.Length.parseIndirectResolved d.lookup limits d.bytes d.objectCount off with
+      match Xref.Length.parseIndirectResolved d.lookup limits d.bytes d.objectCount off d.pre with
       | .error e => ⟨1, 0, .error e⟩
       | .ok (io, _) =>
         if io.num = num ∧ io.gen = gen then ⟨1, 0, d.decrypt num gen io.body⟩
@@ -275,7 +281,7 @@ password, malformed dictionary) is the error. An unencrypted document is returne
 def OpenDoc.withCrypt (d : OpenDoc) (limits : Limits) : Except Error OpenDoc :=
   if d.trailer.encrypted then
     match d.encryptDict limits with
-    | .error e => .error (Crypt.tagError e)
+    | .error e => .error (Crypt.setupError e)
     | .ok (enc, ref) =>
       match Crypt.setup enc d.trailer.dict ref with
       | .error e => .error e
@@ -347,22 +353,23 @@ def repairOpen (limits : Limits) (bytes : ByteArray) : Except Error OpenDoc :=
     | .error e => .error e
     | .ok d => validate limits d
 
-/-- Errors after which the repair path is not tried: cycles (rule P5) and tagged
-encryption-setup errors (rule E2, `Crypt.isSetupError`). -/
-def finalError (e : Error) : Bool := e.isCycle || Crypt.isSetupError e
+/-- The error of `openFile` when both paths fail (rule P4): the strict error `e`, unless the
+repair path failed with an encryption error `e'` (rule E3: the file is encrypted and cannot
+be decrypted; that is the diagnosis, whatever broke its cross-reference data). -/
+def bothFailed (e e' : Error) : Error := if e'.isEncryption then e' else e
 
-/-- **Entry point.** Open a document: the strict path; on a final error (a cycle, rule P5, or
-an encryption-setup error, rule E2) that error; else the repair path; if both fail, the
-strict error (rule P4). -/
+/-- **Entry point.** Open a document: the strict path; on a final error (`Error.isFinal`: a
+cycle, rule P5, or an encryption-setup error, rule E2) that error; else the repair path; if
+both fail, the strict error, or the repair path's encryption error (rules P4, E3). -/
 def openFile (limits : Limits) (bytes : ByteArray) : Except Error OpenDoc :=
   match strictOpen limits bytes with
   | .ok d => .ok d
   | .error e =>
-    if finalError e then .error e
+    if e.isFinal then .error e
     else
       match repairOpen limits bytes with
       | .ok d => .ok d
-      | .error _ => .error e
+      | .error e' => .error (bothFailed e e')
 
 /-! ## Theorems -/
 
@@ -497,15 +504,31 @@ repair path is not tried. -/
 theorem openFile_cycle {limits : Limits} {bytes : ByteArray} {e : Error}
     (h : strictOpen limits bytes = .error e) (hc : e.isCycle = true) :
     openFile limits bytes = .error e := by
-  simp [openFile, finalError, h, hc]
+  simp [openFile, Error.isFinal, h, hc]
 
-/-- **Encryption-setup errors are final** (rule E2, task 4.3b): when the strict path fails
-with a tagged encryption-setup error (unsupported handler, non-empty user password, malformed
+/-- **Final errors are final** (rules P5, E2): when the strict path fails with a final error
+(`Error.isFinal`), `openFile` returns exactly that error; the repair path is not tried. -/
+theorem openFile_final {limits : Limits} {bytes : ByteArray} {e : Error}
+    (h : strictOpen limits bytes = .error e) (hc : e.isFinal = true) :
+    openFile limits bytes = .error e := by
+  simp [openFile, h, hc]
+
+/-- **Encryption-setup errors are final** (rule E2, tasks 4.3b, 4.6): when the strict path
+fails with an `Error.encryption` (unsupported handler, non-empty user password, malformed
 `/Encrypt`), `openFile` returns exactly that error; the repair path is not tried. -/
 theorem openFile_setup_final {limits : Limits} {bytes : ByteArray} {e : Error}
-    (h : strictOpen limits bytes = .error e) (hc : Crypt.isSetupError e = true) :
-    openFile limits bytes = .error e := by
-  simp [openFile, finalError, h, hc]
+    (h : strictOpen limits bytes = .error e) (hc : e.isEncryption = true) :
+    openFile limits bytes = .error e :=
+  openFile_final h (by simp [Error.isFinal, hc])
+
+/-- **An encryption error of the repair path is reported** (rule E3, task 4.6): when the
+strict path fails with a non-final error and the repair path fails with an encryption error,
+`openFile` returns the repair path's error. -/
+theorem openFile_repair_encryption {limits : Limits} {bytes : ByteArray} {e e' : Error}
+    (h : strictOpen limits bytes = .error e) (hf : e.isFinal = false)
+    (hr : repairOpen limits bytes = .error e') (he : e'.isEncryption = true) :
+    openFile limits bytes = .error e' := by
+  simp [openFile, h, hf, hr, bothFailed, he]
 
 /-- **`/Prev`, `/XRefStm` and xref-stream cycles are final.** A cycle error of
 `Chain.loadChain` is the result of `openFile`. -/
@@ -576,9 +599,9 @@ theorem parseIndirectBodyWith_depth {len : ObjParse.LengthResolver} {limits : Li
     · cases h
 
 /-- `Length.parseIndirectResolved` returns bodies within the depth limit. -/
-theorem parseIndirectResolved_depth {lookup : Nat → Option XrefEntry} {limits : Limits}
-    {bytes : ByteArray} {fuel pos : Nat} {io : IndirectObject} {r : Nat}
-    (h : Xref.Length.parseIndirectResolved lookup limits bytes fuel pos = .ok (io, r)) :
+theorem parseIndirectResolved_depth {pre : Xref.ObjStm.Pre} {lookup : Nat → Option XrefEntry}
+    {limits : Limits} {bytes : ByteArray} {fuel pos : Nat} {io : IndirectObject} {r : Nat}
+    (h : Xref.Length.parseIndirectResolved lookup limits bytes fuel pos pre = .ok (io, r)) :
     bodyDepth io.body ≤ limits.maxObjectDepth := by
   unfold Xref.Length.parseIndirectResolved at h
   split at h
@@ -651,9 +674,9 @@ fetching from `d` parses at most `d.objectCount` objects (length objects and obj
 containers, task 2.14). -/
 theorem getObject_length_calls_le (d : OpenDoc) (limits : Limits) (visiting : List Nat)
     (ref : Nat × Nat) :
-    Xref.Length.resolveLengthCalls d.lookup limits d.bytes d.objectCount visiting ref ≤
+    Xref.Length.resolveLengthCalls d.pre d.lookup limits d.bytes d.objectCount visiting ref ≤
       d.objectCount :=
-  Xref.Length.resolveLength_calls_le _ _ _ _ _ _
+  Xref.Length.resolveLength_calls_le _ _ _ _ _ _ _
 
 /-! ## Budgeted opening and sessions (task 3.13)
 
@@ -847,11 +870,11 @@ def openFileB (limits : Limits) (budget : Budget) (bytes : ByteArray) :
   match strictOpenB limits budget bytes with
   | (.ok d, b1, c1) => (.ok d, b1, c1)
   | (.error e, b1, _) =>
-    if finalError e then (.error e, b1, [])
+    if e.isFinal then (.error e, b1, [])
     else
       match repairOpenB limits b1 bytes with
       | (.ok d, b2, c2) => (.ok d, b2, c2)
-      | (.error _, b2, _) => (.error e, b2, [])
+      | (.error e', b2, _) => (.error (bothFailed e e'), b2, [])
 
 /-- `strictOpenB` never increases the budget. -/
 theorem strictOpenB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) :
@@ -939,7 +962,7 @@ theorem openFileB_cycle {limits : Limits} {budget : Budget} {bytes : ByteArray} 
   rw [hs] at h
   simp only at h
   subst h
-  simp [finalError, hc]
+  simp [Error.isFinal, hc]
 
 /-- **`/Prev`, `/XRefStm` and xref-stream cycles are final** (budgeted). -/
 theorem openFileB_loadChain_cycle {limits : Limits} {budget : Budget} {bytes : ByteArray}

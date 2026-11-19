@@ -184,6 +184,7 @@ def errorKind : Error → String
   | .limitExceeded _ => "limit"
   | .unsupported _ => "unsupported"
   | .cycle _ _ => "cycle"
+  | .encryption _ => "encryption"
 
 /-- An error's text without its byte offset, for grouping. -/
 def errorKey : Error → String

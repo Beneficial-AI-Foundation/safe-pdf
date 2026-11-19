@@ -44,6 +44,7 @@ def formatError (e : Error) : String :=
     | .limitExceeded k => s!"limitExceeded: {reprStr k}"
     | .unsupported what => s!"unsupported: {what}"
     | .cycle off what => s!"cycle at {off}: {what}"
+    | .encryption what => s!"encryption: {what}"
   s!"error\n{body}\n"
 
 /-- Renderer for the `header` suite: the result of `SafePdf.parse` (header check, then
