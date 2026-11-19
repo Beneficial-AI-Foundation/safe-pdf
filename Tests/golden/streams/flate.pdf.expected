@@ -1,0 +1,29 @@
+--- default limits
+file:       input
+open:       strict
+entries:    5 fetched, 0 fetch error(s), 0 in object streams (skipped)
+streams:    3: 3 decoded, 0 image placeholder(s), 0 error(s), 0 skipped; 0 needed indirect /Filter or /DecodeParms resolution
+  3 0  [FlateDecode]  raw 52 -> decoded 46
+  4 0  [ASCIIHexDecode,FlateDecode]  raw 105 -> decoded 46
+  5 0  [(none)]  raw 10 -> decoded 10
+chains:
+  1  (none)
+  1  ASCIIHexDecode,FlateDecode
+  1  FlateDecode
+errors:
+bytes:      167 raw, 102 decoded
+--- maxDecodedTotalBytes 50
+file:       input
+open:       strict
+entries:    5 fetched, 0 fetch error(s), 0 in object streams (skipped)
+streams:    3: 1 decoded, 0 image placeholder(s), 1 error(s), 1 skipped; 0 needed indirect /Filter or /DecodeParms resolution
+  3 0  [FlateDecode]  raw 52 -> decoded 46
+  4 0  [ASCIIHexDecode,FlateDecode]  raw 105 -> error: resource limit exceeded: total decoded size
+  5 0  [(none)]  raw 10 -> skipped: decoded-bytes budget exhausted
+chains:
+  1  (none)
+  1  ASCIIHexDecode,FlateDecode
+  1  FlateDecode
+errors:
+  1  resource limit exceeded: total decoded size
+bytes:      167 raw, 46 decoded
