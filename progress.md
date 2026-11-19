@@ -17,6 +17,7 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
+* 2.14 (wt) — wave 15; 3.4 integrated (part 1)
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -88,7 +89,7 @@ Plan.md §6 Phase 2, §5.2, §5.4. Exit: **M2**: 99% of corpus opens (strict or 
 | 2.11 | Document opening for M2: `openFile limits bytes : Except Error OpenDoc` in `SafePdf/Core/Open.lean` — strict: `Chain.loadChain` + `mergeChain`; on failure `Repair.repair` with `repaired := true` (S7, Plan §5.4); `OpenDoc.getObject n` resolves `inUse` via `Length.parseIndirectResolved` and `compressed` via `ObjStm.fetchCompressed`; validate `/Root` resolves to a dict; replace the stub `Document` in `Core/Parse.lean` so `parse` opens the file (keep `parseObjectAt`/`parseIndirectAt`); inspector `summary` shows strict/repaired/failed + revision count; dashboard columns % strict, % repaired, % failed, and a per-file 'all in-use objects resolve' count | 2.4a, 2.4b, 2.6 | `SafePdf/Core/Open.lean`, `SafePdf/Core/Parse.lean`, `SafePdf/Shell/Views/Summary.lean`, `scripts/corpus/dashboard.py`, `Tests/golden/header/` | wt | done (2026-11-19) |
 | 2.12 | Compose `Unambiguous.checkSize` (object numbers < newest `/Size`) into `Open.openFile` strict validation (failure → repair path), and discharge 2.5's `SameAt` hypothesis with a prefix-stability lemma for `parseSection`/`matchAt`/`parseXrefStream` (parsers read `bytes.size` in range checks: state stability for successful parses when bytes are appended), plus the hybrid-update case of `loadChain_update` | 2.5, 2.11 | `SafePdf/Core/Open.lean`, `SafePdf/Spec/Unambiguous.lean`, `SafePdf/Spec/PrefixStable.lean` | wt | done (2026-11-19) |
 | 2.13 | M2 clause "Bogk-style cyclic files all rejected in bounded time": add a structured cycle error (e.g. `Error.cycle (offset) (what)` or a `malformed` kind tag) produced by `Chain.loadChain` (`/Prev`, `/XRefStm` cycles), `ObjStm` (object in its own stream) and `Length.resolveLength` (cyclic `/Length`); `Open.openFile` returns it without trying repair; prove `openFile_cycle` (a cycle error from strict ⇒ `openFile` returns that error); adversarial expectations for `xref-prev-cycle`, `xref-prev-self`, `objstm-self-container` become `open: error` | 2.11 | `SafePdf/Core/Error.lean`, `SafePdf/Core/Xref/Chain.lean`, `SafePdf/Core/Xref/ObjStm.lean`, `SafePdf/Core/Xref/Length.lean`, `SafePdf/Core/Open.lean`, `Tests/Adversarial.lean` | wt | done (2026-11-19) |
-| 2.14 | Cyclic `/Length` through an object stream (`length-mutual.pdf`): `Length.resolveLength` cannot follow a `compressed` entry (ObjStm imports Length, so a direct call is circular) — restructure (e.g. pass a compressed-object fetcher into the resolver, or move `/Length` resolution above ObjStm) so a `/Length` chain through object streams resolves, and a cycle through them yields `Error.cycle`; tighten the `length-mutual.pdf` expectations to `errCycle` | 2.13 | `SafePdf/Core/Xref/Length.lean`, `SafePdf/Core/Xref/ObjStm.lean`, `SafePdf/Core/Open.lean`, `Tests/Adversarial.lean` | wt | todo |
+| 2.14 | Cyclic `/Length` through an object stream (`length-mutual.pdf`): `Length.resolveLength` cannot follow a `compressed` entry (ObjStm imports Length, so a direct call is circular) — restructure (e.g. pass a compressed-object fetcher into the resolver, or move `/Length` resolution above ObjStm) so a `/Length` chain through object streams resolves, and a cycle through them yields `Error.cycle`; tighten the `length-mutual.pdf` expectations to `errCycle` | 2.13 | `SafePdf/Core/Xref/Length.lean`, `SafePdf/Core/Xref/ObjStm.lean`, `SafePdf/Core/Open.lean`, `Tests/Adversarial.lean` | wt | doing (2026-11-19) |
 Exit criterion checked: [ ]
 
 ## Phase 3 — Filters
@@ -98,7 +99,7 @@ Plan.md §6 Phase 3. Exit: **M3**: decompression-bomb suite (nested streams, 10�
 | 3.1 | FlateDecode (inflate) in Lean, output ≤ limit or error, totality | 1.1 | `SafePdf/Core/Filter/Flate.lean` | new | done (2026-11-18) |
 | 3.2 | PNG predictors with output-length law | 1.1 | `SafePdf/Core/Filter/Predictor.lean` | new | done (2026-11-18) |
 | 3.3 | ASCIIHex, ASCII85, RunLength (fully proven) | 1.1 | `SafePdf/Core/Filter/Ascii.lean`, `SafePdf/Core/Filter/RunLength.lean` | new | done (2026-11-19) |
-| 3.4 | LZW (totality + bounds) | 1.1 | `SafePdf/Core/Filter/LZW.lean` | new | todo |
+| 3.4 | LZW (totality + bounds) | 1.1 | `SafePdf/Core/Filter/LZW.lean` | new | done (2026-11-19) |
 | 3.5 | Filter pipeline + DCT/JPX/JBIG2 placeholder (S7) | 3.1, 3.2, 3.3, 3.4 | `SafePdf/Core/Filter.lean` | new | todo |
 | 3.6 | Decompression-bomb suite + differential vs zlib | 3.5 | `Tests/adversarial/bombs/`, `Tests/Bombs.lean` | wt | todo |
 | 3.7 | Inspector view: decoded-stream viewer | 3.5 | `SafePdf/Shell/Views/Streams.lean` | wt | todo |
@@ -246,6 +247,8 @@ Exit criterion checked: [ ]
 * `lake env lean` on one file ignores the lakefile's `autoImplicit = false`: a misspelled type silently becomes an auto-bound variable — confirm with `lake build`.
 * Prefix-stability proofs: error branches carry `errAt bytes pos` — rewrite with `errAt_ext` first; with `match _h : …` in a parser, `split` the goal and use the introduced equation; `rw [f]` fails on mutual-block functions → `f.eq_def`; `parseXrefStream`'s do-block becomes nested matches after `simp only [throw, throwThe, MonadExceptOf.throw, bind, Except.bind, pure, Except.pure]`.
 * A subagent stopped by a transient API error (HTTP 522) keeps its uncommitted worktree: resume it with SendMessage to its agent id rather than respawning.
+* LZW (3.4): `Core.Filter.LZW.lzwDecode limits input (early := true) (strict := true)`; `earlyOfDict` reads `/EarlyChange` (0/1, else malformed); table `Array Entry` (`pre`, `last`), `expand` by well-founded recursion with a runtime prefix<entry check; loop structural on `workBound = size*8/9 + 1` (`lzwDecode_fuel_enough`: fuel never decides the result); `lzwDecode_size_le`, `step_wf`, `expand_ok`. Missing EOD is accepted in both modes. Total-work O(input+output) is argued, not mechanised. Not yet called from any filter pipeline (3.5).
+* v4.36 (3.4): `prefix` is a keyword (not a field name); `rw [getElem?_pos tab i hi]` on `Array` can hit max recursion — use `Array.getElem?_eq_getElem hi`; no `Nat.strong_induction_on` — use a self-calling theorem with `termination_by`; after `subst` of a structure literal run `dsimp only` before `omega`.
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -283,3 +286,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — wave 14 part 1 (phase 2, PR #3): 2.8 (inspector xref/revisions/repair views), 2.13 (**cycle errors final: Bogk-style files rejected by `openFile`**, `openFile_cycle`), 3.3 (ASCIIHex/ASCII85/RunLength, fully proven) done; added 2.14 (`/Length` cycle through object streams); corpus 0 regressions; commit "wave 14 (part 1): 2.8 2.13 3.3 — xref views, final cycle errors, ASCII/RunLength filters"
 * 2026-11-19 — phase 1 milestone: PR #2 marked ready for review (CI green on 14e689f, runs 44515147861/44515153520)
 * 2026-11-19 — wave 14 part 2 (phase 2, PR #3): 2.12 done (`/Size` checked in strict open; 2.5's `SameAt` fully discharged incl. hybrid updates); corpus 74/74 open strict, 0 regressions; commit "wave 14 (part 2): 2.12 — /Size check, prefix stability"
+* 2026-11-19 — wave 15 part 1 (phase 2, PR #3): 3.4 done (LZWDecode: output bound, work bound by fuel, table invariants); commit "wave 15 (part 1): 3.4 — LZW decoder"
