@@ -48,3 +48,4 @@ import SafePdf.Core.Content.GState
 import SafePdf.Core.Content.DisplayList
 import SafePdf.Core.Content.Ops
 import SafePdf.Core.Content.Interp
+import SafePdf.Spec.Content

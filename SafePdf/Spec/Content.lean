@@ -47,7 +47,8 @@ display items `is`. It has three constructors:
   `0 -TL Td`; a show operator emits one `glyphRun` (font from `Tf` required) carrying `Tm`,
   the CTM, the text state, the colour snapshots and the clip, then advances `Tm` by the
   displacement of §9.4.4 (`displacement`); `'` is `T*` then `Tj`; `"` sets `Tw`, `Tc` then
-  `'`.
+  `'`. Without a font, `Tj`/`TJ` are skipped while `'`/`"` still perform their `T*`
+  (and `Tw`/`Tc`) parts (`quoteNoFont`, `dquoteNoFont`), as the impl does.
 * **`Do`, `sh`, `BI`**: emit an image/shading placeholder with the CTM, fill snapshot and clip.
 * **`BX`/`EX`** count the compatibility nesting; **`gs d0 d1 BMC BDC EMC MP DP`** change
   nothing (`IgnoredKw`; ExtGState resolution is task 5.2b).
@@ -69,6 +70,11 @@ helpers of `Core.Content.Interp`: `nums n` = the last `n` operands, all numbers;
 
 Not covered: the warning and unknown-operator *counts* of `Result` (only the state and the
 display items are specified).
+
+Proof note: `simple_match_fallthrough` names the auxiliary matcher of `Interp.simple`'s operator
+dispatch (`Interp.simple.match_33`) and walks its decision tree, because Lean cannot generate
+the matcher's equation lemmas or splitter within the default heartbeat budget (57 `List UInt8`
+literal patterns). If `Interp.simple` is edited, that name and `simpleKws` may need updating.
 -/
 
 set_option autoImplicit false
@@ -179,7 +185,8 @@ def simpleKws : List (List UInt8) :=
    [100, 49], [68, 111], [115, 104], [66, 73], [66, 77, 67], [66, 68, 67], [69, 77, 67],
    [77, 80], [68, 80], [66, 88], [69, 88]]
 
-/-- The 71 operators the interpreter knows (ISO 32000-2 Annex A, minus none). -/
+/-- The 71 operators the interpreter knows (ISO 32000-2 Annex A Table A.1, except `BI`'s
+`ID`/`EI`, which the tokenizer folds into `BI`). -/
 def keywords : List (List UInt8) := controlKws ++ simpleKws
 
 /-! ## State vocabulary -/
@@ -320,22 +327,22 @@ inductive SimpleStep (cfg : Config) : Core → Op → Core → List DisplayItem 
       SimpleStep cfg c ⟨o, [105], off, dat⟩ { c with gs := { c.gs with flatness := x } } []
   /-- `gs d0 d1 BMC BDC EMC MP DP`: no change. -/
   | ignored {c : Core} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
-      (k : IgnoredKw kw) : SimpleStep cfg c ⟨o, kw, off, dat⟩ c []
+      (hkw : IgnoredKw kw) : SimpleStep cfg c ⟨o, kw, off, dat⟩ c []
   /-- `/N CS`, `/N cs`: set the space and its initial colour (§8.6.8). -/
   | space {c : Core} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
-      {stroke : Bool} {n : Name} (k : SpaceKw kw stroke) (h : Interp.lastName? o = some n) :
+      {stroke : Bool} {n : Name} (hkw : SpaceKw kw stroke) (h : Interp.lastName? o = some n) :
       SimpleStep cfg c ⟨o, kw, off, dat⟩
         (withColour c stroke (Interp.spaceOfName n) (Interp.spaceOfName n).initialColor) []
   /-- `SC SCN sc scn`: a colour in the current space. -/
   | colour {c : Core} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
-      {stroke : Bool} {col : Color} (k : ColourKw kw stroke)
+      {stroke : Bool} {col : Color} (hkw : ColourKw kw stroke)
       (h : Interp.colorIn (if stroke then c.gs.strokeSpace else c.gs.fillSpace) o = some col) :
       SimpleStep cfg c ⟨o, kw, off, dat⟩
         (withColour c stroke (if stroke then c.gs.strokeSpace else c.gs.fillSpace) col) []
   /-- `G g RG rg K k`: the device space and a colour of its component count. -/
   | device {c : Core} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
       {stroke : Bool} {s : DeviceSpace} {xs : List Fixed} {col : Color}
-      (k : DeviceKw kw stroke s) (h : Interp.nums s.nComps o = some xs)
+      (hkw : DeviceKw kw stroke s) (h : Interp.nums s.nComps o = some xs)
       (hc : Interp.deviceColor s xs = some col) :
       SimpleStep cfg c ⟨o, kw, off, dat⟩ (withColour c stroke (.device s) col) []
   /-- `x y m`: start a subpath at the point. -/
@@ -458,6 +465,16 @@ inductive SimpleStep (cfg : Config) : Core → Op → Core → List DisplayItem 
       SimpleStep cfg c ⟨o, [34], off, dat⟩
         (afterShow cfg (nextLine (withSpacing c w cs)) f [.str s])
         [.glyphRun (runOf (nextLine (withSpacing c w cs)) f [.str s]) c.gs.clip]
+  /-- `(s) '` without a font: the `T*` part only (showing is skipped). -/
+  | quoteNoFont {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {s : List UInt8}
+      (h : Interp.lastString? o = some s) (hf : c.gs.text.font = none) :
+      SimpleStep cfg c ⟨o, [39], off, dat⟩ (nextLine c) []
+  /-- `aw ac (s) "` without a font: the `Tw`, `Tc` and `T*` parts only. -/
+  | dquoteNoFont {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      {aw ac : PdfObject} {s : List UInt8} {w cs : Fixed}
+      (h : Interp.lastN 3 o = some [aw, ac, .string s]) (hw : Interp.num? aw = some w)
+      (hc : Interp.num? ac = some cs) (hf : c.gs.text.font = none) :
+      SimpleStep cfg c ⟨o, [34], off, dat⟩ (nextLine (withSpacing c w cs)) []
   /-- `/N Do`: an XObject placeholder (resolved in 5.2b). -/
   | Do {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {n : Name}
       (h : Interp.lastName? o = some n) :
@@ -492,13 +509,13 @@ inductive Effect (cfg : Config) : Machine → Op → Machine → List DisplayIte
         []
   /-- A painting operator (see `paintOutput`, `afterPaint`); the pending clip is consumed. -/
   | paint {m : Machine} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
-      {p : Option Paint} {close : Bool} (k : PaintKw kw p close) :
+      {p : Option Paint} {close : Bool} (hkw : PaintKw kw p close) :
       Effect cfg m ⟨o, kw, off, dat⟩
         ⟨afterPaint m.pending (closeIf close m.core), m.stack, none⟩
         (paintOutput m.pending p (closeIf close m.core))
   /-- `W`, `W*`: the clip rule is pending until the next painting operator. -/
   | clip {m : Machine} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
-      {r : FillRule} (k : ClipKw kw r) :
+      {r : FillRule} (hkw : ClipKw kw r) :
       Effect cfg m ⟨o, kw, off, dat⟩ { m with pending := some r } []
   /-- Any other known operator acts on the `Core` state only. -/
   | simple {m : Machine} {op : Op} {c' : Core} {is : List DisplayItem}
@@ -524,5 +541,429 @@ inductive Steps (cfg : Config) : Machine → List Op → Machine → List Displa
   | cons {m m₁ m₂ : Machine} {op : Op} {ops : List Op} {is₁ is₂ : List DisplayItem}
       (h : Step cfg m op m₁ is₁) (t : Steps cfg m₁ ops m₂ is₂) :
       Steps cfg m (op :: ops) m₂ (is₁ ++ is₂)
+
+/-! ## Proofs: the implementation against the relation -/
+
+section Proofs
+
+/-- `List.foldl Array.push` appends. -/
+theorem foldl_push {α : Type} (a : Array α) (l : List α) :
+    l.foldl Array.push a = a ++ l.toArray := by
+  induction l generalizing a with
+  | nil => simp
+  | cons x xs ih => simp [ih]
+
+/-- The impl's segment appending is `extendPath`. -/
+theorem addSegs_eq (c : Core) (segs : List Segment) (cur start : Option Point) :
+    Interp.addSegs c segs cur start = extendPath c segs cur start := by
+  obtain ⟨gs, tm, path, cur0, start0, it, bx⟩ := c
+  simp only [Interp.addSegs, extendPath, foldl_push]
+
+/-- The impl's subpath closing is `closeSubpath`. -/
+theorem closeCore_eq (c : Core) : Interp.closeCore c = closeSubpath c := by
+  unfold Interp.closeCore closeSubpath
+  cases c.cur <;> simp only [addSegs_eq]
+
+/-- The impl's run displacement is `displacement`. -/
+theorem runTx_eq (cfg : Config) (t : TextState) (size : Fixed) (parts : List TextPart) :
+    Interp.runTx cfg t size parts = displacement cfg t size parts := by
+  induction parts with
+  | nil => rfl
+  | cons p rest ih =>
+    cases p <;> simp only [Interp.runTx, ih, displacement, List.foldr_cons, partDisp,
+      Interp.adjustTx]
+
+/-- Case analysis on a `dite` (used to walk the operator matcher's decision tree). -/
+theorem dite_by {α : Sort _} {c : Prop} [inst : Decidable c] {t : c → α} {e : ¬c → α} {r : α}
+    (h1 : ∀ h : c, t h = r) (h2 : ∀ h : ¬c, e h = r) : dite c t e = r := by
+  cases inst with
+  | isFalse h => exact h2 h
+  | isTrue h => exact h1 h
+
+/-- The fallthrough of the operator dispatch of `Interp.simple` (its auxiliary matcher, with
+abstract alternatives): an operator outside `simpleKws` reaches the last alternative. Proved
+by walking the matcher's decision tree (`dite` on each byte, `List` cases on the rest). -/
+theorem simple_match_fallthrough {α : Type} (kw : List UInt8) (hk : kw ∉ simpleKws)
+    (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24 a25 a26 a27 a28 a29 a30 a31 a32 a33 a34 a35 a36 a37 a38 a39 a40 a41 a42 a43 a44 a45 a46 a47 a48 a49 a50 a51 a52 a53 a54 a55 a56 : Unit → α) (f : List UInt8 → α) :
+    Interp.simple.match_33 (fun _ => α) kw a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24 a25 a26 a27 a28 a29 a30 a31 a32 a33 a34 a35 a36 a37 a38 a39 a40 a41 a42 a43 a44 a45 a46 a47 a48 a49 a50 a51 a52 a53 a54 a55 a56 f = f kw := by
+  delta Interp.simple.match_33
+  rcases kw with _ | ⟨x, xs⟩
+  · rfl
+  dsimp only [Interp.deviceColor._sparseCasesOn_1]
+  repeat' (first
+    | (apply dite_by <;> intro hh <;> (try subst hh) <;>
+        (try dsimp only [Eq.ndrec_symm, Interp.deviceColor._sparseCasesOn_1,
+          Interp.deviceColor._sparseCasesOn_2]))
+    | exact absurd (by decide) hk
+    | rfl
+    | (cases ‹List UInt8› <;>
+        (try dsimp only [Eq.ndrec_symm, Interp.deviceColor._sparseCasesOn_1,
+          Interp.deviceColor._sparseCasesOn_2])))
+
+/-- An operator outside `simpleKws` is `unsupported` in `Interp.simple`. -/
+theorem simple_unknown (cfg : Config) (c : Core) (o : List PdfObject) (kw : List UInt8)
+    (off : Nat) (dat : ByteArray) (hk : kw ∉ simpleKws) :
+    Interp.simple cfg c ⟨o, kw, off, dat⟩ =
+      (c, some (.unsupported kw), (if c.bxDepth = 0 then 1 else 0), 1) := by
+  unfold Interp.simple
+  exact simple_match_fallthrough kw hk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+/-- An operator outside `controlKws` is dispatched to `Interp.simple`. -/
+theorem opKind_of_not_control {kw : List UInt8} (hk : kw ∉ controlKws) :
+    Interp.opKind kw = .simple := by
+  unfold Interp.opKind
+  split <;> first | rfl | exact absurd (by decide) hk
+
+/-- `exec` on a simple operator. -/
+theorem exec_simple_eq (cfg : Config) (m : Machine) (op : Op)
+    (h : Interp.opKind op.op = .simple) :
+    Interp.exec cfg m op =
+      ({ m with core := (Interp.simple cfg m.core op).1 },
+        (Interp.simple cfg m.core op).2.1.toList, (Interp.simple cfg m.core op).2.2.1,
+        (Interp.simple cfg m.core op).2.2.2) := by
+  unfold Interp.exec
+  rw [h]
+
+/-- **Spec ⇒ impl** for the simple operators: a specified transition is what `Interp.simple`
+computes. -/
+theorem simple_of_step {cfg : Config} {c : Core} {op : Op} {c' : Core} {is : List DisplayItem}
+    (h : SimpleStep cfg c op c' is) :
+    (Interp.simple cfg c op).1 = c' ∧ (Interp.simple cfg c op).2.1.toList = is := by
+  cases h
+  all_goals (try cases ‹IgnoredKw _›)
+  all_goals (try cases ‹SpaceKw _ _›)
+  all_goals (try cases ‹ColourKw _ _›)
+  all_goals (try cases ‹DeviceKw _ _ _›)
+  all_goals (try dsimp only [enumOperand] at *)
+  all_goals constructor
+  all_goals (conv in Interp.simple _ _ _ => whnf)
+  all_goals (try simp only [↓reduceIte] at *)
+  all_goals (try simp only [*, Interp.showText, Interp.nextLine, Interp.moveText,
+    Interp.setText, Interp.setGs, addSegs_eq])
+  all_goals (try simp only [runTx_eq])
+  all_goals (try rfl)
+  all_goals (try (rcases hcur : c.cur with _ | q <;>
+    simp only [hcur, closeSubpath, Interp.ok, Option.toList_none] <;> done))
+  all_goals (simp only [*, afterShow, nextLine, withSpacing, withText, moveLine, Interp.bad])
+
+/-- **Impl ⇒ spec** for the simple operators: for a known operator, `Interp.simple` either
+performs a specified transition or leaves the state unchanged and emits nothing. -/
+theorem simple_cases (cfg : Config) (c : Core) (o : List PdfObject) (kw : List UInt8)
+    (off : Nat) (dat : ByteArray) (hk : kw ∈ simpleKws) :
+    (∃ c' is, SimpleStep cfg c ⟨o, kw, off, dat⟩ c' is) ∨
+      ((Interp.simple cfg c ⟨o, kw, off, dat⟩).1 = c ∧
+        (Interp.simple cfg c ⟨o, kw, off, dat⟩).2.1 = none) := by
+  generalize hs : Interp.simple cfg c ⟨o, kw, off, dat⟩ = r
+  simp only [simpleKws, List.mem_cons, List.not_mem_nil, or_false] at hk
+  rcases hk with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals (conv at hs => lhs; whnf)
+  all_goals subst hs
+  all_goals (try unfold Interp.showText)
+  all_goals (try simp only [Interp.nextLine, Interp.moveText, Interp.setText, Interp.setGs])
+  all_goals (repeat' split)
+  all_goals first
+    | exact Or.inr ⟨rfl, rfl⟩
+    | exact Or.inl ⟨_, _, .cm ‹_›⟩
+    | exact Or.inl ⟨_, _, .w ‹_›⟩
+    | exact Or.inl ⟨_, _, .J ‹_›⟩
+    | exact Or.inl ⟨_, _, .j ‹_›⟩
+    | exact Or.inl ⟨_, _, .M ‹_›⟩
+    | exact Or.inl ⟨_, _, .d ‹_› ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .ri ‹_›⟩
+    | exact Or.inl ⟨_, _, .i ‹_›⟩
+    | exact Or.inl ⟨_, _, .ignored (by constructor)⟩
+    | exact Or.inl ⟨_, _, .space (by constructor) ‹_›⟩
+    | exact Or.inl ⟨_, _, .colour (by constructor) ‹_›⟩
+    | exact Or.inl ⟨_, _, .device (by constructor) ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .moveTo ‹_›⟩
+    | exact Or.inl ⟨_, _, .lineTo ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .curveTo ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .curveV ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .curveY ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .close⟩
+    | exact Or.inl ⟨_, _, .rect ‹_›⟩
+    | exact Or.inl ⟨_, _, .BT⟩
+    | exact Or.inl ⟨_, _, .ET⟩
+    | exact Or.inl ⟨_, _, .Tc ‹_›⟩
+    | exact Or.inl ⟨_, _, .Tw ‹_›⟩
+    | exact Or.inl ⟨_, _, .Tz ‹_›⟩
+    | exact Or.inl ⟨_, _, .TL ‹_›⟩
+    | exact Or.inl ⟨_, _, .Tf ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .Tr ‹_›⟩
+    | exact Or.inl ⟨_, _, .Ts ‹_›⟩
+    | exact Or.inl ⟨_, _, .Td ‹_›⟩
+    | exact Or.inl ⟨_, _, .TD ‹_›⟩
+    | exact Or.inl ⟨_, _, .Tm ‹_›⟩
+    | exact Or.inl ⟨_, _, .TStar⟩
+    | exact Or.inl ⟨_, _, .Tj ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .TJ ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .quote ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .dquote ‹_› ‹_› ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .quoteNoFont ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .dquoteNoFont ‹_› ‹_› ‹_› ‹_›⟩
+    | exact Or.inl ⟨_, _, .Do ‹_›⟩
+    | exact Or.inl ⟨_, _, .sh ‹_›⟩
+    | exact Or.inl ⟨_, _, .BI⟩
+    | exact Or.inl ⟨_, _, .BX⟩
+    | exact Or.inl ⟨_, _, .EX ‹_›⟩
+
+/-- The painting step of the impl is `afterPaint` / `paintOutput`. -/
+theorem paintStep_eq (m : Machine) (p : Option Paint) (close : Bool) :
+    Interp.paintStep m p close =
+      (⟨afterPaint m.pending (closeIf close m.core), m.stack, none⟩,
+        paintOutput m.pending p (closeIf close m.core), 0, 0) := by
+  obtain ⟨c0, stack, pending⟩ := m
+  have hc : (if close = true then Interp.closeCore c0 else c0) = closeIf close c0 := by
+    cases close <;> simp [closeIf, closeCore_eq]
+  simp only [Interp.paintStep, hc]
+  generalize closeIf close c0 = c
+  obtain ⟨gs, tm, path, cur, start, it, bx⟩ := c
+  cases pending <;> cases p <;> by_cases he : path.segs.isEmpty = true <;>
+    simp [he, afterPaint, paintOutput, Interp.paintItemsOf]
+
+/-- `exec` on a painting operator. -/
+theorem exec_paint_eq (cfg : Config) (m : Machine) (op : Op) (p : Option Paint) (close : Bool)
+    (h : Interp.opKind op.op = .paint p close) :
+    Interp.exec cfg m op = Interp.paintStep m p close := by
+  unfold Interp.exec
+  rw [h]
+
+/-- `exec` on `W`/`W*`. -/
+theorem exec_clip_eq (cfg : Config) (m : Machine) (op : Op) (r : FillRule)
+    (h : Interp.opKind op.op = .clip r) :
+    Interp.exec cfg m op = ({ m with pending := some r }, [], 0, 0) := by
+  unfold Interp.exec
+  rw [h]
+
+/-- The operator of a simple transition is one of `simpleKws`. -/
+theorem SimpleStep.mem {cfg : Config} {c : Core} {op : Op} {c' : Core}
+    {is : List DisplayItem} (h : SimpleStep cfg c op c' is) : op.op ∈ simpleKws := by
+  cases h
+  all_goals (try cases ‹IgnoredKw _›)
+  all_goals (try cases ‹SpaceKw _ _›)
+  all_goals (try cases ‹ColourKw _ _›)
+  all_goals (try cases ‹DeviceKw _ _ _›)
+  all_goals (dsimp only; decide)
+
+/-- The simple and control operators are disjoint. -/
+theorem not_control_of_simple {kw : List UInt8} (h : kw ∈ simpleKws) : kw ∉ controlKws := by
+  have : ∀ k ∈ simpleKws, k ∉ controlKws := by decide
+  exact this kw h
+
+/-- The operator of a specified effect is one of `keywords`. -/
+theorem Effect.mem {cfg : Config} {m : Machine} {op : Op} {m' : Machine}
+    {is : List DisplayItem} (h : Effect cfg m op m' is) : op.op ∈ keywords := by
+  cases h with
+  | simple h => exact List.mem_append_right _ h.mem
+  | paint hkw => cases hkw <;> (dsimp only; decide)
+  | clip hkw => cases hkw <;> (dsimp only; decide)
+  | save => dsimp only; decide
+  | restore => dsimp only; decide
+
+/-- **Spec ⇒ impl**: a specified effect is what `exec` computes. -/
+theorem exec_of_effect {cfg : Config} {m : Machine} {op : Op} {m' : Machine}
+    {is : List DisplayItem} (h : Effect cfg m op m' is) :
+    (Interp.exec cfg m op).1 = m' ∧ (Interp.exec cfg m op).2.1 = is := by
+  cases h with
+  | simple h =>
+    rw [exec_simple_eq _ _ _ (opKind_of_not_control (not_control_of_simple h.mem))]
+    obtain ⟨h1, h2⟩ := simple_of_step h
+    exact ⟨by rw [h1], h2⟩
+  | save hd =>
+    generalize he : Interp.exec cfg m _ = r
+    conv at he => lhs; whnf
+    subst he
+    simp [GStack.push, hd]
+  | restore hs =>
+    generalize he : Interp.exec cfg m _ = r
+    conv at he => lhs; whnf
+    subst he
+    simp [GStack.restore, GStack.pop, hs]
+  | paint hkw =>
+    cases hkw <;>
+    · rw [exec_paint_eq cfg m _ _ _ rfl, paintStep_eq]
+      exact ⟨rfl, rfl⟩
+  | clip hkw =>
+    cases hkw <;>
+    · rw [exec_clip_eq cfg m _ _ rfl]
+      exact ⟨rfl, rfl⟩
+
+/-- **Impl ⇒ spec**: `exec` performs a specified effect, or skips a known operator (no change,
+no item), or reports an unknown operator. -/
+theorem exec_cases (cfg : Config) (m : Machine) (op : Op) :
+    (∃ m' is, Effect cfg m op m' is) ∨
+    (op.op ∈ keywords ∧ (Interp.exec cfg m op).1 = m ∧ (Interp.exec cfg m op).2.1 = []) ∨
+    (op.op ∉ keywords ∧ (Interp.exec cfg m op).1 = m ∧
+      (Interp.exec cfg m op).2.1 = [.unsupported op.op]) := by
+  obtain ⟨o, kw, off, dat⟩ := op
+  by_cases hc : kw ∈ controlKws
+  · have hk : kw ∈ keywords := List.mem_append_left _ hc
+    simp only [controlKws, List.mem_cons, List.not_mem_nil, or_false] at hc
+    rcases hc with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    · by_cases hd : m.stack.depth < cfg.limits.maxGStateDepth
+      · exact Or.inl ⟨_, _, .save hd⟩
+      · refine Or.inr (Or.inl ⟨hk, ?_⟩)
+        generalize he : Interp.exec cfg m _ = r
+        conv at he => lhs; whnf
+        subst he
+        simp [GStack.push, hd]
+    · rcases hs : m.stack.saved with _ | ⟨g, rest⟩
+      · refine Or.inr (Or.inl ⟨hk, ?_⟩)
+        generalize he : Interp.exec cfg m _ = r
+        conv at he => lhs; whnf
+        subst he
+        obtain ⟨core, ⟨saved⟩, pending⟩ := m
+        dsimp only at hs
+        subst hs
+        exact ⟨rfl, rfl⟩
+      · exact Or.inl ⟨_, _, .restore hs⟩
+    all_goals first
+      | exact Or.inl ⟨_, _, .paint (by constructor)⟩
+      | exact Or.inl ⟨_, _, .clip (by constructor)⟩
+  · have hs := opKind_of_not_control hc
+    rw [exec_simple_eq _ _ _ hs]
+    by_cases hk : kw ∈ simpleKws
+    · rcases simple_cases cfg m.core o kw off dat hk with ⟨c', is, h⟩ | ⟨h1, h2⟩
+      · exact Or.inl ⟨_, _, .simple h⟩
+      · refine Or.inr (Or.inl ⟨List.mem_append_right _ hk, ?_, ?_⟩)
+        · rw [h1]
+        · simp only [h2, Option.toList_none]
+    · refine Or.inr (Or.inr ⟨?_, ?_, ?_⟩)
+      · simp only [keywords, List.mem_append, not_or]
+        exact ⟨hc, hk⟩
+      · rw [simple_unknown _ _ _ _ _ _ hk]
+      · rw [simple_unknown _ _ _ _ _ _ hk]
+        rfl
+
+end Proofs
+
+/-! ## Main theorems -/
+
+/-- **Equivalence**: the relation holds exactly for the state and items `exec` computes. -/
+theorem step_iff_exec (cfg : Config) (m : Machine) (op : Op) (m' : Machine)
+    (is : List DisplayItem) :
+    Step cfg m op m' is ↔ (Interp.exec cfg m op).1 = m' ∧ (Interp.exec cfg m op).2.1 = is := by
+  constructor
+  · intro h
+    cases h with
+    | defined h => exact exec_of_effect h
+    | skip hk hn =>
+      rcases exec_cases cfg m op with hg | ⟨_, h1, h2⟩ | ⟨hk', _, _⟩
+      · exact absurd hg hn
+      · exact ⟨h1, h2⟩
+      · exact absurd hk hk'
+    | unknown hk =>
+      rcases exec_cases cfg m op with ⟨_, _, hg⟩ | ⟨hk', _, _⟩ | ⟨_, h1, h2⟩
+      · exact absurd hg.mem hk
+      · exact absurd hk' hk
+      · exact ⟨h1, h2⟩
+  · rintro ⟨rfl, rfl⟩
+    by_cases hg : ∃ m'' is'', Effect cfg m op m'' is''
+    · obtain ⟨m'', is'', hg⟩ := hg
+      obtain ⟨h1, h2⟩ := exec_of_effect hg
+      rw [h1, h2]
+      exact .defined hg
+    · rcases exec_cases cfg m op with hg' | ⟨hk, h1, h2⟩ | ⟨hk, h1, h2⟩
+      · exact absurd hg' hg
+      · rw [h1, h2]
+        exact .skip hk hg
+      · rw [h1, h2]
+        exact .unknown hk
+
+/-- **Soundness**: every `exec` result is a transition of the relation. -/
+theorem exec_step (cfg : Config) (m : Machine) (op : Op) :
+    Step cfg m op (Interp.exec cfg m op).1 (Interp.exec cfg m op).2.1 :=
+  (step_iff_exec cfg m op _ _).2 ⟨rfl, rfl⟩
+
+/-- **Determinism** of the relation. -/
+theorem step_det {cfg : Config} {m : Machine} {op : Op} {m₁ m₂ : Machine}
+    {is₁ is₂ : List DisplayItem} (h₁ : Step cfg m op m₁ is₁) (h₂ : Step cfg m op m₂ is₂) :
+    m₁ = m₂ ∧ is₁ = is₂ := by
+  obtain ⟨a1, b1⟩ := (step_iff_exec cfg m op _ _).1 h₁
+  obtain ⟨a2, b2⟩ := (step_iff_exec cfg m op _ _).1 h₂
+  exact ⟨a1 ▸ a2, b1 ▸ b2⟩
+
+/-- **Totality**: every operator has a transition from every state. -/
+theorem step_total (cfg : Config) (m : Machine) (op : Op) :
+    ∃ m' is, Step cfg m op m' is :=
+  ⟨_, _, exec_step cfg m op⟩
+
+/-- `pushAll` appends to the list view. -/
+theorem pushAll_toList (a : DisplayList) (l : List DisplayItem) :
+    (Interp.pushAll a l).toList = a.toList ++ l := by
+  induction l generalizing a with
+  | nil => simp [Interp.pushAll]
+  | cons x xs ih => simp [Interp.pushAll, ih]
+
+/-- One fold step of the impl, in terms of `exec`. -/
+theorem stepAcc_eq (cfg : Config) (acc : Machine × Result) (op : Op) :
+    (Interp.stepAcc cfg acc op).1 = (Interp.exec cfg acc.1 op).1 ∧
+      (Interp.stepAcc cfg acc op).2.items.toList =
+        acc.2.items.toList ++ (Interp.exec cfg acc.1 op).2.1 := by
+  obtain ⟨m, items, w, u⟩ := acc
+  simp only [Interp.stepAcc]
+  generalize Interp.exec cfg m op = r
+  obtain ⟨m', its, w', u'⟩ := r
+  simp [pushAll_toList]
+
+/-- The impl's fold over a list is a `Steps` run, whose items it appends. -/
+theorem foldl_steps (cfg : Config) (l : List Op) (acc : Machine × Result) :
+    ∃ is, Steps cfg acc.1 l (l.foldl (Interp.stepAcc cfg) acc).1 is ∧
+      (l.foldl (Interp.stepAcc cfg) acc).2.items.toList = acc.2.items.toList ++ is := by
+  induction l generalizing acc with
+  | nil => exact ⟨[], .nil, by simp⟩
+  | cons op rest ih =>
+    obtain ⟨is₂, hs, hi⟩ := ih (Interp.stepAcc cfg acc op)
+    obtain ⟨e1, e2⟩ := stepAcc_eq cfg acc op
+    refine ⟨(Interp.exec cfg acc.1 op).2.1 ++ is₂, ?_, ?_⟩
+    · rw [e1] at hs
+      exact .cons (exec_step cfg acc.1 op) hs
+    · simp only [List.foldl_cons, hi, e2, List.append_assoc]
+
+/-- **Determinism** of runs. -/
+theorem steps_det {cfg : Config} {m : Machine} {ops : List Op} {m₁ m₂ : Machine}
+    {is₁ is₂ : List DisplayItem} (h₁ : Steps cfg m ops m₁ is₁) (h₂ : Steps cfg m ops m₂ is₂) :
+    m₁ = m₂ ∧ is₁ = is₂ := by
+  induction h₁ generalizing is₂ with
+  | nil => cases h₂; exact ⟨rfl, rfl⟩
+  | cons h t ih =>
+    cases h₂ with
+    | cons h' t' =>
+      obtain ⟨rfl, rfl⟩ := step_det h h'
+      obtain ⟨rfl, rfl⟩ := ih t'
+      exact ⟨rfl, rfl⟩
+
+/-- **Lifted equivalence**: a run from the initial state over the operators ends in `m` with
+items `is` exactly when the impl ends in `m` and its display list is `is`. -/
+theorem steps_iff_runOps (cfg : Config) (ops : Array Op) (m : Machine)
+    (is : List DisplayItem) :
+    Steps cfg {} ops.toList m is ↔
+      (runOps cfg ops).1 = m ∧ (interp cfg ops).items.toList = is := by
+  obtain ⟨is₀, hs, hi⟩ := foldl_steps cfg ops.toList ({}, {})
+  have hr : runOps cfg ops = ops.toList.foldl (Interp.stepAcc cfg) ({}, {}) := by
+    simp only [runOps, Array.foldl_toList]
+  have hi' : (interp cfg ops).items.toList = is₀ := by
+    simp only [interp, hr, hi]
+    rfl
+  rw [← hr] at hs
+  rw [hi']
+  constructor
+  · intro h
+    obtain ⟨e1, e2⟩ := steps_det h hs
+    exact ⟨e1.symm, e2.symm⟩
+  · rintro ⟨rfl, rfl⟩
+    exact hs
+
+/-- **`interp` is the unique run**: the impl's display list is the items of a `Steps` run
+from the initial state. -/
+theorem interp_steps (cfg : Config) (ops : Array Op) :
+    Steps cfg {} ops.toList (runOps cfg ops).1 (interp cfg ops).items.toList :=
+  (steps_iff_runOps cfg ops _ _).2 ⟨rfl, rfl⟩
+
+/-- Any run from the initial state produces exactly `interp`'s display list. -/
+theorem interp_items_of_steps {cfg : Config} {ops : Array Op} {m : Machine}
+    {is : List DisplayItem} (h : Steps cfg {} ops.toList m is) :
+    (interp cfg ops).items.toList = is :=
+  ((steps_iff_runOps cfg ops m is).1 h).2
 
 end SafePdf.Spec.Content
