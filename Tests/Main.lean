@@ -6,6 +6,7 @@ import Tests.FlateRoundTrip
 import Tests.StreamsView
 import Tests.Bombs
 import Tests.PagesView
+import Tests.Crypt
 
 /-!
 # Test runner
@@ -31,7 +32,8 @@ def suites : List Suite :=
     { name := "flate-roundtrip", run := SafePdf.Tests.FlateRoundTrip.run },
     { name := "streams-view", run := SafePdf.Tests.StreamsView.run },
     { name := "bombs", run := SafePdf.Tests.Bombs.run },
-    { name := "pages-view", run := SafePdf.Tests.PagesView.run } ]
+    { name := "pages-view", run := SafePdf.Tests.PagesView.run },
+    { name := "crypt", run := SafePdf.Tests.Crypt.run } ]
 
 end SafePdf.Tests
 

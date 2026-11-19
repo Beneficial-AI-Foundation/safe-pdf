@@ -546,3 +546,20 @@ import SafePdf
 #print axioms SafePdf.Core.Content.GStack.restore_bounded
 #print axioms SafePdf.Core.Content.Paint.items_length_le
 #print axioms SafePdf.Core.Content.Paint.items_ne_nil
+-- Phase 4, task 4.3b: standard security handler (SafePdf/Core/Crypt.lean, Open.lean)
+#print axioms SafePdf.Core.Crypt.decryptObj_depth
+#print axioms SafePdf.Core.Crypt.decryptList_depth
+#print axioms SafePdf.Core.Crypt.decryptDict_depth
+#print axioms SafePdf.Core.Crypt.decryptBody_shape
+#print axioms SafePdf.Core.Crypt.decryptBytes_size_le
+#print axioms SafePdf.Core.Crypt.decryptBytes_rc4_size
+#print axioms SafePdf.Core.Crypt.decryptBytes_aes_size
+#print axioms SafePdf.Core.Crypt.decryptData_size_le
+#print axioms SafePdf.Core.Crypt.decryptContainer_size_le
+#print axioms SafePdf.Core.Open.withCrypt_ok
+#print axioms SafePdf.Core.Open.withCrypt_plain
+#print axioms SafePdf.Core.Open.decrypt_none
+#print axioms SafePdf.Core.Open.decrypt_depth
+#print axioms SafePdf.Core.Open.repairOpen_ok
+#print axioms SafePdf.Core.Open.repairOpenB_ok
+#print axioms SafePdf.Core.Open.openFile_setup_final
