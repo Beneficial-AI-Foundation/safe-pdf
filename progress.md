@@ -22,7 +22,7 @@ Design document: Plan.md
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
 | 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
-| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | draft |
+| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | awaiting-ci |
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | — | none |
 | 3 | `phase-3-filters` | `phase-2-xref` | — | none |
 | 4 | `phase-4-document` | `phase-3-filters` | — | none |
@@ -67,7 +67,7 @@ Plan.md §6 Phase 1, §5.1. Exit: **M1**: object-level round-trip `parse (print 
 | 1.12 | Inspector view `objects`: pretty-printed object tree, diffable against `qpdf --json` | 1.7, 0.10 | `SafePdf/Shell/Views/Objects.lean`, `SafePdf/Shell/Inspect.lean` | wt | done (2026-11-18) |
 | 1.13 | M1 evidence in CI: job `differential-objects` on `ubuntu-24.04` (qpdf ≥ 11 for JSON v2; pin/assert version), build `inspect`, restore the corpus from an Actions cache keyed on `corpus/manifest.json` (fetch once with `scripts/corpus/fetch.py` when missing), run `Tests/differential/run.py --comparator objects` over corpus + `Tests/adversarial/minimal-valid.pdf`; triage every disagreement (our bug / their bug / spec ambiguity → `docs/deviations-from-spec.md`) | 1.11, 1.12 | `.github/workflows/ci.yml`, `docs/deviations-from-spec.md`, `Tests/differential/` | wt | done (2026-11-18) |
 | 1.14 | Fix CI `differential-objects` failure: `inspect --view objects --json` timed out (> 60 s) on `corpus/files/arxiv-2307.09288.pdf` (13.7 MB). Profile with a short time budget (find whether the Shell scan, the lexer re-lexing, `parseIndirect`, or the O(n²) dict duplicate check dominates), fix the hot spot without weakening any theorem (Core changes must keep their proofs), re-run the corpus locally with per-file times ≤ 10 s | 1.13 | `SafePdf/Shell/Views/Objects.lean`, `SafePdf/Core/ObjParse.lean`, `SafePdf/Core/Lex.lean` | wt | done (2026-11-18) |
-Exit criterion checked: [ ]
+Exit criterion checked: [x] (2026-11-19: `parseObject_print` proved (axioms OK, 184 checked); `scripts/fuzz.sh` 2000 iters, 0 slow, no panics; CI `differential-objects` run 44412083516 on 54bf87e: 74 files, 67,473/67,473 objects agree, 0 disagree)
 
 ## Phase 2 — File structure: xref, trailer, revisions ★
 Plan.md §6 Phase 2, §5.2, §5.4. Exit: **M2**: 99% of corpus opens (strict or repaired); Bogk-style cyclic files all rejected in bounded time; first machine-checked proof that PDF xref resolution terminates on arbitrary input.
@@ -265,3 +265,4 @@ Exit criterion checked: [ ]
 * 2026-11-18 — wave 12 (phase 1, PR #2): 1.14 (inspector timeout fixed: 13.7 MB file 0.10 s), 2.4a (xref streams + hybrid in the chain walk, all 2.2 theorems kept), 2.4b (object streams, no-recursion rank lemma) done; adversarial expectations tightened for xref-stream files; 2.10 deferred (overlap with 1.14); 158 theorems axiom-checked; commit "wave 12: 1.14 2.4a 2.4b — inspector perf, xref streams, object streams"
 * 2026-11-18 — wave 13 part 1 (phase 1, PR #2): 2.5 (S6 unambiguity, `SameAt` hypothesis open → 2.12), 2.10 (shared indirect-object parsing; repair skips indirect-/Length streams) done; qpdf comparator D-001 rule extended to null-valued targets; added 2.12; 173 theorems axiom-checked; commit "wave 13 (part 1): 2.5 2.10 — S6 unambiguity, parser refactor, comparator null-target rule"
 * 2026-11-19 — wave 13 part 2 (phase 1, PR #2): 2.11 done (`openFile`, real `Document`, `--view resolve`, dashboard M2 columns; depth proof re-done against the 2.10 API at merge); corpus 74/74 open, 99.999% objects resolve; added 2.13 (cycle errors must not be repaired, M2 clause 2); commit "wave 13 (part 2): 2.11 — document opening"
+* 2026-11-19 — phase 1 milestone M1 verified (round trip proved, fuzz clean, qpdf 67,473/67,473 agree); PR #2 → awaiting-ci (CI on f99c9d8 running); phase 2 continues on `phase-2-xref`
