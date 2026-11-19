@@ -1,0 +1,31 @@
+--- default limits
+file:       input
+open:       strict
+entries:    8 fetched, 0 fetch error(s), 0 in object streams (skipped)
+streams:    4: 2 decoded, 0 image placeholder(s), 2 error(s), 0 skipped; 2 needed indirect /Filter or /DecodeParms resolution
+  3 0  [FlateDecode] (resolved)  raw 52 -> decoded 46
+  5 0  [FlateDecode] +parms (resolved)  raw 16 -> decoded 6
+  7 0  [FlateDecode]  raw 15 -> error: malformed input at byte 0: zlib: unknown compression method
+  8 0  [BogusDecode]  raw 3 -> error: unsupported: filter /BogusDecode
+chains:
+  3  FlateDecode
+  1  BogusDecode
+errors:
+  1  malformed: zlib: unknown compression method
+  1  unsupported: filter /BogusDecode
+bytes:      86 raw, 52 decoded
+--- maxDecodedTotalBytes 50
+file:       input
+open:       strict
+entries:    8 fetched, 0 fetch error(s), 0 in object streams (skipped)
+streams:    4: 1 decoded, 0 image placeholder(s), 1 error(s), 2 skipped; 2 needed indirect /Filter or /DecodeParms resolution
+  3 0  [FlateDecode] (resolved)  raw 52 -> decoded 46
+  5 0  [FlateDecode] +parms (resolved)  raw 16 -> error: resource limit exceeded: total decoded size
+  7 0  [FlateDecode]  raw 15 -> skipped: decoded-bytes budget exhausted
+  8 0  [BogusDecode]  raw 3 -> skipped: decoded-bytes budget exhausted
+chains:
+  3  FlateDecode
+  1  BogusDecode
+errors:
+  1  resource limit exceeded: total decoded size
+bytes:      86 raw, 46 decoded

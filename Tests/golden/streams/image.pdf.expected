@@ -1,0 +1,24 @@
+--- default limits
+file:       input
+open:       strict
+entries:    4 fetched, 0 fetch error(s), 0 in object streams (skipped)
+streams:    2: 0 decoded, 2 image placeholder(s), 0 error(s), 0 skipped; 0 needed indirect /Filter or /DecodeParms resolution
+  3 0  /XObject /Image  [DCTDecode]  raw 22 -> image dct (22 bytes to codec)
+  4 0  /XObject /Image  [AHx,DCT]  raw 45 -> image dct (22 bytes to codec)
+chains:
+  1  AHx,DCT
+  1  DCTDecode
+errors:
+bytes:      67 raw, 44 decoded
+--- maxDecodedTotalBytes 50
+file:       input
+open:       strict
+entries:    4 fetched, 0 fetch error(s), 0 in object streams (skipped)
+streams:    2: 0 decoded, 2 image placeholder(s), 0 error(s), 0 skipped; 0 needed indirect /Filter or /DecodeParms resolution
+  3 0  /XObject /Image  [DCTDecode]  raw 22 -> image dct (22 bytes to codec)
+  4 0  /XObject /Image  [AHx,DCT]  raw 45 -> image dct (22 bytes to codec)
+chains:
+  1  AHx,DCT
+  1  DCTDecode
+errors:
+bytes:      67 raw, 44 decoded
