@@ -234,3 +234,29 @@ import SafePdf
 #print axioms SafePdf.Core.Open.getObject_depth
 #print axioms SafePdf.Core.Open.getObject_work
 #print axioms SafePdf.Core.Open.getObject_length_calls_le
+-- Phase 2, task 2.12: prefix stability (SafePdf/Spec/PrefixStable.lean), SameAt discharged,
+-- hybrid update, /Size in the strict open path
+#print axioms SafePdf.Spec.PrefixStable.next_ext
+#print axioms SafePdf.Spec.PrefixStable.parseObjTok_ext
+#print axioms SafePdf.Spec.PrefixStable.parseIndirect_ext
+#print axioms SafePdf.Spec.PrefixStable.parseXrefTable_ext
+#print axioms SafePdf.Spec.PrefixStable.parseXrefStream_ext
+#print axioms SafePdf.Spec.PrefixStable.findStartxref_last
+#print axioms SafePdf.Spec.PrefixStable.parseXrefTable_end_lt
+#print axioms SafePdf.Spec.PrefixStable.parseIndirect_end_lt
+#print axioms SafePdf.Spec.PrefixStable.parseXrefTable_stable
+#print axioms SafePdf.Spec.PrefixStable.parseXrefStream_stable
+#print axioms SafePdf.Spec.PrefixStable.section_stable
+#print axioms SafePdf.Spec.PrefixStable.stream_stable
+#print axioms SafePdf.Spec.Unambiguous.loadChain_parses
+#print axioms SafePdf.Spec.Unambiguous.sameAt_of_extends
+#print axioms SafePdf.Spec.Unambiguous.loadChain_sameAt
+#print axioms SafePdf.Spec.Unambiguous.loadChain_append
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_append
+#print axioms SafePdf.Spec.Unambiguous.loadChain_update_hybrid
+#print axioms SafePdf.Spec.Unambiguous.loadChain_append_hybrid
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_append_hybrid
+#print axioms SafePdf.Spec.Unambiguous.openFile_lt_size
+#print axioms SafePdf.Core.Open.strictOpen_ok
+#print axioms SafePdf.Core.Open.checkSize_ok
+#print axioms SafePdf.Core.Open.strictOpen_lt_size
