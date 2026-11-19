@@ -349,13 +349,26 @@ def textBlock (f : Found) : List String :=
 def errorCount (fs : List Found) : Nat :=
   (fs.filter fun f => match f.outcome with | .err _ => true | .ok _ => false).length
 
+/-- Decrypt a discovered object with the opened document's decryption state (task 4.3b):
+strings and stream data of an encrypted file, as `OpenDoc.decrypt` does for `getObject` (the
+encryption dictionary and cross-reference streams are left as stored). Unencrypted files, and
+files that did not open, are shown as stored. A decryption failure becomes the object's
+error. -/
+def decryptFound (r : Except Error Document) (f : Found) : Found :=
+  match r, f.outcome with
+  | .ok doc, .ok io =>
+    match doc.doc.decrypt f.num f.gen io.body with
+    | .ok b => { f with outcome := .ok { io with body := b } }
+    | .error e => { f with outcome := .err e }
+  | _, _ => f
+
 /-- The `objects` view. -/
 def view : View where
   name := "objects"
   description := "pretty-printed tree of every indirect object (linear scan; --all keeps \
     superseded definitions)"
   run cfg i := do
-    let found := discover cfg.limits i.bytes
+    let found := (discover cfg.limits i.bytes).map (decryptFound i.result)
     let shown := if cfg.all then found.toList else lastOnly found
     let errs := errorCount shown
     let ok := shown.length - errs
