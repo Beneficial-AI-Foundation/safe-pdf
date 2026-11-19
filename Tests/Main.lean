@@ -3,6 +3,7 @@ import Tests.Golden
 import Tests.Adversarial
 import Tests.XrefViews
 import Tests.FlateRoundTrip
+import Tests.Bombs
 
 /-!
 # Test runner
@@ -25,7 +26,8 @@ def suites : List Suite :=
     { name := "golden", run := SafePdf.Tests.Golden.run },
     { name := "adversarial", run := SafePdf.Tests.Adversarial.run },
     { name := "xref-views", run := SafePdf.Tests.XrefViews.run },
-    { name := "flate-roundtrip", run := SafePdf.Tests.FlateRoundTrip.run } ]
+    { name := "flate-roundtrip", run := SafePdf.Tests.FlateRoundTrip.run },
+    { name := "bombs", run := SafePdf.Tests.Bombs.run } ]
 
 end SafePdf.Tests
 
