@@ -62,14 +62,14 @@ def Mode.name : Mode → String
   | .small => "small(1MiB)"
   | .default => "default(256MiB)"
 
-/-- Per-call time bound of a mode, in nanoseconds: 2 s for the small limit; 60 s for the
-default limit (it decodes up to 256 MiB first). Measured at task 3.6a (compiled, Apple
-silicon): Flate rejections ≈ 1 s, RunLength/ASCII85/8-filter chains ≈ 2 s, the 256 MiB
-Flate control 3.1 s, but the two LZW bombs 150–300 s each, so default mode fails on them
-until the LZW decoder's large-output cost is fixed (recorded as a finding, not loosened). -/
+/-- Per-call time bound of a mode, in nanoseconds: 2 s for the small limit; 10 s for the
+default limit (it decodes up to 256 MiB first). Measured (compiled, Apple silicon): Flate
+rejections ≈ 1 s, RunLength/ASCII85/8-filter chains ≈ 2 s, the 256 MiB Flate control 3.1 s,
+LZW bombs ≈ 2.4–2.8 s since task 3.12 (they took 150–300 s before: the output buffer was
+shared and copied on every append). -/
 def Mode.boundNs : Mode → Nat
   | .small => 2000000000
-  | .default => 60000000000
+  | .default => 10000000000
 
 /-! ## Expectations -/
 
