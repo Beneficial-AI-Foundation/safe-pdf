@@ -99,6 +99,7 @@ def errS : Error → String
   | .limitExceeded k => s!"limitExceeded {reprStr k}"
   | .unsupported w => s!"unsupported: {w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- Whether a result (summarised to a size) meets the expectation. -/
 def Expect.accepts : Expect → Except Error Nat → Bool

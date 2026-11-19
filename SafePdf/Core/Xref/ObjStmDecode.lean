@@ -26,8 +26,8 @@ value lives in one (`Core.Xref.ObjStm` imports `Core.Xref.Length` for its contai
   `/DecodeParms`, at most `limits.maxFilters` filters (`limitExceeded .filters`), output
   bounded by `limits.maxDecodedStreamBytes`; no `/Filter` (or `[]`) is raw. An image codec is
   `Error.malformed` (the data is PDF syntax). A `/Crypt` filter (first only, §7.4.10) follows
-  `Filter`: `/Identity` passes, others are `unsupported` until decryption (task 4.3b); object
-  streams of encrypted files are encrypted (§7.6.2), unlike xref streams. An indirect
+  `Filter`; object streams of encrypted files are encrypted (§7.6.2), unlike xref streams,
+  and are decrypted by a `Pre` pass before decoding (tasks 4.3b, 4.6). An indirect
   `/Filter` or `/DecodeParms` is `Error.unsupported`: nothing is resolved at this layer.
 * O3. Header: exactly `N` pairs of non-negative integers, lexed by `Lex.next` from the decoded
   bytes `[0, /First)` only, and nothing else in that range.
@@ -55,6 +55,23 @@ namespace SafePdf.Core.Xref.ObjStm
 open SafePdf
 open SafePdf.Core.Xref (XrefEntry)
 open SafePdf.Core.ObjParse (errAt lexErr)
+
+/-! ## Container pre-pass (task 4.3b, rule O7 of `Core.Xref.ObjStm`) -/
+
+/-- **A container pre-pass** (task 4.3b, rule O7 of `Core.Xref.ObjStm`; defined here since task
+4.6 so that `Core.Xref.Length` applies it too, rule L6): applied to the container stream of object
+stream `c` before it is decoded — the decryption of an encrypted file's object streams
+(`Core.Open`), the identity otherwise (`Pre.id`). It may fail, and never makes the data
+longer (`le`), so the decode cost bounds stay as they are. -/
+structure Pre where
+  /-- The pass: container number, raw container stream ↦ the stream to decode. -/
+  f : Nat → Stream → Except Error Stream
+  /-- The data never grows. -/
+  le : ∀ c st st', f c st = .ok st' → st'.data.size ≤ st.data.size
+
+/-- The identity pre-pass (unencrypted files). -/
+def Pre.id : Pre := ⟨fun _ st => .ok st, by intro c st st' h; cases h; exact Nat.le_refl _⟩
+
 
 /-! ## Strictly ascending lists -/
 
@@ -351,6 +368,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}:{w}"
+  | .encryption w => s!"encryption:{w}"
 
 /-- Test helper: a stream from string keys. -/
 private def mkSt (d : List (String × PdfObject)) (data : ByteArray) : Stream :=

@@ -34,7 +34,15 @@ the standard filters. This module parses that chain (`parseChain`) and runs it
   parameters (`Filter.Predictor`, ISO 32000-2 Table 10); `/LZWDecode` reads `/EarlyChange`.
   `/ASCIIHexDecode`, `/ASCII85Decode`, `/RunLengthDecode` take no parameters. `/Crypt` with
   `/Name /Identity` (the default) passes the data through; any other crypt filter is
-  `Error.unsupported` (decryption is task 4.3b). ISO 32000-2 §7.4.10: a `/Crypt` filter
+  `Error.unsupported`. Decryption is not done here (task 4.3b): `Core.Open.OpenDoc.getObject`
+  decrypts a stream's data before any filter runs, with the stream's own crypt filter when
+  its first filter is `/Crypt` (`Core.Crypt.streamMethod`), and then marks that stage applied
+  by setting its `/Name` to `/Identity` (`Core.Crypt.markApplied`, rule C7', task 4.6). So a
+  named (non-Identity) crypt filter of an encrypted file **is accepted** here, as a
+  pass-through, exactly when it was the one already applied; a named crypt filter that was
+  not applied (an unencrypted file, a `/Metadata` stream left unencrypted, an indirect
+  `/DecodeParms` that decryption did not read) is still `Error.unsupported`, never a silent
+  pass-through of encrypted bytes. ISO 32000-2 §7.4.10: a `/Crypt` filter
   "shall be the first filter in the /Filter array"; a `/Crypt` stage in any other position
   is `Error.malformed` (task 3.9, `parseChain_crypt_first`).
 * F5. Image codecs (S7). `/DCTDecode`, `/JPXDecode`, `/JBIG2Decode`, `/CCITTFaxDecode` are not
@@ -123,7 +131,8 @@ inductive ByteFilter where
   | ascii85
   /-- `/RunLengthDecode`. -/
   | runLength
-  /-- `/Crypt` (only `/Identity` is supported here). -/
+  /-- `/Crypt` (only `/Identity` passes here; an applied named filter arrives as `/Identity`,
+  rule F4). -/
   | crypt
   deriving Repr, DecidableEq, Inhabited
 
@@ -290,7 +299,7 @@ def cryptCheck (parms : Dict) : Except Error Unit :=
   | none => .ok ()
   | some (.name n) =>
     if n = Name.ofString "Identity" then .ok ()
-    else .error (.unsupported s!"/Crypt filter /{nameText n} (decryption: task 4.3b)")
+    else .error (.unsupported s!"/Crypt filter /{nameText n} (not applied by decryption)")
   | some _ => .error (.malformed 0 "/Crypt /DecodeParms /Name is not a name")
 
 /-- Decode one byte stage (F4). -/
@@ -1045,7 +1054,8 @@ private def pngParms : PdfObject := .dict [(K "Predictor", .int 12), (K "Columns
 #guard okData (decodeStream dl [(K "Filter", N "RunLengthDecode")]
   (B [2, 97, 98, 99, 254, 120, 128])) [97, 98, 99, 120, 120, 120]
 
--- Crypt /Identity passes through; another crypt filter is unsupported.
+-- Crypt /Identity passes through; another crypt filter is unsupported (unless decryption
+-- applied it and set /Name /Identity, `Crypt.markApplied`: then it is the first case).
 #guard okData (decodeStream dl [(K "Filter", .array [N "Crypt", N "AHx"])] (B [52, 49, 62]))
   [0x41]
 #guard isUnsupported (decodeStream dl [(K "Filter", N "Crypt"),

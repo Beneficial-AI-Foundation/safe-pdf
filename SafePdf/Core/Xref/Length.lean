@@ -19,7 +19,7 @@ not depend on how the xref chain is merged (task 2.2).
 
 ## Rules
 
-* L1. `resolveLength lookup limits bytes fuel visiting (n, g)`: if `n ∈ visiting` the result
+* L1. `resolveLength pre lookup limits bytes fuel visiting (n, g)`: if `n ∈ visiting` the result
   is `Error.cycle _ "cyclic /Length"` (checked first, whatever the fuel; task 2.13 made it a
   `cycle` rather than `malformed`, so `Core.Open.openFile` does not try repair on it).
 * L2. Fuel `0` is `Error.limitExceeded .objects`. The fuel is a budget of object parses
@@ -53,6 +53,13 @@ not depend on how the xref chain is merged (task 2.2).
   `Error.cycle`. Then the body, `ObjStm.decodeObjStm`, `ObjStm.findObject` (must be `idx`)
   and `ObjStm.getObject` (`containerMember`); the member is then treated as in L4, a
   reference being followed with the budget left over and `n` added to `visiting`.
+  (Task 4.6.) Between the body and `decodeObjStm` the container passes through the pre-pass
+  `pre` (`ObjStm.Pre`, rule O7 of `Core.Xref.ObjStm`): `Core.Open` passes the decryption of
+  an encrypted file's object streams (`OpenDoc.pre`), so a `/Length` stored in an object
+  stream of an encrypted file resolves; `Pre.id` otherwise. Every resolver function takes
+  `pre`; `parseIndirectResolved` takes it as an optional last argument (default `Pre.id`,
+  for the repair scan and the raw inspector views, which have no decryption state). The
+  pass performs no object parse, so the bounds below hold for every `pre`.
 
 Module structure: `ObjStm.lean` imports this module (its containers may have an indirect
 `/Length`), so the decoding of object streams lives in `Core.Xref.ObjStmDecode`, which both
@@ -137,21 +144,26 @@ def containerLength (res : List Nat → Nat × Nat → Nat × Except Error Nat) 
 
 /-- Member `num` (index `idx`) of the object-stream container whose head was read at `off`
 (dictionary `d`, `stream` keyword ending at `p`) with data length `len` (rule L6): the stream
-body, `ObjStm.decodeObjStm`, the header index check `ObjStm.findObject`, `ObjStm.getObject`.
+body, the container pre-pass `pre` (decryption of an encrypted file's container, task 4.6),
+`ObjStm.decodeObjStm`, the header index check `ObjStm.findObject`, `ObjStm.getObject`.
 Not recursive. -/
-def containerMember (limits : Limits) (bytes : ByteArray) (off c num idx : Nat) (d : Dict)
-    (p : Nat) (len : Except Error Nat) : Except Error PdfObject :=
+def containerMember (pre : ObjStm.Pre) (limits : Limits) (bytes : ByteArray)
+    (off c num idx : Nat) (d : Dict) (p : Nat) (len : Except Error Nat) :
+    Except Error PdfObject :=
   match len with
   | .error e => .error e
   | .ok len =>
     match ObjParse.parseStreamBodyWith (fun _ _ => .ok len) bytes p d with
     | .error e => .error e
-    | .ok (st, _) =>
-      match ObjStm.decodeObjStm limits st with
+    | .ok (st0, _) =>
+      match pre.f c st0 with
       | .error e => .error e
-      | .ok os =>
-        if ObjStm.findObject os num = some idx then ObjStm.getObject os limits idx
-        else .error (.malformed off s!"object {num} is not at index {idx} of object stream {c}")
+      | .ok st =>
+        match ObjStm.decodeObjStm limits st with
+        | .error e => .error e
+        | .ok os =>
+          if ObjStm.findObject os num = some idx then ObjStm.getObject os limits idx
+          else .error (.malformed off s!"object {num} is not at index {idx} of object stream {c}")
 
 /-- Instrumented resolution (rules L1–L4, L6): the number of object parses performed, and the
 length or an error. `resolveLength` is its second component; `resolveLength_calls_le` bounds
@@ -159,8 +171,9 @@ the first by `fuel`. The fuel is a work budget: a hop through an object stream m
 recursive calls (the container's `/Length`, then the member's value if it is a reference),
 and the second gets what the first left (`fuel - used`), so the total stays below `fuel`.
 Well-founded recursion on `fuel`. -/
-def resolveLengthAux (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) : Nat × Except Error Nat :=
+def resolveLengthAux (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) :
+    Nat × Except Error Nat :=
   if ref.1 ∈ visiting then (0, .error (.cycle (errOffset lookup ref.1) "cyclic /Length"))
   else
     match fuel with
@@ -181,13 +194,13 @@ def resolveLengthAux (lookup : Nat → Option XrefEntry) (limits : Limits) (byte
               | .error e => (1, .error e)
               | .ok (d, p) =>
                 let r1 := containerLength
-                  (fun v r => resolveLengthAux lookup limits bytes fuel v r)
+                  (fun v r => resolveLengthAux pre lookup limits bytes fuel v r)
                   (c :: ref.1 :: visiting) d p
-                match containerMember limits bytes off c ref.1 idx d p r1.2 with
+                match containerMember pre limits bytes off c ref.1 idx d p r1.2 with
                 | .error e => (r1.1 + 1, .error e)
                 | .ok (.int l) => (r1.1 + 1, intLength off l)
                 | .ok (.ref m h) =>
-                  let r2 := resolveLengthAux lookup limits bytes (fuel - r1.1)
+                  let r2 := resolveLengthAux pre lookup limits bytes (fuel - r1.1)
                     (ref.1 :: visiting) (m, h)
                   (r1.1 + 1 + r2.1, r2.2)
                 | .ok _ => (r1.1 + 1, .error (.malformed off "/Length is not an integer"))
@@ -204,7 +217,7 @@ def resolveLengthAux (lookup : Nat → Option XrefEntry) (limits : Limits) (byte
           | .error e => (1, .error e)
           | .ok (.int l) => (1, intLength off l)
           | .ok (.ref m h) =>
-            let r := resolveLengthAux lookup limits bytes fuel (ref.1 :: visiting) (m, h)
+            let r := resolveLengthAux pre lookup limits bytes fuel (ref.1 :: visiting) (m, h)
             (r.1 + 1, r.2)
           | .ok _ => (1, .error (.malformed off "/Length is not an integer"))
         else (0, .error (.malformed off "/Length reference generation mismatch"))
@@ -215,14 +228,15 @@ decreasing_by all_goals omega
 generation), following a chain of references at most `fuel` hops (rules L1–L4). Objects in
 `visiting` are being resolved: referring to one is a cycle error. Callers pass the number of
 objects in the cross-reference data as `fuel`. -/
-def resolveLength (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) : Except Error Nat :=
-  (resolveLengthAux lookup limits bytes fuel visiting ref).2
+def resolveLength (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) :
+    Except Error Nat :=
+  (resolveLengthAux pre lookup limits bytes fuel visiting ref).2
 
 /-- The number of object parses `resolveLength` performs on these arguments. -/
-def resolveLengthCalls (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) : Nat :=
-  (resolveLengthAux lookup limits bytes fuel visiting ref).1
+def resolveLengthCalls (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) : Nat :=
+  (resolveLengthAux pre lookup limits bytes fuel visiting ref).1
 
 /-! ## Indirect objects with resolved `/Length` -/
 
@@ -230,11 +244,11 @@ def resolveLengthCalls (lookup : Nat → Option XrefEntry) (limits : Limits) (by
 `ObjParse.parseStreamBody`: unchanged when `/Length` is not a reference; otherwise the
 resolved length (with `visiting = [self]`) is put in front, shadowing the reference for
 `Dict.lookup`. -/
-def lengthDict (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel self : Nat) (d : Dict) : Except Error Dict :=
+def lengthDict (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel self : Nat) (d : Dict) : Except Error Dict :=
   match Dict.lookup d ObjParse.nameLength with
   | some (.ref m h) =>
-    match resolveLength lookup limits bytes fuel [self] (m, h) with
+    match resolveLength pre lookup limits bytes fuel [self] (m, h) with
     | .ok len => .ok ((ObjParse.nameLength, .int len) :: d)
     | .error e => .error e
   | _ => .ok d
@@ -242,9 +256,9 @@ def lengthDict (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : By
 /-- The length resolver of rule L5 for object `self`: the stream data length from `d`
 (an indirect `/Length` resolved through `lengthDict`, then the direct rule
 `ObjParse.streamLength`). Passed to `ObjParse.parseIndirectBodyWith`. -/
-def lengthOf (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
-    (fuel self : Nat) : ObjParse.LengthResolver := fun d at_ =>
-  match lengthDict lookup limits bytes fuel self d with
+def lengthOf (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel self : Nat) : ObjParse.LengthResolver := fun d at_ =>
+  match lengthDict pre lookup limits bytes fuel self d with
   | .error e => .error e
   | .ok d' => ObjParse.streamLength d' at_
 
@@ -254,11 +268,12 @@ but resolving an indirect stream `/Length` through `resolveLength` with fuel `fu
 number of objects) and `visiting = [n]` (rule L5, `lengthOf`). Returns the object and the
 position after `endobj`. -/
 def parseIndirectResolved (lookup : Nat → Option XrefEntry) (limits : Limits)
-    (bytes : ByteArray) (fuel pos : Nat) : Except Error (IndirectObject × Nat) :=
+    (bytes : ByteArray) (fuel pos : Nat) (pre : ObjStm.Pre := ObjStm.Pre.id) :
+    Except Error (IndirectObject × Nat) :=
   match ObjParse.parseHeader bytes pos with
   | .error e => .error e
   | .ok (n, g, q) =>
-    match ObjParse.parseIndirectBodyWith (lengthOf lookup limits bytes fuel n.toNat) limits
+    match ObjParse.parseIndirectBodyWith (lengthOf pre lookup limits bytes fuel n.toNat) limits
         bytes q with
     | .ok (b, r) => .ok (⟨n.toNat, g.toNat, b⟩, r)
     | .error e => .error e
@@ -276,9 +291,9 @@ theorem containerLength_calls_le {res : List Nat → Nat × Nat → Nat × Excep
 
 /-- **Bounded work.** Resolving one `/Length` parses at most `fuel` objects (length objects
 and object-stream containers), also through object streams (task 2.14). -/
-theorem resolveLength_calls_le (lookup : Nat → Option XrefEntry) (limits : Limits)
+theorem resolveLength_calls_le (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) :
-    resolveLengthCalls lookup limits bytes fuel visiting ref ≤ fuel := by
+    resolveLengthCalls pre lookup limits bytes fuel visiting ref ≤ fuel := by
   unfold resolveLengthCalls
   induction fuel using Nat.strongRecOn generalizing visiting ref with
   | _ fuel ih =>
@@ -288,7 +303,7 @@ theorem resolveLength_calls_le (lookup : Nat → Option XrefEntry) (limits : Lim
     · split
       · simp
       · rename_i f
-        have h1 : ∀ v r, (resolveLengthAux lookup limits bytes f v r).1 ≤ f :=
+        have h1 : ∀ v r, (resolveLengthAux pre lookup limits bytes f v r).1 ≤ f :=
           fun v r => ih f (by omega) v r
         split
         · simp
@@ -302,7 +317,7 @@ theorem resolveLength_calls_le (lookup : Nat → Option XrefEntry) (limits : Lim
                 · simp
                 · rename_i d p _
                   have hc : (containerLength
-                      (fun v r => resolveLengthAux lookup limits bytes f v r)
+                      (fun v r => resolveLengthAux pre lookup limits bytes f v r)
                       (c :: ref.1 :: visiting) d p).1 ≤ f := containerLength_calls_le h1 _ d p
                   dsimp only
                   split
@@ -310,7 +325,7 @@ theorem resolveLength_calls_le (lookup : Nat → Option XrefEntry) (limits : Lim
                   · omega
                   · rename_i m hh _
                     have h2 := ih (f - (containerLength
-                      (fun v r => resolveLengthAux lookup limits bytes f v r)
+                      (fun v r => resolveLengthAux pre lookup limits bytes f v r)
                       (c :: ref.1 :: visiting) d p).1) (by omega) (ref.1 :: visiting) (m, hh)
                     omega
                   · omega
@@ -331,10 +346,10 @@ theorem resolveLength_calls_le (lookup : Nat → Option XrefEntry) (limits : Lim
 
 /-- **Cycles are errors.** A `/Length` reference to an object already being resolved fails
 with `cyclic /Length`, whatever the fuel. -/
-theorem resolveLength_self (lookup : Nat → Option XrefEntry) (limits : Limits)
+theorem resolveLength_self (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat)
     (h : ref.1 ∈ visiting) :
-    resolveLength lookup limits bytes fuel visiting ref =
+    resolveLength pre lookup limits bytes fuel visiting ref =
       .error (.cycle (errOffset lookup ref.1) "cyclic /Length") := by
   unfold resolveLength resolveLengthAux
   simp [h]
@@ -342,10 +357,10 @@ theorem resolveLength_self (lookup : Nat → Option XrefEntry) (limits : Limits)
 /-- **Cycles through object streams are errors** (rule L6, task 2.14): with any non-zero
 fuel, resolving a reference to an object stored in an object stream that is itself being
 resolved (or in itself) fails with `Error.cycle`, before any parse. -/
-theorem resolveLength_container_cycle (lookup : Nat → Option XrefEntry) (limits : Limits)
+theorem resolveLength_container_cycle (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) (c idx : Nat)
     (hl : lookup ref.1 = some (.compressed c idx)) (hc : c = ref.1 ∨ c ∈ visiting) :
-    ∃ o w, resolveLength lookup limits bytes (fuel + 1) visiting ref = .error (.cycle o w) := by
+    ∃ o w, resolveLength pre lookup limits bytes (fuel + 1) visiting ref = .error (.cycle o w) := by
   unfold resolveLength
   rw [resolveLengthAux.eq_def]
   by_cases hv : ref.1 ∈ visiting
@@ -354,21 +369,21 @@ theorem resolveLength_container_cycle (lookup : Nat → Option XrefEntry) (limit
 
 /-- A stream whose `/Length` is a reference to the stream object itself is rejected by
 `lengthDict` (Bogk's self-referential `/Length`). -/
-theorem lengthDict_self (lookup : Nat → Option XrefEntry) (limits : Limits)
+theorem lengthDict_self (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel self g : Nat) (d : Dict)
     (h : Dict.lookup d ObjParse.nameLength = some (.ref self g)) :
-    ∃ e, lengthDict lookup limits bytes fuel self d = .error e := by
+    ∃ e, lengthDict pre lookup limits bytes fuel self d = .error e := by
   unfold lengthDict
   rw [h]
   simp only
-  rw [resolveLength_self lookup limits bytes fuel [self] (self, g) (by simp)]
+  rw [resolveLength_self pre lookup limits bytes fuel [self] (self, g) (by simp)]
   exact ⟨_, rfl⟩
 
 /-- **Progress** of `parseIndirectResolved`: the object ends strictly after `pos` and within
 the input. -/
-theorem parseIndirectResolved_pos {lookup : Nat → Option XrefEntry} {limits : Limits}
+theorem parseIndirectResolved_pos {pre : ObjStm.Pre} {lookup : Nat → Option XrefEntry} {limits : Limits}
     {bytes : ByteArray} {fuel pos : Nat} {o : IndirectObject} {r : Nat}
-    (h : parseIndirectResolved lookup limits bytes fuel pos = .ok (o, r)) :
+    (h : parseIndirectResolved lookup limits bytes fuel pos pre = .ok (o, r)) :
     pos < r ∧ r ≤ bytes.size := by
   unfold parseIndirectResolved at h
   split at h
@@ -386,9 +401,9 @@ theorem parseIndirectResolved_pos {lookup : Nat → Option XrefEntry} {limits : 
 /-- **Stream data within the file.** On success, a stream's data is the input slice
 `[st, st + size)` for some `st > pos` with `st + size ≤ bytes.size`; for an indirect
 `/Length` the size is the resolved length. -/
-theorem parseIndirectResolved_data {lookup : Nat → Option XrefEntry} {limits : Limits}
+theorem parseIndirectResolved_data {pre : ObjStm.Pre} {lookup : Nat → Option XrefEntry} {limits : Limits}
     {bytes : ByteArray} {fuel pos : Nat} {o : IndirectObject} {r : Nat} {s : Stream}
-    (h : parseIndirectResolved lookup limits bytes fuel pos = .ok (o, r))
+    (h : parseIndirectResolved lookup limits bytes fuel pos pre = .ok (o, r))
     (hs : o.body = .stream s) :
     ∃ st, pos < st ∧ st + s.data.size ≤ bytes.size ∧
       s.data = bytes.extract st (st + s.data.size) := by
@@ -416,6 +431,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}:{w}"
+  | .encryption w => s!"encryption:{w}"
 
 /-- Test helper: `parseIndirectResolved` summarised as (num, gen, stream data or none, end). -/
 private def pir (lookup : Nat → Option XrefEntry) (b : ByteArray) (fuel pos : Nat) :
@@ -430,7 +446,7 @@ private def pir (lookup : Nat → Option XrefEntry) (b : ByteArray) (fuel pos : 
 /-- Test helper: `resolveLength` summarised. -/
 private def rl (lookup : Nat → Option XrefEntry) (b : ByteArray) (fuel : Nat)
     (visiting : List Nat) (ref : Nat × Nat) : Sum String Nat :=
-  match resolveLength lookup Limits.default b fuel visiting ref with
+  match resolveLength ObjStm.Pre.id lookup Limits.default b fuel visiting ref with
   | .ok n => .inr n
   | .error e => .inl (errS e)
 
@@ -531,7 +547,7 @@ private def mutualLookup : Nat → Option XrefEntry :=
 -- length-mutual.pdf: stream 4 needs object 6, in object stream 5, whose own /Length is
 -- `4 0 R`: a cycle through an object stream (task 2.14), found after one container parse.
 #guard (pir mutualLookup mutualPdf 8 225) == .inl "cycle@225:cyclic /Length"
-#guard resolveLengthCalls mutualLookup Limits.default mutualPdf 8 [4] (6, 0) == 1
+#guard resolveLengthCalls ObjStm.Pre.id mutualLookup Limits.default mutualPdf 8 [4] (6, 0) == 1
 -- object stream 5 needs `4 0 R`, a stream object, not an integer object: rejected where
 -- `endobj` was expected (the `stream` keyword of object 4, offset 254).
 #guard (pir mutualLookup mutualPdf 8 294) == .inl "malformed@254:expected endobj"
@@ -551,7 +567,7 @@ private def oneHopLookup : Nat → Option XrefEntry :=
 #guard (pir oneHopLookup oneHop 2 0) ==
   .inr (1, 0, some "hello world".toUTF8.toList, oneHopHead.utf8ByteSize - 1)
 #guard rl oneHopLookup oneHop 2 [1] (5, 0) == .inr 11
-#guard resolveLengthCalls oneHopLookup Limits.default oneHop 2 [1] (5, 0) == 1
+#guard resolveLengthCalls ObjStm.Pre.id oneHopLookup Limits.default oneHop 2 [1] (5, 0) == 1
 -- the dictionary keeps the reference as written
 #guard (match parseIndirectResolved oneHopLookup Limits.default oneHop 2 0 with
   | .ok (⟨_, _, .stream s⟩, _) => s.dict.length == 1
@@ -574,10 +590,10 @@ private def twoHopLookup : Nat → Option XrefEntry :=
 
 #guard (pir twoHopLookup twoHop 3 0) ==
   .inr (1, 0, some "hello world".toUTF8.toList, oneHopHead.utf8ByteSize - 1)
-#guard resolveLengthCalls twoHopLookup Limits.default twoHop 3 [1] (5, 0) == 2
+#guard resolveLengthCalls ObjStm.Pre.id twoHopLookup Limits.default twoHop 3 [1] (5, 0) == 2
 -- fuel exhaustion: two hops with fuel 1
 #guard (pir twoHopLookup twoHop 1 0) == .inl "limit:SafePdf.LimitKind.objects"
-#guard resolveLengthCalls twoHopLookup Limits.default twoHop 1 [1] (5, 0) == 1
+#guard resolveLengthCalls ObjStm.Pre.id twoHopLookup Limits.default twoHop 1 [1] (5, 0) == 1
 
 /-- A cycle between two integer-less objects: `5 0 obj 6 0 R endobj`, `6 0 obj 5 0 R endobj`. -/
 private def cyc : ByteArray := (oneHopHead ++ twoHopObjs ++ "6 0 obj 5 0 R endobj\n").toUTF8
@@ -639,16 +655,16 @@ private def osOk : Sum String (Nat × Nat × Option (List UInt8) × Nat) :=
 
 -- the member is the integer 11: resolves, one parse (the container)
 #guard (pir (osLookup "6" "11") (osFile "6" "11" "") 3 0) == osOk
-#guard resolveLengthCalls (osLookup "6" "11") Limits.default (osFile "6" "11" "") 3 [1] (7, 0) == 1
+#guard resolveLengthCalls ObjStm.Pre.id (osLookup "6" "11") Limits.default (osFile "6" "11" "") 3 [1] (7, 0) == 1
 -- the container's own /Length is indirect (`3 0 R`, an integer object): two parses
 #guard (pir (osLookup "3 0 R" "11" [(3, .inUse 0 0)])
   (osFile "3 0 R" "11" "3 0 obj 6 endobj\n") 3 0) == osOk
-#guard resolveLengthCalls (osLookup "3 0 R" "11" [(3, .inUse 0 0)]) Limits.default
+#guard resolveLengthCalls ObjStm.Pre.id (osLookup "3 0 R" "11" [(3, .inUse 0 0)]) Limits.default
   (osFile "3 0 R" "11" "3 0 obj 6 endobj\n") 3 [1] (7, 0) == 2
 -- the member is a reference to an integer object: two parses
 #guard (pir (osLookup "9" "8 0 R" [(8, .inUse 0 0)])
   (osFile "9" "8 0 R" "8 0 obj 11 endobj\n") 3 0) == osOk
-#guard resolveLengthCalls (osLookup "9" "8 0 R" [(8, .inUse 0 0)]) Limits.default
+#guard resolveLengthCalls ObjStm.Pre.id (osLookup "9" "8 0 R" [(8, .inUse 0 0)]) Limits.default
   (osFile "9" "8 0 R" "8 0 obj 11 endobj\n") 3 [1] (7, 0) == 2
 -- the budget is shared: container /Length and member reference with fuel 2 (three parses needed)
 #guard (pir (osLookup "3 0 R" "8 0 R" [(3, .inUse 0 0), (8, .inUse 17 0)])

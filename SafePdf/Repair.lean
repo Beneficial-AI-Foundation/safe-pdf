@@ -42,6 +42,14 @@ document built from it is flagged `repaired := true` (S7, by the caller).
   newest scanned object whose dictionary has `/Type /Catalog`. `/Size` is the larger of the
   dictionary's `/Size` and (highest scanned object number + 1); `/Prev` and `/XRefStm` are
   dropped (the scan replaces every revision).
+* R4'. **`/Encrypt` is kept** (task 4.6): when the chosen (or synthesized) dictionary has no
+  `/Encrypt` but the file has one (`encryptSource`: the newest `trailer` dictionary with
+  `/Encrypt`, else the newest cross-reference stream dictionary, `/Type /XRef`, with
+  `/Encrypt` among the scanned objects), that `/Encrypt` value and its `/ID` are copied into
+  the repaired trailer (`withEncrypt`), so the repaired document is decrypted
+  (`Core.Open.repairOpen` runs `withCrypt`) or fails with `Error.encryption` (an
+  unresolvable or broken `/Encrypt`); it never opens undecrypted. The xref-stream search
+  parses each scanned object once more, only when no `trailer` dictionary has `/Encrypt`.
 * R5. `repair`: the section `0 → free 0 65535` plus `n → inUse offset gen` for every scanned
   object, and the trailer. Errors only when nothing usable is found: no object, or neither a
   trailer with `/Root` nor a catalog object.
@@ -294,6 +302,72 @@ def findCatalog (limits : Limits) (bytes : ByteArray) (entries : List (Nat × Xr
 def scanSize (entries : List (Nat × XrefEntry)) : Nat :=
   entries.foldl (fun m e => max m (e.1 + 1)) 0
 
+/-- Key `/ID`. -/
+def nameID : Name := Name.ofString "ID"
+
+/-- Name `/XRef`. -/
+def nameXRef : Name := Name.ofString "XRef"
+
+/-- Whether a dictionary has an `/Encrypt` entry (not `null`). -/
+def hasEncrypt (d : Dict) : Bool := (Dict.get? d Xref.nameEncrypt).isSome
+
+/-- The dictionary of the scanned object at `off` when it is a cross-reference stream
+(`/Type /XRef`) with an `/Encrypt` entry (R4'). -/
+def encryptXrefAt (limits : Limits) (bytes : ByteArray) (off : Nat) : Option Dict :=
+  match ObjParse.parseIndirect limits bytes off with
+  | .ok (⟨_, _, .stream st⟩, _) =>
+    if Dict.get? st.dict nameType == some (.name nameXRef) && hasEncrypt st.dict then
+      some st.dict
+    else none
+  | _ => none
+
+/-- The newest (largest offset) cross-reference stream dictionary with `/Encrypt` among the
+in-use `entries` (R4'). -/
+def findEncryptXref (limits : Limits) (bytes : ByteArray) (entries : List (Nat × XrefEntry)) :
+    Option Dict :=
+  let best := entries.foldl (fun (acc : Option (Nat × Dict)) e =>
+    match e with
+    | (_, .inUse off _) =>
+      match encryptXrefAt limits bytes off with
+      | some d =>
+        match acc with
+        | some y => if y.1 < off then some (off, d) else acc
+        | none => some (off, d)
+      | none => acc
+    | _ => acc) none
+  best.map Prod.snd
+
+/-- The newest dictionary of the file that carries `/Encrypt` (R4'): the newest `trailer`
+dictionary with `/Encrypt` among `trailers` (newest last), else the newest cross-reference
+stream dictionary with `/Encrypt` (`findEncryptXref`, which parses the scanned objects; it
+runs only when no `trailer` dictionary has `/Encrypt`). -/
+def encryptSource (limits : Limits) (bytes : ByteArray) (trailers : List Dict)
+    (entries : List (Nat × XrefEntry)) : Option Dict :=
+  match trailers.reverse.find? hasEncrypt with
+  | some d => some d
+  | none => findEncryptXref limits bytes entries
+
+/-- `d` with key `k` set to `v` (any previous `k` entries removed, the new one first). -/
+def setKey (d : Dict) (k : Name) (v : PdfObject) : Dict :=
+  (k, v) :: d.filter (fun kv => decide (kv.1 ≠ k))
+
+/-- **Keep `/Encrypt`** (R4', task 4.6): when the repaired trailer dictionary `d` has no
+`/Encrypt` but the file has one (`encryptSource`, computed only then), `d` gets that
+dictionary's `/Encrypt` and its `/ID` (the first `/ID` string enters the file key). -/
+def withEncrypt (d : Dict) (src : Unit → Option Dict) : Dict :=
+  if hasEncrypt d then d
+  else
+    match src () with
+    | none => d
+    | some e =>
+      match Dict.get? e Xref.nameEncrypt with
+      | none => d
+      | some v =>
+        let d1 := setKey d Xref.nameEncrypt v
+        match Dict.get? e nameID with
+        | some idv => setKey d1 nameID idv
+        | none => d1
+
 /-- The typed trailer for dictionary `d`, catalog reference `root`, and `/Size` `size`. -/
 def mkTrailer (d : Dict) (root : Nat × Nat) (size : Nat) : Trailer :=
   { dict := d, size, prev? := none, root? := some root, xrefStm? := none,
@@ -304,14 +378,15 @@ def mkTrailer (d : Dict) (root : Nat × Nat) (size : Nat) : Trailer :=
 `entries`. -/
 def repairTrailer (limits : Limits) (bytes : ByteArray) (entries : List (Nat × XrefEntry)) :
     Option Trailer :=
-  match (findTrailers limits bytes).reverse.findSome?
-      (fun d => (rootOf d).map (fun r => (d, r))) with
-  | some (d, root) => some (mkTrailer d root (max (sizeOf d) (scanSize entries)))
+  let trailers := findTrailers limits bytes
+  let src := fun (_ : Unit) => encryptSource limits bytes trailers entries
+  match trailers.reverse.findSome? (fun d => (rootOf d).map (fun r => (d, r))) with
+  | some (d, root) => some (mkTrailer (withEncrypt d src) root (max (sizeOf d) (scanSize entries)))
   | none =>
     match findCatalog limits bytes entries with
     | some (n, g) =>
-      some (mkTrailer [(Xref.nameSize, .int (scanSize entries)), (Xref.nameRoot, .ref n g)]
-        (n, g) (scanSize entries))
+      some (mkTrailer (withEncrypt [(Xref.nameSize, .int (scanSize entries)),
+          (Xref.nameRoot, .ref n g)] src) (n, g) (scanSize entries))
     | none => none
 
 /-! ## The repaired section (R5) -/
@@ -522,6 +597,7 @@ theorem repair_ok {limits : Limits} {bytes : ByteArray} {sec : XrefSection} {tr 
       cases h
       refine ⟨rfl, ?_⟩
       unfold repairTrailer at htr
+      simp only at htr
       split at htr
       · cases htr; rfl
       · split at htr
@@ -603,6 +679,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- Test helper: `repair` summarised as (entries, /Size, /Root). -/
 private def rp (b : ByteArray) (lim : Limits := Limits.default) :
