@@ -21,13 +21,10 @@ never on the viewing path.
 * The fixed-Huffman encoder is checked by `#guard` here and by the property suite
   `Tests/FlateRoundTrip.lean` (not proved).
 
-## Not done here: the Flate work bound
+## Not here: the Flate work bound
 
-A mechanised bound "steps ≤ c·(input bits + output)" needs a cost model: an instrumented copy
-of `Flate.decodeGo`/`codes`/`stored`/`readLengths`/`readDynamic`/`blocks` that also returns a
-step count, a theorem that its first component equals the real decoder, and the bound on the
-count. That copy and its equality proofs belong in `Flate.lean` (they unfold its definitions
-one by one), so the work bound stays argued in `Flate.lean`'s module doc.
+The work bound "steps ≤ c·(input bits + output)" is proved in `SafePdf/Spec/FlateWork.lean`
+(task 3.8b) with counted twins of the decoder (`flateDecodeW_steps_le`).
 
 `deflateStoredFrom` appends blocks right-nested, so it copies O(n²/65535) bytes; it is a test
 encoder, not a production one.

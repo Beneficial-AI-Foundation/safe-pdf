@@ -17,7 +17,7 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
-* 3.6a (wt), 3.8b (wt) — wave 17; 3.7, 3.9 integrated (part 1)
+* 3.6a (wt) — wave 17; 3.7, 3.9, 3.8b integrated
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -106,9 +106,10 @@ Plan.md §6 Phase 3. Exit: **M3**: decompression-bomb suite (nested streams, 10�
 | 3.6b | Differential vs zlib on the corpus: decode every Flate stream with our decoder (via 3.7's view) and with Python `zlib`, compare bytes; report mismatches and timing | 3.7 | `Tests/differential/streams.py` | new | todo |
 | 3.7 | Inspector view: decoded-stream viewer | 3.5 | `SafePdf/Shell/Views/Streams.lean` | wt | done (2026-11-19) |
 | 3.8 | Flate correctness via round trip (Plan §6 Phase 3): a small Lean deflate encoder (stored + fixed-Huffman blocks, optional LZ77 with bounded window) in `SafePdf/Core/Filter/Deflate.lean`; theorem or exhaustive property test that `inflate (deflate bs) = bs` (stored blocks proved; fixed-Huffman at least property-tested on random data via a `Tests/` suite); and close the Flate work-bound gap (steps ≤ c·(input bits + output)) if feasible | 3.1 | `SafePdf/Core/Filter/Deflate.lean`, `Tests/FlateRoundTrip.lean` | new | done (2026-11-19) |
-| 3.8b | Flate work bound (S3): a counted twin of `decodeGo`/`codes`/`stored`/`readLengths`/`readDynamic`/`blocks` in `Flate.lean` whose first component is the real decoder, and a proof that steps ≤ c·(input bits + output) (3.8 obstacle: needs unfolding Flate's definitions in place) | 3.1 | `SafePdf/Core/Filter/Flate.lean` | wt | doing (2026-11-19) |
+| 3.8b | Flate work bound (S3): a counted twin of `decodeGo`/`codes`/`stored`/`readLengths`/`readDynamic`/`blocks` in `Flate.lean` whose first component is the real decoder, and a proof that steps ≤ c·(input bits + output) (3.8 obstacle: needs unfolding Flate's definitions in place) | 3.1 | `SafePdf/Core/Filter/Flate.lean` | wt | done (2026-11-19) |
 | 3.9 | Filter consolidation: move `ObjStmDecode.decodeData` and `Xref/Stream.decodeData` onto `Filter.decodeStream` (gives them full filter chains); move `Filter.maxFilters` into `Limits` with a new `LimitKind.filters` (exceeding it → `limitExceeded`); enforce `/Crypt` first in a chain (ISO §7.4.10); keep every existing theorem | 3.5, 2.14 | `SafePdf/Core/Filter.lean`, `SafePdf/Core/Limits.lean`, `SafePdf/Core/Error.lean`, `SafePdf/Core/Xref/ObjStmDecode.lean`, `SafePdf/Core/Xref/Stream.lean` | wt | done (2026-11-19) |
 | 3.10 | Document-wide decoded-bytes accounting against `Limits.maxDecodedTotalBytes` (S3): a budget threaded through stream decoding at the document level (open + page access), with a theorem that total decoded bytes ≤ the limit or an error | 3.9, 4.1 | `SafePdf/Core/Filter.lean`, `SafePdf/Core/Doc.lean` | wt | todo |
+| 3.11 | Inflate performance (Plan §8 open question "Inflate performance in Lean (M3)"): table-driven Huffman decoding (e.g. 9-bit primary lookup table + fallback) replacing bit-by-bit `decodeGo` on the hot path, proved equal to the current decoder (`decode_eq`) so every Flate theorem (output bound, round trip, `FlateWork` bound) carries over; target ≥ 50 MiB/s compiled on dynamic-Huffman text (today ≈ 6 MiB/s; zeros 84, stored 110); benchmark harness under `scripts/` | 3.8b | `SafePdf/Core/Filter/Flate.lean`, `SafePdf/Spec/FlateWork.lean`, `scripts/bench-flate.lean` | wt | todo |
 Exit criterion checked: [ ]
 
 ## Phase 4 — Document structure
@@ -272,6 +273,9 @@ Exit criterion checked: [ ]
 * Streams view (3.7): `inspect --view streams [--json] FILE`; `SAFEPDF_STREAM=N` restricts to object N (`--json` adds `hex`, first 1 MiB), `SAFEPDF_STREAM_OUT=path` writes the full decoded bytes (use for 3.6b); resolves indirect `/Filter`/`/DecodeParms` one level; per-run budget `maxDecodedTotalBytes`. Corpus: 16,367 streams, 0 decode errors, 766 image placeholders, 1,454 MB decoded; slowest file 11.5 s (arxiv-2307.09288) — Flate speed is the bottleneck (Plan open question "Inflate performance in Lean").
 * Golden suites treat EVERY file in `Tests/golden/<suite>/` as an input — keep generators outside (e.g. `Tests/golden/generate_streams.py`).
 * v4.36 (3.7): `String.trim` gone → `s.trimAscii.toString`; no `ToString Prop` → `toString (decide (a > b))`; macOS `date +%N` doesn't work — time with Python `time.monotonic`.
+* Flate work bound (3.8b): `Spec.FlateWork` — counted twins (`flateDecodeW`, `inflateAtW`, …) with `…W_fst` equal to the real decoder; `flateDecodeW_steps_le`: steps ≤ 536·input.size + 3·maxDecodedStreamBytes + 1923 for ANY outcome (potential 67/bit + 2/byte; dynamic block ≤ 1922 extra, ≥ 29 bits). Table building is a cost model (`buildCost n = 4n+64`), not twinned.
+* Compiled `flateDecode` throughput (3.8b): zeros ≈ 84 MiB/s, stored ≈ 110 MiB/s, dynamic-Huffman text ≈ 6 MiB/s (bit-by-bit `decodeGo`) → task 3.11. A 256 MiB-limit bomb of text-like data costs ~40 s before rejection.
+* v4.36 (3.8b): `split` on a `match` only generalizes the LHS — use `rcases <scrutinee> with …`; matches in two defs compile to different `match_i` auxiliaries, so `rw [heq]` between them fails — case-split the pieces; `set_option … in` goes before the docstring; `(a, b).fst` blocks `omega` — `dsimp only`; `readDynamic`'s do-block unfolds with `simp only [bind, Except.bind]`.
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -317,3 +321,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — phase 2 milestone: PR #3 marked ready for review (CI green on d864749, push run 44522826184; the pull_request run hit an apt 503 and was re-run)
 * 2026-11-19 — wave 16 (phase 3, PR #4): 3.5 (filter pipeline with image placeholders), 3.8 (deflate encoder; stored round trip proved, fixed tested), 4.1 (catalog + page tree), 4.3a (MD5/SHA-2/RC4/AES, vector-tested) done; added 3.8b, 3.9, 3.10, 4.1b; commit "wave 16: 3.5 3.8 4.1 4.3a — filter pipeline, deflate round trip, page tree, crypto primitives"
 * 2026-11-19 — wave 17 part 1 (phase 3, PR #4): 3.7 (streams view + dump for 3.6b), 3.9 (xref/object streams on the filter pipeline; `maxFilters` in `Limits`; Crypt-first) done; commit "wave 17 (part 1): 3.7 3.9 — streams view, filter consolidation"
+* 2026-11-19 — wave 17 part 2 (phase 3, PR #4): 3.8b done (**Flate work bound proved for all block types**, `flateDecodeW_steps_le`; throughput measured); added 3.11 (table-driven inflate); commit "wave 17 (part 2): 3.8b — Flate work bound"
