@@ -694,3 +694,27 @@ import SafePdf
 #print axioms SafePdf.Core.Content.runPage_ops_le
 #print axioms SafePdf.Core.Content.runPage_items_le
 #print axioms SafePdf.Core.Content.runBytes_items_le_max
+-- Phase 6, task 6.1: TrueType fonts
+#print axioms SafePdf.Core.Font.TrueType.u8At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.u16At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.u32At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.i16At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.u16At_lt
+#print axioms SafePdf.Core.Font.TrueType.findTable_bounds
+#print axioms SafePdf.Core.Font.TrueType.tableBytes_size
+#print axioms SafePdf.Core.Font.TrueType.seg4Find_lt
+#print axioms SafePdf.Core.Font.TrueType.TTFont.advanceOfGlyph_lt
+#print axioms SafePdf.Core.Font.TrueType.TTFont.lookupIn_lt
+#print axioms SafePdf.Core.Font.TrueType.outlineAux_zero
+#print axioms SafePdf.Core.Font.TrueType.outlineAux_visited
+-- Phase 6, task 6.5: ToUnicode CMaps and text extraction
+#print axioms SafePdf.Core.Font.CMap.parse_entries_le_tokens
+#print axioms SafePdf.Core.Font.CMap.parse_entries_le_max
+#print axioms SafePdf.Core.Font.CMap.tokenize_length_le
+#print axioms SafePdf.Core.Font.CMap.CMap.codes_flatten
+#print axioms SafePdf.Core.Font.CMap.CMap.decode_flatten
+#print axioms SafePdf.Core.Text.SplitKind.codes_flatten
+#print axioms SafePdf.Core.Text.extract_from_items
+#print axioms SafePdf.Core.Text.runGlyphs_codes
+#print axioms SafePdf.Core.Text.extractPage_glyphs
+#print axioms SafePdf.Core.Text.extractPage_items
