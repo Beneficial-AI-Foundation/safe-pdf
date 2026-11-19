@@ -11,7 +11,7 @@ sections:   2 parsed (newest first)
       /Size 6  /Prev 652  /Root 1 0 R  /XRefStm -  encrypted false
       keys: /Size /Root /Prev
 stopped:    malformed input at byte 652: xref /Prev cycle (following /Prev to offset 652)
-strict:     error: malformed input at byte 652: xref /Prev cycle
+strict:     error: reference cycle at byte 652: xref /Prev cycle
 --- revisions
 file:       input
 sections:   2 (oldest first; #0 is the newest)
@@ -27,5 +27,5 @@ scan:       6 header hit(s), 6 parse attempt(s), 0 failed
 repair:     ok, 5 object(s), /Size 6, /Root 1 0 R, encrypted false
 trailer:    /Size /Root /Prev
 validates:  yes (/Root resolves to a dictionary)
-strict:     error: malformed input at byte 652: xref /Prev cycle
+strict:     error: reference cycle at byte 652: xref /Prev cycle
 diff:       n/a (needs both strict and repaired sections)

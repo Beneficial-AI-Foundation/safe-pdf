@@ -247,3 +247,19 @@ import SafePdf
 #print axioms SafePdf.Spec.XrefTerm.loadChain_endless
 #print axioms SafePdf.Spec.XrefTerm.loadChain_endless_cycle
 #print axioms SafePdf.Spec.XrefTerm.openFile_endless
+-- Phase 3, task 3.3: ASCIIHex, ASCII85, RunLength
+#print axioms SafePdf.Core.Filter.Ascii.run_spec
+#print axioms SafePdf.Core.Filter.Ascii.decodeWith_spec
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_spec
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_size_le
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_size_le_input
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_encode
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_spec
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_size_le
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_size_le_input
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_encode
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_spec
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_size_le
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_size_le_input
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_encode
+#print axioms SafePdf.Core.Filter.RunLength.rlSpec_repeat
