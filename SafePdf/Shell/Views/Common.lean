@@ -58,6 +58,7 @@ def renderLimitKind : LimitKind → String
   | .gstateDepth => "graphics-state nesting depth"
   | .opsPerPage => "operators per page"
   | .revisions => "xref revision count"
+  | .filters => "filters per stream"
 
 /-- Human-readable rendering of a core `Error`. -/
 def renderError : Error → String

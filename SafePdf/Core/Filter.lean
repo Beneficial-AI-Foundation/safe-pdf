@@ -23,8 +23,8 @@ the standard filters. This module parses that chain (`parseChain`) and runs it
   readers do; the extra leniency is harmless since they name the same decoders). Any other
   name is `Error.unsupported`.
 * F2. Shape. `/Filter` absent, `null`, a name, or an array of names (`[]` = no filter).
-  At most `maxFilters` = 8 filters, else `Error.unsupported` (no `LimitKind` fits; see the
-  constant). An indirect `/Filter` or `/DecodeParms` (or array element) is
+  At most `limits.maxFilters` (default 8) filters, else `Error.limitExceeded .filters`
+  (task 3.9). An indirect `/Filter` or `/DecodeParms` (or array element) is
   `Error.unsupported`: the caller resolves references before calling (no resolver here).
 * F3. Parameters. With no filter, `/DecodeParms` is ignored. Otherwise absent/`null` means
   "all defaults"; a dictionary is allowed only for exactly one filter; an array must have
@@ -34,7 +34,9 @@ the standard filters. This module parses that chain (`parseChain`) and runs it
   parameters (`Filter.Predictor`, ISO 32000-2 Table 10); `/LZWDecode` reads `/EarlyChange`.
   `/ASCIIHexDecode`, `/ASCII85Decode`, `/RunLengthDecode` take no parameters. `/Crypt` with
   `/Name /Identity` (the default) passes the data through; any other crypt filter is
-  `Error.unsupported` (decryption is task 4.3b).
+  `Error.unsupported` (decryption is task 4.3b). ISO 32000-2 §7.4.10: a `/Crypt` filter
+  "shall be the first filter in the /Filter array"; a `/Crypt` stage in any other position
+  is `Error.malformed` (task 3.9, `parseChain_crypt_first`).
 * F5. Image codecs (S7). `/DCTDecode`, `/JPXDecode`, `/JBIG2Decode`, `/CCITTFaxDecode` are not
   decoded here: the chain stops and returns `Decoded.image codec parms bytes`, the output of
   the preceding filters, for the quarantine zone to decode later. An image codec must be the
@@ -46,11 +48,14 @@ the standard filters. This module parses that chain (`parseChain`) and runs it
 * F7. Strictness. `decodeStream` takes `strict` (default `true`), handed to every decoder
   (`strict := false` also skips Flate's Adler-32 check). The strict path is the default, as
   for the decoders themselves; the lenient flag exists for the repair path.
+* F8. Structural streams. `decodeBytes` runs `decodeStream` for streams whose data the core
+  itself reads (object streams, cross-reference streams; `Core.Xref.ObjStm`,
+  `Core.Xref.Stream`): an image-codec result is an error chosen by the caller.
 
 Per-document accounting against `Limits.maxDecodedTotalBytes` is **not** done here: this
 module decodes one stream. The aggregate bound it does give is `produced_le`: the bytes
 allocated by all stages of one chain are at most `(number of stages) · maxDecodedStreamBytes`,
-so at most `maxFilters · maxDecodedStreamBytes` (`produced_le_maxFilters`).
+so at most `limits.maxFilters · maxDecodedStreamBytes` (`produced_le_maxFilters`).
 
 ## Theorems
 
@@ -61,6 +66,10 @@ so at most `maxFilters · maxDecodedStreamBytes` (`produced_le_maxFilters`).
   returns `.image codec parms b` where `.data b` is what `pre` decodes to.
 * `decodeStream_unknown`: an unknown filter name gives `Error.unsupported`.
 * `parseChain_length_le`, `produced_le`, `produced_le_maxFilters`: the aggregate bound.
+* `decodeStream_too_many`: more than `limits.maxFilters` filters is
+  `Error.limitExceeded .filters`.
+* `parseChain_crypt_first`: a parsed chain has `/Crypt` at most as its first stage.
+* `decodeBytes_size_le`: the structural-stream entry point keeps the per-stream bound.
 -/
 
 namespace SafePdf.Core.Filter
@@ -126,10 +135,6 @@ def Decoded.bytes : Decoded → ByteArray
   | .data b => b
   | .image _ _ b => b
 
-/-- Cap on the number of filters in one chain (F2). Real files use at most 2–3. It should
-become a `Limits` field (with a `LimitKind`); until then exceeding it is `unsupported`. -/
-def maxFilters : Nat := 8
-
 /-- Filter names and abbreviations (F1). -/
 def nameTable : List (String × Kind) :=
   [ ("FlateDecode", .byte .flate), ("Fl", .byte .flate),
@@ -165,14 +170,15 @@ def namesOf : List PdfObject → Except Error (List Name)
     | .ref _ _ => .error (.unsupported "/Filter: indirect array element")
     | _ => .error (.malformed 0 "/Filter: array element is not a name")
 
-/-- The `/Filter` names in order (F2), at most `maxFilters`. -/
-def filterNames (d : Dict) : Except Error (List Name) :=
+/-- The `/Filter` names in order (F2), at most `limits.maxFilters` (else
+`Error.limitExceeded .filters`). -/
+def filterNames (limits : Limits) (d : Dict) : Except Error (List Name) :=
   match d.get? (Name.ofString "Filter") with
   | none => .ok []
-  | some (.name n) => .ok [n]
+  | some (.name n) => if 1 ≤ limits.maxFilters then .ok [n] else .error (.limitExceeded .filters)
   | some (.array items) =>
-    if items.length ≤ maxFilters then namesOf items
-    else .error (.unsupported s!"/Filter: more than {maxFilters} filters")
+    if items.length ≤ limits.maxFilters then namesOf items
+    else .error (.limitExceeded .filters)
   | some (.ref _ _) => .error (.unsupported "/Filter: indirect reference")
   | some _ => .error (.malformed 0 "/Filter is not a name or an array")
 
@@ -216,9 +222,18 @@ def parmsList (d : Dict) (n : Nat) : Except Error (List Dict) :=
   | some (.ref _ _) => .error (.unsupported "/DecodeParms: indirect reference")
   | some _ => .error (.malformed 0 "/DecodeParms is not a dictionary or an array")
 
-/-- Parse the filter chain of a stream dictionary (F1–F3). -/
-def parseChain (d : Dict) : Except Error (List Stage) :=
-  match filterNames d with
+/-- Whether a stage is a `/Crypt` filter. -/
+def Stage.isCrypt (s : Stage) : Bool := decide (s.kind = .byte .crypt)
+
+/-- ISO 32000-2 §7.4.10: `/Crypt` only as the first stage (F4). -/
+def cryptFirst (stages : List Stage) : Except Error (List Stage) :=
+  if (stages.drop 1).any Stage.isCrypt then
+    .error (.malformed 0 "/Crypt is not the first filter of the chain (ISO 32000-2 §7.4.10)")
+  else .ok stages
+
+/-- Parse the filter chain of a stream dictionary (F1–F4). -/
+def parseChain (limits : Limits) (d : Dict) : Except Error (List Stage) :=
+  match filterNames limits d with
   | .error e => .error e
   | .ok [] => .ok []
   | .ok names =>
@@ -227,7 +242,7 @@ def parseChain (d : Dict) : Except Error (List Stage) :=
     | .ok kinds =>
       match parmsList d kinds.length with
       | .error e => .error e
-      | .ok ps => .ok (List.zipWith Stage.mk kinds ps)
+      | .ok ps => cryptFirst (List.zipWith Stage.mk kinds ps)
 
 /-! ## One byte stage (F4) -/
 
@@ -338,9 +353,19 @@ def applyStages (limits : Limits) (strict : Bool) : List Stage → ByteArray →
 `d` (ISO 32000-2 §7.3.8, §7.4). Strict by default (F7). -/
 def decodeStream (limits : Limits) (d : Dict) (raw : ByteArray) (strict : Bool := true) :
     Except Error Decoded :=
-  match parseChain d with
+  match parseChain limits d with
   | .error e => .error e
   | .ok stages => applyStages limits strict stages raw
+
+/-- **Structural streams (F8).** Decode a stream whose data the core reads itself (an object
+stream or a cross-reference stream) with `decodeStream`; an image-codec result, meaningless
+for such a stream, is the error `imageErr`. -/
+def decodeBytes (limits : Limits) (d : Dict) (raw : ByteArray) (imageErr : Error)
+    (strict : Bool := true) : Except Error ByteArray :=
+  match decodeStream limits d raw strict with
+  | .error e => .error e
+  | .ok (.data b) => .ok b
+  | .ok (.image _ _ _) => .error imageErr
 
 /-! ## Theorems -/
 
@@ -375,9 +400,22 @@ theorem decodeStream_size_le {limits : Limits} {d : Dict} {raw : ByteArray} {str
   · cases h
   · exact applyStages_size_le limits strict _ raw r h
 
+/-- **Output bound** for structural streams: `decodeBytes` returns at most
+`limits.maxDecodedStreamBytes` bytes. -/
+theorem decodeBytes_size_le {limits : Limits} {d : Dict} {raw : ByteArray} {imageErr : Error}
+    {strict : Bool} {out : ByteArray} (h : decodeBytes limits d raw imageErr strict = .ok out) :
+    out.size ≤ limits.maxDecodedStreamBytes := by
+  unfold decodeBytes at h
+  split at h
+  · cases h
+  · rename_i b hb
+    simp only [Except.ok.injEq] at h; subst h
+    exact decodeStream_size_le hb
+  · cases h
+
 /-- With no `/Filter` there are no stages. -/
-theorem parseChain_nil {d : Dict} (h : d.get? (Name.ofString "Filter") = none) :
-    parseChain d = .ok [] := by
+theorem parseChain_nil {limits : Limits} {d : Dict} (h : d.get? (Name.ofString "Filter") = none) :
+    parseChain limits d = .ok [] := by
   simp [parseChain, filterNames, h]
 
 /-- **No filter**: without `/Filter` the data is returned unchanged (when within the
@@ -419,7 +457,7 @@ theorem applyStages_image (limits : Limits) (strict : Bool) (c : ImageCodec) (p 
 `pre` decodes to `b`, the result is `.image codec parms b`. -/
 theorem decodeStream_image {limits : Limits} {d : Dict} {raw b : ByteArray} {strict : Bool}
     {pre : List Stage} {c : ImageCodec} {p : Dict}
-    (hc : parseChain d = .ok (pre ++ [⟨.image c, p⟩]))
+    (hc : parseChain limits d = .ok (pre ++ [⟨.image c, p⟩]))
     (hp : applyStages limits strict pre raw = .ok (.data b)) :
     decodeStream limits d raw strict = .ok (.image c p b) := by
   simp only [decodeStream, hc]
@@ -445,7 +483,7 @@ theorem kindsOf_unknown : (ns : List Name) → (∃ n ∈ ns, kindOfName n = non
 /-- **Unknown filter**: if the `/Filter` names include one that is not a known filter, the
 stream is `Error.unsupported` (whatever `/DecodeParms` holds). -/
 theorem decodeStream_unknown {limits : Limits} {d : Dict} {raw : ByteArray} {strict : Bool}
-    {ns : List Name} (hf : filterNames d = .ok ns) (hu : ∃ n ∈ ns, kindOfName n = none) :
+    {ns : List Name} (hf : filterNames limits d = .ok ns) (hu : ∃ n ∈ ns, kindOfName n = none) :
     ∃ msg, decodeStream limits d raw strict = .error (.unsupported msg) := by
   obtain ⟨msg, hmsg⟩ := kindsOf_unknown ns hu
   refine ⟨msg, ?_⟩
@@ -457,9 +495,9 @@ theorem decodeStream_unknown {limits : Limits} {d : Dict} {raw : ByteArray} {str
 /-- Special case: a single unknown `/Filter` name is `unsupported`. -/
 theorem decodeStream_unknown_name {limits : Limits} {d : Dict} {raw : ByteArray}
     {strict : Bool} {n : Name} (hf : d.get? (Name.ofString "Filter") = some (.name n))
-    (hk : kindOfName n = none) :
+    (hm : 1 ≤ limits.maxFilters) (hk : kindOfName n = none) :
     ∃ msg, decodeStream limits d raw strict = .error (.unsupported msg) :=
-  decodeStream_unknown (ns := [n]) (by simp [filterNames, hf]) ⟨n, by simp, hk⟩
+  decodeStream_unknown (ns := [n]) (by simp [filterNames, hf, hm]) ⟨n, by simp, hk⟩
 
 /-! ## Aggregate bound across stages -/
 
@@ -478,13 +516,15 @@ theorem namesOf_length : (items : List PdfObject) → (ns : List Name) →
     · cases h
     · cases h
 
-/-- At most `maxFilters` names. -/
-theorem filterNames_length_le {d : Dict} {ns : List Name} (h : filterNames d = .ok ns) :
-    ns.length ≤ maxFilters := by
+/-- At most `limits.maxFilters` names. -/
+theorem filterNames_length_le {limits : Limits} {d : Dict} {ns : List Name}
+    (h : filterNames limits d = .ok ns) : ns.length ≤ limits.maxFilters := by
   unfold filterNames at h
   split at h
-  · simp only [Except.ok.injEq] at h; subst h; simp [maxFilters]
-  · simp only [Except.ok.injEq] at h; subst h; simp [maxFilters]
+  · simp only [Except.ok.injEq] at h; subst h; simp
+  · split at h
+    · rename_i hm; simp only [Except.ok.injEq] at h; subst h; simpa using hm
+    · cases h
   · split at h
     · rename_i hl; rw [namesOf_length _ _ h]; exact hl
     · cases h
@@ -505,16 +545,24 @@ theorem kindsOf_length : (ns : List Name) → (ks : List Kind) →
         simp only [Except.ok.injEq] at h; subst h
         simp [kindsOf_length rest ks' h']
 
-/-- **Chain length**: a parsed chain has at most `maxFilters` stages. -/
-theorem parseChain_length_le {d : Dict} {stages : List Stage} (h : parseChain d = .ok stages) :
-    stages.length ≤ maxFilters := by
-  cases hn : filterNames d with
+/-- `cryptFirst` returns its argument or fails. -/
+theorem cryptFirst_eq {stages out : List Stage} (h : cryptFirst stages = .ok out) :
+    out = stages := by
+  unfold cryptFirst at h
+  split at h
+  · cases h
+  · simp only [Except.ok.injEq] at h; exact h.symm
+
+/-- **Chain length**: a parsed chain has at most `limits.maxFilters` stages. -/
+theorem parseChain_length_le {limits : Limits} {d : Dict} {stages : List Stage}
+    (h : parseChain limits d = .ok stages) : stages.length ≤ limits.maxFilters := by
+  cases hn : filterNames limits d with
   | error e => simp [parseChain, hn] at h
   | ok names =>
     have hl := filterNames_length_le hn
     cases names with
     | nil =>
-      simp only [parseChain, hn, Except.ok.injEq] at h; subst h; simp [maxFilters]
+      simp only [parseChain, hn, Except.ok.injEq] at h; subst h; simp
     | cons n ns =>
       simp only [parseChain, hn] at h
       cases hk : kindsOf (n :: ns) with
@@ -523,9 +571,43 @@ theorem parseChain_length_le {d : Dict} {stages : List Stage} (h : parseChain d 
         cases hp : parmsList d kinds.length with
         | error e => simp [hk, hp] at h
         | ok ps =>
-          simp only [hk, hp, Except.ok.injEq] at h; subst h
-          rw [List.length_zipWith, kindsOf_length _ _ hk]
+          simp only [hk, hp] at h
+          rw [cryptFirst_eq h, List.length_zipWith, kindsOf_length _ _ hk]
           exact Nat.le_trans (Nat.min_le_left _ _) hl
+
+/-- **Crypt first (ISO 32000-2 §7.4.10)**: in a parsed chain, no stage after the first is a
+`/Crypt` filter. -/
+theorem parseChain_crypt_first {limits : Limits} {d : Dict} {stages : List Stage}
+    (h : parseChain limits d = .ok stages) : ∀ s ∈ stages.drop 1, s.kind ≠ .byte .crypt := by
+  have hc : ∀ xs out : List Stage, cryptFirst xs = .ok out →
+      ∀ s ∈ out.drop 1, s.kind ≠ .byte .crypt := by
+    intro xs out hx s hs hk
+    unfold cryptFirst at hx
+    split at hx
+    · cases hx
+    · rename_i hn
+      simp only [Except.ok.injEq] at hx; subst hx
+      exact hn (List.any_eq_true.mpr ⟨s, hs, by simp [Stage.isCrypt, hk]⟩)
+  unfold parseChain at h
+  split at h
+  · cases h
+  · simp only [Except.ok.injEq] at h; subst h; simp
+  · split at h
+    · cases h
+    · split at h
+      · cases h
+      · exact hc _ _ h
+
+/-- **Filter-count limit**: a `/Filter` array of more than `limits.maxFilters` names is
+`Error.limitExceeded .filters`, before any byte is decoded. -/
+theorem decodeStream_too_many {limits : Limits} {d : Dict} {raw : ByteArray} {strict : Bool}
+    {items : List PdfObject} (hf : d.get? (Name.ofString "Filter") = some (.array items))
+    (hl : limits.maxFilters < items.length) :
+    decodeStream limits d raw strict = .error (.limitExceeded .filters) := by
+  have hn : filterNames limits d = .error (.limitExceeded .filters) := by
+    simp only [filterNames, hf]
+    simp only [show ¬ items.length ≤ limits.maxFilters by omega, ↓reduceIte]
+  simp [decodeStream, parseChain, hn]
 
 /-- Bytes allocated by the stages of a chain run on `b`: each decoding stage counts its
 output size, a failing stage counts the full limit (it may have allocated that much before
@@ -561,10 +643,10 @@ theorem produced_le (limits : Limits) (strict : Bool) :
       omega
 
 /-- **Aggregate bound for a stream**: decoding the chain of `d` allocates at most
-`maxFilters · maxDecodedStreamBytes` bytes. -/
+`limits.maxFilters · maxDecodedStreamBytes` bytes. -/
 theorem produced_le_maxFilters {limits : Limits} {strict : Bool} {d : Dict}
-    {stages : List Stage} (h : parseChain d = .ok stages) (b : ByteArray) :
-    produced limits strict stages b ≤ maxFilters * limits.maxDecodedStreamBytes :=
+    {stages : List Stage} (h : parseChain limits d = .ok stages) (b : ByteArray) :
+    produced limits strict stages b ≤ limits.maxFilters * limits.maxDecodedStreamBytes :=
   Nat.le_trans (produced_le limits strict stages b)
     (Nat.mul_le_mul_right _ (parseChain_length_le h))
 
@@ -627,6 +709,12 @@ private def isLimit (r : Except Error Decoded) : Bool :=
   | .error (.limitExceeded .decodedStreamBytes) => true
   | _ => false
 
+/-- Failure with the filter-count limit. -/
+private def isFilterLimit (r : Except Error Decoded) : Bool :=
+  match r with
+  | .error (.limitExceeded .filters) => true
+  | _ => false
+
 /-- PNG "Up" rows (tag 2), 3 columns: rows `1 2 3` and `+1 +1 +1`. -/
 private def pngRows : List UInt8 := [2, 1, 2, 3, 2, 1, 1, 1]
 
@@ -679,6 +767,20 @@ private def pngParms : PdfObject := .dict [(K "Predictor", .int 12), (K "Columns
   [0x41]
 #guard isUnsupported (decodeStream dl [(K "Filter", N "Crypt"),
   (K "DecodeParms", .dict [(K "Name", N "StdCF")])] (B [1]))
+-- /Crypt must be first (ISO 32000-2 §7.4.10): second or last position is malformed,
+-- also when /Identity, and also twice.
+#guard isMalformed (decodeStream dl [(K "Filter", .array [N "AHx", N "Crypt"])] (B [52, 49, 62]))
+#guard isMalformed (decodeStream dl [(K "Filter", .array [N "Crypt", N "Crypt"])] (B [1]))
+#guard isMalformed (decodeStream dl [(K "Filter", .array [N "AHx", N "Crypt", N "DCT"])]
+  (B [52, 49, 62]))
+#guard decide ((parseChain dl [(K "Filter", .array [N "Fl", N "Crypt"])]).toOption.isNone)
+#guard decide ((parseChain dl [(K "Filter", .array [N "Crypt", N "Fl"])]).toOption.map
+  List.length = some 2)
+-- decodeBytes: data passes, an image codec is the caller's error.
+#guard decide ((decodeBytes dl [(K "Filter", N "AHx")] (B [52, 49, 62]) (.unsupported "img")).toOption.map
+  (·.data.toList) = some [0x41])
+#guard (match decodeBytes dl [(K "Filter", N "DCT")] (B [1]) (.unsupported "img") with
+  | .error (.unsupported "img") => true | _ => false)
 
 -- DCT placeholder: the payload is the AHx output; codec parameters are kept.
 #guard okImage (decodeStream dl [(K "Filter", .array [N "ASCIIHexDecode", N "DCTDecode"])]
@@ -705,9 +807,15 @@ private def pngParms : PdfObject := .dict [(K "Predictor", .int 12), (K "Columns
 #guard isUnsupported (decodeStream dl [(K "Filter", N "Foo")] (B []))
 #guard isUnsupported (decodeStream dl [(K "Filter", .array [N "AHx", N "Foo"])] (B []))
 
--- Too many filters (9 > maxFilters).
-#guard isUnsupported (decodeStream dl
+-- Too many filters (9 > limits.maxFilters = 8): limitExceeded .filters.
+#guard isFilterLimit (decodeStream dl
   [(K "Filter", .array (List.replicate 9 (N "AHx")))] (B []))
+-- The cap follows the limits: 3 filters with maxFilters 2; a single name with maxFilters 0.
+#guard isFilterLimit (decodeStream { maxFilters := 2 }
+  [(K "Filter", .array (List.replicate 3 (N "AHx")))] (B []))
+#guard isFilterLimit (decodeStream { maxFilters := 0 } [(K "Filter", N "AHx")] (B []))
+#guard okData (decodeStream { maxFilters := 2 } [(K "Filter", .array [N "AHx", N "AHx"])]
+  (Ascii.asciiHexEncode (Ascii.asciiHexEncode (B [0x42])))) [0x42]
 -- Eight is fine: AHx eight times over a hex-encoded-eight-times payload.
 #guard okData (decodeStream dl [(K "Filter", .array (List.replicate 8 (N "AHx")))]
   (Nat.repeat Ascii.asciiHexEncode 8 (B [0x42]))) [0x42]

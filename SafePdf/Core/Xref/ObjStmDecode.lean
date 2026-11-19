@@ -1,8 +1,7 @@
 import SafePdf.Core.Xref
 import SafePdf.Core.ObjParse
 import SafePdf.Core.Lex
-import SafePdf.Core.Filter.Flate
-import SafePdf.Core.Filter.Predictor
+import SafePdf.Core.Filter
 
 /-!
 # Object streams: decoding (Plan.md §5.2, tasks 2.4b, 2.14)
@@ -22,10 +21,14 @@ value lives in one (`Core.Xref.ObjStm` imports `Core.Xref.Length` for its contai
 * O1. `decodeObjStm`: `/Type /ObjStm`; `/N` an integer `≥ 0` (above `limits.maxObjects` is
   `Error.limitExceeded .objects`); `/First` an integer `≥ 0`, at most the decoded size;
   `/Extends`, if present, a reference (recorded, not followed).
-* O2. Data: no `/Filter` (or `[]`) is raw; `/FlateDecode` (or `[/FlateDecode]`) is inflated
-  with `Filter.Flate.flateDecode limits`, then `/DecodeParms` (a dictionary or a one-element
-  array) is applied with `Filter.Predictor`; any other filter or filter chain is
-  `Error.unsupported`.
+* O2. Data: decoded by the filter pipeline `Filter.decodeStream` (task 3.9, via
+  `Filter.decodeBytes`): any chain of the byte filters of ISO 32000-2 §7.4 with their
+  `/DecodeParms`, at most `limits.maxFilters` filters (`limitExceeded .filters`), output
+  bounded by `limits.maxDecodedStreamBytes`; no `/Filter` (or `[]`) is raw. An image codec is
+  `Error.malformed` (the data is PDF syntax). A `/Crypt` filter (first only, §7.4.10) follows
+  `Filter`: `/Identity` passes, others are `unsupported` until decryption (task 4.3b); object
+  streams of encrypted files are encrypted (§7.6.2), unlike xref streams. An indirect
+  `/Filter` or `/DecodeParms` is `Error.unsupported`: nothing is resolved at this layer.
 * O3. Header: exactly `N` pairs of non-negative integers, lexed by `Lex.next` from the decoded
   bytes `[0, /First)` only, and nothing else in that range.
 * O4. Offsets strictly increasing; `/First + offset <` decoded size for every pair; object
@@ -159,42 +162,14 @@ def getExtends (d : Dict) : Except Error (Option (Nat × Nat)) :=
   | some (.ref n g) => .ok (some (n, g))
   | some _ => .error (.malformed 0 "object stream: /Extends is not a reference")
 
-/-- The single filter name, if any: `/F`, `[/F]`, absent or `[]`; chains are unsupported. -/
-def filterName (d : Dict) : Except Error (Option Name) :=
-  match d.get? (Name.ofString "Filter") with
-  | none => .ok none
-  | some (.name n) => .ok (some n)
-  | some (.array []) => .ok none
-  | some (.array [.name n]) => .ok (some n)
-  | some _ => .error (.unsupported "object stream: filter chain")
-
-/-- The predictor parameters dictionary: absent, a dictionary, or a one-element array. -/
-def decodeParms (d : Dict) : Except Error Dict :=
-  match d.get? (Name.ofString "DecodeParms") with
-  | none => .ok []
-  | some (.dict p) => .ok p
-  | some (.array []) => .ok []
-  | some (.array [.null]) => .ok []
-  | some (.array [.dict p]) => .ok p
-  | some _ => .error (.malformed 0 "object stream: /DecodeParms is not a dictionary")
-
 /-- Decode the stream data (O2). -/
 def decodeData (limits : Limits) (d : Dict) (raw : ByteArray) : Except Error ByteArray :=
-  match filterName d with
-  | .error e => .error e
-  | .ok none => .ok raw
-  | .ok (some n) =>
-    if n = Name.ofString "FlateDecode" then
-      match Filter.Flate.flateDecode limits raw with
-      | .error e => .error e
-      | .ok out =>
-        match decodeParms d with
-        | .error e => .error e
-        | .ok parms =>
-          match Filter.Predictor.Params.ofDict parms with
-          | .error e => .error e
-          | .ok p => Filter.Predictor.decode p out
-    else .error (.unsupported "object stream: filter other than /FlateDecode")
+  Filter.decodeBytes limits d raw (.malformed 0 "object stream: image filter")
+
+/-- The decoded data of an object stream is within `limits.maxDecodedStreamBytes`. -/
+theorem decodeData_size_le {limits : Limits} {d : Dict} {raw out : ByteArray}
+    (h : decodeData limits d raw = .ok out) : out.size ≤ limits.maxDecodedStreamBytes :=
+  Filter.decodeBytes_size_le h
 
 /-! ## Header (O3) -/
 
@@ -475,8 +450,20 @@ private def strHi : PdfObject := .string "hi".toUTF8.toList
   ByteArray.empty) == .inl "malformed@0:object stream: /Type is not /ObjStm"
 #guard dec (mkSt (osDict (-1) 0) ByteArray.empty) == .inl "malformed@0:object stream: negative /N"
 #guard dec (mkSt (osDict 8388608 0) ByteArray.empty) == .inl "limit:SafePdf.LimitKind.objects"
-#guard dec (mkSt (osDict 0 0 [("Filter", PdfObject.nameOf "ASCIIHexDecode")]) ByteArray.empty) ==
-  .inl "unsupported:object stream: filter other than /FlateDecode"
+-- filters go through the pipeline (task 3.9): ASCIIHex, Flate after ASCIIHex, image codec,
+-- /Crypt not first, too many filters
+#guard dec (mkSt (osDict 3 17 [("Filter", PdfObject.nameOf "ASCIIHexDecode")])
+  (Filter.Ascii.asciiHexEncode raw3)) == .inr [(10, 0), (11, 11), (12, 19)]
+#guard dec (mkSt (osDict 3 17 [("Filter", .array [PdfObject.nameOf "AHx", PdfObject.nameOf "Fl"])])
+  (Filter.Ascii.asciiHexEncode z3)) == .inr [(10, 0), (11, 11), (12, 19)]
+#guard dec (mkSt (osDict 3 17 [("Filter", .array [PdfObject.nameOf "Crypt", PdfObject.nameOf "Fl"])])
+  z3) == .inr [(10, 0), (11, 11), (12, 19)]
+#guard dec (mkSt (osDict 0 0 [("Filter", PdfObject.nameOf "DCTDecode")]) ByteArray.empty) ==
+  .inl "malformed@0:object stream: image filter"
+#guard (dec (mkSt (osDict 3 17 [("Filter", .array [PdfObject.nameOf "Fl", PdfObject.nameOf "Crypt"])])
+  z3)).isLeft
+#guard dec (mkSt (osDict 0 0 [("Filter", .array (List.replicate 9 (PdfObject.nameOf "AHx")))])
+  ByteArray.empty) == .inl "limit:SafePdf.LimitKind.filters"
 #guard (dec (mkSt (osDict 3 17 flate) raw3)).isLeft
 
 end Tests

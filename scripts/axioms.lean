@@ -319,6 +319,12 @@ import SafePdf
 #print axioms SafePdf.Core.Filter.parseChain_length_le
 #print axioms SafePdf.Core.Filter.produced_le
 #print axioms SafePdf.Core.Filter.produced_le_maxFilters
+-- Phase 3, task 3.9: filter consolidation (Filter.lean, Xref/Stream.lean, Xref/ObjStmDecode.lean)
+#print axioms SafePdf.Core.Filter.decodeStream_too_many
+#print axioms SafePdf.Core.Filter.parseChain_crypt_first
+#print axioms SafePdf.Core.Filter.decodeBytes_size_le
+#print axioms SafePdf.Core.Xref.Stream.decodeData_size_le
+#print axioms SafePdf.Core.Xref.ObjStm.decodeData_size_le
 -- Phase 3, task 3.8: deflate encoder and Flate round trip (SafePdf/Core/Filter/Deflate.lean)
 #print axioms SafePdf.Core.Filter.Deflate.inflate_deflateStored
 #print axioms SafePdf.Core.Filter.Deflate.zlibDecode_zlibStored
