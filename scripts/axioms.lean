@@ -234,3 +234,16 @@ import SafePdf
 #print axioms SafePdf.Core.Open.getObject_depth
 #print axioms SafePdf.Core.Open.getObject_work
 #print axioms SafePdf.Core.Open.getObject_length_calls_le
+
+-- Phase 2, task 2.13: cycles are final (Error.cycle; Open, XrefTerm, ObjStm, Length)
+#print axioms SafePdf.Core.Open.openFile_cycle
+#print axioms SafePdf.Core.Open.openFile_loadChain_cycle
+#print axioms SafePdf.Core.Open.openFile_cycle_not_ok
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_self_cycle
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_mutual_cycle
+#print axioms SafePdf.Spec.XrefTerm.step_revisited
+#print axioms SafePdf.Spec.XrefTerm.step_error_endless
+#print axioms SafePdf.Spec.XrefTerm.walk_endless
+#print axioms SafePdf.Spec.XrefTerm.loadChain_endless
+#print axioms SafePdf.Spec.XrefTerm.loadChain_endless_cycle
+#print axioms SafePdf.Spec.XrefTerm.openFile_endless

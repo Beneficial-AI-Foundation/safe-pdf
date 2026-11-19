@@ -37,7 +37,8 @@ data is a table of fixed-width binary rows. Its dictionary doubles as the traile
 * XS7. Each row is three big-endian unsigned fields. A zero-width field reads as 0, except
   that a zero-width type field means type 1 (§7.5.8.3). Type 0 → `free f2 f3`; type 1 →
   `inUse f2 f3` with `f2 < bytes.size`; type 2 → `compressed f2 f3` with `f2 < /Size` and
-  `f2 ≠` the entry's own object number (an object stream cannot contain itself); any other
+  `f2 ≠` the entry's own object number (an object stream cannot contain itself: else
+  `Error.cycle`, task 2.13); any other
   type is "a reference to the null object" (§7.5.8.3), recorded as `free 0 0`. Generations
   of types 0 and 1 must be `≤ 65535`.
 * XS8. An object number may occur at most once in the section (S6; overlapping `/Index`
@@ -168,7 +169,7 @@ def mkEntry (bytesSize size n t f2 f3 at_ : Nat) : Except Error XrefEntry :=
     if size ≤ f2 then
       .error (.malformed at_ s!"xref stream: object stream of object {n} not below /Size")
     else if f2 = n then
-      .error (.malformed at_ s!"xref stream: object {n} lies in its own object stream")
+      .error (.cycle at_ s!"xref stream: object {n} lies in its own object stream")
     else .ok (.compressed f2 f3)
   else .ok (.free 0 0)
 
@@ -244,6 +245,7 @@ private def errS : Error → String
   | .malformed o m => s!"malformed@{o}: {m}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o w => s!"cycle@{o}: {w}"
 
 /-- Test helper: the entries of the stream at `off`, or the error. -/
 private def ps (b : ByteArray) (off : Nat) : Sum String (List (Nat × XrefEntry) × Option Nat) :=
@@ -285,7 +287,7 @@ private def xs (pre : String) (extra : String) (rowBytes : List UInt8) : ByteArr
 #guard ps (xs "" "/Size 1 /W [1 1 3]" [1, 0, 1, 0, 0]) 0 ==
   .inl "malformed@0: xref stream: generation above 65535 for object 0"
 #guard ps (xs "" "/Size 3 /W [1 1 1]" [1, 0, 0, 1, 0, 0, 2, 2, 0]) 0 ==
-  .inl "malformed@0: xref stream: object 2 lies in its own object stream"
+  .inl "cycle@0: xref stream: object 2 lies in its own object stream"
 -- not an xref stream: wrong /Type, a non-stream object, no object at all, indirect /Length
 #guard ps ("1 0 obj\n<< /Type /ObjStm /Size 1 /W [1 1 0] /Length 2 >>\nstream\n".toUTF8 ++
     ByteArray.mk #[1, 0] ++ "\nendstream\nendobj\n".toUTF8) 0 ==

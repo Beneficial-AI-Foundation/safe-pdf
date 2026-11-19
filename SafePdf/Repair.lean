@@ -602,6 +602,7 @@ private def errS : Error → String
   | .malformed o m => s!"malformed@{o}: {m}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o w => s!"cycle@{o}: {w}"
 
 /-- Test helper: `repair` summarised as (entries, /Size, /Root). -/
 private def rp (b : ByteArray) (lim : Limits := Limits.default) :

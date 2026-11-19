@@ -18,7 +18,8 @@ not depend on how the xref chain is merged (task 2.2).
 ## Rules
 
 * L1. `resolveLength lookup limits bytes fuel visiting (n, g)`: if `n ∈ visiting` the result
-  is `Error.malformed _ "cyclic /Length"` (checked first, whatever the fuel).
+  is `Error.cycle _ "cyclic /Length"` (checked first, whatever the fuel; task 2.13 made it a
+  `cycle` rather than `malformed`, so `Core.Open.openFile` does not try repair on it).
 * L2. Fuel `0` is `Error.limitExceeded .objects`. Callers pass the number of objects in the
   cross-reference data; since every hop adds a distinct object number to `visiting`, a chain
   longer than that revisits an object (L1) or misses the table (L3), so the limit only fires
@@ -82,7 +83,7 @@ length or an error. `resolveLength` is its second component; `resolveLength_call
 the first. Structural recursion on `fuel`. -/
 def resolveLengthAux (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
     (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat) : Nat × Except Error Nat :=
-  if ref.1 ∈ visiting then (0, .error (.malformed (errOffset lookup ref.1) "cyclic /Length"))
+  if ref.1 ∈ visiting then (0, .error (.cycle (errOffset lookup ref.1) "cyclic /Length"))
   else
     match fuel with
     | 0 => (0, .error (.limitExceeded .objects))
@@ -192,7 +193,7 @@ theorem resolveLength_self (lookup : Nat → Option XrefEntry) (limits : Limits)
     (bytes : ByteArray) (fuel : Nat) (visiting : List Nat) (ref : Nat × Nat)
     (h : ref.1 ∈ visiting) :
     resolveLength lookup limits bytes fuel visiting ref =
-      .error (.malformed (errOffset lookup ref.1) "cyclic /Length") := by
+      .error (.cycle (errOffset lookup ref.1) "cyclic /Length") := by
   unfold resolveLength resolveLengthAux
   simp [h]
 
@@ -259,6 +260,7 @@ private def errS : Error → String
   | .malformed o m => s!"malformed@{o}:{m}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o w => s!"cycle@{o}:{w}"
 
 /-- Test helper: `parseIndirectResolved` summarised as (num, gen, stream data or none, end). -/
 private def pir (lookup : Nat → Option XrefEntry) (b : ByteArray) (fuel pos : Nat) :
@@ -358,11 +360,11 @@ private def mutualPdf : ByteArray := ⟨#[
 -- (offset 247, `/Length 4 0 R`) is rejected at once as a cycle.
 #guard (tableLookup selfRefPdf).2 == 6
 #guard (tableLookup selfRefPdf).1 4 == some (.inUse 247 0)
-#guard (pir (tableLookup selfRefPdf).1 selfRefPdf 6 247) == .inl "malformed@247:cyclic /Length"
+#guard (pir (tableLookup selfRefPdf).1 selfRefPdf 6 247) == .inl "cycle@247:cyclic /Length"
 #guard (pir (tableLookup selfRefPdf).1 selfRefPdf 6 15).isRight
 #guard (pir (tableLookup selfRefPdf).1 selfRefPdf 6 337).isRight
 -- with any fuel, including 0
-#guard (pir (tableLookup selfRefPdf).1 selfRefPdf 0 247) == .inl "malformed@247:cyclic /Length"
+#guard (pir (tableLookup selfRefPdf).1 selfRefPdf 0 247) == .inl "cycle@247:cyclic /Length"
 
 /-- Lookup for `length-mutual.pdf`, built by hand: its xref is a stream (task 2.4). Offsets are
 those `Tests/adversarial/generate.py` (`length_mutual`) wrote: objects 1–5 and the xref stream 7
@@ -423,7 +425,7 @@ private def twoHopLookup : Nat → Option XrefEntry :=
 /-- A cycle between two integer-less objects: `5 0 obj 6 0 R endobj`, `6 0 obj 5 0 R endobj`. -/
 private def cyc : ByteArray := (oneHopHead ++ twoHopObjs ++ "6 0 obj 5 0 R endobj\n").toUTF8
 
-#guard (pir twoHopLookup cyc 100 0) == .inl s!"malformed@{oneHopHead.utf8ByteSize}:cyclic /Length"
+#guard (pir twoHopLookup cyc 100 0) == .inl s!"cycle@{oneHopHead.utf8ByteSize}:cyclic /Length"
 
 -- generation mismatch: the reference says generation 1, the entry generation 0
 #guard (pir oneHopLookup

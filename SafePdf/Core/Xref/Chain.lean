@@ -27,7 +27,7 @@ cross-reference stream, then `/Prev`"): the table wins over its own stream (as i
 MuPDF), and the stream supplies the objects the table omits (typically those in object
 streams). The stream's own `/Prev` and `/XRefStm`, and `/XRefStm` in an xref stream's
 dictionary, are ignored. An `/XRefStm` offset counts as visited exactly like a `/Prev`
-offset: it must be inside the input, not visited before (else `"xref /XRefStm cycle"`) and
+offset: it must be inside the input, not visited before (else `Error.cycle s "xref /XRefStm cycle"`) and
 within the revision budget.
 
 ## Termination by the visited set (Plan.md §5.2)
@@ -35,7 +35,7 @@ within the revision budget.
 The loop `walk` carries the list `visited` of offsets already parsed, together with the
 proofs that it is duplicate-free and that every element is `< bytes.size`. Each round runs
 `step`, which checks `off < bytes.size` (else `Error.malformed`, `/Prev` offsets are not
-range-checked by 2.1) and `off ∉ visited` (else `Error.malformed off "xref /Prev cycle"`):
+range-checked by 2.1) and `off ∉ visited` (else `Error.cycle off "xref /Prev cycle"`):
 **a revisited offset is an error, not a loop**; for a hybrid table it checks the `/XRefStm`
 offset the same way against `off :: visited`. `step` returns its revisions in a `StepOk`
 whose fields prove that the new offsets are fresh, distinct and inside the input, and that
@@ -134,7 +134,7 @@ def step (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
     (hnd : visited.Nodup) :
     Except Error (StepOk bytes visited) × Nat :=
   if hoff : off < bytes.size then
-    if hmem : off ∈ visited then (.error (.malformed off "xref /Prev cycle"), 0)
+    if hmem : off ∈ visited then (.error (.cycle off "xref /Prev cycle"), 0)
     else if limits.maxRevisions ≤ visited.length then (.error (.limitExceeded .revisions), 0)
     else
       match parseSection limits bytes off with
@@ -150,7 +150,7 @@ def step (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
             by simp⟩, 1)
         | some s =>
           if hs : s < bytes.size then
-            if hsm : s = off ∨ s ∈ visited then (.error (.malformed s "xref /XRefStm cycle"), 1)
+            if hsm : s = off ∨ s ∈ visited then (.error (.cycle s "xref /XRefStm cycle"), 1)
             else if limits.maxRevisions ≤ visited.length + 1 then
               (.error (.limitExceeded .revisions), 1)
             else
@@ -178,7 +178,7 @@ offsets added to `visited`. Returns the revisions from `off` on, newest first (a
 table is immediately followed by its `/XRefStm` stream), and the number of section parses
 (tables and streams) made.
 
-Errors: an offset `≥ bytes.size` (malformed), an offset already visited (malformed,
+Errors: an offset `≥ bytes.size` (malformed), an offset already visited (`Error.cycle`,
 `"xref /Prev cycle"` resp. `"xref /XRefStm cycle"`), more than `limits.maxRevisions`
 revisions (`limitExceeded .revisions`), or a parse error. -/
 def walk (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
@@ -325,6 +325,7 @@ private def errS : Error → String
   | .malformed o m => s!"malformed@{o}: {m}"
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
+  | .cycle o w => s!"cycle@{o}: {w}"
 
 /-- Test helper: `loadChain` summarised as the revision offsets, with the call count. -/
 private def lc (b : ByteArray) : Sum String (List Nat) × Nat :=
@@ -448,8 +449,8 @@ private def twoRevisions : ByteArray :=
 -- minimal-valid: one revision, one parse
 #guard lc minimalValid == (.inr [404], 1)
 -- Bogk-style cycles are rejected as cycles, after 1 resp. 2 parses
-#guard lc prevSelf == (.inl "malformed@404: xref /Prev cycle", 1)
-#guard lc prevCycle == (.inl "malformed@652: xref /Prev cycle", 2)
+#guard lc prevSelf == (.inl "cycle@404: xref /Prev cycle", 1)
+#guard lc prevCycle == (.inl "cycle@652: xref /Prev cycle", 2)
 -- an incremental update: two revisions, the newer one overrides object 3
 #guard twoRevisions.size == 775
 #guard lc twoRevisions == (.inr [658, 404], 2)
@@ -514,7 +515,7 @@ private def lengthMutual : ByteArray :=
 #guard objstmSelf.size == 378 && fnv objstmSelf == 770663905
 #guard lengthMutual.size == 550 && fnv lengthMutual == 3220438046
 -- the self-containing object stream entry is a structural error of the xref stream
-#guard lc objstmSelf == (.inl "malformed@223: xref stream: object 5 lies in its own object stream", 1)
+#guard lc objstmSelf == (.inl "cycle@223: xref stream: object 5 lies in its own object stream", 1)
 -- length-mutual: the xref loads (the /Length cycle is found later, when resolving)
 #guard lc lengthMutual == (.inr [381], 1)
 #guard lk lengthMutual 6 == some (.compressed 5 0)
@@ -551,7 +552,7 @@ private def flateFile : ByteArray :=
 private def streamPrevSelf : ByteArray :=
   withStartxref (xstm 1 "/Size 2 /Prev 9 /W [1 1 0]" [0, 0, 1, 0]) 9
 
-#guard lc streamPrevSelf == (.inl "malformed@9: xref /Prev cycle", 1)
+#guard lc streamPrevSelf == (.inl "cycle@9: xref /Prev cycle", 1)
 
 /-- Two stream revisions: the older at 9, the newer (object 1 moved) with `/Prev 9`. -/
 private def twoStreams : ByteArray :=
@@ -593,7 +594,7 @@ private def hybrid : ByteArray := hybridAt minimalValid.size
 #guard lk hybrid 7 == some (.compressed 4 0)
 #guard lk hybrid 5 == some (.inUse 334 0)
 -- /XRefStm pointing at the table itself, at the /Prev table, beyond the end of input
-#guard lc (hybridAt 692) == (.inl "malformed@692: xref /XRefStm cycle", 1)
+#guard lc (hybridAt 692) == (.inl "cycle@692: xref /XRefStm cycle", 1)
 #guard lc (hybridAt 404) ==
   (.inl "malformed@404: expected an xref keyword or an xref stream object", 2)
 #guard lc (hybridAt 99999) == (.inl "malformed@99999: xref /XRefStm offset beyond end of input", 1)

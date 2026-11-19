@@ -17,12 +17,22 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   entry wins per object number, S6). The trailer is the newest revision's. Then `validate`.
 * P2. **Validation** (`validate`): the trailer has `/Root`, and `getObject` of that reference
   is a dictionary (not a stream, not `null`).
-* P3. **Repair** (`repairOpen`): if the strict path fails at any step (chain or validation),
+* P3. **Repair** (`repairOpen`): if the strict path fails at any step (chain or validation)
+  other than with a cycle (P5),
   `SafePdf.Repair.repair` rebuilds a section by scanning, and the same `validate` runs on it.
   The result has `repaired := true` (S7) and `revisions := 0` (no xref chain was used).
 * P4. If repair fails too, `openFile` returns the **strict** error: it is the primary
   diagnosis (what is wrong with the file as written); the repair error ("no object found")
   is usually less informative.
+* P5. **Cycles are final** (task 2.13; §6 Phase 2 M2 "Bogk-style cyclic files all rejected in
+  bounded time"): if the strict error is an `Error.cycle` (a revisited `/Prev` or `/XRefStm`
+  offset in `Chain.loadChain`, an object in its own object stream in the xref stream or in
+  `ObjStm.fetchCompressed`, a cyclic `/Length` in `Length.resolveLength`), `openFile` returns
+  it without trying repair. This includes cycles found while *validating the root* (P2):
+  they are strict-path findings about the file as written, and the repair path, which
+  re-reads the same objects through a scanned section, would at best rediscover the same
+  cycle and at worst "succeed" by picking a different object, silently accepting the attack.
+  Other strict errors (broken offsets, missing keywords) still fall back to repair (P3).
 
 ## Object resolution (`OpenDoc.getObject`)
 
@@ -47,6 +57,9 @@ encrypted; strings and stream data stay encrypted until Phase 4 (task 4.3).
   the trailer is the newest one (S7: a non-repaired document came from the strict path).
 * `openFile_strict`: when the strict path succeeds, `openFile` returns it (repair never
   overrides a strictly valid file).
+* `openFile_cycle`: when the strict path fails with a cycle error, `openFile` returns that
+  error (rule P5); `openFile_loadChain_cycle`: in particular a cycle error of
+  `Chain.loadChain`.
 * `openFile_root`: an opened document's root is present and resolves to a dictionary.
 * `getObject_depth`: every object returned nests at most `limits.maxObjectDepth`.
 * `getObject_work`: one `getObject` performs at most one top-level object parse
@@ -180,15 +193,17 @@ def repairOpen (limits : Limits) (bytes : ByteArray) : Except Error OpenDoc :=
   | .error e => .error e
   | .ok (sec, tr) => validate limits (OpenDoc.mk' bytes sec tr 0 true)
 
-/-- **Entry point.** Open a document: the strict path, else the repair path; if both fail,
-the strict error (rule P4). -/
+/-- **Entry point.** Open a document: the strict path; on a cycle error (`Error.cycle`,
+rule P5) that error; else the repair path; if both fail, the strict error (rule P4). -/
 def openFile (limits : Limits) (bytes : ByteArray) : Except Error OpenDoc :=
   match strictOpen limits bytes with
   | .ok d => .ok d
   | .error e =>
-    match repairOpen limits bytes with
-    | .ok d => .ok d
-    | .error _ => .error e
+    if e.isCycle then .error e
+    else
+      match repairOpen limits bytes with
+      | .ok d => .ok d
+      | .error _ => .error e
 
 /-! ## Theorems -/
 
@@ -252,16 +267,40 @@ theorem openFile_repaired {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
           exact ⟨_, hl, rfl, rfl, sec, off, rest, rfl⟩
   · split at h
     · cases h
-      rename_i d1 hrep
-      rw [repairOpen_repaired hrep] at hr
-      cases hr
-    · cases h
+    · split at h
+      · cases h
+        rename_i d1 hrep
+        rw [repairOpen_repaired hrep] at hr
+        cases hr
+      · cases h
 
 /-- **Strict first.** When the strict path succeeds, `openFile` returns exactly its result:
 repair never overrides a strictly valid file. -/
 theorem openFile_strict {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     (h : strictOpen limits bytes = .ok d) : openFile limits bytes = .ok d := by
   simp [openFile, h]
+
+/-- **Cycles are final** (rule P5, task 2.13; M2 "Bogk-style cyclic files all rejected"):
+when the strict path fails with a cycle error, `openFile` returns exactly that error; the
+repair path is not tried. -/
+theorem openFile_cycle {limits : Limits} {bytes : ByteArray} {e : Error}
+    (h : strictOpen limits bytes = .error e) (hc : e.isCycle = true) :
+    openFile limits bytes = .error e := by
+  simp [openFile, h, hc]
+
+/-- **`/Prev`, `/XRefStm` and xref-stream cycles are final.** A cycle error of
+`Chain.loadChain` is the result of `openFile`. -/
+theorem openFile_loadChain_cycle {limits : Limits} {bytes : ByteArray} {e : Error}
+    (h : Core.Xref.Chain.loadChain limits bytes = .error e) (hc : e.isCycle = true) :
+    openFile limits bytes = .error e :=
+  openFile_cycle (by simp [strictOpen, h]) hc
+
+/-- **A cycle error never yields a document.** If the strict path fails with a cycle error,
+`openFile` returns no document, repaired or not. -/
+theorem openFile_cycle_not_ok {limits : Limits} {bytes : ByteArray} {e : Error} {d : OpenDoc}
+    (h : strictOpen limits bytes = .error e) (hc : e.isCycle = true) :
+    openFile limits bytes ≠ .ok d := by
+  rw [openFile_cycle h hc]; exact fun h' => by cases h'
 
 /-- **Root validated.** An opened document's `/Root` is present and resolves to a
 dictionary. -/
@@ -283,14 +322,16 @@ theorem openFile_root {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
         exact validate_root hs
   · split at h
     · cases h
-      rename_i d1 hrep
-      unfold repairOpen at hrep
-      split at hrep
-      · cases hrep
-      · have := validate_eq hrep
-        subst this
-        exact validate_root hrep
-    · cases h
+    · split at h
+      · cases h
+        rename_i d1 hrep
+        unfold repairOpen at hrep
+        split at hrep
+        · cases hrep
+        · have := validate_eq hrep
+          subst this
+          exact validate_root hrep
+      · cases h
 
 /-- Nesting depth of an indirect body: a stream counts as its dictionary. -/
 def bodyDepth : IndirectBody → Nat
@@ -400,6 +441,7 @@ private def os (b : ByteArray) : String :=
   match openFile Limits.default b with
   | .ok d => s!"ok repaired={d.repaired} revs={d.revisions} n={d.objectCount}"
   | .error (.malformed _ m) => s!"err {m}"
+  | .error (.cycle o m) => s!"cycle@{o} {m}"
   | .error _ => "err"
 
 /-- A minimal valid file with a correct xref table. -/
@@ -418,6 +460,17 @@ private def minimalValid : ByteArray :=
   (body ++ "xref\n0 3\n0000000000 65535 f \n" ++ row 9 ++ row 58 ++
     "trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n" ++ toString x ++ "\n%%EOF\n").toUTF8
 
+/-- `minimal` with an xref table whose `/Prev` is its own offset (a one-element cycle). -/
+private def minimalPrevSelf : ByteArray :=
+  let body := minimal
+  let x := body.utf8ByteSize
+  let row (o : Nat) : String :=
+    let s := toString o
+    String.ofList (List.replicate (10 - s.length) '0') ++ s ++ " 00000 n \n"
+  (body ++ "xref\n0 3\n0000000000 65535 f \n" ++ row 9 ++ row 58 ++
+    s!"trailer\n<< /Size 3 /Root 1 0 R /Prev {x} >>\nstartxref\n" ++ toString x ++
+    "\n%%EOF\n").toUTF8
+
 /-- `minimal` with a broken `startxref`. -/
 private def minimalBroken : ByteArray :=
   (minimal ++ "trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n9999\n%%EOF\n").toUTF8
@@ -432,6 +485,12 @@ private def isNull : Except Error IndirectBody → Bool
 
 -- A broken xref is repaired.
 #guard os minimalBroken == "ok repaired=true revs=0 n=3"
+
+-- A `/Prev` cycle is final: no repair (rule P5), although the scan would find the objects.
+#guard os minimalPrevSelf == "cycle@110 xref /Prev cycle"
+#guard (match repairOpen Limits.default minimalPrevSelf with
+  | .ok _ => true
+  | .error _ => false)
 
 -- Garbage: the strict error is reported.
 #guard os "%PDF-1.4\nhello\n".toUTF8 == "err startxref not found"
