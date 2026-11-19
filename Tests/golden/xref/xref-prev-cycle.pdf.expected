@@ -1,0 +1,31 @@
+--- xref
+file:       input
+startxref:  652
+sections:   2 parsed (newest first)
+  #0 offset 652 via startxref: table
+      6 entries (5 in use, 0 compressed, 1 free), highest object 5
+      /Size 6  /Prev 404  /Root 1 0 R  /XRefStm -  encrypted false
+      keys: /Size /Root /Prev
+  #1 offset 404 via /Prev: table
+      6 entries (5 in use, 0 compressed, 1 free), highest object 5
+      /Size 6  /Prev 652  /Root 1 0 R  /XRefStm -  encrypted false
+      keys: /Size /Root /Prev
+stopped:    malformed input at byte 652: xref /Prev cycle (following /Prev to offset 652)
+strict:     error: malformed input at byte 652: xref /Prev cycle
+--- revisions
+file:       input
+sections:   2 (oldest first; #0 is the newest)
+  #1 offset 404: table, 6 entries
+      added   6: 0 1 2 3 4 5
+  #0 offset 652: table, 6 entries
+      changed 5: 1 2 3 4 5
+      still free 1
+stopped:    malformed input at byte 652: xref /Prev cycle (following /Prev to offset 652)
+--- repair
+file:       input
+scan:       6 header hit(s), 6 parse attempt(s), 0 failed
+repair:     ok, 5 object(s), /Size 6, /Root 1 0 R, encrypted false
+trailer:    /Size /Root /Prev
+validates:  yes (/Root resolves to a dictionary)
+strict:     error: malformed input at byte 652: xref /Prev cycle
+diff:       n/a (needs both strict and repaired sections)
