@@ -1,0 +1,66 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 612 792] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>
+endobj
+4 0 obj
+<< /Length 325 >>
+stream
+% part 1
+0.5 g 10 10 100 50 re f
+1 0 0 RG 4 w 1 J 1 j 120 10 80 50 re S
+0 0 1 0 k 0 1 0 0.5 K 220 10 60 60 re 260 30 60 60 re f*
+q 2 0 0 2 300 100 cm 0 0 1 rg 0 0 20 10 re f
+  0.5 w [3 1] 0 d 0 J 2 j 0 0 m 20 0 l 20 10 l S
+Q
+q 1 0.5 0 1 50 150 cm 0.2 0.4 0.6 RG 2 w 0 0 m 30 40 60 -40 90 0 c S Q
+0 w 0 G 10 300 m 200 300 l S
+
+endstream
+endobj
+5 0 obj
+<< /Length 272 >>
+stream
+% part 2 (separate stream)
+q 0 0 300 300 re W n
+  1 0 0 rg 50 50 400 400 re f
+  q 100 100 100 100 re W* n 0 1 0 rg 0 0 600 600 re f Q
+  0.5 0.5 0 rg 0 0 1 RG 3 w 150 150 50 50 re b
+Q
+0.1 M 400 400 m 450 450 l 500 400 l S
+1 2 frobnicate BX 3 zork EX
+/x w Q
+/Sh0 sh /Im1 Do
+
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /Rotate 90 /CropBox [5 5 205.5 105] /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 49 >>
+stream
+q 2 0 0 1 10 10 cm 0 0 1 RG 3 w 0 0 50 50 re S Q
+
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000145 00000 n 
+0000000216 00000 n 
+0000000592 00000 n 
+0000000915 00000 n 
+0000001014 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1113
+%%EOF
