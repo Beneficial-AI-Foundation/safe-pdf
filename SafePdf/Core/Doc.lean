@@ -35,7 +35,7 @@ so `Doc.getPage` is total and trivial.
 * W6. **Bounds.** Depth above `limits.maxObjectDepth` ⇒ `limitExceeded .objectDepth`. The
   number of visited nodes is bounded by fuel `objectCount`; exhausting it with live work left
   ⇒ `limitExceeded .objects` (in a consistent file every live node has its own xref entry, so
-  this should not happen; that fact is not proven here). Every node visit costs at most 6
+  this cannot happen: `Spec.PageTree.walk_fuel_irrelevant`, `popLive_exhausted`). Every node visit costs at most 6
   `getObject` calls (node, `/Kids`, four attributes): the work is `O(objectCount)` fetches.
 * W7. **`/Count`** is advisory: the root's `/Count` is kept as `Doc.declaredCount` and a
   mismatch is reported by `Doc.countMismatch`, never as an error.
