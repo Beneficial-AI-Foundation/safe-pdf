@@ -1,7 +1,7 @@
 # Corpus dashboard
 
-- Generated: 2026-11-19 12:03 UTC
-- Git commit: `1130a99`
+- Generated: 2026-11-19 12:18 UTC
+- Git commit: `206fe78`
 - Inspector milestone: M2
 - Corpus: `corpus`
 
@@ -19,35 +19,35 @@
 | encrypted (opened; strings/streams not decrypted) | 0 |
 | in-use objects resolved (`--view resolve`) | 68573 / 68574 (99.999%) |
 | files whose in-use objects all resolve | 73 / 74 |
-| parse time, median (inspector `parseMs`) | 0.122 ms |
-| parse time, p95 | 0.570 ms |
-| wall time per process, median | 8.1 ms |
-| wall time per process, p95 | 10.5 ms |
-| wall time per process, max (summary / resolve) | 330.6 / 603.0 ms |
+| parse time, median (inspector `parseMs`) | 0.132 ms |
+| parse time, p95 | 0.609 ms |
+| wall time per process, median | 1006.4 ms |
+| wall time per process, p95 | 1024.4 ms |
+| wall time per process, max (summary / resolve) | 1350.7 / 1531.8 ms |
 | total size | 183.8 MB |
 
 ## By engine
 
 | group | files | opens | % opens | strict | repaired | failed | objects resolved | median parse ms | MB |
 |---|---|---|---|---|---|---|---|---|---|
-| pdfTeX | 32 | 32 | 100.0% | 32 | 0 | 0 | 100.0% | 0.170 | 151.5 |
-| dvips+ghostscript | 14 | 14 | 100.0% | 14 | 0 | 0 | 100.0% | 0.110 | 8.8 |
-| Ghostscript | 11 | 11 | 100.0% | 11 | 0 | 0 | 100.0% | 0.072 | 6.4 |
-| other | 6 | 6 | 100.0% | 6 | 0 | 0 | 100.0% | 0.111 | 7.7 |
-| Acrobat | 4 | 4 | 100.0% | 4 | 0 | 0 | 100.0% | 0.083 | 2.4 |
-| Word | 4 | 4 | 100.0% | 4 | 0 | 0 | 100.0% | 0.391 | 3.8 |
-| Chrome/Skia | 2 | 2 | 100.0% | 2 | 0 | 0 | 99.9% | 0.308 | 2.8 |
-| unknown | 1 | 1 | 100.0% | 1 | 0 | 0 | 100.0% | 0.045 | 0.4 |
+| pdfTeX | 32 | 32 | 100.0% | 32 | 0 | 0 | 100.0% | 0.174 | 151.5 |
+| dvips+ghostscript | 14 | 14 | 100.0% | 14 | 0 | 0 | 100.0% | 0.112 | 8.8 |
+| Ghostscript | 11 | 11 | 100.0% | 11 | 0 | 0 | 100.0% | 0.086 | 6.4 |
+| other | 6 | 6 | 100.0% | 6 | 0 | 0 | 100.0% | 0.134 | 7.7 |
+| Acrobat | 4 | 4 | 100.0% | 4 | 0 | 0 | 100.0% | 0.091 | 2.4 |
+| Word | 4 | 4 | 100.0% | 4 | 0 | 0 | 100.0% | 0.396 | 3.8 |
+| Chrome/Skia | 2 | 2 | 100.0% | 2 | 0 | 0 | 99.9% | 0.348 | 2.8 |
+| unknown | 1 | 1 | 100.0% | 1 | 0 | 0 | 100.0% | 0.062 | 0.4 |
 
 ## By year bucket
 
 | group | files | opens | % opens | strict | repaired | failed | objects resolved | median parse ms | MB |
 |---|---|---|---|---|---|---|---|---|---|
-| <2005 | 8 | 8 | 100.0% | 8 | 0 | 0 | 100.0% | 0.062 | 3.4 |
+| <2005 | 8 | 8 | 100.0% | 8 | 0 | 0 | 100.0% | 0.078 | 3.4 |
 | 2005-2009 | 9 | 9 | 100.0% | 9 | 0 | 0 | 100.0% | 0.113 | 7.0 |
-| 2010-2014 | 14 | 14 | 100.0% | 14 | 0 | 0 | 100.0% | 0.083 | 27.3 |
-| 2015-2019 | 14 | 14 | 100.0% | 14 | 0 | 0 | 100.0% | 0.129 | 25.4 |
-| 2020+ | 29 | 29 | 100.0% | 29 | 0 | 0 | 100.0% | 0.216 | 120.7 |
+| 2010-2014 | 14 | 14 | 100.0% | 14 | 0 | 0 | 100.0% | 0.102 | 27.3 |
+| 2015-2019 | 14 | 14 | 100.0% | 14 | 0 | 0 | 100.0% | 0.137 | 25.4 |
+| 2020+ | 29 | 29 | 100.0% | 29 | 0 | 0 | 100.0% | 0.222 | 120.7 |
 
 ## Failures
 
