@@ -1,4 +1,6 @@
 import SafePdf.Spec.XrefTerm
+import SafePdf.Spec.PrefixStable
+import SafePdf.Core.Open
 
 /-!
 # Unambiguous object resolution across incremental updates (S6)
@@ -31,14 +33,20 @@ function, hence deterministic; the theorems say *which* entry it returns.
   own `/Size` (task 2.4a, XS4) but not classic-table numbers (2.1). `checkSize` is the
   separate check that every merged object number is below the newest trailer's `/Size`
   (§7.5.5: `/Size` of an update covers the whole file); `checkSize_ok` and
-  `resolveEntry_lt_size` state what it guarantees. It is composed into the open path by 2.11.
+  `resolveEntry_lt_size` state what it guarantees. It is composed into the strict open path
+  (task 2.12, `Core.Open.strictOpen`; a failure sends the file to repair).
 
-## Not proved here
+## Prefix stability (task 2.12)
 
 `SameAt` (the old section offsets parse the same way in the extended file) is a hypothesis of
-`loadChain_update`. Discharging it needs a prefix-stability lemma for `parseSection`
-(`parseXrefTable`, `ObjParse.parseObject`, `Stream.parseXrefStream`), all of which read
-`bytes.size` for their range checks; that lemma is not proved.
+`loadChain_update`; it is discharged for every update that only appends bytes
+(`PrefixStable.Extends bytes bytes'`) to a file with a valid `startxref`: `sameAt_of_extends`,
+`loadChain_sameAt` (classic tables and xref streams alike, via `Spec.PrefixStable`). Hence
+`loadChain_append` / `resolveEntry_append` (plain update) and `loadChain_update_hybrid`,
+`loadChain_append_hybrid`, `resolveEntry_append_hybrid` (the update is a hybrid table with its
+own `/XRefStm` stream at or after the old end of file). `checkSize` is `Core.Open.checkSize`,
+run by the strict open path; `openFile_lt_size` states that non-repaired documents respect
+`/Size`.
 -/
 
 namespace SafePdf.Spec.Unambiguous
@@ -563,18 +571,233 @@ theorem resolveEntry_update {limits : Limits} {bytes bytes' : ByteArray} {start 
   resolveEntry_of_cons
     (loadChain_update hold hstart hnew hoff hsec hnohyb hprev hbud hsame) hold n
 
+/-! ## Discharging `SameAt`: appended bytes do not change old sections (task 2.12) -/
+
+/-- The section at `o` parses: as a section (`parseSection`, table or stream) or as an
+`/XRefStm` stream (`Stream.parseXrefStream`). Every offset of a loaded chain has this
+property (`loadChain_parses`). -/
+def ParsesAt (limits : Limits) (bytes : ByteArray) (o : Nat) : Prop :=
+  (∃ x, parseSection limits bytes o = .ok x) ∨ (∃ x, Stream.parseXrefStream limits bytes o = .ok x)
+
+/-- The offsets of a successful step parse. -/
+theorem step_parses {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
+    {hnd : visited.Nodup} {so : StepOk bytes visited} {k : Nat}
+    (h : step limits bytes off visited hnd = (.ok so, k)) :
+    ∀ o ∈ so.revs.map Revision.offset, ParsesAt limits bytes o := by
+  obtain ⟨sec, tr, hp, -, hcase⟩ := step_ok_shape h
+  rcases hcase with ⟨-, hrevs⟩ | ⟨s, sec2, tr2, -, hp2, hrevs⟩
+  · rw [hrevs]
+    simp only [List.map_cons, List.map_nil, Revision.offset, List.mem_singleton, forall_eq]
+    exact Or.inl ⟨_, hp⟩
+  · rw [hrevs]
+    simp only [List.map_cons, List.map_nil, Revision.offset, List.mem_cons, List.not_mem_nil,
+      or_false, forall_eq_or_imp, forall_eq]
+    exact ⟨Or.inl ⟨_, hp⟩, Or.inr ⟨_, hp2⟩⟩
+
+/-- The offsets of a successful walk parse. -/
+theorem walk_parses {limits : Limits} {bytes : ByteArray} (off : Nat) (visited : List Nat)
+    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) {revs : List Revision}
+    (h : (walk limits bytes off visited hnd hlt).1 = .ok revs) :
+    ∀ o ∈ revs.map Revision.offset, ParsesAt limits bytes o := by
+  revert revs
+  fun_induction walk limits bytes off visited hnd hlt with
+  | case1 => simp
+  | case3 => simp
+  | case2 off visited hnd hlt so k hs hp =>
+    intro revs h
+    simp only [Except.ok.injEq] at h
+    subst h
+    exact step_parses hs
+  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+    intro revs h
+    simp only [Except.ok.injEq] at h
+    subst h
+    intro o ho
+    simp only [List.map_append, List.mem_append] at ho
+    rcases ho with ho | ho
+    · exact step_parses hs o ho
+    · exact ih (revs := rest) (by rw [hw]) o ho
+
+/-- **Every offset of a loaded chain parses** (as a section, or as an `/XRefStm` stream). -/
+theorem loadChain_parses {limits : Limits} {bytes : ByteArray} {revs : List Revision}
+    (h : loadChain limits bytes = .ok revs) :
+    ∀ o ∈ revs.map Revision.offset, ParsesAt limits bytes o := by
+  cases hs : findStartxref bytes with
+  | error e =>
+    unfold loadChain loadChainCounted at h
+    rw [hs] at h
+    cases h
+  | ok start =>
+    rw [loadChain_eq hs] at h
+    exact walk_parses _ _ _ _ h
+
+/-- **`SameAt` holds for appended bytes.** If `bytes'` extends `bytes` (same bytes, possibly
+more after them) and `bytes` has a valid `startxref` (so it ends with `%%EOF` and optional
+whitespace), every offset at which a section of `bytes` parses reads the same in `bytes'`:
+the section parse, the `xref` keyword test and the xref-stream parse agree
+(`PrefixStable.section_stable`, `PrefixStable.stream_stable`; classic tables and xref streams
+alike). -/
+theorem sameAt_of_extends {limits : Limits} {bytes bytes' : ByteArray}
+    (hext : PrefixStable.Extends bytes bytes') {start : Nat}
+    (hstart : findStartxref bytes = .ok start) {o : Nat} (hp : ParsesAt limits bytes o) :
+    SameAt limits bytes bytes' o := by
+  rcases hp with ⟨x, hx⟩ | ⟨x, hx⟩
+  · exact PrefixStable.section_stable hext hstart hx
+  · exact PrefixStable.stream_stable hext hstart hx
+
+/-- **`SameAt` for a whole loaded chain.** Every revision offset of a file with a valid
+`startxref` reads the same in any extension of it. -/
+theorem loadChain_sameAt {limits : Limits} {bytes bytes' : ByteArray}
+    (hext : PrefixStable.Extends bytes bytes') {start : Nat}
+    (hstart : findStartxref bytes = .ok start) {revs : List Revision}
+    (hold : loadChain limits bytes = .ok revs) :
+    ∀ o ∈ revs.map Revision.offset, SameAt limits bytes bytes' o :=
+  fun o ho => sameAt_of_extends hext hstart (loadChain_parses hold o ho)
+
+/-- **Revision monotonicity for appended updates** (ISO 32000-2 §7.5.6), `SameAt` discharged:
+`loadChain_update` for an update that only appends bytes (`bytes'` extends `bytes`). -/
+theorem loadChain_append {limits : Limits} {bytes bytes' : ByteArray} {start off' : Nat}
+    {revs : List Revision} {sec' : XrefSection} {tr' : Trailer}
+    (hold : loadChain limits bytes = .ok revs) (hstart : findStartxref bytes = .ok start)
+    (hext : PrefixStable.Extends bytes bytes')
+    (hnew : findStartxref bytes' = .ok off') (hoff : bytes.size ≤ off')
+    (hsec : parseSection limits bytes' off' = .ok (sec', tr'))
+    (hnohyb : hybridStm bytes' off' tr' = none) (hprev : tr'.prev? = some start)
+    (hbud : revs.length + 1 ≤ limits.maxRevisions) :
+    loadChain limits bytes' = .ok ((sec', tr', off') :: revs) :=
+  loadChain_update hold hstart hnew hoff hsec hnohyb hprev hbud
+    (loadChain_sameAt hext hstart hold)
+
+/-- **Resolution after an appended update**, `SameAt` discharged: object `n` resolves to the
+update's entry if its section lists `n`, and otherwise exactly as before. -/
+theorem resolveEntry_append {limits : Limits} {bytes bytes' : ByteArray} {start off' : Nat}
+    {revs : List Revision} {sec' : XrefSection} {tr' : Trailer}
+    (hold : loadChain limits bytes = .ok revs) (hstart : findStartxref bytes = .ok start)
+    (hext : PrefixStable.Extends bytes bytes')
+    (hnew : findStartxref bytes' = .ok off') (hoff : bytes.size ≤ off')
+    (hsec : parseSection limits bytes' off' = .ok (sec', tr'))
+    (hnohyb : hybridStm bytes' off' tr' = none) (hprev : tr'.prev? = some start)
+    (hbud : revs.length + 1 ≤ limits.maxRevisions) (n : Nat) :
+    resolveEntry limits bytes' n =
+      (resolveEntry limits bytes n).map (fun o => (lookupEntry n sec'.entries).or o) :=
+  resolveEntry_of_cons (loadChain_append hold hstart hext hnew hoff hsec hnohyb hprev hbud) hold n
+
+/-- An xref stream that parses starts inside the input. -/
+theorem lt_of_parseXrefStream {limits : Limits} {bytes : ByteArray} {s : Nat}
+    {x : XrefSection × Trailer} (h : Stream.parseXrefStream limits bytes s = .ok x) :
+    s < bytes.size := by
+  have hd := PrefixStable.digitAt_of_parseXrefStream h
+  unfold digitAt at hd
+  split at hd
+  · rename_i c hc
+    exact Core.Lex.lt_size_of_getElem?_eq_some hc
+  · cases hd
+
+/-- **Revision monotonicity, hybrid update** (§7.5.6, §7.5.8.4). As `loadChain_update`, but
+the update's classic table at `off'` is hybrid: its `/XRefStm` offset `s` (at or after the end
+of `bytes`) holds an xref stream that parses as `(sec2, tr2)`. Then `bytes'` loads as the old
+chain preceded by the table and its stream, provided the old sections read the same in
+`bytes'` (`SameAt`) and the revision budget has room for two more. -/
+theorem loadChain_update_hybrid {limits : Limits} {bytes bytes' : ByteArray} {start off' s : Nat}
+    {revs : List Revision} {sec' sec2 : XrefSection} {tr' tr2 : Trailer}
+    (hold : loadChain limits bytes = .ok revs) (hstart : findStartxref bytes = .ok start)
+    (hnew : findStartxref bytes' = .ok off') (hoff : bytes.size ≤ off') (hs : bytes.size ≤ s)
+    (hsec : parseSection limits bytes' off' = .ok (sec', tr'))
+    (hhyb : hybridStm bytes' off' tr' = some s)
+    (hstm : Stream.parseXrefStream limits bytes' s = .ok (sec2, tr2))
+    (hprev : tr'.prev? = some start)
+    (hbud : revs.length + 2 ≤ limits.maxRevisions)
+    (hsame : ∀ o ∈ revs.map Revision.offset, SameAt limits bytes bytes' o) :
+    loadChain limits bytes' = .ok ((sec', tr', off') :: (sec2, tr2, s) :: revs) := by
+  have hlt' : off' < bytes'.size := findStartxref_lt hnew
+  have hsz : bytes.size ≤ bytes'.size := by omega
+  have hslt : s < bytes'.size := lt_of_parseXrefStream hstm
+  have hso : s ≠ off' := by
+    intro he
+    subst he
+    have hm : matchAt bytes' s kwXref = true := by
+      unfold hybridStm at hhyb
+      cases hm : matchAt bytes' s kwXref
+      · rw [hm] at hhyb; cases hhyb
+      · rfl
+    have := PrefixStable.digitAt_of_parseXrefStream hstm
+    rw [PrefixStable.digitAt_of_matchAt_xref hm] at this
+    cases this
+  have hold' := hold
+  rw [loadChain_eq hstart] at hold'
+  rw [loadChain_eq hnew]
+  obtain ⟨so, k, hst, hr, hp⟩ := step_of_hybrid (visited := []) List.nodup_nil hlt'
+    List.not_mem_nil hslt hso List.not_mem_nil (by simp; omega) hsec hhyb hstm
+  rw [walk, hst]
+  simp only
+  rw [hp, hprev]
+  simp only
+  have hih := walk_frame hsz start [] _ _ hold' (so.revs.map Revision.offset ++ [])
+    so.nodup (fun x hx => by
+      rcases List.mem_append.mp hx with hx | hx
+      · exact so.lt x hx
+      · cases hx)
+    (fun o ho hmem => by
+      rw [hr] at hmem
+      simp only [List.map_cons, List.map_nil, Revision.offset, List.append_nil,
+        List.mem_cons, List.not_mem_nil, or_false] at hmem
+      have := loadChain_offsets_lt hold o ho
+      omega)
+    (by rw [hr]; simp; omega) hsame
+  split
+  · rename_i e k3 he
+    rw [he] at hih
+    cases hih
+  · rename_i rest' k3 he
+    rw [he] at hih
+    simp only [Except.ok.injEq] at hih
+    rw [hih, hr]
+    rfl
+
+/-- **Hybrid update, `SameAt` discharged**: `loadChain_update_hybrid` for an update that only
+appends bytes. -/
+theorem loadChain_append_hybrid {limits : Limits} {bytes bytes' : ByteArray} {start off' s : Nat}
+    {revs : List Revision} {sec' sec2 : XrefSection} {tr' tr2 : Trailer}
+    (hold : loadChain limits bytes = .ok revs) (hstart : findStartxref bytes = .ok start)
+    (hext : PrefixStable.Extends bytes bytes')
+    (hnew : findStartxref bytes' = .ok off') (hoff : bytes.size ≤ off') (hs : bytes.size ≤ s)
+    (hsec : parseSection limits bytes' off' = .ok (sec', tr'))
+    (hhyb : hybridStm bytes' off' tr' = some s)
+    (hstm : Stream.parseXrefStream limits bytes' s = .ok (sec2, tr2))
+    (hprev : tr'.prev? = some start)
+    (hbud : revs.length + 2 ≤ limits.maxRevisions) :
+    loadChain limits bytes' = .ok ((sec', tr', off') :: (sec2, tr2, s) :: revs) :=
+  loadChain_update_hybrid hold hstart hnew hoff hs hsec hhyb hstm hprev hbud
+    (loadChain_sameAt hext hstart hold)
+
+/-- **Resolution after an appended hybrid update**: the update's table wins, then its
+`/XRefStm` stream, then the old resolution. -/
+theorem resolveEntry_append_hybrid {limits : Limits} {bytes bytes' : ByteArray}
+    {start off' s : Nat} {revs : List Revision} {sec' sec2 : XrefSection} {tr' tr2 : Trailer}
+    (hold : loadChain limits bytes = .ok revs) (hstart : findStartxref bytes = .ok start)
+    (hext : PrefixStable.Extends bytes bytes')
+    (hnew : findStartxref bytes' = .ok off') (hoff : bytes.size ≤ off') (hs : bytes.size ≤ s)
+    (hsec : parseSection limits bytes' off' = .ok (sec', tr'))
+    (hhyb : hybridStm bytes' off' tr' = some s)
+    (hstm : Stream.parseXrefStream limits bytes' s = .ok (sec2, tr2))
+    (hprev : tr'.prev? = some start)
+    (hbud : revs.length + 2 ≤ limits.maxRevisions) (n : Nat) :
+    resolveEntry limits bytes' n =
+      (resolveEntry limits bytes n).map
+        (fun o => ((lookupEntry n sec'.entries).or (lookupEntry n sec2.entries)).or o) := by
+  have h' := loadChain_append_hybrid hold hstart hext hnew hoff hs hsec hhyb hstm hprev hbud
+  rw [resolveEntry_of_ok h', resolveEntry_of_ok hold, List.findSome?_cons, List.findSome?_cons]
+  simp only [Except.map]
+  cases lookupEntry n sec'.entries <;> cases lookupEntry n sec2.entries <;> rfl
+
 /-! ## Object numbers below the newest `/Size` -/
 
 /-- **`/Size` check** (ISO 32000-2 §7.5.5). Every object number of the merged chain must be
 below the `/Size` of the newest trailer (which, per §7.5.6, counts the objects of the whole
 file). `loadChain` checks this for xref streams against their own `/Size` but not for classic
-tables; this check covers both and is meant to be composed after `loadChain`. An empty chain
-passes. -/
-def checkSize : List Revision → Except Error Unit
-  | [] => .ok ()
-  | r :: rest =>
-    if (mergeChain (r :: rest)).entries.all (fun x => decide (x.1 < r.2.1.size)) then .ok ()
-    else .error (.malformed r.2.2 "cross-reference object number not below the trailer /Size")
+tables; this check covers both. It is `Core.Open.checkSize`, which the strict open path runs
+after `loadChain` (task 2.12). An empty chain passes. -/
+abbrev checkSize : List Revision → Except Error Unit := Core.Open.checkSize
 
 /-- `checkSize` on a non-empty chain. -/
 theorem checkSize_cons (r : Revision) (rest : List Revision) :
@@ -585,14 +808,8 @@ theorem checkSize_cons (r : Revision) (rest : List Revision) :
 
 /-- What `checkSize` guarantees: every merged object number is below the newest `/Size`. -/
 theorem checkSize_ok {r : Revision} {rest : List Revision} (h : checkSize (r :: rest) = .ok ()) :
-    ∀ x ∈ (mergeChain (r :: rest)).entries, x.1 < r.2.1.size := by
-  rw [checkSize_cons] at h
-  split at h
-  · rename_i hall
-    intro x hx
-    have := List.all_eq_true.mp hall x hx
-    simpa using this
-  · cases h
+    ∀ x ∈ (mergeChain (r :: rest)).entries, x.1 < r.2.1.size :=
+  Core.Open.checkSize_ok h
 
 /-- `checkSize` fails exactly when some merged object number reaches the newest `/Size`. -/
 theorem checkSize_ok_iff {r : Revision} {rest : List Revision} :
@@ -613,6 +830,20 @@ theorem resolveEntry_lt_size {limits : Limits} {bytes : ByteArray} {r : Revision
   rw [hl] at hr
   simp only [Except.ok.injEq] at hr
   exact checkSize_ok hc (n, e) (lookupEntry_mergeChain_iff.mp hr)
+
+/-- **Strict documents respect `/Size`** (task 2.12). A document opened without repair has
+every object number of its cross-reference section below its trailer's `/Size`; a file that
+violates this fails the strict path (`Core.Open.checkSize`) and goes to the repair path, whose
+documents are flagged `repaired`. -/
+theorem openFile_lt_size {limits : Limits} {bytes : ByteArray} {d : Core.Open.OpenDoc}
+    (h : Core.Open.openFile limits bytes = .ok d) (hr : d.repaired = false) :
+    ∀ x ∈ d.xref.entries, x.1 < d.trailer.size := by
+  unfold Core.Open.openFile at h
+  repeat' split at h
+  all_goals first
+    | (cases h; exact Core.Open.strictOpen_lt_size ‹_›)
+    | (cases h; rw [Core.Open.repairOpen_repaired ‹_›] at hr; cases hr)
+    | cases h
 
 /-! ## Tests -/
 

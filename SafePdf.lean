@@ -28,4 +28,5 @@ import SafePdf.Core.Filter.RunLength
 import SafePdf.Core.Xref.Stream
 import SafePdf.Core.Xref.ObjStm
 import SafePdf.Spec.Unambiguous
+import SafePdf.Spec.PrefixStable
 import SafePdf.Core.Open
