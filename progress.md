@@ -17,7 +17,7 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
-* 3.13 (wt), 4.1b (wt) — wave 19; 4.2 integrated (part 1); 4.3b deferred (overlaps 3.13 in Open.lean getObject)
+* 3.13 (wt) — wave 19; 4.2, 4.1b integrated; 4.3b deferred (overlaps 3.13 in Open.lean getObject)
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -119,7 +119,8 @@ Plan.md §6 Phase 4. Exit: **M4**: page count + page boxes match `qpdf` on corpu
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
 | 4.1 | Catalog + page tree with inheritance, acyclicity proof, total `getPage` | 2.5 | `SafePdf/Core/Doc.lean` | new | done (2026-11-19) |
-| 4.1b | Page-tree end-to-end theorems (4.1 left them `#guard`-tested only): (1) a node whose `/Kids` contains an ancestor makes `openDoc` fail with `Error.cycle` (invariant: each stack entry's ancestors are visited); (2) inheritance law stated on output `Page`s (MediaBox/CropBox/Rotate/Resources = nearest ancestor's); (3) fuel exhaustion `limitExceeded .objects` is unreachable when nodes are distinct xref entries | 4.1 | `SafePdf/Core/Doc.lean`, `SafePdf/Spec/Doc.lean` | wt | doing (2026-11-19) |
+| 4.1b | Page-tree end-to-end theorems (4.1 left them `#guard`-tested only): (1) a node whose `/Kids` contains an ancestor makes `openDoc` fail with `Error.cycle` (invariant: each stack entry's ancestors are visited); (2) inheritance law stated on output `Page`s (MediaBox/CropBox/Rotate/Resources = nearest ancestor's); (3) fuel exhaustion `limitExceeded .objects` is unreachable when nodes are distinct xref entries | 4.1 | `SafePdf/Core/Doc.lean`, `SafePdf/Spec/Doc.lean` | wt | done (2026-11-19) |
+| 4.1c | Page-tree theorem gaps left by 4.1b: (1) pin the error kind — a `/Kids` edge back to an ancestor makes `openDoc` fail with `Error.cycle` specifically (needs: nodes popped before the cycle succeed, or a statement "fails with `Error.cycle` or an earlier node's error" made precise); (2) uniqueness of the root-to-leaf path in `ofOpen_page_inherit` (disjoint live subtrees of the stack) | 4.1b | `SafePdf/Spec/Doc.lean` | wt | todo |
 | 4.2 | Outline, named destinations, links, page labels (visited-set) | 4.1 | `SafePdf/Core/Doc/Nav.lean` | new | done (2026-11-19) |
 | 4.3 | Standard security handler (RC4, AES-128/256, empty user password) | 2.5 | `SafePdf/Core/Crypt.lean` | new | split (into 4.3a, 4.3b) |
 | 4.3a | Crypto primitives in Lean (Plan §6 Phase 4: smallest trusted implementation, tested against vectors; proving AES out of scope): MD5, SHA-256/384/512, RC4, AES-128/256 block decrypt + CBC decrypt with PKCS#7 unpadding (and AES-ECB encrypt for R6 hash), each total and checked against published test vectors (RFC 1321, FIPS 180-4, FIPS 197 / SP 800-38A) | — | `SafePdf/Core/Crypt/Md5.lean`, `SafePdf/Core/Crypt/Sha2.lean`, `SafePdf/Core/Crypt/Rc4.lean`, `SafePdf/Core/Crypt/Aes.lean` | new | done (2026-11-19) |
@@ -293,6 +294,8 @@ Exit criterion checked: [ ]
 * zlib differential (3.6b): `python3 -I Tests/differential/run.py --comparator streams [--files 'corpus/files/X*.pdf'] [--per-file N]` (`--files` is a glob relative to cwd); plain `[FlateDecode]` streams without `/DecodeParms` only; raw bytes located by scanning `N G obj … stream` and taking the view's raw length; size check for every stream + byte compare for a sample (`--per-file`, default 20 — a full corpus run takes ~35 min, one inspector process per sampled stream). Corpus (pre-3.11 decoder): 12,748 plain-Flate streams, 1,476 byte-compared (111 MB), 0 disagreements, 0 size mismatches; 43 streams with trailing bytes after the zlib end decode identically. Offline mode: `streams.py --ours F --raw F`.
 * Navigation (4.2): `Core.Doc.Nav` — never fails the document (rules N1–N8, `warnings` counts); generic name/number-tree walk `treeWalk`/`treeLookup` (visited set, fuel objectCount, `/Limits` pruning); `Dest n` (page `Option (Fin n)`, `Fit`), `Target` (dest | unresolved name | action kind, e.g. URI/GoToR kept, not followed); `outline doc limits` flat preorder with depths; `pageLinks doc limits i`; `pageLabel doc limits i` (roman/letters capped at 1..3999, else decimal). Theorems `treeWalk_visited_le`, `outline_items_le` (≤ objectCount), `*_nodup`. Lookup worst case objectCount × lookups (bounded, quadratic).
 * Name-tree `/Limits` compare raw bytes: `(zeta) > (z)`, so `/Limits [(n) (z)]` excludes `zeta`.
+* Page-tree proofs (4.1b): `Spec.PageTree` (`SafePdf/Spec/Doc.lean`) — tree view `KidsOf`/`Kid`/`KidPath`/`Descends`/`LeafNode`, `nearest f path`; `openDoc_path_nodup`, `walk_kid_not_ancestor`, `openDoc_cycle_error` (fails, error kind not pinned), `openDoc_page_inherit` (every page's boxes/rotate/resources/contents = nearest ancestor's along SOME root path), `walk_fuel_irrelevant`, `popLive_exhausted`, `getObject_ne_null_key` (non-null ⇒ an xref index key, via `bsearch_key`). Gaps → 4.1c.
+* v4.36 (4.1b): `h ▸ hv` fails when `h : v = (a, b).fst` — `rw [h] at hv`; `rw [Core.Open.bsearch.eq_def]` for the `termination_by` binary search.
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -348,3 +351,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — wave 18 part 3 (phase 3, PR #4): 3.11 done (table-driven inflate proved equal to the bit-by-bit spec; text 4.5 → 78 MiB/s; work-bound constants raised, see Decisions); commit "wave 18 (part 3): 3.11 — table-driven inflate"
 * 2026-11-19 — wave 18 part 4 (phase 3, PR #4): 3.6b done (zlib differential: 0 mismatches on 12,748 corpus Flate streams; spot-checked again after 3.11); phase 3 left: 3.13; commit "wave 18 (part 4): 3.6b — zlib differential"
 * 2026-11-19 — wave 19 part 1 (phase 3, PR #4): 4.2 done (outline, named destinations, links, page labels; bounded walks with visited sets); commit "wave 19 (part 1): 4.2 — navigation"
+* 2026-11-19 — wave 19 part 2 (phase 3, PR #4): 4.1b done (page-tree acyclicity, inheritance and fuel theorems end to end; error kind and path uniqueness → 4.1c); commit "wave 19 (part 2): 4.1b — page-tree theorems"
