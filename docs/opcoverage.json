@@ -1,6 +1,6 @@
 {
- "generated": "2026-11-19 17:03 UTC",
- "commit": "835d4a4",
+ "generated": "2026-11-19 17:08 UTC",
+ "commit": "8336b22",
  "timeout_s": 60,
  "deferred": [
   "sh",
@@ -29,9 +29,9 @@
   "tok_warnings": 0,
   "files_full_coverage": 81,
   "min_file_covered_pct": 100.0,
-  "max_wall_ms": 6983.68,
-  "max_ops_ms": 5892.172,
-  "max_page_ms": 2366.504,
+  "max_wall_ms": 6656.844,
+  "max_ops_ms": 5606.277,
+  "max_page_ms": 2360.934,
   "max_page_ops": 618737,
   "items": {
    "fillPath": 310024,
@@ -421,7 +421,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1663.266,
+   "wall_ms": 1894.054,
    "pages": 37,
    "ops": 214809,
    "forms": 0,
@@ -434,8 +434,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 54382,
-   "ms": 601.757,
-   "max_page_ms": 171.698,
+   "ms": 595.101,
+   "max_page_ms": 178.058,
    "items": {
     "fillPath": 23425,
     "strokePath": 2979,
@@ -450,7 +450,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1166.164,
+   "wall_ms": 1135.48,
    "pages": 14,
    "ops": 47613,
    "forms": 6,
@@ -463,8 +463,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 35742,
-   "ms": 78.68,
-   "max_page_ms": 44.779,
+   "ms": 76.861,
+   "max_page_ms": 44.202,
    "items": {
     "fillPath": 2881,
     "strokePath": 3499,
@@ -479,7 +479,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1103.052,
+   "wall_ms": 1104.558,
    "pages": 10,
    "ops": 13028,
    "forms": 0,
@@ -492,8 +492,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1591,
-   "ms": 36.745,
-   "max_page_ms": 4.924,
+   "ms": 34.098,
+   "max_page_ms": 4.52,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -508,7 +508,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1773.599,
+   "wall_ms": 1745.158,
    "pages": 21,
    "ops": 386608,
    "forms": 0,
@@ -521,8 +521,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 154619,
-   "ms": 684.517,
-   "max_page_ms": 225.866,
+   "ms": 667.55,
+   "max_page_ms": 218.741,
    "items": {
     "fillPath": 0,
     "strokePath": 33646,
@@ -537,7 +537,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1183.868,
+   "wall_ms": 1177.543,
    "pages": 11,
    "ops": 57569,
    "forms": 0,
@@ -550,8 +550,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 31476,
-   "ms": 126.968,
-   "max_page_ms": 51.83,
+   "ms": 122.344,
+   "max_page_ms": 49.243,
    "items": {
     "fillPath": 8,
     "strokePath": 2493,
@@ -566,7 +566,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1104.649,
+   "wall_ms": 1099.056,
    "pages": 20,
    "ops": 22833,
    "forms": 0,
@@ -579,8 +579,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 4133,
-   "ms": 57.55,
-   "max_page_ms": 5.409,
+   "ms": 55.844,
+   "max_page_ms": 5.387,
    "items": {
     "fillPath": 31,
     "strokePath": 1509,
@@ -595,7 +595,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1205.058,
+   "wall_ms": 1182.624,
    "pages": 45,
    "ops": 55758,
    "forms": 0,
@@ -608,8 +608,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2107,
-   "ms": 191.765,
-   "max_page_ms": 5.651,
+   "ms": 184.739,
+   "max_page_ms": 5.326,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -624,7 +624,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1214.105,
+   "wall_ms": 1213.8,
    "pages": 14,
    "ops": 105642,
    "forms": 0,
@@ -637,8 +637,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 34889,
-   "ms": 186.665,
-   "max_page_ms": 41.011,
+   "ms": 196.619,
+   "max_page_ms": 44.449,
    "items": {
     "fillPath": 483,
     "strokePath": 10793,
@@ -653,7 +653,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1107.37,
+   "wall_ms": 1101.681,
    "pages": 13,
    "ops": 13761,
    "forms": 0,
@@ -666,8 +666,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3633,
-   "ms": 82.731,
-   "max_page_ms": 10.008,
+   "ms": 90.008,
+   "max_page_ms": 11.967,
    "items": {
     "fillPath": 0,
     "strokePath": 214,
@@ -682,7 +682,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1452.49,
+   "wall_ms": 1406.866,
    "pages": 12,
    "ops": 135181,
    "forms": 0,
@@ -695,8 +695,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 58659,
-   "ms": 419.91,
-   "max_page_ms": 170.412,
+   "ms": 401.178,
+   "max_page_ms": 165.111,
    "items": {
     "fillPath": 167,
     "strokePath": 22790,
@@ -711,7 +711,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1085.67,
+   "wall_ms": 1042.999,
    "pages": 10,
    "ops": 3195,
    "forms": 0,
@@ -724,8 +724,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 828,
-   "ms": 22.039,
-   "max_page_ms": 3.353,
+   "ms": 22.405,
+   "max_page_ms": 3.386,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -740,7 +740,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1406.286,
+   "wall_ms": 1315.566,
    "pages": 38,
    "ops": 93644,
    "forms": 0,
@@ -753,8 +753,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 13525,
-   "ms": 324.793,
-   "max_page_ms": 20.828,
+   "ms": 298.079,
+   "max_page_ms": 18.831,
    "items": {
     "fillPath": 1420,
     "strokePath": 8876,
@@ -769,7 +769,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1197.947,
+   "wall_ms": 1135.509,
    "pages": 42,
    "ops": 71519,
    "forms": 22,
@@ -782,8 +782,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 10407,
-   "ms": 118.076,
-   "max_page_ms": 18.136,
+   "ms": 116.306,
+   "max_page_ms": 16.582,
    "items": {
     "fillPath": 2832,
     "strokePath": 6001,
@@ -798,7 +798,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1126.13,
+   "wall_ms": 1047.207,
    "pages": 11,
    "ops": 14435,
    "forms": 0,
@@ -811,8 +811,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3136,
-   "ms": 50.647,
-   "max_page_ms": 8.537,
+   "ms": 49.613,
+   "max_page_ms": 8.17,
    "items": {
     "fillPath": 408,
     "strokePath": 421,
@@ -827,7 +827,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1097.108,
+   "wall_ms": 1056.486,
    "pages": 12,
    "ops": 10435,
    "forms": 1,
@@ -840,8 +840,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3247,
-   "ms": 19.348,
-   "max_page_ms": 3.093,
+   "ms": 18.493,
+   "max_page_ms": 2.978,
    "items": {
     "fillPath": 12,
     "strokePath": 677,
@@ -856,7 +856,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 6983.68,
+   "wall_ms": 6656.844,
    "pages": 69,
    "ops": 2786412,
    "forms": 162,
@@ -869,8 +869,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 618737,
-   "ms": 5892.172,
-   "max_page_ms": 1516.865,
+   "ms": 5606.277,
+   "max_page_ms": 1448.51,
    "items": {
     "fillPath": 67662,
     "strokePath": 628823,
@@ -885,7 +885,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1111.646,
+   "wall_ms": 1100.112,
    "pages": 9,
    "ops": 17386,
    "forms": 468,
@@ -898,8 +898,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 12269,
-   "ms": 77.934,
-   "max_page_ms": 65.616,
+   "ms": 76.785,
+   "max_page_ms": 64.565,
    "items": {
     "fillPath": 613,
     "strokePath": 904,
@@ -914,7 +914,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1126.175,
+   "wall_ms": 1134.332,
    "pages": 30,
    "ops": 54336,
    "forms": 0,
@@ -927,8 +927,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 4313,
-   "ms": 99.111,
-   "max_page_ms": 5.219,
+   "ms": 98.731,
+   "max_page_ms": 5.164,
    "items": {
     "fillPath": 339,
     "strokePath": 0,
@@ -943,7 +943,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1032.365,
+   "wall_ms": 1039.783,
    "pages": 15,
    "ops": 14143,
    "forms": 7,
@@ -956,8 +956,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2329,
-   "ms": 28.405,
-   "max_page_ms": 3.11,
+   "ms": 28.915,
+   "max_page_ms": 3.042,
    "items": {
     "fillPath": 323,
     "strokePath": 635,
@@ -972,7 +972,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1094.98,
+   "wall_ms": 1095.504,
    "pages": 14,
    "ops": 11197,
    "forms": 0,
@@ -985,8 +985,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2006,
-   "ms": 66.636,
-   "max_page_ms": 5.5,
+   "ms": 66.432,
+   "max_page_ms": 5.41,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -1001,7 +1001,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1084.195,
+   "wall_ms": 1081.955,
    "pages": 15,
    "ops": 37408,
    "forms": 22,
@@ -1014,8 +1014,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 10100,
-   "ms": 68.177,
-   "max_page_ms": 20.638,
+   "ms": 66.525,
+   "max_page_ms": 20.523,
    "items": {
     "fillPath": 1317,
     "strokePath": 1343,
@@ -1030,7 +1030,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1096.319,
+   "wall_ms": 1077.726,
    "pages": 11,
    "ops": 12080,
    "forms": 0,
@@ -1043,8 +1043,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2272,
-   "ms": 63.1,
-   "max_page_ms": 8.906,
+   "ms": 61.381,
+   "max_page_ms": 8.442,
    "items": {
     "fillPath": 15,
     "strokePath": 167,
@@ -1059,7 +1059,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1089.206,
+   "wall_ms": 1038.69,
    "pages": 9,
    "ops": 3922,
    "forms": 0,
@@ -1072,8 +1072,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 996,
-   "ms": 39.758,
-   "max_page_ms": 5.403,
+   "ms": 38.044,
+   "max_page_ms": 4.96,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -1088,7 +1088,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1090.557,
+   "wall_ms": 1023.977,
    "pages": 4,
    "ops": 10238,
    "forms": 0,
@@ -1101,8 +1101,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3924,
-   "ms": 12.143,
-   "max_page_ms": 4.079,
+   "ms": 11.486,
+   "max_page_ms": 3.897,
    "items": {
     "fillPath": 1,
     "strokePath": 0,
@@ -1117,7 +1117,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1131.744,
+   "wall_ms": 1061.354,
    "pages": 12,
    "ops": 22884,
    "forms": 7,
@@ -1130,8 +1130,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 4616,
-   "ms": 43.606,
-   "max_page_ms": 7.505,
+   "ms": 42.995,
+   "max_page_ms": 7.744,
    "items": {
     "fillPath": 487,
     "strokePath": 940,
@@ -1146,7 +1146,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1264.97,
+   "wall_ms": 1180.921,
    "pages": 16,
    "ops": 80358,
    "forms": 0,
@@ -1159,8 +1159,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 33965,
-   "ms": 182.849,
-   "max_page_ms": 68.901,
+   "ms": 174.228,
+   "max_page_ms": 65.412,
    "items": {
     "fillPath": 2275,
     "strokePath": 672,
@@ -1175,7 +1175,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1112.786,
+   "wall_ms": 1060.528,
    "pages": 19,
    "ops": 12992,
    "forms": 36,
@@ -1188,8 +1188,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2188,
-   "ms": 38.927,
-   "max_page_ms": 4.962,
+   "ms": 36.609,
+   "max_page_ms": 4.65,
    "items": {
     "fillPath": 321,
     "strokePath": 417,
@@ -1204,7 +1204,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1122.169,
+   "wall_ms": 1082.811,
    "pages": 10,
    "ops": 28725,
    "forms": 6,
@@ -1217,8 +1217,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 9000,
-   "ms": 52.411,
-   "max_page_ms": 14.374,
+   "ms": 47.847,
+   "max_page_ms": 13.111,
    "items": {
     "fillPath": 41,
     "strokePath": 1499,
@@ -1233,7 +1233,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1220.81,
+   "wall_ms": 1150.668,
    "pages": 15,
    "ops": 32730,
    "forms": 2565,
@@ -1246,8 +1246,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 10750,
-   "ms": 131.385,
-   "max_page_ms": 46.375,
+   "ms": 126.398,
+   "max_page_ms": 43.464,
    "items": {
     "fillPath": 2255,
     "strokePath": 455,
@@ -1262,7 +1262,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1101.503,
+   "wall_ms": 1100.97,
    "pages": 19,
    "ops": 10871,
    "forms": 42,
@@ -1275,8 +1275,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2240,
-   "ms": 26.932,
-   "max_page_ms": 4.315,
+   "ms": 26.403,
+   "max_page_ms": 4.321,
    "items": {
     "fillPath": 11,
     "strokePath": 127,
@@ -1291,7 +1291,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 6034.44,
+   "wall_ms": 5780.151,
    "pages": 73,
    "ops": 1719292,
    "forms": 21557,
@@ -1304,8 +1304,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 361883,
-   "ms": 4963.682,
-   "max_page_ms": 1255.567,
+   "ms": 4716.812,
+   "max_page_ms": 1207.857,
    "items": {
     "fillPath": 50759,
     "strokePath": 59472,
@@ -1320,7 +1320,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1145.189,
+   "wall_ms": 1138.735,
    "pages": 20,
    "ops": 77806,
    "forms": 18,
@@ -1333,8 +1333,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 24092,
-   "ms": 139.099,
-   "max_page_ms": 43.002,
+   "ms": 136.867,
+   "max_page_ms": 42.486,
    "items": {
     "fillPath": 1214,
     "strokePath": 1717,
@@ -1349,7 +1349,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1087.672,
+   "wall_ms": 1101.705,
    "pages": 16,
    "ops": 34032,
    "forms": 4,
@@ -1362,8 +1362,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 11546,
-   "ms": 60.899,
-   "max_page_ms": 21.559,
+   "ms": 58.753,
+   "max_page_ms": 20.809,
    "items": {
     "fillPath": 543,
     "strokePath": 510,
@@ -1378,7 +1378,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1099.006,
+   "wall_ms": 1178.536,
    "pages": 20,
    "ops": 9314,
    "forms": 0,
@@ -1391,8 +1391,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2357,
-   "ms": 88.266,
-   "max_page_ms": 6.594,
+   "ms": 85.917,
+   "max_page_ms": 6.885,
    "items": {
     "fillPath": 65,
     "strokePath": 134,
@@ -1407,7 +1407,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1019.916,
+   "wall_ms": 1042.427,
    "pages": 12,
    "ops": 3236,
    "forms": 3,
@@ -1420,8 +1420,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 692,
-   "ms": 12.922,
-   "max_page_ms": 1.414,
+   "ms": 12.902,
+   "max_page_ms": 1.41,
    "items": {
     "fillPath": 1,
     "strokePath": 12,
@@ -1436,7 +1436,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1086.728,
+   "wall_ms": 1079.234,
    "pages": 75,
    "ops": 21644,
    "forms": 0,
@@ -1449,8 +1449,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 667,
-   "ms": 80.05,
-   "max_page_ms": 2.583,
+   "ms": 78.737,
+   "max_page_ms": 2.688,
    "items": {
     "fillPath": 1,
     "strokePath": 316,
@@ -1465,7 +1465,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1384.35,
+   "wall_ms": 1367.71,
    "pages": 11,
    "ops": 204570,
    "forms": 0,
@@ -1478,8 +1478,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 134485,
-   "ms": 352.786,
-   "max_page_ms": 183.937,
+   "ms": 370.006,
+   "max_page_ms": 183.774,
    "items": {
     "fillPath": 628,
     "strokePath": 32779,
@@ -1494,7 +1494,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1138.069,
+   "wall_ms": 1115.299,
    "pages": 25,
    "ops": 41923,
    "forms": 4,
@@ -1507,8 +1507,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 26337,
-   "ms": 101.837,
-   "max_page_ms": 68.887,
+   "ms": 94.667,
+   "max_page_ms": 64.571,
    "items": {
     "fillPath": 3065,
     "strokePath": 3190,
@@ -1523,7 +1523,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1218.393,
+   "wall_ms": 1210.648,
    "pages": 22,
    "ops": 57185,
    "forms": 1317,
@@ -1536,8 +1536,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 13473,
-   "ms": 207.162,
-   "max_page_ms": 87.918,
+   "ms": 196.008,
+   "max_page_ms": 84.761,
    "items": {
     "fillPath": 2339,
     "strokePath": 2234,
@@ -1552,7 +1552,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1688.066,
+   "wall_ms": 1641.108,
    "pages": 26,
    "ops": 472947,
    "forms": 71,
@@ -1565,8 +1565,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 326959,
-   "ms": 661.484,
-   "max_page_ms": 445.126,
+   "ms": 629.217,
+   "max_page_ms": 424.201,
    "items": {
     "fillPath": 63852,
     "strokePath": 726,
@@ -1581,7 +1581,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1041.618,
+   "wall_ms": 1109.271,
    "pages": 13,
    "ops": 24437,
    "forms": 0,
@@ -1594,8 +1594,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3505,
-   "ms": 38.378,
-   "max_page_ms": 5.137,
+   "ms": 39.225,
+   "max_page_ms": 5.346,
    "items": {
     "fillPath": 1,
     "strokePath": 0,
@@ -1610,7 +1610,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1098.313,
+   "wall_ms": 1164.919,
    "pages": 45,
    "ops": 34216,
    "forms": 35,
@@ -1623,8 +1623,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 8792,
-   "ms": 75.331,
-   "max_page_ms": 24.194,
+   "ms": 76.016,
+   "max_page_ms": 24.366,
    "items": {
     "fillPath": 109,
     "strokePath": 350,
@@ -1639,7 +1639,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1140.036,
+   "wall_ms": 1187.266,
    "pages": 43,
    "ops": 79220,
    "forms": 4,
@@ -1652,8 +1652,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 7916,
-   "ms": 116.543,
-   "max_page_ms": 8.133,
+   "ms": 116.412,
+   "max_page_ms": 8.023,
    "items": {
     "fillPath": 4181,
     "strokePath": 697,
@@ -1668,7 +1668,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1144.108,
+   "wall_ms": 1169.243,
    "pages": 68,
    "ops": 66393,
    "forms": 46,
@@ -1681,8 +1681,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 18055,
-   "ms": 144.497,
-   "max_page_ms": 43.935,
+   "ms": 140.129,
+   "max_page_ms": 41.365,
    "items": {
     "fillPath": 1194,
     "strokePath": 4248,
@@ -1697,7 +1697,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1058.099,
+   "wall_ms": 1057.386,
    "pages": 19,
    "ops": 15855,
    "forms": 0,
@@ -1710,8 +1710,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1726,
-   "ms": 35.613,
-   "max_page_ms": 2.992,
+   "ms": 36.698,
+   "max_page_ms": 3.051,
    "items": {
     "fillPath": 41,
     "strokePath": 0,
@@ -1726,7 +1726,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 2697.857,
+   "wall_ms": 2746.227,
    "pages": 48,
    "ops": 984554,
    "forms": 238,
@@ -1739,8 +1739,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 409829,
-   "ms": 1679.348,
-   "max_page_ms": 681.502,
+   "ms": 1711.245,
+   "max_page_ms": 685.109,
    "items": {
     "fillPath": 9982,
     "strokePath": 10380,
@@ -1755,7 +1755,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1104.225,
+   "wall_ms": 1164.61,
    "pages": 27,
    "ops": 44828,
    "forms": 2,
@@ -1768,8 +1768,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 28080,
-   "ms": 86.877,
-   "max_page_ms": 47.815,
+   "ms": 86.723,
+   "max_page_ms": 47.765,
    "items": {
     "fillPath": 143,
     "strokePath": 427,
@@ -1784,7 +1784,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1125.394,
+   "wall_ms": 1150.971,
    "pages": 100,
    "ops": 41390,
    "forms": 174,
@@ -1797,8 +1797,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3296,
-   "ms": 122.646,
-   "max_page_ms": 4.953,
+   "ms": 120.847,
+   "max_page_ms": 4.861,
    "items": {
     "fillPath": 452,
     "strokePath": 994,
@@ -1813,7 +1813,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1014.028,
+   "wall_ms": 1015.397,
    "pages": 5,
    "ops": 4994,
    "forms": 0,
@@ -1826,8 +1826,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1111,
-   "ms": 8.316,
-   "max_page_ms": 2.323,
+   "ms": 8.633,
+   "max_page_ms": 2.362,
    "items": {
     "fillPath": 2,
     "strokePath": 0,
@@ -1842,7 +1842,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 4070.202,
+   "wall_ms": 4074.749,
    "pages": 77,
    "ops": 511297,
    "forms": 25504,
@@ -1855,8 +1855,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 331729,
-   "ms": 3065.195,
-   "max_page_ms": 2366.504,
+   "ms": 3061.292,
+   "max_page_ms": 2360.934,
    "items": {
     "fillPath": 30437,
     "strokePath": 27593,
@@ -1871,7 +1871,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1041.188,
+   "wall_ms": 1098.563,
    "pages": 17,
    "ops": 15252,
    "forms": 4,
@@ -1884,8 +1884,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2986,
-   "ms": 30.798,
-   "max_page_ms": 4.202,
+   "ms": 30.23,
+   "max_page_ms": 4.129,
    "items": {
     "fillPath": 254,
     "strokePath": 316,
@@ -1900,7 +1900,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1019.778,
+   "wall_ms": 1052.975,
    "pages": 16,
    "ops": 10047,
    "forms": 0,
@@ -1913,8 +1913,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2909,
-   "ms": 17.665,
-   "max_page_ms": 3.631,
+   "ms": 17.287,
+   "max_page_ms": 3.496,
    "items": {
     "fillPath": 22,
     "strokePath": 588,
@@ -1929,7 +1929,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1033.087,
+   "wall_ms": 1039.693,
    "pages": 5,
    "ops": 15067,
    "forms": 8,
@@ -1942,8 +1942,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 4077,
-   "ms": 28.339,
-   "max_page_ms": 7.968,
+   "ms": 28.676,
+   "max_page_ms": 8.107,
    "items": {
     "fillPath": 147,
     "strokePath": 490,
@@ -1958,7 +1958,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1029.644,
+   "wall_ms": 1017.826,
    "pages": 6,
    "ops": 8856,
    "forms": 2,
@@ -1971,8 +1971,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2468,
-   "ms": 14.655,
-   "max_page_ms": 4.664,
+   "ms": 14.753,
+   "max_page_ms": 4.708,
    "items": {
     "fillPath": 66,
     "strokePath": 74,
@@ -1987,7 +1987,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1264.387,
+   "wall_ms": 1280.244,
    "pages": 53,
    "ops": 196720,
    "forms": 21,
@@ -2000,8 +2000,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 29222,
-   "ms": 256.965,
-   "max_page_ms": 35.105,
+   "ms": 252.326,
+   "max_page_ms": 34.574,
    "items": {
     "fillPath": 16071,
     "strokePath": 6034,
@@ -2016,7 +2016,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1270.804,
+   "wall_ms": 1273.024,
    "pages": 86,
    "ops": 122418,
    "forms": 788,
@@ -2029,8 +2029,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 15730,
-   "ms": 251.598,
-   "max_page_ms": 34.466,
+   "ms": 253.01,
+   "max_page_ms": 34.626,
    "items": {
     "fillPath": 2624,
     "strokePath": 3661,
@@ -2045,7 +2045,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1035.332,
+   "wall_ms": 1057.708,
    "pages": 8,
    "ops": 16056,
    "forms": 9,
@@ -2058,8 +2058,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3751,
-   "ms": 27.217,
-   "max_page_ms": 4.982,
+   "ms": 26.501,
+   "max_page_ms": 4.693,
    "items": {
     "fillPath": 130,
     "strokePath": 428,
@@ -2074,7 +2074,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1090.682,
+   "wall_ms": 1081.683,
    "pages": 25,
    "ops": 26157,
    "forms": 0,
@@ -2087,8 +2087,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1694,
-   "ms": 53.413,
-   "max_page_ms": 2.938,
+   "ms": 54.354,
+   "max_page_ms": 2.929,
    "items": {
     "fillPath": 0,
     "strokePath": 32,
@@ -2103,7 +2103,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1027.15,
+   "wall_ms": 1082.662,
    "pages": 3,
    "ops": 5170,
    "forms": 0,
@@ -2116,8 +2116,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2283,
-   "ms": 7.367,
-   "max_page_ms": 2.977,
+   "ms": 7.714,
+   "max_page_ms": 3.158,
    "items": {
     "fillPath": 0,
     "strokePath": 66,
@@ -2132,7 +2132,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1094.313,
+   "wall_ms": 1166.604,
    "pages": 52,
    "ops": 43792,
    "forms": 0,
@@ -2145,8 +2145,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1606,
-   "ms": 81.097,
-   "max_page_ms": 2.578,
+   "ms": 84.52,
+   "max_page_ms": 2.599,
    "items": {
     "fillPath": 0,
     "strokePath": 487,
@@ -2161,7 +2161,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1039.107,
+   "wall_ms": 1136.938,
    "pages": 4,
    "ops": 26640,
    "forms": 0,
@@ -2174,8 +2174,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 8774,
-   "ms": 34.576,
-   "max_page_ms": 12.004,
+   "ms": 35.791,
+   "max_page_ms": 11.84,
    "items": {
     "fillPath": 4,
     "strokePath": 12,
@@ -2190,7 +2190,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1214.188,
+   "wall_ms": 1279.083,
    "pages": 44,
    "ops": 135638,
    "forms": 0,
@@ -2203,8 +2203,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 8322,
-   "ms": 195.662,
-   "max_page_ms": 12.258,
+   "ms": 198.003,
+   "max_page_ms": 12.16,
    "items": {
     "fillPath": 44,
     "strokePath": 2,
@@ -2219,7 +2219,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1034.331,
+   "wall_ms": 1115.944,
    "pages": 21,
    "ops": 16932,
    "forms": 0,
@@ -2232,8 +2232,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2479,
-   "ms": 39.757,
-   "max_page_ms": 3.784,
+   "ms": 39.917,
+   "max_page_ms": 3.7,
    "items": {
     "fillPath": 68,
     "strokePath": 189,
@@ -2248,7 +2248,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1064.68,
+   "wall_ms": 1115.387,
    "pages": 29,
    "ops": 30181,
    "forms": 0,
@@ -2261,8 +2261,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2001,
-   "ms": 57.658,
-   "max_page_ms": 3.293,
+   "ms": 56.533,
+   "max_page_ms": 3.174,
    "items": {
     "fillPath": 198,
     "strokePath": 685,
@@ -2277,7 +2277,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1381.772,
+   "wall_ms": 1384.847,
    "pages": 91,
    "ops": 122713,
    "forms": 0,
@@ -2290,8 +2290,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 14493,
-   "ms": 367.228,
-   "max_page_ms": 24.309,
+   "ms": 359.795,
+   "max_page_ms": 23.125,
    "items": {
     "fillPath": 2131,
     "strokePath": 8839,
@@ -2306,7 +2306,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1330.417,
+   "wall_ms": 1391.0,
    "pages": 72,
    "ops": 185875,
    "forms": 0,
@@ -2319,8 +2319,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 35526,
-   "ms": 331.966,
-   "max_page_ms": 29.249,
+   "ms": 336.298,
+   "max_page_ms": 29.843,
    "items": {
     "fillPath": 386,
     "strokePath": 23943,
@@ -2335,7 +2335,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1249.766,
+   "wall_ms": 1246.701,
    "pages": 33,
    "ops": 77953,
    "forms": 0,
@@ -2348,8 +2348,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 23254,
-   "ms": 223.736,
-   "max_page_ms": 31.149,
+   "ms": 222.955,
+   "max_page_ms": 31.604,
    "items": {
     "fillPath": 287,
     "strokePath": 3289,
@@ -2364,7 +2364,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1089.662,
+   "wall_ms": 1069.368,
    "pages": 5,
    "ops": 43149,
    "forms": 0,
@@ -2377,8 +2377,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 29133,
-   "ms": 71.863,
-   "max_page_ms": 44.141,
+   "ms": 75.482,
+   "max_page_ms": 47.009,
    "items": {
     "fillPath": 2246,
     "strokePath": 1098,
@@ -2393,7 +2393,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1142.548,
+   "wall_ms": 1144.526,
    "pages": 8,
    "ops": 56932,
    "forms": 0,
@@ -2406,8 +2406,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 19826,
-   "ms": 125.648,
-   "max_page_ms": 46.784,
+   "ms": 126.567,
+   "max_page_ms": 47.907,
    "items": {
     "fillPath": 4381,
     "strokePath": 470,
@@ -2422,7 +2422,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1041.272,
+   "wall_ms": 1037.863,
    "pages": 12,
    "ops": 5271,
    "forms": 0,
@@ -2435,8 +2435,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 776,
-   "ms": 23.804,
-   "max_page_ms": 2.544,
+   "ms": 21.906,
+   "max_page_ms": 2.279,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -2451,7 +2451,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1078.96,
+   "wall_ms": 1064.17,
    "pages": 22,
    "ops": 10467,
    "forms": 0,
@@ -2464,8 +2464,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 893,
-   "ms": 62.941,
-   "max_page_ms": 3.657,
+   "ms": 63.827,
+   "max_page_ms": 3.579,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -2480,7 +2480,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1132.855,
+   "wall_ms": 1194.5,
    "pages": 39,
    "ops": 38301,
    "forms": 0,
@@ -2493,8 +2493,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1712,
-   "ms": 132.73,
-   "max_page_ms": 4.5,
+   "ms": 133.123,
+   "max_page_ms": 4.599,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -2509,7 +2509,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1108.685,
+   "wall_ms": 1187.313,
    "pages": 22,
    "ops": 24948,
    "forms": 0,
@@ -2522,8 +2522,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1884,
-   "ms": 97.462,
-   "max_page_ms": 5.764,
+   "ms": 98.146,
+   "max_page_ms": 6.012,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -2538,7 +2538,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1108.015,
+   "wall_ms": 1158.746,
    "pages": 28,
    "ops": 18558,
    "forms": 0,
@@ -2551,8 +2551,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 1807,
-   "ms": 108.028,
-   "max_page_ms": 4.845,
+   "ms": 104.421,
+   "max_page_ms": 4.567,
    "items": {
     "fillPath": 0,
     "strokePath": 0,
@@ -2567,7 +2567,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1181.179,
+   "wall_ms": 1170.773,
    "pages": 120,
    "ops": 62900,
    "forms": 0,
@@ -2580,8 +2580,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 13450,
-   "ms": 153.142,
-   "max_page_ms": 46.933,
+   "ms": 153.427,
+   "max_page_ms": 47.479,
    "items": {
     "fillPath": 1362,
     "strokePath": 953,
@@ -2596,7 +2596,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1180.544,
+   "wall_ms": 1204.054,
    "pages": 173,
    "ops": 78820,
    "forms": 1,
@@ -2609,8 +2609,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 8039,
-   "ms": 168.598,
-   "max_page_ms": 13.023,
+   "ms": 167.14,
+   "max_page_ms": 13.0,
    "items": {
     "fillPath": 1379,
     "strokePath": 988,
@@ -2625,7 +2625,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1155.956,
+   "wall_ms": 1169.144,
    "pages": 74,
    "ops": 118032,
    "forms": 0,
@@ -2638,8 +2638,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3156,
-   "ms": 159.434,
-   "max_page_ms": 3.02,
+   "ms": 156.221,
+   "max_page_ms": 2.958,
    "items": {
     "fillPath": 606,
     "strokePath": 1,
@@ -2654,7 +2654,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1037.2,
+   "wall_ms": 1062.267,
    "pages": 11,
    "ops": 11206,
    "forms": 0,
@@ -2667,8 +2667,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 4934,
-   "ms": 31.254,
-   "max_page_ms": 7.28,
+   "ms": 31.367,
+   "max_page_ms": 7.564,
    "items": {
     "fillPath": 784,
     "strokePath": 11,
@@ -2683,7 +2683,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1053.754,
+   "wall_ms": 1061.458,
    "pages": 12,
    "ops": 15142,
    "forms": 0,
@@ -2696,8 +2696,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 2028,
-   "ms": 43.592,
-   "max_page_ms": 6.025,
+   "ms": 43.742,
+   "max_page_ms": 5.982,
    "items": {
     "fillPath": 352,
     "strokePath": 12,
@@ -2712,7 +2712,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1056.147,
+   "wall_ms": 1064.806,
    "pages": 36,
    "ops": 17928,
    "forms": 1,
@@ -2725,8 +2725,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 3380,
-   "ms": 41.523,
-   "max_page_ms": 9.377,
+   "ms": 42.263,
+   "max_page_ms": 9.627,
    "items": {
     "fillPath": 143,
     "strokePath": 331,
@@ -2741,7 +2741,7 @@
   {
    "status": "ok",
    "open": "strict",
-   "wall_ms": 1002.98,
+   "wall_ms": 1003.925,
    "pages": 1,
    "ops": 314,
    "forms": 0,
@@ -2754,8 +2754,8 @@
    "error_pages": 0,
    "page_errors": [],
    "max_page_ops": 314,
-   "ms": 2.229,
-   "max_page_ms": 2.229,
+   "ms": 2.308,
+   "max_page_ms": 2.308,
    "items": {
     "fillPath": 3,
     "strokePath": 13,
