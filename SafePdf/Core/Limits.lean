@@ -37,6 +37,12 @@ structure Limits where
   its worst-case time by `O(maxRepairFailures · input size)`. Exhausting it is not an error:
   repair is best-effort, so no `LimitKind` corresponds to it. -/
   maxRepairFailures : Nat := 256
+  /-- Maximum number of filters in one stream's `/Filter` chain (ISO 32000-2 §7.3.8.2,
+  Plan.md §4 S3). Real files use at most 2–3; the cap bounds the work of one chain at
+  `maxFilters` decoding stages, so a chain allocates at most
+  `maxFilters · maxDecodedStreamBytes` bytes (`Core.Filter.produced_le_maxFilters`). Excess
+  yields `Error.limitExceeded .filters`. -/
+  maxFilters : Nat := 8
   deriving Repr, Inhabited
 
 namespace Limits
