@@ -54,10 +54,16 @@ never an error (M5: the interpreter never fails).
   `/Subtype /PS` is ignored silently (§8.8.2); a missing or malformed XObject is a warning.
 * **Inline images** are executed by `exec` (an `.inline dict data` item); `Ops.tokenize` has
   already expanded the dictionary's abbreviations and sliced the data.
+* **Font identity** (`Tf`, task 6.7a): `exec` sets the font by resource name; the runner then
+  resolves that name in the current frame's `/Font` resources and records the font *object*
+  in `FontRef.id`: `.ref num gen` when the entry is an indirect reference, else `.res owner`
+  (the entry of that name in the resources of `Frame.owner`: 0 for the page, the form's object
+  number for a form with its own `/Resources`). So a form's `/F1` and the page's `/F1` are
+  different fonts, and a font set before a form is invoked keeps its identity inside it.
 * **`gs`** (§8.4.5, Table 57): `/LW`, `/LC`, `/LJ`, `/ML`, `/D`, `/RI`, `/CA`, `/ca` are
-  applied to the graphics state (what the display list carries). Ignored, documented: `/Font`
-  (the display list's `FontRef` names a `/Font` *resource*, an ExtGState font is an indirect
-  font dictionary: phase 6), `/SMask`, `/BM`, `/AIS`, `/TK`, `/OP`, `/op`, `/OPM`, `/BG`,
+  applied to the graphics state (what the display list carries); `/Font [ref size]` sets the
+  font (`FontId.ref`, empty resource name) and size (a direct font dictionary there is skipped
+  with a warning). Ignored, documented: `/SMask`, `/BM`, `/AIS`, `/TK`, `/OP`, `/op`, `/OPM`, `/BG`,
   `/BG2`, `/UCR`, `/UCR2`, `/TR`, `/TR2`, `/HT`, `/FL`, `/SM`, `/SA`, `/UseBlackPtComp`,
   `/HTO`, `/Type`. A malformed value of an applied key is skipped with a warning; a missing
   ExtGState is a warning.
@@ -122,6 +128,10 @@ structure Frame where
   res : Dict
   /-- Object numbers of the forms on the current nesting path (innermost first). -/
   visited : List Nat
+  /-- Whose resources `res` are: 0 for the page, else the object number of the form whose own
+  `/Resources` they are (a form without them inherits its parent's owner). Identifies direct
+  font dictionaries (`FontId.res`). -/
+  owner : Nat
 
 /-- Runner state. -/
 structure St (σ ω : Type) where
@@ -230,15 +240,16 @@ def rectPath (m : Matrix) (x0 y0 x1 y1 : Fixed) : Path :=
   let p := fun x y => Matrix.apply m ⟨x, y⟩
   ⟨#[.moveTo (p x0 y0), .lineTo (p x1 y0), .lineTo (p x1 y1), .lineTo (p x0 y1), .closePath]⟩
 
-/-- A form's resources: its own `/Resources`, else the parent's. -/
-def formResources {σ : Type} (src : Source σ) (s : σ) (d : Dict) (parent : Dict) :
-    Dict × σ :=
+/-- A form's resources and their owner (`Frame.owner`): its own `/Resources` (owner: the
+form's object number `num`), else the parent's (`parent`, owner `owner`). -/
+def formResources {σ : Type} (src : Source σ) (s : σ) (d : Dict) (parent : Dict) (owner num : Nat) :
+    (Dict × Nat) × σ :=
   match Dict.get? d (nm "Resources") with
-  | none => (parent, s)
+  | none => ((parent, owner), s)
   | some o =>
     match resolve src s o with
-    | (.dict r, s) => (r, s)
-    | (_, s) => (parent, s)
+    | (.dict r, s) => ((r, num), s)
+    | (_, s) => ((parent, owner), s)
 
 /-! ## ExtGState (§8.4.5) -/
 
@@ -279,10 +290,19 @@ def gsEntry (g : GState) (k : Name) (v : PdfObject) : GState × Nat :=
     match num? v with
     | some x => ({ g with fillAlpha := Comp.ofFixed x }, 0)
     | none => (g, 1)
+  else if k = nm "Font" then
+    match v with
+    | .array [.ref n gen, sz] =>
+      match num? sz with
+      | some x =>
+        ({ g with text := { g.text with font := some { name := ⟨[]⟩, size := x, id := .ref n gen } } },
+          0)
+      | none => (g, 1)
+    | _ => (g, 1)
   else (g, 0)
 
 /-- Keys `gsEntry` applies (others are ignored without resolving their values). -/
-def gsKeys : List String := ["LW", "LC", "LJ", "ML", "D", "RI", "CA", "ca"]
+def gsKeys : List String := ["LW", "LC", "LJ", "ML", "D", "RI", "CA", "ca", "Font"]
 
 /-- Apply an ExtGState dictionary: new state, warnings, source state. -/
 def applyExtGState {σ : Type} (src : Source σ) (s : σ) (d : Dict) (g : GState) :
@@ -548,6 +568,38 @@ def gsStep {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op
       | (_, s) => (m, [], 1, 0, s)
     | (none, s) => (m, [], 1, 0, s)
 
+/-- The font object that resource name `name` denotes in frame `fr` (`FontId`): the
+referenced object when the `/Font` entry is a reference, else the entry of that name in the
+frame owner's resources. -/
+def fontIdOf {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (name : Name) : FontId × σ :=
+  match resEntry src s fr.res "Font" name with
+  | (some (.ref n g), s) => (.ref n g, s)
+  | (_, s) => (.res fr.owner, s)
+
+/-- The font name `Tf` selects (the operand pattern `exec` accepts). -/
+def tfName? (o : List PdfObject) : Option Name :=
+  match lastN 2 o with
+  | some [.name n, sz] => (num? sz).map fun _ => n
+  | _ => none
+
+/-- Record font object `id` in the current font when it has resource name `n`. -/
+def setFontId (m : Machine) (n : Name) (id : FontId) : Machine :=
+  let g := m.core.gs
+  withGs m { g with text := { g.text with
+    font := g.text.font.map fun f => if f.name = n then { f with id } else f } }
+
+/-- `Tf`: `exec` selects the font by name, then the name is resolved in the current frame
+(`fontIdOf`). -/
+def tfStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    Local σ :=
+  match viaExec env.cfg m s op with
+  | (m', its, w, u, s1) =>
+    match tfName? op.operands with
+    | some n =>
+      let (id, s2) := fontIdOf env.src s1 fr n
+      (setFontId m' n id, its, w, u, s2)
+    | none => (m', its, w, u, s1)
+
 /-- `CS`/`cs`: a resource name is resolved; device names and `Pattern` go to `exec`. -/
 def csStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (stroke : Bool) (m : Machine) (s : σ)
     (op : Op) : Local σ :=
@@ -592,6 +644,7 @@ def localStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : �
     Local σ :=
   match op.op with
   | [103, 115] => gsStep env.src fr m s op          -- gs
+  | [84, 102] => tfStep env fr m s op               -- Tf
   | [67, 83] => csStep env fr true m s op           -- CS
   | [99, 115] => csStep env fr false m s op         -- cs
   | [83, 67] => scStep env fr true m s op           -- SC
@@ -612,6 +665,8 @@ structure FormJob where
   tokW : Nat
   /-- The form's resources. -/
   res : Dict
+  /-- Whose resources they are (`Frame.owner`). -/
+  owner : Nat
   /-- Graphics state at the start of the form. -/
   gs : GState
   /-- The `/BBox` clip, page space. -/
@@ -631,15 +686,15 @@ inductive DoOut (σ : Type) where
 def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n : Nat) (d : Dict)
     (bytes : ByteArray) (s : σ) : DoOut σ :=
   let t := Ops.tokenize env.cfg.limits bytes
-  let r := formResources env.src s d fr.res
+  let r := formResources env.src s d fr.res fr.owner n
   let gs := m.core.gs
   let ctm := Matrix.mul (formMatrix d) gs.ctm
   match bboxOf d with
   | some (x0, y0, x1, y1) =>
     let path := rectPath ctm x0 y0 x1 y1
-    .form ⟨n, t.ops, t.warnings, r.1, { gs with ctm, clip := ⟨path, .nonzero⟩ :: gs.clip },
-      some path, 0⟩ r.2
-  | none => .form ⟨n, t.ops, t.warnings, r.1, { gs with ctm }, none, 1⟩ r.2
+    .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2,
+      { gs with ctm, clip := ⟨path, .nonzero⟩ :: gs.clip }, some path, 0⟩ r.2
+  | none => .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2, { gs with ctm }, none, 1⟩ r.2
 
 /-- `formJob` prepares form `n`. -/
 theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n : Nat}
@@ -690,7 +745,7 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
         match inner with
         | some run =>
           let w := job.w + job.tokW
-          match run ⟨job.res, job.num :: fr.visited⟩
+          match run ⟨job.res, job.num :: fr.visited, job.owner⟩
               ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
                 warnings + w, unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op w 0⟩ job.ops with
@@ -791,6 +846,17 @@ theorem localStep_bound {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machi
           · exact viaExec_bound env.cfg m _ op
         · exact viaExec_bound env.cfg m _ op
     · exact viaExec_bound env.cfg m s op
+  have htf : (tfStep env fr m s op).2.1.length + pendBit (tfStep env fr m s op).1
+      ≤ pendBit m + Paint.maxItems := by
+    have := viaExec_bound env.cfg m s op
+    unfold tfStep
+    revert this
+    rcases viaExec env.cfg m s op with ⟨m', its, w, u, s1⟩
+    intro hv
+    dsimp only at hv ⊢
+    split
+    · exact hv
+    · exact hv
   unfold localStep
   split
   · unfold gsStep
@@ -801,6 +867,7 @@ theorem localStep_bound {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machi
         · simp only [List.length_nil, hgs]; omega
         · exact hk
       · exact hk
+  · exact htf
   · exact hcs true s
   · exact hcs false s
   · exact hsc true s
@@ -851,9 +918,9 @@ theorem stepR_good {σ ω : Type} (env : Env σ ω)
             simp only [size_pushAll, formMachine, pendBit, Option.isSome_none,
               Bool.false_eq_true, ↓reduceIte, Paint.maxItems] at h hcl ⊢
             omega
-          have h2 := hin run hrun (pendBit m + k) ⟨job.res, job.num :: fr.visited⟩ _ job.ops h1
+          have h2 := hin run hrun (pendBit m + k) ⟨job.res, job.num :: fr.visited, job.owner⟩ _ job.ops h1
           revert h2
-          rcases run ⟨job.res, job.num :: fr.visited⟩
+          rcases run ⟨job.res, job.num :: fr.visited, job.owner⟩
               ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ job.ops with
@@ -909,7 +976,7 @@ def St.init {σ ω : Type} (s : σ) (obs : ω) : St σ ω :=
 `Limits.maxXObjectDepth`, from the initial machine. Total; never fails. -/
 def runPage {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ) (obs : ω) :
     St σ ω :=
-  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, []⟩ (St.init s obs) ops
+  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0⟩ (St.init s obs) ops
 
 /-- Tokenize and run decoded page content; tokenizer warnings and truncation are added. -/
 def runBytes {σ ω : Type} (env : Env σ ω) (res : Dict) (bytes : ByteArray) (s : σ)
@@ -935,7 +1002,7 @@ theorem runPage_items_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Ar
     (obs : ω) :
     (runPage env res ops s obs).items.size ≤
       Paint.maxItems * (runPage env res ops s obs).ops := by
-  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, []⟩ (St.init s obs) ops
+  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0⟩ (St.init s obs) ops
     (St.init_good _ s obs)).1
   unfold runPage
   omega
@@ -1083,6 +1150,34 @@ private def gsRes : String :=
   some (Comp.ofFixed (Fixed.ofDecimal ⟨25, 2⟩))
 #guard (run [] gsRes "/GS0 gs").warnings == 0
 #guard (run [] gsRes "/GS9 gs").warnings == 1
+-- font identity (6.7a): `Tf` resolved in the current frame; ExtGState `/Font`
+private def fontOf : DisplayItem → Option FontRef
+  | .glyphRun r _ => some r.font
+  | _ => none
+private def fontDoc : List (Nat × IndirectBody) :=
+  [(6, strm "<< /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 21 0 R >> >> >>"
+     "BT /F1 9 Tf (x) Tj ET"),
+   (7, strm "<< /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 << /Subtype /Type1 >> >> >> >>"
+     "BT /F1 9 Tf (x) Tj ET"),
+   (8, strm "<< /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 23 0 R >> >> >>"
+     "BT (y) Tj ET"),
+   (9, strm "<< /Subtype /Form /BBox [0 0 1 1] >>" "BT /F2 5 Tf (z) Tj ET")]
+private def fontRes : String :=
+  "<< /Font << /F1 20 0 R /F2 << /Subtype /Type1 >> >> " ++
+  "/XObject << /A 6 0 R /B 7 0 R /C 8 0 R /D 9 0 R >> /ExtGState << /G << /Font [22 0 R 7] >> >> >>"
+private def fontsIn (c : String) : List FontRef :=
+  (run fontDoc fontRes c).items.toList.filterMap fontOf
+#guard (fontsIn "BT /F1 12 Tf (a) Tj ET").map (·.id) == [.ref 20 0]
+#guard (fontsIn "BT /F2 12 Tf (a) Tj ET").map (·.id) == [.res 0]
+#guard (fontsIn "/A Do BT /F1 12 Tf (a) Tj ET").map (·.id) == [.ref 21 0, .ref 20 0]
+#guard (fontsIn "/B Do").map (·.id) == [.res 7]
+-- a font selected before a form keeps its identity inside it (form 8 has its own /F1)
+#guard (fontsIn "/F1 12 Tf /C Do").map (·.id) == [.ref 20 0]
+-- a form without /Resources resolves in the invoking content's frame
+#guard (fontsIn "/D Do").map (·.id) == [.res 0]
+#guard (fontsIn "BT /G gs (a) Tj ET").map (fun f => (f.id, f.size)) == [(.ref 22 0, fi 7)]
+#guard (run fontDoc fontRes "BT /G gs (a) Tj ET").warnings == 0
+#guard (run [] "<< /ExtGState << /G << /Font [<< >> 7] >> >> >>" "/G gs").warnings == 1
 -- named colour spaces
 private def csDoc : List (Nat × IndirectBody) :=
   [(10, strm "<< /N 3 /Alternate /DeviceRGB >>" ""),

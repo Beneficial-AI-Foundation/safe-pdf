@@ -2,7 +2,7 @@ import SafePdf.Shell.Views.Common
 import SafePdf.Shell.Views.Summary
 import SafePdf.Shell.Views.Objects
 import SafePdf.Shell.Views.Pages
-import SafePdf.Core.Content.Run
+import SafePdf.Core.Text
 
 /-!
 # `ops` and `svg` views: operator coverage and SVG export from the display list (task 5.4)
@@ -20,7 +20,7 @@ significant, but a token must not run across a boundary), tokenize with
 `Core.Content.Ops.tokenize` and run the content with the page's `/Resources` through
 `Core.Content.runPage` (task 5.2b: forms expanded, images, ExtGState and named colour spaces
 resolved) with the default `Core.Content.Config` (zero glyph advance: fonts are phase 6). The
-runner's `Source` is `docSource`: objects fetched with `OpenDoc.getObject`, form contents and
+runner's `Source` is `Core.Text.docSource`: objects fetched with `OpenDoc.getObject`, form contents and
 `Indexed` lookup streams decoded with `decodeBodyB` from the **same** document budget.
 
 ## Coverage: definition
@@ -135,21 +135,13 @@ def interpConfig (limits : Limits) : SafePdf.Core.Content.Config := { limits }
 
 open SafePdf.Core.Filter (Budget)
 
-/-- The runner's document access: `OpenDoc.getObject`, and stream decoding under the document
-budget (`decodeBodyB`, rules D1–D2, as `Doc.decodeStreamOf` without a second fetch; an
-image codec is an error, rule D3). -/
-def docSource (limits : Limits) (doc : Doc) : SafePdf.Core.Content.Source Budget :=
-  ⟨fun b n g => (doc.file.getObject limits n g, b),
-   fun b n st =>
-     let r := decodeBodyB doc.file limits b (offsetOf doc.file n) (.stream st)
-     (contentData (offsetOf doc.file n) r.1, r.2)⟩
+-- The runner's document access and the concatenation of content parts are shared with text
+-- extraction (`Core.Text.docSource`: `OpenDoc.getObject`, stream decoding under the document
+-- budget with `decodeBodyB`, rules D1–D3; `Core.Text.joinParts`: one space byte between parts,
+-- §7.8.2).
+export SafePdf.Core.Text (docSource joinParts)
 
 /-! ## Page content -/
-
-/-- Concatenate decoded content parts with one space byte between them (§7.8.2). -/
-def joinParts : List ByteArray → ByteArray
-  | [] => ByteArray.empty
-  | p :: ps => ps.foldl (fun acc b => (acc.push 32) ++ b) p
 
 /-- Per-operator counters. -/
 structure OpStat where

@@ -535,12 +535,28 @@ def TextRenderMode.paints : TextRenderMode → Bool
   | .invisible | .clip => false
   | _ => true
 
-/-- Font selection by `Tf`: font resource name and size. -/
+/-- Which font dictionary a `FontRef` denotes (task 6.7a): a resource name alone is ambiguous
+once forms carry their own `/Resources` (a form's `/F1` may differ from the page's `/F1`). -/
+inductive FontId where
+  /-- The entry `FontRef.name` of the `/Font` resources of content `owner`: `0` is the page,
+  any other value the object number of the form XObject whose own `/Resources` hold the entry
+  (a direct font dictionary, or an unresolvable name). The resource-free interpreter
+  (`Interp`) always leaves `.res 0` (the page's resource of that name). -/
+  | res (owner : Nat)
+  /-- The font dictionary is indirect object `num gen` (a `/Font` resource that is a
+  reference, or an ExtGState `/Font` entry). -/
+  | ref (num gen : Nat)
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Font selection by `Tf` (or an ExtGState `/Font`): font resource name, size, and the font
+object it resolved to. -/
 structure FontRef where
-  /-- The `/Font` resource name. -/
+  /-- The `/Font` resource name (empty for an ExtGState font). -/
   name : Name
   /-- `Tfs` (may be negative or zero; kept as given). -/
   size : Fixed
+  /-- The font object (set by the content runner `Core.Content.Run`, task 6.7a). -/
+  id : FontId := .res 0
   deriving DecidableEq, Repr, Inhabited
 
 /-- Text state parameters (ISO 32000-2 §9.3), part of the graphics state. -/
