@@ -652,3 +652,15 @@ import SafePdf
 #print axioms SafePdf.Core.Doc.contentPart_total
 #print axioms SafePdf.Core.Doc.decodeContentsBC_total
 #print axioms SafePdf.Core.Doc.decodeContentsS_total
+-- Phase 5, task 5.2b: content runner with resources (SafePdf/Core/Content/Run.lean)
+#print axioms SafePdf.Core.Content.Run.formJob_num
+#print axioms SafePdf.Core.Content.Run.doStep_form_fresh
+#print axioms SafePdf.Core.Content.Run.viaExec_bound
+#print axioms SafePdf.Core.Content.Run.localStep_bound
+#print axioms SafePdf.Core.Content.Run.stepR_good
+#print axioms SafePdf.Core.Content.Run.foldl_good
+#print axioms SafePdf.Core.Content.Run.runOps_good
+#print axioms SafePdf.Core.Content.St.init_good
+#print axioms SafePdf.Core.Content.runPage_ops_le
+#print axioms SafePdf.Core.Content.runPage_items_le
+#print axioms SafePdf.Core.Content.runBytes_items_le_max

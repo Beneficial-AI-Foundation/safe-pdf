@@ -2,11 +2,12 @@
 file:       input
 open:       strict
 pages:      2 (0 with undecodable contents, 0 truncated)
-operators:  82, covered 80 (97.56%), unsupported 2, warned 2
-warnings:   interpreter 3, tokenizer 0
-items:      fillPath=6 strokePath=7 clip=2 image=1 shading=1 unsupported=2
-  #0  ops 75  covered 73  unsupported 2  warned 2  warnings 3+0  items fillPath=6 strokePath=6 clip=2 image=1 shading=1 unsupported=2
-  #1  ops 7  covered 7  unsupported 0  warned 0  warnings 0+0  items strokePath=1
+forms:      0 expanded
+operators:  82, covered 80 (97.56%), unsupported 2, warned 3
+warnings:   interpreter 4, tokenizer 0
+items:      fillPath=6 strokePath=7 clip=2 shading=1 unsupported=2
+  #0  ops 75  forms 0  covered 73  unsupported 2  warned 3  warnings 4+0  items fillPath=6 strokePath=6 clip=2 shading=1 unsupported=2
+  #1  ops 7  forms 0  covered 7  unsupported 0  warned 0  warnings 0+0  items strokePath=1
 histogram:
   re                 11  warned 0
   w                   7  warned 1
@@ -23,7 +24,7 @@ histogram:
   j                   2  warned 0
   n                   2  warned 0
   BX                  1  warned 0
-  Do                  1  warned 0
+  Do                  1  warned 1
   EX                  1  warned 0
   G                   1  warned 0
   K                   1  warned 0
@@ -40,9 +41,9 @@ histogram:
   sh                  1  warned 0
   zork                1  warned 0  UNSUPPORTED
 --- ops --json
-{"page": 0, "error": null, "parts": 2, "contentBytes": 598, "ops": 75, "covered": 73, "unsupported": 2, "warned": 2, "interpWarnings": 3, "tokWarnings": 0, "truncated": false, "items": {"fillPath": 6, "strokePath": 6, "clip": 2, "glyphRun": 0, "image": 1, "shading": 1, "unsupported": 2}, "unsupportedOps": {"frobnicate": 1, "zork": 1}}
-{"page": 1, "error": null, "parts": 1, "contentBytes": 49, "ops": 7, "covered": 7, "unsupported": 0, "warned": 0, "interpWarnings": 0, "tokWarnings": 0, "truncated": false, "items": {"fillPath": 0, "strokePath": 1, "clip": 0, "glyphRun": 0, "image": 0, "shading": 0, "unsupported": 0}, "unsupportedOps": {}}
-{"summary": {"path": "input", "open": "strict", "pages": 2, "errorPages": 0, "truncatedPages": 0, "ops": 82, "covered": 80, "unsupported": 2, "warned": 2, "interpWarnings": 3, "tokWarnings": 0, "maxPageOps": 75, "items": {"fillPath": 6, "strokePath": 7, "clip": 2, "glyphRun": 0, "image": 1, "shading": 1, "unsupported": 2}, "histogram": {"re": {"count": 11, "unsupported": 0, "warned": 0}, "w": {"count": 7, "unsupported": 0, "warned": 1}, "Q": {"count": 6, "unsupported": 0, "warned": 1}, "S": {"count": 6, "unsupported": 0, "warned": 0}, "l": {"count": 5, "unsupported": 0, "warned": 0}, "q": {"count": 5, "unsupported": 0, "warned": 0}, "RG": {"count": 4, "unsupported": 0, "warned": 0}, "f": {"count": 4, "unsupported": 0, "warned": 0}, "m": {"count": 4, "unsupported": 0, "warned": 0}, "rg": {"count": 4, "unsupported": 0, "warned": 0}, "cm": {"count": 3, "unsupported": 0, "warned": 0}, "J": {"count": 2, "unsupported": 0, "warned": 0}, "j": {"count": 2, "unsupported": 0, "warned": 0}, "n": {"count": 2, "unsupported": 0, "warned": 0}, "BX": {"count": 1, "unsupported": 0, "warned": 0}, "Do": {"count": 1, "unsupported": 0, "warned": 0}, "EX": {"count": 1, "unsupported": 0, "warned": 0}, "G": {"count": 1, "unsupported": 0, "warned": 0}, "K": {"count": 1, "unsupported": 0, "warned": 0}, "M": {"count": 1, "unsupported": 0, "warned": 0}, "W": {"count": 1, "unsupported": 0, "warned": 0}, "W*": {"count": 1, "unsupported": 0, "warned": 0}, "b": {"count": 1, "unsupported": 0, "warned": 0}, "c": {"count": 1, "unsupported": 0, "warned": 0}, "d": {"count": 1, "unsupported": 0, "warned": 0}, "f*": {"count": 1, "unsupported": 0, "warned": 0}, "frobnicate": {"count": 1, "unsupported": 1, "warned": 0}, "g": {"count": 1, "unsupported": 0, "warned": 0}, "k": {"count": 1, "unsupported": 0, "warned": 0}, "sh": {"count": 1, "unsupported": 0, "warned": 0}, "zork": {"count": 1, "unsupported": 1, "warned": 0}}}}
+{"page": 0, "error": null, "parts": 2, "contentBytes": 598, "ops": 75, "forms": 0, "covered": 73, "unsupported": 2, "warned": 3, "interpWarnings": 4, "tokWarnings": 0, "truncated": false, "items": {"fillPath": 6, "strokePath": 6, "clip": 2, "glyphRun": 0, "image": 0, "shading": 1, "unsupported": 2}, "unsupportedOps": {"frobnicate": 1, "zork": 1}}
+{"page": 1, "error": null, "parts": 1, "contentBytes": 49, "ops": 7, "forms": 0, "covered": 7, "unsupported": 0, "warned": 0, "interpWarnings": 0, "tokWarnings": 0, "truncated": false, "items": {"fillPath": 0, "strokePath": 1, "clip": 0, "glyphRun": 0, "image": 0, "shading": 0, "unsupported": 0}, "unsupportedOps": {}}
+{"summary": {"path": "input", "open": "strict", "pages": 2, "errorPages": 0, "truncatedPages": 0, "ops": 82, "forms": 0, "covered": 80, "unsupported": 2, "warned": 3, "interpWarnings": 4, "tokWarnings": 0, "maxPageOps": 75, "items": {"fillPath": 6, "strokePath": 7, "clip": 2, "glyphRun": 0, "image": 0, "shading": 1, "unsupported": 2}, "histogram": {"re": {"count": 11, "unsupported": 0, "warned": 0}, "w": {"count": 7, "unsupported": 0, "warned": 1}, "Q": {"count": 6, "unsupported": 0, "warned": 1}, "S": {"count": 6, "unsupported": 0, "warned": 0}, "l": {"count": 5, "unsupported": 0, "warned": 0}, "q": {"count": 5, "unsupported": 0, "warned": 0}, "RG": {"count": 4, "unsupported": 0, "warned": 0}, "f": {"count": 4, "unsupported": 0, "warned": 0}, "m": {"count": 4, "unsupported": 0, "warned": 0}, "rg": {"count": 4, "unsupported": 0, "warned": 0}, "cm": {"count": 3, "unsupported": 0, "warned": 0}, "J": {"count": 2, "unsupported": 0, "warned": 0}, "j": {"count": 2, "unsupported": 0, "warned": 0}, "n": {"count": 2, "unsupported": 0, "warned": 0}, "BX": {"count": 1, "unsupported": 0, "warned": 0}, "Do": {"count": 1, "unsupported": 0, "warned": 1}, "EX": {"count": 1, "unsupported": 0, "warned": 0}, "G": {"count": 1, "unsupported": 0, "warned": 0}, "K": {"count": 1, "unsupported": 0, "warned": 0}, "M": {"count": 1, "unsupported": 0, "warned": 0}, "W": {"count": 1, "unsupported": 0, "warned": 0}, "W*": {"count": 1, "unsupported": 0, "warned": 0}, "b": {"count": 1, "unsupported": 0, "warned": 0}, "c": {"count": 1, "unsupported": 0, "warned": 0}, "d": {"count": 1, "unsupported": 0, "warned": 0}, "f*": {"count": 1, "unsupported": 0, "warned": 0}, "frobnicate": {"count": 1, "unsupported": 1, "warned": 0}, "g": {"count": 1, "unsupported": 0, "warned": 0}, "k": {"count": 1, "unsupported": 0, "warned": 0}, "sh": {"count": 1, "unsupported": 0, "warned": 0}, "zork": {"count": 1, "unsupported": 1, "warned": 0}}}}
 --- consistency
 page 0: ok
 page 1: ok
@@ -72,7 +73,6 @@ page 1: ok
 <!-- unsupported operator: frobnicate -->
 <!-- unsupported operator: zork -->
 <rect x="0" y="0" width="612" height="792" fill="rgb(70%,70%,70%)" fill-opacity="0.5" data-shading="Sh0"/>
-<rect x="0" y="0" width="1" height="1" transform="matrix(1 0 0 1 0 0)" fill="rgb(80%,80%,80%)" data-image="Im1"/>
 <defs>
 <clipPath id="c0" clipPathUnits="userSpaceOnUse"><path d="M0 0 L300 0 L300 300 L0 300 Z" clip-rule="nonzero"/></clipPath>
 <clipPath id="c1" clipPathUnits="userSpaceOnUse" clip-path="url(#c0)"><path d="M100 100 L200 100 L200 200 L100 200 Z" clip-rule="evenodd"/></clipPath>

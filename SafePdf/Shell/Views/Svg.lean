@@ -2,6 +2,7 @@ import SafePdf.Shell.Views.Common
 import SafePdf.Shell.Views.Summary
 import SafePdf.Shell.Views.Objects
 import SafePdf.Shell.Views.Pages
+import SafePdf.Core.Content.Run
 
 /-!
 # `ops` and `svg` views: operator coverage and SVG export from the display list (task 5.4)
@@ -16,15 +17,20 @@ decode each page's `/Contents` with `Doc.decodeContentsB` under **one document b
 (`Filter.Budget.init`, threaded from page to page in document order), concatenate the parts
 with one space byte between them (ISO 32000-2 §7.8.2: the division into streams is not
 significant, but a token must not run across a boundary), tokenize with
-`Core.Content.Ops.tokenize` and interpret with the default `Core.Content.Config` (zero glyph
-advance: fonts are phase 6).
+`Core.Content.Ops.tokenize` and run the content with the page's `/Resources` through
+`Core.Content.runPage` (task 5.2b: forms expanded, images, ExtGState and named colour spaces
+resolved) with the default `Core.Content.Config` (zero glyph advance: fonts are phase 6). The
+runner's `Source` is `docSource`: objects fetched with `OpenDoc.getObject`, form contents and
+`Indexed` lookup streams decoded with `decodeBodyB` from the **same** document budget.
 
 ## Coverage: definition
 
-The views run the interpreter's own step function `Interp.exec` operator by operator, folding
-exactly as `Core.Content.interp` does (`stepAcc`: same machine, same item order), so every
-operator occurrence can be attributed. The golden test checks that the resulting item count,
-warning and unsupported totals equal `Core.Content.interpBytes`.
+The views run `Core.Content.runPage` with an observer (`Env.observe`) that the runner calls
+once per executed operator with that operator's warning and unknown-operator counts, so every
+operator occurrence is attributed, **including the operators inside form XObjects** (since
+task 5.2b; each expansion of a form counts its operators again). The golden test checks that
+the item count, warning and unsupported totals equal `Core.Content.runBytes` without an
+observer.
 
 * An operator occurrence is **unsupported** iff `exec` reports a non-zero unknown-operator
   count for it — equivalently, it emitted a `DisplayItem.unsupported` item. (Outside
@@ -35,9 +41,9 @@ warning and unsupported totals equal `Core.Content.interpBytes`.
   `Q` on an empty stack, `q` at the depth limit, text shown without a font, …) are counted in
   addition as **warned**; they are still covered (the operator is known, the input was bad).
 * Covered also includes the operators the interpreter deliberately treats as placeholders or
-  no-ops in phase 5: `gs` (ExtGState not resolved until 5.2b), `Do` (placeholder image item;
-  forms not expanded until 5.2b), `sh` (placeholder shading), `d0`/`d1`, marked content.
-  `scripts/corpus/opcoverage.py` reports a second, stricter fraction excluding those.
+  no-ops in phase 5: `sh` (placeholder shading), `d0`/`d1`, marked content.
+  `scripts/corpus/opcoverage.py` reports a second, stricter fraction excluding those. (`gs`
+  and `Do` are resolved since task 5.2b.)
 * Coverage = covered / all operator occurrences. Tokenizer recoveries (dropped operands,
   stray delimiters) are not operators; they are reported as tokenizer warnings, and a page
   whose operator count reached `Limits.maxOpsPerPage` is reported as truncated.
@@ -92,7 +98,12 @@ per page is printed (JSON with `--json`). The SVG is produced from the `DisplayL
   for stroke-only modes, `none` for invisible/clip modes (`data-render-mode` is then set).
   Real glyphs are phase 6.
 * **`image`** → a grey `<rect>` over the unit square with `transform="matrix(CTM)"` and
-  `data-image` (resource name, or `inline`); stencil masks use the fill colour.
+  `data-image` (resource name, or `inline`), plus a summary of the image dictionary
+  (`data-width`, `data-height`, `data-bpc`, `data-colorspace`, and `data-object` for
+  XObjects; read from the document, data not decoded); stencil masks (`/ImageMask true`) use
+  the fill colour (`data-mask="stencil"`). Inline image data is decoded with
+  `Filter.decodeStream` (strict, per-stream limit) and the outcome recorded in
+  `data-decoded` (`N bytes`, the image codec left for the quarantine, or `error`).
 * **`shading`** → a translucent grey rect over the CropBox, clipped by the item's clip,
   `data-shading` = resource name.
 * **`unsupported`** → an XML comment naming the operator.
@@ -114,6 +125,17 @@ open SafePdf.Core.Content (Fixed Matrix Point Segment Path Clip ClipPath FillRul
 
 /-- The interpreter configuration used by both views: default, with the run's limits. -/
 def interpConfig (limits : Limits) : SafePdf.Core.Content.Config := { limits }
+
+open SafePdf.Core.Filter (Budget)
+
+/-- The runner's document access: `OpenDoc.getObject`, and stream decoding under the document
+budget (`decodeBodyB`, rules D1–D2, as `Doc.decodeStreamOf` without a second fetch; an
+image codec is an error, rule D3). -/
+def docSource (limits : Limits) (doc : Doc) : SafePdf.Core.Content.Source Budget :=
+  ⟨fun b n g => (doc.file.getObject limits n g, b),
+   fun b n st =>
+     let r := decodeBodyB doc.file limits b (offsetOf doc.file n) (.stream st)
+     (contentData (offsetOf doc.file n) r.1, r.2)⟩
 
 /-! ## Page content -/
 
@@ -197,8 +219,10 @@ structure PageOps where
   parts : Nat := 0
   /-- Concatenated content length. -/
   bytes : Nat := 0
-  /-- Operators produced by the tokenizer. -/
+  /-- Operators executed: the page's and those of its forms (each expansion counted). -/
   ops : Nat := 0
+  /-- Form XObjects expanded. -/
+  forms : Nat := 0
   /-- Unsupported occurrences. -/
   unsupported : Nat := 0
   /-- Covered occurrences executed with a warning. -/
@@ -207,7 +231,7 @@ structure PageOps where
   interpWarnings : Nat := 0
   /-- Tokenizer warnings. -/
   tokWarnings : Nat := 0
-  /-- The tokenizer stopped at `Limits.maxOpsPerPage`. -/
+  /-- Tokenizing or execution stopped at `Limits.maxOpsPerPage`. -/
   truncated : Bool := false
   /-- Histogram of this page. -/
   hist : Hist := {}
@@ -222,60 +246,56 @@ structure PageOps where
 /-- Covered occurrences. -/
 def PageOps.covered (p : PageOps) : Nat := p.ops - p.unsupported
 
-/-- Accumulator of the attributed fold. -/
-structure Acc where
-  /-- Interpreter machine. -/
-  m : Machine := {}
-  /-- Items so far. -/
-  items : DisplayList := #[]
-  /-- Interpreter warnings. -/
-  warnings : Nat := 0
-  /-- Unknown-operator count. -/
-  unsupported : Nat := 0
-  /-- Covered occurrences with warnings. -/
-  warned : Nat := 0
+/-- Observer state of the attributed run. -/
+structure Obs where
   /-- Histogram. -/
   hist : Hist := {}
+  /-- Covered occurrences with warnings. -/
+  warned : Nat := 0
+  deriving Inhabited
 
-/-- One step: `Interp.exec`, items appended exactly as `Interp.stepAcc` does. -/
-def step (cfg : SafePdf.Core.Content.Config) (a : Acc) (op : Op) : Acc :=
-  match SafePdf.Core.Content.Interp.exec cfg a.m op with
-  | (m', its, w, u) =>
-    let warned := if u == 0 && w > 0 then 1 else 0
-    { m := m', items := SafePdf.Core.Content.Interp.pushAll a.items its,
-      warnings := a.warnings + w, unsupported := a.unsupported + u,
-      warned := a.warned + warned,
-      hist := a.hist.add op.op 1 (if u > 0 then 1 else 0) warned }
+/-- Record one executed operator with its warning and unknown counts. -/
+def observe (o : Obs) (op : Op) (w u : Nat) : Obs :=
+  let warned := if u == 0 && w > 0 then 1 else 0
+  { hist := o.hist.add op.op 1 (if u > 0 then 1 else 0) warned, warned := o.warned + warned }
 
-/-- Analyse one page from its decoded contents. -/
-def analyze (limits : Limits) (index : Nat) (keepItems : Bool)
-    (decoded : Except Error (List ByteArray)) : PageOps :=
+/-- The runner environment of the views. -/
+def runEnv (limits : Limits) (doc : Doc) : SafePdf.Core.Content.Env Budget Obs :=
+  { cfg := interpConfig limits, src := docSource limits doc, observe }
+
+/-- Analyse one page from its decoded contents, running forms under `budget`; returns the
+analysis and the budget left. -/
+def analyze (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (keepItems : Bool)
+    (decoded : Except Error (List ByteArray)) (budget : Budget) : PageOps × Budget :=
   match decoded with
-  | .error e => { index, error := some e }
+  | .error e => ({ index, error := some e }, budget)
   | .ok parts =>
     let bytes := joinParts parts
     let t := SafePdf.Core.Content.Ops.tokenize limits bytes
-    let a := t.ops.foldl (step (interpConfig limits)) {}
-    let kinds := a.items.foldl (fun k it => k.modify (kindIndex it) (· + 1))
+    let st := SafePdf.Core.Content.runPage (runEnv limits doc) (page.resources.getD []) t.ops
+      budget {}
+    let kinds := st.items.foldl (fun k it => k.modify (kindIndex it) (· + 1))
       (Array.replicate nKinds 0)
-    { index, parts := parts.length, bytes := bytes.size, ops := t.ops.size,
-      unsupported := a.unsupported, warned := a.warned, interpWarnings := a.warnings,
-      tokWarnings := t.warnings, truncated := t.truncated, hist := a.hist, kinds,
-      itemCount := a.items.size, items := if keepItems then a.items else #[] }
+    ({ index, parts := parts.length, bytes := bytes.size, ops := st.ops, forms := st.forms,
+       unsupported := st.unsupported, warned := st.obs.warned, interpWarnings := st.warnings,
+       tokWarnings := t.warnings, truncated := t.truncated || st.truncated, hist := st.obs.hist,
+       kinds, itemCount := st.items.size, items := if keepItems then st.items else #[] }, st.s)
 
 /-- Analyse every page, threading the document budget (pure; no timings). -/
 def analyzeDoc (limits : Limits) (doc : Doc) (keepItems : Bool) : Array PageOps := Id.run do
-  let mut budget := SafePdf.Core.Filter.Budget.init limits
+  let mut budget := Budget.init limits
   let mut out : Array PageOps := #[]
   for h : i in [0:doc.pages.size] do
-    let (r, b) := doc.decodeContentsB limits budget (doc.pages[i]'h.upper)
+    let page := doc.pages[i]'h.upper
+    let (r, b) := doc.decodeContentsB limits budget page
+    let (po, b) := analyze limits doc page i keepItems r b
     budget := b
-    out := out.push (analyze limits i keepItems r)
+    out := out.push po
   return out
 
-/-- Analyse every page with per-page wall time (decode + tokenize + interpret). -/
+/-- Analyse every page with per-page wall time (decode + tokenize + run). -/
 def analyzeDocTimed (limits : Limits) (doc : Doc) : IO (Array (PageOps × Nat)) := do
-  let mut budget := SafePdf.Core.Filter.Budget.init limits
+  let mut budget := Budget.init limits
   let mut out : Array (PageOps × Nat) := #[]
   for h : i in [0:doc.pages.size] do
     let page := doc.pages[i]'h.upper
@@ -284,7 +304,7 @@ def analyzeDocTimed (limits : Limits) (doc : Doc) : IO (Array (PageOps × Nat)) 
     -- `lazyPure` evaluates the (strict) pair when this action runs, between the clock reads.
     let r ← IO.lazyPure fun _ =>
       let (d, b) := doc.decodeContentsB limits b0 page
-      (analyze limits i false d, b)
+      analyze limits doc page i false d b
     match r with
     | (po, b) =>
       let t1 ← IO.monoNanosNow
@@ -316,6 +336,8 @@ structure Totals where
   pages : Nat := 0
   /-- Operators. -/
   ops : Nat := 0
+  /-- Form expansions. -/
+  forms : Nat := 0
   /-- Unsupported. -/
   unsupported : Nat := 0
   /-- Warned. -/
@@ -338,7 +360,7 @@ structure Totals where
 /-- Totals over pages. -/
 def totals (ps : Array PageOps) : Totals :=
   ps.foldl (fun t p =>
-    { pages := t.pages + 1, ops := t.ops + p.ops, unsupported := t.unsupported + p.unsupported,
+    { pages := t.pages + 1, ops := t.ops + p.ops, forms := t.forms + p.forms, unsupported := t.unsupported + p.unsupported,
       warned := t.warned + p.warned, interpWarnings := t.interpWarnings + p.interpWarnings,
       tokWarnings := t.tokWarnings + p.tokWarnings,
       truncated := t.truncated + (if p.truncated then 1 else 0),
@@ -355,7 +377,7 @@ def pageText (p : PageOps) (nanos : Option Nat) : String :=
   | some e => s!"  #{p.index}  error: {renderError e}{ms}"
   | none =>
     let tr := if p.truncated then "  TRUNCATED" else ""
-    s!"  #{p.index}  ops {p.ops}  covered {p.covered}  unsupported {p.unsupported}  warned {p.warned}  warnings {p.interpWarnings}+{p.tokWarnings}  items {kindsText p.kinds}{tr}{ms}"
+    s!"  #{p.index}  ops {p.ops}  forms {p.forms}  covered {p.covered}  unsupported {p.unsupported}  warned {p.warned}  warnings {p.interpWarnings}+{p.tokWarnings}  items {kindsText p.kinds}{tr}{ms}"
 
 /-- Histogram lines. -/
 def histText (h : Hist) : List String :=
@@ -380,6 +402,7 @@ def opsText (path : String) (limits : Limits) (result : Except Error Document)
       | none => []
     head ++
     [ s!"pages:      {t.pages} ({t.errors} with undecodable contents, {t.truncated} truncated)",
+      s!"forms:      {t.forms} expanded",
       s!"operators:  {t.ops}, covered {t.ops - t.unsupported} ({pctText (t.ops - t.unsupported) t.ops}), unsupported {t.unsupported}, warned {t.warned}",
       s!"warnings:   interpreter {t.interpWarnings}, tokenizer {t.tokWarnings}",
       s!"items:      {kindsText t.kinds}" ] ++ time ++
@@ -404,7 +427,7 @@ def pageJson (p : PageOps) (nanos : Option Nat) : String :=
       | some e => jsonString (renderError e)
       | none => "null"),
     ("parts", toString p.parts), ("contentBytes", toString p.bytes),
-    ("ops", toString p.ops), ("covered", toString p.covered),
+    ("ops", toString p.ops), ("forms", toString p.forms), ("covered", toString p.covered),
     ("unsupported", toString p.unsupported), ("warned", toString p.warned),
     ("interpWarnings", toString p.interpWarnings), ("tokWarnings", toString p.tokWarnings),
     ("truncated", toString p.truncated), ("items", kindsJson p.kinds),
@@ -430,6 +453,7 @@ def opsJson (path : String) (limits : Limits) (result : Except Error Document)
     [ jsonObject [ ("summary", jsonObject (base ++
       [ ("pages", toString t.pages), ("errorPages", toString t.errors),
         ("truncatedPages", toString t.truncated), ("ops", toString t.ops),
+        ("forms", toString t.forms),
         ("covered", toString (t.ops - t.unsupported)),
         ("unsupported", toString t.unsupported), ("warned", toString t.warned),
         ("interpWarnings", toString t.interpWarnings), ("tokWarnings", toString t.tokWarnings),
@@ -628,17 +652,46 @@ def textElem (r : GlyphRun) : String :=
       s!" fill=\"{colorText r.stroke.color}\"{patternAttr r.stroke.color}{alphaAttr "fill-opacity" r.stroke.alpha} data-render-mode=\"{modeName r.renderMode}\""
   s!"<text transform=\"{matrixText r.startMatrix} scale(1 -1)\" font-family=\"sans-serif\" font-size=\"1\" xml:space=\"preserve\" data-font=\"{escAttr (nameText r.font.name)}\" data-size=\"{num r.font.size}\"{paint}>{escText (runText r.parts)}</text>"
 
-/-- An image placeholder element. -/
-def imageElem (src : ImageSource) (ctm : Matrix) (fill : FillStyle) : String :=
-  let (name, mask) := match src with
-    | .xobject n _ _ => (nameText n, false)
-    | .inline d _ =>
-      (match SafePdf.Dict.get? d (SafePdf.Name.ofString "IM"),
-          SafePdf.Dict.get? d (SafePdf.Name.ofString "ImageMask") with
-        | some (.bool true), _ | _, some (.bool true) => ("inline", true)
-        | _, _ => ("inline", false))
+/-- A summary attribute from an image dictionary entry (numbers and names only). -/
+def dictAttr (d : SafePdf.Dict) (key attr : String) : String :=
+  match SafePdf.Dict.get? d (SafePdf.Name.ofString key) with
+  | some (.int i) => s!" {attr}=\"{i}\""
+  | some (.name n) => s!" {attr}=\"{escAttr (nameText n)}\""
+  | some (.array (.name n :: _)) => s!" {attr}=\"{escAttr (nameText n)}\""
+  | some (.ref n g) => s!" {attr}=\"{n} {g} R\""
+  | _ => ""
+
+/-- Whether an image dictionary is a stencil mask. -/
+def isMask (d : SafePdf.Dict) : Bool :=
+  SafePdf.Dict.get? d (SafePdf.Name.ofString "ImageMask") == some (.bool true)
+
+/-- Name of an image codec. -/
+def codecName : SafePdf.Core.Filter.ImageCodec → String
+  | .dct => "DCT"
+  | .jpx => "JPX"
+  | .jbig2 => "JBIG2"
+  | .ccitt => "CCITTFax"
+
+/-- Outcome of decoding inline image data (`Filter.decodeStream`, strict). -/
+def inlineDecoded (limits : Limits) (d : SafePdf.Dict) (data : ByteArray) : String :=
+  match SafePdf.Core.Filter.decodeStream limits d data with
+  | .ok (.data b) => s!"{b.size} bytes"
+  | .ok (.image c _ b) => s!"codec {codecName c} ({b.size} bytes)"
+  | .error _ => "error"
+
+/-- An image placeholder element; `imgDict num gen` is the dictionary of an image XObject. -/
+def imageElem (limits : Limits) (imgDict : Nat → Nat → SafePdf.Dict) (src : ImageSource)
+    (ctm : Matrix) (fill : FillStyle) : String :=
+  let (name, d, extra) := match src with
+    | .xobject n num gen => (nameText n, imgDict num gen, s!" data-object=\"{num} {gen}\"")
+    | .inline d data =>
+      ("inline", d, s!" data-decoded=\"{escAttr (inlineDecoded limits d data)}\"")
+  let summary := dictAttr d "Width" "data-width" ++ dictAttr d "Height" "data-height" ++
+    dictAttr d "BitsPerComponent" "data-bpc" ++ dictAttr d "ColorSpace" "data-colorspace"
+  let mask := isMask d
   let color := if mask then colorText fill.color else "rgb(80%,80%,80%)"
-  s!"<rect x=\"0\" y=\"0\" width=\"1\" height=\"1\" transform=\"{matrixText ctm}\" fill=\"{color}\" data-image=\"{escAttr name}\"/>"
+  let maskAttr := if mask then " data-mask=\"stencil\"" else ""
+  s!"<rect x=\"0\" y=\"0\" width=\"1\" height=\"1\" transform=\"{matrixText ctm}\" fill=\"{color}\" data-image=\"{escAttr name}\"{extra}{summary}{maskAttr}/>"
 
 /-! ## Clip registry -/
 
@@ -711,8 +764,15 @@ def itemClip : DisplayItem → Option Clip
     some c
   | _ => none
 
+/-- The stream dictionary of object `num gen` (`[]` if it is not a stream). -/
+def streamDict (limits : Limits) (doc : Doc) (num gen : Nat) : SafePdf.Dict :=
+  match doc.file.getObject limits num gen with
+  | .ok (.stream s) => s.dict
+  | _ => []
+
 /-- Render a page's display list as an SVG document (`index` is 0-based). -/
-def renderPage (page : Page) (index : Nat) (po : PageOps) : String := Id.run do
+def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : PageOps) :
+    String := Id.run do
   let (w, h, m) := frame page.cropBox page.rotate
   let mut out : Array String := #[
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
@@ -739,7 +799,8 @@ def renderPage (page : Page) (index : Nat) (po : PageOps) : String := Id.run do
     | .strokePath p s _ => out := out.push (strokeElem p s)
     | .clip _ _ => pure ()
     | .glyphRun r _ => out := out.push (textElem r)
-    | .image src ctm fill _ => out := out.push (imageElem src ctm fill)
+    | .image src ctm fill _ =>
+      out := out.push (imageElem limits (streamDict limits doc) src ctm fill)
     | .shading n _ _ =>
       out := out.push s!"<rect {cropRect} fill=\"rgb(70%,70%,70%)\" fill-opacity=\"0.5\" data-shading=\"{escAttr (nameText n)}\"/>"
     | .unsupported op => out := out.push s!"<!-- unsupported operator: {commentSafe (opName op)} -->"
@@ -756,8 +817,8 @@ def renderPage (page : Page) (index : Nat) (po : PageOps) : String := Id.run do
 def renderIndex (limits : Limits) (doc : Doc) (i : Nat) : Option String :=
   if h : i < doc.pages.size then
     let page := doc.pages[i]
-    let (r, _) := doc.decodeContentsB limits (SafePdf.Core.Filter.Budget.init limits) page
-    some (renderPage page i (analyze limits i true r))
+    let (r, b) := doc.decodeContentsB limits (Budget.init limits) page
+    some (renderPage limits doc page i (analyze limits doc page i true r b).1)
   else none
 
 /-- The `svg` view. -/
@@ -772,13 +833,13 @@ def svgView : View where
       | some dir =>
         let dir : System.FilePath := dir
         IO.FS.createDirAll dir
-        let mut budget := SafePdf.Core.Filter.Budget.init cfg.limits
+        let mut budget := Budget.init cfg.limits
         for h : k in [0:doc.pages.size] do
           let page := doc.pages[k]'h.upper
           let (r, b) := doc.decodeContentsB cfg.limits budget page
+          let (po, b) := analyze cfg.limits doc page k true r b
           budget := b
-          let po := analyze cfg.limits k true r
-          let svg := renderPage page k po
+          let svg := renderPage cfg.limits doc page k po
           let out := dir / s!"page-{k + 1}.svg"
           IO.FS.writeFile out svg
           let err := match po.error with

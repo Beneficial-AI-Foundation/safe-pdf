@@ -159,6 +159,42 @@ def xobject_recursive():
     return p.finish(x)
 
 
+def xobject_mutual():
+    # Fm1 (6) draws Fm2 (7), which draws Fm1: mutual recursion through two forms.
+    p = Pdf()
+    basic_objs(p, content=b"/Fm1 Do", resources="<< /XObject << /Fm1 6 0 R >> >>")
+    p.add(6, stream_obj(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] "
+                           "/Resources << /XObject << /Fm2 7 0 R >> >>", b"0 0 10 10 re f /Fm2 Do"))
+    p.add(7, stream_obj(7, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] "
+                           "/Resources << /XObject << /Fm1 6 0 R >> >>", b"5 5 10 10 re f /Fm1 Do"))
+    x, _ = p.xref_table(8)
+    return p.finish(x)
+
+
+FANOUT_DEPTH = 8
+FANOUT_WIDTH = 16
+
+
+def xobject_fanout():
+    # "Billion laughs" through forms: form k (k = 0..7, objects 6..13) invokes form k+1
+    # FANOUT_WIDTH times; the last form fills a rectangle. No cycle and only 8 levels (below
+    # the nesting fuel), but 16^8 ≈ 4.3e9 form expansions: only a global operator budget
+    # (Limits.maxOpsPerPage) stops it.
+    p = Pdf()
+    basic_objs(p, content=b"/F0 Do", resources="<< /XObject << /F0 6 0 R >> >>")
+    for k in range(FANOUT_DEPTH):
+        n = 6 + k
+        if k + 1 < FANOUT_DEPTH:
+            data = b" ".join([b"/F Do"] * FANOUT_WIDTH)
+            res = "/Resources << /XObject << /F %d 0 R >> >>" % (n + 1)
+        else:
+            data = b"0 0 1 1 re f"
+            res = ""
+        p.add(n, stream_obj(n, "/Type /XObject /Subtype /Form /BBox [0 0 1 1] %s" % res, data))
+    x, _ = p.xref_table(6 + FANOUT_DEPTH)
+    return p.finish(x)
+
+
 def objstm_self_container():
     # Xref stream says object 5 is object 0 of object stream 5 (itself).
     # Object 5 is referenced by the page (/Rotate 5 0 R) so a resolver must follow it.
@@ -192,6 +228,8 @@ FILES = {
     "length-mutual.pdf": length_mutual,
     "pages-kids-cycle.pdf": pages_kids_cycle,
     "xobject-recursive.pdf": xobject_recursive,
+    "xobject-mutual.pdf": xobject_mutual,
+    "xobject-fanout.pdf": xobject_fanout,
     "objstm-self-container.pdf": objstm_self_container,
     "deep-nesting.pdf": deep_nesting,
 }

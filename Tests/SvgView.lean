@@ -14,9 +14,10 @@ as SVG rendered from the DisplayList"). `SAFEPDF_GOLDEN_UPDATE=1` regenerates;
 `python3 -I Tests/golden/generate_svg.py --check Tests/golden/svg` checks that every SVG
 section is well-formed XML.
 
-**Consistency.** The views attribute operators by folding `Interp.exec` themselves; the
+**Consistency.** The views attribute operators with the runner's observer; the
 `--- consistency` line compares their item count, warnings and unsupported count with
-`Core.Content.interpBytes` on the same concatenated contents (`ok` or the mismatch).
+`Core.Content.runBytes` (no observer, fresh budget) on the same concatenated contents and page
+resources (`ok` or the mismatch).
 -/
 
 namespace SafePdf.Tests.SvgView
@@ -34,7 +35,10 @@ def consistency (limits : Limits) (doc : SafePdf.Core.Doc.Doc) (po : PageOps) : 
     match (doc.decodeContentsB limits (SafePdf.Core.Filter.Budget.init limits) page).1 with
     | .error _ => if po.error.isSome then "ok" else "decode mismatch"
     | .ok parts =>
-      let r := SafePdf.Core.Content.interpBytes (interpConfig limits) (joinParts parts)
+      let env : SafePdf.Core.Content.Env SafePdf.Core.Filter.Budget Unit :=
+        { cfg := interpConfig limits, src := docSource limits doc, observe := fun u _ _ _ => u }
+      let r := SafePdf.Core.Content.runBytes env (page.resources.getD []) (joinParts parts)
+        (SafePdf.Core.Filter.Budget.init limits) ()
       if r.items.size == po.itemCount && r.warnings == po.interpWarnings + po.tokWarnings &&
           r.unsupported == po.unsupported then "ok"
       else s!"MISMATCH items {r.items.size}/{po.itemCount} warnings {r.warnings}/{po.interpWarnings + po.tokWarnings} unsupported {r.unsupported}/{po.unsupported}"
@@ -53,7 +57,7 @@ def render (bytes : ByteArray) : String :=
       ["--- consistency"] ++ pages.toList.map (fun p => s!"page {p.index}: {consistency l doc p}")
     let svgs := pages.toList.filterMap fun p =>
       doc.pages[p.index]?.map fun page =>
-        s!"--- svg page {p.index + 1}\n" ++ renderPage page p.index p
+        s!"--- svg page {p.index + 1}\n" ++ renderPage l doc page p.index p
     "\n".intercalate lines ++ "\n" ++ String.join svgs
 
 /-- Run the suite; returns the number of failures. -/
