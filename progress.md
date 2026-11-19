@@ -17,6 +17,7 @@ Design document: Plan.md
   phase becomes current.
 
 ## Current wave
+* 5.2b (wt) — wave 23; 6.3, 6.4 integrated (part 1)
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -26,7 +27,7 @@ Design document: Plan.md
 | 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | ready (2026-11-19) |
 | 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | ready (2026-11-19) |
 | 4 | `phase-4-document` | `phase-3-filters` | [#5](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/5) | awaiting-ci |
-| 5 | `phase-5-content` | `phase-4-document` | — | none |
+| 5 | `phase-5-content` | `phase-4-document` | [#6](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/6) | draft |
 | 6 | `phase-6-fonts-text` | `phase-5-content` | — | none |
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | — | none |
 | 8 | `phase-8-shell` | `phase-7-raster` | — | none |
@@ -137,7 +138,7 @@ Plan.md §6 Phase 5. Exit: **M5**: operator coverage report ≥ 99% of corpus op
 | 5.1 | `DisplayList` type + graphics state | 4.1 | `SafePdf/Core/Content/DisplayList.lean`, `SafePdf/Core/Content/GState.lean` | new | done (2026-11-19) |
 | 5.2 | Interpreter: q/Q bounded stack, cm, color, paths, clipping, text ops, XObjects with fuel, inline images | 5.1, 3.5 | `SafePdf/Core/Content/Interp.lean` | new | split (into 5.2a, 5.2b) |
 | 5.2a | Content-stream interpreter core `SafePdf/Core/Content/Interp.lean`: content tokenizer on top of `Core.Lex` (operands + operator keywords; `BI … ID … EI` inline images skipped safely with a bounded scan — decoding is 5.2b), operator dispatch for graphics state (`q Q cm w J j M d ri i gs`), colour (`CS cs SC SCN sc scn G g RG rg K k`), paths (`m l c v y h re`), painting (`S s f F f* B B* b b* n`), clipping (`W W*`), text (`BT ET Tc Tw Tz TL Tf Tr Ts Td TD Tm T* Tj TJ ' "`), marked content and compatibility (`BMC BDC EMC MP DP BX EX`) and `Do` emitting an `image`/form placeholder; unknown operators → `unsupported` item (never fail, M5); operand count/type errors skip the operator; output `DisplayList` + warnings; total by construction; theorem `interp_items_le` (items ≤ `Paint.maxItems` × operators); glyph advance as a parameter (zero stub) | 5.1, 3.5 | `SafePdf/Core/Content/Interp.lean`, `SafePdf/Core/Content/Ops.lean` | new | done (2026-11-19) |
-| 5.2b | Interpreter part 2: Form XObjects expanded inline with recursion fuel + visited set (proof that a self-referencing form terminates; `xobject-recursive.pdf` adversarial), image XObjects and inline images (`BI` dict abbreviations, data length via `/L` or filter-aware scan, decode via `Filter.decodeStream` with image-codec placeholder), resources lookup through `Page.resources` | 5.2a, 4.5 | `SafePdf/Core/Content/XObject.lean`, `SafePdf/Core/Content/Interp.lean` | wt | todo |
+| 5.2b | Interpreter part 2: Form XObjects expanded inline with recursion fuel + visited set (proof that a self-referencing form terminates; `xobject-recursive.pdf` adversarial), image XObjects and inline images (`BI` dict abbreviations, data length via `/L` or filter-aware scan, decode via `Filter.decodeStream` with image-codec placeholder), resources lookup through `Page.resources` | 5.2a, 4.5 | `SafePdf/Core/Content/XObject.lean`, `SafePdf/Core/Content/Interp.lean` | wt | doing (2026-11-19) |
 | 5.3 | Inductive transition spec + impl proof | 5.2a | `SafePdf/Spec/Content.lean` | new | done (2026-11-19) |
 | 5.4 | Operator coverage report + SVG export view | 5.2a | `SafePdf/Shell/Views/Svg.lean`, `scripts/corpus/opcoverage.py` | wt | done (2026-11-19) |
 Exit criterion checked: [ ]
@@ -148,8 +149,9 @@ Plan.md §6 Phase 6. Exit: **M6**: text extraction ≥ 98% similarity vs pdfium/
 |---|---|---|---|---|---|
 | 6.1 | TrueType (glyf + cmap) | 5.1 | `SafePdf/Core/Font/TrueType.lean` | new | todo |
 | 6.2 | CFF | 5.1 | `SafePdf/Core/Font/CFF.lean` | new | todo |
-| 6.3 | Type 1 | 5.1 | `SafePdf/Core/Font/Type1.lean` | new | todo |
-| 6.4 | Type0/CIDFont Identity-H, `/Differences`, standard-14 metrics | 5.1 | `SafePdf/Core/Font/Encoding.lean`, `SafePdf/Core/Font/Std14.lean` | new | todo |
+| 6.3 | Type 1 | 5.1 | `SafePdf/Core/Font/Type1.lean` | new | done (2026-11-19) |
+| 6.4 | Type0/CIDFont Identity-H, `/Differences`, standard-14 metrics | 5.1 | `SafePdf/Core/Font/Encoding.lean`, `SafePdf/Core/Font/Std14.lean` | new | done (2026-11-19) |
+| 6.4b | Symbol and ZapfDingbats: built-in encodings (ISO 32000-2 Annex D) and AFM widths (left out by 6.4); verify the Euro widths in the standard-14 tables (6.4 marked them unsure); deduplicate StandardEncoding (6.3 `Type1.standardEncodingEntries` vs 6.4 `Encoding.standardEncoding`); move font caps (`maxGlyphs`, `maxSubrs`, `glyphFuel`) into `Limits` with a `LimitKind` for fonts | 6.3, 6.4 | `SafePdf/Core/Font/Encoding.lean`, `SafePdf/Core/Font/Std14.lean`, `SafePdf/Core/Font/Type1.lean`, `SafePdf/Core/Limits.lean`, `SafePdf/Core/Error.lean` | wt | todo |
 | 6.5 | ToUnicode CMaps + text extraction from DisplayList (C3, C6) | 6.4, 5.2 | `SafePdf/Core/Text.lean`, `SafePdf/Core/Font/CMap.lean` | new | todo |
 | 6.6 | Text differential vs pdftotext; inspector text browser + overlay | 6.5 | `Tests/differential/text.py`, `SafePdf/Shell/Views/Text.lean` | wt | todo |
 Exit criterion checked: [ ]
@@ -324,6 +326,9 @@ Exit criterion checked: [ ]
 * Orchestrator: `git add -A` while a shared-checkout subagent is still writing commits its partial file — stage only the integrated paths when a `new` subagent is still running.
 * Session-wide accounting (4.5): budgeted `/Length` resolver (`resolveLengthAuxB`, `parseIndirectResolvedB`; `decodeObjStmB` moved to Length.lean) charges rule-L6 decodes (not cached: caching could turn a cycle into success); page-tree walk twins `walkB`/`ofOpenB`, `Doc.ofSession`, `Doc.openDocS` (one-directional `openDocS_eq`: success with ≥ 1 allowance left ⇒ equals `openDoc`); `Doc.decodeStreamS`/`decodeContentsS`; `Document.session` (parseWith uses `Session.open`), views Resolve/Pages/Streams share it. New equality pattern: "≥ one allowance left at the END ⇒ budgeted = unbudgeted". Still unbudgeted: `Core.Doc.Nav` walks (bounded by `getObject_work`), `Doc.decodeStreamOf`/`decodeContentsB` (kept for 5.4's SVG/ops views). Bomb `objstm-two.pdf` (two 768 KiB object streams) exercises the shared budget + cache.
 * v4.36 (4.5): `rcases h : e` only rewrites the goal — revert dependent hypotheses first; `rw` can't match another definition's `match` (different matchers) — rewrite the discriminant equality; `simp only` turns `x = x` into `True` — close leaves with `first | rfl | trivial`; `generalize` a `let`-bound term only after `dsimp only`.
+* Encodings/widths (6.4): `Core.Font` — `GlyphName := String` (Latin-1 bytes); `standardEncoding`, `winAnsiEncoding` (= cp1252 exactly), `macRomanEncoding`, `pdfDocEncoding` (256 each), `applyDifferences`, `simpleEncoding resolve fontDict builtin?`, `glyphToUnicode` (AGL rules, 248-name subset + uniXXXX/uXXXX); `Std14.width?`, `Std14.ofBaseFont` (subset prefix and Arial/TimesNewRoman/CourierNew substitution); `Widths`: `FontMetrics.ofDict` (simple: /Widths → /MissingWidth → std14 → 0; Type0 Identity-H/V: `/W` dense 65536 table, `/DW` 1000; Type3 and other CMaps → none), widths /1000 exact as `Fixed`. Symbol/ZapfDingbats missing → 6.4b. Every dict reader takes `resolve : PdfObject → PdfObject`.
+* Type 1 fonts (6.3): `Core.Font.Type1.parse limits bytes (len1 len2)` → `Font1` (name, `fontMatrix`, bbox, encoding (256), glyphs with `hsbw`/`sbw`/`seac` metrics, `rejected` list, `advances` (256)); robust split (PFB, eexec search; `/Length1/2` only if consistent), hex eexec, `lenIV`; charstring interpreter for metrics only (path ops clear the stack; outlines in phase 7), bounded stack 24/subr depth 10/fuel 20000; `Font1.advance code : Option Fixed` (text space). Corpus smoke: 109 embedded Type 1 fonts, 7,652 glyphs, 0 rejected. Fixtures `Tests/fonts/gen_type1.py [OUTDIR]` (deterministic; tiny.t1/.pfb/.pfa). Some corpus PDFs give `/Length1` as an indirect reference.
+* v4.36 (6.3/6.4): `rfl`/`simp` on the size of a 256-element `#[…]` literal hits recursion limits — `set_option maxRecDepth 4000 in` before the docstring + `rw [def, Array.size_map]; rfl`; Lean strings have no `\u{…}` escape — `String.ofList [Char.ofNat n]`; docstrings aren't allowed on `#guard`; `split at h` on a long `if` chain behind `have c := s[i]` exhausts simp steps — factor branches out; `ByteArray.emptyWithCapacity` sizes are awkward — use `ByteArray.empty`; no `swap` without Batteries.
 
 ## Decisions and deviations from the design document
 * 2026-11-18 (0.1) — Toolchain pinned to `leanprover/lean4:v4.36.0`; **no Lake dependencies** (no Mathlib, no Batteries) to start, for build speed and a small trusted base. Termination measures that Plan.md §5.2 sketches with `Finset ℕ` use core-Lean structures (e.g. `List Nat`/bitmaps with explicit size measures) instead. Adding Mathlib later needs a new Decisions entry.
@@ -399,3 +404,4 @@ Exit criterion checked: [ ]
 * 2026-11-19 — wave 22 part 2 (phase 4, PR #5): 5.3 done (inductive transition spec for all 71 operators; `exec` sound, complete and deterministic w.r.t. it; `interp` = the unique `Steps` run); note fea6869 had committed a partial Spec/Content.lean (harmless, not imported then); commit "wave 22 (part 2): 5.3 — interpreter transition spec"
 * 2026-11-19 — M4 evidence on CI run 44558084040 (9bacf94, 81 corpus files incl. 7 encrypted): `pages` vs qpdf 81/81 agree, 2,450 pages, 0 disagree; `objects` vs qpdf 81/81 agree, 71,854/71,854 objects, 0 disagree. Encrypted clause accepted by the human (government PDFs). Phase 4 exit criterion ticks when 4.5 lands.
 * 2026-11-19 — wave 22 part 3 (phase 4, PR #5): 4.5 done (one budget + object-stream cache across open, page-tree walk and content decoding; `/Length` decodes charged); **phase 4 exit criterion M4 ticked**; PR #5 → awaiting-ci; commit "wave 22 (part 3): 4.5 — session-wide decode accounting; M4"
+* 2026-11-19 — wave 23 part 1 (phase 5, PR #6): 6.3 (Type 1 parser: 109/109 corpus fonts) and 6.4 (encodings, standard-14 widths, simple/CID width lookup) done, pulled from phase 6; added 6.4b; commit "wave 23 (part 1): 6.3 6.4 — Type 1 fonts, encodings and widths"
