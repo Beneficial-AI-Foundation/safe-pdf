@@ -18,6 +18,12 @@ Stdlib only, deterministic (no compression). The generated PDFs are the test inp
 * text.pdf    one page of text: Tf, Td, TL, T*, Tj, TJ with adjustments, ' and ", Tr modes
               (fill, stroke, invisible), Tc/Tw/Tz/Ts, Latin-1 and XML-special bytes
               (& < > "), an inline image (BI/ID/EI), text shown without a font (warned).
+* forms.pdf   one page with resources (task 5.2b): a form XObject with /Matrix, /BBox and its
+              own resources (ExtGState, a nested form without /Resources), invoked twice;
+              a self-referencing form (cut with a warning); an image XObject and a stencil
+              mask image (fill colour); an ExtGState (/LW /CA /ca /D); named colour spaces
+              (Indexed, Separation with a type 2 tint transform, ICCBased /N 3, DeviceN);
+              a missing XObject (warned); an abbreviated inline image with /F /AHx.
 """
 
 import os
@@ -105,6 +111,55 @@ def text():
     ])
 
 
+FORMS_PAGE = (
+    b"q 1 0 0 1 50 600 cm /Fm1 Do Q\n"
+    b"q 0.5 0 0 0.5 300 600 cm /Fm1 Do Q\n"
+    b"/Loop Do\n"
+    b"q 100 0 0 50 50 450 cm /Im0 Do Q\n"
+    b"0 0 1 rg q 40 0 0 40 200 450 cm /Mask Do Q\n"
+    b"/GS0 gs 1 0 0 RG 50 400 200 20 re S 0 1 0 rg 50 350 200 20 re f\n"
+    b"/CSi cs 1 sc 50 300 40 40 re f /CSs cs 0.5 sc 100 300 40 40 re f\n"
+    b"/CSicc cs 0 0.5 1 sc 150 300 40 40 re f /CSn CS 1 0.5 SCN 200 300 40 40 re S\n"
+    b"/Nope Do\n"
+    b"q 20 0 0 20 300 300 cm BI /W 2 /H 1 /CS /G /BPC 8 /F /AHx ID 00FF> EI Q\n"
+)
+
+FORM1 = (
+    b"0 0 1 rg 0 0 100 100 re f /GSf gs 0 0 0 RG 10 10 m 90 90 l S /Fm2 Do\n"
+    b"1 0 0 rg 150 0 50 50 re f\n"  # outside the /BBox: clipped
+)
+
+FORM2 = b"0 1 0 rg 40 40 20 20 re f\n"
+
+LOOP = b"0.5 g 0 0 10 10 re f /Loop Do\n"
+
+
+def forms():
+    return pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+        b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << "
+        b"/XObject << /Fm1 5 0 R /Loop 7 0 R /Im0 8 0 R /Mask 9 0 R >> "
+        b"/ExtGState << /GS0 << /LW 4 /CA 0.5 /ca 0.25 /D [[6 2] 0] >> >> "
+        b"/ColorSpace << /CSi [/Indexed /DeviceRGB 1 <0000FFFF8000>] "
+        b"/CSs [/Separation /Spot /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] "
+        b"/C1 [0 1 1 0] /N 1 >>] /CSicc [/ICCBased 10 0 R] "
+        b"/CSn [/DeviceN [/A /B] /DeviceCMYK 11 0 R] >> >> >>",
+        stream(FORMS_PAGE),
+        stream(FORM1, b" /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 10 10]"
+                      b" /Resources << /ExtGState << /GSf << /LW 3 /LC 1 >> >>"
+                      b" /XObject << /Fm2 6 0 R >> >>"),
+        stream(FORM2, b" /Type /XObject /Subtype /Form /BBox [0 0 100 100]"),
+        stream(LOOP, b" /Type /XObject /Subtype /Form /BBox [0 0 50 50]"
+                     b" /Resources << /XObject << /Loop 7 0 R >> >>"),
+        stream(b"\x00\x80\xff\x40", b" /Type /XObject /Subtype /Image /Width 2 /Height 2"
+                                    b" /BitsPerComponent 8 /ColorSpace /DeviceGray"),
+        stream(b"\x55", b" /Type /XObject /Subtype /Image /Width 8 /Height 1 /ImageMask true"),
+        stream(b"", b" /N 3 /Alternate /DeviceRGB"),
+        b"<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] >>",
+    ])
+
+
 def svg_sections(text_):
     """Yield (title, svg text) for each `--- svg page N` section of an .expected file."""
     title, buf = None, []
@@ -153,7 +208,7 @@ def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--check":
         sys.exit(check(sys.argv[2:]))
     d = sys.argv[1]
-    for name, data in (("shapes.pdf", shapes()), ("text.pdf", text())):
+    for name, data in (("shapes.pdf", shapes()), ("text.pdf", text()), ("forms.pdf", forms())):
         with open(os.path.join(d, name), "wb") as f:
             f.write(data)
 

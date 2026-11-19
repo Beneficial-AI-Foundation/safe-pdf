@@ -25,8 +25,11 @@ is any `Token.keyword` other than `true`, `false`, `null`.
   (1) from `/L` or `/Length` when that many bytes are followed (after whitespace) by `EI`, else
   (2) by a **byte scan** (never lexing binary data) for `EI` preceded by whitespace and followed
   by whitespace, a delimiter or the end of input. The whitespace byte before `EI` is not data.
-  One `Op` named `BI` carries the dictionary (unexpanded abbreviations; 5.2b expands and
-  decodes) as its single operand and the raw data in `Op.data`. A malformed dictionary skips to
+  The dictionary's abbreviations are expanded (`expandInline`, task 5.2b: keys of Table 91,
+  filter and colour-space names of Tables 92–93). Before the scan, an **unfiltered** image's
+  exact length `H · ⌈W · comps · BPC / 8⌉` is tried (`rawLength`), so binary samples that
+  happen to contain ` EI ` are not cut short. One `Op` named `BI` carries the expanded
+  dictionary as its single operand and the raw (still encoded) data in `Op.data`. A malformed dictionary skips to
   the `EI` (warning); a missing `EI` takes the data to the end of input (warning).
 * **Termination and bounds.** `run` recurses on `bytes.size - pos`; every step moves to
   `jumpPos size pos target = max (pos + 1) (min target size)`, so progress is by construction,
@@ -137,17 +140,122 @@ def inlineLength (d : Dict) : Option Nat :=
   | some (.int n) => if 0 ≤ n then some n.toNat else none
   | _ => none
 
-/-- End of inline image data starting at `start`: `(dataEnd, positionAfterEI)`. -/
+/-! ### Inline image abbreviations (ISO 32000-2 §8.9.7, Tables 91–93) -/
+
+/-- Key abbreviations of inline image dictionaries (Table 91), abbreviation first. -/
+def keyAbbrevs : List (String × String) :=
+  [("BPC", "BitsPerComponent"), ("CS", "ColorSpace"), ("D", "Decode"), ("DP", "DecodeParms"),
+   ("F", "Filter"), ("H", "Height"), ("IM", "ImageMask"), ("I", "Interpolate"),
+   ("W", "Width"), ("L", "Length")]
+
+/-- Filter-name abbreviations (Table 93). -/
+def filterAbbrevs : List (String × String) :=
+  [("AHx", "ASCIIHexDecode"), ("A85", "ASCII85Decode"), ("LZW", "LZWDecode"),
+   ("Fl", "FlateDecode"), ("RL", "RunLengthDecode"), ("CCF", "CCITTFaxDecode"),
+   ("DCT", "DCTDecode")]
+
+/-- Colour-space abbreviations (Table 92). -/
+def csAbbrevs : List (String × String) :=
+  [("G", "DeviceGray"), ("RGB", "DeviceRGB"), ("CMYK", "DeviceCMYK"), ("I", "Indexed")]
+
+/-- Expand a name through an abbreviation table (unknown names are kept). -/
+def expandName (tbl : List (String × String)) (n : Name) : Name :=
+  match tbl.find? (fun (a, _) => Name.ofString a == n) with
+  | some (_, full) => Name.ofString full
+  | none => n
+
+/-- Expand a `/Filter` value: a name or an array of names. -/
+def expandFilter : PdfObject → PdfObject
+  | .name n => .name (expandName filterAbbrevs n)
+  | .array xs => .array (xs.map fun
+      | .name n => .name (expandName filterAbbrevs n)
+      | o => o)
+  | o => o
+
+/-- Expand a `/ColorSpace` value: a name, or an `[/I base hival lookup]` array whose family
+and base may be abbreviated. Other names (resource names) are kept. -/
+def expandCS : PdfObject → PdfObject
+  | .name n => .name (expandName csAbbrevs n)
+  | .array (.name f :: .name b :: rest) =>
+    .array (.name (expandName csAbbrevs f) :: .name (expandName csAbbrevs b) :: rest)
+  | .array (.name f :: rest) => .array (.name (expandName csAbbrevs f) :: rest)
+  | o => o
+
+/-- **Abbreviation expansion** of an inline image dictionary (§8.9.7): keys of Table 91, and
+the values of `/Filter` (Table 93) and `/ColorSpace` (Table 92). An abbreviated key whose
+full form is already present is dropped (the first occurrence wins, as for `Dict.get?`). -/
+def expandInline (d : Dict) : Dict :=
+  let step (acc : Dict) (kv : Name × PdfObject) : Dict :=
+    let k := expandName keyAbbrevs kv.1
+    if (acc.find? (·.1 == k)).isSome then acc
+    else
+      let v :=
+        if k == Name.ofString "Filter" then expandFilter kv.2
+        else if k == Name.ofString "ColorSpace" then expandCS kv.2
+        else kv.2
+      (k, v) :: acc
+  (d.foldl step []).reverse
+
+/-- Components per sample of an (expanded) inline image colour space, when known without
+resources: device spaces and `Indexed`. -/
+def inlineComps : Option PdfObject → Option Nat
+  | some (.name n) =>
+    if n == Name.ofString "DeviceGray" then some 1
+    else if n == Name.ofString "DeviceRGB" then some 3
+    else if n == Name.ofString "DeviceCMYK" then some 4
+    else none
+  | some (.array (.name f :: _)) => if f == Name.ofString "Indexed" then some 1 else none
+  | _ => none
+
+/-- A positive integer entry. -/
+def posNat? (o : Option PdfObject) : Option Nat :=
+  match o with
+  | some (.int n) => if 0 < n then some n.toNat else none
+  | _ => none
+
+/-- **Filter-aware length**: the exact data length of an unfiltered inline image (no
+`/Filter`), `Height · ⌈Width · comps · BitsPerComponent / 8⌉` (§8.9.5.1: rows are padded to
+whole bytes); an image mask has one 1-bit component. `none` when filtered or unknown. -/
+def rawLength (d : Dict) : Option Nat :=
+  if (Dict.get? d (Name.ofString "Filter")).isSome then none
+  else
+    match posNat? (Dict.get? d (Name.ofString "Width")),
+        posNat? (Dict.get? d (Name.ofString "Height")) with
+    | some w, some h =>
+      let mask := Dict.get? d (Name.ofString "ImageMask") == some (.bool true)
+      let cb : Option (Nat × Nat) :=
+        if mask then some (1, 1)
+        else
+          match inlineComps (Dict.get? d (Name.ofString "ColorSpace")),
+              posNat? (Dict.get? d (Name.ofString "BitsPerComponent")) with
+          | some c, some b => some (c, b)
+          | _, _ => none
+      cb.map fun (c, b) => h * ((w * c * b + 7) / 8)
+    | _, _ => none
+
+/-- Data of length `l` from `start` is followed (after whitespace) by `EI`. -/
+def endAfter (bytes : ByteArray) (start l : Nat) : Option (Nat × Nat) :=
+  if start + l ≤ bytes.size then
+    let p := skipWhite bytes (start + l)
+    if isEIAt bytes p then some (start + l, p + 2) else none
+  else none
+
+/-- End of inline image data starting at `start`: `(dataEnd, positionAfterEI)`. Tried in
+order: `/L` or `/Length`; the computed length of an unfiltered image (`rawLength`); a byte
+scan for `EI`. -/
 def imageEnd (bytes : ByteArray) (d : Dict) (start : Nat) : Option (Nat × Nat) :=
   let viaLen : Option (Nat × Nat) :=
     match inlineLength d with
-    | some l =>
-      if start + l ≤ bytes.size then
-        let p := skipWhite bytes (start + l)
-        if isEIAt bytes p then some (start + l, p + 2) else none
-      else none
+    | some l => endAfter bytes start l
     | none => none
-  match viaLen with
+  let viaRaw : Option (Nat × Nat) :=
+    match viaLen with
+    | some r => some r
+    | none =>
+      match rawLength d with
+      | some l => endAfter bytes start l
+      | none => none
+  match viaRaw with
   | some r => some r
   | none =>
     match findEI bytes start with
@@ -192,7 +300,8 @@ def inlineImage (limits : Limits) (bytes : ByteArray) (pos q : Nat) (stk : List 
   let off := ObjParse.tokStart bytes pos
   let w0 := if stk.isEmpty then 0 else 1
   match inlineDict limits.maxObjectDepth bytes q [] with
-  | some (d, r) =>
+  | some (d0, r) =>
+    let d := expandInline d0
     let start := match bytes[r]? with
       | some b => if Lex.isWhite b then r + 1 else r
       | none => r
@@ -352,6 +461,22 @@ private def nOperands (s : String) : List Nat := (tk s).ops.toList.map (·.opera
 #guard names "[(A) 1 TJ 0 g" == ["TJ", "g"]
 #guard names "] 1 w" == ["w"]
 #guard (tk "1 2").warnings == 1
+-- abbreviations expanded; the unfiltered length skips an ` EI ` inside the samples
+private def bi1 : String := "BI /W 4 /H 1 /CS /G /BPC 8 /F /AHx ID 00ff> EI Q"
+#guard ((tk bi1).ops[0]?.map (·.operands)) == some [.dict
+  [(Name.ofString "Width", .int 4), (Name.ofString "Height", .int 1),
+   (Name.ofString "ColorSpace", .name (Name.ofString "DeviceGray")),
+   (Name.ofString "BitsPerComponent", .int 8),
+   (Name.ofString "Filter", .name (Name.ofString "ASCIIHexDecode"))]]
+#guard ((tk "BI /W 4 /H 1 /CS /G /BPC 8 ID a EI EI Q").ops[0]?.map (·.data.size)) == some 4
+#guard names "BI /W 4 /H 1 /CS /G /BPC 8 ID a EI EI Q" == ["BI", "Q"]
+#guard ((tk "BI /W 4 /H 1 /CS /G /BPC 8 ID a EI EI Q").ops[0]?.map (·.data.toList)) ==
+  some [97, 32, 69, 73]
+#guard ((tk "BI /IM true /W 9 /H 2 ID abcd EI").ops[0]?.map (·.data.size)) == some 4
+#guard (Ops.expandInline [(Name.ofString "CS", .array [.name (Name.ofString "I"),
+    .name (Name.ofString "RGB"), .int 1, .string [0, 0, 0, 255, 255, 255]])]) ==
+  [(Name.ofString "ColorSpace", .array [.name (Name.ofString "Indexed"),
+    .name (Name.ofString "DeviceRGB"), .int 1, .string [0, 0, 0, 255, 255, 255]])]
 #guard (Ops.tokenize { maxOpsPerPage := 2 } "q q q".toUTF8).truncated
 #guard (Ops.tokenize { maxOpsPerPage := 2 } "q q q".toUTF8).ops.size == 2
 
