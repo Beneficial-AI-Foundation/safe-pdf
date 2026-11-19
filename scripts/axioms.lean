@@ -289,3 +289,8 @@ import SafePdf
 #print axioms SafePdf.Core.Open.strictOpen_ok
 #print axioms SafePdf.Core.Open.checkSize_ok
 #print axioms SafePdf.Core.Open.strictOpen_lt_size
+
+-- Phase 2, task 2.14: /Length through object streams (SafePdf/Core/Xref/Length.lean;
+-- decoding split into SafePdf/Core/Xref/ObjStmDecode.lean, same names)
+#print axioms SafePdf.Core.Xref.Length.containerLength_calls_le
+#print axioms SafePdf.Core.Xref.Length.resolveLength_container_cycle
