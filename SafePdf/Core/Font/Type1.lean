@@ -2,6 +2,7 @@ import SafePdf.Core.Error
 import SafePdf.Core.Limits
 import SafePdf.Core.Object
 import SafePdf.Core.Content.GState
+import SafePdf.Core.Font.Encoding
 
 /-!
 # Embedded Type 1 fonts: metrics (Plan.md §6 Phase 6, task 6.3; Adobe Type 1 Font Format)
@@ -40,13 +41,15 @@ every byte read bounds-checked (`bs[i]?`, `extract`), every charstring run fuel-
    fatal) on: stack overflow (`maxStack = 24`, §6.1), stack underflow, subroutine nesting
    deeper than `maxCallDepth = 10` (§6.4), a bad subroutine index, an unknown operator, a
    truncated number, division by zero, running off the end without `endchar`/`return`, more
-   than `glyphFuel` operations, or no `hsbw`/`sbw`.
+   than `Limits.glyphFuel` operations, or no `hsbw`/`sbw`.
 
 ## Bounds and caps
 
 * Input ≤ `Limits.maxDecodedStreamBytes` (else `Error.limitExceeded .decodedStreamBytes`).
-* At most `maxGlyphs = 4096` charstrings and subroutine indices `< maxSubrs = 32768`. `Limits`
-  has no font-specific `LimitKind`, so exceeding these is reported as `Error.malformed`.
+* At most `Limits.maxFontGlyphs` (default 4096) charstrings, else
+  `Error.limitExceeded .fontGlyphs`; subroutine indices `< Limits.maxFontSubrs` (default
+  32768), else `Error.limitExceeded .fontSubrs`; each glyph runs at most `Limits.glyphFuel`
+  (default 20000) steps, else it is rejected (task 6.4b moved these caps into `Limits`).
 * Numbers in the font program have at most 18 digits (longer tokens are names), so every
   `Decimal` has scale ≤ 18 and the exact advance computation stays small.
 
@@ -471,39 +474,10 @@ def tokenize (s : ByteArray) (i : Nat) (prevInt : Option Nat) (acc : Array Item)
     | _, _ => tokenize s j none (acc.push (.tok t))
 termination_by s.size - i
 
-/-! ## Standard encoding (§2.3; ISO 32000-2 Annex D.2) -/
+/-! ## Encodings (§2.3)
 
-/-- The non-`.notdef` entries of Adobe `StandardEncoding`. -/
-def standardEncodingEntries : List (Nat × String) :=
-  [(32, "space"), (33, "exclam"), (34, "quotedbl"), (35, "numbersign"), (36, "dollar"),
-   (37, "percent"), (38, "ampersand"), (39, "quoteright"), (40, "parenleft"),
-   (41, "parenright"), (42, "asterisk"), (43, "plus"), (44, "comma"), (45, "hyphen"),
-   (46, "period"), (47, "slash"), (48, "zero"), (49, "one"), (50, "two"), (51, "three"),
-   (52, "four"), (53, "five"), (54, "six"), (55, "seven"), (56, "eight"), (57, "nine"),
-   (58, "colon"), (59, "semicolon"), (60, "less"), (61, "equal"), (62, "greater"),
-   (63, "question"), (64, "at"), (65, "A"), (66, "B"), (67, "C"), (68, "D"), (69, "E"),
-   (70, "F"), (71, "G"), (72, "H"), (73, "I"), (74, "J"), (75, "K"), (76, "L"), (77, "M"),
-   (78, "N"), (79, "O"), (80, "P"), (81, "Q"), (82, "R"), (83, "S"), (84, "T"), (85, "U"),
-   (86, "V"), (87, "W"), (88, "X"), (89, "Y"), (90, "Z"), (91, "bracketleft"),
-   (92, "backslash"), (93, "bracketright"), (94, "asciicircum"), (95, "underscore"),
-   (96, "quoteleft"), (97, "a"), (98, "b"), (99, "c"), (100, "d"), (101, "e"), (102, "f"),
-   (103, "g"), (104, "h"), (105, "i"), (106, "j"), (107, "k"), (108, "l"), (109, "m"),
-   (110, "n"), (111, "o"), (112, "p"), (113, "q"), (114, "r"), (115, "s"), (116, "t"),
-   (117, "u"), (118, "v"), (119, "w"), (120, "x"), (121, "y"), (122, "z"),
-   (123, "braceleft"), (124, "bar"), (125, "braceright"), (126, "asciitilde"),
-   (161, "exclamdown"), (162, "cent"), (163, "sterling"), (164, "fraction"), (165, "yen"),
-   (166, "florin"), (167, "section"), (168, "currency"), (169, "quotesingle"),
-   (170, "quotedblleft"), (171, "guillemotleft"), (172, "guilsinglleft"),
-   (173, "guilsinglright"), (174, "fi"), (175, "fl"), (177, "endash"), (178, "dagger"),
-   (179, "daggerdbl"), (180, "periodcentered"), (182, "paragraph"), (183, "bullet"),
-   (184, "quotesinglbase"), (185, "quotedblbase"), (186, "quotedblright"),
-   (187, "guillemotright"), (188, "ellipsis"), (189, "perthousand"), (191, "questiondown"),
-   (193, "grave"), (194, "acute"), (195, "circumflex"), (196, "tilde"), (197, "macron"),
-   (198, "breve"), (199, "dotaccent"), (200, "dieresis"), (202, "ring"), (203, "cedilla"),
-   (205, "hungarumlaut"), (206, "ogonek"), (207, "caron"), (208, "emdash"), (225, "AE"),
-   (227, "ordfeminine"), (232, "Lslash"), (233, "Oslash"), (234, "OE"),
-   (235, "ordmasculine"), (241, "ae"), (245, "dotlessi"), (248, "lslash"), (249, "oslash"),
-   (250, "oe"), (251, "germandbls")]
+`/Encoding StandardEncoding` (and an absent `/Encoding`) is `Font.standardEncoding`, the one
+Annex D table of `Core.Font.Encoding`. -/
 
 /-- A 256-entry encoding from `(code, name)` entries applied in order (later wins);
 `.notdef` and out-of-range codes leave `none`. -/
@@ -610,15 +584,6 @@ def maxStack : Nat := 24
 
 /-- Maximum subroutine nesting (§6.4: 10). -/
 def maxCallDepth : Nat := 10
-
-/-- Maximum number of operators and operands executed per glyph, subroutines included. -/
-def glyphFuel : Nat := 20000
-
-/-- Maximum number of charstrings in one font. -/
-def maxGlyphs : Nat := 4096
-
-/-- Subroutine indices must be below this. -/
-def maxSubrs : Nat := 32768
 
 /-- An operand stack bounded by `maxStack` by construction (top first). -/
 abbrev Stack := {l : List Fixed // l.length ≤ maxStack}
@@ -799,10 +764,10 @@ structure Glyph where
   seac : Option (UInt8 × UInt8)
   deriving Repr, Inhabited
 
-/-- Decrypt and run one charstring, at most `glyphFuel` steps. -/
-def evalGlyph (subrs : Array ByteArray) (lenIV : Int) (name : String) (enc : ByteArray) :
-    Except String Glyph := do
-  let st ← run subrs glyphFuel (decryptCharstring lenIV enc) 0 {}
+/-- Decrypt and run one charstring, at most `fuel` steps (`Limits.glyphFuel`). -/
+def evalGlyph (subrs : Array ByteArray) (lenIV : Int) (name : String) (enc : ByteArray)
+    (fuel : Nat := Limits.default.glyphFuel) : Except String Glyph := do
+  let st ← run subrs fuel (decryptCharstring lenIV enc) 0 {}
   match st.width with
   | some (wx, wy) => .ok { name, sbx := st.sbx, wx, wy, seac := st.seac }
   | none => .error "no hsbw/sbw"
@@ -903,15 +868,13 @@ def parse (limits : Limits) (bytes : ByteArray) (len1 len2 : Option Nat := none)
   let ci := scanClear (tokenize parts.clear 0 none #[]).toList {}
   let plain := eexecDecrypt parts.cipher
   let pi := scanPrivate (tokenize plain 0 none #[]).toList {}
-  if maxGlyphs < pi.charstrings.length then
-    throw (.malformed 0 s!"Type 1: more than {maxGlyphs} charstrings")
-  if pi.subrs.any (fun (i, _) => maxSubrs ≤ i) then
-    throw (.malformed 0 s!"Type 1: subroutine index ≥ {maxSubrs}")
+  if limits.maxFontGlyphs < pi.charstrings.length then throw (.limitExceeded .fontGlyphs)
+  if pi.subrs.any (fun (i, _) => limits.maxFontSubrs ≤ i) then throw (.limitExceeded .fontSubrs)
   let nSubrs := pi.subrs.foldl (fun m (i, _) => max m (i + 1)) 0
   let subrs := pi.subrs.reverse.foldl (fun a (i, b) =>
     a.setIfInBounds i (decryptCharstring pi.lenIV b)) (Array.replicate nSubrs ByteArray.empty)
   let (glyphs, rejected) := pi.charstrings.reverse.foldl (fun (gs, rs) (n, b) =>
-    match evalGlyph subrs pi.lenIV n b with
+    match evalGlyph subrs pi.lenIV n b limits.glyphFuel with
     | .ok g => (gs.push g, rs)
     | .error e => (gs, rs.push (n, e))) ((#[] : Array Glyph), (#[] : Array (String × String)))
   if glyphs.isEmpty then throw (.malformed 0 "Type 1: no valid charstring")
@@ -922,7 +885,7 @@ def parse (limits : Limits) (bytes : ByteArray) (len1 len2 : Option Nat := none)
   let bx (k : Nat) : Fixed := Fixed.ofDecimal (bb.getD k ⟨0, 0⟩)
   let encoding := match ci.encKind with
     | .explicit => encodingOf ci.entries.reverse
-    | _ => encodingOf standardEncodingEntries
+    | _ => standardEncoding
   let a := dm.getD 0 ⟨0, 0⟩
   let c := dm.getD 2 ⟨0, 0⟩
   return {
@@ -933,7 +896,9 @@ def parse (limits : Limits) (bytes : ByteArray) (len1 len2 : Option Nat := none)
     bbox := ⟨bx 0, bx 1, bx 2, bx 3⟩
     encoding
     encoding_size := by
-      simp only [encoding]; split <;> exact encodingOf_size _
+      simp only [encoding]; split
+      · exact encodingOf_size _
+      · exact standardEncoding_size
     glyphs, rejected
     lenIV := pi.lenIV
     advances := mkAdvances encoding glyphs a c

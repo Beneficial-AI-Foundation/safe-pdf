@@ -146,8 +146,8 @@ structure SimpleMetrics where
   deriving Inhabited
 
 /-- Read the width inputs of a simple font. `builtin?` is the font program's built-in
-encoding when known (see `simpleEncoding`); when absent and the font maps onto Symbol or
-ZapfDingbats, nothing better than StandardEncoding is available. -/
+encoding when known (see `simpleEncoding`); when absent, a `/BaseFont` naming Symbol or
+ZapfDingbats selects that font's built-in encoding (`implicitBase`). -/
 def SimpleInputs.ofDict (resolve : PdfObject → PdfObject) (fontDict : Dict)
     (builtin? : Option Encoding) : SimpleInputs :=
   let fd := (fontDescriptor? resolve fontDict).getD []

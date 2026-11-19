@@ -59,6 +59,8 @@ def renderLimitKind : LimitKind → String
   | .opsPerPage => "operators per page"
   | .revisions => "xref revision count"
   | .filters => "filters per stream"
+  | .fontGlyphs => "glyphs per font program"
+  | .fontSubrs => "subroutine index per font program"
 
 /-- Human-readable rendering of a core `Error`. -/
 def renderError : Error → String

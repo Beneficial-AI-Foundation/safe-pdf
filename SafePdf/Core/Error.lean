@@ -21,6 +21,10 @@ inductive LimitKind where
   | revisions
   /-- Number of filters in one stream's `/Filter` chain (`Limits.maxFilters`). -/
   | filters
+  /-- Number of charstrings in one embedded font program (`Limits.maxFontGlyphs`). -/
+  | fontGlyphs
+  /-- Subroutine index in one embedded font program (`Limits.maxFontSubrs`). -/
+  | fontSubrs
   deriving Repr, DecidableEq, Inhabited
 
 /-- Errors produced by the verified core. -/

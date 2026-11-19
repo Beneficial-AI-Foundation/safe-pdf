@@ -222,7 +222,7 @@ def expectations : String → List (String × Expect)
     [("openFile", .okEq "strict revs=1 objects=8"), ("parse", .okEq "strict root=(1, 0)"),
      ("interpret", .okEq "pages=1 forms=2 ops=7 items=4 warnings=1 truncated=false")]
   -- 16-way fan-out over 8 levels (16^8 expansions without a cap): stopped by the
-  -- form-expansion cap `Run.defaultMaxForms` = 100000, one warning per form `Do` skipped after it
+  -- form-expansion cap `Limits.maxFormsPerPage` = 100000, one warning per form `Do` skipped after it
   | "xobject-fanout.pdf" =>
     [("openFile", .okEq "strict revs=1 objects=14"), ("parse", .okEq "strict root=(1, 0)"),
      ("interpret", .okEq "pages=1 forms=100000 ops=287571 items=193745 warnings=81 truncated=false")]
