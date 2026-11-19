@@ -188,15 +188,19 @@ def expectations : String → List (String × Expect)
      ("getObject obj 4", .errCycle "cyclic /Length")]
   -- The file's xref stream is structurally valid, so loadChain succeeds since task 2.4a;
   -- the attack is the /Length cycle 4 → 6 (in object stream 5) → stream 5 → 4, which only
-  -- appears when objects are resolved: resolving object 4's /Length must fail.
+  -- appears when objects are resolved: resolving object 4's /Length is a cycle (task 2.14).
+  -- Object 5's own /Length `4 0 R` names a stream, not an integer object: resolving 5 fails
+  -- as malformed ("expected endobj") before any cycle is reached (the stream 4 is never
+  -- parsed as a stream there), so its rows stay `.err`.
   | "length-mutual.pdf" =>
     [("loadChain", .ok), ("repair", .ok),
      ("parseIndirectAt obj 4", .err), ("parseIndirectAt obj 5", .err),
-     ("parseIndirectResolved obj 4", .err),
-     -- opens strictly (the root is sound); resolving 4 or 5 fails. Not yet reported as a
-     -- cycle: a /Length into an object stream is still `unsupported` in `Core.Xref.Length`.
+     ("parseIndirectResolved obj 4", .errCycle "cyclic /Length"),
+     ("parseIndirectResolved obj 5", .err),
+     -- opens strictly (the root is sound); the cycle is final where it is met: resolving
+     -- object 4 (the page contents) through the opened document
      ("openFile", .okEq "strict revs=1 objects=8"), ("parse", .okEq "strict root=(1, 0)"),
-     ("getObject obj 4", .err), ("getObject obj 5", .err)]
+     ("getObject obj 4", .errCycle "cyclic /Length"), ("getObject obj 5", .err)]
   -- Structure-level attacks for Phases 4/5 (page tree, XObject nesting): the xref and the
   -- root are sound, so the files open strictly; the cycles are for the page-tree and content
   -- layers to reject.

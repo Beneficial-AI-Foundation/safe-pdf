@@ -29,7 +29,8 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
 * P5. **Cycles are final** (task 2.13; §6 Phase 2 M2 "Bogk-style cyclic files all rejected in
   bounded time"): if the strict error is an `Error.cycle` (a revisited `/Prev` or `/XRefStm`
   offset in `Chain.loadChain`, an object in its own object stream in the xref stream or in
-  `ObjStm.fetchCompressed`, a cyclic `/Length` in `Length.resolveLength`), `openFile` returns
+  `ObjStm.fetchCompressed`, a cyclic `/Length` in `Length.resolveLength`, also through an
+  object stream since task 2.14), `openFile` returns
   it without trying repair. This includes cycles found while *validating the root* (P2):
   they are strict-path findings about the file as written, and the repair path, which
   re-reads the same objects through a scanned section, would at best rediscover the same
@@ -42,7 +43,8 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   copy of the sorted entries).
 * G2. `inUse off g`: if `g` differs from the requested generation the object does not exist
   (null, G4). Otherwise `Length.parseIndirectResolved` at `off` (indirect `/Length` resolved
-  with fuel = number of entries); the header must be `num g` (else `malformed`).
+  with fuel = number of entries, also when a `/Length` lives in an object stream, task 2.14);
+  the header must be `num g` (else `malformed`).
 * G3. `compressed c i`: the requested generation must be 0 (else null, G4); then
   `ObjStm.fetchCompressed` with fuel = number of entries (one container, never nested).
 * G4. `free`, absent, or a generation mismatch: `null` — ISO 32000-2 §7.3.10, "an indirect
@@ -68,7 +70,8 @@ encrypted; strings and stream data stay encrypted until Phase 4 (task 4.3).
 * `getObject_depth`: every object returned nests at most `limits.maxObjectDepth`.
 * `getObject_work`: one `getObject` performs at most one top-level object parse
   (`parseIndirectResolved` or a container parse inside `fetchCompressed`) and at most one
-  object-stream decode; each `/Length` chain inside costs at most `fuel` object parses
+  object-stream decode; each `/Length` chain inside, including hops through object streams
+  (task 2.14), costs at most `fuel` object parses and container decodes
   (`Length.resolveLength_calls_le`). That `parseIndirectResolved` runs at most one
   `resolveLength` is by inspection of `Length.lengthDict` (it is not instrumented).
 -/
@@ -456,7 +459,8 @@ theorem getObject_depth {d : OpenDoc} {limits : Limits} {num gen : Nat} {b : Ind
 
 /-- **Work bound.** One `getObject` performs at most one top-level object parse and at most
 one object-stream decode. (Inside a parse, each indirect `/Length` chain costs at most
-`d.objectCount` further parses: `Length.resolveLength_calls_le`.) -/
+`d.objectCount` further parses, object-stream containers included:
+`Length.resolveLength_calls_le`.) -/
 theorem getObject_work (d : OpenDoc) (limits : Limits) (num gen : Nat) :
     (d.getObjectTrace limits num gen).parses ≤ 1 ∧
     (d.getObjectTrace limits num gen).decodes ≤ 1 := by
@@ -474,7 +478,8 @@ theorem getObject_work (d : OpenDoc) (limits : Limits) (num gen : Nat) :
   · simp
 
 /-- **Length-chain bound** in `getObject`'s fuel: resolving an indirect `/Length` while
-fetching from `d` parses at most `d.objectCount` objects. -/
+fetching from `d` parses at most `d.objectCount` objects (length objects and object-stream
+containers, task 2.14). -/
 theorem getObject_length_calls_le (d : OpenDoc) (limits : Limits) (visiting : List Nat)
     (ref : Nat × Nat) :
     Xref.Length.resolveLengthCalls d.lookup limits d.bytes d.objectCount visiting ref ≤
