@@ -29,6 +29,7 @@ import SafePdf.Core.Filter.RunLength
 import SafePdf.Core.Filter.LZW
 import SafePdf.Core.Filter.Deflate
 import SafePdf.Core.Filter
+import SafePdf.Core.Filter.Structural
 import SafePdf.Core.Crypt.Md5
 import SafePdf.Core.Crypt.Sha2
 import SafePdf.Core.Crypt.Rc4
