@@ -6,10 +6,10 @@ import SafePdf.Shell.Views.Summary
 
 Plan.md §6 Phase 3 (filters) and the M3 row of the MVP / visibility track ("decoded-stream
 viewer"). For every stream object of an opened document it runs the verified filter
-pipeline `Core.Filter.decodeStream` and reports what came out.
+pipeline (`Core.Filter.decodeStreamB`) and reports what came out.
 
 **Enumeration.** Every `inUse` cross-reference entry is fetched with
-`Core.Open.OpenDoc.getObject`; the stream bodies are reported. Entries in object streams
+`Core.Open.Session.getObject`; the stream bodies are reported. Entries in object streams
 (`compressed`) are counted but not fetched: an object inside an object stream can never be a
 stream (ISO 32000-2 §7.5.7), so fetching them would only cost object-stream decodes.
 
@@ -20,12 +20,18 @@ of an array, are replaced by the direct object `getObject` returns (a stream or 
 leaves the reference in place, so `decodeStream` still reports it). Streams that needed this
 are flagged `resolved` and counted in the summary.
 
-**Budget.** Decoding respects both limits: each stream is decoded under
-`maxDecodedStreamBytes` capped to the remaining `maxDecodedTotalBytes` budget. When a stream
-does not fit the remaining budget it is reported as `resource limit exceeded: total decoded
-size`, and every later stream is skipped with the marker `skipped: decoded-bytes budget
-exhausted` (JSON `"skipped": "budget"`). Total work is therefore bounded by
-`maxDecodedTotalBytes` plus the per-stream bound of the failed attempt.
+**Budget** (task 3.13). Decoding goes through `Core.Filter.decodeStreamB` from a session
+(`Core.Open.Session.ofDoc`: the full `maxDecodedTotalBytes` budget and an empty object-stream
+cache), so every byte a filter stage allocates is charged, intermediate stages and failed
+attempts included (rules B1–B5 of `Core.Filter`); fetches go through
+`Core.Open.Session.getObject`, which charges (and caches) any object-stream decode needed to
+resolve an indirect `/Filter` or `/DecodeParms`. When a stream does not fit the remaining
+budget it is reported as `resource limit exceeded: total decoded size`, and every later stream
+is skipped with the marker `skipped: decoded-bytes budget exhausted` (JSON
+`"skipped": "budget"`); with nothing left, later streams are skipped as well. The decodes
+charged here are therefore bounded by `maxDecodedTotalBytes`. Not charged: the open itself
+(the document comes from `SafePdf.parseWith`, unbudgeted) and object-stream decodes inside an
+indirect `/Length` resolution (`Core.Xref.Length`, see `Core.Open`).
 
 **Per stream.** Object number and generation, `/Type` and `/Subtype` when they are names,
 the `/Filter` chain (names), whether `/DecodeParms` is present, the raw length, then the
@@ -119,35 +125,43 @@ def codecName : ImageCodec → String
   | .jbig2 => "jbig2"
   | .ccitt => "ccitt"
 
-/-- Resolve one indirect reference to the direct object it names. `(o, true)` when a
-reference was replaced; a stream body or a fetch error leaves the reference in place. -/
-def resolveRef (doc : Core.Open.OpenDoc) (limits : Limits) : PdfObject → PdfObject × Bool
+/-- Resolve one indirect reference to the direct object it names, fetching through the
+session (`Core.Open.Session.getObject`: an object-stream decode is charged to the budget and
+cached). `(o, true)` when a reference was replaced; a stream body or a fetch error leaves the
+reference in place. -/
+def resolveRef (sess : Core.Open.Session) (limits : Limits) :
+    PdfObject → PdfObject × Bool × Core.Open.Session
   | .ref n g =>
-    match doc.getObject limits n g with
-    | .ok (.obj o) => (o, true)
-    | _ => (.ref n g, false)
-  | o => (o, false)
+    match sess.getObject limits n g with
+    | (.ok (.obj o), sess') => (o, true, sess')
+    | (_, sess') => (.ref n g, false, sess')
+  | o => (o, false, sess)
 
 /-- Resolve one level of indirection in a `/Filter` or `/DecodeParms` value: the value
 itself, then (if it is an array) each of its elements. -/
-def resolveValue (doc : Core.Open.OpenDoc) (limits : Limits) (v : PdfObject) :
-    PdfObject × Bool :=
-  let (v1, r1) := resolveRef doc limits v
+def resolveValue (sess : Core.Open.Session) (limits : Limits) (v : PdfObject) :
+    PdfObject × Bool × Core.Open.Session :=
+  let (v1, r1, sess) := resolveRef sess limits v
   match v1 with
   | .array items =>
-    let rs := items.map (resolveRef doc limits)
-    (.array (rs.map (·.1)), r1 || rs.any (·.2))
-  | _ => (v1, r1)
+    let (out, any, sess) := items.foldl (init := (([] : List PdfObject), r1, sess))
+      fun (acc, any, sess) it =>
+        let (o, r, sess) := resolveRef sess limits it
+        (o :: acc, any || r, sess)
+    (.array out.reverse, any, sess)
+  | _ => (v1, r1, sess)
 
 /-- The stream dictionary with `/Filter` and `/DecodeParms` resolved one level. -/
-def resolveDict (doc : Core.Open.OpenDoc) (limits : Limits) (d : Dict) : Dict × Bool :=
+def resolveDict (sess : Core.Open.Session) (limits : Limits) (d : Dict) :
+    Dict × Bool × Core.Open.Session :=
   let keyF := Name.ofString "Filter"
   let keyP := Name.ofString "DecodeParms"
-  d.foldr (init := ([], false)) fun (k, v) (acc, any) =>
+  let (out, any, sess) := d.foldl (init := (([] : Dict), false, sess)) fun (acc, any, sess) (k, v) =>
     if k == keyF || k == keyP then
-      let (v', r) := resolveValue doc limits v
-      ((k, v') :: acc, any || r)
-    else ((k, v) :: acc, any)
+      let (v', r, sess) := resolveValue sess limits v
+      ((k, v') :: acc, any || r, sess)
+    else ((k, v) :: acc, any, sess)
+  (out.reverse, any, sess)
 
 /-- The `/Filter` chain as display names. -/
 def filterList (d : Dict) : List String :=
@@ -179,26 +193,23 @@ def errorKey : Error → String
 
 /-! ## Decoding with a budget -/
 
-/-- Decode one stream body. `remaining` is what is left of the total budget; `exhausted`
-means an earlier stream already ran out of it. -/
-def decodeBody (doc : Core.Open.OpenDoc) (limits : Limits) (remaining : Nat) (exhausted : Bool)
-    (num gen : Nat) (s : Stream) : Rec :=
-  let (d, resolved) := resolveDict doc limits s.dict
+/-- Decode one stream body with `Core.Filter.decodeStreamB` from the session's budget
+(task 3.13), returning the record and the session (budget charged, cache updated by the
+`/Filter` resolution). `exhausted` means an earlier stream already ran out of budget. -/
+def decodeBody (sess : Core.Open.Session) (limits : Limits) (exhausted : Bool)
+    (num gen : Nat) (s : Stream) : Rec × Core.Open.Session :=
+  let (d, resolved, sess) := resolveDict sess limits s.dict
   let base : Rec :=
     { num, gen, type := nameEntry d "Type", subtype := nameEntry d "Subtype",
       filters := filterList d, hasParms := (d.get? (Name.ofString "DecodeParms")).isSome,
       resolved, raw := s.data.size, outcome := .skipped }
-  if exhausted || remaining = 0 then base
+  if exhausted || sess.budget.remaining = 0 then (base, sess)
   else
-    let cap := min limits.maxDecodedStreamBytes remaining
-    let lim := { limits with maxDecodedStreamBytes := cap }
-    match Core.Filter.decodeStream lim d s.data with
-    | .ok r => { base with outcome := .decoded r }
-    | .error (.limitExceeded .decodedStreamBytes) =>
-      if cap < limits.maxDecodedStreamBytes then
-        { base with outcome := .failed (.limitExceeded .decodedTotalBytes) }
-      else { base with outcome := .failed (.limitExceeded .decodedStreamBytes) }
-    | .error e => { base with outcome := .failed e }
+    let (r, budget) := Core.Filter.decodeStreamB limits sess.budget d s.data
+    let outcome : Outcome := match r with
+      | .ok r => .decoded r
+      | .error e => .failed e
+    ({ base with outcome }, { sess with budget })
 
 /-- Did this record exhaust the total budget? -/
 def Rec.exhausts (r : Rec) : Bool :=
@@ -217,16 +228,16 @@ structure Scan where
 
 /-- Decoding state threaded through the entries. -/
 structure State where
-  /-- Bytes decoded so far. -/
-  used : Nat := 0
+  /-- The session: document, budget, object-stream cache. -/
+  sess : Core.Open.Session
   /-- The budget ran out. -/
   exhausted : Bool := false
   /-- Entry counters. -/
   scan : Scan := {}
 
-/-- Step for one stream record: update the budget state. -/
-def State.after (st : State) (r : Rec) : State :=
-  { st with used := st.used + r.decodedBytes, exhausted := st.exhausted || r.exhausts }
+/-- Step for one stream record: the session after it, and whether the budget ran out. -/
+def State.after (st : State) (r : Rec) (sess : Core.Open.Session) : State :=
+  { st with sess, exhausted := st.exhausted || r.exhausts }
 
 /-- The in-use entries to look at: all, or only object `only`. -/
 def entries (doc : Core.Open.OpenDoc) (only : Option Nat) : Array (Nat × XrefEntry) :=
@@ -234,10 +245,12 @@ def entries (doc : Core.Open.OpenDoc) (only : Option Nat) : Array (Nat × XrefEn
   | none => doc.index
   | some n => doc.index.filter (·.1 == n)
 
-/-- Pure run over all entries (no timing): used by the golden tests. -/
+/-- Pure run over all entries (no timing): used by the golden tests. The budget starts full
+(`Core.Open.Session.ofDoc`). -/
 def decodeAll (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat := none) :
     Array Rec × Scan :=
-  let (recs, st) := (entries doc only).foldl (init := ((#[] : Array Rec), ({} : State)))
+  let st0 : State := { sess := Core.Open.Session.ofDoc limits doc }
+  let (recs, st) := (entries doc only).foldl (init := ((#[] : Array Rec), st0))
     fun (recs, st) (num, e) =>
       match e with
       | .compressed _ _ =>
@@ -245,14 +258,13 @@ def decodeAll (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat := 
       | .free _ _ => (recs, st)
       | .inUse _ g =>
         let st := { st with scan := { st.scan with fetched := st.scan.fetched + 1 } }
-        match doc.getObject limits num g with
-        | .error _ =>
-          (recs, { st with scan := { st.scan with fetchErrors := st.scan.fetchErrors + 1 } })
-        | .ok (.obj _) => (recs, st)
-        | .ok (.stream s) =>
-          let r := decodeBody doc limits (limits.maxDecodedTotalBytes - st.used) st.exhausted
-            num g s
-          (recs.push r, st.after r)
+        match st.sess.getObject limits num g with
+        | (.error _, sess) =>
+          (recs, { st with sess, scan := { st.scan with fetchErrors := st.scan.fetchErrors + 1 } })
+        | (.ok (.obj _), sess) => (recs, { st with sess })
+        | (.ok (.stream s), sess) =>
+          let (r, sess) := decodeBody sess limits st.exhausted num g s
+          (recs.push r, st.after r sess)
   (recs, st.scan)
 
 /-! ## Rendering -/
@@ -410,7 +422,7 @@ def hexCap : Nat := 1 <<< 20
 /-- Run over all entries with per-stream timing (same logic as `decodeAll`). -/
 def decodeAllTimed (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat) :
     IO (Array Rec × Scan × Array Nat) := do
-  let mut st : State := {}
+  let mut st : State := { sess := Core.Open.Session.ofDoc limits doc }
   let mut recs : Array Rec := #[]
   let mut times : Array Nat := #[]
   for (num, e) in entries doc only do
@@ -419,20 +431,20 @@ def decodeAllTimed (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Na
     | .free _ _ => pure ()
     | .inUse _ g =>
       st := { st with scan := { st.scan with fetched := st.scan.fetched + 1 } }
-      match doc.getObject limits num g with
-      | .error _ => st := { st with scan := { st.scan with fetchErrors := st.scan.fetchErrors + 1 } }
-      | .ok (.obj _) => pure ()
-      | .ok (.stream s) =>
-        let remaining := limits.maxDecodedTotalBytes - st.used
+      match st.sess.getObject limits num g with
+      | (.error _, sess) =>
+        st := { st with sess, scan := { st.scan with fetchErrors := st.scan.fetchErrors + 1 } }
+      | (.ok (.obj _), sess) => st := { st with sess }
+      | (.ok (.stream s), sess) =>
         let exhausted := st.exhausted
         let t0 ← IO.monoNanosNow
         -- `lazyPure` evaluates the (strict) record when this action runs, between the two
         -- clock reads.
-        let r ← IO.lazyPure fun _ => decodeBody doc limits remaining exhausted num g s
+        let (r, sess) ← IO.lazyPure fun _ => decodeBody sess limits exhausted num g s
         let t1 ← IO.monoNanosNow
         recs := recs.push r
         times := times.push (t1 - t0)
-        st := st.after r
+        st := st.after r sess
   return (recs, st.scan, times)
 
 /-- The `streams` view. -/
