@@ -1,0 +1,23 @@
+--- xref
+file:       input
+startxref:  381
+sections:   1 parsed (newest first)
+  #0 offset 381 via startxref: xref stream
+      8 entries (6 in use, 1 compressed, 1 free), highest object 7
+      /Size 8  /Prev -  /Root 1 0 R  /XRefStm -  encrypted false
+      keys: /Type /Size /W /Root /Length
+strict:     ok, 1 section(s)
+merged:     8 entries (6 in use, 1 compressed, 1 free), highest object 7
+--- revisions
+file:       input
+sections:   1 (oldest first; #0 is the newest)
+  #0 offset 381: xref stream, 8 entries
+      added   8: 0 1 2 3 4 5 6 7
+--- repair
+file:       input
+scan:       6 header hit(s), 6 parse attempt(s), 2 failed
+repair:     ok, 6 object(s), /Size 8, /Root 1 0 R, encrypted false
+trailer:    /Size /Root
+validates:  yes (/Root resolves to a dictionary)
+strict:     ok, 8 merged entries
+diff:       6 same, 0 offset/generation mismatch(es), 0 only in strict, 0 only in repair, 1 compressed (not scanned), 0 found over compressed
