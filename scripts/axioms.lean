@@ -398,3 +398,15 @@ import SafePdf
 #print axioms SafePdf.Core.Filter.Flate.adler32_eq_foldl
 #print axioms SafePdf.Spec.FlateWork.decodeSymW_fst
 #print axioms SafePdf.Core.Filter.Deflate.or4_mod_eight
+-- Phase 4, task 4.2: navigation (SafePdf/Core/Doc/Nav.lean)
+#print axioms SafePdf.Core.Doc.Nav.treeLoop_inv
+#print axioms SafePdf.Core.Doc.Nav.treeWalk_visited_le
+#print axioms SafePdf.Core.Doc.Nav.treeWalk_nodup
+#print axioms SafePdf.Core.Doc.Nav.destsTree_visited_le
+#print axioms SafePdf.Core.Doc.Nav.outlineLoop_inv
+#print axioms SafePdf.Core.Doc.Nav.outline_inv
+#print axioms SafePdf.Core.Doc.Nav.outline_visited_le
+#print axioms SafePdf.Core.Doc.Nav.outline_nodup
+#print axioms SafePdf.Core.Doc.Nav.outline_items_le
+#print axioms SafePdf.Core.Doc.Nav.labelTable_visited_le
+#print axioms SafePdf.Core.Doc.Nav.labelTable_nodup
