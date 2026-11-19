@@ -31,8 +31,8 @@ MILESTONE_NOTE = {
     "M2": "M2 (task 2.11): 'opens' means the xref chain loads (strict) or the repair scan "
           "rebuilds it (repaired), and /Root resolves to a dictionary. 'Objects resolve' "
           "fetches every in-use xref entry (classic offsets and object-stream members) with "
-          "getObject; it does not decode content streams, fonts or images, and encrypted "
-          "files' strings and streams are not decrypted (Phase 4).",
+          "getObject; it does not decode content streams, fonts or images; encrypted "
+          "files are decrypted with the empty user password (task 4.3b).",
 }
 
 
@@ -178,7 +178,7 @@ def render_md(data):
          "| open: strict | %d (%s) |" % (s["strict"], pct(s["strict"], s["files"])),
          "| open: repaired | %d (%s) |" % (s["repaired"], pct(s["repaired"], s["files"])),
          "| open: failed | %d (%s) |" % (s["failed"], pct(s["failed"], s["files"])),
-         "| encrypted (opened; strings/streams not decrypted) | %d |" % s["encrypted"],
+         "| encrypted (opened and decrypted, empty user password; task 4.3b) | %d |" % s["encrypted"],
          "| in-use objects resolved (`--view resolve`) | %d / %d (%s) |" % (
              s["objects_resolved"], s["objects_fetched"],
              "n/a" if s["pct_objects_resolved"] is None else "%.3f%%" % s["pct_objects_resolved"]),
