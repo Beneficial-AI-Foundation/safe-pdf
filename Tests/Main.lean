@@ -8,6 +8,7 @@ import Tests.Bombs
 import Tests.PagesView
 import Tests.Crypt
 import Tests.SvgView
+import Tests.TextView
 
 /-!
 # Test runner
@@ -35,7 +36,8 @@ def suites : List Suite :=
     { name := "bombs", run := SafePdf.Tests.Bombs.run },
     { name := "pages-view", run := SafePdf.Tests.PagesView.run },
     { name := "crypt", run := SafePdf.Tests.Crypt.run },
-    { name := "svg-view", run := SafePdf.Tests.SvgView.run } ]
+    { name := "svg-view", run := SafePdf.Tests.SvgView.run },
+    { name := "text-view", run := SafePdf.Tests.TextView.run } ]
 
 end SafePdf.Tests
 

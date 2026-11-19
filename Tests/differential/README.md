@@ -5,7 +5,7 @@ corpus (Plan.md section 7, item 1). Stdlib only; run with `python3 -I`.
 
     python3 -I Tests/differential/run.py [--comparator NAME]... [--corpus DIR]
                                          [--files GLOB] [--limit N] [--json OUT]
-                                         [--min-compared N]
+                                         [--min-compared N] [--min-similarity X] [--no-fold]
 
 Defaults: all comparators, `corpus/files` (git-ignored; a missing or empty
 directory reports 0 files and exits 0). `--files` overrides `--corpus`.
@@ -20,7 +20,8 @@ our dump (`.lake/build/bin/inspect <file> <view>`) + normalizer + compare.
 | `size`    | `os.path.getsize`        | default        | working     |
 | `objects` | `qpdf --json=2` (>= 11)  | `objects`      | working (needs qpdf; see below) |
 | `pages`   | `qpdf --json=2` (>= 11)  | `pages`        | working (needs qpdf; see below) |
-| `text`    | `pdftotext`              | `text`         | placeholder |
+| `streams` | Python `zlib`            | `streams`      | working     |
+| `text`    | `pdftotext` (poppler)    | `text`         | working (needs pdftotext; see below) |
 
 Add one by appending a `Comparator(...)` to `COMPARATORS` in `run.py` (pdf.js
 later).
@@ -133,3 +134,54 @@ rotate disagreements, exit 1), `pages_shared.{ours.jsonl,qpdf.json}` (known,
 exit 0). CI: step "Pages comparison on the corpus" in job `differential-objects`
 (`--min-compared 20`), results in the `differential-objects` artifact as
 `differential-pages.{json,log}`.
+
+## `text` comparator (`text.py`)
+
+Compares `inspect --view text --json FILE` (task 6.6: `Core.Text.extractDocPage`,
+all pages under one document budget) with poppler's `pdftotext -enc UTF-8 FILE -`
+(reading-order mode, not `-layout`), split into pages on form feeds. Pages are
+paired by index; a page present on one side only is compared with the empty
+string (note `page-count`). Phase 6 exit M6 asks for >= 98% similarity; this
+comparator **reports** the numbers, the threshold is evaluated by the
+orchestrator.
+
+Normalization (both sides; full list in the `text.py` docstring): Unicode NFKC
+(ligatures, NBSP, compatibility forms); soft hyphen, zero-width characters, BOM
+and other non-whitespace control characters dropped; dashes U+2010–2015 and
+U+2212 folded to `-`, curly single/double quotes and primes to `'` / `"`
+(`--no-fold` disables this step); every whitespace run collapsed to one space,
+ends stripped. U+FFFD is kept (an edit against the reference).
+
+Similarity per page: `1 - lev(a, b) / max(len(a), len(b))` (1 when both are
+empty), Levenshtein over code points after stripping the common prefix and
+suffix, computed exactly with the bit-parallel Myers/Hyyrö algorithm on Python
+ints (checked against the O(n·m) DP by `text.py --selftest`; ~3 s for a
+100 000-character page). Size guard: a remainder above 100 000 code points is
+compared at word-token level (same algorithm over tokens, character distance
+estimated as `(1 - sim_tok) · max len`), above 200 000 tokens by bag-of-words F1;
+both counted in `fallback_pages`. Per file: character-weighted similarity
+`1 - Σ lev / Σ max len`, page mean / median / min. Corpus (printed by `run.py`):
+character-weighted similarity over all pages, and the 10 worst pages with an
+excerpt around the first difference (50 in the JSON under `"text"`).
+
+Status: agree (compared), disagree (never by default), known (the core rejects
+the document — open failures are the `objects` / `pages` comparators' concern;
+counted as similarity 0), error (inspector crash, timeout, non-JSON output),
+skipped (`pdftotext` missing or failing on the file). `--min-similarity X`
+fails the run when the corpus similarity is below X. Stats: `compared`/`pages`,
+`pages_exact`, `page_count_mismatch`, `chars_ours`, `chars_ref`, `dist`,
+`maxlen`, `fallback_pages`, `ours_replacement`, `ours_failed`.
+
+    python3 -I Tests/differential/run.py --comparator text --json differential-text.json
+    python3 -I Tests/differential/text.py --ours OURS.jsonl --ref REF.txt [--min-similarity X]
+    python3 -I Tests/differential/text.py --selftest
+
+Fixtures (`ours` is real inspector output for `Tests/golden/text/latin.pdf`; the
+pdftotext side is hand-written, since pdftotext is not installed locally):
+`fixtures/text_ours.jsonl` + `text_ref.txt` (ligature, en dash, one missing word
+space: similarity 0.9863, exit 0 even with `--min-similarity 0.9`),
+`text_ours.jsonl` + `text_diff.ref.txt` (different text and a page-count mismatch:
+0.1561, exit 1 with `--min-similarity 0.9`), `text_failed.ours.jsonl` +
+`text_ref.txt` (our open failure: known, exit 0). CI: step "Text comparison on
+the corpus" in job `differential-objects` (apt `poppler-utils`), results in the
+`differential-objects` artifact as `differential-text.{json,log}`.

@@ -111,6 +111,13 @@ per page is printed (JSON with `--json`). The SVG is produced from the `DisplayL
   CMYK naively `R = (1 − c)(1 − k)` (likewise G with m, B with y), no colour management;
   pattern colours → mid grey with `data-pattern`. Alpha below 1 → `fill-opacity` /
   `stroke-opacity`.
+* **Text overlay** (`SAFEPDF_SVG_TEXT=1`, task 6.6, for visual checking of text extraction):
+  after the page content, a `<g data-overlay="text">` with one translucent `<rect>` per glyph
+  extracted by `Core.Text.extractDocPage` (fresh budget; a separate run of the page content
+  with font advances, while the drawing above uses the zero-advance phase-5 configuration):
+  along the baseline over the glyph's width, across it from 0.2 em below to 0.8 em above
+  the baseline (nominal; no glyph bounding boxes yet), blue for visible and green for invisible
+  glyphs, `data-item`/`data-seq` (provenance) and `data-text`.
 * XML text and attribute values are escaped (`&`, `<`, `>`, `"`), XML-invalid control
   characters replaced; comments never contain `--`.
 -/
@@ -770,9 +777,50 @@ def streamDict (limits : Limits) (doc : Doc) (num gen : Nat) : SafePdf.Dict :=
   | .ok (.stream s) => s.dict
   | _ => []
 
-/-- Render a page's display list as an SVG document (`index` is 0-based). -/
-def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : PageOps) :
-    String := Id.run do
+/-! ## Text overlay (`SAFEPDF_SVG_TEXT=1`, task 6.6) -/
+
+/-- Page-space point of a point given in a baseline direction's frame (`u` along the baseline,
+`v` across it): the inverse of `Core.Text.rotFrame`. -/
+def unrot (dir : Nat) (u v : Fixed) : Fixed × Fixed :=
+  match dir with
+  | 1 => (Fixed.neg v, u)
+  | 2 => (Fixed.neg u, Fixed.neg v)
+  | 3 => (v, Fixed.neg u)
+  | _ => (u, v)
+
+/-- Smaller of two values. -/
+def fmin (x y : Fixed) : Fixed := if x.raw ≤ y.raw then x else y
+
+/-- Larger of two values. -/
+def fmax (x y : Fixed) : Fixed := if x.raw ≤ y.raw then y else x
+
+/-- The overlay box of an extracted glyph, as a page-space `<rect>`: along the baseline from
+the origin over the glyph width, across it from 0.2 em below the baseline to 0.8 em above
+(a nominal descent/ascent; the extraction carries no glyph bounding box), mapped back from the
+glyph's baseline frame and normalised to an axis-aligned rectangle. -/
+def glyphRect (g : SafePdf.Core.Text.Glyph) : String :=
+  let (u0, v0) := SafePdf.Core.Text.rotFrame g.dir g.x g.y
+  let lo := Fixed.sub v0 (Fixed.mul g.fontSize (Fixed.ofDecimal ⟨2, 1⟩))
+  let hi := Fixed.add v0 (Fixed.mul g.fontSize (Fixed.ofDecimal ⟨8, 1⟩))
+  let (ax, ay) := unrot g.dir u0 lo
+  let (bx, by_) := unrot g.dir (Fixed.add u0 g.width) hi
+  let x0 := fmin ax bx
+  let y0 := fmin ay by_
+  let fill := if g.visible then "rgb(0%,0%,100%)" else "rgb(0%,60%,0%)"
+  s!"<rect x=\"{num x0}\" y=\"{num y0}\" width=\"{num (Fixed.sub (fmax ax bx) x0)}\" height=\"{num (Fixed.sub (fmax ay by_) y0)}\" fill=\"{fill}\" fill-opacity=\"0.15\" stroke=\"rgb(100%,0%,0%)\" stroke-width=\"0.2\" stroke-opacity=\"0.6\" data-item=\"{g.item}\" data-seq=\"{g.seq}\" data-text=\"{escAttr g.text}\"/>"
+
+/-- The text overlay of a page: one group of glyph boxes (`glyphRect`) from
+`Core.Text.extractDocPage` with a fresh budget, or a comment when the contents do not decode. -/
+def textOverlay (limits : Limits) (doc : Doc) (page : Page) : List String :=
+  match (SafePdf.Core.Text.extractDocPage limits doc page (Budget.init limits)).1 with
+  | .error e => [s!"<!-- text overlay: {commentSafe (renderError e)} -->"]
+  | .ok pt =>
+    ["<g data-overlay=\"text\">"] ++ pt.glyphs.map glyphRect ++ ["</g>"]
+
+/-- Render a page's display list as an SVG document (`index` is 0-based). `overlay` lines are
+appended last inside the page-space group (the `SAFEPDF_SVG_TEXT` glyph boxes). -/
+def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : PageOps)
+    (overlay : List String := []) : String := Id.run do
   let (w, h, m) := frame page.cropBox page.rotate
   let mut out : Array String := #[
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
@@ -809,26 +857,30 @@ def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : P
     out := out.push "<defs>"
     out := out ++ reg.defs
     out := out.push "</defs>"
+  out := out ++ overlay.toArray
   out := out.push "</g>"
   out := out.push "</svg>"
   return "\n".intercalate out.toList ++ "\n"
 
-/-- Render page `i` (0-based) with a fresh budget. -/
-def renderIndex (limits : Limits) (doc : Doc) (i : Nat) : Option String :=
+/-- Render page `i` (0-based) with a fresh budget; `text` adds the glyph-box overlay. -/
+def renderIndex (limits : Limits) (doc : Doc) (i : Nat) (text : Bool := false) :
+    Option String :=
   if h : i < doc.pages.size then
     let page := doc.pages[i]
     let (r, b) := doc.decodeContentsB limits (Budget.init limits) page
-    some (renderPage limits doc page i (analyze limits doc page i true r b).1)
+    some (renderPage limits doc page i (analyze limits doc page i true r b).1
+      (if text then textOverlay limits doc page else []))
   else none
 
 /-- The `svg` view. -/
 def svgView : View where
   name := "svg"
-  description := "render a page to SVG from the display list (SAFEPDF_PAGE=N, default 1; SAFEPDF_SVG_DIR=dir writes all pages)"
+  description := "render a page to SVG from the display list (SAFEPDF_PAGE=N, default 1; SAFEPDF_SVG_DIR=dir writes all pages; SAFEPDF_SVG_TEXT=1 overlays extracted glyph boxes)"
   run cfg i := do
     match Pages.docOf cfg.limits i.result with
     | .error e => IO.eprintln s!"inspect: {i.path}: {renderError e}"
     | .ok doc =>
+      let text := (← IO.getEnv "SAFEPDF_SVG_TEXT") == some "1"
       match ← IO.getEnv "SAFEPDF_SVG_DIR" with
       | some dir =>
         let dir : System.FilePath := dir
@@ -840,6 +892,7 @@ def svgView : View where
           let (po, b) := analyze cfg.limits doc page k true r b
           budget := b
           let svg := renderPage cfg.limits doc page k po
+            (if text then textOverlay cfg.limits doc page else [])
           let out := dir / s!"page-{k + 1}.svg"
           IO.FS.writeFile out svg
           let err := match po.error with
@@ -865,7 +918,7 @@ def svgView : View where
         if n == 0 then
           IO.eprintln s!"inspect: {i.path}: SAFEPDF_PAGE is 1-based"
         else
-          match renderIndex cfg.limits doc (n - 1) with
+          match renderIndex cfg.limits doc (n - 1) text with
           | some svg => IO.print svg
           | none =>
             IO.eprintln s!"inspect: {i.path}: page {n} out of range (1..{doc.pages.size})"
