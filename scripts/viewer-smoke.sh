@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -16,6 +16,8 @@
 #   1e. a generated three-page PDF with page labels, an outline, an internal and a URI link
 #      (SAFEPDF_VIEWER_SMOKE_MODE=nav): outline clicks, link hover/click, back/forward, the
 #      URI confirmation dialog and clipboard, Ctrl+G with labels, F9 (8.2d);
+#   1f. the same PDF through the menubar (SAFEPDF_VIEWER_SMOKE_MODE=menu): File / Edit / View /
+#      Go entries invoked by their .menubar paths, enabled states (9.1);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -325,6 +327,59 @@ if not 0.45 <= y <= 0.53: errs.append("outline /XYZ position not applied: yview 
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-nav" "$work/nav-uri.txt" || fail=1
+
+# 1f. Menubar (task 9.1) on the same three-page PDF (SAFEPDF_VIEWER_SMOKE_MODE=menu): the
+# menubar File / Edit / View / Go is attached to the window with the expected entries; every
+# action is invoked through `.menubar.*` entries: Go (next, last, first, previous, Go to
+# page..., Back, Forward; entries are disabled where they cannot run), View (Outline check,
+# zoom, fit, rotate), Edit (Find..., Select all), File (Close, then Quit ends the run).
+mkdir -p "$work/out-menu"
+SAFEPDF_VIEWER_SMOKE_MODE=menu run_viewer "$work/out-menu" "$work/nav.pdf"
+cat "$work/out-menu/menu.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines()
+         if ": " in l)
+want = {
+    "menubar": ".menubar",
+    "cascades": "File|Edit|View|Go",
+    "entries.menubar.file": "Open...|Close|Quit",
+    "entries.menubar.edit": "Copy|Select all|Find...",
+    "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left",
+    "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
+    "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
+                    "Back=disabled,Forward=disabled,Copy=disabled,Outline=normal",
+    "toolbar-prev-page1": "disabled",
+    "page-after-next": "2",
+    "page-after-last": "3",
+    "states-page3": "Previous page=normal,Next page=disabled,First page=normal,Last page=disabled,"
+                    "Back=disabled,Forward=disabled",
+    "page-after-next-at-end": "3",
+    "page-after-first": "1",
+    "page-after-prev-at-start": "1",
+    "goto-bar-mapped": "1",
+    "page-after-goto": "2",
+    "states-after-goto": "Back=normal,Forward=disabled",
+    "page-after-back": "1",
+    "page-after-forward": "2",
+    "outline-after-view-outline": "false 0",
+    "outline-after-view-outline2": "true 1",
+    "zoom-actual": "100",
+    "zoom-in": "125",
+    "zoom-out": "100",
+    "mode-fit-width": "fit width",
+    "mode-fit-page": "fit page",
+    "rot-after-right": "90",
+    "rot-after-left": "0",
+    "find-bar-mapped": "1",
+    "title-after-close": "safe-pdf",
+    "states-after-close": "Close=disabled,Next page=disabled,Zoom in=disabled,Open...=normal,Quit=normal",
+}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "no text" not in v.get("status-select-all", ""): errs.append("Select all: %r" % v.get("status-select-all"))
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-menu/menu.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
