@@ -954,3 +954,21 @@ import SafePdf
 #print axioms SafePdf.Core.Raster.Transparency.lumLoop_size
 #print axioms SafePdf.Core.Raster.Transparency.alphaLoop_size
 #print axioms SafePdf.Core.Raster.Transparency.maskFromSpec_size
+
+-- Phase 8, task 8.3: annotation appearance streams (SafePdf/Core/Annot.lean)
+#print axioms SafePdf.Core.Annot.aOf_corners
+#print axioms SafePdf.Core.Annot.parseAll_length
+#print axioms SafePdf.Core.Annot.widgetsLast_length
+#print axioms SafePdf.Core.Annot.collect_drawn_le
+#print axioms SafePdf.Core.Annot.runOne_good
+#print axioms SafePdf.Core.Annot.foldl_runOne_good
+#print axioms SafePdf.Core.Annot.runAppearances_ops_le
+#print axioms SafePdf.Core.Annot.runAppearances_items_le
+#print axioms SafePdf.Core.Annot.pageAnnots_bounds
+
+-- Phase 7, task 7.2i: integer stroker
+#print axioms SafePdf.Core.Raster.Stroke.gridQ_err
+
+-- Phase 7, task 7.2h: fixed-point glyph transforms
+#print axioms SafePdf.Core.Raster.Glyph.outlineToDF_size
+#print axioms SafePdf.Core.Raster.Glyph.runPathSpec_size_le

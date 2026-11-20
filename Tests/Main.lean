@@ -27,6 +27,7 @@ import Tests.RasterTransparency
 import Tests.RasterShading
 import Tests.RasterTiling
 import Tests.RasterTxFast
+import Tests.Annot
 
 /-!
 # Test runner
@@ -73,7 +74,8 @@ def suites : List Suite :=
     { name := "raster-transparency", run := SafePdf.Tests.RasterTransparency.run },
     { name := "raster-shading", run := SafePdf.Tests.RasterShading.run },
     { name := "raster-tiling", run := SafePdf.Tests.RasterTiling.run },
-    { name := "raster-tx-fast", run := SafePdf.Tests.RasterTxFast.run } ]
+    { name := "raster-tx-fast", run := SafePdf.Tests.RasterTxFast.run },
+    { name := "annot", run := SafePdf.Tests.Annot.run } ]
 
 end SafePdf.Tests
 

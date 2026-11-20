@@ -4,6 +4,7 @@ import SafePdf.Core.Font.Outline
 import SafePdf.Core.Raster.Image
 import SafePdf.Core.Raster.Transparency
 import SafePdf.Core.Raster.Shading
+import SafePdf.Core.Annot
 
 /-!
 # Glyph rendering: outlines through the path rasterizer (task 7.3a)
@@ -977,10 +978,17 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
   match Text.extractDocPage limits doc page budget with
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
+    -- Annotation appearance streams (task 8.3), drawn after the page content in MuPDF order.
+    -- They get their own op/form budget (the page run's counts are not exposed by `PageText`).
+    let (ap, b) := Annot.docAnnots limits doc page pt.fonts
+      { ops := limits.maxOpsPerPage, forms := limits.maxFormsPerPage } b
+    let items := pt.items ++ ap.items
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD [])
-    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) pt.items
-    let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) pt.items
-    (.ok (renderPage page zoom rot ⟨pt.fonts, srcs, imgs, shs⟩ pt.items cfg), b)
+    let (srcs, b) := ap.roots.foldl (fun (acc : SourceTable × Filter.Budget) r =>
+      let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2; (acc.1 ++ t, b)) (srcs, b)
+    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) items
+    let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) items
+    (.ok (renderPage page zoom rot ⟨ap.fonts, srcs, imgs, shs⟩ items cfg), b)
 
 /-! ## 6. Checks -/
 
