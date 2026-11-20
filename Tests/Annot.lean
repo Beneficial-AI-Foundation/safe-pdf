@@ -614,9 +614,62 @@ def richFixture : ByteArray := mkPdf [
     "/RC (<?xml version=\"1.0\"?><body><p>Rich &amp; <b>bold</b></p><p>Second   para</p>" ++
     "</body>) /Contents (Plain contents) >>"]
 
+/-- Task 8.3e (3): cloudy borders (`/BE /S /C`): (0) a stroked square, intensity 1; (1) a filled
+square, intensity 2, width 2; (2) a filled circle; (3) a stroked polygon. -/
+def cloudFixture : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>",
+  strmObj "" "",
+  "<< /Type /Annot /Subtype /Square /Rect [20 180 140 280] /BE << /S /C /I 1 >> /C [1 0 0] >>",
+  "<< /Type /Annot /Subtype /Square /Rect [160 180 280 280] /BE << /S /C /I 2 >> /C [0 0 1] " ++
+    "/IC [1 1 0] /BS << /W 2 >> >>",
+  "<< /Type /Annot /Subtype /Circle /Rect [20 20 140 140] /BE << /S /C /I 1 >> /C [0 0.5 0] " ++
+    "/IC [0.8 0.8 1] >>",
+  "<< /Type /Annot /Subtype /Polygon /Rect [0 0 1 1] /Vertices [170 30 280 40 260 150 180 120] " ++
+    "/BE << /S /C /I 1 >> /C [0 0 0] >>"]
+
 /-- Task 8.3e checks. -/
 def run83e : IO Nat := do
   let mut failures := 0
+  -- (3) cloudy borders
+  match process cloudFixture with
+  | none => failures := failures + (← check "cloud fixture processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "cloud all drawn" (ds.length == 4 && ds.all (·.synth)))
+    -- rectangles grow by the cloud radius (MuPDF's `getRect` is these less `/RD`, 5 or 10)
+    failures := failures + (← check "cloud rects"
+      ((ds.map (·.rect)).take 3 == [⟨31 / 2, 351 / 2, 289 / 2, 569 / 2⟩, ⟨151, 171, 289, 289⟩,
+        ⟨31 / 2, 31 / 2, 289 / 2, 289 / 2⟩]))
+    -- the first arc of the first square: MuPDF 1.25.1's content (`mutool run`, `update()`)
+    failures := failures + (← check "cloud content"
+      (match ds[0]? with
+       | some d => has ((String.fromUTF8? d.ap.data).getD "")
+           ("2 j\n18.012532 184.250000 m\n17.393706 184.660482 16.886082 185.217728 " ++
+            "16.534927 185.872044 c\n")
+       | none => false))
+    -- pixels sampled from `mutool draw -r 72` (device y = 300 − page y): scallops and fills
+    -- (the whole page differs from MuPDF in 0.234% of pixels, 211 of 90,000: anti-aliasing of
+    -- the 1-point arcs)
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("square scallop", 16, 112, (255, 115, 115)), ("filled square", 220, 70, (255, 255, 0)),
+      ("filled scallop outside /Rect", 152, 104, (0, 0, 255)),
+      ("circle fill", 80, 220, (204, 204, 255)), ("polygon scallop", 283, 260, (63, 63, 63)),
+      ("white", 150, 150, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"cloud px {n}" (near (pxAt o.img x y) c))
+    -- trigonometry to 10⁻⁸
+    let close := fun (a b : Rat) => decide (a - b ≤ 1 / 100000000 ∧ b - a ≤ 1 / 100000000)
+    failures := failures + (← check "cloud trig"
+      (close (Annot.sinR (Annot.piR / 6)) (1 / 2) && close (Annot.cosR (Annot.piR / 3)) (1 / 2) &&
+       close (Annot.sinR (-7 * Annot.piR / 2)) 1 && close (Annot.atan2R 1 1) (Annot.piR / 4) &&
+       close (Annot.atan2R (-1) (-1)) (-3 * Annot.piR / 4) &&
+       close (Annot.atanR 3) (1249045772 / 1000000000) &&
+       close (Annot.sqrtR 2) (1414213562 / 1000000000)))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "cloud.ppm") o.img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "cloud.pdf") cloudFixture
   -- CSS pieces
   failures := failures + (← check "css colour" (Annot.cssColor "#00f".toList == some [0, 0, 1] &&
     Annot.cssColor "rgb(255, 0, 51)".toList == some [1, 0, 1 / 5] &&
