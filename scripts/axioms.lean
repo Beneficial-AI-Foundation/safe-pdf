@@ -1197,3 +1197,14 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Raster.Image.boxGrid_size
 #print axioms SafePdf.Core.Raster.Image.fitTarget_le
 #print axioms SafePdf.Core.Raster.Image.finishTo_dims
+-- Phase 9, task 9.9: FreeText and Ink
+#print axioms SafePdf.Core.Write.Annots.mkAnnot_lookup
+#print axioms SafePdf.Core.Write.Annots.mkAnnot_lookup_first
+#print axioms SafePdf.Core.Write.Annots.freeTextDict_shape
+#print axioms SafePdf.Core.Write.Annots.inkDict_shape
+#print axioms SafePdf.Core.Write.Annots.inkListObj_length
+#print axioms SafePdf.Core.Write.Annots.inkListObj_getElem?
+#print axioms SafePdf.Core.Write.Annots.strokeNums_length
+#print axioms SafePdf.Core.Write.Annots.slots_freeText_ink
+#print axioms SafePdf.Shell.App.Bubble.Ui.selectEditor_exclusive
+#print axioms SafePdf.Shell.App.Bubble.Ui.toolClick_exclusive
