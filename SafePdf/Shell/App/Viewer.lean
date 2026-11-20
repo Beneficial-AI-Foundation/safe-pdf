@@ -5985,6 +5985,42 @@ def smokeM9Reopen (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile ((dir : System.FilePath) / "m9-reopen.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- The M9 look-check set-up (`SAFEPDF_VIEWER_SMOKE_MODE=m9-shot`, task 9.10), in the state of
+the human's PDF.js reference screenshot (`docs/viewer-reference/pdfjs-firefox.png`): page 1 at
+Automatic Zoom with the outline sidebar as opened on load, the toolbar's Highlight pop-over open
+(tool on, yellow), the first sentence of the abstract (`SAFEPDF_VIEWER_SHOT_FROM` …
+`SAFEPDF_VIEWER_SHOT_TO`, default the first sentence of arxiv-1706.03762's abstract) dragged
+over in the tool mode, so it is highlighted in yellow and shows its edit bubble. Writes
+`ready.txt` (or `error: …`) and stays up 20 s for the screenshot, then closes. -/
+def smokeM9Shot (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  settle st
+  let fromQ := (← IO.getEnv "SAFEPDF_VIEWER_SHOT_FROM").getD "The dominant sequence"
+  let toQ := (← IO.getEnv "SAFEPDF_VIEWER_SHOT_TO").getD "and a decoder."
+  sendEvent ".bar.highlight" "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+  sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text on page 1")
+  let some (a, _) := (ix.hits (Select.normQuery fromQ))[0]? | throw (IO.userError s!"{fromQ} not found")
+  let some (_, b) := (ix.hits (Select.normQuery toQ))[0]? | throw (IO.userError s!"{toQ} not found")
+  let (some p0, some p1) := (← cellWindowPos st ix a, ← cellWindowPos st ix b) |
+    throw (IO.userError "sentence not shown")
+  sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+  sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+  sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+  discard <| run ["update"]
+  settle st
+  discard <| run ["update"]
+  let s ← st.get
+  let kind := match s.bubble with
+    | some (.float, _) => "float" | some (.edit, _) => "edit" | some (.editor, _) => "editor"
+    | none => "none"
+  IO.FS.writeFile ((dir : System.FilePath) / "ready.txt")
+    s!"ready\nmarks: {s.marks.marks.size}\nbubble: {kind}\npopover: {← run ["winfo", "ismapped", ".hlbar"]}\n\
+      field: {← run ["set", "::safepdf::pageText"]} {← run [".bar.of", "cget", "-text"]}\n\
+      zoom: {← run [".bar.zoom", "itemcget", "label", "-text"]}\nsidebar: {s.outlineShown}\n"
+  discard <| run ["after", "20000", "destroy ."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -6061,10 +6097,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "editors.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
-  if s.smokeMode == "m9" || s.smokeMode == "m9-reopen" then
+  if s.smokeMode == "m9" || s.smokeMode == "m9-reopen" || s.smokeMode == "m9-shot" then
     let name := s!"{s.smokeMode}.txt"
     try
-      if s.smokeMode == "m9" then smokeM9 st dir else smokeM9Reopen st dir
+      if s.smokeMode == "m9" then smokeM9 st dir
+      else if s.smokeMode == "m9-shot" then smokeM9Shot st dir
+      else smokeM9Reopen st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]

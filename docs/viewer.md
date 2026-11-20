@@ -986,3 +986,145 @@ interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A secon
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
 cache keys at `lakefile.lean`).
+
+## M9 evidence (9.6, 9.10)
+
+Recorded 2026-11-20 on the worktree of tasks 9.6/9.10 (base c368bc9), Linux arm64, Xvfb.
+M9 reads: *a paper reads end-to-end with the wheel in every view mode; a highlight and a note
+survive close/reopen inside the PDF (C7 proved; the annotated file opens in
+Acrobat/Okular/pdf.js with the highlights visible, and in our strict parser unchanged);
+side-by-side screenshots of the same paper in our viewer and in Firefox's PDF.js show the same
+toolbar layout (sidebar only with an outline, page box with arrows, centred zoom, tools on the
+right) and the same selection bubble.*
+
+### Wheel end to end, close/reopen (automated: `scripts/viewer-smoke.sh`, case 1n)
+
+The `m9` / `m9-reopen` smoke runs (see "Smoke test" above) on the two fixtures and on
+`arxiv-1706.03762.pdf` (15 pages, an outline) pass:
+
+    wheel-single: seen=1,2,…,15 spreads=15 notches=72 monotone=true field=15 last=true bottom=true
+    wheel-continuous: seen=1,2,…,15 spreads=15 notches=186 monotone=true field=15 last=true bottom=true
+    wheel-facing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=7 monotone=true field=15 last=true bottom=true
+    wheel-cfacing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=42 monotone=true field=15 last=true bottom=true
+    saved: true false 4 4
+    closed: true 0 safe-pdf
+    reopened: true 4 4 false false
+    marks-reopened: highlight 0 yellow 1 | ink 0 2 [5, 5] 4 100 #0060DF | note 0 yellow M9 note ✓ [x] | text 0 M9 text 59 60 16 #D70022
+    pixels-reopened: hl=55 note=30 text=14 ink=10
+    export: exported 4 mark(s) to m9.xfdf
+    removed: 0 hl=0 note=0 text=0 ink=0
+    import: m9.xfdf: 4 imported, 0 already present, 0 skipped
+    (fresh process) restored: 4 4 false; pixels: hl=55 note=30 text=14 ink=10
+    mutool: coloured pixels per mark: {'hl': 371, 'note': 85, 'text': 152, 'ink': 628}
+
+(In facing mode at Automatic Zoom a whole spread fits the window, so one notch per spread.)
+
+### The annotated file in other readers
+
+The file is the `arxiv-1706.03762-annotated.pdf` the `m9` run writes (a highlight on
+`Provided`, a note, the free text `M9 text` in red, a blue two-stroke drawing; 3,533 bytes
+appended to the 2,215,272-byte original).
+
+* **Byte prefix, qpdf**: `cmp -n $(stat -c %s paper.pdf) paper.pdf paper-annotated.pdf` →
+  equal; `qpdf --check paper-annotated.pdf` → "No syntax or stream encoding errors found".
+* **Our strict parser, "unchanged"**: `inspect paper-annotated.pdf` → `open: strict`,
+  `revisions: 2`; `inspect --view resolve` → `5965 ok, 0 error(s)` (original: `5957 ok`).
+  `diff <(inspect --view objects paper.pdf) <(inspect --view objects paper-annotated.pdf)`
+  removes only the old definition of page 1 (`91 0 obj`, superseded by the update: the same
+  dictionary plus `/Annots [5958 0 R 5959 0 R 5960 0 R 5961 0 R]`) and adds the new objects
+  5958–5965; every other object's pretty-printed tree is identical. The general statement is
+  proved (`Spec.Write.c7`, `c7Update`, value level `c7Value'`/`c7ValueAnnots'`) and tested on
+  fixtures, encrypted fixtures and the corpus by `Tests/WriteIncremental.lean` ("every original
+  object … fetches identically", checks `original objects unchanged` / `objects not written
+  unchanged`) and `Tests/WriteAnnots.lean`.
+* **MuPDF**: `mutool draw -r 72 -o p1.png paper-annotated.pdf 1` draws all four marks (yellow
+  highlight, the yellow note icon, the red text, the blue strokes); the smoke script counts
+  their coloured pixels in each mark's box (above).
+* **Poppler** (Okular's PDF backend; Okular itself is not installed — 382 packages): `pdftoppm
+  -r 72 -f 1 -l 1 -png paper-annotated.pdf p` (poppler 25.03.0) draws all four marks the same
+  way.
+* **pdf.js**: Node 20.19.2 and npm from Debian (`sudo apt-get install nodejs npm`, system
+  tools of the sandbox, not project dependencies) and `pdfjs-dist@4.10.38` (published
+  2025-01-01) with its optional `@napi-rs/canvas` 0.1.100, installed with
+  `npm install --ignore-scripts pdfjs-dist@4.10.38` in a scratch directory outside the
+  repository. `node scripts/pdfjs-annots.mjs SCRATCH/node_modules/pdfjs-dist
+  paper-annotated.pdf p1.png` (`getDocument` + `page.getAnnotations()` on every page):
+
+      pdfjs 4.10.38: 15 pages
+      page 1: Highlight id=5958R color=255,255,152 rect=124.7,707.6,167.7,719.6 hasAppearance=true contents="" quads=1
+      page 1: Text id=5959R color=255,255,152 rect=566.7,727.5,586.7,747.5 hasAppearance=true contents="M9 note ✓ [x]"
+      page 1: FreeText id=5960R color=font:215,0,34 size:16 rect=59.4,34.6,115.8,60.2 hasAppearance=true contents="M9 text" textContent=["M9 text"]
+      page 1: Ink id=5961R color=0,96,223 rect=437.5,46.9,525.3,84.6 hasAppearance=true contents="" inkLists=2
+
+  Subtypes, colours (PDF.js yellow `#FFFF98`, red `#D70022`, blue `#0060DF`), contents and
+  geometry are ours; the sorted listing differs from the original file's only by these four
+  lines (the original's 113 `/Link` annotations are listed unchanged). pdf.js does not expose
+  `/NM`. Rendering page 1 through pdf.js (`AnnotationMode.ENABLE`, `standardFontDataUrl` set
+  to pdfjs-dist's `standard_fonts/`) shows all four marks; without `standardFontDataUrl` the
+  free text (non-embedded `/Helv` in its appearance) is not drawn in Node.
+* **Acrobat, Okular (GUI), Firefox's built-in PDF.js**: not available here. **Check for the
+  human**: open `arxiv-1706.03762-annotated.pdf` (re-create it with
+  `scripts/viewer-smoke.sh`, or by hand: highlight, note, Add text, Draw, Save) in Acrobat
+  Reader, Okular and Firefox and confirm the four marks are drawn, the note opens with its
+  text, and the highlight can be selected/edited.
+
+### Side by side with PDF.js (look check)
+
+`docs/viewer-reference/m9-side-by-side.png`: left the human's reference
+(`pdfjs-firefox.png`, 1915 × 938, Firefox PDF.js on Perceus, PLDI '21), right our viewer at
+1900 × 940 on `arxiv-1706.03762.pdf` (the Perceus PDF has no clear licence for the corpus, so
+the paper differs; layout only). Ours was taken with the smoke variant `m9-shot`
+(`Viewer.smokeM9Shot`: Highlight pop-over open, the abstract's first sentence dragged over in
+the tool mode → yellow highlight with its edit bubble; `ready.txt` reports `marks: 1`,
+`bubble: edit`, `popover: 1`, `field: 1 of 15`, `zoom: Automatic Zoom`, `sidebar: true`):
+
+    Xvfb :97 -screen 0 1900x940x24 -nolisten tcp &
+    DISPLAY=:97 SAFEPDF_VIEWER_SMOKE=out SAFEPDF_VIEWER_SMOKE_MODE=m9-shot \
+      SAFEPDF_VIEWER_GEOMETRY=1900x940 .lake/build/bin/viewer corpus/files/arxiv-1706.03762.pdf &
+    # when out/ready.txt exists:
+    DISPLAY=:97 import -window root ours.png
+    convert ref.png ours.png … +append m9-side-by-side.png   # ImageMagick, labels spliced on top
+
+What matches:
+
+* Toolbar layout: sidebar toggle at the far left (shown because there is an outline), ∧ / ∨
+  arrows, the editable page box `1` and `of N`; centred − | + and the `Automatic Zoom`
+  drop-down with its chevron; the tool buttons at the right, then Print, Save and `»`; the
+  active Highlight tool drawn on a round grey-lavender background.
+* Sidebar rule: the outline sidebar is open on load because the document has an outline, with
+  a "Document outline" title and indented, collapsible entries.
+* Highlight pop-over: right-aligned under the Highlight button, "Highlight color" with the same
+  five swatches (yellow selected with a ring, green, blue, pink, red), "Thickness" with a small
+  dot, a slider and a large dot, a divider, "Show all" with an on switch.
+* The highlight: PDF.js yellow multiplied over the text (glyphs stay black), outlined in blue
+  while selected; the edit bubble below it near the end of the selection with colour swatch +
+  chevron, comment and delete icons separated by dividers.
+* Page on a grey background, white paper, the same zoom choice.
+
+What differs:
+
+* We have a native menubar row (File / Edit / View / Go, 31 px) above the toolbar (Plan
+  Phase 9 asks for it); Firefox's own chrome is cropped from the reference.
+* Tool order and set: PDF.js (this Firefox build) shows Comment, Signature, Highlight, Add
+  text, Draw, Add image; we show Highlight, Comment, Add text, Draw, Add image (no Signature
+  tool). Our Print and Add image are disabled (greyed, post-M9); PDF.js's are enabled.
+* Spacing: PDF.js leaves a wider gap between the sidebar toggle and the arrows (arrows at
+  x ≈ 120 vs ours ≈ 63); the toolbars are about as tall (41 vs 40 px) but ours is lighter
+  (`#f9f9fa` vs Firefox's `#ebebef`).
+* Shapes: PDF.js uses rounded corners almost everywhere (page box, zoom pill, pop-over card
+  with a shadow, sidebar card, round slider thumb, pill-shaped edit bubble with a shadow); ours
+  has square or slightly rounded corners, a flat pop-over with a thin border, a square slider
+  thumb and a smaller, flatter bubble.
+* Sidebar: PDF.js's header has a view-switch button (thumbnails/outline, with chevron) and an
+  outline-options button; ours is a plain title. PDF.js expands nested entries (▼) here, ours
+  shows top-level entries with ▸ collapsed; PDF.js's sidebar is ≈ 230 px wide, ours ≈ 270 px.
+* Selection outline: PDF.js traces one dark-indigo outline around the union of the line
+  boxes; ours draws one brighter blue rectangle per line (they overlap at the line join).
+* Fonts and colours: PDF.js uses the system UI font (the reference is from macOS) at a
+  slightly larger size, icons in a purple-grey; ours DejaVu Sans via Tk/Xft, the zoom label
+  bold, icons near-black.
+* Anti-aliasing: the reference is a (HiDPI) browser screenshot with smooth text; our page is
+  drawn by our own rasterizer at 1× with greyscale anti-aliasing (slightly heavier glyph
+  edges), UI text by Xft.
+* The paper differs (Perceus vs Attention Is All You Need), so page content, positions and
+  the page count ("of 16" vs "of 15") are not comparable.
