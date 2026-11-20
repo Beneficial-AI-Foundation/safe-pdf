@@ -14,7 +14,8 @@ selected `objects` / `pages` comparators, fewer than N files had at least one
 object (page) compared, or if --min-similarity X is given and the `text`
 comparator's corpus-wide similarity is below X, or if --min-within P is given
 and fewer than P percent of the `positions` comparator's measured glyph pairs
-are within tolerance.
+are within tolerance, or fewer than P percent of the `pixels` comparator's
+pages are within its perceptual threshold.
 """
 import argparse
 import fnmatch
@@ -227,6 +228,30 @@ def _positions_check(path: str):
         raise Skip(str(e))
 
 
+_PIXELS = []
+PIXELS_DPI = 72   # set from --dpi in main()
+
+
+def _load_pixels_module():
+    if not _PIXELS:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "pixels_cmp", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pixels.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _PIXELS.append(mod)
+    return _PIXELS[0]
+
+
+def _pixels_check(path: str):
+    mod = _load_pixels_module()
+    mod.DPI = PIXELS_DPI
+    try:
+        return mod.check_file(INSPECT, path, dpi=PIXELS_DPI)
+    except mod.Skip as e:
+        raise Skip(str(e))
+
+
 # Comparators whose stats carry a "compared" count checked by --min-compared.
 MIN_COMPARED = ("objects", "pages")
 
@@ -247,6 +272,8 @@ COMPARATORS = {
                    custom=_text_checker("mupdf")),
         # Per-glyph origins vs MuPDF's `mutool draw -F stext` char origins (positions.py).
         Comparator("positions", ["mutool"], "text", lambda p: "", custom=_positions_check),
+        # Rendered pages vs MuPDF `mutool draw -F pnm`, perceptual pixel diff (pixels.py).
+        Comparator("pixels", ["mutool"], "raster", lambda p: "", custom=_pixels_check),
     ]
 }
 # Comparator-specific normalization of OUR dump (applied before compare).
@@ -303,12 +330,19 @@ def main(argv=None) -> int:
                          "similarity is below X (default: report only)")
     ap.add_argument("--min-within", type=float, default=None, metavar="P",
                     help="positions comparator: fail when fewer than P percent of the "
-                         "measured glyph pairs are within tolerance (default: report only)")
+                         "measured glyph pairs are within tolerance; pixels comparator: fail "
+                         "when fewer than P percent of the pages are within the perceptual "
+                         "threshold (default: report only)")
+    ap.add_argument("--dpi", type=int, default=72, metavar="D",
+                    help="pixels comparator: render resolution (default 72, as mutool)")
+    ap.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                    help="skip files matching GLOB (fnmatch on the path; repeatable)")
     ap.add_argument("--no-fold", action="store_true",
                     help="text comparator: do not fold dashes and quotes")
     args = ap.parse_args(argv)
 
-    global STREAMS_PER_FILE, TEXT_FOLD
+    global STREAMS_PER_FILE, TEXT_FOLD, PIXELS_DPI
+    PIXELS_DPI = args.dpi
     TEXT_FOLD = not args.no_fold
     STREAMS_PER_FILE = args.per_file if args.per_file is not None else (0 if args.files else 20)
     names = args.comparator or list(COMPARATORS)
@@ -317,13 +351,14 @@ def main(argv=None) -> int:
             ap.error("unknown comparator %r (have: %s)" % (n, ", ".join(COMPARATORS)))
 
     if args.files:
-        files = sorted(glob.glob(args.files))
+        files = sorted(glob.glob(args.files, recursive=True))
     elif os.path.isdir(args.corpus):
         files = sorted(os.path.join(args.corpus, f) for f in os.listdir(args.corpus)
                        if f.lower().endswith(".pdf"))
     else:
         files = []
-    files = [f for f in files if os.path.isfile(f)]
+    files = [f for f in files if os.path.isfile(f)
+             and not any(fnmatch.fnmatch(f, g) for g in args.exclude)]
     if args.limit is not None:
         files = files[:args.limit]
     print("files: %d" % len(files))
@@ -395,6 +430,14 @@ def main(argv=None) -> int:
             print(ln)
         bad = bad or fail
 
+    pixels_report = {}
+    if "pixels" in names:
+        mod = _load_pixels_module()
+        lines, pixels_report, fail = mod.summary_lines(stats["pixels"], args.min_within)
+        for ln in lines:
+            print(ln)
+        bad = bad or fail
+
     if args.min_compared > 0:
         checked = [n for n in names if n in MIN_COMPARED]
         if not checked:
@@ -415,6 +458,8 @@ def main(argv=None) -> int:
             out.update(text_reports)
             if "positions" in names:
                 out["positions"] = positions_report
+            if "pixels" in names:
+                out["pixels"] = pixels_report
             json.dump(out, fh, indent=1)
     return 1 if bad else 0
 
