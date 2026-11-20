@@ -28,7 +28,8 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
   (`mul255_le_left`, `mul255_le_right`).
 * **Clip cache.** Display items of one page usually share a few clip lists (the persistent
   list of the interpreter). `ClipCache` keeps at most `Config.clipCacheSize`
-  (`Limits.clipCacheSize`, 16) `(Clip, Mask)` pairs, most recently inserted first (oldest evicted). A miss on `cp :: rest` looks up
+  (`Limits.clipCacheSize`, 16) `(Clip, Mask)` pairs, most recently used first (a hit moves to
+  the front, task 7.9; the least recently used is evicted). A miss on `cp :: rest` looks up
   `rest` first (recursively), so a nested clip reuses the mask of its parent. Keys are
   compared with the derived `DecidableEq` on paths (no pointer equality in pure code).
 * **Applying a clip** to a fill or stroke mask is the same product, evaluated per pixel at
@@ -341,6 +342,12 @@ def ClipCache.find? (cc : ClipCache) (c : Clip) : Option Mask :=
 def ClipCache.insert (cc : ClipCache) (cap : Nat) (c : Clip) (m : Mask) : ClipCache :=
   { cc with entries := ((c, m) :: cc.entries).take cap }
 
+/-- Move a hit to the front (task 7.9: least recently *used* is evicted first; with insertion
+order, a page clip shared by thousands of items with their own inner clips was evicted every
+`clipCacheSize` items and recomputed). -/
+def ClipCache.touch (cc : ClipCache) (c : Clip) (m : Mask) : ClipCache :=
+  { cc with entries := (c, m) :: cc.entries.filter (fun e => !decide (e.1 = c)), hits := cc.hits + 1 }
+
 /-- The cache never holds more than `cap` entries after an insertion. -/
 theorem ClipCache.insert_length_le (cc : ClipCache) (cap : Nat) (c : Clip) (m : Mask) :
     (cc.insert cap c m).entries.length ≤ cap := by
@@ -405,7 +412,7 @@ def clipMaskC (cfg : Config) (m : Aff) (W H : Nat) (cc : ClipCache) :
   | [] => (none, cc, 0)
   | cp :: rest =>
     match cc.find? (cp :: rest) with
-    | some mk => (some mk, { cc with hits := cc.hits + 1 }, 0)
+    | some mk => (some mk, cc.touch (cp :: rest) mk, 0)
     | none =>
       let r1 := clipMaskC cfg m W H cc rest
       let win := clipWindow W H r1.1
@@ -681,7 +688,8 @@ theorem composite_size (b : ByteArray) (W : Nat) (fm : Mask) (cm : Option Mask) 
 
 /-- A stroker: raster configuration (caps), page → device matrix, device window, page-space
 path, stroke style ↦ coverage mask (expected inside the window; compositing ignores anything
-outside it). Task 7.2b. -/
+outside it). Task 7.2b. The mask must depend on the style's `line` and `ctm` only (not on its
+colour, alpha, blend mode or soft mask): `renderItem` reuses the last mask (`RState.smemo`). -/
 abbrev StrokeFn := Config → Aff → IRect → Path → StrokeStyle → Mask
 
 /-- A stroker that paints nothing. -/
@@ -718,6 +726,10 @@ def hairlineStroke : StrokeFn := fun cfg m win p _ =>
 configuration (so its caps come from the same `Limits`). -/
 def defaultStroke : StrokeFn := fun cfg m win p s => Stroke.strokePath m p s win cfg
 
+/-- `defaultStroke` with the page's precomputed stroke geometries (task 7.9,
+`Stroke.strokePathT`; same masks). -/
+def tableStroke (t : Stroke.GeoTable) : StrokeFn := fun cfg m win p s => Stroke.strokePathT t m p s win cfg
+
 /-! ## 7. Rendering path items -/
 
 /-- An RGBA8 image, row-major, `4 · w · h` bytes. -/
@@ -738,6 +750,11 @@ structure RState where
   cache : ClipCache := {}
   /-- Counted work. -/
   steps : Nat := 0
+  /-- The last stroke mask with what it was computed from (task 7.9): the knockout driver paints
+  a translucent stroke three times (over its backdrop and opaque over black and white), and a
+  stroker's mask depends only on the view, the window, the path and the style's line and CTM
+  (`StrokeFn` contract), so the repeats reuse it. -/
+  smemo : Option ((Aff × IRect × Path × Content.LineStyle × Content.Matrix) × Mask) := none
 
 /-- Device window of an item: its clip's rectangle (or the page). -/
 def itemWindow (W H : Nat) (c : Option Mask) : IRect := clipWindow W H c
@@ -758,8 +775,12 @@ def renderItem (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RS
     paintMask W H st c.1 f.1 style.color style.alpha c.2.1 (c.2.2 + f.2)
   | .strokePath p style clip =>
     let c := clipMaskC cfg m W H st.cache clip
-    let fm := stroke cfg m (itemWindow W H c.1) p style
-    paintMask W H st c.1 fm style.color style.alpha c.2.1 c.2.2
+    let win := itemWindow W H c.1
+    let key := (m, win, p, style.line, style.ctm)
+    let fm := match st.smemo with
+      | some (k, mk) => if k = key then mk else stroke cfg m win p style
+      | none => stroke cfg m win p style
+    { paintMask W H st c.1 fm style.color style.alpha c.2.1 c.2.2 with smemo := some (key, fm) }
   | _ => st
 
 /-! ### Item bounds (task 7.2g)
@@ -770,7 +791,8 @@ was painted into them. Paths: the device bounding box of all their points (contr
 included, so the box contains every Bézier curve), rounded outwards plus one pixel of margin
 (the anti-aliased coverage of a filled pixel needs the polygon to meet that pixel); clip lists:
 the intersection of their paths' boxes (`[]` = the page); everything is intersected with the
-page. Strokes, glyph runs and shadings are bounded by their clip only; images by the device box
+page. Strokes by their path's box grown by the pen's reach (`strokeBound`, task 7.9) and their
+clip; glyph runs and shadings by their clip only; images by the device box
 of their unit square (two pixels of margin, for `Image.place`'s grid fitting) and their clip;
 items that paint nothing (`clip`, `unsupported`, …) by the empty rectangle. -/
 
@@ -798,6 +820,28 @@ def clipBound (cfg : Config) (m : Aff) (W H : Nat) : Clip → IRect
   | [] => pageRect W H
   | cp :: rest => (pathBound cfg m cp.path).inter (clipBound cfg m W H rest)
 
+/-- Device bound of a stroke (task 7.9): the path's box (`pathBound`) grown on every side by
+the pen's reach plus two pixels. In user space every point of the stroke outline lies within
+`k · w/2` of the centre line, `k = max(miter limit, 4)` (miter tips are at most `miterLimit · w/2`
+from their vertex, the smooth joins of flattened curves at most `smoothMiterLimit = 4` times,
+square caps `√2` times, round caps and joins once); the user → subpixel map `L` stretches a
+vector `u` to at most `(|a| + |b| + |c| + |d|) · |u|` in either coordinate, and that sum is at
+most the product of the sums of the CTM's and the view's linear parts (times 256; computed so,
+in integers, as the bound is evaluated several times per item). The hairline pen (zero width,
+degenerate CTM) reaches half a pixel. `k` gets 1/64 extra for the stroker's 2⁻¹⁶-grid rounding
+of tangents and offsets. -/
+def strokeBound (cfg : Config) (m : Aff) (p : Path) (st : StrokeStyle) : IRect :=
+  let b := pathBound cfg m p
+  let ab := fun (q : Rat) => if q < 0 then -q else q
+  let sv : Int := (ab m.a + ab m.b + ab m.c + ab m.d).ceil
+  let sc : Int := st.ctm.a.raw.natAbs + st.ctm.b.raw.natAbs + st.ctm.c.raw.natAbs + st.ctm.d.raw.natAbs
+  let k : Int := max st.line.miterLimit.raw.natAbs 4000000
+  -- reach ≤ (k/10⁶)·(65/64)·(|w|/(2·10⁶))·(sc/10⁶)·sv pixels
+  let num := k * 65 * st.line.width.raw.natAbs * sc * sv
+  let den : Int := 1000000 * 64 * 2000000 * 1000000
+  let e := (num + den - 1) / den + 2
+  if b == emptyRect then b else ⟨b.x0 - e, b.y0 - e, b.x1 + e, b.y1 + e⟩
+
 /-- Device box of the unit square through `ctm` then `m`, plus two pixels of margin. -/
 def unitBound (m : Aff) (ctm : Content.Matrix) : IRect :=
   let d := Aff.ofMatrix ctm * m
@@ -811,7 +855,7 @@ def unitBound (m : Aff) (ctm : Content.Matrix) : IRect :=
 /-- **Upper bound of the pixels painting `it` changes** (see above), within the page. -/
 def itemBound (cfg : Config) (m : Aff) (W H : Nat) : DisplayItem → IRect
   | .fillPath p _ _ clip => (pathBound cfg m p).inter (clipBound cfg m W H clip)
-  | .strokePath _ _ clip => clipBound cfg m W H clip
+  | .strokePath p st clip => (strokeBound cfg m p st).inter (clipBound cfg m W H clip)
   | .glyphRun _ clip => clipBound cfg m W H clip
   | .image _ ctm _ clip => (unitBound m ctm).inter (clipBound cfg m W H clip)
   | .shading _ _ _ _ clip => clipBound cfg m W H clip
@@ -897,9 +941,12 @@ theorem renderItem_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : Strok
   | strokePath p style clip =>
     simp only [renderItem, paintMask, itemCost]
     have h0 := clipMaskC_steps_le cfg m W H st.cache clip
-    have ha := paint_area_le W H
-      (stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style)
-      (clipMaskC cfg m W H st.cache clip).1
+    generalize (match st.smemo with
+      | some (k, mk) =>
+        if k = (m, itemWindow W H (clipMaskC cfg m W H st.cache clip).1, p, style.line, style.ctm)
+        then mk else stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style
+      | none => stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style) = fm
+    have ha := paint_area_le W H fm (clipMaskC cfg m W H st.cache clip).1
     omega
   | _ => simp [renderItem, itemCost]
 

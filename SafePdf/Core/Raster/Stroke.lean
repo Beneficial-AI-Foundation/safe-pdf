@@ -71,7 +71,8 @@ that are handed, all together, to 7.2a's scanline filler with the **nonzero** ru
    edge-for-edge equality on 8000 pseudo-random cases. Rounding to the grid moves a point by
    at most `2⁻¹⁷` subpixel units per rounded term before the final rounding to `1/256` px.
 6. **Fill.** The pen polygon is the ellipse sampled at the exactly-on-circle rational points
-   `((m² − j²)/(m² + j²), 2jm/(m² + j²))`, `j < m`, of each quarter (`circleTable`), with `m`
+   `((m² − j²)/(m² + j²), 2jm/(m² + j²))`, `j < m`, of each quarter (`circleTable`; the fast
+   stroker uses its grid rounding computed in integers, `circleTableI`), with `m`
    the least value in `[1, Config.arcCap]` (`Limits.arcSegCap`) such that the chord sagitta bound
    `r·‖L‖_F / (2m²)` is at most `tol`. All pieces are **convex** and every polygon is emitted
    with the **same orientation** (`emit` reverses polygons of negative shoelace area). With
@@ -314,10 +315,47 @@ def arcCountGo (r2 : Rat) (tol : Nat) : Nat → Nat → Nat
     if r2 ≤ 4 * (tol : Rat) * tol * ((m : Rat) * m * m * m) then m
     else arcCountGo r2 tol (m + 1) fuel
 
+/-- `arcCountGo` in integers (task 7.9: the `Rat` products normalised a fraction per step, per
+stroke): `r2 ≤ k` for an integer `k` is `r2.num ≤ k · r2.den`. -/
+def arcCountGoI (n : Int) (d : Nat) (tol : Nat) : Nat → Nat → Nat
+  | m, 0 => m
+  | m, fuel + 1 =>
+    if n ≤ ((4 * tol * tol * (m * m * m * m) * d : Nat) : Int) then m
+    else arcCountGoI n d tol (m + 1) fuel
+
+/-- The integer test is the `Rat` test. -/
+theorem arcCountGoI_eq (r2 : Rat) (tol : Nat) :
+    ∀ m fuel, arcCountGoI r2.num r2.den tol m fuel = arcCountGo r2 tol m fuel := by
+  intro m fuel
+  induction fuel generalizing m with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [arcCountGoI, arcCountGo, ih]
+    have hk : (4 * (tol : Rat) * tol * ((m : Rat) * m * m * m)) =
+        ((4 * tol * tol * (m * m * m * m) : Nat) : Rat) := by
+      simp only [Rat.natCast_mul]; rfl
+    have hle : (r2 ≤ ((4 * tol * tol * (m * m * m * m) : Nat) : Rat)) ↔
+        r2.num ≤ ((4 * tol * tol * (m * m * m * m) * r2.den : Nat) : Int) := by
+      rw [Rat.le_iff]
+      simp only [Rat.num_natCast, Rat.den_natCast, Int.natCast_mul]
+      simp
+    rw [hk]
+    by_cases h : r2 ≤ ((4 * tol * tol * (m * m * m * m) : Nat) : Rat)
+    · simp only [h, hle.mp h, ↓reduceIte]
+    · have h' : ¬ r2.num ≤ ((4 * tol * tol * (m * m * m * m) * r2.den : Nat) : Int) :=
+        fun h' => h (hle.mpr h')
+      simp only [h, h', ↓reduceIte]
+
 /-- Chords per quarter for a pen whose device radius squared is at most `r2` (subpixel
 units²): the least `m ≥ 1` with sagitta bound `√r2 / (2m²) ≤ tol`, capped at `cap`
 (`Config.arcCap`). -/
-def arcCount (cap : Nat) (r2 : Rat) (tol : Nat) : Nat := min cap (arcCountGo r2 tol 1 (cap - 1))
+def arcCount (cap : Nat) (r2 : Rat) (tol : Nat) : Nat :=
+  min cap (arcCountGoI r2.num r2.den tol 1 (cap - 1))
+
+/-- `arcCount` is the least-`m` search over `Rat` (`arcCountGo`). -/
+theorem arcCount_eq (cap : Nat) (r2 : Rat) (tol : Nat) :
+    arcCount cap r2 tol = min cap (arcCountGo r2 tol 1 (cap - 1)) := by
+  rw [arcCount, arcCountGoI_eq]
 
 /-- The `4·m` rational points on the unit circle used for the pen polygon, counter-clockwise
 from `(1, 0)`: in each quarter, `((m² − j²)/(m² + j²), 2jm/(m² + j²))` for `j < m`
@@ -374,8 +412,8 @@ structure Pen where
   inv : Aff
   /-- Radius (half the line width) in pen units. -/
   r : Rat
-  /-- Unit-circle sample points (`circleTable`). -/
-  circle : Array Pt
+  /-- Chords per quarter of the unit-circle samples (`circleTable circM`, see `Pen.circle`). -/
+  circM : Nat
   /-- Upper bound on the vertices of an emitted polygon (`Config.polyCap`). -/
   polyCap : Nat := 4 * Limits.default.arcSegCap
   /-- Device points are clamped to `±lim` subpixel units (`Config.coordLimit`). -/
@@ -402,13 +440,34 @@ inductive Metric where
   | none
   deriving Inhabited
 
+/-- Unit-circle sample points of the pen (`circleTable`; used by the reference stroker only,
+so not computed when the pen is made). -/
+def Pen.circle (p : Pen) : Array Pt := circleTable p.circM
+
+/-- `circleTable m` on the frame grid, in integers (task 7.9: the `Rat` table and its rounding
+cost ~20 µs per stroke): `gridQ (a / d) = roundDivI (a · 2¹⁶) d` for the unreduced fraction,
+since rounding the exact quotient does not depend on the representation (`#guard` below for
+every `m ≤ 64`). -/
+def circleTableI (m : Nat) : Array (Int × Int) :=
+  Array.ofFn (n := 4 * m) fun i =>
+    let q := i.val / m
+    let j : Int := (i.val % m : Nat)
+    let mm : Int := m
+    let den := mm * mm + j * j
+    let g := fun (a : Int) => roundDivI (a * fone) den
+    match q with
+    | 0 => (g (mm * mm - j * j), g (2 * j * mm))
+    | 1 => (g (-(2 * j * mm)), g (mm * mm - j * j))
+    | 2 => (g (-(mm * mm - j * j)), g (-(2 * j * mm)))
+    | _ => (g (2 * j * mm), g (-(mm * mm - j * j)))
+
 /-- Make a pen from its map and radius (tolerance and caps from `cfg`). -/
 def Pen.make (map : Aff) (r : Rat) (cfg : Config) : Pen :=
   let fro := map.a * map.a + map.b * map.b + map.c * map.c + map.d * map.d
-  let circle := circleTable (arcCount cfg.arcCap (r * r * fro) cfg.tol)
+  let circM := arcCount cfg.arcCap (r * r * fro) cfg.tol
   let inv := map.inv
-  { map, inv, r, circle, polyCap := cfg.polyCap, lim := cfg.coordLimit,
-    detPos := decide (0 < map.det), circI := circle.map fun p => (gridQ p.x, gridQ p.y),
+  { map, inv, r, circM, polyCap := cfg.polyCap, lim := cfg.coordLimit,
+    detPos := decide (0 < map.det), circI := circleTableI circM,
     invI := IMat.ofAff inv, nrmI := IMat.ofAff (normalMap map inv) }
 
 /-- The hairline pen: a device circle of diameter one pixel. -/
@@ -979,6 +1038,79 @@ def strokeEdges (view : Aff) (path : Content.Path) (style : Content.StrokeStyle)
 def strokePath (view : Aff) (path : Content.Path) (style : Content.StrokeStyle) (clip : IRect)
     (cfg : Config := {}) : Mask :=
   fillEdges (strokeEdges view path style cfg) .nonzero clip cfg
+
+/-! ### Stroke geometry table (task 7.9)
+
+`Geo.make` (pen map and inverse, normal map, chord count, all over `Rat`) costs ~10 µs per
+stroke; plots with 10⁵ strokes spend most of their time there. The geometry depends only on
+the **linear part** of `userToSub view ctm` (every use goes through `lin`, `IMat.ofAff`, `det`;
+the translation of the CTM never enters) and on the line width, so a page precomputes it for
+the distinct `(a, b, c, d, width)` of its strokes (`GeoTable.build`, at most `geoTableCap`
+entries, first seen first) and `strokePathT` looks it up; a miss, another view or another
+configuration computes it as before. Same edges as `strokePath` (suite `raster-stroke-spec`,
+translated copies). -/
+
+/-- What the stroke geometry depends on in a stroke style: the CTM's linear part and the line
+width. -/
+abbrev GeoKey := Content.Fixed × Content.Fixed × Content.Fixed × Content.Fixed × Content.Fixed
+
+/-- The geometry key of a stroke style. -/
+def geoKey (s : Content.StrokeStyle) : GeoKey := (s.ctm.a, s.ctm.b, s.ctm.c, s.ctm.d, s.line.width)
+
+/-- The stroke geometry of a style under `view` (as `strokeEdges`). -/
+def geoOf (view : Aff) (s : Content.StrokeStyle) (cfg : Config) : Geo :=
+  Geo.make (userToSub view s.ctm) (Fixed.toRat s.line.width) cfg
+
+/-- Most distinct geometries a page precomputes. -/
+def geoTableCap : Nat := 64
+
+/-- Precomputed stroke geometries of a page: the view and configuration they were made for. -/
+structure GeoTable where
+  /-- Page → device matrix the table was made for. -/
+  view : Aff
+  /-- Raster configuration the table was made for. -/
+  cfg : Config
+  /-- Geometry per key (at most `geoTableCap`). -/
+  entries : Array (GeoKey × Geo) := #[]
+
+/-- Add a style's geometry unless its key is present or the table is full. -/
+def GeoTable.add (t : GeoTable) (s : Content.StrokeStyle) : GeoTable :=
+  let k := geoKey s
+  if t.entries.size < geoTableCap ∧ (t.entries.find? (·.1 == k)).isNone then
+    { t with entries := t.entries.push (k, geoOf t.view s t.cfg) }
+  else t
+
+/-- The configuration fields `Geo.make` reads agree. -/
+def sameGeoCfg (a b : Config) : Bool :=
+  a.tol == b.tol && a.arcSegCap == b.arcSegCap && a.coordLimit == b.coordLimit &&
+    a.polyCap == b.polyCap
+
+/-- The geometry of a style: from the table when it was made for this view and configuration
+and holds the key, else `geoOf`. -/
+def GeoTable.geo (t : GeoTable) (view : Aff) (s : Content.StrokeStyle) (cfg : Config) : Geo :=
+  if view == t.view && sameGeoCfg cfg t.cfg then
+    match t.entries.find? (·.1 == geoKey s) with
+    | some e => e.2
+    | none => geoOf view s cfg
+  else geoOf view s cfg
+
+/-- **Stroke coverage** with precomputed geometries (`strokePath`'s mask). -/
+def strokePathT (t : GeoTable) (view : Aff) (path : Content.Path) (style : Content.StrokeStyle)
+    (clip : IRect) (cfg : Config := {}) : Mask :=
+  fillEdges (strokeDPath cfg (t.geo view style cfg) style.line (ofContentPath view path cfg))
+    .nonzero clip cfg
+
+/-- With an empty table, `strokePathT` is `strokePath`. -/
+theorem strokePathT_empty (view v : Aff) (c : Config) (path : Content.Path)
+    (style : Content.StrokeStyle) (clip : IRect) (cfg : Config) :
+    strokePathT { view := v, cfg := c } view path style clip cfg = strokePath view path style clip cfg := by
+  simp only [strokePathT, GeoTable.geo, strokePath, strokeEdges, geoOf]
+  split
+  · split
+    · rename_i e h
+      simp at h
+    · rfl
+  · rfl
 
 /-! ## 9. Work bound (S3) -/
 
@@ -1626,6 +1758,9 @@ private def tcov (w sx : Rat) (l : LineStyle) (p : DPath) : Nat :=
 #guard sqrtQ (9 / 4) == 3 / 2 && sqrtQ 0 == 0
 -- The pen circle points lie exactly on the unit circle.
 #guard (circleTable 5).size == 20 && (circleTable 5).all fun p => p.x * p.x + p.y * p.y == 1
+-- the integer grid table is the rounded `Rat` table (every chord count up to the default cap)
+#guard (List.range 65).all fun m =>
+  circleTableI m == (circleTable m).map fun p => (gridQ p.x, gridQ p.y)
 -- The fast stroker equals the reference: round joins and caps, dashes, a curve with miter
 -- joins, a non-uniform pen.
 #guard
