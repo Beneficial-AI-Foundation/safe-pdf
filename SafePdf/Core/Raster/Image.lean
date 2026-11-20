@@ -35,9 +35,10 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    `/Alternate`) as device spaces; `Indexed` (lookup string or stream; indices clamp to
    `hival`, and to 255); `Separation` (type 2 tint transform, else the interpreter's darkness
    placeholder); `DeviceN` (the interpreter's average-darkness placeholder); `Lab` (`L*` as
-   grey). An inline image's resource-name colour space is looked up in the page's
-   `/ColorSpace` resources (`ImageTable.named`; a form's own resources are not consulted — a
-   gap: the display item carries no resource frame). A missing or unknown space (and
+   grey). An inline image's resource-name colour space has been replaced by the runner with
+   the definition from the resources of the content that shows it (page or form; task 7.3f,
+   `Run.annotInline`), as a direct object; a name left unresolved is looked up in the page's
+   `/ColorSpace` resources (`ImageTable.named`). A missing or unknown space (and
    `Pattern`) yields the placeholder. Colour conversion to RGB is the same as
    `Clip.deviceRGB` (naive CMYK).
 4. **Samples** (`samples`, row by row): rows padded to whole bytes (`rowBytes`), samples
@@ -97,7 +98,7 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
 ## Wiring into `Glyph.renderPage`
 
 `loadImages limits src s res items` decodes every distinct image XObject of a display list
-once (by object number), with its masks, under the session state `σ` (the document budget),
+once (by object number, also inside soft-mask groups), with its masks, under the session state `σ` (the document budget),
 and resolves the page's named colour spaces; it returns an `ImageTable`. Decoded pixmaps on
 one page are capped at `maxPageImagePixels` pixels in total (further XObjects get the
 placeholder). `renderImage cfg m W H tbl st src ctm fill clip : Clip.RState` paints one image
@@ -854,14 +855,15 @@ def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num g
   | .error _ => ({ t with xobjs := ((num, gen), none) :: t.xobjs }, s)
 
 /-- **Load the images of a display list**: every distinct image XObject decoded once (in
-first-use order), the page's named colour spaces resolved (`res`: the page resources). -/
+first-use order), including images inside soft-mask groups (`DisplayList.foldDeep`, task
+7.3f), the page's named colour spaces resolved (`res`: the page resources). -/
 def loadImages {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict)
     (items : DisplayList) : ImageTable × σ :=
   let (named, s) := namedSpaces src s res
-  items.foldl (fun acc it =>
+  Content.DisplayList.foldDeep (fun acc it =>
     match it with
     | .image (.xobject _ n g) _ _ _ => ImageTable.add src acc n g
-    | _ => acc) ({ limits, named }, s)
+    | _ => acc) limits.maxXObjectDepth ({ limits, named }, s) items
 
 /-- The pixmap of an image source (`none`: nothing to draw). Inline images are decoded here. -/
 def ImageTable.pixmap (t : ImageTable) : ImageSource → Option Pixmap
