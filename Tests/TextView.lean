@@ -49,8 +49,19 @@ def render (bytes : ByteArray) : String :=
       overlay.flatten
     "\n".intercalate lines ++ "\n"
 
+/-- Task 6.9: `jsonString` keeps U+2028/U+2029 (and every control character) escaped, so a
+JSON object never spans two physical lines for any line splitter. -/
+def jsonEscapeFailures : Nat :=
+  let s := String.ofList [Char.ofNat 0x2028, Char.ofNat 0x2029, '\t', Char.ofNat 0, '"', '\\',
+    Char.ofNat 0x85, Char.ofNat 0x7f, Char.ofNat 0x1f, 'x', Char.ofNat 0x20ac]
+  let want := "\"\\u2028\\u2029\\t\\u0000\\\"\\\\\\u0085\\u007f\\u001fx" ++
+    String.ofList [Char.ofNat 0x20ac] ++ "\""
+  if SafePdf.Shell.jsonString s == want then 0 else 1
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
+  let jf := jsonEscapeFailures
+  if jf != 0 then IO.println "  FAIL text view: jsonString escaping of U+2028/U+2029/controls"
   let update := (← IO.getEnv Tests.Golden.updateEnvVar) == some "1"
   if !(← dir.isDir) then
     IO.println s!"  FAIL text view: directory {dir} not found (run from the repo root)"
@@ -65,6 +76,6 @@ def run : IO Nat := do
     c ← Tests.Golden.runCase update render input c
   if update then IO.println s!"  text view: wrote {c.written} .expected file(s)"
   else IO.println s!"  text view: {c.cases} case(s), {c.failures} failure(s)"
-  return c.failures
+  return c.failures + jf
 
 end SafePdf.Tests.TextView
