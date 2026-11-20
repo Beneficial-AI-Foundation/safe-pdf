@@ -17,11 +17,23 @@ Plan.md §6 Phase 8 ("display existing annotations via appearance streams"), ISO
 * (d) a `/Stamp` whose `/BBox` and rotating `/Matrix` need A (§12.5.5) to fit its `/Rect`;
 * (e) a `/FreeText` showing text with a font of its own appearance resources (an embedded
   TrueType font object the page does not use): glyph positions with the font's advances;
-* skips: `/Link`, `/Popup`, a `/Square` without `/AP`, a widget without `/FT`, a duplicate
-  reference;
-* the shared operator budget (a tiny budget truncates);
+* skips: `/Link`, `/Popup`, a `/Text` without `/AP` (not synthesised), a widget without `/FT`,
+  a duplicate reference;
+* the shared operator budget (a tiny budget truncates; `Budget.after` leaves the page run's
+  remainder);
 * pixels of the full render (`Glyph.renderPage` over page items ++ annotation items).
   Set `SAFEPDF_PPM_DIR=<dir>` to write the render (`annot.ppm`) and the PDF (`annot.pdf`).
+
+Task 8.3b adds:
+
+* annotation text in extraction (`Annot.extractDocPageAnnots`): the free text's glyphs follow
+  the page's, item indices continuing after the page's items (MuPDF `-F txt` prints `AA`);
+* synthesised appearances (`synthFixture`, nine annotations without `/AP`: Square with `/RD`
+  and CMYK interior, Circle, Line with leader lines and a dash, Ink, Highlight over a gray
+  box, Underline, StrikeOut with `/CA`): recomputed rectangles, the Multiply `/H` ExtGState,
+  and pixels sampled from `mutool draw -r 72` (MuPDF 1.25.1) within 32 per channel. The whole
+  page differs from MuPDF in 0.21% of pixels (84 of 40,000; thin-line anti-aliasing) under
+  `run.py --comparator pixels` (`SAFEPDF_PPM_DIR` writes `synth.pdf`).
 -/
 
 namespace SafePdf.Tests.Annot
@@ -56,10 +68,10 @@ def fixture (ttf : ByteArray) : ByteArray := mkPdf [
   "<< /Type /Annot /Subtype /Stamp /Rect [100 20 120 60] /AP << /N 19 0 R >> >>",
   -- 14: free text (e)
   "<< /Type /Annot /Subtype /FreeText /Rect [20 150 120 170] /AP << /N 20 0 R >> >>",
-  -- 15: link, 16: popup, 17: square without /AP
+  -- 15: link, 16: popup, 17: text (note) without /AP: not synthesised
   "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /AP << /N 8 0 R >> >>",
   "<< /Type /Annot /Subtype /Popup /Rect [0 0 10 10] /AP << /N 8 0 R >> >>",
-  "<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] >>",
+  "<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] >>",
   -- 18: blue /Off appearance (never drawn here)
   strmObj "/Type /XObject /Subtype /Form /BBox [0 0 20 20]" "0 0 1 rg 0 0 20 20 re f",
   -- 19: BBox 40 × 20 rotated by 90°; fills form y ∈ [0, 10]
@@ -107,7 +119,7 @@ def process (b : ByteArray) (bud : Annot.Budget := { ops := 1000000, forms := 10
         let (srcs, _) := ap.roots.foldl (fun (acc : Glyph.SourceTable × Filter.Budget) r =>
           let (t, b) := Glyph.loadSources lim src acc.2 r.2
           (acc.1 ++ t, b)) (srcs, b2)
-        let img := Glyph.renderPage p 1 .r0 ⟨ap.fonts, srcs, {}, {}⟩ items
+        let img := Glyph.renderPage p 1 .r0 { fonts := ap.fonts, sources := srcs } items
         some ⟨p, pt, ap, img⟩
 
 /-- RGB at device pixel `(x, y)`. -/
@@ -147,6 +159,117 @@ def check (name : String) (ok : Bool) : IO Nat := do
   if ok then return 0
   IO.eprintln s!"annot: FAILED {name}"
   return 1
+
+/-- Annotations without `/AP` whose appearances are synthesised (see the module doc; the PDF
+`mutool draw` was compared against). -/
+def synthFixture : ByteArray := mkPdf ([
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R " ++
+    "/Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>",
+  strmObj "" "0.9 g 100 170 60 15 re f",
+  "<< /Type /Annot /Subtype /Square /Rect [20 20 80 60] /C [1 0 0] /IC [0 0 1] /BS << /W 3 >> >>",
+  "<< /Type /Annot /Subtype /Circle /Rect [100 20 180 80] /C [0 0.5 0] /Border [0 0 2] >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 100 180 120] /C [0 0 1] /BS << /W 2 >> >>",
+  "<< /Type /Annot /Subtype /Ink /Rect [0 0 1 1] /InkList [[20 140 40 170 60 150] [70 140 90 175]] " ++
+    "/C [1 0 1] /BS << /W 4 >> >>",
+  "<< /Type /Annot /Subtype /Highlight /Rect [0 0 1 1] " ++
+    "/QuadPoints [100 185 160 185 100 170 160 170] /C [1 1 0] >>",
+  "<< /Type /Annot /Subtype /Underline /Rect [0 0 1 1] " ++
+    "/QuadPoints [100 165 160 165 100 150 160 150] /C [0 0 1] >>",
+  "<< /Type /Annot /Subtype /StrikeOut /Rect [0 0 1 1] " ++
+    "/QuadPoints [100 145 160 145 100 130 160 130] /C [1 0 0] /CA 0.7 >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [120 90 190 90] /LL 8 /LLE 3 /LLO 2 " ++
+    "/C [0 0 0] /Border [0 0 1 [3 2]] >>",
+  "<< /Type /Annot /Subtype /Square /Rect [150 100 195 125] /C [0.2] /IC [0 1 0 0] /RD [5 2 5 2] >>"])
+
+/-- Page 1 of a PDF. -/
+def firstPage (b : ByteArray) : Option (Doc.Doc × Doc.Page) :=
+  match Doc.openDoc {} b with
+  | .error _ => none
+  | .ok d => d.pages.toList.head?.map (d, ·)
+
+/-- `/Resources /ExtGState /H /BM` of a (direct) stream dictionary. -/
+def bmOf (d : Dict) : Option PdfObject :=
+  let sub := fun (o : Option PdfObject) (k : String) => match o with
+    | some (.dict e) => Dict.get? e (Name.ofString k)
+    | _ => none
+  sub (sub (sub (Dict.get? d (Name.ofString "Resources")) "ExtGState") "H") "BM"
+
+/-- Whether `s` contains `pat`. -/
+def has (s pat : String) : Bool := (s.splitOn pat).length > 1
+
+/-- Whether two pixels are within 32 per channel. -/
+def near (a b : Nat × Nat × Nat) : Bool :=
+  let d := fun (x y : Nat) => x - y + (y - x)
+  d a.1 b.1 ≤ 32 && d a.2.1 b.2.1 ≤ 32 && d a.2.2 b.2.2 ≤ 32
+
+/-- Task 8.3b checks: shared budget, annotation text, synthesised appearances. -/
+def run83b (pdf : ByteArray) : IO Nat := do
+  let mut failures := 0
+  -- (1) the page run's counts and what is left for the annotations
+  match process pdf with
+  | none => failures := failures + 1
+  | some o =>
+    failures := failures + (← check "page run counts" (o.pt.ops == 3 && o.pt.forms == 0))
+    let lim : Limits := { maxOpsPerPage := o.pt.ops + 2, maxFormsPerPage := 7 }
+    let bud := Annot.Budget.after lim o.pt
+    failures := failures + (← check "budget after" (bud.ops == 2 && bud.forms == 7))
+    match process pdf bud with
+    | none => failures := failures + 1
+    | some o2 => failures := failures + (← check "shared budget truncates"
+        (o2.ap.truncated && o.pt.ops + o2.ap.ops ≤ lim.maxOpsPerPage))
+  -- (2) annotation text in extraction
+  match firstPage pdf with
+  | none => failures := failures + 1
+  | some (d, p) =>
+    match (Text.extractDocPage {} d p (Filter.Budget.init {})).1,
+        (Annot.extractDocPageAnnots {} d p (Filter.Budget.init {})).1 with
+    | .ok pt, .ok t =>
+      failures := failures + (← check "annot text" (pt.text == "" && t.text == "AA"))
+      failures := failures + (← check "annot glyph items continue"
+        (t.glyphs.length == 2 && t.glyphs.all (·.item ≥ pt.items.size)))
+      failures := failures + (← check "annot text counts" (t.ops > pt.ops && t.forms == 4))
+    | _, _ => failures := failures + (← check "annot text extracts" false)
+  -- (3) synthesised appearances
+  match process synthFixture with
+  | none => failures := failures + (← check "synth fixture processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "synth all drawn"
+      (ds.length == 9 && ds.all (·.synth) && o.ap.collected.skipped.isEmpty))
+    let rects := ds.map (·.rect)
+    failures := failures + (← check "synth square rect" (rects[0]? == some ⟨20, 20, 80, 60⟩))
+    failures := failures + (← check "synth line rect" (rects[2]? == some ⟨18, 98, 182, 122⟩))
+    failures := failures + (← check "synth ink rect" (rects[3]? == some ⟨10, 130, 100, 185⟩))
+    failures := failures + (← check "synth rd square rect"
+      (rects[8]? == some ⟨150, 100, 195, 125⟩))
+    failures := failures + (← check "synth highlight rect"
+      (match rects[4]? with
+       | some r => 96 < r.x0 && r.x0 < 97 && 163 < r.x1 && r.x1 < 164
+       | none => false))
+    let hl := ds[4]?
+    failures := failures + (← check "synth highlight multiply"
+      (match hl with
+       | some d => has ((String.fromUTF8? d.ap.data).getD "") "/H gs" &&
+           bmOf d.ap.dict == some (.name (Name.ofString "Multiply"))
+       | none => false))
+    failures := failures + (← check "synth matrix identity"
+      (ds.all (·.matrix == Content.Matrix.identity)))
+    -- pixels sampled from `mutool draw -r 72` (device y = 200 − page y)
+    let img := o.img
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("square interior", 50, 160, (0, 0, 255)), ("square border", 21, 160, (255, 0, 0)),
+      ("outside square", 19, 160, (255, 255, 255)), ("highlight multiply", 130, 22, (229, 229, 0)),
+      ("circle", 140, 120, (0, 127, 0)), ("circle right", 179, 150, (14, 134, 14)),
+      ("rd square cmyk", 170, 85, (255, 0, 255)), ("strike out alpha", 130, 63, (255, 88, 88)),
+      ("strike out edge", 130, 64, (255, 244, 244)), ("white", 100, 99, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"synth px {n}" (near (pxAt img x y) c))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "synth.ppm") img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "synth.pdf") synthFixture
+  return failures
 
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
@@ -205,6 +328,7 @@ def run : IO Nat := do
   | none => failures := failures + 1
   | some o =>
     failures := failures + (← check "tiny budget" (o.ap.truncated && o.ap.ops ≤ 2))
+  failures := failures + (← run83b pdf)
   return failures
 
 end SafePdf.Tests.Annot

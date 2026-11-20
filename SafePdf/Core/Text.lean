@@ -1120,6 +1120,12 @@ structure PageText where
   text : String
   /-- Interpreter warnings. -/
   warnings : Nat
+  /-- Operators the page run executed (page and forms). Task 8.3b: the annotations of the page
+  get what is left of `Limits.maxOpsPerPage` (`Annot.Budget.after`). -/
+  ops : Nat := 0
+  /-- Forms the page run expanded; the annotations get what is left of
+  `Limits.maxFormsPerPage`. -/
+  forms : Nat := 0
 
 /-- The runner environment with the fonts' advances. -/
 def textEnv {σ : Type} (limits : Limits) (src : Source σ) (fonts : FontTable) : Env σ Unit :=
@@ -1133,7 +1139,8 @@ def extractPage {σ : Type} (limits : Limits) (src : Source σ) (res : Dict) (co
   let st := runBytes (textEnv limits src fonts) res content s ()
   let gs := extractItems fonts st.items.toList
   let (lines, text) := layout o gs
-  ({ fonts, items := st.items, glyphs := gs, lines, text, warnings := st.warnings }, st.s)
+  ({ fonts := fonts, items := st.items, glyphs := gs, lines := lines, text := text,
+     warnings := st.warnings, ops := st.ops, forms := st.forms }, st.s)
 
 /-- **C6 (same pass)**: the page's glyphs are the extraction of the page's own display list,
 under its own fonts — the list the runner produced, not a second interpretation. -/
