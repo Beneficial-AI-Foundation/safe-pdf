@@ -829,3 +829,26 @@ import SafePdf
 #print axioms SafePdf.Core.Raster.Glyph.paintAll_size
 #print axioms SafePdf.Core.Raster.Glyph.renderItemG_size
 #print axioms SafePdf.Core.Raster.Glyph.renderPage_size
+
+-- Phase 7, task 7.2e: fast compositor (SafePdf/Core/Raster/Clip.lean)
+#print axioms SafePdf.Core.Raster.Clip.composite_size
+#print axioms SafePdf.Core.Raster.Clip.compositeSpec_size
+#print axioms SafePdf.Core.Raster.Clip.compLoopSpec_size
+
+-- Phase 7, task 7.3b: images (SafePdf/Core/Raster/Image.lean)
+#print axioms SafePdf.Core.Raster.Image.rd_eq_getB
+#print axioms SafePdf.Core.Raster.Image.sampleOffset_lt
+#print axioms SafePdf.Core.Raster.Image.samplesLoop_size
+#print axioms SafePdf.Core.Raster.Image.samples_size
+#print axioms SafePdf.Core.Raster.Image.pushPixel_size
+#print axioms SafePdf.Core.Raster.Image.rgbaLoop_size
+#print axioms SafePdf.Core.Raster.Image.finish_dims
+#print axioms SafePdf.Core.Raster.Image.decodePixmap_pixels
+#print axioms SafePdf.Core.Raster.Image.putPx_size
+#print axioms SafePdf.Core.Raster.Image.colLoop_size
+#print axioms SafePdf.Core.Raster.Image.rowLoop_size
+#print axioms SafePdf.Core.Raster.Image.place_size
+#print axioms SafePdf.Core.Raster.Image.placeRect_area_le
+#print axioms SafePdf.Core.Raster.Image.place_steps_le
+#print axioms SafePdf.Core.Raster.Image.renderImage_size
+#print axioms SafePdf.Core.Raster.Image.renderImage_steps_le
