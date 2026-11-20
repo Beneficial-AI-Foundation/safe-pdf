@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.7 PDF.js look)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.4 highlights and notes, 9.7 PDF.js look)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -86,11 +86,12 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 | Menu | Entries (accelerator) |
 |---|---|
 | File | Open… (Ctrl+O), Close (Ctrl+W), Quit (Ctrl+Q) |
-| Edit | Copy (Ctrl+C), Select all (Ctrl+A), Find… (Ctrl+F) |
+| Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Find… (Ctrl+F) |
 | View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`) |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
 
-Disabled: everything but Open… and Quit without a document; Copy without a selection;
+Disabled: everything but Open… and Quit without a document; Copy and Highlight selection
+without a selection; Delete mark without a selected mark;
 Outline when the document has none; Previous/First on the first page, Next/Last on the last;
 Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
 Outline command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
@@ -122,9 +123,10 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     300 %, 400 % (`Toolbar.ZoomChoice.presets`, radio entries). A zoom reached with − / +, the
     keys or Ctrl+wheel that is not in the list (33 %, 67 %, 600 %, …) shows as its percentage
     with no entry checked (PDF.js's custom option).
-  * *right*: Highlight, Comment, Text, Draw, Image, then Print and Save — **disabled
-    placeholders** until their tasks land (Highlight 9.8, Comment 9.9, Save 9.5c; Print and
-    Image after M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
+  * *right*: Highlight (works since 9.4: highlights the selection in the current colour, or
+    without a selection opens the colour menu; see *Highlights and notes*), Comment, Text,
+    Draw, Image, then Print and Save — **disabled placeholders** until their tasks land
+    (Comment, Text, Draw 9.9, Save 9.5c; Print and Image after M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
     buttons). Document properties are not available yet.
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
@@ -146,7 +148,8 @@ attachment views, "find current outline item"), no thumbnails; the menubar stays
 toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
-the Highlight pop-over, selection bubble and annotation tools are later tasks (9.8/9.9).
+the Highlight pop-over (swatches, thickness, "Show all"), selection bubble and the other
+annotation tools are later tasks (9.8/9.9).
 
 ## Wheel scrolling across pages (9.2)
 
@@ -173,6 +176,64 @@ The wheel continues into the next / previous page as the keys do. Pure logic in
 * Not tested here: real macOS trackpad deltas (the smoke test generates Tk 9 `<MouseWheel>`
   and `<Button-4/5>` events on X11; the `line` and `pixel` kinds are covered by the `#guard`s
   only).
+
+## Highlights and notes (9.4)
+
+Pure model in `SafePdf/Shell/App/Marks.lean` (Tk-free, `#guard` checks, `Store.add_id` /
+`Store.add_next`: ids are never reused). Marks are kept **in memory** per open document in
+this task (closing or opening a file drops them); saving them into the PDF as annotations by
+incremental update is tasks 9.5b/9.5c, and the model is shaped for it: every mark has a
+stable id (`/NM` = `Mark.nm` = `safepdf-mark-ID`), a page, a colour (`Color.unit` = `/C`)
+and page-space geometry (`Mark.quadPoints` in the upper-left, upper-right, lower-left,
+lower-right order PDF.js and Acrobat use; `Mark.rect`; `Store.restore` re-inserts a mark read
+back from a file with its own id).
+
+* **Colours**: PDF.js's highlight palette (`web/app_options.js`, `highlightEditorColors`):
+  yellow `#FFFF98` (default), green `#53FFBC`, blue `#80EBFF`, pink `#FFCBE6`, red `#FF4F5F`.
+  The colour menus (Edit → Highlight colour, the context menu's Highlight cascade, and the
+  menu the toolbar's Highlight button opens without a selection) show a swatch per colour and
+  share one radio variable (`::safepdf::hlColor`): the checked colour is the current one.
+* **Highlight**: select text (drag, double-click, Ctrl+A), then the toolbar's Highlight
+  button, `h`, Edit → Highlight selection, or a colour in a colour menu (which also makes it
+  the current colour). The quads are the selection's C3 glyph boxes, one per line run
+  (`Select.rangeBoxes`), in page space. The new highlight is selected and the text selection
+  cleared, as in PDF.js.
+* **Drawing**: highlights are **multiplied into the page image** (`Marks.composite`; the
+  cached render stays clean, the composite is put into the photo on every show), because
+  PDF.js draws highlights with `mix-blend-mode: multiply` at fill opacity 1
+  (`web/draw_layer_builder.css`, `src/display/editor/highlight.js`): white paper takes the
+  colour and the glyphs stay black. A Tk canvas has no alpha; a stipple (as the selection
+  uses) would be a 50 % dot pattern that lightens the text and looks nothing like PDF.js, so
+  blending into the pixels is the closest match. Notes, the dashed outline of a note's
+  anchor text and the selected mark's outline (`#0060df`, PDF.js's selected-editor blue) are
+  canvas items (tag `mark`) drawn below the selection and search highlights.
+* **Notes**: Add note… (Edit menu: on the selection, else at the window centre; context
+  menu: on the selection, else at the right-clicked point) adds a yellow note and opens its
+  popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape). A note shows as a
+  speech-bubble icon of 20 × 20 page units (the size of a `/Text` annotation icon; it scales
+  with the zoom as in PDF.js), its upper-left corner at the point, or right of the first
+  quad for a note on text (whose quads get a dashed outline); the icon is kept inside the page.
+  The text enters Tk by variable substitution and comes back as one event word, never parsed
+  as script.
+* **Selecting, recolouring, deleting**: a click (press and release in place) on a mark selects
+  it (icons before highlights, the newest first; marks before links) and a note's click
+  opens its popup; a right click on a mark selects it, on empty paper deselects. A colour
+  entry recolours the selected highlight; **Delete**, Edit → Delete mark or the context menu's
+  Delete mark removes it (the note popup's Delete removes its note).
+* Marks are stored in page space, so they follow zoom, rotation and page changes; a page's
+  marks are drawn whenever it is shown.
+
+Not done here: the PDF.js selection bubble and the Highlight pop-over with swatches,
+thickness slider and "Show all" (task 9.8; `Viewer.highlight` and `Viewer.addNote` are the
+hooks), free (drawn) highlights, saving (9.5b/9.5c), undo. The selected-mark outline is drawn
+per quad (PDF.js outlines the union shape).
+
+| Key / mouse | Action |
+|---|---|
+| `h`, toolbar Highlight | highlight the selection in the current colour (toolbar without a selection: colour menu) |
+| click on a mark | select it (a note opens its popup) |
+| `Delete` | delete the selected mark |
+| right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
 
 ## Selection, copy and search (8.2c)
 
@@ -215,7 +276,7 @@ page copies exactly the page text of the text view.
 | drag (button 1) | select text |
 | double-click | select a word |
 | `Ctrl+A` / `Ctrl+C` | select the page / copy |
-| right button | menu: Copy, Select all, Find… |
+| right button | menu: Copy, Select all, Find…, Highlight ▸, Add note…, Delete mark, … |
 | `Ctrl+F` | open the find bar |
 | `Enter`, `F3` / `Shift+Enter`, `Shift+F3` | next / previous hit |
 | `Escape` (in the find bar) | close the find bar |
@@ -292,7 +353,8 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
-| `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1). |
+| `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
+| `SafePdf/Shell/App/Marks.lean` | Tk-free model of highlights and notes with `#guard` checks: PDF.js colours, marks with stable ids and `/NM` names, quads and `/QuadPoints`, note icon boxes, the store (add, remove, recolour, edit, restore), hit-testing, the multiply blend into the page image (task 9.4). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
 | `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
@@ -389,7 +451,28 @@ radio values, + gives `200%`, − − gives `125%`, 50 % then − gives the cust
 radio value, Automatic Zoom returns; the overflow menu lists Open… … Rotate left and its Last /
 First page entries page; all seven tool buttons are disabled and a click on Highlight changes
 nothing; clicking the disclosure triangle of `Chapter` hides `Section` and a second click
-shows it again; the toggle button hides the sidebar and shows it again.
+shows it again; the toggle button hides the sidebar and shows it again. Since 9.4 Highlight is
+enabled with a document (the disabled-click check uses Comment).
+
+Highlights and notes (9.4) run in a sixth variant (`SAFEPDF_VIEWER_SMOKE_MODE=marks`,
+`Viewer.smokeMarks`) on the text PDF of the selection test (substitute fonts off, so page 1 is
+white except the black marker under `safe`), reading the photo's pixels with `photo get`: a
+double click on `world` and the toolbar's Highlight turn its pixels `255 255 152` (yellow);
+Edit → Highlight colour → Green recolours the selected highlight (`83 255 188`); `safe` +
+Edit → Highlight selection gives a green highlight in which the marker stays `0 0 0` and the
+paper above it is green (multiply); a click selects the `world` highlight and Delete makes it
+white again; a right click at a blank point (Delete mark disabled there) + Add note… opens the
+popup, a text full of Tcl metacharacters is saved verbatim and the icon's canvas bounding box
+matches the model's icon box; a click on the icon reopens the popup with that text, which is
+then edited (non-ASCII); after zooming in twice, rotating, going to page 2 (no mark items) and
+back, the pixels and the icon are still right; Edit → Delete mark removes the selected note;
+ids are never reused. (In smoke mode the context menu and the toolbar's colour menu are not
+posted — their entries are invoked directly — so that no menu grab blocks the generated
+events.)
+
+A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
+with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
+popup.
 
 Screenshots for comparison with the reference can be taken under Xvfb at the reference size,
 e.g. `Xvfb :97 -screen 0 1900x940x24 &`, then
