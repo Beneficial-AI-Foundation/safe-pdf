@@ -84,32 +84,21 @@ def glyphBox (g : Glyph) : Box :=
   let (x1, y1) := unFrame g.dir (max u0 u1) (v + ascent * s)
   ⟨min x0 x1, min y0 y1, max x0 x1, max y0 y1⟩
 
-/-- The separator before the first glyph of line `l` after line `prev` (as `Text.layout`). -/
-def lineSep (o : Options) (prev : Option Line) (l : Line) : String :=
-  match prev with
-  | none => ""
-  | some p =>
-    if l.dir != p.dir ||
-        Text.withinPermille (Fixed.sub l.v p.v) (Text.fmax p.size l.size) o.paraGap then "\n"
-    else "\n\n"
+/-- The separator before the first glyph of line `l` after line `prev` (`Text.lineSep`, as
+`Text.layout`). -/
+def lineSep (o : Options) (prev : Option Line) (l : Line) : String := Text.lineSep o prev l
 
 /-- The cells of one line (line index `li`, separator `lsep` before its first glyph), as
-`Text.lineText` lays it out: an overprinted duplicate gets empty text and separator; a word
-gap becomes `" "`. -/
+`Text.lineText` lays it out (`Text.glyphSep`): an overprinted duplicate gets empty text and
+separator; a word gap becomes `" "`. -/
 def lineCells (o : Options) (li : Nat) (lsep : String) (l : Line) : Array Cell :=
   let (out, _) := (Text.lineOrder o l).foldl (fun (acc : Array Cell × Option Glyph) g =>
     match acc.2 with
     | none => (acc.1.push ⟨g.text, lsep, glyphBox g, li⟩, some g)
     | some p =>
-      let sz := Text.fmax p.fontSize g.fontSize
-      let dup := p.text == g.text && Text.withinPermille (Fixed.sub g.u p.u) sz 100 &&
-        Text.withinPermille (Fixed.sub g.v p.v) sz 100
-      if dup then (acc.1.push ⟨"", "", glyphBox g, li⟩, acc.2)
-      else
-        let gap := Fixed.sub g.u (Fixed.add p.u p.width)
-        let space := gap.raw > 0 && !Text.withinPermille gap sz o.wordGap &&
-          Text.spaceMayFollow p.text && !g.text.startsWith " "
-        (acc.1.push ⟨g.text, if space then " " else "", glyphBox g, li⟩, some g)) (#[], none)
+      match Text.glyphSep o l.frame p g with
+      | none => (acc.1.push ⟨"", "", glyphBox g, li⟩, acc.2)
+      | some sep => (acc.1.push ⟨g.text, sep, glyphBox g, li⟩, some g)) (#[], none)
   out
 
 /-- The cells of a page: the glyphs of `lines` (`PageText.lines`) in reading order. -/

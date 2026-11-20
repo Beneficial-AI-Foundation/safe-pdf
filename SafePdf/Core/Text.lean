@@ -86,8 +86,11 @@ The advance handed to the runner (`advanceFn`) is, per code, `((w0 · Tfs) + Tc 
 interpreter itself. Extraction recomputes the same sums inside each run: the glyph at text-space
 offset `tx` has its origin at `(tx, Ts)` mapped by `Tm × CTM` (equal to `(0, 0)` mapped by the
 text rendering matrix of §9.4.4), its width is the page-space extent of its advance along its baseline direction, and its
-page-space font size is `|Tfs| · max(|M.c|, |M.d|)` for `M = Tm × CTM` (times an em estimate
-for Type 3 fonts, whose glyph space has no em: `type3SizeScale`). Type 3 advances are
+page-space font size is `|Tfs| · √|det(diag(Th, 1) × M)|` for `M = Tm × CTM` (`expansion`,
+MuPDF's `fz_matrix_expansion` of its text rendering matrix, task 6.8e; times an em estimate
+for Type 3 fonts, whose glyph space has no em: `type3SizeScale`). Its own advance
+`w0 · Tfs · Th` without `Tc`/`Tw` is `Glyph.adv`, its exact baseline direction
+`Glyph.dirX/dirY`. Type 3 advances are
 truncated to multiples of `1/1000` em as MuPDF's integer metrics table (`type3TruncWidth`,
 task 7.3l).
 
@@ -97,9 +100,13 @@ Glyphs are taken in content-stream order (filtered to visible ones unless
 `Options.includeInvisible`, the default being to keep invisible text such as OCR layers, and
 leaving out glyphs whose box — advance × [−0.2, 0.8] of the size, `Glyph.bounds` — lies
 entirely outside `Options.pageBox`, the CropBox for document pages: MuPDF's `FZ_STEXT_CLIP`,
-task 6.8b; e.g. a mailing panel drawn above the CropBox of a cover page). A
-glyph joins the current line when its baseline is within `lineTol` (‰ of the font size) of the
-line's, or when it is a **sub/superscript** of the line (`scriptJoin`, task 6.7c): a glyph of
+task 6.8b; e.g. a mailing panel drawn above the CropBox of a cover page; glyphs entirely
+outside the bounding box of their run's clip are already gone from `PageText.shown`,
+`unclipped`, task 6.8f). A glyph joins the current line when its baseline is within `lineTol`
+(‰ of **its own** font size, as MuPDF measures offsets in units of the glyph added; task 6.8e)
+of the line's, when it continues the line's last glyph as MuPDF's text device would
+(`nearPrev`: baseline offset below `baseMax`, distance from that glyph's pen below `spaceMax`,
+both 0.8 em; e.g. a raised radical sign `√`), or when it is a **sub/superscript** of the line (`scriptJoin`, task 6.7c): a glyph of
 smaller size raised by at most `scriptRaise` ‰ of the line's size, or a larger glyph lying that
 far below a line of smaller glyphs (a footnote begun by its marker), provided it continues the
 line horizontally (`continuesLine`: from `scriptBack` before to `scriptAhead` after the line's
@@ -112,18 +119,24 @@ shown before it — moved back behind that glyph's origin, but by less than `att
 size past its advance end, i.e. overlapping it — keeps content order (`lineOrder`, task 6.7d):
 an accent built as a separate glyph and drawn before its base letter (TeX's `\c{c}`, `\.z`)
 stays before it, as in MuPDF (`¸ca`, `˙z`). A space is inserted where the gap between a
-glyph's advance end and the next origin exceeds `wordGap` ‰ of the font size (gaps from `TJ`
-numbers and `Td` moves alike; 0.15 em, MuPDF's `SPACE_DIST`), unless either side already is a
+glyph's **pen** — its origin plus its own advance `w0 · Tfs · Th`, without `Tc` and `Tw`
+(`Glyph.adv`), as MuPDF — and the next origin exceeds `wordGap` ‰ of the next glyph's font size
+(gaps from `TJ` numbers, `Td` moves and character spacing alike, so letter-spaced capitals read
+`R A I L`; 0.15 em, MuPDF's `SPACE_DIST`; task 6.8e), unless either side already is a
 space or the text before the gap ends in a character after which MuPDF never inserts one
 (`spaceMayFollow`: U+0700 and above outside U+2000–U+20CF, e.g. the math operators of `a −b`,
 `c ≤d`, and CJK); an overprinted duplicate
 (same text from the same code bytes, origin within 10 % of the size: fake bold) is dropped
 (an `/ActualText` character placed on another code, e.g. a dot leader's space shown as '.'
 next to a real '.', is not a duplicate; task 6.8d). Lines are separated by a
-newline, with a blank line when the baselines are more than `paraGap` ‰ of the font size apart.
-Coordinates are taken in the frame of each glyph's baseline direction (`dirOf`: the quarter
-turn nearest to the image of the text x axis), so text rotated by 90°, 180° or 270° groups and
-orders like upright text; other angles are snapped to the nearest quarter turn.
+newline, with a blank line when the baselines are more than `paraGap` ‰ of the font size of the
+second line apart (`lineSep`).
+Lines need the same quarter turn (`dirOf`: the quarter turn nearest to the image of the text x
+axis) and the same exact baseline direction (`Frame.same`: cosine at least 0.999, MuPDF's
+test); positions are measured in the exact frame of a line's first glyph (`Glyph.dirX/dirY`,
+task 6.8e), so text rotated by any angle — 90° pages, 45° or 30° chart labels — groups and
+orders like upright text. (`Glyph.u`/`v`/`bounds` stay in the quarter-turn frame, the boxes the
+API and the viewer draw.)
 
 ## `/ActualText` (`shownItems`, task 6.8d; as MuPDF 1.25.1 `stext-device.c`)
 
@@ -813,6 +826,18 @@ structure Glyph where
   fontSize : Fixed
   /-- Whether the run's render mode paints (not `Tr 3`/`Tr 7`). -/
   visible : Bool
+  /-- Page-space length, along the exact baseline direction (`dirX`, `dirY`), of the glyph's
+  own advance `w0 · Tfs · Th` — without character and word spacing (`Tc`, `Tw`): the pen
+  position after the glyph that MuPDF measures word gaps from (task 6.8e). Defaults to
+  `width`. -/
+  adv : Fixed := width
+  /-- The exact baseline direction in page space, a unit vector (x component; `Fixed` rounding):
+  the normalised image of the text x axis under `Tm × CTM` (task 6.8e). Defaults to the
+  quarter turn `dir`. Layout measures lines in this frame (`Glyph.frame`), so text rotated
+  by other angles than quarter turns (45° chart labels) groups and orders like upright text. -/
+  dirX : Fixed := match dir with | 1 | 3 => Fixed.zero | 2 => Fixed.neg Fixed.one | _ => Fixed.one
+  /-- The exact baseline direction, y component (see `dirX`). -/
+  dirY : Fixed := match dir with | 1 => Fixed.one | 3 => Fixed.neg Fixed.one | _ => Fixed.zero
   deriving Repr, Inhabited, DecidableEq
 
 /-- The text state a run was shown with. -/
@@ -878,16 +903,53 @@ def rotFrame (dir : Nat) (x y : Fixed) : Fixed × Fixed :=
   | 3 => (Fixed.neg y, x)
   | _ => (x, y)
 
+/-- The unit vector of the baseline direction `(m.a, m.b)` of a text-to-page matrix, in
+`Fixed` (normalised with the integer square root of the raw values, so an axis-aligned
+direction gives exactly `(±1, 0)` or `(0, ±1)`); the quarter turn `dir` for a degenerate
+matrix. -/
+def unitDir (m : Matrix) (dir : Nat) : Fixed × Fixed :=
+  let n := Nat.sqrt (m.a.raw.natAbs * m.a.raw.natAbs + m.b.raw.natAbs * m.b.raw.natAbs)
+  if n = 0 then
+    match dir with
+    | 1 => (Fixed.zero, Fixed.one)
+    | 2 => (Fixed.neg Fixed.one, Fixed.zero)
+    | 3 => (Fixed.zero, Fixed.neg Fixed.one)
+    | _ => (Fixed.one, Fixed.zero)
+  else
+    (Fixed.clamp (m.a.raw * fixedScale / (n : Int)), Fixed.clamp (m.b.raw * fixedScale / (n : Int)))
+
+/-- The glyph's own advance in text space, `w0 · Tfs · Th` (no `Tc`, `Tw`): what MuPDF's text
+device advances its pen by (`fz_add_stext_char`'s `adv`), computed from the code's full
+displacement `a = (w0 · Tfs + Tc + Tw) · Th` (`codeAdvance`) by taking the spacing back out, so
+the font's width function is not evaluated a second time. -/
+def fontAdvance (r : GlyphRun) (c : List UInt8) (a : Fixed) : Fixed :=
+  let th := Fixed.div r.horizScaling (Fixed.ofInt 100)
+  let tw := if isSpaceCode c then r.wordSpacing else Fixed.zero
+  Fixed.sub a (Fixed.mul (Fixed.add r.charSpacing tw) th)
+
+/-- The **expansion** of the text rendering matrix per unit of font size: `√|det|` of
+`diag(Th, 1) × m` (MuPDF's `fz_matrix_expansion` of its `trm`, task 6.8e): the size of an em of a
+glyph whose text space is scaled non-uniformly or by `Tz`, the size MuPDF measures word gaps and
+baseline offsets in. Computed with the integer square root of the raw determinant. -/
+def expansion (m : Matrix) (horizScaling : Fixed) : Fixed :=
+  let th := Fixed.div horizScaling (Fixed.ofInt 100)
+  let det := (Fixed.mul m.a th).raw * m.d.raw - (Fixed.mul m.b th).raw * m.c.raw
+  Fixed.clamp (Nat.sqrt det.natAbs : Int)
+
 /-- A positioned glyph from a laid-out code (provenance fields set by `runGlyphs`). -/
 def mkGlyph (fi : FontInfo) (r : GlyphRun) (e : List UInt8 × Fixed × Fixed) : Glyph :=
   let m := Matrix.mul r.tm r.ctm
   let p0 := Matrix.apply m ⟨e.2.1, r.rise⟩
   let p1 := Matrix.apply m ⟨Fixed.add e.2.1 e.2.2, r.rise⟩
+  let p2 := Matrix.apply m ⟨Fixed.add e.2.1 (fontAdvance r e.1 e.2.2), r.rise⟩
   let d := dirOf m
+  let (ux, uy) := unitDir m d
   { text := textOf fi e.1, code := e.1, item := 0, seq := 0, x := p0.x, y := p0.y,
     width := Fixed.sub (rotFrame d p1.x p1.y).1 (rotFrame d p0.x p0.y).1, dir := d,
-    fontSize := Fixed.mul (Fixed.mul (fabs r.font.size) fi.sizeScale) (fmax (fabs m.c) (fabs m.d)),
-    visible := r.renderMode.paints }
+    fontSize := Fixed.mul (Fixed.mul (fabs r.font.size) fi.sizeScale) (expansion m r.horizScaling),
+    visible := r.renderMode.paints,
+    adv := Fixed.add (Fixed.mul (Fixed.sub p2.x p0.x) ux) (Fixed.mul (Fixed.sub p2.y p0.y) uy),
+    dirX := ux, dirY := uy }
 
 /-- The glyphs of the run at display-list index `i`, in show order. -/
 def runGlyphs (fonts : FontTable) (i : Nat) (r : GlyphRun) : List Glyph :=
@@ -986,6 +1048,13 @@ structure Options where
   /-- How far past the previous glyph's advance end a backward-moving glyph may start and still
   keep content order (`attached`); MuPDF's `SPACE_MAX_DIST` (0.8 em). -/
   attachBack : Nat := 800
+  /-- Largest baseline offset from the previous glyph (‰ of the size of the glyph added) for
+  a glyph that continues it (`nearPrev`); MuPDF's `BASE_MAX_DIST` (0.8 em, task 6.8e). -/
+  baseMax : Nat := 800
+  /-- Largest distance along the baseline between the previous glyph's pen and the origin of a
+  glyph that continues it (`nearPrev`, ‰ of the size of the glyph added); MuPDF's
+  `SPACE_MAX_DIST` (0.8 em, task 6.8e). -/
+  spaceMax : Nat := 800
   /-- The visible page area in default user space, `(llx, lly, urx, ury)`: glyphs lying
   entirely outside it are left out of the lines and the text (`Glyph.offPage`; MuPDF's
   `FZ_STEXT_CLIP`, which `mutool draw` sets). `none`: no clipping. `extractDocPage` fills it
@@ -1037,8 +1106,29 @@ def Options.keeps (o : Options) (g : Glyph) : Bool :=
     | some b => !g.offPage b
     | none => true
 
+/-- A layout frame: the unit vector `(x, y)` of a baseline direction in page space
+(`Glyph.dirX`, `Glyph.dirY`). Lines are measured in the frame of their first glyph. -/
+abbrev Frame := Fixed × Fixed
+
+/-- The frame of a glyph's own baseline. -/
+def Glyph.frame (g : Glyph) : Frame := (g.dirX, g.dirY)
+
+/-- Position of a glyph's origin along the frame's baseline direction. -/
+def Frame.u (f : Frame) (g : Glyph) : Fixed := Fixed.add (Fixed.mul g.x f.1) (Fixed.mul g.y f.2)
+
+/-- Position of a glyph's origin across the frame's baseline direction (up). -/
+def Frame.v (f : Frame) (g : Glyph) : Fixed := Fixed.sub (Fixed.mul g.y f.1) (Fixed.mul g.x f.2)
+
+/-- The pen after a glyph along the frame (origin plus the glyph's own advance `adv`). -/
+def Frame.uEnd (f : Frame) (g : Glyph) : Fixed := Fixed.add (f.u g) g.adv
+
+/-- Whether two frames are the same direction for layout: cosine of the angle between them at
+least `0.999` (MuPDF starts a new line when `vec_dot(ndir, line->dir) < 0.999`). -/
+def Frame.same (f h : Frame) : Bool :=
+  (Fixed.add (Fixed.mul f.1 h.1) (Fixed.mul f.2 h.2)).raw * 1000 ≥ 999 * fixedScale
+
 /-- A line: glyphs in content order, the baseline of its largest-size glyphs, its largest
-size, and its extent along the baseline. -/
+size, and its extent along the baseline. Positions are taken in the line's `frame`. -/
 structure Line where
   /-- Glyphs, content order. -/
   glyphs : Array Glyph
@@ -1054,11 +1144,16 @@ structure Line where
   lo : Fixed
   /-- Largest glyph end along the baseline. -/
   hi : Fixed
+  /-- The exact baseline direction of the line (of its first glyph; task 6.8e): `v`, `lo`,
+  `hi` and the order of the glyphs are measured in it. -/
+  frame : Frame := (Fixed.one, Fixed.zero)
   deriving Repr, Inhabited
 
 /-- A line of one glyph. -/
 def Line.ofGlyph (g : Glyph) : Line :=
-  ⟨#[g], g.dir, g.v, g.fontSize, fmin g.u g.uEnd, fmax g.u g.uEnd⟩
+  let f := g.frame
+  { glyphs := #[g], dir := g.dir, v := f.v g, size := g.fontSize,
+    lo := fmin (f.u g) (f.uEnd g), hi := fmax (f.u g) (f.uEnd g), frame := f }
 
 /-- `x ≤ k‰ of s` on raw values. -/
 def withinPermille (x s : Fixed) (k : Nat) : Bool := (fabs x).raw * 1000 ≤ (fabs s).raw * k
@@ -1066,7 +1161,7 @@ def withinPermille (x s : Fixed) (k : Nat) : Bool := (fabs x).raw * 1000 ≤ (fa
 /-- Whether `g` starts where the line ends: no more than `scriptBack` ‰ of `size` before the
 line's end and no more than `scriptAhead` ‰ after it. -/
 def continuesLine (o : Options) (l : Line) (g : Glyph) (size : Fixed) : Bool :=
-  let d := Fixed.sub g.u l.hi
+  let d := Fixed.sub (l.frame.u g) l.hi
   if d.raw < 0 then withinPermille d size o.scriptBack else withinPermille d size o.scriptAhead
 
 /-- **Sub/superscripts** (heuristic): `g` joins line `l` although its baseline is further than
@@ -1075,25 +1170,45 @@ horizontally: a smaller `g` raised above the line's baseline by at most `scriptR
 line's size (footnote marker, exponent), or a larger `g` whose baseline lies below that of a
 line of smaller glyphs by at most `scriptRaise` ‰ of `g`'s size (a line begun by a marker). -/
 def scriptJoin (o : Options) (l : Line) (g : Glyph) : Bool :=
-  let d := Fixed.sub g.v l.v
+  let d := Fixed.sub (l.frame.v g) l.v
   if g.fontSize.raw < l.size.raw then
     0 < d.raw && withinPermille d l.size o.scriptRaise && continuesLine o l g l.size
   else if l.size.raw < g.fontSize.raw then
     d.raw < 0 && withinPermille d g.fontSize o.scriptRaise && continuesLine o l g g.fontSize
   else false
 
-/-- Whether `g` continues line `l`: its baseline is within `lineTol` of the line's, or it is a
-sub/superscript of it (`scriptJoin`). -/
+/-- Whether `g` continues the last glyph `p` of line `l` as MuPDF's text device would keep it
+on `p`'s line (`fz_add_stext_char`, task 6.8e): its baseline is less than `baseMax` ‰ of `g`'s
+size off `p`'s, and its origin less than `spaceMax` ‰ of `g`'s size from `p`'s pen along the
+baseline (forwards or backwards). E.g. a radical sign raised 0.78 em right after a word
+(`by √dk`), or an underbar 0.7 em below its letter. -/
+def nearPrev (o : Options) (l : Line) (g : Glyph) : Bool :=
+  match l.glyphs.back? with
+  | none => false
+  | some p =>
+    let f := l.frame
+    let dv := Fixed.sub (f.v g) (f.v p)
+    let du := Fixed.sub (f.u g) (f.uEnd p)
+    (fabs dv).raw * 1000 < (fabs g.fontSize).raw * o.baseMax &&
+      (fabs du).raw * 1000 < (fabs g.fontSize).raw * o.spaceMax
+
+/-- Whether `g` continues line `l`: same baseline direction (quarter turn and exact frame,
+`Frame.same`), and its baseline is within `lineTol` ‰ of **its own** size of the line's (MuPDF
+measures baseline offsets in units of the size of the glyph being added: a small caption below
+a huge title starts a line of its own, task 6.8e), or it continues the line's last glyph
+(`nearPrev`), or it is a sub/superscript of the line (`scriptJoin`). -/
 def sameLine (o : Options) (l : Line) (g : Glyph) : Bool :=
-  g.dir == l.dir &&
-    (withinPermille (Fixed.sub g.v l.v) (fmax l.size g.fontSize) o.lineTol || scriptJoin o l g)
+  g.dir == l.dir && l.frame.same g.frame &&
+    (withinPermille (Fixed.sub (l.frame.v g) l.v) g.fontSize o.lineTol ||
+      nearPrev o l g || scriptJoin o l g)
 
 /-- Add a glyph to a line; a glyph of larger size than the line's moves the baseline to its
 own. -/
 def Line.push (l : Line) (g : Glyph) : Line :=
+  let f := l.frame
   { l with glyphs := l.glyphs.push g, size := fmax l.size g.fontSize,
-           v := if l.size.raw < g.fontSize.raw then g.v else l.v,
-           lo := fmin l.lo (fmin g.u g.uEnd), hi := fmax l.hi (fmax g.u g.uEnd) }
+           v := if l.size.raw < g.fontSize.raw then f.v g else l.v,
+           lo := fmin l.lo (fmin (f.u g) (f.uEnd g)), hi := fmax l.hi (fmax (f.u g) (f.uEnd g)) }
 
 /-- Group glyphs (content order) into lines. -/
 def groupLines (o : Options) (gs : List Glyph) : Array Line :=
@@ -1116,61 +1231,81 @@ def spaceMayFollow (s : String) : Bool :=
   | none => true
   | some c => c != ' ' && (c.toNat < 0x700 || (0x2000 ≤ c.toNat && c.toNat ≤ 0x20CF))
 
-/-- Whether `g`, shown right after `p`, is **attached** to it: it starts before `p`'s origin
-(a backward move) but by less than `attachBack` ‰ of the size past `p`'s advance end —
-overlapping glyph boxes, such as a base letter drawn after its accent (TeX's `\c{c}`, `\.z`).
-Attached glyphs keep content order (as MuPDF, which keeps such glyphs on the line in content
-order). -/
-def attached (o : Options) (p g : Glyph) : Bool :=
-  g.dir == p.dir && g.u.raw < p.u.raw &&
-    withinPermille (Fixed.sub g.u p.uEnd) (fmax p.fontSize g.fontSize) o.attachBack
+/-- Whether `g`, shown right after `p`, is **attached** to it in frame `f`: it starts before
+`p`'s origin (a backward move) but by less than `attachBack` ‰ of the size past `p`'s pen
+(`Frame.uEnd`) — overlapping glyph boxes, such as a base letter drawn after its accent (TeX's
+`\c{c}`, `\.z`). Attached glyphs keep content order (as MuPDF, which keeps such glyphs on the
+line in content order). -/
+def attached (o : Options) (f : Frame) (p g : Glyph) : Bool :=
+  g.dir == p.dir && (f.u g).raw < (f.u p).raw &&
+    withinPermille (Fixed.sub (f.u g) (f.uEnd p)) (fmax p.fontSize g.fontSize) o.attachBack
 
-/-- Sort keys of a line's glyphs (content order): a glyph's own position along the baseline,
-or the key of the glyph before it when it is `attached` to it. -/
-def sortKeys (o : Options) (gs : List Glyph) : List (Glyph × Int) :=
+/-- Sort keys of a line's glyphs (content order) in frame `f`: a glyph's own position along the
+baseline, or the key of the glyph before it when it is `attached` to it. -/
+def sortKeys (o : Options) (f : Frame) (gs : List Glyph) : List (Glyph × Int) :=
   let (out, _) := gs.foldl (fun (acc : Array (Glyph × Int) × Option (Glyph × Int)) g =>
     let k := match acc.2 with
-      | some (p, kp) => if attached o p g then kp else g.u.raw
-      | none => g.u.raw
+      | some (p, kp) => if attached o f p g then kp else (f.u g).raw
+      | none => (f.u g).raw
     (acc.1.push (g, k), some (g, k))) (#[], none)
   out.toList
 
 /-- The glyphs of a line in reading order: left to right by `sortKeys` (stable), so glyphs
 attached to their predecessor (accents before their base letter) keep content order. -/
 def lineOrder (o : Options) (l : Line) : List Glyph :=
-  ((sortKeys o l.glyphs.toList).mergeSort fun a b => a.2 ≤ b.2).map (·.1)
+  ((sortKeys o l.frame l.glyphs.toList).mergeSort fun a b => a.2 ≤ b.2).map (·.1)
 
-/-- The text of a line: glyphs in `lineOrder`, spaces at word gaps, overprints dropped. -/
+/-- What goes before glyph `g` that follows `p` in a line of frame `f`: `none` when `g` is an
+overprinted duplicate of `p` (same text from the same code bytes, origin within 10 % of the
+size: fake bold), which is dropped; else `" "` at a **word gap** and `""` otherwise. A word gap
+is MuPDF's (`fz_add_stext_char`, task 6.8e): the distance from `p`'s pen — its origin plus its
+own advance `w0 · Tfs · Th`, **without** `Tc` and `Tw` (`Glyph.adv`) — to `g`'s origin exceeds
+`wordGap` ‰ of `g`'s size (so letter-spaced text, `Tc` above 0.15 em, reads `R A I L`, and a
+superscript 1.4 pt after its base letter is a word of its own: `W O`), unless
+`g` starts with a space or the text of `p` ends in a character after which MuPDF never inserts
+one (`spaceMayFollow`). -/
+def glyphSep (o : Options) (f : Frame) (p g : Glyph) : Option String :=
+  let sz := fmax p.fontSize g.fontSize
+  let dup := p.text == g.text && p.code == g.code &&
+    withinPermille (Fixed.sub (f.u g) (f.u p)) sz 100 &&
+    withinPermille (Fixed.sub (f.v g) (f.v p)) sz 100
+  if dup then none
+  else
+    let gap := Fixed.sub (f.u g) (f.uEnd p)
+    let space := gap.raw > 0 && !withinPermille gap g.fontSize o.wordGap &&
+      spaceMayFollow p.text && !g.text.startsWith " "
+    some (if space then " " else "")
+
+/-- The text of a line: glyphs in `lineOrder`, separated as `glyphSep` says (spaces at word
+gaps, overprints dropped). -/
 def lineText (o : Options) (l : Line) : String :=
   let sorted := lineOrder o l
   let (out, _) := sorted.foldl (fun (acc : String × Option Glyph) g =>
     match acc.2 with
     | none => (acc.1 ++ g.text, some g)
     | some p =>
-      let sz := fmax p.fontSize g.fontSize
-      let dup := p.text == g.text && p.code == g.code &&
-        withinPermille (Fixed.sub g.u p.u) sz 100 &&
-        withinPermille (Fixed.sub g.v p.v) sz 100
-      if dup then acc
-      else
-        let gap := Fixed.sub g.u (Fixed.add p.u p.width)
-        let space := gap.raw > 0 && !withinPermille gap sz o.wordGap &&
-          spaceMayFollow p.text && !g.text.startsWith " "
-        (acc.1 ++ (if space then " " else "") ++ g.text, some g)) ("", none)
+      match glyphSep o l.frame p g with
+      | none => acc
+      | some sep => (acc.1 ++ sep ++ g.text, some g)) ("", none)
   out
+
+/-- The separator before line `l` after line `prev`: nothing for the first line, a newline,
+or a blank line when both run in the same direction and their baselines are more than
+`paraGap` ‰ of the size of `l` apart (MuPDF measures in units of the glyph added, task 6.8e: a
+caption 40 pt below a 100 pt title is a paragraph of its own). -/
+def lineSep (o : Options) (prev : Option Line) (l : Line) : String :=
+  match prev with
+  | none => ""
+  | some p =>
+    if l.dir != p.dir || !l.frame.same p.frame ||
+        withinPermille (Fixed.sub l.v p.v) l.size o.paraGap then "\n"
+    else "\n\n"
 
 /-- **Reading order**: the page text of a glyph list (see the module doc). -/
 def layout (o : Options) (gs : List Glyph) : Array Line × String :=
   let lines := groupLines o (gs.filter o.keeps)
   let (text, _) := lines.foldl (fun (acc : String × Option Line) l =>
-    let t := lineText o l
-    match acc.2 with
-    | none => (t, some l)
-    | some p =>
-      let sep := if l.dir != p.dir ||
-          withinPermille (Fixed.sub l.v p.v) (fmax p.size l.size) o.paraGap then "\n"
-        else "\n\n"
-      (acc.1 ++ sep ++ t, some l)) ("", none)
+    (acc.1 ++ lineSep o acc.2 l ++ lineText o l, some l)) ("", none)
   (lines, text)
 
 /-! ## `/ActualText` (task 6.8d; heuristic as MuPDF, tested) -/
@@ -1221,7 +1356,7 @@ def flushChars (box : Option (Fixed × Fixed × Fixed × Fixed)) (last : Option 
     else
       let p := unFrame g.dir g.uEnd g.v
       cs.map fun ch => { g with text := normalize (String.singleton ch), code := [], x := p.1,
-                                 y := p.2, width := Fixed.zero }
+                                 y := p.2, width := Fixed.zero, adv := Fixed.zero }
 
 /-- One glyph under the innermost open `/ActualText` sequence (MuPDF
 `do_extract_within_actualtext` without its prefix/postfix matching, which compares glyph ids
@@ -1346,6 +1481,67 @@ theorem shownItems_eq_extract (fonts : FontTable) (box : Option (Fixed × Fixed 
   obtain ⟨rfl, rfl⟩ := this
   simp [closeAll]
 
+/-! ## Clipping (task 6.8f; as MuPDF's `FZ_STEXT_CLIP`) -/
+
+/-- A page-space box `(x0, y0, x1, y1)`. -/
+abbrev Box := Fixed × Fixed × Fixed × Fixed
+
+/-- The bounding box of the points of a path, curve control points included (MuPDF's
+`fz_bound_path`); `none` for a path without points. -/
+def pathBox (p : Path) : Option Box :=
+  let grow (b : Option Box) (q : Point) : Option Box :=
+    match b with
+    | none => some (q.x, q.y, q.x, q.y)
+    | some (x0, y0, x1, y1) => some (fmin x0 q.x, fmin y0 q.y, fmax x1 q.x, fmax y1 q.y)
+  p.segs.foldl (fun b s => match s with
+    | .moveTo q | .lineTo q => grow b q
+    | .curveTo c1 c2 q => grow (grow (grow b c1) c2) q
+    | .closePath => b) none
+
+/-- The **scissor** of a clip: the intersection of the bounding boxes of its paths (MuPDF's
+device clip stack, `fz_device_current_scissor`); `none` when unclipped. An empty intersection
+(or a path without points) is a box with `x1 < x0`. -/
+def scissor (c : Clip) : Option Box :=
+  c.foldl (fun acc cp =>
+    let b := (pathBox cp.path).getD (Fixed.one, Fixed.one, Fixed.zero, Fixed.zero)
+    match acc with
+    | none => some b
+    | some (x0, y0, x1, y1) =>
+      some (fmax x0 b.1, fmax y0 b.2.1, fmin x1 b.2.2.1, fmin y1 b.2.2.2)) none
+
+/-- Whether glyph `g` is hidden by the scissor `s`: the box is empty, or the glyph's box
+(`Glyph.bounds`) lies entirely outside it (`Glyph.offPage`; MuPDF
+`fz_glyph_entirely_outside_box`). -/
+def hiddenBy (s : Option Box) (g : Glyph) : Bool :=
+  match s with
+  | none => false
+  | some b => b.2.2.1.raw < b.1.raw || b.2.2.2.raw < b.2.1.raw || g.offPage b
+
+/-- The scissor of every display item: that of its clip for a glyph run, `none` otherwise
+(computed once per run). -/
+def itemScissors (items : Array DisplayItem) : Array (Option Box) :=
+  items.map fun it => match it with
+    | .glyphRun _ c => scissor c
+    | _ => none
+
+/-- **Clipped text** (task 6.8f): the glyphs whose glyph run (`Glyph.item`, an index into
+`items`) was clipped so that the glyph lies entirely outside the scissor of the clip are left
+out, as MuPDF's text device does under `FZ_STEXT_CLIP` (which `mutool draw` sets): e.g. the
+labels of a matplotlib figure drawn outside its axes clip, invisible on the rendered page.
+Glyphs whose `item` is not a glyph run of `items` (an annotation's) are kept. -/
+def unclipped (items : Array DisplayItem) (gs : List Glyph) : List Glyph :=
+  let sc := itemScissors items
+  gs.filter fun g => !hiddenBy (sc[g.item]?.getD none) g
+
+/-- Without clips nothing is hidden. -/
+theorem unclipped_of_none (items : Array DisplayItem) (gs : List Glyph)
+    (h : ∀ g ∈ gs, (itemScissors items)[g.item]?.getD none = none) :
+    unclipped items gs = gs := by
+  unfold unclipped
+  rw [List.filter_eq_self]
+  intro g hg
+  simp [h g hg, hiddenBy]
+
 /-! ## Pages -/
 
 /-- The text of a page, with everything it was computed from. -/
@@ -1357,8 +1553,9 @@ structure PageText where
   /-- All glyphs, content order (`extractItems fonts items`). -/
   glyphs : List Glyph
   /-- The glyphs as shown (task 6.8d): `glyphs` with the `/ActualText` of marked content
-  applied (`shownItems`); equal to `glyphs` when the page has none
-  (`shownItems_eq_extract`). Lines and text are laid out from these. -/
+  applied (`shownItems`; equal to `glyphs` when the page has none, `shownItems_eq_extract`),
+  without the glyphs the clip hides (`unclipped`, task 6.8f; nothing is hidden on an
+  unclipped page, `unclipped_of_none`). Lines and text are laid out from these. -/
   shown : List Glyph
   /-- Lines in reading order. -/
   lines : Array Line
@@ -1384,7 +1581,7 @@ def extractPage {σ : Type} (limits : Limits) (src : Source σ) (res : Dict) (co
   let (fonts, s) := loadFonts limits src s res
   let st := runBytes (textEnv limits src fonts) res content s ()
   let gs := extractItems fonts st.items.toList
-  let sh := shownItems fonts o.pageBox st.items.toList
+  let sh := unclipped st.items (shownItems fonts o.pageBox st.items.toList)
   let (lines, text) := layout o sh
   ({ fonts := fonts, items := st.items, glyphs := gs, shown := sh, lines := lines, text := text,
      warnings := st.warnings, ops := st.ops, forms := st.forms }, st.s)
@@ -1542,11 +1739,12 @@ private def gDown : Glyph :=
     width := Fixed.ofInt 10, dir := 3, fontSize := Fixed.ofInt 10, visible := true }
 #guard gDown.bounds == (Fixed.ofInt 98, Fixed.ofInt 490, Fixed.ofInt 108, Fixed.ofInt 500)
 
--- a superscript raised 0.55 em by `Ts` stays on its line (beyond `lineTol`, `scriptJoin`)
+-- a superscript raised 0.55 em by `Ts` stays on its line (beyond `lineTol`: `scriptJoin`, and
+-- `nearPrev` — 5.5 pt is below 0.8 of its 7 pt size); with both off it starts a line
 #guard txt (page helv "BT /F1 10 Tf 72 700 Td (mc) Tj /F1 7 Tf 5.5 Ts (2) Tj /F1 10 Tf 0 Ts ( x) Tj ET"
   [helvObj]) == "mc2 x"
 #guard txt (page helv "BT /F1 10 Tf 72 700 Td (mc) Tj /F1 7 Tf 5.5 Ts (2) Tj /F1 10 Tf 0 Ts ( x) Tj ET"
-  [helvObj] ) { scriptRaise := 500 } == "mc\n2\n x"
+  [helvObj] ) { scriptRaise := 500, baseMax := 500 } == "mc\n2\n x"
 
 /-- A Type0 Identity-H font with `/W` and a ToUnicode CMap (2-byte codes, a `bfrange`). -/
 private def cidPdf : ByteArray := page "/F2 5 0 R" "BT /F2 10 Tf 72 700 Td <000100020003> Tj ET" [
