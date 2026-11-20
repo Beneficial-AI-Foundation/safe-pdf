@@ -52,6 +52,11 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
   division per pixel, ≈ 150 ns/px compiled) is kept as its specification. They agree byte
   for byte (tested on 5000 pseudo-random cases, `Tests/RasterComposite.lean`; not proved).
   `scripts/bench-raster.sh`: full-page fill 69 → 6 ms.
+* **Byte clamp (task 7.2g).** `blend` (hence `blendPx`) and `Mask.inter` clamp with `u8`
+  (`u8_eq`, `blend_eq`: equal to `UInt8.ofNatClamp`, ≈ 30 ns → ≈ 1 ns per call compiled).
+* **Item bounds (task 7.2g).** `itemBound` bounds, before painting, the pixels an item can
+  change (path / unit-square device boxes ∩ clip boxes ∩ page); the transparency driver
+  combines layers only over these bounds (`Transparency.Painter.bound`).
 * **The page.** `renderPaths page zoom rot items` uses the CropBox and the rotation
   `Geom.rotAdd page.rotate rot` (page `/Rotate` + user rotation), the view matrix
   `Geom.viewMatrix` (C2, task 7.1; y flipped, origin top-left) and a pixel size of
@@ -124,6 +129,21 @@ theorem mul255_255_left (b : Nat) : mul255 255 b = b := by
 /-- Zero coverage absorbs. -/
 theorem mul255_zero_left (b : Nat) : mul255 0 b = 0 := by
   unfold mul255; simp
+
+/-- A natural number as a byte, clamped to 255. Equal to `UInt8.ofNatClamp` (`u8_eq`), which
+compiles to a `BitVec` computation with `2 ^ 8` evaluated per call (≈ 30 ns compiled; this is
+≈ 1 ns). The same definition as `Image.u8` (task 7.3e), which `Image` could reuse (`Image`
+imports `Clip`, not the other way round). -/
+@[inline] def u8 (n : Nat) : UInt8 := if n < 256 then UInt8.ofNat n else 255
+
+/-- `u8` is `UInt8.ofNatClamp`. -/
+theorem u8_eq (n : Nat) : u8 n = UInt8.ofNatClamp n := by
+  unfold u8 UInt8.ofNatClamp BitVec.ofNatClamp
+  by_cases h : n < 256
+  · simp only [h, ite_true, dite_true]
+    apply UInt8.toNat_inj.mp
+    simp [Nat.mod_eq_of_lt h]
+  · simp only [h, ite_false, dite_false]; rfl
 
 /-- A `UInt8` read as a coverage is at most 255. -/
 theorem toNat_le_255 (u : UInt8) : u.toNat ≤ 255 := by
@@ -219,11 +239,15 @@ theorem _root_.SafePdf.Core.Raster.Fill.Mask.tabulate_get (r : IRect) (f : Int �
 /-- Pointwise product of two masks over the intersection of their rectangles. -/
 def _root_.SafePdf.Core.Raster.Fill.Mask.inter (a b : Mask) : Mask :=
   Mask.tabulate (a.rect.inter b.rect)
-    (fun x y => UInt8.ofNatClamp (mul255 (a.get x y).toNat (b.get x y).toNat))
+    (fun x y => u8 (mul255 (a.get x y).toNat (b.get x y).toNat))
 
 /-- Reading a clamped byte of a value `≤ 255` gives the value back. -/
 theorem toNat_ofNatClamp_le (n : Nat) (h : n ≤ 255) : (UInt8.ofNatClamp n).toNat = n :=
   UInt8.toNat_ofNatClamp_of_lt (by simp [UInt8.size]; omega)
+
+/-- Reading a `u8` byte of a value `≤ 255` gives the value back. -/
+theorem toNat_u8_le (n : Nat) (h : n ≤ 255) : (u8 n).toNat = n := by
+  rw [u8_eq]; exact toNat_ofNatClamp_le n h
 
 /-- The intersection's coverage is the product, or 0. -/
 theorem _root_.SafePdf.Core.Raster.Fill.Mask.inter_get (a b : Mask) (x y : Int) :
@@ -232,7 +256,7 @@ theorem _root_.SafePdf.Core.Raster.Fill.Mask.inter_get (a b : Mask) (x y : Int) 
   simp only [Mask.inter, Mask.tabulate_get]
   split
   · right
-    exact toNat_ofNatClamp_le _
+    exact toNat_u8_le _
       (mul255_le_255 _ _ (toNat_le_255 _) (toNat_le_255 _))
   · left; rfl
 
@@ -441,8 +465,13 @@ def deviceRGB : Color → Nat × Nat × Nat
       255 - min 255 (compByte y + compByte k))
   | .pattern _ => (128, 128, 128)
 
-/-- Source-over of `s` onto `d` with opacity `a` (all bytes): `round((s·a + d·(255 − a))/255)`. -/
-def blend (s d a : Nat) : UInt8 := UInt8.ofNatClamp ((s * a + d * (255 - a) + 127) / 255)
+/-- Source-over of `s` onto `d` with opacity `a` (all bytes): `round((s·a + d·(255 − a))/255)`,
+clamped to a byte with `u8` (task 7.2g; `blend_eq`: the same as through `UInt8.ofNatClamp`). -/
+def blend (s d a : Nat) : UInt8 := u8 ((s * a + d * (255 - a) + 127) / 255)
+
+/-- `blend` is the 7.2c definition through `UInt8.ofNatClamp`. -/
+theorem blend_eq (s d a : Nat) :
+    blend s d a = UInt8.ofNatClamp ((s * a + d * (255 - a) + 127) / 255) := u8_eq _
 
 /-- Read a byte (`0` out of range). -/
 def getB (b : ByteArray) (i : Nat) : Nat := (b[i]?.getD 0).toNat
@@ -732,6 +761,61 @@ def renderItem (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RS
     let fm := stroke cfg m (itemWindow W H c.1) p style
     paintMask W H st c.1 fm style.color style.alpha c.2.1 c.2.2
   | _ => st
+
+/-! ### Item bounds (task 7.2g)
+
+An upper bound, before painting, of the device pixels an item can change: the transparency
+driver (`Transparency.Painter.bound`) combines layers only over the union of the bounds of what
+was painted into them. Paths: the device bounding box of all their points (control points
+included, so the box contains every Bézier curve), rounded outwards plus one pixel of margin
+(the anti-aliased coverage of a filled pixel needs the polygon to meet that pixel); clip lists:
+the intersection of their paths' boxes (`[]` = the page); everything is intersected with the
+page. Strokes, glyph runs and shadings are bounded by their clip only; images by the device box
+of their unit square (two pixels of margin, for `Image.place`'s grid fitting) and their clip;
+items that paint nothing (`clip`, `unsupported`, …) by the empty rectangle. -/
+
+/-- The empty pixel rectangle. -/
+def emptyRect : IRect := ⟨0, 0, 0, 0⟩
+
+/-- Device bounding box of a page-space path through `m`, in pixels, rounded outwards plus a
+one-pixel margin; the empty rectangle for a path without points. -/
+def pathBound (cfg : Config) (m : Aff) (p : Path) : IRect :=
+  let dp := ofContentPath m p cfg
+  let pts : Array FPt := dp.foldl (fun acc s => match s with
+    | .moveTo q | .lineTo q => acc.push q
+    | .curveTo a b q => ((acc.push a).push b).push q
+    | .closePath => acc) #[]
+  match pts[0]? with
+  | none => emptyRect
+  | some q0 =>
+    let bb := pts.foldl (fun (bb : Int × Int × Int × Int) q =>
+      (min bb.1 q.x, min bb.2.1 q.y, max bb.2.2.1 q.x, max bb.2.2.2 q.y)) (q0.x, q0.y, q0.x, q0.y)
+    ⟨floorSub bb.1 - 1, floorSub bb.2.1 - 1, ceilSub bb.2.2.1 + 1, ceilSub bb.2.2.2 + 1⟩
+
+/-- Upper bound of a clip list's region: the intersection of its paths' boxes, within the
+page. -/
+def clipBound (cfg : Config) (m : Aff) (W H : Nat) : Clip → IRect
+  | [] => pageRect W H
+  | cp :: rest => (pathBound cfg m cp.path).inter (clipBound cfg m W H rest)
+
+/-- Device box of the unit square through `ctm` then `m`, plus two pixels of margin. -/
+def unitBound (m : Aff) (ctm : Content.Matrix) : IRect :=
+  let d := Aff.ofMatrix ctm * m
+  let ps := [d.apply ⟨0, 0⟩, d.apply ⟨1, 0⟩, d.apply ⟨0, 1⟩, d.apply ⟨1, 1⟩]
+  let x0 := ps.foldl (fun a p => min a p.x) (d.apply ⟨0, 0⟩).x
+  let y0 := ps.foldl (fun a p => min a p.y) (d.apply ⟨0, 0⟩).y
+  let x1 := ps.foldl (fun a p => max a p.x) (d.apply ⟨0, 0⟩).x
+  let y1 := ps.foldl (fun a p => max a p.y) (d.apply ⟨0, 0⟩).y
+  ⟨x0.floor - 2, y0.floor - 2, x1.ceil + 2, y1.ceil + 2⟩
+
+/-- **Upper bound of the pixels painting `it` changes** (see above), within the page. -/
+def itemBound (cfg : Config) (m : Aff) (W H : Nat) : DisplayItem → IRect
+  | .fillPath p _ _ clip => (pathBound cfg m p).inter (clipBound cfg m W H clip)
+  | .strokePath _ _ clip => clipBound cfg m W H clip
+  | .glyphRun _ clip => clipBound cfg m W H clip
+  | .image _ ctm _ clip => (unitBound m ctm).inter (clipBound cfg m W H clip)
+  | .shading _ _ clip => clipBound cfg m W H clip
+  | _ => emptyRect
 
 /-- An opaque white RGBA buffer of `W · H` pixels. -/
 def whiteBuf (W H : Nat) : ByteArray := ByteArray.mk (Array.replicate (4 * W * H) 255)
