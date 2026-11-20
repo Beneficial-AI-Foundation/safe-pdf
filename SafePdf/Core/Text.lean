@@ -117,11 +117,31 @@ numbers and `Td` moves alike; 0.15 em, MuPDF's `SPACE_DIST`), unless either side
 space or the text before the gap ends in a character after which MuPDF never inserts one
 (`spaceMayFollow`: U+0700 and above outside U+2000–U+20CF, e.g. the math operators of `a −b`,
 `c ≤d`, and CJK); an overprinted duplicate
-(same text, origin within 10 % of the size: fake bold) is dropped. Lines are separated by a
+(same text from the same code bytes, origin within 10 % of the size: fake bold) is dropped
+(an `/ActualText` character placed on another code, e.g. a dot leader's space shown as '.'
+next to a real '.', is not a duplicate; task 6.8d). Lines are separated by a
 newline, with a blank line when the baselines are more than `paraGap` ‰ of the font size apart.
 Coordinates are taken in the frame of each glyph's baseline direction (`dirOf`: the quarter
 turn nearest to the image of the text x axis), so text rotated by 90°, 180° or 270° groups and
 orders like upright text; other angles are snapped to the nearest quarter turn.
+
+## `/ActualText` (`shownItems`, task 6.8d; as MuPDF 1.25.1 `stext-device.c`)
+
+The interpreter brackets marked content whose property list has `/ActualText` (inline, or a
+`/Properties` resource) by `actualTextBegin text` … `actualTextEnd` items. The glyphs as shown
+(`PageText.shown`, from which lines and text are laid out) replace each glyph inside such a
+sequence by the next ActualText character, at the glyph's own position and advance (MuPDF
+`do_extract_within_actualtext`); the innermost sequence applies; glyphs beyond the characters,
+and every glyph of an empty ActualText, are dropped; characters left when the sequence closes
+(or at the end of the page) are placed as zero-width glyphs at the advance end of the last glyph
+placed (MuPDF's pen, `flush_actualtext`). E.g. an NTSB table-of-contents leader: a space shown
+under `/ActualText (.)` reads `.`. Not done: MuPDF's prefix/postfix matching (it compares glyph
+ids with Unicode values, so it only fires by coincidence), `/ActualText` of the structure
+element an `/MCID` points to, and the text of a sequence closed before any glyph of the page
+was placed (MuPDF puts it at the bounds of the sequence's images and paths; here it is
+dropped). A form's sequences left open at its end are closed only at the end of the page (MuPDF
+closes them with the form). `PageText.glyphs` stays the plain extraction (C3/C6 below);
+without `/ActualText` marks the two are equal (`shownItems_eq_extract`).
 
 ## Properties
 
@@ -1128,7 +1148,8 @@ def lineText (o : Options) (l : Line) : String :=
     | none => (acc.1 ++ g.text, some g)
     | some p =>
       let sz := fmax p.fontSize g.fontSize
-      let dup := p.text == g.text && withinPermille (Fixed.sub g.u p.u) sz 100 &&
+      let dup := p.text == g.text && p.code == g.code &&
+        withinPermille (Fixed.sub g.u p.u) sz 100 &&
         withinPermille (Fixed.sub g.v p.v) sz 100
       if dup then acc
       else
@@ -1152,6 +1173,179 @@ def layout (o : Options) (gs : List Glyph) : Array Line × String :=
       (acc.1 ++ sep ++ t, some l)) ("", none)
   (lines, text)
 
+/-! ## `/ActualText` (task 6.8d; heuristic as MuPDF, tested) -/
+
+/-- The characters of a PDF text string (ISO 32000-2 §7.9.2.2), as MuPDF's
+`pdf_to_text_string`: UTF-16BE after `FE FF`, UTF-16LE after `FF FE`, UTF-8 after `EF BB BF`,
+else PDFDocEncoding through the glyph list (tab, line feed and carriage return kept, other
+undefined bytes U+FFFD). Decoding stops at the first NUL, as MuPDF reads the result as a C
+string. -/
+def actualChars (bs : List UInt8) : List Char :=
+  let pdfDoc (bs : List UInt8) : List Char :=
+    bs.flatMap fun (b : UInt8) =>
+      if b == 9 || b == 10 || b == 13 then [Char.ofNat b.toNat]
+      else match (Font.pdfDocEncoding.glyph b.toNat).bind glyphToUnicode with
+        | some t => t.toList
+        | none => [Font.CMap.replacement]
+  let swap : List UInt8 → List UInt8 := fun bs =>
+    (pairs bs).flatMap fun p => match p with
+      | [a, b] => [b, a]
+      | q => q
+  let cs := match bs with
+    | 0xFE :: 0xFF :: rest => (Font.CMap.ofUtf16 rest).toList
+    | 0xFF :: 0xFE :: rest => (Font.CMap.ofUtf16 (swap rest)).toList
+    | 0xEF :: 0xBB :: 0xBF :: rest =>
+      match String.fromUTF8? ⟨rest.toArray⟩ with
+      | some t => t.toList
+      | none => pdfDoc rest
+    | _ => pdfDoc bs
+  cs.takeWhile (· != Char.ofNat 0)
+
+/-- The extraction state of `/ActualText` sequences: the characters still to place of every
+open sequence (innermost first), and the last glyph placed (its advance end is MuPDF's pen). -/
+structure ActState where
+  /-- Remaining characters of the open `/ActualText` sequences, innermost first. -/
+  open_ : List (List Char) := []
+  /-- The last glyph placed. -/
+  last : Option Glyph := none
+
+/-- The leftover characters `cs` of a closing sequence, placed at MuPDF's pen: zero-width
+glyphs at the advance end of the last glyph placed (`flush_actualtext`; nothing without a
+previous glyph, or when that glyph lies entirely outside `box`, MuPDF's `last.clipped`). -/
+def flushChars (box : Option (Fixed × Fixed × Fixed × Fixed)) (last : Option Glyph)
+    (cs : List Char) : List Glyph :=
+  match last with
+  | none => []
+  | some g =>
+    if (match box with | some b => g.offPage b | none => false) then []
+    else
+      let p := unFrame g.dir g.uEnd g.v
+      cs.map fun ch => { g with text := normalize (String.singleton ch), code := [], x := p.1,
+                                 y := p.2, width := Fixed.zero }
+
+/-- One glyph under the innermost open `/ActualText` sequence (MuPDF
+`do_extract_within_actualtext` without its prefix/postfix matching, which compares glyph ids
+with Unicode values): it takes the sequence's next character, keeping its position and
+advance; once the characters are used up (or the `/ActualText` is empty) it is dropped. -/
+def actGlyph (st : ActState) (g : Glyph) : ActState × List Glyph :=
+  match st.open_ with
+  | [] => ({ st with last := some g }, [g])
+  | [] :: _ => (st, [])
+  | (ch :: more) :: rest =>
+    let g' := { g with text := normalize (String.singleton ch) }
+    ({ open_ := more :: rest, last := some g' }, [g'])
+
+/-- The glyphs of a list under the `/ActualText` state, in order. -/
+def actGlyphs (st : ActState) : List Glyph → ActState × List Glyph
+  | [] => (st, [])
+  | g :: gs =>
+    let (st, out) := actGlyph st g
+    let (st, out2) := actGlyphs st gs
+    (st, out ++ out2)
+
+/-- One display item under the `/ActualText` state: a glyph run's glyphs (`runGlyphs`) through
+`actGlyph`; `actualTextBegin` opens a sequence; `actualTextEnd` closes the innermost one,
+placing its unused characters at the pen (`flushChars`; MuPDF `fz_stext_end_metatext`). -/
+def actItem (fonts : FontTable) (box : Option (Fixed × Fixed × Fixed × Fixed)) (i : Nat)
+    (st : ActState) : DisplayItem → ActState × List Glyph
+  | .glyphRun r _ => actGlyphs st (runGlyphs fonts i r)
+  | .actualTextBegin t => ({ st with open_ := actualChars t :: st.open_ }, [])
+  | .actualTextEnd =>
+    match st.open_ with
+    | [] => (st, [])
+    | cs :: rest => ({ st with open_ := rest }, flushChars box st.last cs)
+  | _ => (st, [])
+
+/-- The glyphs of a display list from index `i` on, `/ActualText` applied. -/
+def actualAux (fonts : FontTable) (box : Option (Fixed × Fixed × Fixed × Fixed)) :
+    Nat → ActState → List DisplayItem → ActState × List Glyph
+  | _, st, [] => (st, [])
+  | i, st, it :: rest =>
+    let (st, out) := actItem fonts box i st it
+    let (st, out2) := actualAux fonts box (i + 1) st rest
+    (st, out ++ out2)
+
+/-- Close every sequence still open at the end (MuPDF `clear_marked_content` at the end of the
+page), innermost first. -/
+def closeAll (box : Option (Fixed × Fixed × Fixed × Fixed)) :
+    List (List Char) → Option Glyph → List Glyph
+  | [], _ => []
+  | cs :: rest, last => flushChars box last cs ++ closeAll box rest last
+
+/-- **The glyphs as shown** (task 6.8d): the extraction of the display list with the
+`/ActualText` of marked content applied, as MuPDF's structured-text device does — each glyph
+inside an `/ActualText` sequence takes the next character of the sequence at its own position
+(the innermost sequence applies; glyphs beyond its characters, and all glyphs of an empty
+`/ActualText`, are dropped), unused characters go to the pen when the sequence closes, and
+sequences open at the end of the list are closed there. `box` is the page box glyphs are
+clipped to (`Options.pageBox`). Without `actualTextBegin` items this is `extractItems`
+(`shownItems_eq_extract`). -/
+def shownItems (fonts : FontTable) (box : Option (Fixed × Fixed × Fixed × Fixed))
+    (items : List DisplayItem) : List Glyph :=
+  shownAux fonts box 0 items
+where
+  /-- `shownItems` from index `i` on (annotation items continue the page's indices). -/
+  shownAux (fonts : FontTable) (box : Option (Fixed × Fixed × Fixed × Fixed)) (i : Nat)
+      (items : List DisplayItem) : List Glyph :=
+    let (st, out) := actualAux fonts box i {} items
+    out ++ closeAll box st.open_ st.last
+
+/-- Whether a display item is an `/ActualText` mark. -/
+def isActualMark : DisplayItem → Bool
+  | .actualTextBegin _ | .actualTextEnd => true
+  | _ => false
+
+/-- Outside `/ActualText` sequences glyphs pass through unchanged. -/
+theorem actGlyphs_none (gs : List Glyph) (last : Option Glyph) :
+    (actGlyphs { open_ := [], last } gs).2 = gs ∧
+      (actGlyphs { open_ := [], last } gs).1.open_ = [] := by
+  induction gs generalizing last with
+  | nil => simp [actGlyphs]
+  | cons g gs ih =>
+    have := ih (some g)
+    simp only [actGlyphs, actGlyph] at this ⊢
+    exact ⟨by rw [this.1]; rfl, this.2⟩
+
+/-- Without `/ActualText` marks, `actualAux` is `extractAux` and leaves nothing open. -/
+theorem actualAux_none (fonts : FontTable) (box : Option (Fixed × Fixed × Fixed × Fixed)) :
+    ∀ (i : Nat) (last : Option Glyph) (items : List DisplayItem),
+      items.all (fun it => !isActualMark it) = true →
+      (actualAux fonts box i { open_ := [], last } items).2 = extractAux fonts i items ∧
+        (actualAux fonts box i { open_ := [], last } items).1.open_ = []
+  | _, _, [], _ => by simp [actualAux, extractAux]
+  | i, last, it :: rest, h => by
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    cases it with
+    | glyphRun r clip =>
+      have hg := actGlyphs_none (runGlyphs fonts i r) last
+      simp only [actualAux, actItem, extractAux, itemGlyphs]
+      generalize actGlyphs { open_ := [], last } (runGlyphs fonts i r) = q at hg
+      obtain ⟨st, out⟩ := q
+      obtain ⟨st0, st1⟩ := st
+      simp only at hg
+      obtain ⟨rfl, rfl⟩ := hg
+      have := actualAux_none fonts box (i + 1) st1 rest h.2
+      exact ⟨by rw [this.1], this.2⟩
+    | actualTextBegin t => simp [isActualMark] at h
+    | actualTextEnd => simp [isActualMark] at h
+    | _ =>
+      have := actualAux_none fonts box (i + 1) last rest h.2
+      simp only [actualAux, actItem, extractAux, itemGlyphs, List.nil_append]
+      exact this
+
+/-- **No `/ActualText`, no change**: when a display list has no `/ActualText` marks, the
+glyphs as shown are exactly the extracted glyphs (`extractItems`, with its C3/C6 provenance). -/
+theorem shownItems_eq_extract (fonts : FontTable) (box : Option (Fixed × Fixed × Fixed × Fixed))
+    (items : List DisplayItem) (h : items.all (fun it => !isActualMark it) = true) :
+    shownItems fonts box items = extractItems fonts items := by
+  have := actualAux_none fonts box 0 none items h
+  simp only [shownItems, shownItems.shownAux, extractItems]
+  generalize actualAux fonts box 0 { open_ := [], last := none } items = q at this
+  obtain ⟨⟨op, last⟩, out⟩ := q
+  simp only at this
+  obtain ⟨rfl, rfl⟩ := this
+  simp [closeAll]
+
 /-! ## Pages -/
 
 /-- The text of a page, with everything it was computed from. -/
@@ -1162,6 +1356,10 @@ structure PageText where
   items : DisplayList
   /-- All glyphs, content order (`extractItems fonts items`). -/
   glyphs : List Glyph
+  /-- The glyphs as shown (task 6.8d): `glyphs` with the `/ActualText` of marked content
+  applied (`shownItems`); equal to `glyphs` when the page has none
+  (`shownItems_eq_extract`). Lines and text are laid out from these. -/
+  shown : List Glyph
   /-- Lines in reading order. -/
   lines : Array Line
   /-- The page text. -/
@@ -1186,8 +1384,9 @@ def extractPage {σ : Type} (limits : Limits) (src : Source σ) (res : Dict) (co
   let (fonts, s) := loadFonts limits src s res
   let st := runBytes (textEnv limits src fonts) res content s ()
   let gs := extractItems fonts st.items.toList
-  let (lines, text) := layout o gs
-  ({ fonts := fonts, items := st.items, glyphs := gs, lines := lines, text := text,
+  let sh := shownItems fonts o.pageBox st.items.toList
+  let (lines, text) := layout o sh
+  ({ fonts := fonts, items := st.items, glyphs := gs, shown := sh, lines := lines, text := text,
      warnings := st.warnings, ops := st.ops, forms := st.forms }, st.s)
 
 /-- **C6 (same pass)**: the page's glyphs are the extraction of the page's own display list,

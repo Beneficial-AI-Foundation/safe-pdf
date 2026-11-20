@@ -192,7 +192,7 @@ def Hist.sorted (h : Hist) : Array OpStat :=
   all.qsort fun a b => a.count > b.count || (a.count == b.count && opName a.op < opName b.op)
 
 /-- Number of display-item kinds. -/
-def nKinds : Nat := 10
+def nKinds : Nat := 12
 
 /-- Index of an item's kind. -/
 def kindIndex : DisplayItem → Nat
@@ -206,11 +206,13 @@ def kindIndex : DisplayItem → Nat
   | .groupBegin _ => 7
   | .groupEnd => 8
   | .softMask .. => 9
+  | .actualTextBegin _ => 10
+  | .actualTextEnd => 11
 
 /-- Kind names, in index order (as `DisplayItem.kind`). -/
 def kindNames : List String :=
   ["fillPath", "strokePath", "clip", "glyphRun", "image", "shading", "unsupported",
-   "groupBegin", "groupEnd", "softMask"]
+   "groupBegin", "groupEnd", "softMask", "actualTextBegin", "actualTextEnd"]
 
 /-- What the views know about one page's content. -/
 structure PageOps where
@@ -329,9 +331,11 @@ def kindsText (k : Array Nat) : String :=
   let l := (kindNames.zip k.toList).filter (·.2 > 0)
   if l.isEmpty then "none" else " ".intercalate (l.map fun (n, c) => s!"{n}={c}")
 
-/-- Item counts as a JSON object (all kinds). -/
+/-- Item counts as a JSON object: the first ten kinds always, the `/ActualText` marks (task
+6.8d, indices 10 and 11) only when present (so pages without them print as before). -/
 def kindsJson (k : Array Nat) : String :=
-  jsonObject ((kindNames.zip k.toList).map fun (n, c) => (n, toString c))
+  jsonObject (((kindNames.zip k.toList).zipIdx.filter fun ((_, c), i) => i < 10 || c > 0).map
+    fun ((n, c), _) => (n, toString c))
 
 /-- Document totals. -/
 structure Totals where
@@ -850,6 +854,8 @@ def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : P
     | .unsupported op => out := out.push s!"<!-- unsupported operator: {commentSafe (opName op)} -->"
     -- transparency (7.3c) is not exported: groups paint their items plainly, masks are skipped
     | .groupBegin _ | .groupEnd | .softMask .. => pure ()
+    -- /ActualText marks (6.8d) only concern text extraction
+    | .actualTextBegin _ | .actualTextEnd => pure ()
   if cur.isSome then out := out.push "</g>"
   if !reg.defs.isEmpty then
     out := out.push "<defs>"

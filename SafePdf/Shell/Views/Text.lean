@@ -27,7 +27,9 @@ A header (`file`, `open`, `pages`), then per page a line
 text as extracted (newlines are the layout's line breaks). With `SAFEPDF_TEXT_GLYPHS=1` each
 page is followed by `--- glyphs page N (item seq x y width size text)` and one line per glyph
 in content order: display-list item index, index in the run, page-space origin, width, font
-size (exact decimals, `Fixed.toDecimal`) and the glyph's text as a JSON string literal. Then a
+size (exact decimals, `Fixed.toDecimal`) and the glyph's text as a JSON string literal. These
+are the glyphs as shown (`PageText.shown`): inside `/ActualText` marked content they carry the
+ActualText characters (task 6.8d; unused characters as zero-width glyphs at the pen). Then a
 `total:` line.
 
 ## `--json`
@@ -55,7 +57,7 @@ structure PageOut where
   number : Nat
   /-- Page text (empty on error). -/
   text : String := ""
-  /-- Extracted glyphs, content order. -/
+  /-- Glyphs as shown (`PageText.shown`: `/ActualText` applied, task 6.8d), content order. -/
   glyphs : List Glyph := []
   /-- Interpreter warnings. -/
   warnings : Nat := 0
@@ -71,7 +73,7 @@ def PageOut.replacement (p : PageOut) : Nat :=
 
 /-- The view's record of an extraction result. -/
 def pageOut (number : Nat) : Except Error PageText → PageOut
-  | .ok pt => { number, text := pt.text, glyphs := pt.glyphs, warnings := pt.warnings }
+  | .ok pt => { number, text := pt.text, glyphs := pt.shown, warnings := pt.warnings }
   | .error e => { number, error := some e }
 
 /-- Extract every page in document order under one document budget. -/

@@ -312,7 +312,8 @@ private def sampleCells : Array Cell := cellsOf {} (Text.layout {} sample).1
 
 /-- The extraction result of `sample`. -/
 private def samplePT : Text.PageText :=
-  { fonts := [], items := #[], glyphs := sample, lines := (Text.layout {} sample).1, text := "",
+  { fonts := [], items := #[], glyphs := sample, shown := sample,
+    lines := (Text.layout {} sample).1, text := "",
     warnings := 0 }
 
 -- The cells' text is the layout's page text (separators and overprints as `Text.layout`).
