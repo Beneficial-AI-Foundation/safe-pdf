@@ -1,6 +1,8 @@
 import SafePdf.Core.Write.Incremental
 import SafePdf.Spec.Unambiguous
 import SafePdf.Spec.RoundTripCore
+import SafePdf.Spec.WritePrefix
+import SafePdf.Spec.Doc
 
 /-!
 # C7: the incremental update is conservative (Plan.md §4 C7/S8, §6 Phase 9; task 9.5a)
@@ -64,7 +66,22 @@ spec. This file proves, for every successful `Core.Write.Incremental.writeAnnots
    `pp.removed = []`; their general forms are `newDict_annots_kept` and
    `annotItems_newDict_kept`.
 
-`c7` bundles 1–5; `c7Update` bundles 1–5 and 7 for the general writer.
+8. **Every other object keeps its value** (task 9.5e; `writeUpdate_value`,
+   `writeAnnots_value`): for a document opened from its own bytes (`hd0`; `openFile_self`
+   derives it from `Doc.openDoc`), every object number not in `Plan.keys` fetches on the
+   re-opened result exactly what it fetches on the original — every successful
+   `OpenDoc.getObject` (any generation, `null` for undefined objects included), with
+   indirect `/Length` resolution, object-stream members and decryption — and the result has
+   *exactly* the original's decryption state. Side condition `EncKept`: the document is
+   unencrypted (`encKept_plain`), or its encryption dictionary is an indirect object whose
+   number the update does not write. Proof: `Spec.WritePrefix` (prefix stability of object
+   resolution); the numbers in `Plan.keys` are new (above the old `/Size`, no entry) or
+   rewritten pages and superseded objects, which fetch as dictionaries and therefore cannot
+   be a `/Length` value or an object-stream container (`keys_cases`, `keys_notLen`).
+   `c7Value` (general writer), `c7Value_plain` (unencrypted, no side condition) and
+   `c7ValueAnnots` (`writeAnnots`) bundle it next to the unchanged `c7` / `c7Update`.
+
+`c7` bundles 1–5; `c7Update` bundles 1–5 and 7 for the general writer; `c7Value` adds 8.
 
 ## What is proved by construction, what by the writer's self-check
 
@@ -76,14 +93,20 @@ theorems turn those Boolean checks into statements about the parser — via
 (completeness: the serializer's section and objects always parse) is tested, not proved
 (`Tests/WriteIncremental.lean`, fixtures and corpus).
 
-**Not proved here (recorded obstacle, split in the ledger):** fact 3 is stated at the level
-of cross-reference entries. Lifting it to `OpenDoc.getObject` ("the object *value* is
-unchanged") needs prefix stability of object resolution itself — `Length.parseIndirectResolved`
-(an indirect `/Length` looked up through the *new* section, with fuel = the new object
-count), `ObjStm.fetchCompressed` (container decode on extended bytes) and decryption — none of
-which has `_ext` lemmas yet (`Spec.PrefixStable` covers the lexer, the object parser, xref
-tables and xref streams). The object-level property is checked by the test suite on every
-original object of every fixture and of the corpus sample.
+**Not proved (recorded obstacles):**
+
+* Fact 8 for an encrypted document whose `/Encrypt` is a *direct* dictionary in the trailer.
+  The result's decryption state is built from the *update's* trailer, and nothing proved
+  says that this trailer carries the original `/Encrypt` dictionary (rule W6 copies it, but
+  the self-check only checks `/Prev` and the section's numbers, and `sameCrypt` compares
+  the key, `/StrF`, `/StmF` and the reference, not `/EncryptMetadata` or the crypt filters
+  a stream's own `/Crypt` filter selects). Closing it needs either a parse-back theorem for
+  the written trailer (serializer completeness for the section, which is tested, not
+  proved) or a stronger `sameCrypt` (comparing the whole handler) in the writer.
+* Only successful fetches are claimed stable: an original object whose fetch *fails* may
+  fail differently (or succeed) on the result, as in `Spec.PrefixStable`.
+The object-level property stays checked by the test suite on every original object of
+every fixture and of the corpus sample.
 -/
 
 namespace SafePdf.Spec.Write
@@ -784,6 +807,175 @@ theorem writeAnnots_crypt {limits : Limits} {doc : Doc.Doc} {marks : Marks}
     ∃ d', Open.openFile limits out = .ok d' ∧ SameCrypt d'.crypt doc.file.crypt :=
   writeUpdate_crypt h
 
+/-! ## Untouched objects keep their value (task 9.5e) -/
+
+/-- `numberAux n` numbers from `n` on. -/
+theorem numberAux_ge {n : Nat} {as : List AuxStream} {a : Nat × AuxStream}
+    (h : a ∈ numberAux n as) : n ≤ a.1 := by
+  induction as generalizing n with
+  | nil => simp [numberAux] at h
+  | cons x xs ih =>
+    simp only [numberAux, List.mem_cons] at h
+    rcases h with rfl | h
+    · exact Nat.le_refl _
+    · have := ih h
+      omega
+
+/-- **What the update writes over**: every number of the update's section is either new (at
+or above the original `/Size`: an added annotation, an auxiliary stream, the xref stream) or
+an original object that fetches as a dictionary (a rewritten page or a superseded object,
+rule W11). -/
+theorem keys_cases {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
+    {aux : List AuxStream} {p : Plan} (hp : planUpdate limits doc edits sups aux = .ok p)
+    {m : Nat} (hm : m ∈ p.keys) :
+    doc.file.trailer.size ≤ m ∨
+      ∃ gk dd, doc.file.getObject limits m gk = .ok (.obj (.dict dd)) := by
+  obtain ⟨_, _, hsize, _, haux, hsups, _, hsok⟩ := planUpdate_ok hp
+  unfold Plan.keys at hm
+  rw [List.mem_mergeSort] at hm
+  simp only [List.mem_append, List.mem_map] at hm
+  rcases hm with (⟨o, ho, rfl⟩ | ⟨a, ha, rfl⟩) | hx
+  · unfold Plan.objects at ho
+    rcases List.mem_append.mp ho with ho | ho
+    · obtain ⟨pp, hpp, ho⟩ := List.mem_flatMap.mp ho
+      have hok := (planUpdate_page hp hpp).1
+      unfold PagePlan.objects at ho
+      rcases List.mem_append.mp ho with ho | ho
+      · obtain ⟨a, ha, rfl⟩ := List.mem_map.mp ho
+        exact Or.inl (hok.fresh a ha)
+      · rw [List.mem_singleton] at ho
+        subst ho
+        exact Or.inr ⟨pp.gen, pp.dict, hok.dict⟩
+    · unfold supObjects at ho
+      obtain ⟨s, hs, rfl⟩ := List.mem_map.mp ho
+      rw [hsups] at hs
+      obtain ⟨-, -, od, hod⟩ := supOk_ok (hsok s hs)
+      exact Or.inr ⟨s.2.1, od, hod⟩
+  · rw [haux] at ha
+    have := numberAux_ge ha
+    exact Or.inl (by omega)
+  · left
+    split at hx
+    · rw [List.mem_singleton] at hx
+      subst hx
+      unfold Plan.xrefNum
+      omega
+    · cases hx
+
+/-- The numbers the update writes over cannot take part in a `/Length` resolution of the
+original (`WritePrefix.NotLen`): new numbers have no entry, rewritten pages and superseded
+objects are dictionaries. -/
+theorem keys_notLen {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
+    {aux : List AuxStream} {p : Plan} (hp : planUpdate limits doc edits sups aux = .ok p)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {m : Nat} (hm : m ∈ p.keys) :
+    WritePrefix.NotLen doc.file.pre doc.file.lookup limits doc.file.bytes m := by
+  rcases keys_cases hp hm with hge | ⟨gk, dd, hg⟩
+  · apply WritePrefix.notLen_of_none
+    rcases hl : doc.file.lookup m with _ | e
+    · rfl
+    · exfalso
+      rw [WritePrefix.lookup_eq] at hl
+      have hmem := (Unambiguous.lookupEntry_eq_some_iff doc.file.xref.keys_nodup).mp hl
+      have := Unambiguous.openFile_lt_size hd0 (planUpdate_ok hp).1 _ hmem
+      simp only at this
+      omega
+  · exact WritePrefix.notLen_of_dict hg
+
+/-- The original's decryption state is kept by the update in the provable case (rule W10):
+the document is unencrypted, or its encryption dictionary is an indirect object that the
+update does not write. (A direct `/Encrypt` dictionary in the trailer is the case left open:
+it would need the update's trailer to parse back to the carried dictionary, rule W6, which
+the writer's self-check does not establish.) -/
+def EncKept (doc : Doc.Doc) (p : Plan) : Prop :=
+  ∀ st, doc.file.crypt = some st → ∃ r, st.encRef = some r ∧ r.1 ∉ p.keys
+
+/-- An unencrypted document satisfies `EncKept`. -/
+theorem encKept_plain {doc : Doc.Doc} (p : Plan) (h : doc.file.crypt = none) : EncKept doc p := by
+  intro st hst
+  rw [h] at hst
+  cases hst
+
+/-- **C7 (3), value level, general writer** (task 9.5e; rules G1–G5, W10, W11). For a
+successful `writeUpdate` of a document opened from its bytes, if the encryption dictionary
+(if any) is indirect and not written over (`EncKept`; always true for unencrypted
+documents): the result opens with exactly the original's decryption state, and every object
+number the update does not write **fetches the same value** — every successful
+`getObject` of the original (any generation; `null` for undefined objects included) gives the
+same body on the result, `/Length` resolution, object streams and decryption included. -/
+theorem writeUpdate_value {limits : Limits} {doc : Doc.Doc} {edits : Edits}
+    {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
+    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
+    (hp : planUpdate limits doc edits sups aux = .ok p) (henc : EncKept doc p) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v := by
+  obtain ⟨p1, revs, sec', tr', off', hp1, hold, hnew, _, _, hstart, hkeys⟩ := writeUpdate_chain h
+  rw [hp] at hp1
+  cases hp1
+  obtain ⟨p2, d', hp2, hd', hr', _, _, hcr⟩ := writeUpdate_open h
+  rw [hp] at hp2
+  cases hp2
+  obtain ⟨hrep, hpc, -⟩ := planUpdate_ok hp
+  rw [hpc] at hcr
+  have hE := writeUpdate_extends h
+  have hs : WritePrefix.HasEnd doc.file.bytes := ⟨_, hstart⟩
+  -- the two documents
+  obtain ⟨revs0, sec0, tr0, o0, rest0, hl0, hrv0, hw0⟩ := WritePrefix.openFile_shape hd0 hrep
+  rw [hold] at hl0
+  cases hl0
+  obtain ⟨revs1, sec1, tr1, o1, rest1, hl1, hrv1, hw1⟩ := WritePrefix.openFile_shape hd' hr'
+  rw [hnew] at hl1
+  cases hl1
+  obtain ⟨hb0, hx0, -⟩ := WritePrefix.withCrypt_mk' hw0
+  obtain ⟨hb1, hx1, -⟩ := WritePrefix.withCrypt_mk' hw1
+  -- lookups agree outside the keys
+  have hlk : ∀ m, m ∉ p.keys →
+      lookupEntry m (Xref.Chain.mergeChain ((sec', tr', off') :: revs)).entries =
+        lookupEntry m (Xref.Chain.mergeChain revs).entries := by
+    intro m hm
+    apply WritePrefix.mergeChain_cons_lookup_none
+    simp only
+    rw [hkeys]
+    exact hm
+  have hL : ∀ m, m ∉ p.keys → d'.lookup m = doc.file.lookup m := by
+    intro m hm
+    rw [WritePrefix.lookup_eq, WritePrefix.lookup_eq, hx0, hx1]
+    exact hlk m hm
+  have hfuel : doc.file.objectCount ≤ d'.objectCount := by
+    rw [WritePrefix.objectCount_eq, WritePrefix.objectCount_eq, hx0, hx1]
+    exact WritePrefix.mergeChain_cons_length _ _
+  -- the decryption state
+  have hc : d'.crypt = doc.file.crypt := by
+    rcases hcd : doc.file.crypt with _ | st
+    · rw [hcd] at hcr
+      rcases hcr with ⟨h1, -⟩ | ⟨x, y, -, hy, -⟩
+      · exact h1
+      · cases hy
+    · rw [hcd] at hcr
+      rcases hcr with ⟨-, h2⟩ | ⟨x, y, hx, hy, hkey, -, -, hre⟩
+      · cases h2
+      · cases hy
+        obtain ⟨r, hr, hrk⟩ := henc st hcd
+        rw [hx]
+        congr 1
+        rw [hb0] at hE
+        exact WritePrefix.crypt_eq_of_ref hw0 hw1 hE (hb0 ▸ hs) hcd hx hr (hre ▸ hr) hkey.symm
+          (hlk r.1 hrk)
+  refine ⟨d', hd', hc, fun n hn g v hv => ?_⟩
+  have hE' : PrefixStable.Extends doc.file.bytes d'.bytes := by rw [hb1]; exact hE
+  exact WritePrefix.getObject_transfer hE' hs hL (fun m hm => keys_notLen hp hd0 hm) hfuel hc hn hv
+
+/-- **C7 (3), value level** (task 9.5e) for `writeAnnots`: see `writeUpdate_value`. -/
+theorem writeAnnots_value {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
+    (hp : plan limits doc marks aux = .ok p) (henc : EncKept doc p) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v :=
+  writeUpdate_value h hd0 hp henc
+
 /-! ## C7 -/
 
 /-- **C7 (Plan.md §4): the incremental update is conservative.** For every successful
@@ -796,7 +988,8 @@ theorem writeAnnots_crypt {limits : Limits} {doc : Doc.Doc} {marks : Marks}
 * `out` opens strictly, and for each page of `marks` its annotation list is the original
   list followed by fresh references that fetch exactly the given annotation dictionaries.
 
-(The object-value form of "every other object unchanged" is tested, see the module doc.) -/
+(The object-value form of "every other object unchanged" is `c7ValueAnnots`,
+`writeAnnots_value`.) -/
 theorem c7 {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
     (h : writeAnnots limits doc marks aux = .ok out) :
@@ -878,5 +1071,59 @@ theorem c7Update {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List 
     fun pp hpp => ⟨(hall pp hpp).1, (hall pp hpp).2.1, (hall pp hpp).2.2.1,
       (hall pp hpp).2.2.2.2.1⟩,
     fun s hs => ⟨(hsups s hs).2.2.1, (hsups s hs).2.2.2⟩⟩
+
+/-- A document opened by `Doc.openDoc` strictly (the writer refuses repaired documents) is
+the strict open of its own bytes: the hypothesis `hd0` of `writeUpdate_value`. -/
+theorem openFile_self {limits : Limits} {bytes : ByteArray} {doc : Doc.Doc}
+    (h : Doc.openDoc limits bytes = .ok doc) (hr : doc.file.repaired = false) :
+    Open.openFile limits doc.file.bytes = .ok doc.file := by
+  have h1 := (Spec.PageTree.openDoc_ok h).1
+  obtain ⟨_, _, _, _, _, _, _, hw⟩ := WritePrefix.openFile_shape h1 hr
+  rw [(WritePrefix.withCrypt_mk' hw).1]
+  exact h1
+
+/-- **C7 at the value level, general writer** (task 9.5e; alongside `c7Update`, whose
+statement is unchanged). For every successful `writeUpdate limits doc edits sups aux = .ok out`
+of a document opened from its bytes (`openFile_self` for `Doc.openDoc`): the plan `p` and the
+strictly opened result `d'` are those of `c7Update`, and if the encryption dictionary is kept
+(`EncKept`: unencrypted, or `/Encrypt` an indirect object not in `p.keys`) the result has the
+original's decryption state and every object number not in `p.keys` fetches exactly as in
+the original (every successful `getObject`, any generation). The direct-`/Encrypt` case is
+the one part not proved (see the module doc). -/
+theorem c7Value {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
+    {aux : List AuxStream} {out : ByteArray}
+    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
+    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      (EncKept doc p → d'.crypt = doc.file.crypt ∧
+        ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+          d'.getObject limits n g = .ok v) := by
+  obtain ⟨p, d', hp, hd, _⟩ := writeUpdate_open h
+  refine ⟨p, d', hp, hd, fun henc => ?_⟩
+  obtain ⟨d'', hd', hc, hv⟩ := writeUpdate_value h hd0 hp henc
+  rw [hd] at hd'
+  cases hd'
+  exact ⟨hc, hv⟩
+
+/-- **C7 at the value level for unencrypted documents** (task 9.5e): no side condition. -/
+theorem c7Value_plain {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
+    {aux : List AuxStream} {out : ByteArray}
+    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) (hplain : doc.file.crypt = none) :
+    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v := by
+  obtain ⟨p, d', hp, hd, hv⟩ := c7Value h hd0
+  exact ⟨p, d', hp, hd, (hv (encKept_plain p hplain)).2⟩
+
+/-- **C7 at the value level for `writeAnnots`** (task 9.5e; alongside `c7`). -/
+theorem c7ValueAnnots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
+    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      (EncKept doc p → d'.crypt = doc.file.crypt ∧
+        ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+          d'.getObject limits n g = .ok v) :=
+  c7Value h hd0
 
 end SafePdf.Spec.Write
