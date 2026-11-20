@@ -210,8 +210,39 @@ belongs to task 6.8e's file in wave 44.
   streams would remove ~2 s); the rest is three stroke renders per marker (`Stroke.mkSeg`).
 * Long polylines and dense strokes (2210.00002 p30/31/36 1.5–2.7 s, 1303.5076 p21–23
   1.4–1.8 s): `Stroke.mkSeg` per chord (`sqrtQ` and grid divisions on bignum common
-  denominators: the inverse pen map has denominators ~10¹²) and the scanline fill. Needs a
-  64-bit fast path for `mkSeg` (with `mkSegSpec` as the reference, as 7.2i did for points).
+  denominators) and the scanline fill. Task 7.9c (below) moved `mkSeg` to 64 bits.
+
+### 64-bit chord geometry (task 7.9c)
+
+`Stroke.mkSeg` now tries `mkSegW` first: the same formulas as the exact path
+(`mkSegExact`, the 7.2i code) in `UInt64`/`Int64`: `|u|²` from the pen's 64-bit inverse map
+(`IMatW`), its normalisation by `gcd64`, the 128-bit radicand `mul128`, the digit-by-digit
+root `isqrtW` (`⌊√(Y·2⁴⁰)⌋` for `Y < 2⁸²`), the length as a `Rat` built from a 64-bit gcd
+(`ratW`), and the six grid values as `roundDivI(±A·2³⁶, B)` by chunked long division
+(`rdiv36`). 64-bit arithmetic wraps; every operation sits under a run-time range guard that
+is the hypothesis of a kernel theorem (`mulW_toNat`, `mul128_eq`, `isqrtW_eq`, `gcd64_eq`,
+`rdiv36_eq`, `lin64_toInt`, `abs64_toNat`, `IMatW.of_ok`, `ratW_eq`), so within the guards
+nothing wraps; outside them (large denominators, huge chords) it falls back to
+`mkSegExact`. The composition is tested: `raster-stroke-spec` compares `mkSeg`,
+`mkSegExact` and `mkSegSpec` on 16,000 chords (≥ 5,000 on the 64-bit path; 0 mismatches)
+plus 3,000 kernel cases. On the slow pages 76–89% of chords take the 64-bit path
+(fallback: `|u|²` radicand ≥ 2⁸² or divisors ≥ 2⁶²); `mkSeg` went from ~31% of
+2210.00002 p31's time to ~8%.
+
+| page (72 dpi, sequential) | before | after |
+|---|---|---|
+| 2210.00002 p30 | 1,384 ms | 1,046 ms |
+| 2210.00002 p31 | 2,241 ms | 1,658 ms |
+| 2210.00002 p36 | 2,418 ms | 1,702 ms |
+| 1303.5076 p21 | 1,227 ms | 1,014 ms |
+| 1303.5076 p22 | 1,624 ms | 1,316 ms |
+| 1303.5076 p23 | 1,784 ms | 1,587 ms |
+
+Full corpus (`timing.py --jobs 2`): median 64.8 → 66.2 ms, p95 247 → 246 ms, max 3.9 → 4.2 s
+(2307.09288 p25, unchanged code path: noise), 41 → 44 pages over 500 ms (noise on the other
+pages); all 2,450 page PPMs byte-identical before and after. What remains on these pages is
+the scanline fill (`Fill.fillEdgesCounted`, ~50% of 2210.00002 p31) and text extraction
+inside `renderDocPage` (`Text.extractDocPage`, 26–39%).
 * Image decoding at full resolution (2112.10752, 2006.11239, 2501.12948, 2005.14165:
   0.7–1.4 s): JPEG (`Quarantine/DCT`, MuPDF decodes at reduced size, task 7.6d), Flate
   (Adler-32, `Filter`), and per-sample `ByteArray.push` in `Image.samplesLoop`/`blockRow`.
