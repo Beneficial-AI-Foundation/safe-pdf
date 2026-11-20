@@ -16,8 +16,9 @@ pseudo-random inputs (fixed seed), that the bytes are identical:
 * `renderTx` (with `Clip.itemBound` bounds, and without bounds) vs `renderTxSpec` on random
   scenes of 1–24 × 1–24 pixel pages: opaque and translucent fills with anti-aliased edges and
   clips, strokes, all blend modes, soft-mask references, groups (alpha, blend, soft mask;
-  nested up to 11 deep, beyond `maxLayerDepth`; sometimes unbalanced), soft-mask definitions
-  (luminosity with a backdrop colour, alpha; nested) — 1500 scenes.
+  nested up to 11 deep, beyond `maxLayerDepth`; sometimes unbalanced; a third of them knockout
+  groups, task 7.3i), soft-mask definitions (luminosity with a backdrop colour, alpha; nested)
+  — 1500 scenes.
 -/
 
 namespace SafePdf.Tests.RasterTxFast
@@ -200,8 +201,9 @@ partial def randScene (W H : Nat) (fuel n : Nat) (s : UInt64) : Array DisplayIte
       let (alpha, s1) := randAlpha s
       let (blend, s1) := randMode s1
       let (smask, s1) := randSmask s1
+      let (ko, s1) := rand s1 3
       s := s1
-      out := out.push (.groupBegin { alpha, blend, smask })
+      out := out.push (.groupBegin { alpha, blend, smask, knockout := ko = 0 })
       depth := depth + 1
     else if k = 2 then
       if depth > 0 then
