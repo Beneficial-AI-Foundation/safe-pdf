@@ -483,7 +483,8 @@ inductive SimpleStep (cfg : Config) : Core → Op → Core → List DisplayItem 
   /-- `/N sh`: paint a shading over the clip. -/
   | sh {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {n : Name}
       (h : Interp.lastName? o = some n) :
-      SimpleStep cfg c ⟨o, [115, 104], off, dat⟩ c [.shading n c.gs.ctm c.gs.clip]
+      SimpleStep cfg c ⟨o, [115, 104], off, dat⟩ c
+        [.shading n .page c.gs.ctm c.gs.fillStyle c.gs.clip]
   /-- `BI … ID … EI`: an inline image with its parameters and raw data. -/
   | BI {c : Core} {dict : Dict} {off : Nat} {dat : ByteArray} :
       SimpleStep cfg c ⟨[.dict dict], [66, 73], off, dat⟩ c
@@ -511,7 +512,7 @@ inductive Effect (cfg : Config) : Machine → Op → Machine → List DisplayIte
   | paint {m : Machine} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
       {p : Option Paint} {close : Bool} (hkw : PaintKw kw p close) :
       Effect cfg m ⟨o, kw, off, dat⟩
-        ⟨afterPaint m.pending (closeIf close m.core), m.stack, none⟩
+        ⟨afterPaint m.pending (closeIf close m.core), m.stack, none, m.patFill, m.patStroke⟩
         (paintOutput m.pending p (closeIf close m.core))
   /-- `W`, `W*`: the clip rule is pending until the next painting operator. -/
   | clip {m : Machine} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
@@ -710,9 +711,9 @@ theorem simple_cases (cfg : Config) (c : Core) (o : List PdfObject) (kw : List U
 /-- The painting step of the impl is `afterPaint` / `paintOutput`. -/
 theorem paintStep_eq (m : Machine) (p : Option Paint) (close : Bool) :
     Interp.paintStep m p close =
-      (⟨afterPaint m.pending (closeIf close m.core), m.stack, none⟩,
+      (⟨afterPaint m.pending (closeIf close m.core), m.stack, none, m.patFill, m.patStroke⟩,
         paintOutput m.pending p (closeIf close m.core), 0, 0) := by
-  obtain ⟨c0, stack, pending⟩ := m
+  obtain ⟨c0, stack, pending, pf, ps⟩ := m
   have hc : (if close = true then Interp.closeCore c0 else c0) = closeIf close c0 := by
     cases close <;> simp [closeIf, closeCore_eq]
   simp only [Interp.paintStep, hc]

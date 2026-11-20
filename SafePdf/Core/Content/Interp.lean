@@ -47,7 +47,8 @@ text showing), §8.9.7 (inline images), §14.6 (marked content), §7.8.2 (`BX`/`
   `BMC BDC EMC MP DP`. `ri`/`i` are recorded in the `GState`.
 * **XObjects, shadings, inline images**: `Do` emits a placeholder
   `image (.xobject name 0 0)` (5.2b resolves it to an image or expands a form); `sh` a
-  `shading` item; `BI` an `image (.inline dict data)` item with the raw data.
+  `shading` item (resource `.page`, resolved by 5.2b; with the fill snapshot for `ca`, blend
+  mode and soft mask, task 7.3f); `BI` an `image (.inline dict data)` item with the raw data.
 -/
 
 namespace SafePdf.Core.Content
@@ -83,6 +84,18 @@ structure Core where
   bxDepth : Nat := 0
   deriving Inhabited
 
+/-- Pattern-colour bookkeeping of one painting mode (task 7.3f), maintained by the resource
+runner (5.2b), never by `exec`: the `/ColorSpace` resource name of the current pattern space
+(`[/Pattern base]` spaces), and the underlying colour the last `SCN`/`scn` gave an uncoloured
+(PaintType 2) pattern, with that pattern's name. Not saved by `q`/`Q` (consumers check the
+name against the current colour). -/
+structure PatState where
+  /-- Resource name of the current pattern colour space, if it was named. -/
+  space : Option Name := none
+  /-- Pattern name and underlying colour of the last `SCN`/`scn` with colour operands. -/
+  under : Option (Name × Color) := none
+  deriving Inhabited
+
 /-- The full interpreter state. -/
 structure Machine where
   /-- Everything but the stack and pending clip. -/
@@ -91,6 +104,10 @@ structure Machine where
   stack : GStack := {}
   /-- Clip rule set by `W`/`W*`, applied at the next painting operator. -/
   pending : Option FillRule := none
+  /-- Pattern bookkeeping for filling (task 7.3f; runner only). -/
+  patFill : PatState := {}
+  /-- Pattern bookkeeping for stroking (task 7.3f; runner only). -/
+  patStroke : PatState := {}
   deriving Inhabited
 
 /-- Interpreter output. -/
@@ -500,7 +517,7 @@ def simple (cfg : Config) (c : Core) (op : Op) : Out :=
     | none => bad c
   | [115, 104] => -- sh
     match lastName? o with
-    | some n => (c, some (.shading n c.gs.ctm c.gs.clip), 0, 0)
+    | some n => (c, some (.shading n .page c.gs.ctm c.gs.fillStyle c.gs.clip), 0, 0)
     | none => bad c
   | [66, 73] => -- BI (from the tokenizer: the dictionary and the raw data)
     match o with
@@ -541,7 +558,7 @@ cleared. -/
 def paintStep (m : Machine) (p : Option Paint) (close : Bool) :
     Machine × List DisplayItem × Nat × Nat :=
   match m with
-  | ⟨c0, stack, pending⟩ =>
+  | ⟨c0, stack, pending, pf, ps⟩ =>
     let c := if close then closeCore c0 else c0
     match c with
     | ⟨gs, tm, path, _, _, inText, bx⟩ =>
@@ -555,7 +572,7 @@ def paintStep (m : Machine) (p : Option Paint) (close : Bool) :
         match pending with
         | some r => if empty then gs else { gs with clip := ⟨path, r⟩ :: gs.clip }
         | none => gs
-      (⟨⟨gs', tm, {}, none, none, inText, bx⟩, stack, none⟩, paintItems ++ clipItems, 0, 0)
+      (⟨⟨gs', tm, {}, none, none, inText, bx⟩, stack, none, pf, ps⟩, paintItems ++ clipItems, 0, 0)
 
 /-- Execute one operator: new machine, emitted items, warnings, unknown-operator count. -/
 def exec (cfg : Config) (m : Machine) (op : Op) : Machine × List DisplayItem × Nat × Nat :=

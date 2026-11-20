@@ -43,8 +43,16 @@ displayed" (C6) becomes a property of this one structure.
   defined once, where the ExtGState sets it, by a nested `softMask id info items` item
   (`id` is unique in the page's list; items reference it by `smask = some id`). A
   transparency group form is bracketed by `groupBegin g` … `groupEnd` (flat, so extraction
-  sees the text inside groups). `sh` items carry no style yet: shadings are painted without
-  blend mode or soft mask (gap).
+  sees the text inside groups). `sh` items carry the fill snapshot too (task 7.3f: `ca`,
+  blend mode, soft mask).
+* **Resources independent of the page (task 7.3f).** Items that name resources record where
+  they live, resolved by the runner in the resources of the content being run (page or form):
+  image XObjects by object number; `sh` by `ResRef` (the indirect object, or the form whose
+  own `/Resources` hold a direct entry); pattern colours by `FillStyle.pattern` /
+  `StrokeStyle.pattern` (`PatternUse`: the `ResRef` and the **base matrix** of the using
+  content, §8.7.3); an inline image's resource-name `/ColorSpace` is replaced by the
+  definition from the current resources. So loaders never need the page's resources alone,
+  and `DisplayList.foldDeep` reaches items nested in soft masks.
 * **Unknown operators** become `unsupported op`, logged for the coverage report (M5), never a
   failure.
 * **Length bound.** `DisplayList` is a plain `Array`; that its length is at most the number
@@ -54,6 +62,36 @@ displayed" (C6) becomes a property of this one structure.
 namespace SafePdf.Core.Content
 
 open SafePdf
+
+/-- Where a named resource used by an item lives (task 7.3f), so that consumers resolve it
+independently of the page: the runner (5.2b) resolves the name in the resources of the content
+being run when it emits the item. -/
+inductive ResRef where
+  /-- Not resolved (resource-free runs), or a direct entry of the **page's** resources: look
+  the name up in the page's `/Resources`. -/
+  | page
+  /-- The resource entry is the indirect reference `num gen`: the object itself. -/
+  | ref (num gen : Nat)
+  /-- A direct entry of the own `/Resources` of form XObject `num gen`: look the name up
+  there. -/
+  | form (num gen : Nat)
+  deriving DecidableEq, Repr, Inhabited, Hashable
+
+/-- A pattern colour as it is used (task 7.3f, ISO 32000-2 §8.7.3): where the pattern resource
+lives, and the **base matrix**, the CTM that maps the default coordinate space of the page or
+form in which the pattern is used to page space (a form's `/Matrix` × the CTM at its `Do`;
+the identity for page content). The pattern matrix maps pattern space to that space, so it is
+composed with `base`. -/
+structure PatternUse where
+  /-- Where the pattern resource (named by the colour) lives. -/
+  res : ResRef := .page
+  /-- Default space of the using content → page space. -/
+  base : Matrix := Matrix.identity
+  /-- For an uncoloured (PaintType 2) pattern: the colour in the underlying space that the
+  `SCN`/`scn` setting this pattern gave (`c₁ … cₙ /P scn`, §8.7.3.3), as a device colour;
+  `none` without colour operands. -/
+  under : Option Color := none
+  deriving DecidableEq, Repr
 
 /-- Snapshot for filling: colour and alpha. -/
 structure FillStyle where
@@ -65,6 +103,9 @@ structure FillStyle where
   blend : BlendMode := .normal
   /-- Soft mask: identifier of a `DisplayItem.softMask` item (task 7.3c). -/
   smask : Option Nat := none
+  /-- For a pattern colour: where its pattern lives and the base matrix (task 7.3f; set by
+  the runner, `none` from the resource-free interpreter). -/
+  pattern : Option PatternUse := none
   deriving DecidableEq, Repr, Inhabited
 
 /-- Snapshot for stroking: colour, alpha, line style (user space) and the CTM mapping user
@@ -82,15 +123,17 @@ structure StrokeStyle where
   blend : BlendMode := .normal
   /-- Soft mask: identifier of a `DisplayItem.softMask` item (task 7.3c). -/
   smask : Option Nat := none
+  /-- For a pattern colour: where its pattern lives and the base matrix (task 7.3f). -/
+  pattern : Option PatternUse := none
   deriving DecidableEq, Repr, Inhabited
 
-/-- The fill snapshot of a graphics state. -/
+/-- The fill snapshot of a graphics state (no pattern use: the runner adds it). -/
 def GState.fillStyle (g : GState) : FillStyle :=
-  ⟨g.fillColor, g.fillAlpha, g.blendMode, g.softMask⟩
+  ⟨g.fillColor, g.fillAlpha, g.blendMode, g.softMask, none⟩
 
-/-- The stroke snapshot of a graphics state. -/
+/-- The stroke snapshot of a graphics state (no pattern use: the runner adds it). -/
 def GState.strokeStyle (g : GState) : StrokeStyle :=
-  ⟨g.strokeColor, g.strokeAlpha, g.line, g.ctm, g.blendMode, g.softMask⟩
+  ⟨g.strokeColor, g.strokeAlpha, g.line, g.ctm, g.blendMode, g.softMask, none⟩
 
 /-- One element of a text-showing operator: a string, or a `TJ` adjustment in thousandths of
 text space (positive moves left/down). `Tj` is a single `str`. -/
@@ -197,9 +240,10 @@ inductive DisplayItem where
   /-- Paint an image into the unit square mapped by `ctm`; `fill` is the colour of stencil
   masks (`/ImageMask true`). -/
   | image (src : ImageSource) (ctm : Matrix) (fill : FillStyle) (clip : Clip)
-  /-- `sh`: paint a shading resource over the clip (placeholder until shadings are
-  rendered). -/
-  | shading (name : Name) (ctm : Matrix) (clip : Clip)
+  /-- `sh`: paint shading resource `name` (living where `res` says, task 7.3f) over the clip,
+  with the fill snapshot's alpha (`ca`), blend mode and soft mask (task 7.3f; its colour is
+  unused). -/
+  | shading (name : Name) (res : ResRef) (ctm : Matrix) (fill : FillStyle) (clip : Clip)
   /-- An operator the interpreter does not handle (bytes of the operator name). -/
   | unsupported (op : List UInt8)
   /-- Start of a transparency group (task 7.3c): the items up to the matching `groupEnd` are
@@ -219,6 +263,17 @@ instance : Inhabited DisplayItem := ⟨.unsupported []⟩
 
 /-- The display list of a page (or form). -/
 abbrev DisplayList := Array DisplayItem
+
+/-- Fold `f` over the items of a list and, depth first, over the items of nested `softMask`
+items (after the `softMask` item itself), up to `fuel` levels of nesting (the runner nests
+soft masks at most `Limits.maxXObjectDepth` deep; deeper items are not visited). Used by
+resource loaders (task 7.3f) so that images and shadings inside soft-mask groups are found. -/
+def DisplayList.foldDeep {α : Type} (f : α → DisplayItem → α) : Nat → α → DisplayList → α
+  | 0, acc, items => items.foldl f acc
+  | n + 1, acc, items => items.foldl (fun acc it =>
+      match it with
+      | .softMask _ _ inner => DisplayList.foldDeep f n (f acc it) inner
+      | _ => f acc it) acc
 
 /-- Path-painting operators (ISO 32000-2 §8.5.3.1 Table 59), excluding `n`. -/
 inductive Paint where
@@ -291,7 +346,8 @@ private def sampleRun : GlyphRun :=
     ({} : GState).fillStyle []).kind == "image"
 #guard (DisplayItem.image (.inline [] (ByteArray.mk #[0, 255])) Matrix.identity
     ({} : GState).fillStyle []).kind == "image"
-#guard (DisplayItem.shading (Name.ofString "Sh0") Matrix.identity []).kind == "shading"
+#guard (DisplayItem.shading (Name.ofString "Sh0") .page Matrix.identity ({} : GState).fillStyle []).kind
+    == "shading"
 #guard (DisplayItem.unsupported "BX".toUTF8.toList).kind == "unsupported"
 #guard (#[DisplayItem.unsupported []] : DisplayList).size == 1
 #guard (DisplayItem.groupBegin {}).kind == "groupBegin"
@@ -300,4 +356,10 @@ private def sampleRun : GlyphRun :=
 #guard ({ ({} : GState) with blendMode := .multiply, softMask := some 4 }).fillStyle.smask
     == some 4
 
+#guard (DisplayList.foldDeep (fun n (_ : DisplayItem) => n + 1) 2 0
+    #[.groupEnd, .softMask 1 { kind := .alpha } #[.groupEnd, .softMask 2 { kind := .alpha } #[.groupEnd]]])
+  == 5
+#guard (DisplayList.foldDeep (fun n (_ : DisplayItem) => n + 1) 1 0
+    #[.groupEnd, .softMask 1 { kind := .alpha } #[.groupEnd, .softMask 2 { kind := .alpha } #[.groupEnd]]])
+  == 4
 end SafePdf.Core.Content

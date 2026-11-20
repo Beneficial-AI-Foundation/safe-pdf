@@ -95,6 +95,18 @@ never an error (M5: the interpreter never fails).
   space); `Lab` shows `L*/100` as gray. Initial colours follow §8.6: index 0, tint 1, `L* = 0`;
   an `ICCBased` space with 4 components starts at `(0, 0, 0, 0)`. An unresolvable resource
   name keeps 5.2a's behaviour (`.other name 0 .gray`) and adds a warning.
+* **Resource annotation** (task 7.3f): every item a step emits is annotated in the current
+  frame (`annotItem`), so consumers resolve resources without the page's resources: an `sh`
+  records its `ResRef` (`resRefOf`: the indirect object, or the owner form `num gen` of a
+  direct entry, or `.page`); a pattern colour in a fill/stroke snapshot (fills, strokes, glyph
+  runs, stencil images) records a `PatternUse` — its `ResRef`, the frame's **base matrix**
+  (`Frame.base`: identity for the page, the form's start CTM `/Matrix × CTM` for a form or
+  soft-mask group, §8.7.3) and, for uncoloured patterns, the underlying colour of the last
+  `SCN`/`scn` (`patBook`: computed in the underlying space of a named `[/Pattern base]` space,
+  else by operand count; kept in `Machine.patFill`/`patStroke`, not saved by `q`/`Q`, matched
+  by pattern name); an inline image's resource-name `/ColorSpace` is replaced by its
+  definition in the current frame, as a direct object (`CSInfo.toObj`). Consumers look a
+  `ResRef` up with `resLookup`. Annotation keeps the item count (`annotAll_length`).
 -/
 
 namespace SafePdf.Core.Content
@@ -143,6 +155,12 @@ structure Frame where
   `/Resources` they are (a form without them inherits its parent's owner). Identifies direct
   font dictionaries (`FontId.res`). -/
   owner : Nat
+  /-- Generation number of the owner form (`0` for the page; task 7.3f, `ResRef.form`). -/
+  ownerGen : Nat
+  /-- Base matrix (task 7.3f): the CTM at the start of the content being run, i.e. its
+  default coordinate space → page space (the identity for the page; a form's `/Matrix` × the
+  CTM at its `Do`). Pattern colours record it (`PatternUse.base`, §8.7.3). -/
+  base : Matrix
 
 /-- Runner state. -/
 structure St (σ ω : Type) where
@@ -209,8 +227,8 @@ def numsOf : PdfObject → Option (List Fixed)
 
 /-- What a `Do` operand names. -/
 inductive XObj where
-  /-- A form XObject: object number, the stream. -/
-  | form (num : Nat) (st : Stream)
+  /-- A form XObject: object number, generation, the stream. -/
+  | form (num gen : Nat) (st : Stream)
   /-- An image XObject. -/
   | image (num gen : Nat) (dict : Dict)
   /-- A PostScript XObject (ignored, §8.8.2). -/
@@ -226,7 +244,7 @@ def xobjectOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (name : Name) 
     | (.ok (.stream st), s) =>
       match Dict.get? st.dict (nm "Subtype") with
       | some (.name t) =>
-        if t = nm "Form" then (.form n st, s)
+        if t = nm "Form" then (.form n g st, s)
         else if t = nm "Image" then (.image n g st.dict, s)
         else if t = nm "PS" then (.ignored, s)
         else (.missing, s)
@@ -570,6 +588,152 @@ def namedCS {σ : Type} (src : Source σ) (s : σ) (res : Dict) (name : Name) :
   | (some o, s) => csInfo src s o
   | (none, s) => (none, s)
 
+/-! ## Resource annotation (task 7.3f)
+
+Items that name resources record where those live, resolved here in the current frame, so that
+the rasterizer's loaders never consult the page's resources for content of a form. -/
+
+/-- Where resource `name` of category `cat` (`"Shading"`, `"Pattern"`) lives, seen from frame
+`fr`: the referenced object when the entry is an indirect reference, else (a direct entry, or
+none at all) the resources of the frame's owner (`.page` for the page, `.form` for a form
+with its own `/Resources`). -/
+def resRefOf {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (cat : String) (name : Name) :
+    ResRef × σ :=
+  match resEntry src s fr.res cat name with
+  | (some (.ref n g), s) => (.ref n g, s)
+  | (_, s) => (if fr.owner = 0 then .page else .form fr.owner fr.ownerGen, s)
+
+/-- **Look up a recorded resource** (the consumer side of `resRefOf`): resource `name` of
+category `cat` where `r` says it lives — the referenced object itself, the page's resources
+`pageRes`, or the own `/Resources` of form `num gen`. -/
+def resLookup {σ : Type} (src : Source σ) (s : σ) (pageRes : Dict) (cat : String) (r : ResRef)
+    (name : Name) : Option PdfObject × σ :=
+  match r with
+  | .ref n g => (some (.ref n g), s)
+  | .page => resEntry src s pageRes cat name
+  | .form n g =>
+    match src.fetch s n g with
+    | (.ok (.stream st), s) =>
+      match Dict.get? st.dict (nm "Resources") with
+      | some o =>
+        let (d, s) := dictOf src s o
+        resEntry src s d cat name
+      | none => (none, s)
+    | (_, s) => (none, s)
+
+/-- The pattern use of colour `c` in frame `fr` (`none` for a non-pattern colour): where the
+pattern lives, the frame's base matrix, and the underlying colour the last `SCN`/`scn` gave
+this pattern (`pst.under`, kept only when its pattern name is `c`'s). -/
+def patternUse {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (pst : PatState) :
+    Color → Option PatternUse × σ
+  | .pattern n =>
+    let (r, s) := resRefOf src s fr "Pattern" n
+    let under := match pst.under with
+      | some (n', c) => if n' = n then some c else none
+      | none => none
+    (some { res := r, base := fr.base, under }, s)
+  | _ => (none, s)
+
+/-- Record the pattern use in a fill snapshot. -/
+def annotFill {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (pst : PatState) (f : FillStyle) :
+    FillStyle × σ :=
+  let (p, s) := patternUse src s fr pst f.color
+  ({ f with pattern := p }, s)
+
+/-- Record the pattern use in a stroke snapshot. -/
+def annotStroke {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (pst : PatState)
+    (f : StrokeStyle) :
+    StrokeStyle × σ :=
+  let (p, s) := patternUse src s fr pst f.color
+  ({ f with pattern := p }, s)
+
+/-- The name of a device space. -/
+def devName : DeviceSpace → Name
+  | .gray => nm "DeviceGray"
+  | .rgb => nm "DeviceRGB"
+  | .cmyk => nm "DeviceCMYK"
+
+/-- A number as an object (exact: `Fixed.toDecimal`). -/
+def fixedObj (x : Fixed) : PdfObject := .real x.toDecimal
+
+/-- A **direct** colour-space object that `csInfo` resolves without any document access to
+the same rendering behaviour (task 7.3f; used to inline a resource colour space into an inline
+image's parameters): device names, `[/Indexed base hival (lookup)]` with the table as a
+string, `[/Separation /Spot alt fn]` with a type 2 function dictionary (or `null`: the
+darkness placeholder), `[/DeviceN [/C …] alt null]`, `[/Lab << >>]`. (An `ICCBased` CMYK space
+becomes `/DeviceCMYK`: only its initial colour differs, which images do not use.) -/
+def CSInfo.toObj : CSInfo → PdfObject
+  | .dev d _ => .name (devName d)
+  | .pattern => .name (nm "Pattern")
+  | .indexed b hival lut =>
+    .array [.name (nm "Indexed"), .name (devName b), .int hival, .string lut.data.toList]
+  | .separation a fn =>
+    let f : PdfObject := match fn with
+      | some e => .dict [(nm "FunctionType", .int 2), (nm "Domain", .array [.int 0, .int 1]),
+          (nm "C0", .array (e.c0.map fixedObj)), (nm "C1", .array (e.c1.map fixedObj)),
+          (nm "N", .int e.n)]
+      | none => .null
+    .array [.name (nm "Separation"), .name (nm "Spot"), .name (devName a), f]
+  | .deviceN n a =>
+    .array [.name (nm "DeviceN"), .array (List.replicate n (.name (nm "C"))), .name (devName a),
+      .null]
+  | .lab => .array [.name (nm "Lab"), .dict []]
+
+/-- An inline image's parameters with a resource-name `/ColorSpace` (not a device name, not
+`Pattern`) replaced by the definition of that name in the current frame (`CSInfo.toObj`;
+§8.9.7: the name is looked up in the current resource dictionary). Unresolvable names are kept. -/
+def annotInline {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (d : Dict) : Dict × σ :=
+  match Dict.get? d (nm "ColorSpace") with
+  | some (.name n) =>
+    if (deviceOfName n).isSome || n = nm "Pattern" then (d, s) else
+    match namedCS src s fr.res n with
+    | (some info, s) =>
+      ((nm "ColorSpace", info.toObj) :: d.filter (fun kv => kv.1 != nm "ColorSpace"), s)
+    | (none, s) => (d, s)
+  | _ => (d, s)
+
+/-- **Annotate one emitted item** with where its resources live (task 7.3f): pattern uses of
+fill and stroke snapshots, the `ResRef` of an `sh`, an inline image's named colour space. -/
+def annotItem {σ : Type} (src : Source σ) (fr : Frame) (pf ps : PatState) (s : σ) :
+    DisplayItem → DisplayItem × σ
+  | .fillPath p r f c =>
+    let (f, s) := annotFill src s fr pf f
+    (.fillPath p r f c, s)
+  | .strokePath p k c =>
+    let (k, s) := annotStroke src s fr ps k
+    (.strokePath p k c, s)
+  | .glyphRun r c =>
+    let (f, s) := annotFill src s fr pf r.fill
+    let (k, s) := annotStroke src s fr ps r.stroke
+    (.glyphRun { r with fill := f, stroke := k } c, s)
+  | .image (.inline d data) ctm f c =>
+    let (d, s) := annotInline src s fr d
+    let (f, s) := annotFill src s fr pf f
+    (.image (.inline d data) ctm f c, s)
+  | .image isrc ctm f c =>
+    let (f, s) := annotFill src s fr pf f
+    (.image isrc ctm f c, s)
+  | .shading n _ ctm f c =>
+    let (r, s) := resRefOf src s fr "Shading" n
+    (.shading n r ctm f c, s)
+  | it => (it, s)
+
+/-- Annotate a list of emitted items. -/
+def annotAll {σ : Type} (src : Source σ) (fr : Frame) (pf ps : PatState) :
+    σ → List DisplayItem → List DisplayItem × σ
+  | s, [] => ([], s)
+  | s, it :: rest =>
+    let a := annotItem src fr pf ps s it
+    let r := annotAll src fr pf ps a.2 rest
+    (a.1 :: r.1, r.2)
+
+/-- Annotation keeps the number of items. -/
+theorem annotAll_length {σ : Type} (src : Source σ) (fr : Frame) (pf ps : PatState) :
+    ∀ (s : σ) (l : List DisplayItem), (annotAll src fr pf ps s l).1.length = l.length
+  | _, [] => rfl
+  | s, it :: rest => by
+    simp only [annotAll, List.length_cons, annotAll_length src fr pf ps _ rest]
+
 /-! ## Steps -/
 
 /-- Output of a step that does not nest: machine, items, warnings, unknown-operator count,
@@ -698,6 +862,8 @@ structure FormJob where
   res : Dict
   /-- Whose resources they are (`Frame.owner`). -/
   owner : Nat
+  /-- Generation number of the owner (`Frame.ownerGen`). -/
+  ownerGen : Nat
   /-- Graphics state at the start of the form. -/
   gs : GState
   /-- The `/BBox` clip, page space. -/
@@ -706,6 +872,10 @@ structure FormJob where
   w : Nat
   /-- The transparency group the form is, if any (task 7.3c). -/
   group : Option GroupInfo := none
+  /-- Fill pattern bookkeeping at the `Do` (task 7.3f; the colour is inherited). -/
+  patFill : PatState := {}
+  /-- Stroke pattern bookkeeping at the `Do`. -/
+  patStroke : PatState := {}
 
 /-- Items emitted before the form's own items: `groupBegin` for a transparency group, else the
 informational `/BBox` `clip` item. -/
@@ -719,6 +889,11 @@ def FormJob.post (j : FormJob) : List DisplayItem :=
   match j.group with
   | some _ => [.groupEnd]
   | none => []
+
+/-- The frame a form job runs in, nested in `fr`: the form's resources and owner, the form
+on the nesting path, the form's start CTM as base matrix. -/
+def FormJob.frame (j : FormJob) (fr : Frame) : Frame :=
+  ⟨j.res, j.num :: fr.visited, j.owner, j.ownerGen, j.gs.ctm⟩
 
 /-- A form adds at most two items of its own (`Paint.maxItems`, charged to its `Do`). -/
 theorem FormJob.pre_post_le (j : FormJob) : j.pre.length + j.post.length ≤ 2 := by
@@ -762,7 +937,7 @@ inductive DoOut (σ : Type) where
   | form (job : FormJob) (s : σ)
 
 /-- Prepare form `n` (dictionary `d`, decoded content `bytes`). -/
-def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n : Nat) (d : Dict)
+def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n g : Nat) (d : Dict)
     (bytes : ByteArray) (s : σ) : DoOut σ :=
   let t := Ops.tokenize env.cfg.limits bytes
   let r := formResources env.src s d fr.res fr.owner n
@@ -774,13 +949,15 @@ def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n : Nat
   let gs2 := match path with
     | some p => { gs1 with ctm, clip := ⟨p, .nonzero⟩ :: gs1.clip }
     | none => { gs1 with ctm }
-  .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2, gs2, path, if path.isSome then 0 else 1, grp.1⟩
+  .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2,
+    if r.1.2 = n then g else fr.ownerGen, gs2, path, if path.isSome then 0 else 1, grp.1,
+    m.patFill, m.patStroke⟩
     grp.2
 
 /-- `formJob` prepares form `n`. -/
-theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n : Nat}
+theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n g : Nat}
     {d : Dict} {bytes : ByteArray} {s : σ} {job : FormJob} {s' : σ}
-    (h : formJob env fr m n d bytes s = .form job s') : job.num = n := by
+    (h : formJob env fr m n g d bytes s = .form job s') : job.num = n := by
   unfold formJob at h
   cases h; rfl
 
@@ -794,18 +971,23 @@ def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mach
     | (.missing, s) => .done none 1 s
     | (.ignored, s) => .done none 0 s
     | (.image n g _, s) =>
-      .done (some (.image (.xobject name n g) m.core.gs.ctm m.core.gs.fillStyle m.core.gs.clip))
-        0 s
-    | (.form n st, s) =>
+      let f := annotFill env.src s fr m.patFill m.core.gs.fillStyle
+      .done (some (.image (.xobject name n g) m.core.gs.ctm f.1 m.core.gs.clip)) 0 f.2
+    | (.form n g st, s) =>
       if fr.visited.contains n then .done none 1 s
       else if nest then
         match env.src.decode s n st with
         | (.error _, s) => .done none 1 s
-        | (.ok bytes, s) => formJob env fr m n st.dict bytes s
+        | (.ok bytes, s) => formJob env fr m n g st.dict bytes s
       else .done none 1 s
 
 /-- The machine a form runs in: the given graphics state, everything else fresh. -/
-def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none⟩
+def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none, {}, {}⟩
+
+/-- The machine a form job runs in: `formMachine` with the invoking machine's pattern
+bookkeeping (task 7.3f). -/
+def FormJob.machine (j : FormJob) : Machine :=
+  { formMachine j.gs with patFill := j.patFill, patStroke := j.patStroke }
 
 /-! ## Soft masks (§11.6.5, task 7.3c) -/
 
@@ -869,7 +1051,7 @@ def maskJob {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mac
           | (.ok (.stream st), s) =>
             match env.src.decode s n st with
             | (.ok bytes, s) =>
-              match formJob env fr (withGs m (resetTx m.core.gs)) n st.dict bytes s with
+              match formJob env fr (withGs m (resetTx m.core.gs)) n g st.dict bytes s with
               | .form job s =>
                 .form { kind, backdrop := bc.getD (.gray Comp.zero), bbox := job.clip } job s
               | .done _ _ s => .bad s
@@ -895,12 +1077,63 @@ def gsR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω →
       match inner with
       | none => ⟨m1, items, warnings + w + 1, unsupported, ops + 1, forms, truncated, s2, obs1⟩
       | some run =>
-        match run ⟨job.res, job.num :: fr.visited, job.owner⟩
-            ⟨formMachine job.gs, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+        match run (job.frame fr)
+            ⟨job.machine, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
               forms + 1, truncated, s2, obs1⟩ job.ops with
         | ⟨_, items2, w2, u2, ops2, forms2, tr2, s3, obs3⟩ =>
           ⟨withGs m1 { m1.core.gs with softMask := some ops },
             items.push (.softMask ops info items2), w2, u2, ops2, forms2, tr2, s3, obs3⟩
+
+/-! ## Uncoloured patterns (task 7.3f, §8.7.3.3) -/
+
+/-- Bookkeeping after `CS`/`cs` (space `sp` now current): a pattern space selected by a
+resource name remembers that name (its underlying space is read at `SCN`/`scn`). -/
+def csBook (sp : ColorSpace) (op : Op) : PatState :=
+  match sp, lastName? op.operands with
+  | .pattern, some n => { space := if (deviceOfName n).isNone && n != nm "Pattern" then some n else none }
+  | _, _ => {}
+
+/-- The underlying space of pattern colour space resource `key` (`[/Pattern base]`). -/
+def underOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (key : Name) : Option CSInfo × σ :=
+  match resEntry src s res "ColorSpace" key with
+  | (some o, s) =>
+    match resolve src s o with
+    | (.array [.name p, b], s) => if p = nm "Pattern" then csInfo src s b else (none, s)
+    | (_, s) => (none, s)
+  | (none, s) => (none, s)
+
+/-- Bookkeeping after `SCN`/`scn` (current space `sp`, colour `c` after `exec`): in a pattern
+space with colour operands before the pattern name, record the pattern's underlying colour —
+computed in the underlying space of the named pattern space, else by operand count (1, 3, 4:
+gray, RGB, CMYK). -/
+def scnBook {σ : Type} (src : Source σ) (fr : Frame) (p : PatState) (sp : ColorSpace) (c : Color)
+    (s : σ) (op : Op) : PatState × σ :=
+  match sp, c with
+  | .pattern, .pattern n =>
+    let xs := op.operands.filterMap num?
+    if xs.isEmpty then ({ p with under := none }, s) else
+    let (info, s) := match p.space with
+      | some key => underOf src s fr.res key
+      | none => (none, s)
+    let col := match info with
+      | some i => i.color xs
+      | none => colorOfNums xs
+    ({ p with under := some (n, col) }, s)
+  | _, _ => (p, s)
+
+/-- Pattern bookkeeping of one executed local operator (`m`: the machine after it). -/
+def patBook {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    PatState × PatState × σ :=
+  match op.op with
+  | [67, 83] => (m.patFill, csBook m.core.gs.strokeSpace op, s)   -- CS
+  | [99, 115] => (csBook m.core.gs.fillSpace op, m.patStroke, s)  -- cs
+  | [83, 67, 78] =>                                               -- SCN
+    let r := scnBook src fr m.patStroke m.core.gs.strokeSpace m.core.gs.strokeColor s op
+    (m.patFill, r.1, r.2)
+  | [115, 99, 110] =>                                             -- scn
+    let r := scnBook src fr m.patFill m.core.gs.fillSpace m.core.gs.fillColor s op
+    (r.1, m.patStroke, r.2)
+  | _ => (m.patFill, m.patStroke, s)
 
 /-- **One runner step.** At the operator cap nothing is executed (the first time, one
 warning). `Do` of a form runs `inner` (the runner with one less fuel) from `formMachine`, then
@@ -921,8 +1154,8 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
         match inner with
         | some run =>
           let w := job.w + job.tokW
-          match run ⟨job.res, job.num :: fr.visited, job.owner⟩
-              ⟨formMachine job.gs, pushAll items job.pre,
+          match run (job.frame fr)
+              ⟨job.machine, pushAll items job.pre,
                 warnings + w, unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op w 0⟩ job.ops with
           | ⟨_, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩ =>
@@ -935,8 +1168,10 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
     else
       match localStep env fr m s op with
       | (m', its, w, u, s') =>
-        ⟨m', pushAll items its, warnings + w, unsupported + u, ops + 1, forms, truncated, s',
-          env.observe obs op w u⟩
+        let pb := patBook env.src fr m' s' op
+        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 its
+        ⟨{ m' with patFill := pb.1, patStroke := pb.2.1 }, pushAll items a.1, warnings + w,
+          unsupported + u, ops + 1, forms, truncated, a.2, env.observe obs op w u⟩
 
 /-- **The runner**, by structural recursion on the nesting fuel: a form invoked at fuel
 `f + 1` runs at fuel `f`; at fuel 0 forms are skipped (warning). -/
@@ -962,7 +1197,7 @@ theorem doStep_form_fresh {σ ω : Type} {env : Env σ ω} {nest : Bool} {fr : F
     · cases h
     · cases h
     · cases h
-    · rename_i n' st s1 _
+    · rename_i n' _ st s1 _
       by_cases hv : fr.visited.contains n' = true
       · simp only [hv, ↓reduceIte] at h; cases h
       · cases nest
@@ -1099,16 +1334,17 @@ theorem gsR_good {σ ω : Type} (env : Env σ ω)
     · exact hbase
     · rename_i run _
       have h1 : Good env.cfg.limits (items.size + 1 + pendBit m + k)
-          ⟨formMachine job.gs, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+          ⟨job.machine, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
             forms + 1, truncated, s2, env.observe obs op w 0⟩ := by
         unfold Good
-        simp only [formMachine, pendBit, Option.isSome_none, Bool.false_eq_true, ↓reduceIte,
+        simp only [FormJob.machine, formMachine, pendBit, Option.isSome_none, Bool.false_eq_true,
+          ↓reduceIte,
           Paint.maxItems, List.size_toArray, List.length_nil] at h ⊢
         omega
-      have h2 := hin run rfl _ ⟨job.res, job.num :: fr.visited, job.owner⟩ _ job.ops h1
+      have h2 := hin run rfl _ (job.frame fr) _ job.ops h1
       revert h2
-      rcases run ⟨job.res, job.num :: fr.visited, job.owner⟩
-          ⟨formMachine job.gs, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+      rcases run (job.frame fr)
+          ⟨job.machine, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
             forms + 1, truncated, s2, env.observe obs op w 0⟩ job.ops with
         ⟨m2, items2, w2, u2, ops2, forms2, tr2, s3, obs3⟩
       intro h2
@@ -1146,18 +1382,18 @@ theorem stepR_good {σ ω : Type} (env : Env σ ω)
           simp only
           have hcl := FormJob.pre_post_le job
           have h1 : Good env.cfg.limits (pendBit m + k + job.post.length)
-              ⟨formMachine job.gs, pushAll items job.pre,
+              ⟨job.machine, pushAll items job.pre,
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ := by
             unfold Good
-            simp only [size_pushAll, formMachine, pendBit, Option.isSome_none,
+            simp only [size_pushAll, FormJob.machine, formMachine, pendBit, Option.isSome_none,
               Bool.false_eq_true, ↓reduceIte, Paint.maxItems] at h hcl ⊢
             omega
           have h2 := hin run hrun (pendBit m + k + job.post.length)
-            ⟨job.res, job.num :: fr.visited, job.owner⟩ _ job.ops h1
+            (job.frame fr) _ job.ops h1
           revert h2
-          rcases run ⟨job.res, job.num :: fr.visited, job.owner⟩
-              ⟨formMachine job.gs, pushAll items job.pre,
+          rcases run (job.frame fr)
+              ⟨job.machine, pushAll items job.pre,
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ job.ops with
             ⟨m2, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩
@@ -1174,7 +1410,9 @@ theorem stepR_good {σ ω : Type} (env : Env σ ω)
         revert hb
         rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
         intro hb
-        simp only [size_pushAll, Paint.maxItems] at h hb ⊢
+        have hl := annotAll_length env.src fr (patBook env.src fr m' s' op).1
+          (patBook env.src fr m' s' op).2.1 (patBook env.src fr m' s' op).2.2 its
+        simp only [size_pushAll, hl, pendBit, Paint.maxItems] at h hb ⊢
         omega
 
 /-- Folding steps keeps `Good`. -/
@@ -1216,7 +1454,7 @@ def St.init {σ ω : Type} (s : σ) (obs : ω) : St σ ω :=
 `Limits.maxXObjectDepth`, from the initial machine. Total; never fails. -/
 def runPage {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ) (obs : ω) :
     St σ ω :=
-  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0⟩ (St.init s obs) ops
+  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
 
 /-- Tokenize and run decoded page content; tokenizer warnings and truncation are added. -/
 def runBytes {σ ω : Type} (env : Env σ ω) (res : Dict) (bytes : ByteArray) (s : σ)
@@ -1242,7 +1480,7 @@ theorem runPage_items_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Ar
     (obs : ω) :
     (runPage env res ops s obs).items.size ≤
       Paint.maxItems * (runPage env res ops s obs).ops := by
-  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0⟩ (St.init s obs) ops
+  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
     (St.init_good _ s obs)).1
   unfold runPage
   omega
@@ -1500,6 +1738,66 @@ private def fillCol (cs : String) : Option Color :=
     Dict.get? d (Name.ofString "ColorSpace") == some (.name (Name.ofString "DeviceGray")) &&
       data.size == 1
   | _ => false)
+-- resource annotation (7.3f): `sh`, pattern uses and inline colour spaces resolved in the
+-- frame that emits them; the pattern base matrix is the form's start CTM
+private def annDoc : List (Nat × IndirectBody) :=
+  [(30, strm ("<< /Subtype /Form /BBox [0 0 10 10] /Matrix [2 0 0 2 0 0] /Resources << " ++
+      "/Shading << /S1 40 0 R /S2 << /ShadingType 2 >> >> /Pattern << /P1 41 0 R >> " ++
+      "/ColorSpace << /Ix [/Indexed /DeviceRGB 1 <000000FF0000>] >> >> >>")
+     "/S1 sh /S2 sh /Pattern cs /P1 scn 0 0 1 1 re f BI /W 1 /H 1 /CS /Ix /BPC 8 ID x EI"),
+   (31, strm "<< /Subtype /Form /BBox [0 0 10 10] >>" "/S0 sh /Pattern CS /P0 SCN 0 0 1 1 re S"),
+   (32, strm "<< /Subtype /Form /BBox [0 0 10 10] >>" "0 0 1 1 re S")]
+private def annRes : String :=
+  "<< /XObject << /Fm 30 0 R /Fn 31 0 R >> /Shading << /S0 << /ShadingType 2 >> >> " ++
+  "/Pattern << /P0 42 0 R >> >>"
+private def annItems : List DisplayItem := (run annDoc annRes "1 0 0 1 5 5 cm /Fm Do /S0 sh").items.toList
+private def shRes : DisplayItem → Option ResRef
+  | .shading _ r _ _ _ => some r
+  | _ => none
+#guard annItems.filterMap shRes == [.ref 40 0, .form 30 0, .page]
+#guard (annItems.filterMap fillOf).map (·.pattern) ==
+  [some { res := .ref 41 0, base := ⟨fi 2, fi 0, fi 0, fi 2, fi 5, fi 5⟩ }]
+#guard annItems.any fun
+  | .image (.inline d _) _ _ _ => (Dict.get? d (nm "ColorSpace")).isSome &&
+      (match Dict.get? d (nm "ColorSpace") with
+       | some o => ((csInfo Source.empty () o).1.map (·.color [fi 1])) ==
+           some (.rgb Comp.one Comp.zero Comp.zero)
+       | none => false)
+  | _ => false
+-- a form without its own resources resolves in the page's; strokes record the use too
+#guard ((run annDoc annRes "/Fn Do").items.toList.filterMap shRes) == [.page]
+#guard ((run annDoc annRes "/Fn Do").items.toList.filterMap strokeOf).map (·.pattern) ==
+  [some { res := .ref 42 0, base := Matrix.identity }]
+-- uncoloured patterns: the `scn` colour operands in the underlying space
+private def uRes : String :=
+  "<< /ColorSpace << /PCS [/Pattern /DeviceRGB] /PIx [/Pattern [/Indexed /DeviceRGB 1 <000000FF0000>]] >> " ++
+  "/Pattern << /P0 42 0 R >> >>"
+private def underOfRun (c : String) : List (Option Color) :=
+  ((run [] uRes c).items.toList.filterMap fillOf).map fun f => f.pattern.bind (·.under)
+#guard underOfRun "/PCS cs 1 0 0 /P0 scn 0 0 1 1 re f" == [some (.rgb Comp.one Comp.zero Comp.zero)]
+#guard underOfRun "/PIx cs 1 /P0 scn 0 0 1 1 re f" == [some (.rgb Comp.one Comp.zero Comp.zero)]
+#guard underOfRun "/Pattern cs 1 /P0 scn 0 0 1 1 re f" == [some (.gray Comp.one)]
+#guard underOfRun "/PCS cs /P0 scn 0 0 1 1 re f" == [none]
+-- the underlying colour is inherited by a form
+#guard ((run annDoc ("<< /XObject << /Fn 32 0 R >> /ColorSpace << /PCS [/Pattern /DeviceRGB] >> " ++
+    "/Pattern << /P0 42 0 R >> /Shading << /S0 1 0 R >> >>") "/PCS CS 0 1 0 /P0 SCN /Fn Do").items.toList.filterMap
+    strokeOf).map (fun k => k.pattern.bind (·.under)) == [some (.rgb Comp.zero Comp.one Comp.zero)]
+-- the consumer side: `resLookup`
+#guard ((resLookup (mkSrc annDoc) () [] "Shading" (.form 30 0) (nm "S2")).1.map fun
+  | .dict _ => true | _ => false) == some true
+#guard (resLookup (mkSrc annDoc) () [] "Shading" (.ref 40 0) (nm "S1")).1.isSome
+-- non-pattern colours record nothing
+#guard ((run [] "<< >>" "0 0 1 1 re f").items.toList.filterMap fillOf).map (·.pattern) == [none]
+-- `CSInfo.toObj` resolves, without document access, to the same colours
+private def csRound (i : CSInfo) (xs : List Fixed) : Bool :=
+  (csInfo Source.empty () i.toObj).1.map (·.color xs) == some (i.color xs)
+#guard csRound (.dev .rgb (.rgb Comp.zero Comp.zero Comp.zero)) [fi 1, fi 0, fi 0]
+#guard csRound (.indexed .rgb 1 ⟨#[0, 0, 0, 255, 0, 0]⟩) [fi 1]
+#guard csRound (.separation .cmyk (some ⟨[fi 0, fi 0, fi 0, fi 0], [fi 0, fi 1, fi 0, fi 0], 1⟩))
+  [Fixed.ofDecimal ⟨5, 1⟩]
+#guard csRound (.separation .gray none) [Fixed.ofDecimal ⟨25, 2⟩]
+#guard csRound (.deviceN 2 .cmyk) [fi 1, fi 0]
+#guard csRound .lab [fi 50, fi 0, fi 0]
 
 end Tests
 

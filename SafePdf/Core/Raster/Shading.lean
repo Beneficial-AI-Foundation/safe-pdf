@@ -75,20 +75,26 @@ triangles beyond the budget are skipped), so `paint_steps_le` bounds every shadi
 
 ## Shading patterns (§8.7.3)
 
-`renderFill` paints a `fillPath` item whose colour is `Color.pattern n` with the page's
-shading pattern `n` (`PatternType 2`: `/Shading`, `/Matrix` relative to the page's default
-space): fill mask ∩ clip ∩ the shading's `/BBox`, the `/Background` first, then the shading.
-Tiling patterns (`PatternType 1`) and unknown names fall back to the path renderer
-(mid-grey). Patterns of a form's own `/Resources` are not seen (page resources only, as
-images), and the pattern matrix ignores a form's matrix (gap).
+`renderFill` paints a `fillPath` item whose colour is `Color.pattern n` with shading pattern
+`n` (`PatternType 2`: `/Shading`, `/Matrix`): fill mask ∩ clip ∩ the shading's `/BBox`, the
+`/Background` first, then the shading. `renderStroke` does the same through the stroke mask
+of a `strokePath` item, and `Glyph` through the glyph masks of a text run (task 7.3f). The
+pattern is the one the runner recorded (`FillStyle.pattern`/`StrokeStyle.pattern`: the
+resource's `ResRef`, so a form's own `/Pattern` resources are found) and its matrix is
+composed with the use's **base matrix** (`pattern /Matrix × base`, base = the CTM at the
+start of the using page or form: §8.7.3 maps pattern space to the default space of the page
+or form in which the pattern is used). Tiling patterns (`PatternType 1`) and unknown names
+fall back to the path renderer (mid-grey).
 
 ## Wiring into `Glyph.renderPage`
 
-`loadShadings limits src s res items : ShadingTable × σ` loads every `sh` name and pattern
-fill of a display list once. `renderShading cfg m W H tbl st name ctm clip` paints an `sh`
-item (`renderShading_size`, `renderShading_steps_le`); `renderFill … st p rule style clip`
-paints a `fillPath` item, delegating non-pattern fills to `Clip.renderItem`
-(`renderFill_size`).
+`loadShadings limits src s res items : ShadingTable × σ` loads every `sh` resource and every
+pattern used by a fill, stroke or glyph-run colour once, by the `ResRef` the runner recorded
+(`res`: the page's resources, for unannotated items), including items inside soft masks
+(`DisplayList.foldDeep`). `renderShading cfg m W H tbl st r name ctm alpha clip` paints an
+`sh` item with its `ca` (`renderShading_size`, `renderShading_steps_le`); `renderFill` /
+`renderStroke` paint `fillPath`/`strokePath` items, delegating non-pattern colours to
+`Clip.renderItem` (`renderFill_size`, `renderStroke_size`).
 -/
 
 namespace SafePdf.Core.Raster.Shading
@@ -97,7 +103,7 @@ open SafePdf SafePdf.Core
 open SafePdf.Core.Raster.Geom
 open SafePdf.Core.Raster.Fill (IRect Mask Config)
 open SafePdf.Core.Content (Fixed Comp Color DeviceSpace Source FillStyle FillRule Matrix Clip
-  ClipPath Path DisplayItem DisplayList)
+  ClipPath Path DisplayItem DisplayList ResRef PatternUse)
 open SafePdf.Core.Content.Run (CSInfo)
 
 /-! ## 1. Numbers -/
@@ -1873,27 +1879,45 @@ theorem paint_steps_le (W H : Nat) (sh : Prepared) (dev : Aff) (cm : Option Mask
 structure Pattern where
   /-- Its shading. -/
   shade : Prepared
-  /-- `/Matrix`: pattern space → the page's default space. -/
+  /-- `/Matrix`: pattern space → the default space of the page or form using it (composed
+  with the use's base matrix at painting time, `PatternUse.base`). -/
   matrix : Matrix
 
-/-- The shadings and shading patterns of a page, loaded before rendering. -/
+/-- The shadings and shading patterns of a page, loaded before rendering, keyed by where the
+resource lives and its name (`ResRef × Name`, task 7.3f: resolved by the runner, so a form's
+own resources are found too). -/
 structure ShadingTable where
-  /-- `sh` operands by resource name (`none`: failed or unsupported, painted as nothing). -/
-  shadings : List (Name × Option Prepared) := []
-  /-- Patterns by resource name (`none`: not a loadable shading pattern). -/
-  patterns : List (Name × Option Pattern) := []
+  /-- `sh` operands (`none`: failed or unsupported, painted as nothing). -/
+  shadings : List ((ResRef × Name) × Option Prepared) := []
+  /-- Patterns (`none`: not a loadable shading pattern). -/
+  patterns : List ((ResRef × Name) × Option Pattern) := []
   /-- Mesh triangles held so far (capped by `maxPageTriangles`). -/
   triangles : Nat := 0
 
 instance : Inhabited ShadingTable := ⟨{}⟩
 
-/-- The prepared shading of an `sh` name. -/
-def ShadingTable.shading? (t : ShadingTable) (n : Name) : Option Prepared :=
-  ((t.shadings.find? (·.1 == n)).map (·.2)).join
+/-- The prepared shading of an `sh` resource. -/
+def ShadingTable.shading? (t : ShadingTable) (r : ResRef) (n : Name) : Option Prepared :=
+  ((t.shadings.find? (·.1 == (r, n))).map (·.2)).join
 
-/-- The shading pattern of a pattern name. -/
-def ShadingTable.pattern? (t : ShadingTable) (n : Name) : Option Pattern :=
-  ((t.patterns.find? (·.1 == n)).map (·.2)).join
+/-- The shading pattern of a pattern resource. -/
+def ShadingTable.pattern? (t : ShadingTable) (r : ResRef) (n : Name) : Option Pattern :=
+  ((t.patterns.find? (·.1 == (r, n))).map (·.2)).join
+
+/-- The pattern resource a colour denotes, with the base matrix of its use: the recorded
+`PatternUse`, or (an unannotated pattern colour, e.g. from the resource-free interpreter) the
+page's resources and the identity. `none` for a non-pattern colour. -/
+def patternRef (c : Color) (u : Option PatternUse) : Option (ResRef × Name × Matrix) :=
+  match c with
+  | .pattern n => some ((u.map (·.res)).getD .page, n, (u.map (·.base)).getD Matrix.identity)
+  | _ => none
+
+/-- The loaded shading pattern of a colour and its base matrix, if any. -/
+def ShadingTable.patternOf (t : ShadingTable) (c : Color) (u : Option PatternUse) :
+    Option (Pattern × Matrix) :=
+  match patternRef c u with
+  | some (r, n, base) => (t.pattern? r n).map (·, base)
+  | none => none
 
 /-- Number of mesh triangles of a prepared shading. -/
 def Prepared.triangles (p : Prepared) : Nat :=
@@ -1909,24 +1933,24 @@ def ShadingTable.admit (t : ShadingTable) (p : Option Prepared) : Option Prepare
     else (some sh, t.triangles + sh.triangles)
   | none => (none, t.triangles)
 
-/-- Load `sh` resource `n` (once). -/
+/-- Load `sh` resource `n` living at `r` (once); `res` are the page's resources. -/
 def ShadingTable.addShading {σ : Type} (limits : Limits) (src : Source σ) (res : Dict)
-    (acc : ShadingTable × σ) (n : Name) : ShadingTable × σ :=
+    (acc : ShadingTable × σ) (r : ResRef) (n : Name) : ShadingTable × σ :=
   let t := acc.1
-  if t.shadings.any (·.1 == n) then acc else
-  let (o, s) := Content.Run.resEntry src acc.2 res "Shading" n
+  if t.shadings.any (·.1 == (r, n)) then acc else
+  let (o, s) := Content.Run.resLookup src acc.2 res "Shading" r n
   let (p, s) := match o with
     | some o => loadShading limits src s o
     | none => (none, s)
   let (p, tc) := t.admit p
-  ({ t with shadings := (n, p) :: t.shadings, triangles := tc }, s)
+  ({ t with shadings := ((r, n), p) :: t.shadings, triangles := tc }, s)
 
-/-- Load pattern resource `n` (once) if it is a shading pattern. -/
+/-- Load pattern resource `n` living at `r` (once) if it is a shading pattern. -/
 def ShadingTable.addPattern {σ : Type} (limits : Limits) (src : Source σ) (res : Dict)
-    (acc : ShadingTable × σ) (n : Name) : ShadingTable × σ :=
+    (acc : ShadingTable × σ) (r : ResRef) (n : Name) : ShadingTable × σ :=
   let t := acc.1
-  if t.patterns.any (·.1 == n) then acc else
-  let (o, s) := Content.Run.resEntry src acc.2 res "Pattern" n
+  if t.patterns.any (·.1 == (r, n)) then acc else
+  let (o, s) := Content.Run.resLookup src acc.2 res "Pattern" r n
   let (pd, s) := match o with
     | some o => fetchBody src s o
     | none => (none, s)
@@ -1943,20 +1967,31 @@ def ShadingTable.addPattern {σ : Type} (limits : Limits) (src : Source σ) (res
   let p := match p, sh with
     | some p, some _ => some p
     | _, _ => none
-  ({ t with patterns := (n, p) :: t.patterns, triangles := tc }, s)
+  ({ t with patterns := ((r, n), p) :: t.patterns, triangles := tc }, s)
 
-/-- **Load the shadings of a display list**: every distinct `sh` name and every pattern
-named by a fill colour, once, from the page resources `res`. -/
+/-- Load the pattern of a colour (if it is a pattern colour). -/
+def ShadingTable.addUse {σ : Type} (limits : Limits) (src : Source σ) (res : Dict)
+    (acc : ShadingTable × σ) (c : Color) (u : Option PatternUse) : ShadingTable × σ :=
+  match patternRef c u with
+  | some (r, n, _) => ShadingTable.addPattern limits src res acc r n
+  | none => acc
+
+/-- **Load the shadings of a display list**: every distinct `sh` resource and every pattern
+used by a fill, stroke or glyph-run colour, once, where the runner recorded it (`ResRef`;
+`res`: the page's resources), including items nested in soft masks (`DisplayList.foldDeep`,
+`Limits.maxXObjectDepth` levels). -/
 def loadShadings {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict)
     (items : DisplayList) : ShadingTable × σ :=
-  items.foldl (fun acc it =>
+  Content.DisplayList.foldDeep (fun acc it =>
     match it with
-    | .shading n _ _ => ShadingTable.addShading limits src res acc n
-    | .fillPath _ _ style _ =>
-      match style.color with
-      | .pattern n => ShadingTable.addPattern limits src res acc n
-      | _ => acc
-    | _ => acc) ({}, s)
+    | .shading n r _ _ _ => ShadingTable.addShading limits src res acc r n
+    | .fillPath _ _ st _ => ShadingTable.addUse limits src res acc st.color st.pattern
+    | .strokePath _ st _ => ShadingTable.addUse limits src res acc st.color st.pattern
+    | .glyphRun run _ =>
+      ShadingTable.addUse limits src res
+        (ShadingTable.addUse limits src res acc run.fill.color run.fill.pattern)
+        run.stroke.color run.stroke.pattern
+    | _ => acc) limits.maxXObjectDepth ({}, s) items
 
 /-- The clip of an `sh` item with the shading's `/BBox` (mapped by `ctm`) as one more path. -/
 def withBBox (sh : Prepared) (ctm : Matrix) (clip : Clip) : Clip :=
@@ -1981,22 +2016,25 @@ theorem withBBox_cost (cfg : Config) (W H : Nat) (sh : Prepared) (ctm : Matrix) 
   · simp only [Clip.clipCost, Clip.pathCost, rectPath_size, bboxCost]
     omega
 
-/-- **Paint an `sh` item** (`DisplayItem.shading name ctm clip`): the shading of `name` in
-the table, through `ctm × m`, under the clip (and its `/BBox`); `/Background` ignored
-(§8.7.4.5.1). Nothing is drawn for an unknown or failed shading. -/
+/-- **Paint an `sh` item** (`DisplayItem.shading name r ctm fill clip`): the shading of
+`(r, name)` in the table, through `ctm × m`, under the clip (and its `/BBox`), with constant
+alpha `alpha` (the item's `ca`, task 7.3f; its blend mode and soft mask are applied by the
+transparency driver, see `Glyph.liftSh`); `/Background` ignored (§8.7.4.5.1). Nothing is drawn
+for an unknown or failed shading. -/
 def renderShading (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable) (st : Clip.RState)
-    (name : Name) (ctm : Matrix) (clip : Clip) : Clip.RState :=
-  match tbl.shading? name with
+    (r : ResRef) (name : Name) (ctm : Matrix) (alpha : Comp) (clip : Clip) : Clip.RState :=
+  match tbl.shading? r name with
   | none => st
   | some sh =>
     let c := Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)
-    let p := paint W H sh (Aff.ofMatrix ctm * m) c.1 (Clip.itemWindow W H c.1) 255 st.buf
+    let p := paint W H sh (Aff.ofMatrix ctm * m) c.1 (Clip.itemWindow W H c.1)
+      (Clip.compByte alpha) st.buf
     { buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2 }
 
 /-- Painting an `sh` item preserves the buffer size. -/
 theorem renderShading_size (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable)
-    (st : Clip.RState) (name : Name) (ctm : Matrix) (clip : Clip) :
-    (renderShading cfg m W H tbl st name ctm clip).buf.size = st.buf.size := by
+    (st : Clip.RState) (r : ResRef) (name : Name) (ctm : Matrix) (alpha : Comp) (clip : Clip) :
+    (renderShading cfg m W H tbl st r name ctm alpha clip).buf.size = st.buf.size := by
   unfold renderShading; split
   · rfl
   · exact paint_size _ _ _ _ _ _ _ _
@@ -2005,8 +2043,8 @@ theorem renderShading_size (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTa
 cost and `W · H + maxMeshVisits` pixel visits (loading is bounded separately by the function,
 mesh and table caps). -/
 theorem renderShading_steps_le (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable)
-    (st : Clip.RState) (name : Name) (ctm : Matrix) (clip : Clip) :
-    (renderShading cfg m W H tbl st name ctm clip).steps ≤
+    (st : Clip.RState) (r : ResRef) (name : Name) (ctm : Matrix) (alpha : Comp) (clip : Clip) :
+    (renderShading cfg m W H tbl st r name ctm alpha clip).steps ≤
       st.steps + Clip.clipCost cfg W H clip + bboxCost cfg W H + (W * H + maxMeshVisits) := by
   unfold renderShading; split
   · omega
@@ -2015,23 +2053,23 @@ theorem renderShading_steps_le (cfg : Config) (m : Aff) (W H : Nat) (tbl : Shadi
     have h1 := withBBox_cost cfg W H sh ctm clip
     have h2 := paint_steps_le W H sh (Aff.ofMatrix ctm * m)
       (Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)).1
-      (Clip.itemWindow W H (Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)).1) 255 st.buf
+      (Clip.itemWindow W H (Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)).1)
+      (Clip.compByte alpha) st.buf
     simp only
     omega
 
-/-- **Paint a path filled with a shading pattern**: fill mask ∩ clip ∩ the shading's
-`/BBox` (mapped by the pattern matrix), the `/Background` first (inside the `/BBox`, as
-MuPDF bounds the shading by it), then the shading through `matrix × m`, with the fill
-alpha. -/
-def renderPatternFill (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Pattern)
-    (p : Path) (rule : FillRule) (alpha : Comp) (clip : Clip) : Clip.RState :=
-  let c := Clip.clipMaskC cfg m W H st.cache clip
-  let f := Clip.fillCounted cfg m p rule (Clip.itemWindow W H c.1)
-  let mk := Clip.combine f.1 c.1
+/-- **Paint a shading pattern through a coverage mask** `mk` (the item's mask, already
+intersected with its clip): `mk` ∩ the shading's `/BBox`, the `/Background` first (inside the
+`/BBox`, as MuPDF bounds the shading by it), then the shading, through `pattern matrix × base
+× m` (§8.7.3: the pattern matrix maps to the default space of the using page or form, `base`
+maps that to page space), with alpha `alpha`. `cc`/`s`: the clip cache and the work so far. -/
+def paintPattern (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Pattern)
+    (base : Matrix) (mk : Mask) (alpha : Comp) (cc : Clip.ClipCache) (s : Nat) : Clip.RState :=
+  let mat := Matrix.mul pat.matrix base
   let bb := match pat.shade.bbox with
     | none => (mk, 0)
     | some (x0, y0, x1, y1) =>
-      let g := Clip.fillCounted cfg m (Content.Run.rectPath pat.matrix x0 y0 x1 y1) .nonzero mk.rect
+      let g := Clip.fillCounted cfg m (Content.Run.rectPath mat x0 y0 x1 y1) .nonzero mk.rect
       (mk.inter g.1, g.2)
   let mk := bb.1
   let a := Clip.compByte alpha
@@ -2039,43 +2077,75 @@ def renderPatternFill (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (p
   let buf := match pat.shade.background with
     | some rgb => Clip.composite st.buf W mk none win rgb a
     | none => st.buf
-  let pr := paint W H pat.shade (Aff.ofMatrix pat.matrix * m) (some mk) win a buf
-  { buf := pr.1, cache := c.2.1, steps := st.steps + c.2.2 + f.2 + bb.2 + mk.area + pr.2 }
+  let pr := paint W H pat.shade (Aff.ofMatrix mat * m) (some mk) win a buf
+  { buf := pr.1, cache := cc, steps := st.steps + s + bb.2 + mk.area + pr.2 }
 
-/-- Painting a pattern fill preserves the buffer size. -/
-theorem renderPatternFill_size (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState)
-    (pat : Pattern) (p : Path) (rule : FillRule) (alpha : Comp) (clip : Clip) :
-    (renderPatternFill cfg m W H st pat p rule alpha clip).buf.size = st.buf.size := by
-  unfold renderPatternFill
+/-- Painting a pattern through a mask preserves the buffer size. -/
+theorem paintPattern_size (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Pattern)
+    (base : Matrix) (mk : Mask) (alpha : Comp) (cc : Clip.ClipCache) (s : Nat) :
+    (paintPattern cfg m W H st pat base mk alpha cc s).buf.size = st.buf.size := by
+  unfold paintPattern
   simp only
   rw [paint_size]
   split
   · exact Clip.composite_size _ _ _ _ _ _ _
   · rfl
 
+/-- **Paint a path filled with a shading pattern**: fill mask ∩ clip, then `paintPattern`. -/
+def renderPatternFill (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Pattern)
+    (base : Matrix) (p : Path) (rule : FillRule) (alpha : Comp) (clip : Clip) : Clip.RState :=
+  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let f := Clip.fillCounted cfg m p rule (Clip.itemWindow W H c.1)
+  paintPattern cfg m W H st pat base (Clip.combine f.1 c.1) alpha c.2.1 (c.2.2 + f.2)
+
+/-- Painting a pattern fill preserves the buffer size. -/
+theorem renderPatternFill_size (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState)
+    (pat : Pattern) (base : Matrix) (p : Path) (rule : FillRule) (alpha : Comp) (clip : Clip) :
+    (renderPatternFill cfg m W H st pat base p rule alpha clip).buf.size = st.buf.size :=
+  paintPattern_size _ _ _ _ _ _ _ _ _ _ _
+
+/-- **Paint a path stroked with a shading pattern** (task 7.3f): stroke mask (by `stroke`, as
+`Clip.renderItem`) ∩ clip, then `paintPattern`. -/
+def renderPatternStroke (cfg : Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (st : Clip.RState) (pat : Pattern) (base : Matrix) (p : Path) (style : Content.StrokeStyle)
+    (clip : Clip) : Clip.RState :=
+  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let fm := stroke cfg m (Clip.itemWindow W H c.1) p style
+  paintPattern cfg m W H st pat base (Clip.combine fm c.1) style.alpha c.2.1 c.2.2
+
 /-- **Paint a `fillPath` item**: a fill with a shading pattern colour through
 `renderPatternFill`, everything else (device colours, tiling patterns, unknown patterns) by
 `Clip.renderItem`. -/
 def renderFill (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable) (st : Clip.RState)
     (p : Path) (rule : FillRule) (style : FillStyle) (clip : Clip) : Clip.RState :=
-  let dflt := Clip.renderItem cfg m W H Clip.noStroke st (.fillPath p rule style clip)
-  match style.color with
-  | .pattern n =>
-    match tbl.pattern? n with
-    | some pat => renderPatternFill cfg m W H st pat p rule style.alpha clip
-    | none => dflt
-  | _ => dflt
+  match tbl.patternOf style.color style.pattern with
+  | some (pat, base) => renderPatternFill cfg m W H st pat base p rule style.alpha clip
+  | none => Clip.renderItem cfg m W H Clip.noStroke st (.fillPath p rule style clip)
 
 /-- Painting a fill preserves the buffer size. -/
 theorem renderFill_size (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable)
     (st : Clip.RState) (p : Path) (rule : FillRule) (style : FillStyle) (clip : Clip) :
     (renderFill cfg m W H tbl st p rule style clip).buf.size = st.buf.size := by
-  unfold renderFill
-  simp only
+  unfold renderFill renderPatternFill
   split
-  · split
-    · exact renderPatternFill_size _ _ _ _ _ _ _ _ _ _
-    · exact Clip.renderItem_size _ _ _ _ _ _ _
+  · exact paintPattern_size _ _ _ _ _ _ _ _ _ _ _
+  · exact Clip.renderItem_size _ _ _ _ _ _ _
+
+/-- **Paint a `strokePath` item** (task 7.3f): a stroke with a shading pattern colour through
+`renderPatternStroke`, everything else by `Clip.renderItem`. -/
+def renderStroke (cfg : Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (tbl : ShadingTable)
+    (st : Clip.RState) (p : Path) (style : Content.StrokeStyle) (clip : Clip) : Clip.RState :=
+  match tbl.patternOf style.color style.pattern with
+  | some (pat, base) => renderPatternStroke cfg m W H stroke st pat base p style clip
+  | none => Clip.renderItem cfg m W H stroke st (.strokePath p style clip)
+
+/-- Painting a stroke preserves the buffer size. -/
+theorem renderStroke_size (cfg : Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (tbl : ShadingTable) (st : Clip.RState) (p : Path) (style : Content.StrokeStyle) (clip : Clip) :
+    (renderStroke cfg m W H stroke tbl st p style clip).buf.size = st.buf.size := by
+  unfold renderStroke renderPatternStroke
+  split
+  · exact paintPattern_size _ _ _ _ _ _ _ _ _ _ _
   · exact Clip.renderItem_size _ _ _ _ _ _ _
 
 /-! ## 10. Checks -/
