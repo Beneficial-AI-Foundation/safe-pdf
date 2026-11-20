@@ -27,8 +27,14 @@ the PDF and restores them from it.
 * **Store** (`Store`): the marks of a document in creation order (later ones on top) and the
   next id; `Store.noteOn` finds the note anchored to a highlight's quads (its comment, 9.8). Ids are never reused (`Store.add_id`, `Store.add_next`); `Store.restore` keeps
   the ids of marks read back from a file and `Store.load` builds the store of a file's marks
-  (9.5c); `Store.saved` lists the marks stored in the file, `Store.unsaved` / `Store.dirty`
-  what Save still has to write. Operations: add, remove, recolour, edit the
+  (9.5c); `Store.saved` lists the marks stored in the file and `Store.base` their state
+  there; `Store.unsaved` (new marks), `Store.changedSaved` (saved marks recoloured or edited)
+  and `Store.deletedSaved` (saved marks deleted) are what Save still has to write, and
+  `Store.dirty` says whether there is any of it (task 9.5g: saved marks are editable).
+  A highlight's **comment** is the newest note anchored to exactly its quads with a
+  non-empty text (`Store.commentOf`, 9.8); Save writes it into the highlight as pdf.js does
+  (`/Contents` + `/Popup`, 9.5g); deleting a highlight deletes its comment
+  (`Store.removeWithComment`). Operations: add, remove, recolour, edit the
   text, find, the marks of a page, hit-testing (`Store.hitAt`: the topmost mark whose icon
   or quads contain a page point; icons are above highlights).
 * **Pixels** (`multiplyRect`, `pixelRect`, `composite`): highlights are blended into the
@@ -222,9 +228,11 @@ structure Store where
   /-- The id the next mark gets (larger than every id in `marks`). -/
   nextId : Nat := 1
   /-- Ids of the marks that are stored in the open file (read back on open or written by a
-  save, task 9.5c). They are drawn by the renderer from their appearance streams and cannot
-  be changed until the writer can supersede annotations (task 9.5g). -/
+  save, task 9.5c). They are drawn by the renderer from their appearance streams (after an
+  edit, from the viewer's preview of the next save, task 9.5g). -/
   saved : List Nat := []
+  /-- The saved marks as they are in the file (task 9.5g: what edits are compared with). -/
+  base : List Mark := []
   deriving Inhabited
 
 /-- Adds a mark of `kind` on `page` in `color`; returns the store and the new mark's id. -/
@@ -263,18 +271,41 @@ def Store.isSaved (s : Store) (id : Nat) : Bool := s.saved.contains id
 def Store.unsaved (s : Store) : List Mark :=
   (s.marks.filter (!s.isSaved ·.id)).toList
 
-/-- Whether there are unsaved marks (the title's `*`, the prompt on close/quit/open). -/
-def Store.dirty (s : Store) : Bool := s.marks.any (!s.isSaved ·.id)
+/-- The mark with id `id`. -/
+def Store.find? (s : Store) (id : Nat) : Option Mark :=
+  s.marks.find? (·.id == id)
+
+/-- Whether two marks are the same in everything Save writes (id, page, colour, kind, text,
+quads). -/
+def Mark.same (a b : Mark) : Bool :=
+  a.id == b.id && a.page == b.page && a.color == b.color && a.isNote == b.isNote &&
+    a.text == b.text && a.quads == b.quads
+
+/-- Saved marks that differ from their state in the file (recoloured, text edited; 9.5g). -/
+def Store.changedSaved (s : Store) : List Mark :=
+  (s.marks.filter fun m => s.isSaved m.id &&
+    match s.base.find? (·.id == m.id) with
+    | some b => !m.same b
+    | none => false).toList
+
+/-- Ids of saved marks that were deleted (9.5g). -/
+def Store.deletedSaved (s : Store) : List Nat :=
+  s.saved.filter fun id => (s.find? id).isNone
+
+/-- Whether there are unsaved changes: new marks, or saved marks changed or deleted (the
+title's `*`, the prompt on close/quit/open). -/
+def Store.dirty (s : Store) : Bool :=
+  s.marks.any (!s.isSaved ·.id) || !s.changedSaved.isEmpty || !s.deletedSaved.isEmpty
+
+/-- The number of unsaved changes (new, changed and deleted marks). -/
+def Store.pending (s : Store) : Nat :=
+  s.unsaved.length + s.changedSaved.length + s.deletedSaved.length
 
 /-- The store of the marks read back from a file (task 9.5c): each restored with its own id
 (`restore`, later duplicates of an id replace earlier ones), all of them saved. -/
 def Store.load (ms : List Mark) : Store :=
   let s := ms.foldl Store.restore {}
-  { s with saved := (s.marks.map (·.id)).toList }
-
-/-- The mark with id `id`. -/
-def Store.find? (s : Store) (id : Nat) : Option Mark :=
-  s.marks.find? (·.id == id)
+  { s with saved := (s.marks.map (·.id)).toList, base := s.marks.toList }
 
 /-- The note of page `page` anchored to exactly the quads `qs` (the comment of a highlight
 over `qs`, task 9.8), the newest first. -/
@@ -287,6 +318,33 @@ def Store.noteOn (s : Store) (page : Nat) (qs : List Box) : Option Nat :=
 /-- Removes the mark `id` (nothing when absent). -/
 def Store.remove (s : Store) (id : Nat) : Store :=
   { s with marks := s.marks.filter (·.id != id) }
+
+/-- The comment of highlight `h` (task 9.5g): the newest note on its page anchored to exactly
+its quads (`noteOn`), when its text is not empty. Save writes it into the highlight
+(`/Contents` + `/Popup`, as pdf.js). -/
+def Store.commentOf (s : Store) (h : Mark) : Option Mark :=
+  if h.isNote || h.quads.isEmpty then none
+  else
+    match (s.noteOn h.page h.quads).bind s.find? with
+    | some n => if n.text.isEmpty then none else some n
+    | none => none
+
+/-- Whether note `m` is the comment of a highlight of the store (`commentOf`). -/
+def Store.isComment (s : Store) (m : Mark) : Bool :=
+  m.isNote && s.marks.any fun h => !h.isNote && h.page == m.page &&
+    ((s.commentOf h).map (·.id)) == some m.id
+
+/-- Removes mark `id` and, for a highlight, its comment (`noteOn`; task 9.5g: deleting a
+highlight deletes its comment note / popup). -/
+def Store.removeWithComment (s : Store) (id : Nat) : Store :=
+  match s.find? id with
+  | some m =>
+    if m.isNote || m.quads.isEmpty then s.remove id
+    else
+      match s.noteOn m.page m.quads with
+      | some n => (s.remove id).remove n
+      | none => s.remove id
+  | none => s
 
 /-- Changes the colour of mark `id`. -/
 def Store.recolor (s : Store) (id : Nat) (c : Color) : Store :=
@@ -410,6 +468,17 @@ private def sample : Store :=
   id == 8 && s'.dirty && (s'.unsaved.map (·.id)) == [8] && s'.isSaved 7
 #guard (Store.load [⟨2, 0, .red, .highlight [q1]⟩, ⟨2, 0, .green, .highlight [q1]⟩]).marks.size == 1
 #guard sample.dirty && sample.unsaved.length == 4 && !({} : Store).dirty
+-- Edits of saved marks make the store dirty (9.5g); undoing them makes it clean again.
+#guard let s := Store.load [⟨7, 0, .red, .highlight [q1]⟩, ⟨3, 0, .blue, .note "x" (.quads [q1])⟩]
+  !s.dirty && (s.recolor 7 .green).dirty && !((s.recolor 7 .green).recolor 7 .red).dirty &&
+  (s.setText 3 "y").dirty && (s.setText 3 "y").pending == 1 &&
+  (s.remove 3).deletedSaved == [3] && (s.removeWithComment 7).marks.size == 0 &&
+  (s.removeWithComment 7).pending == 2
+-- The comment of a highlight: the note on its quads with a text.
+#guard let s := Store.load [⟨7, 0, .red, .highlight [q1]⟩, ⟨3, 0, .blue, .note "x" (.quads [q1])⟩]
+  ((s.find? 7).bind s.commentOf |>.map (·.id)) == some 3 &&
+  ((s.find? 3).map s.isComment) == some true &&
+  (((s.setText 3 "").find? 7).bind (s.setText 3 "").commentOf).isNone
 -- `/NM` names.
 #guard ((sample.find? 3).map Mark.nm) == some "safepdf-mark-3"
 #guard idOfNm "safepdf-mark-17" == some 17 && idOfNm "other-17" == none &&

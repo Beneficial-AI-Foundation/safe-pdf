@@ -34,6 +34,20 @@ encrypted with RC4-40, RC4-128, AES-128, AES-256 and AES-256 with an xref stream
 render check above (our rasterizer and `mutool`), `qpdf --check`, keeps the file key, has no
 mark string or appearance-stream content in the clear, and takes a second update.
 
+Edits of saved marks (task 9.5g, writer rule W11, `runEdits`), on the plain fixture and on
+the encrypted ones: after the first write, one update (`Annots.writeEdits`) recolours
+highlight 1 and gives it a comment (a **new** popup object), recolours highlight 2 and
+changes its comment (its popup **superseded**), edits note 3's text, **removes** highlight 5
+(page 2) and adds a note 7. Checked: the earlier file is a byte prefix; strict reopen with
+one more revision; page 1's `/Annots` is the old list in order (superseded references in
+place) followed by note 7 and the new popup `safepdf-mark-1-popup-8` (rule A11), page 2's has
+no highlight 5; the superseded objects keep their numbers and carry the new `/C`,
+`/Contents`, `/M` and the old `/CreationDate`; the new popup's `/Parent` is highlight 1;
+our render shows highlight 1 green and page 2 without the blue; `mutool` shows it green;
+`qpdf --check`; no plaintext in an encrypted update. A third update on top drops highlight
+2's comment: its popup reference leaves `/Annots`, `/Contents` and `/Popup` leave the
+dictionary.
+
 Environment: `SAFEPDF_WRITEANNOTS_CORPUS=FILE` also writes a highlight over the first text
 line of page 1 of `FILE` plus a note, and checks reopen, read-back and our render;
 `SAFEPDF_WRITE_OUT=DIR` keeps the written files (`DIR/annots-*.pdf`).
@@ -363,6 +377,151 @@ def corpus (file : String) : IO Nat := do
           IO.println s!"  write-annots corpus {file}: {if f == 0 then "ok" else "FAIL"}"
           return f
 
+/-- The `/Annots` reference and dictionary of our annotation named `n` on page `page`. -/
+def refByNm (doc : Doc.Doc) (lim : Limits) (page : Nat) (n : String) :
+    Option ((Nat × Nat) × Dict) :=
+  match doc.pages[page]? with
+  | none => none
+  | some p =>
+    match Write.Incremental.annotsOf doc.file lim p.num p.gen with
+    | .ok xs => xs.findSome? fun a => match a with
+      | .ref k g => match doc.file.getObject lim k g with
+        | .ok (.obj (.dict d)) =>
+          if Dict.get? d kNM == some (.string (textBytes n)) then some ((k, g), d) else none
+        | _ => none
+      | _ => none
+    | .error _ => none
+
+/-- Our annotation names on page `i` of `out`, in `/Annots` order. -/
+def namesOn (out : ByteArray) (i : Nat) : List String :=
+  match Api.openBytes out with
+  | .ok d => match Api.pageAnnotations d i with
+    | .ok as => as.filterMap (·.name)
+    | .error _ => []
+  | .error _ => []
+
+/-- The date of the edit updates. -/
+def date2 : String := "D:20261121090000Z"
+
+/-- **Edits of saved marks** (task 9.5g; see the module doc) on the written file `out1` of
+`marks` into `orig` (`ctx` names the run; `enc`: the document is encrypted). -/
+def runEdits (ctx : String) (orig : System.FilePath) (out1 : ByteArray) (enc : Bool) :
+    IO Nat := do
+  let lim := Limits.default
+  let mut f := 0
+  let .ok d1 := Api.openBytes out1 | return (← check s!"{ctx}: reopen" false)
+  let get (n : String) (pg : Nat) := refByNm d1.doc lim pg n
+  let (some (r1, _), some (r2, h2), some (r3, n3), some (r5, _), some (rp2, _)) :=
+      (get "safepdf-mark-1" 0, get "safepdf-mark-2" 0, get "safepdf-mark-3" 0,
+        get "safepdf-mark-5" 1, get "safepdf-mark-2-popup" 0)
+    | return (← check s!"{ctx}: first write's annotations" false)
+  let created := match Dict.get? n3 (nm "CreationDate") with
+    | some (.string bs) => String.fromUTF8? ⟨bs.toArray⟩ |>.getD ""
+    | _ => ""
+  let find (i : Nat) : Mark := (marks.find? (·.id == i)).getD default
+  let green : Rat × Rat × Rat := (83 / 255, 1, 188 / 255)
+  let m1 := { (find 1) with color := green, contents := "now commented ✓" }
+  let m1 := { m1 with commentId := some 8, date := date2, created := date }
+  let m2 := { (find 2) with color := (128 / 255, 235 / 255, 1), contents := "changed comment" }
+  let m2 := { m2 with date := date2, created := date }
+  let m3 := { (find 3) with contents := "edited note", date := date2, created }
+  let m7 : Mark := { page := 0, kind := .note, quads := [], rect := ⟨10, 10, 30, 30⟩,
+                     color := (1, 79 / 255, 95 / 255), id := 7, date := date2,
+                     contents := "added with the edits" }
+  let es : EditSet :=
+    { adds := [m7],
+      sups := [⟨m1, r1, none⟩, ⟨m2, r2, some rp2⟩, ⟨m3, r3, none⟩],
+      removes := removeMark 1 r5 none }
+  let .ok out2 := writeEdits lim d1.doc es
+    | return (← check s!"{ctx}: writeEdits" false)
+  f := f + (← check s!"{ctx}: first revision is a prefix" (out2.extract 0 out1.size == out1))
+  if enc then
+    f := f + (← check s!"{ctx}: no plaintext /NM in the edit update"
+      (!contains (out2.extract out1.size out2.size).toList (ascii "safepdf-mark")))
+  match Open.openFile lim out1, Open.openFile lim out2 with
+  | .ok o1, .ok o2 =>
+    f := f + (← check s!"{ctx}: strict reopen, one more revision"
+      (!o2.repaired && o2.revisions == o1.revisions + 1))
+  | _, _ => f := f + (← check s!"{ctx}: strict reopen of the edit update" false)
+  f := f + (← check s!"{ctx}: page 1 annotations after the edits"
+    (namesOn out2 0 == ["safepdf-mark-1", "safepdf-mark-2", "safepdf-mark-2-popup",
+      "safepdf-mark-3", "safepdf-mark-7", "safepdf-mark-1-popup-8"])
+    (toString (namesOn out2 0)))
+  f := f + (← check s!"{ctx}: highlight 5 removed from page 2"
+    (namesOn out2 1 == ["safepdf-mark-4"]) (toString (namesOn out2 1)))
+  let .ok d2 := Api.openBytes out2 | return f + (← check s!"{ctx}: Api reopen" false)
+  let get2 (n : String) (pg : Nat) := refByNm d2.doc lim pg n
+  match get2 "safepdf-mark-1" 0, get2 "safepdf-mark-2" 0, get2 "safepdf-mark-3" 0,
+      get2 "safepdf-mark-1-popup-8" 0, get2 "safepdf-mark-2-popup" 0 with
+  | some (q1, e1), some (q2, e2), some (q3, e3), some (qp1, p1), some (qp2, p2) =>
+    f := f + (← check s!"{ctx}: superseded objects keep their numbers"
+      (q1 == r1 && q2 == r2 && q3 == r3 && qp2 == rp2))
+    f := f + (← check s!"{ctx}: new colour" (Dict.get? e1 kC == some (colorObj green)))
+    f := f + (← check s!"{ctx}: comments"
+      (Dict.get? e1 kContents == some (.string (textBytes "now commented ✓")) &&
+       Dict.get? e2 kContents == some (.string (textBytes "changed comment")) &&
+       Dict.get? e3 kContents == some (.string (textBytes "edited note"))))
+    f := f + (← check s!"{ctx}: /Popup and /Parent link the new popup"
+      (Dict.get? e1 (nm "Popup") == some (.ref qp1.1 qp1.2) &&
+       Dict.get? p1 (nm "Parent") == some (.ref r1.1 r1.2) &&
+       Dict.get? p2 (nm "Parent") == some (.ref r2.1 r2.2) &&
+       Dict.get? e2 (nm "Popup") == some (.ref rp2.1 rp2.2)))
+    f := f + (← check s!"{ctx}: /M new, /CreationDate kept"
+      (Dict.get? e3 (nm "M") == some (asciiStr date2) &&
+       Dict.get? e3 (nm "CreationDate") == some (asciiStr created) && !created.isEmpty &&
+       Dict.get? h2 (nm "M") == some (asciiStr date)))
+  | _, _, _, _, _ => f := f + (← check s!"{ctx}: edited annotations" false)
+  -- renders: highlight 1 green (ours, mutool), page 2 without the blue highlight
+  match ours out2 0 with
+  | some a =>
+    let (n, g, _, _) := stats a 2 200 38 114 210 136 (83, 255, 188)
+    f := f + (← check s!"{ctx}: ours: recoloured highlight" (g * 2 ≥ n) s!"{g}/{n} green")
+  | none => f := f + (← check s!"{ctx}: our render" false)
+  match ours out2 1 with
+  | some a =>
+    let (n, blue, _, _) := stats a 2 200 28 146 130 166 (192, 245, 255)
+    f := f + (← check s!"{ctx}: ours: removed highlight gone" (blue == 0) s!"{blue}/{n}")
+  | none => f := f + (← check s!"{ctx}: our render page 2" false)
+  let (path, tmp) ← place s!"annots-edit-{ctx}.pdf" out2
+  match ← mutool path 0 with
+  | some a =>
+    let (n, g, _, _) := stats a 2 200 38 114 210 136 (83, 255, 188)
+    f := f + (← check s!"{ctx}: mutool: recoloured highlight" (g * 2 ≥ n) s!"{g}/{n} green")
+  | none => IO.println "  write-annots: mutool not found, edit render check skipped"
+  if tmp then IO.FS.removeFile path
+  f := f + (← external s!"annots-edit-{ctx}.pdf" orig out2 false)
+  -- a third update: highlight 2 loses its comment (popup removed)
+  let m2' := { m2 with contents := "", date := date2 }
+  match writeEdits lim d2.doc { sups := [⟨m2', r2, some rp2⟩] } with
+  | .error _ => f := f + (← check s!"{ctx}: third update" false)
+  | .ok out3 =>
+    f := f + (← check s!"{ctx}: third update: prefix" (out3.extract 0 out2.size == out2))
+    f := f + (← check s!"{ctx}: third update: popup reference removed"
+      (namesOn out3 0 == ["safepdf-mark-1", "safepdf-mark-2", "safepdf-mark-3",
+        "safepdf-mark-7", "safepdf-mark-1-popup-8"]) (toString (namesOn out3 0)))
+    match Api.openBytes out3 with
+    | .ok d3 =>
+      match refByNm d3.doc lim 0 "safepdf-mark-2" with
+      | some (_, e) => f := f + (← check s!"{ctx}: third update: no /Contents, no /Popup"
+          ((Dict.get? e kContents).isNone && (Dict.get? e (nm "Popup")).isNone))
+      | none => f := f + (← check s!"{ctx}: third update: highlight 2" false)
+    | .error _ => f := f + (← check s!"{ctx}: third update reopen" false)
+    f := f + (← external s!"annots-edit3-{ctx}.pdf" orig out3 false)
+  -- refusals: removing a reference that is not on the page; superseding a page object
+  let isErr (r : Except Error ByteArray) : Bool := match r with
+    | .error _ => true
+    | .ok _ => false
+  f := f + (← check s!"{ctx}: refuse removing an annotation of another page"
+    (isErr (writeEdits lim d1.doc { removes := [(0, r5.1, r5.2)] })))
+  match d1.doc.pages[0]? with
+  | some pg => f := f + (← check s!"{ctx}: refuse superseding a page object"
+      (isErr (Write.Incremental.writeUpdate lim d1.doc [] [(pg.num, pg.gen, [])])))
+  | none => pure ()
+  f := f + (← check s!"{ctx}: refuse superseding twice"
+    (isErr (Write.Incremental.writeUpdate lim d1.doc []
+      [(r1.1, r1.2, [(nm "A", PdfObject.int 1)]), (r1.1, r1.2, [(nm "A", PdfObject.int 2)])])))
+  return f
+
 /-- Encrypted variants of the fixture (task 9.5f; `Tests/fixtures-write/encrypted/`,
 `generate.py`): RC4-40, RC4-128, AES-128, AES-256, and AES-256 with an xref stream. -/
 def encFixtures : List String :=
@@ -409,6 +568,7 @@ def runEncrypted (name : String) : IO Nat := do
       | some b, some a => f := f + (← renderChecks s!"{ctx} ours" b a)
       | _, _ => f := f + (← check s!"{ctx}: our render" false)
       f := f + (← external s!"annots-enc-{name}" path out true)
+      f := f + (← runEdits s!"enc-{name}" path out true)
       match Api.openBytes out with
       | .ok d2 =>
         let more : List Mark :=
@@ -473,6 +633,7 @@ def run : IO Nat := do
         f := f + (← check "ours: half-transparent highlight" (blue * 3 ≥ n) s!"{blue}/{n}")
       | none => f := f + (← check "our render page 2" false)
       f := f + (← external "annots-text.pdf" fixture out true)
+      f := f + (← runEdits "plain" fixture out false)
       -- a second update on top of the first
       match Api.openBytes out with
       | .ok d2 =>

@@ -28,6 +28,18 @@ Encrypted inputs (task 9.5f, rule W10): every encrypted fixture of
 stream with an indirect `/Length`, a signature dictionary) goes through the same checks, plus:
 the result keeps the file key, and the update holds no mark string in the clear.
 
+Removal and supersession (task 9.5g, rule W11, `runEdit`), on every fixture and encrypted
+fixture: after a first write of two squares A, B on page 1 (and C on page 2), one
+`writeUpdate` removes A's reference, supersedes B (and C) under their own numbers with new
+dictionaries, and adds a square D. Checked: the first result is a byte prefix; strict reopen
+with one more revision; every object number the update does not write fetches identically;
+page 1's annotation list is the old one without A (B in place) followed by D, the other page
+keys unchanged; B and C fetch exactly their new dictionaries; page 2 is not rewritten (C's
+reference is unchanged); `qpdf --check` (skipped without qpdf, probed by `qpdf --version`);
+for encrypted files no plaintext in the update; a third update on top (`writeAnnots`) keeps
+everything. Refusals: removing a reference that is not on the page, superseding a page
+object, an object twice, a free or out-of-range number.
+
 Refusals: a document opened through the repair path (`Error.unsupported`, rule W1; also an
 encrypted one), a page index out of range, a duplicate page index, a non-canonical mark
 (duplicate key), a mark with a reference out of range.
@@ -237,6 +249,151 @@ def runEncryptUnit : IO Nat := do
       iv 0 0x73 [1, 2] != iv 0 0x73 [1, 3]))
   return f
 
+/-- `qpdf --check` exit code, if `qpdf` runs (probed with `--version` first: a missing
+command does not throw, the child exits 255). -/
+def qpdfCheck (bytes : ByteArray) : IO (Option UInt32) := do
+  try
+    let probe ← IO.Process.output { cmd := "qpdf", args := #["--version"] }
+    if probe.exitCode != 0 then return none
+    let (h, tmp) ← IO.FS.createTempFile
+    h.flush
+    IO.FS.writeBinFile tmp bytes
+    let out ← IO.Process.output { cmd := "qpdf", args := #["--check", tmp.toString] }
+    IO.FS.removeFile tmp
+    return some out.exitCode
+  catch _ => return none
+
+/-- A square with another colour and contents (the superseding dictionary). -/
+def square2 (x y w h : Int) : Dict :=
+  [(nm "Type", .name (nm "Annot")), (nm "Subtype", .name (nm "Square")),
+    (nm "Rect", .array [.int x, .int y, .int (x + w), .int (y + h)]),
+    (nm "C", .array [.int 1, .int 0, .int 0]),
+    (nm "Contents", .string "safe-pdf 9.5g".toUTF8.toList)]
+
+/-- The page plan's annotation references after `n` old ones. -/
+def lastRefs (d : Open.OpenDoc) (lim : Limits) (pg : Doc.Page) (k : Nat) :
+    List (Nat × Nat) :=
+  match annotsOf d lim pg.num pg.gen with
+  | .ok xs => (xs.drop (xs.length - k)).filterMap fun o => match o with
+    | .ref n g => some (n, g)
+    | _ => none
+  | .error _ => []
+
+/-- **Removal and supersession** (task 9.5g; see the module doc) on `bytes`. -/
+def runEdit (name : String) (bytes : ByteArray) (enc : Bool) : IO Nat := do
+  let lim := Limits.default
+  let ctx := s!"{name} (edit)"
+  let .ok doc := Doc.openDoc lim bytes | return (← check ctx "openDoc" false)
+  let two := doc.pageCount ≥ 2
+  let first : Marks := [(0, [square 20 20 60 40, square 100 20 60 40])] ++
+    (if two then [(1, [square 30 120 50 50])] else [])
+  let .ok out1 := writeAnnots lim doc first | return (← check ctx "first write" false)
+  let .ok doc1 := Doc.openDoc lim out1 | return (← check ctx "reopen first write" false)
+  let (some pg0, pg1) := (doc1.pages[0]?, doc1.pages[1]?) | return (← check ctx "pages" false)
+  let [rA, rB] := lastRefs doc1.file lim pg0 2 | return (← check ctx "first refs" false)
+  let rC := (pg1.map fun pg => lastRefs doc1.file lim pg 1).getD [] |>.head?
+  let newB := square2 100 20 60 40
+  let newC := square2 30 120 50 50
+  let sups : List Supersede := [(rB.1, rB.2, newB)] ++
+    ((if two then rC else none).map fun r => (r.1, r.2, newC)).toList
+  let edits : Edits := [⟨0, [rA], [square 200 20 30 30]⟩]
+  match writeUpdate lim doc1 edits sups, planUpdate lim doc1 edits sups with
+  | .error e, _ => check ctx "writeUpdate" false (errS e)
+  | _, .error e => check ctx "planUpdate" false (errS e)
+  | .ok out2, .ok p =>
+    let mut f := 0
+    f := f + (← check ctx "first result is a prefix"
+      (out2.size ≥ out1.size && out2.extract 0 out1.size == out1))
+    if enc then
+      let upd := (out2.extract out1.size out2.size).toList
+      let pat := "safe-pdf 9.5g".toUTF8.toList
+      f := f + (← check ctx "superseding strings encrypted"
+        (!(List.range (upd.length + 1)).any fun i => (upd.drop i).take pat.length == pat))
+    match Open.openFile lim out2 with
+    | .error e => return f + (← check ctx "strict reopen" false (errS e))
+    | .ok d' =>
+      let d := doc1.file
+      f := f + (← check ctx "strict, one more revision"
+        (!d'.repaired && d'.revisions == d.revisions + 1))
+      let mut differ := 0
+      for (n, e) in d.xref.entries do
+        if p.keys.contains n then continue
+        if let some g := genOf e then
+          if !sameResult (d'.getObject lim n g) (d.getObject lim n g) then differ := differ + 1
+      f := f + (← check ctx "objects not written unchanged" (differ == 0) s!"{differ} differ")
+      match annotsOf d lim pg0.num pg0.gen, annotsOf d' lim pg0.num pg0.gen with
+      | .ok before, .ok now =>
+        let kept := before.filter (· != .ref rA.1 rA.2)
+        f := f + (← check ctx "page 1: old list without A, then D"
+          (now.take kept.length == kept && now.length == kept.length + 1 &&
+            before.contains (.ref rA.1 rA.2) && kept.contains (.ref rB.1 rB.2)))
+        match now.getLast? with
+        | some (.ref n g) => f := f + (← check ctx "D fetches"
+            (match d'.getObject lim n g with
+              | .ok (.obj (.dict x)) => x == square 200 20 30 30
+              | _ => false))
+        | _ => f := f + (← check ctx "D reference" false)
+      | _, _ => f := f + (← check ctx "annotsOf" false)
+      match d.getObject lim pg0.num pg0.gen, d'.getObject lim pg0.num pg0.gen with
+      | .ok (.obj (.dict a)), .ok (.obj (.dict b)) =>
+        f := f + (← check ctx "page 1: other keys unchanged"
+          (a.filter (·.1 != nameAnnots) == b.filter (·.1 != nameAnnots)))
+      | _, _ => f := f + (← check ctx "page 1 dictionary" false)
+      f := f + (← check ctx "B superseded"
+        (match d'.getObject lim rB.1 rB.2 with
+          | .ok (.obj (.dict x)) => x == newB
+          | _ => false))
+      if two then
+        if let (some r, some pg) := (rC, pg1) then
+          f := f + (← check ctx "C superseded, page 2 not rewritten"
+            ((match d'.getObject lim r.1 r.2 with
+              | .ok (.obj (.dict x)) => x == newC
+              | _ => false) && !p.keys.contains pg.num &&
+              (match annotsOf d' lim pg.num pg.gen, annotsOf d lim pg.num pg.gen with
+                | .ok x, .ok y => x == y
+                | _, _ => false)))
+      match ← qpdfCheck out2 with
+      | some code => f := f + (← check ctx "qpdf --check" (code == 0) s!"exit {code}")
+      | none => pure ()
+      dump s!"edit-{name}" out2
+      -- a third update on top
+      match Doc.openDoc lim out2 with
+      | .error e => f := f + (← check ctx "reopen for the third update" false (errS e))
+      | .ok doc2 =>
+        match writeAnnots lim doc2 [(0, [square 140 140 30 30])] with
+        | .error e => f := f + (← check ctx "third update" false (errS e))
+        | .ok out3 =>
+          f := f + (← check ctx "third update: prefix" (out3.extract 0 out2.size == out2))
+          match Open.openFile lim out3 with
+          | .ok d3 =>
+            f := f + (← check ctx "third update: strict, B kept, A still gone"
+              (!d3.repaired && (match d3.getObject lim rB.1 rB.2 with
+                | .ok (.obj (.dict x)) => x == newB
+                | _ => false) &&
+                (match annotsOf d3 lim pg0.num pg0.gen with
+                  | .ok xs => !xs.contains (.ref rA.1 rA.2) && xs.contains (.ref rB.1 rB.2)
+                  | .error _ => false)))
+          | .error e => f := f + (← check ctx "third update reopen" false (errS e))
+          match ← qpdfCheck out3 with
+          | some code => f := f + (← check ctx "third update: qpdf --check" (code == 0))
+          | none => pure ()
+      -- refusals
+      let isErr (r : Except Error ByteArray) : Bool := match r with
+        | .error _ => true
+        | .ok _ => false
+      f := f + (← check ctx "refuse removing a reference not on the page"
+        (isErr (writeUpdate lim doc1 [⟨0, [(rA.1 + 100000, 0)], []⟩] [])))
+      f := f + (← check ctx "refuse superseding a page object"
+        (isErr (writeUpdate lim doc1 [] [(pg0.num, pg0.gen, [])])))
+      f := f + (← check ctx "refuse superseding an object twice"
+        (isErr (writeUpdate lim doc1 [] [(rB.1, rB.2, []), (rB.1, rB.2, [])])))
+      f := f + (← check ctx "refuse superseding a number beyond /Size"
+        (isErr (writeUpdate lim doc1 [] [(d.trailer.size + 5, 0, [])])))
+      f := f + (← check ctx "refuse superseding under the wrong generation"
+        (isErr (writeUpdate lim doc1 [] [(rB.1, rB.2 + 1, [])])))
+      if f == 0 then IO.println s!"  {ctx}: ok"
+      return f
+
 /-- Refusals on a plain file. -/
 def runRefusals : IO Nat := do
   let lim := Limits.default
@@ -298,9 +455,11 @@ def run : IO Nat := do
     let path := dir / name
     if ← path.pathExists then
       f := f + (← runFile name (← IO.FS.readBinFile path))
+      f := f + (← runEdit name (← IO.FS.readBinFile path) false)
     else IO.println s!"  {name}: skipped (not generated)"
   for name in encrypted do
     f := f + (← runEncrypted name (← IO.FS.readBinFile (encDir / name)))
+    f := f + (← runEdit name (← IO.FS.readBinFile (encDir / name)) true)
   f := f + (← runRefusals)
   f := f + (← runEncryptUnit)
   match ← IO.getEnv "SAFEPDF_WRITE_CORPUS" with

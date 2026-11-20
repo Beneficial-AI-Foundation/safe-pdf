@@ -12,6 +12,8 @@ original bytes untouched (S8). `marks` lists, per page index, already-built anno
 dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
 
 * the new annotation objects, numbered from the old trailer's `/Size` upwards (W3);
+* superseded annotation objects under their own numbers, and page `/Annots` without removed
+  references (W11, task 9.5g; `writeUpdate`);
 * each affected page dictionary, rewritten under its own object number and generation with
   `/Annots` extended (W4);
 * auxiliary stream objects passed by the caller, e.g. appearance streams (W9, task 9.5b);
@@ -83,6 +85,24 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
   return every written object exactly (`checkObjects`). On failure the writer returns
   `Error.malformed` instead of bytes. `Spec.Write` derives the conservativity theorem C7 from
   these checks.
+
+* W11. **Removal and supersession** (task 9.5g; `writeUpdate`): the general entry point takes,
+  per page (`PageEdit`), references to **remove** from the page's annotation list and
+  dictionaries to **add**, and a list of **supersessions** `(num, gen, dict)`: an existing
+  object re-emitted under its own number and generation with a new dictionary (ISO 32000-2
+  §7.5.6: the newest cross-reference entry for a number wins; the old object stays in the
+  earlier revision, which is normal for incremental updates). Conditions (else
+  `Error.malformed`): every removed reference occurs in the page's old annotation list; the
+  superseded numbers are distinct, below the old `/Size`, not the object of any page, and
+  their old object is a dictionary under exactly that generation; the new dictionaries
+  satisfy W2. The rewritten page's `/Annots` is the old list without the removed references
+  (`PagePlan.kept`: a filter, so every other element — superseded ones included — keeps its
+  relative position) followed by the new references. A page whose annotations are only
+  superseded is not rewritten (its references do not change). Superseded objects are written
+  after the pages' objects and take no new numbers (W3 and W9 count only added annotations).
+  Encryption (W10) uses the superseded object's own number and generation. The self-check
+  (W8) fetches every superseded object back. `writeAnnots` is `writeUpdate` with add-only
+  page edits and no supersessions, so every 9.5a/9.5b/9.5f statement about it keeps its form.
 
 Everything is pure and total (structural recursion only).
 -/
@@ -208,6 +228,29 @@ def numberFrom : Nat → List Dict → List (Nat × Dict)
   | _, [] => []
   | n, m :: ms => (n, m) :: numberFrom (n + 1) ms
 
+/-- The changes to one page (rule W11): references to remove from its annotation list, and
+annotation dictionaries to add. -/
+structure PageEdit where
+  /-- The page index. -/
+  index : Nat
+  /-- References `(num, gen)` to remove from the page's annotation list. -/
+  remove : List (Nat × Nat) := []
+  /-- Annotation dictionaries to add, in order. -/
+  add : List Dict := []
+  deriving Repr, Inhabited
+
+/-- The changes of an update, page by page (rule W11). -/
+abbrev Edits := List PageEdit
+
+/-- A supersession (rule W11): object number, generation, and the new dictionary. -/
+abbrev Supersede := Nat × Nat × Dict
+
+/-- The page edit of an add-only page (`writeAnnots`). -/
+def PageEdit.ofMarks (pm : Nat × List Dict) : PageEdit := ⟨pm.1, [], pm.2⟩
+
+/-- The reference objects of `(num, gen)` pairs. -/
+def refObjs (rs : List (Nat × Nat)) : List PdfObject := rs.map fun r => .ref r.1 r.2
+
 /-- What happens to one page. -/
 structure PagePlan where
   /-- The page index in `marks`. -/
@@ -222,13 +265,20 @@ structure PagePlan where
   old : List PdfObject
   /-- The new annotations with their object numbers. -/
   annots : List (Nat × Dict)
+  /-- The references removed from the annotation list (rule W11; empty for `writeAnnots`). -/
+  removed : List PdfObject := []
 
 /-- References to the new annotations of a page. -/
 def PagePlan.refs (pp : PagePlan) : List PdfObject := pp.annots.map fun a => .ref a.1 0
 
-/-- The rewritten page dictionary (rule W4). -/
+/-- The old annotations that stay (rule W11): the old list without the removed references,
+in their order. -/
+def PagePlan.kept (pp : PagePlan) : List PdfObject :=
+  pp.old.filter fun o => decide (o ∉ pp.removed)
+
+/-- The rewritten page dictionary (rules W4, W11). -/
 def PagePlan.newDict (pp : PagePlan) : Dict :=
-  setKey pp.dict nameAnnots (.array (pp.old ++ pp.refs))
+  setKey pp.dict nameAnnots (.array (pp.kept ++ pp.refs))
 
 /-- The objects written for a page: its annotations, then the page. -/
 def PagePlan.objects (pp : PagePlan) : List (Nat × Nat × PdfObject) :=
@@ -239,33 +289,56 @@ def markOk (limits : Limits) (m : Dict) : Bool :=
   (PdfObject.dict m).isCanonical && Print.refsInRange (.dict m) &&
     decide ((PdfObject.dict m).depth ≤ limits.maxObjectDepth)
 
-/-- Plan one page: look the page up, read its dictionary and annotation list, number the
-new annotations from `next`. -/
-def planPage (limits : Limits) (doc : Doc.Doc) (next : Nat) (pm : Nat × List Dict) :
+/-- Plan one page edit (rules W4, W11): look the page up, read its dictionary and
+annotation list, check that the removed references occur in it, number the new annotations
+from `next`. -/
+def planEditPage (limits : Limits) (doc : Doc.Doc) (next : Nat) (pe : PageEdit) :
     Except Error PagePlan :=
-  match doc.pages[pm.1]? with
-  | none => .error (.malformed 0 s!"page index {pm.1} out of range")
+  match doc.pages[pe.index]? with
+  | none => .error (.malformed 0 s!"page index {pe.index} out of range")
   | some p =>
-    if pm.2.all (markOk limits) then
+    if pe.add.all (markOk limits) then
       match doc.file.getObject limits p.num p.gen with
       | .ok (.obj (.dict pd)) =>
         match annotItems doc.file limits pd with
-        | .ok old => .ok ⟨pm.1, p.num, p.gen, pd, old, numberFrom next pm.2⟩
+        | .ok old =>
+          if (refObjs pe.remove).all (fun r => decide (r ∈ old)) then
+            .ok { index := pe.index, num := p.num, gen := p.gen, dict := pd, old,
+                  annots := numberFrom next pe.add, removed := refObjs pe.remove }
+          else .error (.malformed 0 s!"a removed annotation is not on page index {pe.index}")
         | .error e => .error e
       | .ok _ => .error (.malformed 0 s!"page {p.num} {p.gen} is not a dictionary")
       | .error e => .error e
     else .error (.malformed 0 "annotation dictionary is not canonical or nests too deep")
 
-/-- Plan all pages; annotation numbers continue from `next`. -/
-def planPages (limits : Limits) (doc : Doc.Doc) : Nat → Marks → Except Error (List PagePlan)
+/-- Plan all page edits; annotation numbers continue from `next`. -/
+def planEditPages (limits : Limits) (doc : Doc.Doc) : Nat → Edits → Except Error (List PagePlan)
   | _, [] => .ok []
-  | next, pm :: rest =>
-    match planPage limits doc next pm with
+  | next, pe :: rest =>
+    match planEditPage limits doc next pe with
     | .error e => .error e
     | .ok pp =>
-      match planPages limits doc (next + pm.2.length) rest with
+      match planEditPages limits doc (next + pe.add.length) rest with
       | .error e => .error e
       | .ok pps => .ok (pp :: pps)
+
+/-- Plan one page of `writeAnnots` (an add-only `PageEdit`). -/
+def planPage (limits : Limits) (doc : Doc.Doc) (next : Nat) (pm : Nat × List Dict) :
+    Except Error PagePlan :=
+  planEditPage limits doc next (PageEdit.ofMarks pm)
+
+/-- Plan all pages of `writeAnnots`; annotation numbers continue from `next`. -/
+def planPages (limits : Limits) (doc : Doc.Doc) (next : Nat) (marks : Marks) :
+    Except Error (List PagePlan) :=
+  planEditPages limits doc next (marks.map PageEdit.ofMarks)
+
+/-- Whether a supersession is acceptable (rule W11): below `size`, not a page object, its new
+dictionary passes W2, and its old object is a dictionary under that generation. -/
+def supOk (limits : Limits) (doc : Doc.Doc) (size : Nat) (s : Supersede) : Bool :=
+  decide (s.1 < size) && doc.pages.all (fun p => p.num != s.1) && markOk limits s.2.2 &&
+    match doc.file.getObject limits s.1 s.2.1 with
+    | .ok (.obj (.dict _)) => true
+    | _ => false
 
 /-- The whole update, before layout. -/
 structure Plan where
@@ -281,6 +354,8 @@ structure Plan where
   trailer : Dict
   /-- The auxiliary streams with their object numbers (rule W9). -/
   aux : List (Nat × AuxStream) := []
+  /-- The superseded objects: number, generation, new dictionary (rule W11). -/
+  sups : List Supersede := []
   /-- The document's decryption state (rule W10; `none` when unencrypted). -/
   crypt : Option Crypt.State := none
   /-- The objects as written (encrypted under `crypt`; rule W10), in write order. -/
@@ -288,8 +363,14 @@ structure Plan where
   /-- The auxiliary streams as written: number, dictionary with `/Length`, data (rule W10). -/
   auxWire : List (Nat × Dict × List UInt8) := []
 
-/-- The objects of the update, in write order. -/
-def Plan.objects (p : Plan) : List (Nat × Nat × PdfObject) := p.pages.flatMap PagePlan.objects
+/-- The superseded objects as `(num, gen, object)` (rule W11). -/
+def supObjects (sups : List Supersede) : List (Nat × Nat × PdfObject) :=
+  sups.map fun s => (s.1, s.2.1, .dict s.2.2)
+
+/-- The objects of the update, in write order: the pages' objects, then the superseded
+objects (rule W11). -/
+def Plan.objects (p : Plan) : List (Nat × Nat × PdfObject) :=
+  p.pages.flatMap PagePlan.objects ++ supObjects p.sups
 
 /-- The number of new annotation objects. -/
 def Plan.annotCount (p : Plan) : Nat := (p.pages.map fun pp => pp.annots.length).sum
@@ -325,33 +406,42 @@ def wireAux (st : Option Crypt.State) (a : Nat × AuxStream) :
     | .ok (d, data) => .ok (a.1, setKey d nameLength (.int data.length), data)
     | .error e => .error e
 
-/-- **Planning** (rules W1–W3, W9): checks the input and reads the pages. -/
-def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
-    Except Error Plan :=
+/-- **Planning** (rules W1–W3, W9–W11): checks the input and reads the pages. -/
+def planUpdate (limits : Limits) (doc : Doc.Doc) (edits : Edits) (sups : List Supersede)
+    (aux : List AuxStream := []) : Except Error Plan :=
   let d := doc.file
   if d.repaired then .error (.unsupported "incremental update of a repaired document")
   else if d.trailer.encrypted && d.crypt.isNone then
     .error (.unsupported "incremental update of an encrypted document without decryption state")
-  else if !(marks.map Prod.fst).Nodup then
+  else if !(edits.map PageEdit.index).Nodup then
     .error (.malformed 0 "a page index occurs twice in the marks")
   else if !aux.all (fun a => markOk limits a.fullDict) then
     .error (.malformed 0 "auxiliary stream dictionary is not canonical or nests too deep")
+  else if !(sups.map Prod.fst).Nodup then
+    .error (.malformed 0 "an object is superseded twice")
+  else if !sups.all (supOk limits doc d.trailer.size) then
+    .error (.malformed 0 "a superseded object is not an existing non-page dictionary, or its new dictionary is not canonical")
   else
     match Xref.findStartxref d.bytes with
     | .error e => .error e
     | .ok start =>
-      match planPages limits doc d.trailer.size marks with
+      match planEditPages limits doc d.trailer.size edits with
       | .error e => .error e
       | .ok pps =>
         let n0 := d.trailer.size + (pps.map fun pp => pp.annots.length).sum
         let p : Plan := ⟨start, !Xref.matchAt d.bytes start Xref.kwXref, d.trailer.size, pps,
-          d.trailer.dict, numberAux n0 aux, d.crypt, [], []⟩
+          d.trailer.dict, numberAux n0 aux, sups, d.crypt, [], []⟩
         if limits.maxObjects + 1 < p.newSize then .error (.limitExceeded .objects)
         else
           match p.objects.mapM (wireObject d.crypt), p.aux.mapM (wireAux d.crypt) with
           | .ok w, .ok wa => .ok { p with wire := w, auxWire := wa }
           | .error e, _ => .error e
           | _, .error e => .error e
+
+/-- **Planning for `writeAnnots`** (rules W1–W3, W9): add-only page edits, no supersessions. -/
+def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
+    Except Error Plan :=
+  planUpdate limits doc (marks.map PageEdit.ofMarks) [] aux
 
 /-! ## Layout -/
 
@@ -475,12 +565,14 @@ def checkObjects (limits : Limits) (out : ByteArray) (objs : List (Nat × Nat ×
 def result (bytes : ByteArray) (p : Plan) : ByteArray :=
   bytes ++ ⟨(update bytes.size p).toArray⟩
 
-/-- **Entry point** (Plan.md C7). Append `marks` to the opened document `doc` as an
-incremental update: `doc.file.bytes ++ update`, self-checked by the strict parser (rule W8).
-`aux` are extra stream objects (rule W9; appearance streams, task 9.5b). -/
-def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
-    Except Error ByteArray :=
-  match plan limits doc marks aux with
+/-- **General entry point** (Plan.md C7, rule W11). Apply `edits` (per page: references
+removed from `/Annots`, annotations added) and `sups` (objects superseded under their own
+number and generation) to the opened document `doc` as one incremental update:
+`doc.file.bytes ++ update`, self-checked by the strict parser (rule W8). `aux` are extra
+stream objects (rule W9). -/
+def writeUpdate (limits : Limits) (doc : Doc.Doc) (edits : Edits) (sups : List Supersede)
+    (aux : List AuxStream := []) : Except Error ByteArray :=
+  match planUpdate limits doc edits sups aux with
   | .error e => .error e
   | .ok p =>
     let out := result doc.file.bytes p
@@ -489,5 +581,14 @@ def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List Au
     then .ok out
     else .error (.malformed doc.file.bytes.size
       "incremental update failed its strict re-parse (internal writer error)")
+
+/-- **Entry point** (Plan.md C7). Append `marks` to the opened document `doc` as an
+incremental update: `doc.file.bytes ++ update`, self-checked by the strict parser (rule W8).
+`aux` are extra stream objects (rule W9; appearance streams, task 9.5b). It is `writeUpdate`
+with add-only page edits and no supersessions (rule W11). -/
+def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
+    Except Error ByteArray :=
+  writeUpdate limits doc (marks.map PageEdit.ofMarks) [] aux
+
 
 end SafePdf.Core.Write.Incremental
