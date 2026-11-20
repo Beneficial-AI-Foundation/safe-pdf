@@ -58,8 +58,10 @@ import SafePdf.Core.Font.CFF
 import SafePdf.Core.Content.Run
 import SafePdf.Core.Font.TrueType
 import SafePdf.Core.Font.CMap
+import SafePdf.Core.Font.Outline
 import SafePdf.Core.Raster.Geom
 import SafePdf.Core.Raster.Fill
 import SafePdf.Core.Raster.Stroke
 import SafePdf.Core.Raster.Clip
+import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text

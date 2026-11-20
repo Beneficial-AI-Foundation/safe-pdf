@@ -23,6 +23,7 @@ our dump (`.lake/build/bin/inspect <file> <view>`) + normalizer + compare.
 | `streams` | Python `zlib`            | `streams`      | working     |
 | `text`    | `pdftotext` (poppler)    | `text`         | working (needs pdftotext; see below) |
 | `text-mupdf` | `mutool draw -F txt` (MuPDF) | `text`    | working (needs mutool; see below) |
+| `positions` | `mutool draw -F stext` (MuPDF) | `text` (`SAFEPDF_TEXT_GLYPHS=1`) | working (needs mutool; see `positions.py` docstring) |
 
 Add one by appending a `Comparator(...)` to `COMPARATORS` in `run.py` (pdf.js
 later).
@@ -189,3 +190,7 @@ space: similarity 0.9863, exit 0 even with `--min-similarity 0.9`),
 `text_ref.txt` (our open failure: known, exit 0). CI: step "Text comparison on
 the corpus" in job `differential-objects` (apt `poppler-utils`), results in the
 `differential-objects` artifact as `differential-text.{json,log}`.
+
+## Glyph positions (`positions`)
+
+Comparator `positions` (`Tests/differential/positions.py`, task 6.10) compares our per-glyph origins with MuPDF's `stext` character origins after converting MuPDF's device space back to PDF user space (page transform printed by `mutool run`). A pair is within tolerance when the distance is ≤ max(1 pt, 0.1 × font size). The conversions, matching and tolerance are documented in the module docstring; `python3 -I Tests/differential/positions.py --selftest` checks the offline fixtures.

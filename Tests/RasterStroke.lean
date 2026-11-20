@@ -64,7 +64,7 @@ def style (cap : LineCap := .butt) (jn : LineJoin := .miter) (ml : Int := 10)
 
 /-- The geometry for user → device-pixel linear map `m` (pixels) and width `w`. -/
 def geo (m : Aff) (w : Rat) : Geo :=
-  Geo.make (m * Aff.scale subUnit subUnit) w 26
+  Geo.make (m * Aff.scale subUnit subUnit) w
 
 /-- The 200 × 200 test window. -/
 def window : IRect := ⟨0, 0, 200, 200⟩
@@ -185,7 +185,8 @@ def run : IO Nat := do
       failures := failures + 1; report s!"random {i}: buffer size"
     if mk.x0 < 0 || mk.y0 < 0 || mk.x0 + mk.w > 200 || mk.y0 + mk.h > 200 then
       failures := failures + 1; report s!"random {i}: mask outside window"
-    if es.size > 3 * polyCap * (curveSegCap * p.size + maxDashSteps + p.size + 1) then
+    let c : Config := {}
+    if es.size > 3 * c.polyCap * (max 2 c.segCap * p.size + c.maxDashSteps + p.size + 1) then
       failures := failures + 1; report s!"random {i}: {es.size} edges above the bound"
   -- Optional PGM dump.
   if let some dir ← IO.getEnv "SAFEPDF_PGM_DIR" then

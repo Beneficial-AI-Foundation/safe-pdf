@@ -3,6 +3,7 @@ import SafePdf.Core.Limits
 import SafePdf.Core.Object
 import SafePdf.Core.Content.GState
 import SafePdf.Core.Font.Encoding
+import SafePdf.Core.Font.Outline
 
 /-!
 # Embedded Type 1 fonts: metrics (Plan.md §6 Phase 6, task 6.3; Adobe Type 1 Font Format)
@@ -10,7 +11,8 @@ import SafePdf.Core.Font.Encoding
 Parses an embedded Type 1 font program (ISO 32000-2 §9.9 `/FontFile`, already Flate-decoded by
 the caller) far enough to give **text extraction and glyph positions** what they need: the font
 name, `/FontMatrix`, `/FontBBox`, the built-in `/Encoding`, and each glyph's advance width from
-its charstring's `hsbw`/`sbw`. Outlines (the full charstring path interpreter) are Phase 7.
+its charstring's `hsbw`/`sbw`; outlines (task 7.3a) by re-running a charstring with path
+recording (`CState.record`, `Font1.outline`: path operators, flex via OtherSubrs 0–2, `seac`).
 References are to *Adobe Type 1 Font Format* (Adobe Systems, 1990): §2 (font program
 structure), §6 (charstring encoding and operators), §7 (encryption), §8 (`/Private`), and
 Adobe Tech Note #5040 (*Supporting Downloadable PostScript Fonts*, PFB segments).
@@ -56,7 +58,9 @@ every byte read bounds-checked (`bs[i]?`, `extract`), every charstring run fuel-
 ## What is skipped
 
 `/OtherSubrs` code, hints, `/FontInfo`, `/UniqueID`, flex details: `callothersubr`/`pop` only
-move numbers between the two stacks (`pop` on an empty PostScript stack pushes 0). Fonts with
+move numbers between the two stacks (`pop` on an empty PostScript stack pushes 0); when
+recording an outline, OtherSubrs 1 and 0 start and end a flex and `setcurrentpoint` ignores its
+operands (after a flex the current point already is the flex end point). Fonts with
 duplicate `/CharStrings` keys use the first definition. Radix and exponent numbers are names.
 
 ## Results
@@ -627,6 +631,85 @@ structure CState where
   width : Option (Fixed × Fixed) := none
   /-- `seac` components `(bchar, achar)`. -/
   seac : Option (UInt8 × UInt8) := none
+  /-- Record path operators (task 7.3a; `false` for metrics, which then only clear). -/
+  record : Bool := false
+  /-- The recorded path (when `record`). -/
+  path : Outline.PathAcc := {}
+  /-- Flex points collected since `1 callothersubr` (when `record`). -/
+  flex : Option (Array Point) := none
+  /-- `seac` placement operands `(asb, adx, ady)`. -/
+  seacArgs : Option (Fixed × Fixed × Fixed) := none
+
+/-- Most flex points (a flex has 7: the reference point and two curves). -/
+def maxFlexPoints : Nat := 16
+
+/-- A relative move while recording: during a flex only the point is collected (§8.3,
+`OtherSubrs` 1/2), else a new subpath. -/
+def recMove (st : CState) (dx dy : Fixed) : Except String CState :=
+  match st.flex with
+  | some pts =>
+    if maxFlexPoints ≤ pts.size then .error "flex: too many points"
+    else
+      let p := st.path.rel dx dy
+      .ok { st with path := { st.path with cur := p }, flex := some (pts.push p) }
+  | none => do
+    let a ← st.path.rmoveTo dx dy
+    .ok { st with path := a }
+
+/-- End of a flex (`0 callothersubr`): the two curves through the collected points 1–6 (point
+0 is the reference point). -/
+def recFlexEnd (st : CState) : Except String CState :=
+  match st.flex with
+  | some pts =>
+    match pts[1]?, pts[2]?, pts[3]?, pts[4]?, pts[5]?, pts[6]? with
+    | some p1, some p2, some p3, some p4, some p5, some p6 => do
+      let a ← st.path.curveTo p1 p2 p3
+      let a ← a.curveTo p4 p5 p6
+      .ok { st with path := a, flex := none }
+    | _, _, _, _, _, _ => .error "flex: fewer than 7 points"
+  | none => .ok st
+
+/-- A path-construction or hint operator (§6.4–6.5, one-byte `v`): with `record` off it only
+clears the stack (the metrics interpreter); with `record` on it extends the path, taking its
+operands from the bottom of the stack. -/
+def pathOp (v : UInt8) (st : CState) : Except String CState :=
+  let z := Fixed.zero
+  let clear := { st with stack := Stack.empty }
+  if !st.record then .ok clear
+  else if v == 21 then do
+    let xs ← st.stack.bottom 2
+    recMove clear (xs.getD 0 z) (xs.getD 1 z)
+  else if v == 22 then do
+    let xs ← st.stack.bottom 1
+    recMove clear (xs.getD 0 z) z
+  else if v == 4 then do
+    let xs ← st.stack.bottom 1
+    recMove clear z (xs.getD 0 z)
+  else if v == 5 || v == 6 || v == 7 then do
+    let xs ← st.stack.bottom (if v == 5 then 2 else 1)
+    let (dx, dy) := if v == 5 then (xs.getD 0 z, xs.getD 1 z)
+      else if v == 6 then (xs.getD 0 z, z) else (z, xs.getD 0 z)
+    let a ← st.path.rlineTo dx dy
+    .ok { clear with path := a }
+  else if v == 8 then do
+    let xs ← st.stack.bottom 6
+    let a ← st.path.rcurveTo (xs.getD 0 z) (xs.getD 1 z) (xs.getD 2 z) (xs.getD 3 z)
+      (xs.getD 4 z) (xs.getD 5 z)
+    .ok { clear with path := a }
+  else if v == 30 then do
+    -- vhcurveto: dy1 dx2 dy2 dx3
+    let xs ← st.stack.bottom 4
+    let a ← st.path.rcurveTo z (xs.getD 0 z) (xs.getD 1 z) (xs.getD 2 z) (xs.getD 3 z) z
+    .ok { clear with path := a }
+  else if v == 31 then do
+    -- hvcurveto: dx1 dx2 dy2 dy3
+    let xs ← st.stack.bottom 4
+    let a ← st.path.rcurveTo (xs.getD 0 z) z (xs.getD 1 z) (xs.getD 2 z) z (xs.getD 3 z)
+    .ok { clear with path := a }
+  else if v == 9 then do
+    let a ← st.path.close
+    .ok { clear with path := a }
+  else .ok clear
 
 /-- Decode the charstring number starting with byte `v ≥ 32` at `pos` (§6.2). -/
 def decodeNum (code : ByteArray) (pos : Nat) (v : UInt8) : Option (Int × Nat) :=
@@ -677,13 +760,16 @@ def run (subrs : Array ByteArray) : Nat → ByteArray → Nat → CState → Exc
             -- seac: asb adx ady bchar achar
             let args ← st.stack.bottom 5
             match toCode? (args.getD 3 Fixed.zero), toCode? (args.getD 4 Fixed.zero) with
-            | some b, some a => .ok { clear with seac := some (b, a) }
+            | some b, some a =>
+              let sa := (args.getD 0 Fixed.zero, args.getD 1 Fixed.zero, args.getD 2 Fixed.zero)
+              .ok { clear with seac := some (b, a), seacArgs := some sa }
             | _, _ => .error "seac: bad character code"
           else if w == 7 then do
             -- sbw: sbx sby wx wy
             let args ← st.stack.bottom 4
             run subrs fuel code (pos + 2) { clear with
               sbx := args.getD 0 Fixed.zero,
+              path := { clear.path with cur := ⟨args.getD 0 Fixed.zero, args.getD 1 Fixed.zero⟩ },
               width := some (args.getD 2 Fixed.zero, args.getD 3 Fixed.zero) }
           else if w == 12 then do
             let (b, s1) ← st.stack.pop
@@ -693,7 +779,7 @@ def run (subrs : Array ByteArray) : Nat → ByteArray → Nat → CState → Exc
               let s3 ← s2.push (Fixed.div a b)
               run subrs fuel code (pos + 2) { st with stack := s3 }
           else if w == 16 then do
-            let (_, s1) ← st.stack.pop
+            let (oi, s1) ← st.stack.pop
             let (nx, s2) ← s1.pop
             match Fixed.toNat? nx with
             | none => .error "callothersubr: bad argument count"
@@ -703,7 +789,12 @@ def run (subrs : Array ByteArray) : Nat → ByteArray → Nat → CState → Exc
                   have := s2.2; simp only [List.length_take]; omega⟩
                 let rest : Stack := ⟨s2.1.drop n, by
                   have := s2.2; simp only [List.length_drop]; omega⟩
-                run subrs fuel code (pos + 2) { st with stack := rest, ps := ps }
+                let st1 := { st with stack := rest, ps := ps }
+                let st2 ← if !st.record then .ok st1
+                  else if oi.raw == fixedScale then .ok { st1 with flex := some #[] }
+                  else if oi.raw == 0 then recFlexEnd st1
+                  else .ok st1
+                run subrs fuel code (pos + 2) st2
               else .error "callothersubr: stack underflow"
           else if w == 17 then do
             let (x, ps') := match st.ps.pop with
@@ -727,16 +818,23 @@ def run (subrs : Array ByteArray) : Nat → ByteArray → Nat → CState → Exc
         | ⟨f :: fs, h⟩ =>
           run subrs fuel f.code f.pos { st with calls := ⟨fs, Nat.le_of_succ_le h⟩ }
         | ⟨[], _⟩ => .error "return outside a subroutine"
-      else if v == 14 then .ok st
+      else if v == 14 then
+        if st.record then do
+          let a ← st.path.close
+          .ok { st with path := a }
+        else .ok st
       else if v == 13 then do
         -- hsbw: sbx wx
         let args ← st.stack.bottom 2
         let wx := args.getD 1 Fixed.zero
         run subrs fuel code (pos + 1)
           { st with stack := Stack.empty, sbx := args.getD 0 Fixed.zero,
-                    width := some (wx, Fixed.zero) }
+                    width := some (wx, Fixed.zero),
+                    path := { st.path with cur := ⟨args.getD 0 Fixed.zero, Fixed.zero⟩ } }
       else if v == 1 || v == 3 || (4 ≤ v ∧ v ≤ 9) || v == 21 || v == 22 || v == 30 || v == 31
-      then run subrs fuel code (pos + 1) { st with stack := Stack.empty }
+      then do
+        let st1 ← pathOp v st
+        run subrs fuel code (pos + 1) st1
       else .error "unknown charstring operator"
 
 /-- The argument stack of any state `run` returns holds at most `maxStack` operands (by
@@ -762,14 +860,17 @@ structure Glyph where
   wy : Fixed
   /-- `seac` accent composition `(base code, accent code)`, if any. -/
   seac : Option (UInt8 × UInt8)
-  deriving Repr, Inhabited
+  /-- The decrypted charstring (re-run with `record` for the outline, task 7.3a). -/
+  code : ByteArray := ByteArray.empty
+  deriving Inhabited
 
 /-- Decrypt and run one charstring, at most `fuel` steps (`Limits.glyphFuel`). -/
 def evalGlyph (subrs : Array ByteArray) (lenIV : Int) (name : String) (enc : ByteArray)
     (fuel : Nat := Limits.default.glyphFuel) : Except String Glyph := do
-  let st ← run subrs fuel (decryptCharstring lenIV enc) 0 {}
+  let code := decryptCharstring lenIV enc
+  let st ← run subrs fuel code 0 {}
   match st.width with
-  | some (wx, wy) => .ok { name, sbx := st.sbx, wx, wy, seac := st.seac }
+  | some (wx, wy) => .ok { name, sbx := st.sbx, wx, wy, seac := st.seac, code }
   | none => .error "no hsbw/sbw"
 
 /-! ## The font -/
@@ -819,6 +920,8 @@ structure Font1 where
   advances : Array (Option Fixed)
   /-- `advances` has 256 entries. -/
   advances_size : advances.size = 256
+  /-- The decrypted `/Subrs` (for outlines, task 7.3a). -/
+  subrs : Array ByteArray := #[]
 
 /-- The glyph with a given name (first definition). -/
 def Font1.glyph? (f : Font1) (n : String) : Option Glyph := f.glyphs.find? (·.name == n)
@@ -902,7 +1005,8 @@ def parse (limits : Limits) (bytes : ByteArray) (len1 len2 : Option Nat := none)
     glyphs, rejected
     lenIV := pi.lenIV
     advances := mkAdvances encoding glyphs a c
-    advances_size := mkAdvances_size _ _ _ _ }
+    advances_size := mkAdvances_size _ _ _ _
+    subrs }
 
 /-- **Advance law** of a parsed font: the advance of `code` is the text-space advance of the
 glyph its built-in encoding names (when `advances` is built by `mkAdvances`, as `parse`
@@ -914,6 +1018,46 @@ theorem Font1.advance_eq (f : Font1)
       | none => none := by
   unfold Font1.advance Font1.glyph?
   rw [h, mkAdvances_get]
+
+/-! ## Outlines (task 7.3a) -/
+
+/-- Run a decrypted charstring with path recording: the final state (path closed at
+`endchar`). Same interpreter, same stack, nesting and fuel bounds as the metrics run. -/
+def recordRun (subrs : Array ByteArray) (fuel : Nat) (code : ByteArray) : Except String CState :=
+  run subrs fuel code 0 { record := true }
+
+/-- The recorded outline of a decrypted charstring, ignoring a `seac` (used for the parts of
+an accented composite: no nested composites). -/
+def plainOutline (subrs : Array ByteArray) (fuel : Nat) (code : ByteArray) :
+    Option Outline.Outline :=
+  (recordRun subrs fuel code).toOption.map (·.path.segs)
+
+/-- **Glyph outline** of a named glyph in glyph space (charstring units; `/FontMatrix` maps to
+text space): the path its charstring draws from the origin (`hsbw`/`sbw` set the current
+point to the side-bearing point). A `seac` composite (Type 1 §6.4) is the base glyph plus the
+accent translated by `(adx + sbx − asb, ady)` (as fontTools' `T1OutlineExtractor`: the accent's
+own `hsbw` adds its side bearing `asb`), both looked up by their StandardEncoding names.
+`none` if the glyph is missing or rejected, its charstring fails when recording, or the outline
+exceeds `Outline.maxOutlineSegs`. At most `3 · fuel` charstring steps. -/
+def Font1.outline (f : Font1) (name : String) (fuel : Nat := Limits.default.glyphFuel) :
+    Option Outline.Outline :=
+  match f.glyph? name with
+  | none => none
+  | some g =>
+    match recordRun f.subrs fuel g.code with
+    | .error _ => none
+    | .ok st =>
+      match st.seac, st.seacArgs with
+      | some (bc, ac), some (asb, adx, ady) => do
+        let bn ← standardEncoding.glyph bc.toNat
+        let an ← standardEncoding.glyph ac.toNat
+        let bg ← f.glyph? bn
+        let ag ← f.glyph? an
+        let bo ← plainOutline f.subrs fuel bg.code
+        let ao ← plainOutline f.subrs fuel ag.code
+        let o ← st.path.segs.append bo
+        o.append (ao.shift (Fixed.sub (Fixed.add adx st.sbx) asb) ady)
+      | _, _ => some st.path.segs
 
 /-! ## Tests
 
@@ -1056,6 +1200,25 @@ private def expected :
 -- `sbw`: sbx sby wx wy.
 #guard (evalGlyph #[] (-1) "g" ⟨#[139, 139, 239, 149, 12, 7, 14]⟩).toOption.map
   (fun g => (g.wx.raw, g.wy.raw)) == some (100000000, 10000000)
+-- Outlines (task 7.3a): A is a triangle from the side-bearing point (10, 0); B (via `div` and
+-- `callsubr`) a right triangle from (20, 0); C = A + B (`seac` with asb = adx = ady = 0).
+#guard ((parse Limits.default tinyT1).toOption.map fun f =>
+  ["A", "B", "C", "space", "Z"].map fun n => (f.outline n).map fun o => (o.bboxUnits, o.1.size))
+  == some [some (some (10, 0, 610, 700), 4), some (some (20, 0, 120, 100), 4),
+    some (some (10, 0, 610, 700), 8), some (none, 0), none]
+#guard ((parse Limits.default tinyT1).toOption.bind fun f => (f.outline "A").map (·.1)) ==
+  some #[.moveTo ⟨Fixed.ofInt 10, Fixed.zero⟩, .lineTo ⟨Fixed.ofInt 310, Fixed.ofInt 700⟩,
+    .lineTo ⟨Fixed.ofInt 610, Fixed.zero⟩, .close]
+#guard ((parse Limits.default tinyT1).toOption.map fun f => f.subrs.size) == some 6
+-- Flex through the conventional Subrs 0–2 (unencrypted): from (0, 0), reference point
+-- (50, 0), then two curves ending at (150, 10) and (300, 0).
+#guard (plainOutline #[⟨#[142, 139, 12, 16, 12, 17, 12, 17, 12, 33, 11]⟩,
+    ⟨#[139, 140, 12, 16, 11]⟩, ⟨#[139, 141, 12, 16, 11]⟩] 1000
+    ⟨#[139, 139, 13, 139, 139, 21, 140, 10,
+       189, 139, 21, 141, 10,  189, 149, 21, 141, 10,  139, 139, 21, 141, 10,
+       189, 139, 21, 141, 10,  189, 129, 21, 141, 10,  189, 139, 21, 141, 10,
+       189, 139, 21, 141, 10,  189, 139, 139, 139, 10, 14]⟩).map (fun o => (o.1.size, o.bboxUnits)) ==
+  some (4, some (0, 0, 300, 10))
 -- Text-space advance with an exact non-decimal-friendly matrix entry 1/2048.
 #guard (textAdvance ⟨48828125, 11⟩ ⟨0, 0⟩ (Fixed.ofInt 1024) Fixed.zero).raw == 500000
 

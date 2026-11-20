@@ -27,8 +27,8 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
   differential (M7) tight. Both bounds that matter hold: the product is `≤` each factor
   (`mul255_le_left`, `mul255_le_right`).
 * **Clip cache.** Display items of one page usually share a few clip lists (the persistent
-  list of the interpreter). `ClipCache` keeps at most `clipCacheCap` (16) `(Clip, Mask)`
-  pairs, most recently inserted first (oldest evicted). A miss on `cp :: rest` looks up
+  list of the interpreter). `ClipCache` keeps at most `Config.clipCacheSize`
+  (`Limits.clipCacheSize`, 16) `(Clip, Mask)` pairs, most recently inserted first (oldest evicted). A miss on `cp :: rest` looks up
   `rest` first (recursively), so a nested clip reuses the mask of its parent. Keys are
   compared with the derived `DecidableEq` on paths (no pointer equality in pure code).
 * **Applying a clip** to a fill or stroke mask is the same product, evaluated per pixel at
@@ -48,13 +48,14 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
 * **The page.** `renderPaths page zoom rot items` uses the CropBox and the rotation
   `Geom.rotAdd page.rotate rot` (page `/Rotate` + user rotation), the view matrix
   `Geom.viewMatrix` (C2, task 7.1; y flipped, origin top-left) and a pixel size of
-  `⌈screenSize⌉`, each side capped at `maxPageSide` (16384, a local constant: the pixel
-  count stays `≤ 2²⁸`, as `Limits.maxImagePixels`; a larger page is cropped, never an error).
+  `⌈screenSize⌉`, each side capped at `Config.maxPageSide` (`Limits.maxPageSide`, 16384: the
+  pixel count stays `≤ 2²⁸`, as `Limits.maxImagePixels`; a larger page is cropped, never an
+  error).
   Only `fillPath` and `strokePath` items paint here; `clip` items are informational (every
   item carries its clip); glyph runs, images and shadings are 7.3's.
-* **Strokes are a parameter** (`StrokeFn`): stroking is task 7.2b. The default is
-  `hairlineStroke`, a placeholder that draws every segment (curves as their chord) as a
-  1-pixel-wide band, so line art stays visible until 7.2b is wired in. Whatever the stroker
+* **Strokes are a parameter** (`StrokeFn`, given the render `Config`): the default
+  `defaultStroke` is 7.2b's stroker; `hairlineStroke` is a simpler placeholder that draws
+  every segment (curves as their chord) as a 1-pixel-wide band. Whatever the stroker
   returns, compositing only visits the part of its mask inside the item's window, so the
   compositing work stays bounded.
 
@@ -69,7 +70,9 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
 * `renderItems_size`, `renderPaths_size`: the output buffer has exactly `4 · w · h` bytes.
 * **S3**: `clipMaskC_steps_le` (a clip list costs at most `Σ pathCost` over its paths, cache
   hits cost 0), `renderItemsCounted_steps_le` (the counted work of a page is at most
-  `Σ itemCost` over the items, where `pathCost = H · (S · (512 · #segments + 1) + W + 1) + W·H`
+  `Σ itemCost` over the items, where
+  `pathCost = H · (S · (segCap · #segments + 1) + W + 1) + W·H` (`segCap` from
+  `Limits.curveSegCap`)
   bounds flattening + scanline + compositing of one path on a `W × H` page). The stroker's own
   work is 7.2b's theorem; here a stroke counts only its compositing (`≤ W · H`). The derived
   `DecidableEq` key comparison of the cache and the crossing sort of 7.2a are not counted.
@@ -259,19 +262,19 @@ theorem fillEdgesCounted_h_le (es : Array Edge) (rule : FillRule) (win : IRect) 
 /-- Fill a page-space path through `m` over `win`, with the counted rasterizer work. -/
 def fillCounted (cfg : Config) (m : Aff) (p : Path) (rule : FillRule) (win : IRect) :
     Mask × Nat :=
-  fillEdgesCounted (flatten cfg win (ofContentPath m p)) rule win cfg
+  fillEdgesCounted (flatten cfg win (ofContentPath m p cfg)) rule win cfg
 
 /-- Work bound of one path fill in terms of the window and the segment count. -/
 theorem fillCounted_steps_le (cfg : Config) (m : Aff) (p : Path) (rule : FillRule)
     (win : IRect) :
     (fillCounted cfg m p rule win).2 ≤
-      win.height * (cfg.samples * (curveSegCap * p.segs.size + 1) + win.width + 1) := by
+      win.height * (cfg.samples * (cfg.segCap * p.segs.size + 1) + win.width + 1) := by
   simp only [fillCounted]
-  have h1 := fillEdgesCounted_steps_le (flatten cfg win (ofContentPath m p)) rule win cfg
-  have h2 := fillEdgesCounted_w_le (flatten cfg win (ofContentPath m p)) rule win cfg
-  have h3 := fillEdgesCounted_h_le (flatten cfg win (ofContentPath m p)) rule win cfg
-  have h4 := flatten_size_le cfg win (ofContentPath m p)
-  have h5 : (ofContentPath m p).size = p.segs.size := by simp [ofContentPath]
+  have h1 := fillEdgesCounted_steps_le (flatten cfg win (ofContentPath m p cfg)) rule win cfg
+  have h2 := fillEdgesCounted_w_le (flatten cfg win (ofContentPath m p cfg)) rule win cfg
+  have h3 := fillEdgesCounted_h_le (flatten cfg win (ofContentPath m p cfg)) rule win cfg
+  have h4 := flatten_size_le cfg win (ofContentPath m p cfg)
+  have h5 : (ofContentPath m p cfg).size = p.segs.size := by simp [ofContentPath]
   rw [h5] at h4
   refine Nat.le_trans h1 (Nat.mul_le_mul h3 ?_)
   have := Nat.mul_le_mul_left cfg.samples h4
@@ -289,10 +292,8 @@ theorem fillCounted_h_le (cfg : Config) (m : Aff) (p : Path) (rule : FillRule) (
 
 /-! ## 4. Clip masks with a bounded cache -/
 
-/-- Maximum number of cached clip masks per page (local constant). -/
-def clipCacheCap : Nat := 16
-
-/-- Cached clip masks, most recently inserted first, at most `clipCacheCap` entries. -/
+/-- Cached clip masks, most recently inserted first, at most `Config.clipCacheSize` entries
+(`Limits.clipCacheSize`). -/
 structure ClipCache where
   /-- `(clip list, its mask)` pairs. -/
   entries : List (Clip × Mask) := []
@@ -304,19 +305,19 @@ structure ClipCache where
 def ClipCache.find? (cc : ClipCache) (c : Clip) : Option Mask :=
   (cc.entries.find? (fun e => decide (e.1 = c))).map (·.2)
 
-/-- Insert an entry, evicting the oldest beyond `clipCacheCap`. -/
-def ClipCache.insert (cc : ClipCache) (c : Clip) (m : Mask) : ClipCache :=
-  { cc with entries := ((c, m) :: cc.entries).take clipCacheCap }
+/-- Insert an entry, evicting the oldest beyond `cap` entries (`Config.clipCacheSize`). -/
+def ClipCache.insert (cc : ClipCache) (cap : Nat) (c : Clip) (m : Mask) : ClipCache :=
+  { cc with entries := ((c, m) :: cc.entries).take cap }
 
-/-- The cache never holds more than `clipCacheCap` entries after an insertion. -/
-theorem ClipCache.insert_length_le (cc : ClipCache) (c : Clip) (m : Mask) :
-    (cc.insert c m).entries.length ≤ clipCacheCap := by
+/-- The cache never holds more than `cap` entries after an insertion. -/
+theorem ClipCache.insert_length_le (cc : ClipCache) (cap : Nat) (c : Clip) (m : Mask) :
+    (cc.insert cap c m).entries.length ≤ cap := by
   simp only [ClipCache.insert, List.length_take]; exact Nat.min_le_left _ _
 
 /-- Cost bound for one path on a page of `W × H` pixels: flattening + scanline (7.2a's bound
 with the window at most the page) + one pass over at most `W · H` pixels. -/
 def pathCost (cfg : Config) (W H : Nat) (p : Path) : Nat :=
-  H * (cfg.samples * (curveSegCap * p.segs.size + 1) + W + 1) + W * H
+  H * (cfg.samples * (cfg.segCap * p.segs.size + 1) + W + 1) + W * H
 
 /-- Cost bound for a clip list: the sum over its paths. -/
 def clipCost (cfg : Config) (W H : Nat) : Clip → Nat
@@ -378,7 +379,7 @@ def clipMaskC (cfg : Config) (m : Aff) (W H : Nat) (cc : ClipCache) :
       let win := clipWindow W H r1.1
       let f := fillCounted cfg m cp.path cp.rule win
       let res := combine f.1 r1.1
-      (some res, r1.2.1.insert (cp :: rest) res, r1.2.2 + f.2 + res.area)
+      (some res, r1.2.1.insert cfg.clipCacheSize (cp :: rest) res, r1.2.2 + f.2 + res.area)
 
 /-- **S3 for clips.** Computing a clip list's mask costs at most `clipCost` (cache hits cost
 nothing). -/
@@ -407,8 +408,8 @@ theorem clipMaskC_steps_le (cfg : Config) (m : Aff) (W H : Nat) (cc : ClipCache)
       generalize (fillCounted cfg m cp.path cp.rule (clipWindow W H r1.1)) = f at *
       generalize hcw : (clipWindow W H r1.1).width = cw at *
       generalize hch : (clipWindow W H r1.1).height = ch at *
-      have e1 : ch * (cfg.samples * (curveSegCap * cp.path.segs.size + 1) + cw + 1) ≤
-          H * (cfg.samples * (curveSegCap * cp.path.segs.size + 1) + W + 1) :=
+      have e1 : ch * (cfg.samples * (cfg.segCap * cp.path.segs.size + 1) + cw + 1) ≤
+          H * (cfg.samples * (cfg.segCap * cp.path.segs.size + 1) + W + 1) :=
         Nat.mul_le_mul hh (by omega)
       have e2 : f.1.w * f.1.h ≤ W * H := Nat.mul_le_mul (by omega) (by omega)
       omega
@@ -517,12 +518,13 @@ theorem composite_size (b : ByteArray) (W : Nat) (cov : Int → Int → Nat) (r 
 
 /-! ## 6. Strokes (parameter) -/
 
-/-- A stroker: page → device matrix, device window, page-space path, stroke style ↦ coverage
-mask (expected inside the window; compositing ignores anything outside it). Task 7.2b. -/
-abbrev StrokeFn := Aff → IRect → Path → StrokeStyle → Mask
+/-- A stroker: raster configuration (caps), page → device matrix, device window, page-space
+path, stroke style ↦ coverage mask (expected inside the window; compositing ignores anything
+outside it). Task 7.2b. -/
+abbrev StrokeFn := Config → Aff → IRect → Path → StrokeStyle → Mask
 
 /-- A stroker that paints nothing. -/
-def noStroke : StrokeFn := fun _ _ _ _ => {}
+def noStroke : StrokeFn := fun _ _ _ _ _ => {}
 
 /-- A 1-pixel band around the device segment `a → b` (sorted so all bands have the same
 orientation, hence never cancel under nonzero). -/
@@ -548,12 +550,12 @@ def hairlineEdges (p : DPath) : Array Edge :=
 
 /-- **Placeholder stroker** until 7.2b: every segment as a 1-pixel-wide band (width, caps,
 joins and dashes ignored). -/
-def hairlineStroke : StrokeFn := fun m win p _ =>
-  fillEdges (hairlineEdges (ofContentPath m p)) .nonzero win
+def hairlineStroke : StrokeFn := fun cfg m win p _ =>
+  fillEdges (hairlineEdges (ofContentPath m p cfg)) .nonzero win cfg
 
-/-- The stroker `renderPaths` uses by default. **7.2b wiring point**: once `Stroke.lean` lands,
-this file imports it and this body becomes its stroker. -/
-def defaultStroke : StrokeFn := fun m win p s => Stroke.strokePath m p s win
+/-- The stroker `renderPaths` uses by default: 7.2b's `Stroke.strokePath`, with the render
+configuration (so its caps come from the same `Limits`). -/
+def defaultStroke : StrokeFn := fun cfg m win p s => Stroke.strokePath m p s win cfg
 
 /-! ## 7. Rendering path items -/
 
@@ -595,7 +597,7 @@ def renderItem (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RS
     paintMask W H st c.1 f.1 style.color style.alpha c.2.1 (c.2.2 + f.2)
   | .strokePath p style clip =>
     let c := clipMaskC cfg m W H st.cache clip
-    let fm := stroke m (itemWindow W H c.1) p style
+    let fm := stroke cfg m (itemWindow W H c.1) p style
     paintMask W H st c.1 fm style.color style.alpha c.2.1 c.2.2
   | _ => st
 
@@ -672,15 +674,15 @@ theorem renderItem_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : Strok
     generalize (fillCounted cfg m p rule (clipWindow W H c.1)) = f at *
     generalize (clipWindow W H c.1).width = cw at *
     generalize (clipWindow W H c.1).height = ch at *
-    have e1 : ch * (cfg.samples * (curveSegCap * p.segs.size + 1) + cw + 1) ≤
-        H * (cfg.samples * (curveSegCap * p.segs.size + 1) + W + 1) :=
+    have e1 : ch * (cfg.samples * (cfg.segCap * p.segs.size + 1) + cw + 1) ≤
+        H * (cfg.samples * (cfg.segCap * p.segs.size + 1) + W + 1) :=
       Nat.mul_le_mul hh (by omega)
     omega
   | strokePath p style clip =>
     simp only [renderItem, paintMask, itemCost]
     have h0 := clipMaskC_steps_le cfg m W H st.cache clip
     have ha := paint_area_le W H
-      (stroke m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style)
+      (stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style)
       (clipMaskC cfg m W H st.cache clip).1
     omega
   | _ => simp [renderItem, itemCost]
@@ -700,7 +702,8 @@ theorem foldl_renderItem_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke :
 
 /-- **S3 for a page of path items.** The counted work (clip masks, fills, compositing) is at
 most the sum over the items of `itemCost`, i.e. `O(#items × (#clip paths + 1) × (W·H +
-H · (S · 512 · #segments)))`. -/
+H · (S · segCap · #segments)))`, with `segCap = max 1 cfg.curveSegCap` (`Limits.curveSegCap`)
+and `W, H ≤ cfg.maxPageSide` for a page (`pageSize_le`). -/
 theorem renderItemsCounted_steps_le (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
     (stroke : StrokeFn) :
     (renderItemsCounted cfg m W H items stroke).steps ≤
@@ -712,22 +715,21 @@ theorem renderItemsCounted_steps_le (cfg : Config) (m : Aff) (W H : Nat) (items 
 
 /-! ## 8. Pages -/
 
-/-- Largest page side in pixels (local constant; `maxPageSide² = 2²⁸ = Limits.maxImagePixels`). -/
-def maxPageSide : Nat := 16384
-
-/-- Pixel size of a page box at zoom `z` and rotation `r`: `⌈screenSize⌉`, capped. -/
-def pageSize (z : Rat) (r : Doc.Rotation) (bx : Box) : Nat × Nat :=
+/-- Pixel size of a page box at zoom `z` and rotation `r`: `⌈screenSize⌉`, each side capped at
+`side` (`Config.maxPageSide`, `Limits.maxPageSide`; default `16384`, `16384² = 2²⁸ =
+Limits.maxImagePixels`). A larger page is cropped (documented degradation). -/
+def pageSize (side : Nat) (z : Rat) (r : Doc.Rotation) (bx : Box) : Nat × Nat :=
   let s := screenSize z r bx
-  (min maxPageSide s.1.ceil.toNat, min maxPageSide s.2.ceil.toNat)
+  (min side s.1.ceil.toNat, min side s.2.ceil.toNat)
 
 /-- **Render the path items of a page** at zoom `zoom` (pixels per page unit) and user rotation
 `rot` (added to the page's `/Rotate`), onto its CropBox, white background. Strokes go through
-`strokeMask` (default: the hairline placeholder until 7.2b). -/
+`strokeMask` (default: 7.2b's stroker). The raster caps come from `cfg` (`Config.ofLimits`). -/
 def renderPaths (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (items : DisplayList)
     (strokeMask : StrokeFn := defaultStroke) (cfg : Config := {}) : Image :=
   let r := rotAdd page.rotate rot
   let bx := Box.ofRect page.cropBox
-  let sz := pageSize zoom r bx
+  let sz := pageSize cfg.maxPageSide zoom r bx
   renderItems cfg (viewMatrix zoom r bx) sz.1 sz.2 items strokeMask
 
 /-- **Buffer shape** of a rendered page: `4 · w · h` bytes. -/
@@ -738,9 +740,9 @@ theorem renderPaths_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation)
         (renderPaths page zoom rot items strokeMask cfg).h :=
   renderItems_size _ _ _ _ _ _
 
-/-- The page is at most `maxPageSide` pixels wide and tall. -/
-theorem pageSize_le (z : Rat) (r : Doc.Rotation) (bx : Box) :
-    (pageSize z r bx).1 ≤ maxPageSide ∧ (pageSize z r bx).2 ≤ maxPageSide := by
+/-- The page is at most `side` (`Limits.maxPageSide`) pixels wide and tall. -/
+theorem pageSize_le (side : Nat) (z : Rat) (r : Doc.Rotation) (bx : Box) :
+    (pageSize side z r bx).1 ≤ side ∧ (pageSize side z r bx).2 ≤ side := by
   simp only [pageSize]; constructor <;> exact Nat.min_le_left _ _
 
 /-! ## 9. Checks -/
@@ -779,10 +781,17 @@ private def px (img : Image) (x y : Nat) : Nat × Nat × Nat :=
 -- Gray 0.5 fill → 128.
 #guard px (renderItems {} idm 4 4 #[.fillPath (rectP 0 0 4 4) .nonzero ⟨gray 50, Comp.one⟩ []])
     1 1 == (128, 128, 128)
--- Mask intersection coverage ≤ operands, cache reuse on a shared clip.
+-- Mask intersection coverage ≤ operands, cache reuse on a shared clip; a zero-size cache
+-- (`Limits.clipCacheSize := 0`) never hits but renders the same image.
 #guard
   let c : Clip := [⟨rectP 1 1 6 6, .nonzero⟩]
   let it := DisplayItem.fillPath (rectP 0 0 8 8) .nonzero ⟨gray 0, Comp.one⟩ c
-  (renderItemsCounted {} idm 8 8 #[it, it, it]).cache.hits == 2
+  (renderItemsCounted {} idm 8 8 #[it, it, it]).cache.hits == 2 &&
+    (renderItemsCounted (Config.ofLimits { clipCacheSize := 0 }) idm 8 8 #[it, it, it]).cache.hits
+      == 0 &&
+    (renderItems (Config.ofLimits { clipCacheSize := 0 }) idm 8 8 #[it, it, it]).data ==
+      (renderItems {} idm 8 8 #[it, it, it]).data
+-- The page side cap crops: a 30 × 10 box at zoom 1 with `maxPageSide := 8` is 8 × 8.
+#guard pageSize 8 1 .r0 ⟨0, 0, 30, 10⟩ == (8, 8) && pageSize 16384 1 .r0 ⟨0, 0, 30, 10⟩ == (30, 10)
 
 end SafePdf.Core.Raster.Clip

@@ -2,6 +2,7 @@ import SafePdf.Core.Error
 import SafePdf.Core.Limits
 import SafePdf.Core.Content.GState
 import SafePdf.Core.Font.Encoding
+import SafePdf.Core.Font.Outline
 
 /-!
 # Embedded TrueType fonts (Plan.md §6 Phase 6, task 6.1; ISO 32000-2 §9.6.6.4, §9.9)
@@ -914,6 +915,52 @@ theorem outlineAux_visited (f : TTFont) (depth b g : Nat) (v : List Nat) (h : g 
 def TTFont.outline (f : TTFont) (gid : Nat) : Option (Array Contour) :=
   (outlineAux f maxCompositeDepth [] maxOutlineCalls gid).map (·.1)
 
+/-! ### Outlines in the common type (task 7.3a) -/
+
+/-- A font-unit point as a glyph-space `Content.Point`. -/
+def Point.toPt (p : Point) : Content.Point := ⟨Fixed.ofInt p.x, Fixed.ofInt p.y⟩
+
+/-- The midpoint of two font-unit points (exact in `Fixed`: halves of integers). -/
+def midPt (p q : Point) : Content.Point :=
+  ⟨Fixed.clamp ((p.x + q.x) * fixedScale / 2), Fixed.clamp ((p.y + q.y) * fixedScale / 2)⟩
+
+/-- The segments of one closed quadratic contour (TrueType rules: two consecutive off-curve
+points imply the on-curve point midway between them; a contour without on-curve points
+starts at the midpoint of its first two points). At most `c.size + 2` segments. -/
+def contourSegs (c : Contour) : Array Outline.OSeg :=
+  match c[0]? with
+  | none => #[]
+  | some p0 =>
+    -- the start point and the index after it where the walk begins
+    let start : Content.Point × Nat :=
+      match c.findIdx? (·.onCurve) with
+      | some i => ((c.getD i p0).toPt, i + 1)
+      | none => (midPt p0 (c.getD 1 p0), 1)
+    let n := c.size
+    -- walk `n` points cyclically from `start.2`, then close back to the start
+    let st := (List.range n).foldl (fun (acc : Array Outline.OSeg × Option Content.Point) k =>
+      let p := c.getD ((start.2 + k) % n) p0
+      if p.onCurve && k + 1 == n && start.1 == p.toPt then acc
+      else
+        match p.onCurve, acc.2 with
+        | true, none => (acc.1.push (.lineTo p.toPt), none)
+        | true, some q => (acc.1.push (.quadTo q p.toPt), none)
+        | false, none => (acc.1, some p.toPt)
+        | false, some q =>
+          let m : Content.Point := ⟨Fixed.clamp ((q.x.raw + p.toPt.x.raw) / 2),
+            Fixed.clamp ((q.y.raw + p.toPt.y.raw) / 2)⟩
+          (acc.1.push (.quadTo q m), some p.toPt)) (#[Outline.OSeg.moveTo start.1], none)
+    let segs := match st.2 with
+      | some q => st.1.push (.quadTo q start.1)
+      | none => st.1
+    segs.push .close
+
+/-- **Glyph outline in the common type** (task 7.3a): the contours of `outline gid` (font
+units, composites resolved) as quadratic segments; `none` when the glyph has no outline or
+exceeds `Outline.maxOutlineSegs`. -/
+def TTFont.glyphOutline (f : TTFont) (gid : Nat) : Option Outline.Outline :=
+  (f.outline gid).bind fun cs => Outline.Outline.ofArray (cs.flatMap contourSegs)
+
 /-! ## Parsing -/
 
 /-- Parse an embedded TrueType font program (`/FontFile2` contents, Flate already decoded).
@@ -1069,6 +1116,19 @@ private def tiny : Option TTFont := (parse Limits.default tinyTtf).toOption
 #guard (tiny.bind fun f => (f.outline 3).map fun cs => (cs.size, numPoints cs, cs[1]?.bind (·[0]?),
   cs[2]?.bind (·[2]?))) == some (3, 11, some ⟨150, 100, true⟩, some ⟨300, 250, true⟩)
 #guard (tiny.bind fun f => f.outline 5) == none
+#guard (tiny.bind fun f => (f.glyphOutline 2).map (·.1)) ==
+  some #[.moveTo ⟨Fixed.zero, Fixed.zero⟩, .quadTo ⟨Fixed.ofInt 300, Fixed.ofInt 700⟩
+    ⟨Fixed.ofInt 600, Fixed.zero⟩, .close]
+#guard (tiny.bind fun f => (f.glyphOutline 3).map (·.bboxUnits)) == some (some (0, 0, 600, 700))
+#guard (tiny.bind fun f => (f.glyphOutline 1).map (·.1.size)) == some 0
+-- all off-curve: starts at the midpoint, implied on-curve points between controls
+#guard contourSegs #[⟨0, 0, false⟩, ⟨100, 0, false⟩, ⟨100, 100, false⟩, ⟨0, 100, false⟩] ==
+  #[.moveTo ⟨Fixed.ofInt 50, Fixed.zero⟩, .quadTo ⟨Fixed.ofInt 100, Fixed.zero⟩
+      ⟨Fixed.ofInt 100, Fixed.ofInt 50⟩,
+    .quadTo ⟨Fixed.ofInt 100, Fixed.ofInt 100⟩ ⟨Fixed.ofInt 50, Fixed.ofInt 100⟩,
+    .quadTo ⟨Fixed.zero, Fixed.ofInt 100⟩ ⟨Fixed.zero, Fixed.ofInt 50⟩,
+    .quadTo ⟨Fixed.zero, Fixed.zero⟩ ⟨Fixed.ofInt 50, Fixed.zero⟩, .close]
+
 -- the standard Macintosh names agree with `macRomanEncoding` (ASCII and 0x80–0xFF), except
 -- 0xCA (`nonbreakingspace` vs PDF's `space`); the 15 Mac-only symbols are unassigned in PDF
 #guard stdMacNames.size == 258

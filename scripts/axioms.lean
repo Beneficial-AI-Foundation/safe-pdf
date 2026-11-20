@@ -813,3 +813,19 @@ import SafePdf
 #print axioms SafePdf.Core.Raster.Stroke.strokeDPath_size_le
 #print axioms SafePdf.Core.Raster.Stroke.subpaths_bound
 #print axioms SafePdf.Core.Raster.Stroke.strokeEdges_size_le
+
+-- Phase 7, task 7.2d: raster caps in Limits
+#print axioms SafePdf.Core.Raster.Fill.segCount_tol_of_cap
+#print axioms SafePdf.Core.Raster.Fill.Config.one_le_segCap
+#print axioms SafePdf.Core.Raster.Stroke.Geo.make_polyCap
+
+-- Phase 7, task 7.3a: glyph outlines (SafePdf/Core/Font/Outline.lean, SafePdf/Core/Raster/Glyph.lean)
+#print axioms SafePdf.Core.Font.Outline.PathAcc.size_le
+#print axioms SafePdf.Core.Font.Outline.PathAcc.push_size
+#print axioms SafePdf.Core.Raster.Glyph.Cache.insert_length_le
+#print axioms SafePdf.Core.Raster.Glyph.outlineToD_size
+#print axioms SafePdf.Core.Raster.Glyph.addGlyph_size_le
+#print axioms SafePdf.Core.Raster.Glyph.runPath_size_le
+#print axioms SafePdf.Core.Raster.Glyph.paintAll_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemG_size
+#print axioms SafePdf.Core.Raster.Glyph.renderPage_size

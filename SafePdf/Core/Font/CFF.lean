@@ -2,6 +2,7 @@ import SafePdf.Core.Error
 import SafePdf.Core.Limits
 import SafePdf.Core.Object
 import SafePdf.Core.Content.GState
+import SafePdf.Core.Font.Outline
 
 /-!
 # Embedded CFF fonts: metrics and mapping (Plan.md §6 Phase 6, task 6.2; Adobe TN #5176, #5177)
@@ -11,7 +12,9 @@ with `/Subtype /Type1C` for simple fonts and `/CIDFontType0C` for CIDFonts, alre
 Flate-decoded by the caller) far enough to give **text extraction and glyph positions** what
 they need: the font name, `FontMatrix`, `FontBBox`, the charset (glyph names or CIDs), the
 encoding (code ↦ glyph), and each glyph's advance width from its Type 2 charstring.
-Outlines are Phase 7. References: *The Compact Font Format Specification* (Adobe Technical
+Outlines (task 7.3a): `CFFFont.outline` re-runs a charstring with path recording
+(`CState.record`; all Type 2 path operators, the flex family, the `endchar` accent form).
+References: *The Compact Font Format Specification* (Adobe Technical
 Note #5176, 2003) §§ 4–19 and *The Type 2 Charstring Format* (TN #5177, 2000) §§ 3–4.
 
 Fonts are untrusted input (Plan.md §6), so this module follows the core discipline: pure,
@@ -71,7 +74,7 @@ twelve Source Sans Pro 3.006 CFFs (1795–2194 glyphs) need about 200 000 steps 
 
 ## What is skipped
 
-Outlines (Phase 7), hint semantics, `put get ifelse random sqrt index roll`, CFF2 and
+Hint semantics, `put get ifelse random sqrt index roll`, CFF2 and
 OpenType-wrapped CFF (`/FontFile3 /Subtype /OpenType`), synthetic fonts, multiple fonts in one
 FontSet (the first is used), `Encoding` for CID-keyed fonts (ignored, as the spec says).
 
@@ -797,6 +800,126 @@ structure CState where
   width : Option Fixed := none
   /-- The `endchar` accent form's `(base code, accent code)`, if used. -/
   seac : Option (UInt8 × UInt8) := none
+  /-- Record path operators (task 7.3a; `false` for metrics, which then only clear). -/
+  record : Bool := false
+  /-- The recorded path (when `record`). -/
+  path : Outline.PathAcc := {}
+  /-- The `endchar` accent offset `(adx, ady)`, if used. -/
+  seacArgs : Option (Fixed × Fixed) := none
+
+/-! ### Path recording (task 7.3a; TN #5177 §4.1) -/
+
+/-- Lines alternating horizontal and vertical (`hlineto`/`vlineto`). -/
+def altLines (a : Outline.PathAcc) (horiz : Bool) : List Fixed → Except String Outline.PathAcc
+  | [] => .ok a
+  | d :: rest => do
+    let a ← if horiz then a.rlineTo d Fixed.zero else a.rlineTo Fixed.zero d
+    altLines a (!horiz) rest
+
+/-- `{dx dy}+` lines (`rlineto`; a trailing odd operand is ignored). -/
+def pairLines (a : Outline.PathAcc) : List Fixed → Except String Outline.PathAcc
+  | dx :: dy :: rest => do
+    let a ← a.rlineTo dx dy
+    pairLines a rest
+  | _ => .ok a
+
+/-- `{dxa dya dxb dyb dxc dyc}+` curves (`rrcurveto`; leftover operands are ignored). -/
+def sixCurves (a : Outline.PathAcc) : List Fixed → Except String Outline.PathAcc
+  | x1 :: y1 :: x2 :: y2 :: x3 :: y3 :: rest => do
+    let a ← a.rcurveTo x1 y1 x2 y2 x3 y3
+    sixCurves a rest
+  | _ => .ok a
+
+/-- `hvcurveto`/`vhcurveto` curves, alternating the start tangent; a final fifth operand is
+the end tangent's other coordinate. -/
+def altCurves (a : Outline.PathAcc) (horiz : Bool) : List Fixed → Except String Outline.PathAcc
+  | [p, q, r, s, t] =>
+    if horiz then a.rcurveTo p Fixed.zero q r t s else a.rcurveTo Fixed.zero p q r s t
+  | p :: q :: r :: s :: rest => do
+    let a ← if horiz then a.rcurveTo p Fixed.zero q r Fixed.zero s
+      else a.rcurveTo Fixed.zero p q r s Fixed.zero
+    altCurves a (!horiz) rest
+  | _ => .ok a
+
+/-- `vvcurveto` (`horiz = false`) / `hhcurveto` (`true`) curves: groups of four, the first
+optionally preceded by the other coordinate of its start tangent (`d1`). -/
+def sameCurves (a : Outline.PathAcc) (horiz : Bool) (d1 : Fixed) :
+    List Fixed → Except String Outline.PathAcc
+  | p :: q :: r :: s :: rest => do
+    let a ← if horiz then a.rcurveTo p d1 q r s Fixed.zero
+      else a.rcurveTo d1 p q r Fixed.zero s
+    sameCurves a horiz Fixed.zero rest
+  | _ => .ok a
+
+/-- The sum of a list of `Fixed` (saturating). -/
+def fsum (l : List Fixed) : Fixed := l.foldl Fixed.add Fixed.zero
+
+/-- The absolute value of a `Fixed`. -/
+def fabs (x : Fixed) : Fixed := if x.raw < 0 then Fixed.neg x else x
+
+/-- A Type 2 path operator `v` (one byte, or `1200 + w` for the flex escapes) on the operands
+`xs` (bottom first). -/
+def recordOp (a : Outline.PathAcc) (v : Nat) (xs : List Fixed) : Except String Outline.PathAcc :=
+  let z := Fixed.zero
+  let g (k : Nat) := xs.getD k z
+  if v == 5 then pairLines a xs
+  else if v == 6 then altLines a true xs
+  else if v == 7 then altLines a false xs
+  else if v == 8 then sixCurves a xs
+  else if v == 24 then do
+    -- rcurveline: curves, then a line
+    let a ← sixCurves a (xs.take (xs.length - 2))
+    a.rlineTo (g (xs.length - 2)) (g (xs.length - 1))
+  else if v == 25 then do
+    -- rlinecurve: lines, then a curve
+    let a ← pairLines a (xs.take (xs.length - 6))
+    let k := xs.length - 6
+    a.rcurveTo (g k) (g (k + 1)) (g (k + 2)) (g (k + 3)) (g (k + 4)) (g (k + 5))
+  else if v == 26 then
+    if xs.length % 2 == 1 then sameCurves a false (g 0) (xs.drop 1) else sameCurves a false z xs
+  else if v == 27 then
+    if xs.length % 2 == 1 then sameCurves a true (g 0) (xs.drop 1) else sameCurves a true z xs
+  else if v == 30 then altCurves a false xs
+  else if v == 31 then altCurves a true xs
+  else if v == 1235 then sixCurves a (xs.take 12)
+  else if v == 1234 then do
+    -- hflex: dx1 dx2 dy2 dx3 dx4 dx5 dx6
+    let a ← a.rcurveTo (g 0) z (g 1) (g 2) (g 3) z
+    a.rcurveTo (g 4) z (g 5) (Fixed.neg (g 2)) (g 6) z
+  else if v == 1236 then do
+    -- hflex1: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6
+    let a ← a.rcurveTo (g 0) (g 1) (g 2) (g 3) (g 4) z
+    a.rcurveTo (g 5) z (g 6) (g 7) (g 8) (Fixed.neg (fsum [g 1, g 3, g 7]))
+  else if v == 1237 then do
+    -- flex1: dx1 dy1 … dx5 dy5 d6
+    let dx := fsum [g 0, g 2, g 4, g 6, g 8]
+    let dy := fsum [g 1, g 3, g 5, g 7, g 9]
+    let a ← a.rcurveTo (g 0) (g 1) (g 2) (g 3) (g 4) (g 5)
+    if (fabs dy).raw < (fabs dx).raw then a.rcurveTo (g 6) (g 7) (g 8) (g 9) (g 10) (Fixed.neg dy)
+    else a.rcurveTo (g 6) (g 7) (g 8) (g 9) (Fixed.neg dx) (g 10)
+  else .ok a
+
+/-- Apply a path operator to the state when recording (operands: the whole stack, bottom
+first, after the width operand `skip` if it is taken here). -/
+def recordSt (st : CState) (v : Nat) (skip : Bool) : Except String CState :=
+  if st.record then do
+    let xs := st.stack.1.reverse
+    let a ← recordOp st.path v (if skip then xs.drop 1 else xs)
+    .ok { st with path := a }
+  else .ok st
+
+/-- A move while recording (`rmoveto` 21, `hmoveto` 22, `vmoveto` 4), after the width operand
+`skip` if it is taken here. -/
+def recordMove (st : CState) (v : Nat) (skip : Bool) : Except String CState :=
+  if st.record then do
+    let xs := st.stack.1.reverse
+    let xs := if skip then xs.drop 1 else xs
+    let z := Fixed.zero
+    let a ← if v == 21 then st.path.rmoveTo (xs.getD 0 z) (xs.getD 1 z)
+      else if v == 22 then st.path.rmoveTo (xs.getD 0 z) z
+      else st.path.rmoveTo z (xs.getD 0 z)
+    .ok { st with path := a }
+  else .ok st
 
 /-- The subroutine bias for a Subrs INDEX of `n` entries (TN #5177 §4.7). -/
 def bias (n : Nat) : Int := if n < 1240 then 107 else if n < 33900 then 1131 else 32768
@@ -920,18 +1043,26 @@ def run (gsubrs lsubrs : Array ByteArray) :
         if pos + 1 + skip ≤ code.size then
           up (run gsubrs lsubrs fuel code (pos + 1 + skip) (clear { st1 with nStems := stems }))
         else .error "truncated hint mask"
-      else if v == 21 then
-        up (run gsubrs lsubrs fuel code (pos + 1) (clear (takeWidth st (2 < n))))
-      else if v == 22 || v == 4 then
-        up (run gsubrs lsubrs fuel code (pos + 1) (clear (takeWidth st (1 < n))))
+      else if v == 21 then do
+        let st1 ← recordMove st v (2 < n && !st.widthDone)
+        up (run gsubrs lsubrs fuel code (pos + 1) (clear (takeWidth st1 (2 < n))))
+      else if v == 22 || v == 4 then do
+        let st1 ← recordMove st v (1 < n && !st.widthDone)
+        up (run gsubrs lsubrs fuel code (pos + 1) (clear (takeWidth st1 (1 < n))))
       else if v == 14 then
         let extra := n == 1 || n == 5
         let st1 := takeWidth st extra
         let m := if extra && !st.widthDone then n - 1 else n
+        match (if st.record then st1.path.close else .ok st1.path) with
+        | .error e => .error e
+        | .ok path =>
+        let st1 := { st1 with path := path }
         if 4 ≤ m then
           match toCode? (st.stack.1.getD 1 Fixed.zero), toCode? (st.stack.1.getD 0 Fixed.zero) with
           | some bc, some ac =>
-            .ok (clear { st1 with seac := some (bc, ac) }, ⟨fuel, Nat.le_succ _⟩)
+            let sa := (st.stack.1.getD 3 Fixed.zero, st.stack.1.getD 2 Fixed.zero)
+            .ok (clear { st1 with seac := some (bc, ac), seacArgs := some sa },
+              ⟨fuel, Nat.le_succ _⟩)
           | _, _ => .error "endchar: bad accent character code"
         else .ok (clear st1, ⟨fuel, Nat.le_succ _⟩)
       else if v == 10 || v == 29 then do
@@ -954,14 +1085,16 @@ def run (gsubrs lsubrs : Array ByteArray) :
           up (run gsubrs lsubrs fuel f.code f.pos
             { st with calls := ⟨fs, Nat.le_of_succ_le h⟩ })
         | ⟨[], _⟩ => .error "return outside a subroutine"
-      else if isPathOp v then
-        up (run gsubrs lsubrs fuel code (pos + 1) (clear { st with widthDone := true }))
+      else if isPathOp v then do
+        let st1 ← recordSt st v false
+        up (run gsubrs lsubrs fuel code (pos + 1) (clear { st1 with widthDone := true }))
       else if v == 12 then
         match u8 code (pos + 1) with
         | none => .error "truncated escape operator"
         | some w =>
-          if w == 0 || (34 ≤ w ∧ w ≤ 37) then
-            up (run gsubrs lsubrs fuel code (pos + 2) (clear { st with widthDone := true }))
+          if w == 0 || (34 ≤ w ∧ w ≤ 37) then do
+            let st1 ← recordSt st (1200 + w) false
+            up (run gsubrs lsubrs fuel code (pos + 2) (clear { st1 with widthDone := true }))
           else
             match arith w st.stack with
             | .ok s => up (run gsubrs lsubrs fuel code (pos + 2) { st with stack := s })
@@ -1109,6 +1242,12 @@ structure CFFFont where
   glyphs_size : glyphs.size = numGlyphs
   /-- Rejected glyphs (GID) with the reason. -/
   rejected : Array (Nat × String)
+  /-- The charstrings by GID (for outlines, task 7.3a). -/
+  charstrings : Array ByteArray := #[]
+  /-- The Global Subrs (for outlines). -/
+  gsubrs : Array ByteArray := #[]
+  /-- The Private DICTs (one per Font DICT; one for name-keyed fonts), for outlines. -/
+  privs : Array PrivInfo := #[]
 
 /-- The string of a SID: a standard string or an entry of the String INDEX. -/
 def CFFFont.sidString? (f : CFFFont) (sid : Nat) : Option String :=
@@ -1269,7 +1408,47 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
       simp only [codes, Array.length_toList, Array.size_ofFn, List.size_toArray,
         List.length_nil, Nat.zero_add] at h
       exact h
-    rejected := ev.2 }
+    rejected := ev.2
+    charstrings := codes.toArray.map (·.2)
+    gsubrs, privs }
+
+/-! ## Outlines (task 7.3a) -/
+
+/-- The Private DICT that applies to a GID. -/
+def CFFFont.privOf (f : CFFFont) (gid : Nat) : Option PrivInfo :=
+  f.privs[if f.isCID then f.fdSelect.getD gid f.privs.size else 0]?
+
+/-- Run a GID's charstring with path recording: the final state (path closed at `endchar`).
+Same interpreter, same stack, nesting and fuel bounds as the metrics run. -/
+def CFFFont.recordRun (f : CFFFont) (gid : Nat) (fuel : Nat) : Option CState := do
+  let code ← f.charstrings[gid]?
+  let priv ← f.privOf gid
+  match run f.gsubrs priv.subrs fuel code 0 { record := true } with
+  | .ok (st, _) => some st
+  | .error _ => none
+
+/-- The GID of a StandardEncoding code (the `endchar` accent form's operands), through the
+charset. -/
+def CFFFont.gidOfStdCode (f : CFFFont) (c : UInt8) : Option Nat := do
+  let sid ← standardEncodingSids[c.toNat]?
+  if sid == 0 then none else (f.inverse[sid]?).join
+
+/-- **Glyph outline** of a GID in glyph space (charstring units; the font matrix maps to text
+space): the path its Type 2 charstring draws from the origin. The `endchar` accent form
+(TN #5177 Appendix C) is the base glyph plus the accent translated by `(adx, ady)`, both
+selected by their StandardEncoding codes through the charset (name-keyed fonts; no nested
+composites). `none` if the GID is missing or rejected, the charstring fails when recording,
+or the outline exceeds `Outline.maxOutlineSegs`. At most `3 · fuel` charstring steps. -/
+def CFFFont.outline (f : CFFFont) (gid : Nat) (fuel : Nat := Limits.default.glyphFuel) :
+    Option Outline.Outline := do
+  let st ← f.recordRun gid fuel
+  match st.seac, st.seacArgs with
+  | some (bc, ac), some (adx, ady) =>
+    let bst ← f.recordRun (← f.gidOfStdCode bc) fuel
+    let ast ← f.recordRun (← f.gidOfStdCode ac) fuel
+    let o ← st.path.segs.append bst.path.segs
+    o.append (ast.path.segs.shift adx ady)
+  | _, _ => some st.path.segs
 
 /-! ## Tests
 
@@ -1445,5 +1624,36 @@ private def width1 (code : List UInt8) (g : Array ByteArray := #[]) : Option Int
 #guard (parse { fontFuel := 40 } tinyCff).toOption.map (·.rejected.toList.map (·.1)) ==
   some [5, 6]
 #guard (parse { glyphFuel := 1 } tinyCff).toOption.isSome == false
+
+-- outlines (task 7.3a): A is a bare move to (5, 5); B a move to (10, 20) after the width
+-- operand and a line by a global subr; C = A + B (endchar accent form, offset (0, 0)); foo a
+-- move by 25 after the 16.16 width; bad is rejected
+#guard (parse Limits.default tinyCff).toOption.map (fun f =>
+  (List.range 8).map fun g => (f.outline g).map fun o => (o.1.size, o.bboxUnits)) ==
+  some [some (2, some (0, 0, 0, 0)), some (0, none), some (2, some (5, 5, 5, 5)),
+    some (3, some (10, 20, 10, 120)), some (5, some (5, 5, 10, 120)),
+    some (2, some (25, 0, 25, 0)), none, none]
+#guard (parse Limits.default tinyCid).toOption.map (fun f =>
+  (List.range 4).map fun g => (f.outline g).map (·.1.size)) ==
+  some [some 2, some 0, some 2, some 0]
+
+/-- Run a charstring alone with path recording; size and bbox of the outline. -/
+private def rec1 (code : List UInt8) : Option (Nat × Option (Int × Int × Int × Int)) :=
+  match run #[] #[] 1000 ⟨code.toArray⟩ 0 { record := true } with
+  | .ok (st, _) => some (st.path.segs.1.size, st.path.segs.bboxUnits)
+  | .error _ => none
+
+-- rmoveto, rlineto ×2, hhcurveto (odd), vhcurveto, rcurveline, flex, hflex; ends at (70, 71)
+#guard rec1 [139, 139, 21,  149, 159, 169, 179, 5,  140, 141, 142, 143, 144, 27,
+  140, 141, 142, 143, 30,  140, 139, 139, 139, 139, 140, 140, 140, 24,
+  140, 139, 140, 139, 140, 139, 140, 139, 140, 139, 140, 139, 189, 12, 35,
+  140, 140, 139, 140, 140, 140, 140, 12, 34, 14] == some (12, some (0, 0, 70, 71))
+-- vvcurveto (odd), hvcurveto, rlinecurve, hflex1, flex1; ends at (26, 44)
+#guard rec1 [139, 139, 21,  140, 141, 142, 143, 144, 26,  140, 141, 142, 143, 31,
+  140, 140, 141, 142, 143, 144, 145, 146, 25,
+  140, 140, 140, 140, 140, 140, 140, 140, 140, 12, 36,
+  140, 140, 140, 140, 140, 140, 140, 140, 140, 140, 144, 12, 37, 14] == some (10, some (0, 0, 31, 44))
+-- recording does not change the metrics: the width of a moving glyph is still taken
+#guard width1 [149, 139, 139, 21, 14] == some 10000000
 
 end SafePdf.Core.Font.CFF

@@ -181,6 +181,55 @@ def layoutCases : List (String × String × String) :=
       "BT /F1 10 Tf 72 700 Td (Word one two) Tj ET BT /F1 7 Tf 200 705.5 Td (9) Tj ET",
       "Word one two\n9") ]
 
+/-- One page with `/F1` Helvetica (WinAnsi) and `/F2` Symbol (built-in encoding). -/
+def mixedDoc (c : String) : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> " ++
+    "/Contents 4 0 R >>",
+  strmObj "" c,
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>"]
+
+/-- Glyph order and word gaps (task 6.7d): label, content (on `mixedDoc`), expected page text,
+each equal to `mutool draw -F txt` (MuPDF 1.25.1) on the same page.
+
+* **Accents built from two glyphs** (TeX's `\c{c}`, `\'e`): the accent is shown first, the
+  base letter after a backward move overlapping it; content order is kept (`attached`), so
+  the accent precedes its letter. A word shown right to left still sorts (`Hello World`;
+  MuPDF breaks the line at the backward move: "World" / "Hello" — the one expectation here
+  that is not MuPDF's, kept from 6.5/6.7c).
+* **Word gaps across fonts**: Helvetica letters with Symbol operators spaced as TeX's math
+  (`a − b`, gaps 0.22 em and 0.28 em): no space after a mathematical operator (U+2212, U+2264,
+  U+221E: `spaceMayFollow`), a space after `×` (U+00D7, below U+0700).
+* **Prose**: TJ gaps of 0.25 em and 0.16 em are spaces, of 0.10 em and 0.13 em are not (`wordGap`
+  0.15 em, MuPDF's `SPACE_DIST`). -/
+def orderCases : List (String × String × String) :=
+  -- Helvetica (10 pt): cedilla, acute 333; c 500; a, e 556; Symbol: minus, lessequal 549,
+  -- multiply 549, infinity 713
+  [ ("cedilla centred under its base letter",
+      "BT /F1 10 Tf 72 700 Td [(gar) -83 (\\270) 416 (con)] TJ ET", "gar¸con"),
+    ("acute shown centred over the following letter",
+      "BT /F1 10 Tf 72 700 Td [(caf) -111 (\\264) 444 (e here)] TJ ET", "caf´e here"),
+    ("dieresis centred over a capital, after a word",
+      "BT /F1 10 Tf 72 700 Td [(Herr ) -250 (\\250) 583 (Muller)] TJ ET", "Herr ¨Muller"),
+    ("word shown right to left still sorts",
+      "BT /F1 10 Tf 100 700 Td (World) Tj -50 0 Td (Hello) Tj ET", "Hello World"),
+    ("binary minus between letters of another font",
+      "BT /F1 10 Tf 1 0 0 1 72 700 Tm (a) Tj /F2 10 Tf 1 0 0 1 79.78 700 Tm (-) Tj " ++
+        "/F1 10 Tf 1 0 0 1 87.49 700 Tm (b) Tj ET", "a −b"),
+    ("multiply then relation",
+      "BT /F1 10 Tf 1 0 0 1 72 700 Tm (x) Tj /F2 10 Tf 1 0 0 1 79.22 700 Tm (\\264) Tj " ++
+        "/F1 10 Tf 1 0 0 1 86.93 700 Tm (c) Tj /F2 10 Tf 1 0 0 1 94.71 700 Tm (\\243) Tj " ++
+        "/F1 10 Tf 1 0 0 1 102.98 700 Tm (d) Tj ET", "x × c ≤d"),
+    ("operators in one string with thick gaps",
+      "BT /F2 10 Tf 72 700 Td [(\\245) -278 (\\316) -278 (\\261) -278 (=)] TJ ET", "∞∈± ="),
+    ("prose: word gaps and kerning",
+      "BT /F1 10 Tf 72 700 Td [(The) -250 (quick) -100 (brown) -250 (fox.)] TJ ET",
+      "The quickbrown fox."),
+    ("prose: a 0.13 em gap is below MuPDF's 0.15 em",
+      "BT /F1 10 Tf 72 700 Td [(tight) -130 (gap) -160 (wide)] TJ ET", "tightgap wide") ]
+
 /-- Run the cases; the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -197,6 +246,15 @@ def run : IO Nat := do
       bad := bad + 1
   for (label, c, text) in layoutCases do
     match extract (helvDoc c) with
+    | some (_, t, _) =>
+      if t != text then
+        IO.println s!"  FAIL {label}: got {repr t}, expected {repr text}"
+        bad := bad + 1
+    | none =>
+      IO.println s!"  FAIL {label}: extraction failed"
+      bad := bad + 1
+  for (label, c, text) in orderCases do
+    match extract (mixedDoc c) with
     | some (_, t, _) =>
       if t != text then
         IO.println s!"  FAIL {label}: got {repr t}, expected {repr text}"

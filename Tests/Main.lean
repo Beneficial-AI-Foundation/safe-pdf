@@ -17,6 +17,7 @@ import Tests.RasterClip
 import Tests.RasterStroke
 import Tests.TextLayout
 import Tests.TextUnicode
+import Tests.RasterGlyph
 
 /-!
 # Test runner
@@ -53,7 +54,8 @@ def suites : List Suite :=
     { name := "raster-clip", run := SafePdf.Tests.RasterClip.run },
     { name := "raster-stroke", run := SafePdf.Tests.RasterStroke.run },
     { name := "text-layout", run := SafePdf.Tests.TextLayout.run },
-    { name := "text-unicode", run := SafePdf.Tests.TextUnicode.run } ]
+    { name := "text-unicode", run := SafePdf.Tests.TextUnicode.run },
+    { name := "raster-glyph", run := SafePdf.Tests.RasterGlyph.run } ]
 
 end SafePdf.Tests
 
