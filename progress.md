@@ -30,8 +30,8 @@ Design document: Plan.md
 | 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | ready (2026-11-20; CI run 44766606520 on 490f559 green) |
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | [#8](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/8) | ready (2026-11-20; CI runs 44778238929/44778250412 on 6620260 green) |
 | 8 | `phase-8-shell` | `phase-7-raster` | [#9](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/9) | ready (2026-11-20; CI run 44794683620 on 4684b5a green) |
-| 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | draft (cut from 4684b5a after M8) |
-| 10 | `phase-10-biblean` | `phase-9-gui` | — | none |
+| 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | draft (all tasks done; M9 waits for the Acrobat/Okular check) |
+| 10 | `phase-10-biblean` | `phase-9-gui` | — | none (Phase 10's tasks landed on #7–#9 while earlier milestones were verified; its branch and PR are cut from #10's tip once M10 can be checked) |
 States: none · draft · awaiting-ci · ready (<date>) · changes-requested · merged · closed.
 
 ## Phase 0 — Infrastructure
