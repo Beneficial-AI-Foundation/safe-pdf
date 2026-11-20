@@ -1,4 +1,5 @@
 import SafePdf.Shell.Views.Common
+import SafePdf.Core.Annot
 import SafePdf.Shell.Views.Summary
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Views.Svg
@@ -78,7 +79,7 @@ def extractAll (limits : Limits) (doc : Doc) : Array PageOut := Id.run do
   let mut budget := Budget.init limits
   let mut out := #[]
   for h : k in [0:doc.pages.size] do
-    let (r, b) := SafePdf.Core.Text.extractDocPage limits doc (doc.pages[k]'h.upper) budget
+    let (r, b) := SafePdf.Core.Annot.extractDocPageAnnots limits doc (doc.pages[k]'h.upper) budget
     budget := b
     out := out.push (pageOut (k + 1) r)
   return out
@@ -89,7 +90,7 @@ def extractOne (limits : Limits) (doc : Doc) (n : Nat) : Option PageOut :=
   | 0 => none
   | k + 1 =>
     if h : k < doc.pages.size then
-      some (pageOut n (SafePdf.Core.Text.extractDocPage limits doc doc.pages[k]
+      some (pageOut n (SafePdf.Core.Annot.extractDocPageAnnots limits doc doc.pages[k]
         (Budget.init limits)).1)
     else none
 

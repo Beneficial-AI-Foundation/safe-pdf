@@ -100,7 +100,7 @@ package «safe-pdf» where
 quoting is injection-free. A default target so that `scripts/axioms.lean` can audit its
 theorems after a plain `lake build`. -/
 @[default_target] lean_lib SafePdfApp where
-  roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas]
+  roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas, `SafePdf.Shell.App.View]
 
 /-- Test suites: every module under `Tests/` (TOML `globs = ["Tests.+"]`). -/
 lean_lib Tests where
