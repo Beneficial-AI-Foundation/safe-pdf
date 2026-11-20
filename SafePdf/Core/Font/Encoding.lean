@@ -29,8 +29,13 @@ Unicode fallback used by text extraction when a font has no `/ToUnicode` CMap (t
     greaterequal partialdiff summation product pi integral Omega radical approxequal Delta
     lozenge apple`) are **not** in PDF's MacRomanEncoding and stay unassigned.
   - PDFDoc: `0x18`–`0x1F` are the spacing accents, `0x7F`, `0x9F`, `0xAD` are undefined.
-  The built-in encodings of Symbol and ZapfDingbats are not tabulated here (reported as a follow-up);
-  a caller that knows a font's built-in encoding passes it as `builtin?`.
+* **Symbol and ZapfDingbats (Annex D.5, D.6).** `symbolEncoding` (190 codes) and
+  `zapfDingbatsEncoding` (202 codes) are the built-in encodings of the two standard symbolic
+  fonts, transcribed from memory of Adobe's `Symbol.afm` (001.008, which encodes `Euro` at
+  `0xA0`) and `ZapfDingbats.afm` (002.000) `C` entries, which Annex D reproduces (no file was
+  downloaded); counts and spot checks are `#guard`s below. They are the implicit base of a font
+  whose `/BaseFont` names one of them (`symbolicBuiltin?`, same prefixes as
+  `Std14.ofBaseFont`, subset tag stripped) when the caller has no program encoding.
 * **`/Differences`** (§9.6.5.1, Table 112): an integer sets the current code, each following
   name is assigned to the current code which then increments. A code outside `0..255` makes
   the names up to the next integer ignored; any other object is skipped. Total, linear in the
@@ -38,15 +43,19 @@ Unicode fallback used by text extraction when a font has no `/ToUnicode` CMap (t
 * **Base encoding** (Table 112 `BaseEncoding`): an `/Encoding` name selects a predefined
   encoding; a dictionary uses its `/BaseEncoding` name, else the implicit base. The implicit
   base is the font program's built-in encoding when the caller knows it (`builtin?`: an
-  embedded program's encoding, or a standard symbolic font's), else `StandardEncoding` (the
+  embedded program's encoding), else a standard symbolic font's built-in encoding by
+  `/BaseFont` (`implicitBase`), else `StandardEncoding` (the
   §9.6.5 rule for nonsymbolic fonts; for a symbolic font without a known built-in encoding
   there is nothing better). `MacExpertEncoding` is not tabulated and falls back to the
   implicit base. TrueType-specific rules (§9.6.5.4) belong to task 6.1.
 * **Glyph name → Unicode** follows the Adobe Glyph List Specification: drop the suffix from
   the first `.`, split at `_`, map each component through the AGL subset `aglNames` (every
   glyph of the four encodings plus `minus`, `ff`, `ffi`, `ffl`, `nbspace`, `sfthyphen` and the
-  15 Mac symbols), else `uniXXXX…` (groups of four hex digits) or `uXXXX`–`uXXXXXX`, else
-  nothing. Hex digits are accepted in either case (AGL requires upper case; pdf.js accepts
+  15 Mac symbols) and `aglSymbolNames` (the other Symbol glyphs: Greek, math, arrows, the
+  Corporate Use extension pieces), else `uniXXXX…` (groups of four hex digits) or
+  `uXXXX`–`uXXXXXX`, else nothing. For a ZapfDingbats font (`glyphToUnicodeIn true`) the
+  ITC Zapf Dingbats Glyph List (`dingbatNames`, `a1`…`a206`) is tried first; `glyphToUnicode`
+  is the variant for any other font. Hex digits are accepted in either case (AGL requires upper case; pdf.js accepts
   both) and surrogates / values above `0x10FFFF` are rejected. `afii*` names are not covered.
 
 Everything is pure and total.
@@ -216,6 +225,81 @@ def pdfDocNames : Array String := #[
   "oslash", "ugrave", "uacute", "ucircumflex", "udieresis", "yacute", "thorn", "ydieresis"
   ]
 
+/-- Built-in encoding of the standard **Symbol** font by code (ISO 32000-2 Annex D.5, Adobe
+`Symbol.afm` 001.008); `""` = unassigned. 190 codes: `0x20`–`0x7E` and `0xA0`–`0xFE`. -/
+def symbolNames : Array String := #[
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "space", "exclam", "universal", "numbersign", "existential", "percent", "ampersand", "suchthat",
+  "parenleft", "parenright", "asteriskmath", "plus", "comma", "minus", "period", "slash",
+  "zero", "one", "two", "three", "four", "five", "six", "seven",
+  "eight", "nine", "colon", "semicolon", "less", "equal", "greater", "question",
+  "congruent", "Alpha", "Beta", "Chi", "Delta", "Epsilon", "Phi", "Gamma",
+  "Eta", "Iota", "theta1", "Kappa", "Lambda", "Mu", "Nu", "Omicron",
+  "Pi", "Theta", "Rho", "Sigma", "Tau", "Upsilon", "sigma1", "Omega",
+  "Xi", "Psi", "Zeta", "bracketleft", "therefore", "bracketright", "perpendicular", "underscore",
+  "radicalex", "alpha", "beta", "chi", "delta", "epsilon", "phi", "gamma",
+  "eta", "iota", "phi1", "kappa", "lambda", "mu", "nu", "omicron",
+  "pi", "theta", "rho", "sigma", "tau", "upsilon", "omega1", "omega",
+  "xi", "psi", "zeta", "braceleft", "bar", "braceright", "similar", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "Euro", "Upsilon1", "minute", "lessequal", "fraction", "infinity", "florin", "club",
+  "diamond", "heart", "spade", "arrowboth", "arrowleft", "arrowup", "arrowright", "arrowdown",
+  "degree", "plusminus", "second", "greaterequal", "multiply", "proportional", "partialdiff", "bullet",
+  "divide", "notequal", "equivalence", "approxequal", "ellipsis", "arrowvertex", "arrowhorizex", "carriagereturn",
+  "aleph", "Ifraktur", "Rfraktur", "weierstrass", "circlemultiply", "circleplus", "emptyset", "intersection",
+  "union", "propersuperset", "reflexsuperset", "notsubset", "propersubset", "reflexsubset", "element", "notelement",
+  "angle", "gradient", "registerserif", "copyrightserif", "trademarkserif", "product", "radical", "dotmath",
+  "logicalnot", "logicaland", "logicalor", "arrowdblboth", "arrowdblleft", "arrowdblup", "arrowdblright", "arrowdbldown",
+  "lozenge", "angleleft", "registersans", "copyrightsans", "trademarksans", "summation", "parenlefttp", "parenleftex",
+  "parenleftbt", "bracketlefttp", "bracketleftex", "bracketleftbt", "bracelefttp", "braceleftmid", "braceleftbt", "braceex",
+  "apple", "angleright", "integral", "integraltp", "integralex", "integralbt", "parenrighttp", "parenrightex",
+  "parenrightbt", "bracketrighttp", "bracketrightex", "bracketrightbt", "bracerighttp", "bracerightmid", "bracerightbt", ""
+  ]
+
+/-- Built-in encoding of the standard **ZapfDingbats** font by code (ISO 32000-2 Annex D.6,
+Adobe `ZapfDingbats.afm` 002.000); `""` = unassigned. 202 codes: `0x20`–`0x7E`, `0x80`–`0x8D`
+and `0xA1`–`0xFE` except `0xF0`. -/
+def zapfDingbatsNames : Array String := #[
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "space", "a1", "a2", "a202", "a3", "a4", "a5", "a119",
+  "a118", "a117", "a11", "a12", "a13", "a14", "a15", "a16",
+  "a105", "a17", "a18", "a19", "a20", "a21", "a22", "a23",
+  "a24", "a25", "a26", "a27", "a28", "a6", "a7", "a8",
+  "a9", "a10", "a29", "a30", "a31", "a32", "a33", "a34",
+  "a35", "a36", "a37", "a38", "a39", "a40", "a41", "a42",
+  "a43", "a44", "a45", "a46", "a47", "a48", "a49", "a50",
+  "a51", "a52", "a53", "a54", "a55", "a56", "a57", "a58",
+  "a59", "a60", "a61", "a62", "a63", "a64", "a65", "a66",
+  "a67", "a68", "a69", "a70", "a71", "a72", "a73", "a74",
+  "a203", "a75", "a204", "a76", "a77", "a78", "a79", "a81",
+  "a82", "a83", "a84", "a97", "a98", "a99", "a100", "",
+  "a89", "a90", "a93", "a94", "a91", "a92", "a205", "a85",
+  "a206", "a86", "a87", "a88", "a95", "a96", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "",
+  "", "a101", "a102", "a103", "a104", "a106", "a107", "a108",
+  "a112", "a111", "a110", "a109", "a120", "a121", "a122", "a123",
+  "a124", "a125", "a126", "a127", "a128", "a129", "a130", "a131",
+  "a132", "a133", "a134", "a135", "a136", "a137", "a138", "a139",
+  "a140", "a141", "a142", "a143", "a144", "a145", "a146", "a147",
+  "a148", "a149", "a150", "a151", "a152", "a153", "a154", "a155",
+  "a156", "a157", "a158", "a159", "a160", "a161", "a163", "a164",
+  "a196", "a165", "a192", "a166", "a167", "a168", "a169", "a170",
+  "a171", "a172", "a173", "a162", "a174", "a175", "a176", "a177",
+  "a178", "a179", "a193", "a180", "a199", "a181", "a200", "a182",
+  "", "a201", "a183", "a184", "a197", "a185", "a194", "a198",
+  "a186", "a195", "a187", "a188", "a189", "a190", "a191", ""
+  ]
+
 /-- Glyph names of the Adobe Glyph List subset (sorted), parallel to `aglCodes`. -/
 def aglNames : Array String := #[
   "A", "AE", "Aacute", "Acircumflex", "Adieresis", "Agrave", "Aring", "Atilde",
@@ -284,6 +368,102 @@ def aglCodes : Array Nat := #[
   0x0075, 0x00FA, 0x00FB, 0x00FC, 0x00F9, 0x005F, 0x0076, 0x0077,
   0x0078, 0x0079, 0x00FD, 0x00FF, 0x00A5, 0x007A, 0x017E, 0x0030]
 
+/-- Glyph names of the Symbol font (Annex D.5) missing from `aglNames`, parallel to
+`aglSymbolCodes`. Code points are those of the Adobe Glyph List; the AGL itself maps the
+Symbol-only extension pieces and serif/sans variants (`parenlefttp`, `registerserif`, `apple`,
+…) to the Corporate Use area `U+F6D9`–`U+F8FF`, and so does this table. -/
+def aglSymbolNames : Array String := #[
+  "universal", "existential", "suchthat", "asteriskmath", "congruent", "Alpha", "Beta", "Chi",
+  "Epsilon", "Phi", "Gamma", "Eta", "Iota", "theta1", "Kappa", "Lambda",
+  "Mu", "Nu", "Omicron", "Pi", "Theta", "Rho", "Sigma", "Tau",
+  "Upsilon", "sigma1", "Xi", "Psi", "Zeta", "therefore", "perpendicular", "radicalex",
+  "alpha", "beta", "chi", "delta", "epsilon", "phi", "gamma", "eta",
+  "iota", "phi1", "kappa", "lambda", "nu", "omicron", "theta", "rho",
+  "sigma", "tau", "upsilon", "omega1", "omega", "xi", "psi", "zeta",
+  "similar", "Upsilon1", "minute", "club", "diamond", "heart", "spade", "arrowboth",
+  "arrowleft", "arrowup", "arrowright", "arrowdown", "second", "proportional", "equivalence", "arrowvertex",
+  "arrowhorizex", "carriagereturn", "aleph", "Ifraktur", "Rfraktur", "weierstrass", "circlemultiply", "circleplus",
+  "emptyset", "intersection", "union", "propersuperset", "reflexsuperset", "notsubset", "propersubset", "reflexsubset",
+  "element", "notelement", "angle", "gradient", "registerserif", "copyrightserif", "trademarkserif", "dotmath",
+  "logicaland", "logicalor", "arrowdblboth", "arrowdblleft", "arrowdblup", "arrowdblright", "arrowdbldown", "angleleft",
+  "registersans", "copyrightsans", "trademarksans", "parenlefttp", "parenleftex", "parenleftbt", "bracketlefttp", "bracketleftex",
+  "bracketleftbt", "bracelefttp", "braceleftmid", "braceleftbt", "braceex", "apple", "angleright", "integraltp",
+  "integralex", "integralbt", "parenrighttp", "parenrightex", "parenrightbt", "bracketrighttp", "bracketrightex", "bracketrightbt",
+  "bracerighttp", "bracerightmid", "bracerightbt"]
+
+/-- Unicode code points of `aglSymbolNames`, entry by entry (Adobe Glyph List). -/
+def aglSymbolCodes : Array Nat := #[
+  0x2200, 0x2203, 0x220B, 0x2217, 0x2245, 0x0391, 0x0392, 0x03A7,
+  0x0395, 0x03A6, 0x0393, 0x0397, 0x0399, 0x03D1, 0x039A, 0x039B,
+  0x039C, 0x039D, 0x039F, 0x03A0, 0x0398, 0x03A1, 0x03A3, 0x03A4,
+  0x03A5, 0x03C2, 0x039E, 0x03A8, 0x0396, 0x2234, 0x22A5, 0xF8E5,
+  0x03B1, 0x03B2, 0x03C7, 0x03B4, 0x03B5, 0x03C6, 0x03B3, 0x03B7,
+  0x03B9, 0x03D5, 0x03BA, 0x03BB, 0x03BD, 0x03BF, 0x03B8, 0x03C1,
+  0x03C3, 0x03C4, 0x03C5, 0x03D6, 0x03C9, 0x03BE, 0x03C8, 0x03B6,
+  0x223C, 0x03D2, 0x2032, 0x2663, 0x2666, 0x2665, 0x2660, 0x2194,
+  0x2190, 0x2191, 0x2192, 0x2193, 0x2033, 0x221D, 0x2261, 0xF8E6,
+  0xF8E7, 0x21B5, 0x2135, 0x2111, 0x211C, 0x2118, 0x2297, 0x2295,
+  0x2205, 0x2229, 0x222A, 0x2283, 0x2287, 0x2284, 0x2282, 0x2286,
+  0x2208, 0x2209, 0x2220, 0x2207, 0xF6DA, 0xF6D9, 0xF6DB, 0x22C5,
+  0x2227, 0x2228, 0x21D4, 0x21D0, 0x21D1, 0x21D2, 0x21D3, 0x2329,
+  0xF8E8, 0xF8E9, 0xF8EA, 0xF8EB, 0xF8EC, 0xF8ED, 0xF8EE, 0xF8EF,
+  0xF8F0, 0xF8F1, 0xF8F2, 0xF8F3, 0xF8F4, 0xF8FF, 0x232A, 0x2320,
+  0xF8F5, 0x2321, 0xF8F6, 0xF8F7, 0xF8F8, 0xF8F9, 0xF8FA, 0xF8FB,
+  0xF8FC, 0xF8FD, 0xF8FE]
+
+/-- Glyph names of the ZapfDingbats font (`a1`…`a206`), parallel to `dingbatCodes`. Used only
+for a font known to be ZapfDingbats (AGL specification: the ITC Zapf Dingbats Glyph List
+applies to that font alone; other fonts may name glyphs `a12` for unrelated shapes). -/
+def dingbatNames : Array String := #[
+  "a1", "a2", "a202", "a3", "a4", "a5", "a119", "a118", "a117", "a11",
+  "a12", "a13", "a14", "a15", "a16", "a105", "a17", "a18", "a19", "a20",
+  "a21", "a22", "a23", "a24", "a25", "a26", "a27", "a28", "a6", "a7",
+  "a8", "a9", "a10", "a29", "a30", "a31", "a32", "a33", "a34", "a35",
+  "a36", "a37", "a38", "a39", "a40", "a41", "a42", "a43", "a44", "a45",
+  "a46", "a47", "a48", "a49", "a50", "a51", "a52", "a53", "a54", "a55",
+  "a56", "a57", "a58", "a59", "a60", "a61", "a62", "a63", "a64", "a65",
+  "a66", "a67", "a68", "a69", "a70", "a71", "a72", "a73", "a74", "a203",
+  "a75", "a204", "a76", "a77", "a78", "a79", "a81", "a82", "a83", "a84",
+  "a97", "a98", "a99", "a100", "a89", "a90", "a93", "a94", "a91", "a92",
+  "a205", "a85", "a206", "a86", "a87", "a88", "a95", "a96", "a101", "a102",
+  "a103", "a104", "a106", "a107", "a108", "a112", "a111", "a110", "a109", "a120",
+  "a121", "a122", "a123", "a124", "a125", "a126", "a127", "a128", "a129", "a130",
+  "a131", "a132", "a133", "a134", "a135", "a136", "a137", "a138", "a139", "a140",
+  "a141", "a142", "a143", "a144", "a145", "a146", "a147", "a148", "a149", "a150",
+  "a151", "a152", "a153", "a154", "a155", "a156", "a157", "a158", "a159", "a160",
+  "a161", "a163", "a164", "a196", "a165", "a192", "a166", "a167", "a168", "a169",
+  "a170", "a171", "a172", "a173", "a162", "a174", "a175", "a176", "a177", "a178",
+  "a179", "a193", "a180", "a199", "a181", "a200", "a182", "a201", "a183", "a184",
+  "a197", "a185", "a194", "a198", "a186", "a195", "a187", "a188", "a189", "a190",
+  "a191"]
+
+/-- Unicode code points of `dingbatNames` (Adobe's ITC Zapf Dingbats Glyph List): the
+Dingbats block `U+2701`–`U+27BE` by position, except the glyphs Unicode encodes elsewhere
+(`☎ ☛ ☞ ★ ● ■ ▲ ▼ ◆ ◗`, the suits `U+2660`–`U+2666`, `①`–`⑩`, `→ ↔ ↕`) and the ornamental
+brackets `0x80`–`0x8D` at `U+2768`–`U+2775`. -/
+def dingbatCodes : Array Nat := #[
+0x2701, 0x2702, 0x2703, 0x2704, 0x260E, 0x2706, 0x2707, 0x2708, 0x2709, 0x261B,
+  0x261E, 0x270C, 0x270D, 0x270E, 0x270F, 0x2710, 0x2711, 0x2712, 0x2713, 0x2714,
+  0x2715, 0x2716, 0x2717, 0x2718, 0x2719, 0x271A, 0x271B, 0x271C, 0x271D, 0x271E,
+  0x271F, 0x2720, 0x2721, 0x2722, 0x2723, 0x2724, 0x2725, 0x2726, 0x2727, 0x2605,
+  0x2729, 0x272A, 0x272B, 0x272C, 0x272D, 0x272E, 0x272F, 0x2730, 0x2731, 0x2732,
+  0x2733, 0x2734, 0x2735, 0x2736, 0x2737, 0x2738, 0x2739, 0x273A, 0x273B, 0x273C,
+  0x273D, 0x273E, 0x273F, 0x2740, 0x2741, 0x2742, 0x2743, 0x2744, 0x2745, 0x2746,
+  0x2747, 0x2748, 0x2749, 0x274A, 0x274B, 0x25CF, 0x274D, 0x25A0, 0x274F, 0x2750,
+  0x2751, 0x2752, 0x25B2, 0x25BC, 0x25C6, 0x2756, 0x25D7, 0x2758, 0x2759, 0x275A,
+  0x275B, 0x275C, 0x275D, 0x275E, 0x2768, 0x2769, 0x276A, 0x276B, 0x276C, 0x276D,
+  0x276E, 0x276F, 0x2770, 0x2771, 0x2772, 0x2773, 0x2774, 0x2775, 0x2761, 0x2762,
+  0x2763, 0x2764, 0x2765, 0x2766, 0x2767, 0x2663, 0x2666, 0x2665, 0x2660, 0x2460,
+  0x2461, 0x2462, 0x2463, 0x2464, 0x2465, 0x2466, 0x2467, 0x2468, 0x2469, 0x2776,
+  0x2777, 0x2778, 0x2779, 0x277A, 0x277B, 0x277C, 0x277D, 0x277E, 0x277F, 0x2780,
+  0x2781, 0x2782, 0x2783, 0x2784, 0x2785, 0x2786, 0x2787, 0x2788, 0x2789, 0x278A,
+  0x278B, 0x278C, 0x278D, 0x278E, 0x278F, 0x2790, 0x2791, 0x2792, 0x2793, 0x2794,
+  0x2192, 0x2194, 0x2195, 0x2798, 0x2799, 0x279A, 0x279B, 0x279C, 0x279D, 0x279E,
+  0x279F, 0x27A0, 0x27A1, 0x27A2, 0x27A3, 0x27A4, 0x27A5, 0x27A6, 0x27A7, 0x27A8,
+  0x27A9, 0x27AA, 0x27AB, 0x27AC, 0x27AD, 0x27AE, 0x27AF, 0x27B1, 0x27B2, 0x27B3,
+  0x27B4, 0x27B5, 0x27B6, 0x27B7, 0x27B8, 0x27B9, 0x27BA, 0x27BB, 0x27BC, 0x27BD,
+  0x27BE]
+
 /-- `StandardEncoding` (Annex D, column STD). -/
 def standardEncoding : Encoding := ofNameTable standardNames
 
@@ -295,6 +475,12 @@ def macRomanEncoding : Encoding := ofNameTable macRomanNames
 
 /-- `PDFDocEncoding` (Annex D, column PDF, Table D.3). -/
 def pdfDocEncoding : Encoding := ofNameTable pdfDocNames
+
+/-- The built-in encoding of the standard Symbol font (Annex D.5). -/
+def symbolEncoding : Encoding := ofNameTable symbolNames
+
+/-- The built-in encoding of the standard ZapfDingbats font (Annex D.6). -/
+def zapfDingbatsEncoding : Encoding := ofNameTable zapfDingbatsNames
 
 set_option maxRecDepth 4000 in
 /-- `StandardEncoding` has 256 entries. -/
@@ -315,6 +501,16 @@ set_option maxRecDepth 4000 in
 /-- `PDFDocEncoding` has 256 entries. -/
 theorem pdfDocEncoding_size : pdfDocEncoding.size = 256 := by
   rw [pdfDocEncoding, ofNameTable, Array.size_map]; rfl
+
+set_option maxRecDepth 4000 in
+/-- The Symbol built-in encoding has 256 entries. -/
+theorem symbolEncoding_size : symbolEncoding.size = 256 := by
+  rw [symbolEncoding, ofNameTable, Array.size_map]; rfl
+
+set_option maxRecDepth 4000 in
+/-- The ZapfDingbats built-in encoding has 256 entries. -/
+theorem zapfDingbatsEncoding_size : zapfDingbatsEncoding.size = 256 := by
+  rw [zapfDingbatsEncoding, ofNameTable, Array.size_map]; rfl
 
 namespace Encoding
 
@@ -388,13 +584,70 @@ encoding rules below only depend on it through `builtin?` (see the module doc). 
 def isSymbolic (resolve : PdfObject → PdfObject) (fontDict : Dict) : Bool :=
   (fontFlags resolve fontDict / 4) % 2 == 1
 
-/-- The encoding of a simple font (ISO 32000-2 §9.6.5, Table 112). `builtin?` is the font
-program's built-in encoding when known (embedded program, or a standard symbolic font);
-otherwise the implicit base is `StandardEncoding`. Never fails: a bad `/Encoding` entry
-leaves the implicit base. -/
+/-- Strip a subset tag: six upper-case ASCII letters followed by `+` (ISO 32000-2 §9.9.2). -/
+def stripSubsetTag (cs : List Char) : List Char :=
+  match cs with
+  | a :: b :: c :: d :: e :: f :: '+' :: rest =>
+    if [a, b, c, d, e, f].all fun x => 'A' ≤ x ∧ x ≤ 'Z' then rest else cs
+  | _ => cs
+
+/-- The built-in encoding of a standard symbolic font named by `/BaseFont` (Annex D.5, D.6):
+after stripping a subset tag and spaces, a name starting with `Symbol` gives
+`symbolEncoding`, one starting with `ZapfDingbats` or `Dingbats` gives `zapfDingbatsEncoding`
+(the same family prefixes as `Std14.ofBaseFont`); any other name gives `none`. -/
+def symbolicBuiltin? (baseFont : String) : Option Encoding :=
+  let cs := (stripSubsetTag baseFont.toList).filter (· ≠ ' ')
+  if "Symbol".toList.isPrefixOf cs then some symbolEncoding
+  else if "ZapfDingbats".toList.isPrefixOf cs || "Dingbats".toList.isPrefixOf cs then
+    some zapfDingbatsEncoding
+  else none
+
+/-- `symbolicBuiltin?` gives a 256-entry encoding. -/
+theorem symbolicBuiltin?_size (baseFont : String) (b : Encoding)
+    (h : symbolicBuiltin? baseFont = some b) : b.size = 256 := by
+  unfold symbolicBuiltin? at h
+  dsimp only at h
+  split at h
+  · cases h; exact symbolEncoding_size
+  · split at h
+    · cases h; exact zapfDingbatsEncoding_size
+    · cases h
+
+/-- The `/BaseFont` of a font dictionary as a string (`""` when absent or not a name). -/
+def baseFontOf (resolve : PdfObject → PdfObject) (fontDict : Dict) : String :=
+  match getR resolve fontDict "BaseFont" with
+  | some (.name n) => glyphNameOf n.bytes
+  | _ => ""
+
+/-- The implicit base encoding of a simple font: the program's built-in encoding `builtin?`
+when the caller knows it (an embedded program), else the built-in encoding of a standard
+symbolic font named by `/BaseFont` (Symbol, ZapfDingbats: `symbolicBuiltin?`), else
+`StandardEncoding`. -/
+def implicitBase (resolve : PdfObject → PdfObject) (fontDict : Dict)
+    (builtin? : Option Encoding) : Encoding :=
+  match builtin? with
+  | some b => b
+  | none => (symbolicBuiltin? (baseFontOf resolve fontDict)).getD standardEncoding
+
+/-- The implicit base has 256 entries whenever `builtin?` has (or is absent). -/
+theorem implicitBase_size (resolve : PdfObject → PdfObject) (fontDict : Dict)
+    (builtin? : Option Encoding) (h : ∀ b, builtin? = some b → b.size = 256) :
+    (implicitBase resolve fontDict builtin?).size = 256 := by
+  unfold implicitBase
+  cases hb : builtin? with
+  | some b => exact h b hb
+  | none =>
+    cases hs : symbolicBuiltin? (baseFontOf resolve fontDict) with
+    | none => simpa using standardEncoding_size
+    | some e => simpa using symbolicBuiltin?_size _ e hs
+
+/-- The encoding of a simple font (ISO 32000-2 §9.6.5, Table 112). The implicit base is
+`implicitBase`: `builtin?` (the embedded program's built-in encoding) when known, else the
+built-in encoding of a non-embedded standard symbolic font (Symbol, ZapfDingbats), else
+`StandardEncoding`. Never fails: a bad `/Encoding` entry leaves the implicit base. -/
 def simpleEncoding (resolve : PdfObject → PdfObject) (fontDict : Dict)
     (builtin? : Option Encoding) : Encoding :=
-  let implicit := builtin?.getD standardEncoding
+  let implicit := implicitBase resolve fontDict builtin?
   match getR resolve fontDict "Encoding" with
   | some (.name n) => (namedEncoding? n).getD implicit
   | some (.dict ed) =>
@@ -412,11 +665,9 @@ def simpleEncoding (resolve : PdfObject → PdfObject) (fontDict : Dict)
 theorem simpleEncoding_size (resolve : PdfObject → PdfObject) (fontDict : Dict)
     (builtin? : Option Encoding) (h : ∀ b, builtin? = some b → b.size = 256) :
     (simpleEncoding resolve fontDict builtin?).size = 256 := by
-  have hi : (builtin?.getD standardEncoding).size = 256 := by
-    cases hb : builtin? with
-    | none => simp [standardEncoding_size]
-    | some b => simpa using h b hb
-  have hn : ∀ n, ((namedEncoding? n).getD (builtin?.getD standardEncoding)).size = 256 := by
+  have hi : (implicitBase resolve fontDict builtin?).size = 256 :=
+    implicitBase_size resolve fontDict builtin? h
+  have hn : ∀ n, ((namedEncoding? n).getD (implicitBase resolve fontDict builtin?)).size = 256 := by
     intro n
     unfold namedEncoding?
     dsimp only
@@ -435,8 +686,8 @@ theorem simpleEncoding_size (resolve : PdfObject → PdfObject) (fontDict : Dict
   · exact hn _
   · rename_i ed _
     have hb : (match getR resolve ed "BaseEncoding" with
-        | some (.name n) => (namedEncoding? n).getD (builtin?.getD standardEncoding)
-        | _ => builtin?.getD standardEncoding).size = 256 := by
+        | some (.name n) => (namedEncoding? n).getD (implicitBase resolve fontDict builtin?)
+        | _ => implicitBase resolve fontDict builtin?).size = 256 := by
       split
       · exact hn _
       · exact hi
@@ -447,11 +698,18 @@ theorem simpleEncoding_size (resolve : PdfObject → PdfObject) (fontDict : Dict
 
 /-! ## Glyph name → Unicode (Adobe Glyph List specification) -/
 
-/-- The AGL code point of a glyph name in the subset `aglNames`. -/
-def aglLookup (g : GlyphName) : Option Nat :=
-  match aglNames.findIdx? (· == g) with
-  | some i => aglCodes[i]?
+/-- The code point of `g` in a name table and its parallel code table. -/
+def tableLookup (names : Array String) (codes : Array Nat) (g : GlyphName) : Option Nat :=
+  match names.findIdx? (· == g) with
+  | some i => codes[i]?
   | none => none
+
+/-- The AGL code point of a glyph name in the subset `aglNames` or `aglSymbolNames`. -/
+def aglLookup (g : GlyphName) : Option Nat :=
+  (tableLookup aglNames aglCodes g).or (tableLookup aglSymbolNames aglSymbolCodes g)
+
+/-- The code point of a ZapfDingbats glyph name (`a1`…`a206`, `dingbatNames`). -/
+def dingbatLookup (g : GlyphName) : Option Nat := tableLookup dingbatNames dingbatCodes g
 
 /-- Value of one hexadecimal digit (either case). -/
 def hexDigit (c : Char) : Option Nat :=
@@ -481,9 +739,11 @@ def uniGroups : List Char → Option (List Char)
     | none => none
   | _ => none
 
-/-- Map one `_`-separated component of a glyph name (AGL specification, step 3). -/
-def componentToUnicode (comp : List Char) : List Char :=
-  match aglLookup (String.ofList comp) with
+/-- Map one `_`-separated component of a glyph name (AGL specification, step 3); with
+`dingbats` (the font is ZapfDingbats) the ITC Zapf Dingbats Glyph List is tried first. -/
+def componentToUnicode (dingbats : Bool) (comp : List Char) : List Char :=
+  let name := String.ofList comp
+  match (if dingbats then dingbatLookup name else none).or (aglLookup name) with
   | some u => [Char.ofNat u]
   | none =>
     match comp with
@@ -496,13 +756,19 @@ def componentToUnicode (comp : List Char) : List Char :=
       else []
     | _ => []
 
+/-- The Unicode text of a glyph name per the Adobe Glyph List specification, for a font that
+is ZapfDingbats (`dingbats = true`: `a1`…`a206` map through the ITC Zapf Dingbats Glyph
+List, as the AGL specification prescribes for that font only) or not. -/
+def glyphToUnicodeIn (dingbats : Bool) (g : GlyphName) : Option String :=
+  let base := g.toList.takeWhile (· ≠ '.')
+  let out := (base.splitOn '_').flatMap (componentToUnicode dingbats)
+  if out.isEmpty then none else some (String.ofList out)
+
 /-- The Unicode text of a glyph name per the Adobe Glyph List specification (suffix after
 `.` dropped, `_` ligature components concatenated); `none` when nothing maps. The fallback for
 text extraction without `/ToUnicode` (task 6.5). -/
 def glyphToUnicode (g : GlyphName) : Option String :=
-  let base := g.toList.takeWhile (· ≠ '.')
-  let out := (base.splitOn '_').flatMap componentToUnicode
-  if out.isEmpty then none else some (String.ofList out)
+  glyphToUnicodeIn false g
 
 /-! ## Spot checks -/
 
@@ -561,7 +827,56 @@ def glyphToUnicode (g : GlyphName) : Option String :=
 #guard isSymbolic id [(Name.ofString "FontDescriptor", .dict [(Name.ofString "Flags", .int 4)])]
 #guard !isSymbolic id [(Name.ofString "FontDescriptor", .dict [(Name.ofString "Flags", .int 32)])]
 -- Every glyph of the four encodings has an AGL code point.
-#guard [standardEncoding, winAnsiEncoding, macRomanEncoding, pdfDocEncoding].all fun e =>
+#guard [standardEncoding, winAnsiEncoding, macRomanEncoding, pdfDocEncoding,
+    symbolEncoding].all fun e =>
   e.all fun g => match g with | some n => (aglLookup n).isSome | none => true
+-- Every ZapfDingbats glyph has a code point through the dingbats list.
+#guard zapfDingbatsEncoding.all fun g => match g with
+  | some n => (glyphToUnicodeIn true n).isSome | none => true
+-- Symbol (Annex D.5): 190 encoded glyphs; ZapfDingbats (Annex D.6): 202.
+#guard (symbolEncoding.filterMap id).size == 190
+#guard (zapfDingbatsEncoding.filterMap id).size == 202
+#guard aglSymbolNames.size == aglSymbolCodes.size && dingbatNames.size == dingbatCodes.size
+#guard dingbatNames.size == 201
+#guard symbolEncoding.glyph 0x2D == some "minus"
+#guard symbolEncoding.glyph 0x4C == some "Lambda"
+#guard symbolEncoding.glyph 0x61 == some "alpha"
+#guard symbolEncoding.glyph 0x6D == some "mu"
+#guard symbolEncoding.glyph 0xA0 == some "Euro"
+#guard symbolEncoding.glyph 0xD5 == some "product"
+#guard symbolEncoding.glyph 0xF0 == some "apple"
+#guard symbolEncoding.glyph 0x7F == none
+#guard zapfDingbatsEncoding.glyph 0x34 == some "a20"
+#guard zapfDingbatsEncoding.glyph 0x6C == some "a71"
+#guard zapfDingbatsEncoding.glyph 0x80 == some "a89"
+#guard zapfDingbatsEncoding.glyph 0xFE == some "a191"
+#guard zapfDingbatsEncoding.glyph 0xF0 == none
+#guard glyphToUnicode "minus" == some "−"
+#guard glyphToUnicode "Lambda" == some "Λ"
+#guard glyphToUnicode "alpha" == some "α"
+#guard glyphToUnicode "summation" == some "∑"
+#guard glyphToUnicode "arrowright" == some "→"
+-- `aNN` names map only for ZapfDingbats.
+#guard glyphToUnicode "a20" == none
+#guard glyphToUnicodeIn true "a20" == some "✔"
+#guard glyphToUnicodeIn true "a71" == some "●"
+#guard glyphToUnicodeIn true "a35" == some "★"
+#guard glyphToUnicodeIn true "a120" == some "①"
+#guard glyphToUnicodeIn true "a1" == some "✁"
+#guard glyphToUnicodeIn true "space" == some " "
+-- A non-embedded Symbol / ZapfDingbats font without `/Encoding` uses its built-in encoding.
+#guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "Symbol"))]
+    none).glyph 0x61 == some "alpha"
+#guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "ABCDEF+SymbolMT"))]
+    none).glyph 0x2D == some "minus"
+#guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "ZapfDingbats"))]
+    none).glyph 0x34 == some "a20"
+#guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "Symbol")),
+    (Name.ofString "Encoding", .name (Name.ofString "WinAnsiEncoding"))] none).glyph 0x61 ==
+  some "a"
+#guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "Symbol"))]
+    (some standardEncoding)).glyph 0x61 == some "a"
+#guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "Helvetica"))]
+    none).glyph 0x61 == some "a"
 
 end SafePdf.Core.Font

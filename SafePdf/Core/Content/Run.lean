@@ -46,8 +46,8 @@ never an error (M5: the interpreter never fails).
   `Paint.maxItems · maxOpsPerPage` items however its forms nest (`runBytes_items_le_max`). Form
   decoding is charged to the source's budget; tokenizing is linear in the decoded bytes.
   Because a form tree without cycles can still fan out ("billion laughs"), at most
-  `Env.maxForms` (default `defaultMaxForms` = 100,000) forms are expanded per page; further
-  form `Do`s are skipped with a warning (an interim constant: `Limits` has no such field).
+  `Env.maxForms` (default `Limits.maxFormsPerPage` = 100,000) forms are expanded per page;
+  further form `Do`s are skipped with a warning.
 * **`Do` on an image** (`/Subtype /Image`): `DisplayItem.image (.xobject name num gen)` with the
   CTM (the unit square), the fill snapshot (stencil masks, §8.9.6.2) and the clip. The image
   data is **not** decoded (rendering is phase 7); its dictionary is summarised by consumers.
@@ -96,13 +96,6 @@ def Source.empty : Source Unit :=
   ⟨fun s _ _ => (.error (.malformed 0 "no document"), s),
    fun s _ _ => (.error (.malformed 0 "no document"), s)⟩
 
-/-- Default cap on form expansions per page (interim constant of task 5.2b; `Limits` has no
-such field yet). Without it a form tree without cycles, within the nesting fuel, that invokes
-each child many times ("billion laughs": 16 children over 8 levels) runs until
-`maxOpsPerPage` operators, i.e. millions of form decodes (≈ 30 s). With it the run stops
-expanding after `defaultMaxForms` forms (each further form `Do` is skipped with a warning). -/
-def defaultMaxForms : Nat := 100000
-
 /-- The runner's environment: interpreter configuration, document source, and an observer
 called once per executed operator with its warning and unknown-operator counts (the `ops`
 view's histogram; `fun w _ _ _ => w` when unused). -/
@@ -113,8 +106,12 @@ structure Env (σ ω : Type) where
   src : Source σ
   /-- Per-operator observer. -/
   observe : ω → Op → Nat → Nat → ω
-  /-- Maximum number of form expansions per page (see `defaultMaxForms`). -/
-  maxForms : Nat := defaultMaxForms
+  /-- Maximum number of form expansions per page, by default `Limits.maxFormsPerPage` of
+  `cfg.limits`. Without it a form tree without cycles, within the nesting fuel, that invokes
+  each child many times ("billion laughs": 16 children over 8 levels) runs until
+  `maxOpsPerPage` operators, i.e. millions of form decodes (≈ 30 s). With it the run stops
+  expanding after `maxForms` forms (each further form `Do` is skipped with a warning). -/
+  maxForms : Nat := cfg.limits.maxFormsPerPage
 
 /-- The resource context of the content being run. -/
 structure Frame where

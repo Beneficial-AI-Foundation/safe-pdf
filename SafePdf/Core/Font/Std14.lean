@@ -12,9 +12,13 @@ font names (Arial, Times New Roman, Courier New, subset prefixes, style suffixes
 * **Provenance.** The widths are the Adobe Core 14 AFM `WX` values (Helvetica, Times,
   Courier families), transcribed from memory of the AFM files (no AFM was downloaded, per the
   task's rules). Every row was written in one fixed glyph order and checked for alignment
-  mechanically. Values are considered reliable for the StandardEncoding glyphs; the `Euro`
-  entries (Helvetica 556, Times 500) are **unsure**: the 1997 Core 14 AFMs may not contain
-  `Euro` at all; the values are those of later Adobe metrics used by common viewers.
+  mechanically. Values are considered reliable for the StandardEncoding glyphs. **`Euro`**
+  (task 6.4b): Helvetica and Helvetica-Bold 556, all four Times styles 500, Courier 600. These
+  are the `Euro` entries of the Core 14 AFM set as redistributed by the open-source viewers
+  (pdf.js `metrics.js`, PDFBox, MuPDF) and agree with the fonts' design (Euro at the figure
+  width: Helvetica/Times figures are 556/500). Re-checked from memory in 6.4b, without access
+  to the AFM files; they match what pdfium and MuPDF use, which is what the M6 comparison
+  measures.
 * **Composites.** Accented letters (`Aacute`, `ccedilla`, `Scaron`, …) were not transcribed
   per font: their width is that of the base letter, which holds for every composite of these AFMs
   (`iacute`, `icircumflex`, `idieresis`, `igrave` take the width of `dotlessi`, e.g.
@@ -22,9 +26,12 @@ font names (Arial, Times New Roman, Courier New, subset prefixes, style suffixes
   58 composites; the generated rows repeat the base width for each composite.
 * **Courier** (all four styles) is monospaced: every glyph of the table is 600. The Oblique
   styles of Helvetica share the upright widths.
-* **Symbol and ZapfDingbats** metrics (and their built-in encodings) are **not** tabulated:
-  `Std14.width?` returns `none` for them, and width resolution reports the fallback. Reported
-  as a follow-up task.
+* **Symbol and ZapfDingbats** (task 6.4b): `symbolWidths` and `zapfDingbatsWidths` are the
+  `WX` values of Adobe's `Symbol.afm` (001.008) and `ZapfDingbats.afm` (002.000), transcribed
+  from memory and indexed by **code** of the fonts' built-in encodings (`symbolNames`,
+  `zapfDingbatsNames` in `Font.Encoding`): every glyph of these two AFMs is encoded, so the
+  built-in encoding names exactly the glyphs that have widths. `width?` looks the glyph name
+  up there.
 * **Substitution** (`Std14.ofBaseFont`): a subset tag `ABCDEF+` (six upper-case letters and
   `+`, §9.9.2) is stripped, spaces are removed, then the family is recognised by prefix
   (`Helvetica`/`Arial` → Helvetica, `TimesNewRoman`/`Times` → Times, `CourierNew`/`Courier`
@@ -234,6 +241,51 @@ def timesBoldItalicWidths : Array Nat := #[
   389]
 
 
+/-- Symbol AFM widths by **code** (parallel to `symbolNames`, the built-in encoding; `0` where
+unassigned). -/
+def symbolWidths : Array Nat := #[
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  250, 333, 713, 500, 549, 833, 778, 439, 333, 333, 500, 549, 250, 549, 250, 278,
+  500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 278, 278, 549, 549, 549, 444,
+  549, 722, 667, 722, 612, 611, 763, 603, 722, 333, 631, 722, 686, 889, 722, 722,
+  768, 741, 556, 592, 611, 690, 439, 768, 645, 795, 611, 333, 863, 333, 658, 500,
+  500, 631, 549, 549, 494, 439, 521, 411, 603, 329, 603, 549, 549, 576, 521, 549,
+  549, 521, 549, 603, 439, 576, 713, 686, 493, 686, 494, 480, 200, 480, 549, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  750, 620, 247, 549, 167, 713, 500, 753, 753, 753, 753, 1042, 987, 603, 987, 603,
+  400, 549, 411, 549, 549, 713, 494, 460, 549, 549, 549, 549, 1000, 603, 1000, 658,
+  823, 686, 795, 987, 768, 768, 823, 768, 768, 713, 713, 713, 713, 713, 713, 713,
+  768, 713, 790, 790, 890, 823, 549, 250, 713, 603, 603, 1042, 987, 603, 987, 603,
+  494, 329, 790, 790, 786, 713, 384, 384, 384, 384, 384, 384, 494, 494, 494, 494,
+  790, 329, 274, 686, 686, 686, 384, 384, 384, 384, 384, 384, 494, 494, 494, 0]
+
+/-- ZapfDingbats AFM widths by **code** (parallel to `zapfDingbatsNames`, the built-in
+encoding; `0` where unassigned). -/
+def zapfDingbatsWidths : Array Nat := #[
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  278, 974, 961, 974, 980, 719, 789, 790, 791, 690, 960, 939, 549, 855, 911, 933,
+  911, 945, 974, 755, 846, 762, 761, 571, 677, 763, 760, 759, 754, 494, 552, 537,
+  577, 692, 786, 788, 788, 790, 793, 794, 816, 823, 789, 841, 823, 833, 816, 831,
+  923, 744, 723, 749, 790, 792, 695, 776, 768, 792, 759, 707, 708, 682, 701, 826,
+  815, 789, 789, 707, 687, 696, 689, 786, 787, 713, 791, 785, 791, 873, 761, 762,
+  762, 759, 759, 892, 892, 788, 784, 438, 138, 277, 415, 392, 392, 668, 668, 0,
+  390, 390, 317, 317, 276, 276, 509, 509, 410, 410, 234, 234, 334, 334, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 732, 544, 544, 910, 667, 760, 760, 776, 595, 694, 626, 788, 788, 788, 788,
+  788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788,
+  788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788, 788,
+  788, 788, 788, 788, 894, 838, 1016, 458, 748, 924, 748, 918, 927, 928, 928, 834,
+  873, 828, 924, 924, 917, 930, 931, 463, 883, 836, 836, 867, 867, 696, 696, 874,
+  0, 874, 760, 946, 771, 865, 771, 888, 967, 888, 831, 873, 927, 970, 918, 0]
+
+set_option maxRecDepth 4000 in
+/-- The Symbol and ZapfDingbats width rows have one entry per code. -/
+theorem symbolic_rows_size : symbolWidths.size = 256 ∧ zapfDingbatsWidths.size = 256 := by
+  refine ⟨rfl, rfl⟩
+
 set_option maxRecDepth 4000 in
 /-- Every width row is parallel to `std14GlyphNames`. -/
 theorem std14_rows_size :
@@ -267,32 +319,39 @@ def isSymbolic : Std14 → Bool
   | symbol | zapfDingbats => true
   | _ => false
 
+/-- The width of glyph `g` in a font whose glyphs are exactly those of a 256-entry built-in
+encoding `names` (`""` = unassigned), with widths `ws` by code. -/
+def widthByCode (names : Array String) (ws : Array Nat) (g : GlyphName) : Option Nat :=
+  if g.isEmpty then none
+  else
+    match names.findIdx? (· == g) with
+    | none => none
+    | some i => ws[i]?
+
 /-- The AFM advance width (glyph space, 1/1000 em) of a glyph, when tabulated. `none` for a
-glyph outside `std14GlyphNames` and for Symbol / ZapfDingbats (not tabulated). -/
+glyph outside `std14GlyphNames` (Helvetica, Times, Courier) or outside the built-in encoding
+(Symbol, ZapfDingbats). -/
 def width? (f : Std14) (g : GlyphName) : Option Nat :=
-  match std14GlyphNames.findIdx? (· == g) with
-  | none => none
-  | some i =>
-    match f with
-    | helvetica | helveticaOblique => helveticaWidths[i]?
-    | helveticaBold | helveticaBoldOblique => helveticaBoldWidths[i]?
-    | timesRoman => timesRomanWidths[i]?
-    | timesBold => timesBoldWidths[i]?
-    | timesItalic => timesItalicWidths[i]?
-    | timesBoldItalic => timesBoldItalicWidths[i]?
-    | courier | courierBold | courierOblique | courierBoldOblique => some 600
-    | symbol | zapfDingbats => none
+  match f with
+  | symbol => widthByCode symbolNames symbolWidths g
+  | zapfDingbats => widthByCode zapfDingbatsNames zapfDingbatsWidths g
+  | _ =>
+    match std14GlyphNames.findIdx? (· == g) with
+    | none => none
+    | some i =>
+      match f with
+      | helvetica | helveticaOblique => helveticaWidths[i]?
+      | helveticaBold | helveticaBoldOblique => helveticaBoldWidths[i]?
+      | timesRoman => timesRomanWidths[i]?
+      | timesBold => timesBoldWidths[i]?
+      | timesItalic => timesItalicWidths[i]?
+      | timesBoldItalic => timesBoldItalicWidths[i]?
+      | courier | courierBold | courierOblique | courierBoldOblique => some 600
+      | symbol | zapfDingbats => none
 
 end Std14
 
 /-! ## Name substitution -/
-
-/-- Strip a subset tag: six upper-case ASCII letters followed by `+` (ISO 32000-2 §9.9.2). -/
-def stripSubsetTag (cs : List Char) : List Char :=
-  match cs with
-  | a :: b :: c :: d :: e :: f :: '+' :: rest =>
-    if [a, b, c, d, e, f].all fun x => 'A' ≤ x ∧ x ≤ 'Z' then rest else cs
-  | _ => cs
 
 /-- Whether `pat` occurs as a contiguous sublist of `cs`. -/
 def hasInfix (pat : List Char) : List Char → Bool
@@ -357,7 +416,7 @@ def Std14.ofBaseFont (name : String) : Option Std14 :=
 #guard Std14.timesBoldItalic.width? "mu" == some 576
 #guard Std14.courier.width? "W" == some 600
 #guard Std14.courierBoldOblique.width? "eacute" == some 600
-#guard Std14.symbol.width? "space" == none
+#guard Std14.zapfDingbats.width? "a4" == some 719
 #guard Std14.helvetica.width? "nonexistent" == none
 -- Every glyph of StandardEncoding and WinAnsiEncoding has a Helvetica / Times width.
 #guard [standardEncoding, winAnsiEncoding, macRomanEncoding, pdfDocEncoding].all fun e =>
@@ -379,6 +438,35 @@ def Std14.ofBaseFont (name : String) : Option Std14 :=
 #guard Std14.ofBaseFont "Symbol" == some .symbol
 #guard Std14.ofBaseFont "ZapfDingbats" == some .zapfDingbats
 #guard Std14.ofBaseFont "AbCDEF+Arial" == none
+-- Euro widths (Core 14 AFMs).
+#guard Std14.helvetica.width? "Euro" == some 556
+#guard Std14.helveticaBold.width? "Euro" == some 556
+#guard Std14.timesRoman.width? "Euro" == some 500
+#guard Std14.timesBoldItalic.width? "Euro" == some 500
+#guard Std14.courier.width? "Euro" == some 600
+-- Symbol and ZapfDingbats.
+#guard Std14.symbol.width? "space" == some 250
+#guard Std14.symbol.width? "alpha" == some 631
+#guard Std14.symbol.width? "Lambda" == some 686
+#guard Std14.symbol.width? "minus" == some 549
+#guard Std14.symbol.width? "arrowboth" == some 1042
+#guard Std14.symbol.width? "Euro" == some 750
+#guard Std14.symbol.width? "apple" == some 790
+#guard Std14.symbol.width? "A" == none
+#guard Std14.symbol.width? "" == none
+#guard Std14.zapfDingbats.width? "space" == some 278
+#guard Std14.zapfDingbats.width? "a1" == some 974
+#guard Std14.zapfDingbats.width? "a20" == some 846
+#guard Std14.zapfDingbats.width? "a120" == some 788
+#guard Std14.zapfDingbats.width? "a163" == some 1016
+#guard Std14.zapfDingbats.width? "a82" == some 138
+#guard Std14.zapfDingbats.width? "a191" == some 918
+#guard Std14.zapfDingbats.width? "alpha" == none
+-- Every encoded Symbol / ZapfDingbats glyph has a non-zero width, and no unassigned code has one.
+#guard (List.range 256).all fun c =>
+  (symbolEncoding.glyph c).isSome == (symbolWidths.getD c 0 != 0)
+#guard (List.range 256).all fun c =>
+  (zapfDingbatsEncoding.glyph c).isSome == (zapfDingbatsWidths.getD c 0 != 0)
 #guard Std14.ofBaseFont "Calibri" == none
 
 end SafePdf.Core.Font
