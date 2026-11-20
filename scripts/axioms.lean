@@ -1030,3 +1030,6 @@ import SafePdf.Shell.App.Links
 
 -- Phase 8, task 8.3d: NoRotate
 #print axioms SafePdf.Core.Annot.noRotate_fixes_corner
+
+-- Phase 7, task 7.3i1: knockout group emission (spec)
+#print axioms SafePdf.Spec.Content.paintItems_eq
