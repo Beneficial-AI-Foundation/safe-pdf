@@ -1,4 +1,5 @@
 import SafePdf.Core.Raster.Transparency
+import SafePdf.Core.Raster.Glyph
 
 /-!
 # Raster benchmark (task 7.2d; Plan.md §6 Phase 7 exit criterion M7: median page < 100 ms)
@@ -28,6 +29,12 @@ whose checksums must be equal:
 * `groups-100`: 100 groups at alpha 0.5, two overlapping 20 × 20 pt squares each, on a grey page;
 * `lum-masked-full-fill`: a luminosity soft mask (three grey bands) on a full-page fill;
 * `multiply-1000`: 1000 `Multiply`-blended 10 × 10 pt rectangles over a full-page fill.
+
+Task 7.2h adds `glyph-transform-3000`: 3000 placements (a 10 pt text line repeated over a
+page, `FontMatrix 1/1000`, a `Tm`, a CTM and the view) of a glyph-like outline (2 contours, 36
+cubics + 12 quadratics, fractional coordinates) mapped to device paths by the reference
+`Glyph.outlineToD` (exact `Rat`) and by `Glyph.outlineToDF` (64-bit fixed point, per-glyph
+translation by `GTx`, as `Glyph.glyphStepF` does it); the device-path checksums must be equal.
 
 Run it compiled, not interpreted (the interpreter is far slower):
 
@@ -243,6 +250,62 @@ def multiply1000 : DisplayList := Id.run do
   let t1 ← IO.monoNanosNow
   pure (sum, t1 - t0)
 
+/-- A glyph-like outline (glyph units, some fractional): two contours of cubics and
+quadratics. -/
+def glyphOutline : Font.Outline.Outline :=
+  let q (x y : Int) : Content.Point := ⟨Content.Fixed.clamp (x * 1000 + 371), Content.Fixed.clamp (y * 1000 - 113)⟩
+  let ring (cx cy r : Int) (quad : Bool) : List Font.Outline.OSeg :=
+    .moveTo (q (cx + r) cy) :: (List.range 24).map fun i =>
+      let a := (i + 1 : Nat)
+      let x := cx + r * ((a * 7) % 11 : Nat) / 10 - r / 2
+      let y := cy + r * ((a * 5) % 13 : Nat) / 12 - r / 2
+      if quad && i % 2 = 0 then .quadTo (q (x + 9) (y - 7)) (q x y)
+      else .curveTo (q (x - 13) (y + 21)) (q (x + 17) (y - 5)) (q x y)
+  match Font.Outline.Outline.ofArray ((ring 300 350 250 false ++ [Font.Outline.OSeg.close] ++ ring 300 350 120 true ++ [Font.Outline.OSeg.close]).toArray) with
+  | some o => o
+  | none => Font.Outline.Outline.empty
+
+/-- Text space → device of the glyph-transform scene: `Tm` (a slight skew), CTM, view. -/
+def glyphRm : Aff :=
+  ⟨1, 0, 1 / 50, 1, 72, 700⟩ * ⟨1, 0, 0, 1, 1 / 3, -2 / 7⟩ * view
+
+/-- The glyph-transform scene: 3000 placements through `outlineToD` (`fast = false`) or
+`outlineToDF` (as `glyphStepF`); time and a checksum of the device paths. -/
+def timeGlyphs (fast : Bool) : IO (Nat × Nat) := do
+  let t0 ← IO.monoNanosNow
+  let F : Aff := Aff.scale (1 / 1000) (1 / 1000)
+  let P0 : Aff := ⟨10, 0, 0, 10, 0, 0⟩
+  let L := F * P0 * glyphRm
+  let xf := Raster.Glyph.GXf.ofAff? L
+  let gt := xf.bind fun g => Raster.Glyph.GTx.make? g L glyphRm
+  let mut sum := 0
+  for i in [0:3000] do
+    -- 60 glyphs of 5.3 pt per line, 50 lines 12 pt apart (offsets in raw Fixed units)
+    let txRaw : Int := ((i % 60) * 5300000 : Nat)
+    let line : Rat := ((i / 60 : Nat) : Rat) * 12
+    let P : Aff := { P0 with e := (txRaw : Rat) / 1000000, f := -line }
+    let L' : Aff := { L with f := L.f - line * glyphRm.d, e := L.e - line * glyphRm.c }
+    let m := F * P * glyphRm
+    let d : DPath :=
+      if fast then
+        match xf with
+        | some g =>
+          -- the per-line rise is folded into the base translation once per line, as a run would
+          let off := match gt with
+            | some t =>
+              let base := g.off L'.e L'.f
+              (Raster.Glyph.GTx.at? g { t with base } txRaw).getD base
+            | none => g.off L'.e L'.f
+          Raster.Glyph.outlineToDF 1073741824 g off (fun _ => m) glyphOutline
+        | none => Raster.Glyph.outlineToD 1073741824 m glyphOutline
+      else Raster.Glyph.outlineToD 1073741824 m glyphOutline
+    sum := d.foldl (fun s seg => match seg with
+      | .moveTo p | .lineTo p => s + (p.x + 3 * p.y).natAbs
+      | .curveTo a b p => s + (a.x + 3 * a.y + 5 * b.x + 7 * b.y + p.x + 3 * p.y).natAbs
+      | .closePath => s + 1) sum
+  let t1 ← IO.monoNanosNow
+  pure (sum, t1 - t0)
+
 /-- Best run (time and checksum) of `reps` runs of `act`. -/
 def bestOfSum (reps : Nat) (act : Unit → IO (Nat × Nat)) : IO (Nat × Nat) := do
   let mut best : Nat × Nat := (0, 0)
@@ -296,6 +359,12 @@ def main (args : List String) : IO UInt32 := do
   IO.println s!"circles-1000, fill masks, reference filler: {cmr.2.toFloat / 1.0e6} ms (best of {reps}; checksum {cmr.1})"
   if sm.1 != smr.1 || cm.1 != cmr.1 then
     IO.println "MISMATCH: fast and reference masks differ"
+    return 1
+  let gs ← bestOfSum 1 (fun _ => timeGlyphs false)
+  let gf ← bestOfSum reps (fun _ => timeGlyphs true)
+  IO.println s!"glyph-transform-3000: reference (Rat) {gs.2.toFloat / 1.0e6} ms (1 run), fixed point {gf.2.toFloat / 1.0e6} ms (best of {reps}; checksum {gf.1})"
+  if gs.1 != gf.1 then
+    IO.println s!"MISMATCH: glyph-transform checksums {gs.1} {gf.1}"
     return 1
   let txScenes : List (String × DisplayList) :=
     [("groups-100 (alpha 0.5)", groups100), ("lum-masked-full-fill", lumMasked),
