@@ -414,7 +414,7 @@ inductive SimpleStep (cfg : Config) : Core → Op → Core → List DisplayItem 
   | Tf {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {n : Name}
       {sz : PdfObject} {s : Fixed} (h : Interp.lastN 2 o = some [.name n, sz])
       (hs : Interp.num? sz = some s) :
-      SimpleStep cfg c ⟨o, [84, 102], off, dat⟩ (withText c { c.gs.text with font := some ⟨n, s⟩ })
+      SimpleStep cfg c ⟨o, [84, 102], off, dat⟩ (withText c { c.gs.text with font := some { name := n, size := s } })
         []
   /-- `n Tr`: rendering mode `0…7`. -/
   | Tr {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {mode : TextRenderMode}
