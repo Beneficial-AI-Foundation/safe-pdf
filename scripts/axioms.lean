@@ -1120,3 +1120,12 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Shell.App.View.spreadOf_spreadFirst
 #print axioms SafePdf.Shell.App.View.nextPage_spread
 #print axioms SafePdf.Shell.App.View.stack_pairwise
+-- Phase 7, task 7.9b: per-page form cache
+#print axioms SafePdf.Core.Content.Run.formJobT_num
+#print axioms SafePdf.Core.Content.Run.FormCache.find?_spec
+#print axioms SafePdf.Core.Content.Run.FormCache.code_hit
+#print axioms SafePdf.Core.Content.Run.FormCache.code_miss
+#print axioms SafePdf.Core.Content.Run.FormCache.code_ok
+#print axioms SafePdf.Core.Content.Run.FormCache.code_fst_eq
+#print axioms SafePdf.Core.Content.runPageUncached_ops_le
+#print axioms SafePdf.Core.Content.runPageUncached_items_le
