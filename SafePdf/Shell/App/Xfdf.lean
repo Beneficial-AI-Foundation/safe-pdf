@@ -1,7 +1,7 @@
 import SafePdf.Shell.App.Marks
 
 /-!
-# XFDF import and export of user marks (task 9.5d; Plan.md §6 Phase 9 "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
+# XFDF import and export of user marks (tasks 9.5d, 9.11; Plan.md §6 Phase 9 "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
 
 XFDF (ISO 19444-1, the XML form of FDF) is the interchange format Acrobat, Okular, Foxit and
 others read and write for annotations. In safe-pdf it is **import/export only**: the store
@@ -18,6 +18,9 @@ shrinking index), checked by `#guard`s and the suite `Tests/Xfdf.lean`.
 <annots>
 <highlight page="0" rect="100,686,166,708" color="#FFFF98" name="safepdf-mark-1" flags="print"
   date="D:20261120144414Z" opacity="1" coords="100,708,166,708,100,698,166,698"/>
+<highlight page="0" rect="100,656,166,668" color="#53FFBC" name="safepdf-mark-3" flags="print"
+  date="D:…" opacity="1" coords="100,668,166,668,100,656,166,656"><contents>a comment</contents><popup
+  page="0" rect="100,656,166,668" name="safepdf-mark-3-popup-4" open="no"/></highlight>
 <text page="0" rect="300,380,320,400" color="#FFFF98" name="safepdf-mark-2" flags="print"
   date="D:…" icon="Comment"><contents>hello</contents></text>
 </annots>
@@ -37,10 +40,17 @@ shrinking index), checked by `#guard`s and the suite `Tests/Xfdf.lean`.
   `<text>` element — not part of the `text` element in ISO 19444-1, ignored by other readers,
   read back by us — exactly as 9.5b keeps them in a non-standard `/QuadPoints` on the `/Text`
   annotation.
-* **A highlight's comment** (the note anchored to the same quads, task 9.8) is exported as its
-  own `<text>` element, not as `<contents>` of the `<highlight>`: this is how Save writes it
-  into the PDF (9.5c: a separate `/Text` annotation, not pdf.js's `/Contents` + `/Popup`), so
-  both exports look the same in other tools, and export → import is the identity.
+* **A highlight's comment** (`Marks.Store.commentOf`: the newest note anchored to exactly its
+  quads, with a text; task 9.8) is exported in the standard form (task 9.11): `<contents>` of
+  the `<highlight>`, followed by a `<popup>` whose `name` is `safepdf-mark-ID-popup-CID` — the
+  form Save writes into the PDF since 9.5g (`/Contents` + `/Popup`, rule A11: the popup's
+  `/NM` carries the comment note's id), and the form Acrobat, Foxit and Okular write. As in
+  the PDF, the comment has no colour of its own: it is the highlight's (`Save.normalize`).
+  Every other note (an empty one, an older note on the same quads, a note on a selection
+  without highlight) stays a `<text>` element. (9.5d exported the comment as a separate
+  `<text>` with `coords`; such files are still imported, below.) Export → import is the
+  identity on the marks as Save stores them (`Save.normalize`: a comment in its highlight's
+  colour), ids included.
 * Escaping (`escape`): `& < > "` as `&amp; &lt; &gt; &quot;`; in attribute values tab, line
   feed and carriage return as character references (so attribute-value normalisation keeps
   them); in content a carriage return as `&#13;` (end-of-line normalisation would turn it
@@ -62,12 +72,15 @@ with the character position. Over the tree, `<xfdf>` (any namespace prefix) →
 
 * `<highlight page coords [color] [name]>` → a highlight over the bounding boxes of each
   group of 8 `coords` numbers (Acrobat and Okular write UL, UR, LL, LR; pdf.js's and Foxit's
-  orders give the same boxes); a `<contents>` / `<contents-richtext>` child → a comment note
-  anchored to the same quads (that is how Acrobat, Okular and Foxit store a highlight's
-  comment).
+  orders give the same boxes); a non-empty `<contents>` / `<contents-richtext>` child → a
+  comment note in the highlight's colour anchored to the same quads (that is how Acrobat,
+  Okular, Foxit and we since 9.11 store a highlight's comment); its id comes from a `<popup>`
+  child named `NAME-popup-CID` (`NAME` the highlight's `name`, ours), else it gets a fresh
+  one.
 * `<text page rect [color] [name] [coords]>` → a note with the text of `<contents>` (or the
   plain text of `<contents-richtext>`: text nodes, `<p>`/`<div>` ended by a line break,
-  `<br/>` a line break), anchored to `coords` when present (ours), else to the upper-left
+  `<br/>` a line break), anchored to `coords` when present (ours; 9.5d's form of a
+  highlight's comment is such a note on the highlight's quads), else to the upper-left
   corner of `rect`. A `<text inreplyto=…>` is a reply in another tool's comment thread and
   is skipped.
 * `color` maps to the nearest PDF.js palette colour (`nearest`; the same squared distance and
@@ -80,9 +93,12 @@ with the character position. Over the tree, `<xfdf>` (any namespace prefix) →
 
 **Into the store** (`importItems`): a mark equal to one already in the store (page, colour,
 kind, text, quads) is not added again (re-importing a file is idempotent); a mark named
-`safepdf-mark-ID` keeps its id when `ID ≥ Store.nextId` (never used in this store, so the
-"ids are never reused" rule of `Marks.Store` holds and a saved id can never be taken over),
-otherwise it gets a fresh id. Imported marks are unsaved: the next Save writes them.
+`safepdf-mark-ID` keeps its id when `ID` is at least the store's `nextId` before the import
+(never used in this store, so the "ids are never reused" rule of `Marks.Store` holds and a
+saved id can never be taken over) and no earlier item of the import took it, otherwise it
+gets a fresh id. The added marks are appended in id order (so a comment exported
+inside its highlight comes back after an older note on the same quads, and `commentOf` finds
+the same note again). Imported marks are unsaved: the next Save writes them.
 -/
 
 namespace SafePdf.Shell.App.Xfdf
@@ -657,22 +673,46 @@ def boxXml (b : Box) : String := numsXml [b.llx, b.lly, b.urx, b.ury]
 /-- US Letter, the page box used when the caller knows none (note icons only). -/
 def letter : Box := ⟨0, 0, 612, 792⟩
 
+/-- The `name` of the popup that carries the comment `cid` of the highlight `m`:
+`safepdf-mark-ID-popup-CID`, the `/NM` Save gives the popup in the PDF (rule A11). -/
+def popupName (m : Mark) (cid : Nat) : String := m.nm ++ "-popup-" ++ toString cid
+
+/-- The comment id in a popup name `popupName` wrote for the highlight named `hl`. -/
+def commentIdOf (hl popup : String) : Option Nat :=
+  let pre := hl ++ "-popup-"
+  if !hl.isEmpty && popup.startsWith pre then (popup.drop pre.length).toString.toNat? else none
+
+#guard commentIdOf "safepdf-mark-4" "safepdf-mark-4-popup-9" == some 9 &&
+  commentIdOf "safepdf-mark-4" "safepdf-mark-4-popup" == none &&
+  commentIdOf "safepdf-mark-4" "safepdf-mark-5-popup-9" == none &&
+  commentIdOf "" "-popup-9" == none
+
 /-- The XFDF element of mark `m` on a page with page box `pb`, dated `date`; `none` for a
-highlight without quads. -/
-def markXml (pb : Box) (date : String) (m : Mark) : Option String :=
+highlight without quads. A highlight's `comment` (`Store.commentOf`) goes into its element as
+`<contents>` and a `<popup>` named `popupName` (task 9.11). -/
+def markXml (pb : Box) (date : String) (m : Mark) (comment : Option Mark := none) :
+    Option String :=
   (m.rect pb).map fun r =>
     let common := [("page", toString m.page), ("rect", boxXml r), ("color", m.color.hex),
       ("name", m.nm), ("flags", "print")] ++ (if date.isEmpty then [] else [("date", date)])
     let coords := if m.quads.isEmpty then [] else [("coords", numsXml m.quadPoints)]
     match m.kind with
-    | .highlight _ => "<highlight" ++ attrsXml (common ++ [("opacity", "1")] ++ coords) ++ "/>"
+    | .highlight _ =>
+      let start := "<highlight" ++ attrsXml (common ++ [("opacity", "1")] ++ coords)
+      match comment with
+      | some c =>
+        start ++ "><contents>" ++ escape false c.text ++ "</contents><popup" ++
+          attrsXml [("page", toString m.page), ("rect", boxXml r), ("name", popupName m c.id),
+            ("open", "no")] ++ "/></highlight>"
+      | none => start ++ "/>"
     | .note t _ =>
       "<text" ++ attrsXml (common ++ [("icon", "Comment")] ++ coords) ++ "><contents>" ++
         escape false t ++ "</contents></text>"
 
-/-- **Export**: the XFDF document of every mark of `s` (creation order); `box` gives page
-boxes for note icons (US Letter when `none`), `date` the `date` attribute (omitted when
-empty), `href` the PDF's file name for `<f href=…/>`. -/
+/-- **Export**: the XFDF document of every mark of `s` (creation order; a highlight's comment
+inside the highlight's element, not on its own); `box` gives page boxes for note icons (US
+Letter when `none`), `date` the `date` attribute (omitted when empty), `href` the PDF's file
+name for `<f href=…/>`. -/
 def toXfdf (s : Store) (box : Nat → Option Box) (date : String) (href : Option String := none) :
     String :=
   let head := "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" ++
@@ -680,8 +720,11 @@ def toXfdf (s : Store) (box : Nat → Option Box) (date : String) (href : Option
     (match href with
      | some h => "<f" ++ attrsXml [("href", h)] ++ "/>\n"
      | none => "")
-  let annots := s.marks.toList.filterMap fun m =>
-    markXml ((box m.page).getD letter) date m
+  let ms := s.marks.toList
+  let comments := ms.filterMap s.commentOf
+  let annots := ms.filterMap fun m =>
+    if m.isNote && comments.any (·.id == m.id) then none
+    else markXml ((box m.page).getD letter) date m (s.commentOf m)
   head ++ "<annots>\n" ++ annots.foldl (fun acc x => acc ++ x ++ "\n") "" ++ "</annots>\n</xfdf>\n"
 
 /-! ## Import -/
@@ -756,8 +799,16 @@ def itemsOf (lim : Limits) (pages : Option Nat) (ln : String) (as : List (String
     let some quads ← coordsOf as | throw "no coords"
     let hl : Item := { name, page, color, kind := .highlight quads }
     let t := (contentsOf lim cs).getD ""
+    -- The comment's id from our popup name (`popupName`), when there is one.
+    let cname := cs.findSome? fun
+      | .elem n pas _ =>
+        if localName n == "popup" then
+          ((name.bind fun h => (attr pas "name").bind (commentIdOf h))).map
+            (Marks.nmPrefix ++ toString ·)
+        else none
+      | .text _ => none
     pure (if t.isEmpty then [hl]
-      else [hl, { name := none, page, color, kind := .note t (.quads quads) }])
+      else [hl, { name := cname, page, color, kind := .note t (.quads quads) }])
   else if ln == "text" then
     if (attr as "inreplyto").isSome then throw "reply to another annotation (inreplyto)"
     let page ← pageOf as pages
@@ -821,19 +872,23 @@ def kindEq : Kind → Kind → Bool
 def sameContent (a b : Mark) : Bool :=
   a.page == b.page && a.color == b.color && kindEq a.kind b.kind
 
-/-- **Into the store** (see the module doc): the store, the ids of the added marks, and the
-number of items already present. -/
+/-- **Into the store** (see the module doc): the store, the ids of the added marks (in item
+order), and the number of items already present. The added marks follow the old ones in id
+order. -/
 def importItems (s : Store) (items : List Item) : Store × List Nat × Nat :=
+  let old := s.marks.size
+  let next0 := s.nextId
   let (s, ids, dups) := items.foldl (fun (s, ids, dups) it =>
     let m : Mark := ⟨0, it.page, it.color, it.kind⟩
     if s.marks.any (sameContent m) then (s, ids, dups + 1)
     else match it.name.bind Marks.idOfNm with
       | some id =>
-        if id ≥ s.nextId then (s.restore { m with id }, id :: ids, dups)
+        if id ≥ next0 && !s.marks.any (·.id == id) then (s.restore { m with id }, id :: ids, dups)
         else let (s, id) := s.add it.page it.color it.kind; (s, id :: ids, dups)
       | none => let (s, id) := s.add it.page it.color it.kind; (s, id :: ids, dups))
     (s, ([] : List Nat), 0)
-  (s, ids.reverse, dups)
+  let added := (s.marks.extract old s.marks.size).toList.mergeSort (·.id ≤ ·.id)
+  ({ s with marks := s.marks.extract 0 old ++ added.toArray }, ids.reverse, dups)
 
 /-! ## Files -/
 
@@ -931,7 +986,7 @@ private def sample : Store :=
   let (s, _) := (s.addHighlight 0 .yellow [q1, q2]).getD (s, 0)
   let (s, _) := s.addNote 0 .yellow "Grüße <&> \"x\" 'y'\n\ttab\r😀 𝔸" (.point ⟨300, 400⟩)
   let (s, _) := (s.addHighlight 2 .green [q2]).getD (s, 0)
-  let (s, _) := s.addNote 2 .blue "comment" (.quads [q2])
+  let (s, _) := s.addNote 2 .green "comment" (.quads [q2])
   let (s, _) := (s.addHighlight 1 .red [⟨1 / 3, 2, 3, 4⟩]).getD (s, 0)
   let (s, _) := s.addNote 1 .pink "" (.point ⟨10, 700⟩)
   s
@@ -963,10 +1018,42 @@ private def roundTrip (s : Store) : Option Store :=
   ("<highlight page=\"0\" rect=\"100,686,166,708.5\" color=\"#FFFF98\" name=\"safepdf-mark-1\" " ++
    "flags=\"print\" date=\"D:1\" opacity=\"1\" " ++
    "coords=\"100.25,708.5,166,708.5,100.25,698,166,698,100,696,111,696,100,686,111,686\"/>")
+-- A highlight's comment: `<contents>` and a `<popup>` named after the comment's id, inside
+-- the `<highlight>` (task 9.11); no `<text>` of its own.
 #guard (toXfdf sample (fun _ => some pb) "").splitOn "\n" |>.contains
-  ("<text page=\"2\" rect=\"111,676,131,696\" color=\"#80EBFF\" name=\"safepdf-mark-4\" " ++
-   "flags=\"print\" icon=\"Comment\" coords=\"100,696,111,696,100,686,111,686\">" ++
-   "<contents>comment</contents></text>")
+  ("<highlight page=\"2\" rect=\"100,686,111,696\" color=\"#53FFBC\" name=\"safepdf-mark-3\" " ++
+   "flags=\"print\" opacity=\"1\" coords=\"100,696,111,696,100,686,111,686\">" ++
+   "<contents>comment</contents><popup page=\"2\" rect=\"100,686,111,696\" " ++
+   "name=\"safepdf-mark-3-popup-4\" open=\"no\"/></highlight>")
+#guard !((toXfdf sample (fun _ => some pb) "").splitOn "safepdf-mark-4\"").length > 1
+#guard ((toXfdf sample (fun _ => some pb) "").splitOn "<text ").length == 3
+-- The comment takes its highlight's colour (as in the PDF, `Save.normalize`); its id comes back.
+#guard let s := (sample.remove 5).recolor 4 .blue
+  match roundTrip s with
+  | some r => (r.find? 4).any (fun m => m.color == .green && m.text == "comment") &&
+    sameMarks r (sample.remove 5)
+  | none => false
+-- An older note on the same quads stays a `<text>`; the comment is still the newest note
+-- after the round trip (marks come back in id order).
+#guard let s := ((({} : Store).addNote 0 .yellow "older" (.quads [q1])).1.add 0 .yellow
+      (.highlight [q1])).1.addNote 0 .yellow "newest" (.quads [q1]) |>.1
+  match roundTrip s with
+  | some r => sameMarks r s && ((r.find? 2).bind r.commentOf).map (·.id) == some 3
+  | none => false
+-- A comment created before its highlight (lower id) keeps its id too.
+#guard let s := (((({} : Store).addNote 0 .yellow "first" (.quads [q1])).1.add 0 .yellow
+      (.highlight [q1])).1)
+  match roundTrip s with
+  | some r => r.marks.toList.map (·.id) == [1, 2] && (r.find? 1).any (·.text == "first")
+  | none => false
+-- 9.5d's form (the comment as a separate `<text>` with `coords`) is still imported.
+#guard let x := "<xfdf><annots><highlight page='0' color='#53FFBC' coords='0,1,1,1,0,0,1,0' " ++
+    "name='safepdf-mark-1'/><text page='0' rect='1,0,21,20' color='#53FFBC' name='safepdf-mark-2' " ++
+    "coords='0,1,1,1,0,0,1,0'><contents>old form</contents></text></annots></xfdf>"
+  match readXfdf {} x.toUTF8 with
+  | .ok r => let s := (importItems {} r.items).1
+    s.marks.size == 2 && ((s.find? 1).bind s.commentOf).map (·.text) == some "old form"
+  | .error _ => false
 -- Re-importing into the same store adds nothing; into a store with used ids, fresh ids.
 #guard match readXfdf {} (toXfdf (sample.remove 5) (fun _ => some pb) "").toUTF8 with
   | .ok r => let (s, ids, dups) := importItems (sample.remove 5) r.items

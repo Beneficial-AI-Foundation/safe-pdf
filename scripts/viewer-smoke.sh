@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7, 9.8; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7, 9.8, 9.11; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -38,6 +38,11 @@
 #      result) saved marks recoloured, deleted, commented and edited, saved, reopened, and a
 #      third revision on top; qpdf --check, prefixes, no duplicate ids, mutool shows the new
 #      colour and not the deleted highlight (9.5g);
+#   1j''. XFDF (SAFEPDF_VIEWER_SMOKE_MODE=xfdf) on a copy of the text PDF: highlight + comment +
+#      note, File → Export annotations… (the comment as <contents> inside the <highlight>),
+#      every mark deleted, import brings them back (pixels, texts, status counts), re-import
+#      adds nothing, hostile files (Tests/xfdf/) and broken ones show an error and change
+#      nothing (9.11);
 #   1k. view modes (SAFEPDF_VIEWER_SMOKE_MODE=modes) on a generated three-page text PDF, each mode
 #      chosen through the View menu: continuous (three page frames, the wheel scrolls the
 #      document and the page field follows 1, 2, 3, a highlight on page 2, a search hit on page
@@ -374,7 +379,7 @@ v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().sp
 want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
-    "entries.menubar.file": "Open...|Save|Save As...|Close|Quit",
+    "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
     "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
@@ -465,7 +470,7 @@ common = {
     "zoom-label0": "Automatic Zoom",
     "zoom-sel0": "auto",
     "zoom-menu": "Automatic Zoom|Actual Size|Page Fit|Page Width|50%|75%|100%|125%|150%|200%|300%|400%",
-    "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left|"
+    "more-menu": "Open...|Import annotations...|Export annotations...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left|"
                  "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
     "tools": ".bar.highlight=normal," + ",".join(w + "=disabled" for w in [
@@ -863,6 +868,59 @@ if grep -qx 'outcome: refused' "$work/out-enc/encrypted.txt"; then
   grep -q '^status: cannot save to rc4-128-annotated.pdf: ' "$work/out-enc/encrypted.txt" \
     && [ ! -e "$work/enc/rc4-128-annotated.pdf" ] || { echo "FAIL: encrypted refusal not shown, or a file was written" >&2; fail=1; }
 fi
+
+# 1j''. XFDF import/export (task 9.11, SAFEPDF_VIEWER_SMOKE_MODE=xfdf, `Viewer.smokeXfdf`) on a
+# copy of the text PDF: a highlight on "world" with a comment and a note are exported through
+# File → Export annotations… (the dialog answered by ::safepdf::autoPath) into marks.xfdf,
+# which must hold the comment in the standard form <highlight …><contents>…</contents><popup …/>
+# and no separate <text> for it; all marks deleted, the import restores them (yellow pixels,
+# comment and note text equal, unsaved) with the status "3 imported, 0 already present, 0
+# skipped"; a second import adds nothing; the hostile samples of Tests/xfdf/, a missing and a
+# non-XFDF file each give "cannot import NAME: …" and leave the marks unchanged.
+mkdir -p "$work/xfdf" "$work/out-xfdf"
+cp "$work/text.pdf" "$work/xfdf/text.pdf"
+for f in billion-laughs xxe undeclared-entity acrobat; do cp "Tests/xfdf/$f.xfdf" "$work/out-xfdf/"; done
+printf '<?xml version="1.0"?>\n<fdf><annots/></fdf>\n' > "$work/out-xfdf/not-xfdf.xfdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=xfdf run_viewer "$work/out-xfdf" "$work/xfdf/text.pdf"
+cat "$work/out-xfdf/xfdf.txt"
+python3 -I -c '
+import re, sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+yellow = "255 255 152"
+want = {
+    "marks": "3 2 true true true",
+    "world-px": yellow,
+    "menu-states": "normal normal",
+    "export-status": "exported 3 mark(s) to marks.xfdf",
+    "export-default": "text.xfdf",
+    "removed": "0 255 255 255",
+    "import-status": "marks.xfdf: 3 imported, 0 already present, 0 skipped",
+    "imported": "3 2 true true true",
+    "imported-px": yellow + " true",
+    "reimport-status": "marks.xfdf: 0 imported, 3 already present, 0 skipped",
+    "reimported": "3 2 true true true",
+    "acrobat": "6",
+}
+for n in ("billion-laughs", "xxe", "undeclared-entity", "missing", "not-xfdf"):
+    want["hostile %s.xfdf" % n] = "true true 1"
+errs = ["xfdf %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+a = v.get("acrobat-status", "")
+if not a.startswith("acrobat.xfdf: 3 imported, 0 already present, 2 skipped"):
+    errs.append("xfdf acrobat-status: %r" % a)
+for n, frag in (("billion-laughs", "document type declarations"), ("xxe", "document type declarations"),
+                ("undeclared-entity", "unknown entity &nbsp;"), ("not-xfdf", "not an XFDF file")):
+    if frag not in v.get("hostile-status %s.xfdf" % n, ""):
+        errs.append("xfdf hostile-status %s: %r" % (n, v.get("hostile-status %s.xfdf" % n)))
+# The exported file: the comment in the standard form, inside its highlight, and nowhere else.
+x = open(sys.argv[2], encoding="utf-8").read()
+if not re.search("<highlight [^>]*name=\"safepdf-mark-1\"[^>]*><contents>Comment ✓ &lt;&amp;&gt;</contents>"
+                 "<popup [^>]*name=\"safepdf-mark-1-popup-2\"[^>]*/></highlight>", x):
+    errs.append("marks.xfdf: no <highlight ...><contents> comment")
+if x.count("<text ") != 1 or "name=\"safepdf-mark-2\"" in x:
+    errs.append("marks.xfdf: the comment is also a separate element")
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-xfdf/xfdf.txt" "$work/out-xfdf/marks.xfdf" || fail=1
 
 # 1k. View modes (task 9.3) on a three-page text PDF (Helvetica, substitute fonts off: white
 # pages): `Alpha` on page 1, `Bravo` on page 2 (y 400), `zebra` on page 3. Every mode through its

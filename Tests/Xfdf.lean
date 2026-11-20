@@ -1,7 +1,7 @@
 import SafePdf.Shell.App.Xfdf
 
 /-!
-# XFDF import/export (task 9.5d)
+# XFDF import/export (tasks 9.5d, 9.11)
 
 Plan.md §6 Phase 9 ("Persistence — annotations inside the PDF": XFDF stays as import/export).
 The pure module `SafePdf.Shell.App.Xfdf` carries most checks as `#guard`s; this suite covers
@@ -9,6 +9,10 @@ what needs files or large inputs:
 
 * round trip export → file → import on a store with highlights, notes, a highlight's comment
   and non-ASCII / non-BMP / control-character text: the identity on our marks (ids included);
+* the standard comment form (task 9.11): a highlight's comment is exported as `<contents>` and
+  a `<popup name="safepdf-mark-H-popup-C">` inside the `<highlight>`, with no `<text>` of its
+  own, and comes back with its id; 9.5d's form (a separate `<text>` with `coords`) is still
+  imported, as is a foreign popup without our name (fresh id);
 * the samples under `Tests/xfdf/` in the styles of Acrobat, Foxit, an Okular-style and a
   PDF.js-style variant (each file's header comment says where its conventions come from and
   what it must import): marks, colours, pages, quads, comments, skipped and ignored counts;
@@ -136,10 +140,41 @@ def run : IO Nat := do
     let (s2, ids2, dups2) := importItems s rep.items
     failures := failures + (← check "re-import idempotent"
       (ids2.isEmpty && dups2 == 6 && s2.marks.size == 6))
-  -- A page beyond the document is skipped, not an error.
+  -- 1b. The standard comment form (task 9.11): mark 4 is the comment of highlight 3.
+  let hl3 := (xml.splitOn "\n").find? (·.startsWith "<highlight page=\"3\"")
+  failures := failures + (← check "comment inside its highlight" (hl3.any fun l =>
+      l.endsWith ("><contents>its comment</contents><popup page=\"3\" rect=\"10,10,20,20\" " ++
+        "name=\"safepdf-mark-3-popup-4\" open=\"no\"/></highlight>")) s!"{hl3}")
+  failures := failures + (← check "no separate comment element"
+    (!(xml.splitOn "name=\"safepdf-mark-4\"").length > 1 && (xml.splitOn "<text ").length == 4))
+  -- 9.5d's form of the same store (the comment as `<text coords>`) imports to the same marks.
+  let oldForm := "<xfdf xmlns='http://ns.adobe.com/xfdf/'><annots>" ++
+    "<highlight page='3' rect='10,10,20,20' color='#53FFBC' name='safepdf-mark-3' coords='10,20,20,20,10,10,20,10'/>" ++
+    "<text page='3' rect='20,0,40,20' color='#53FFBC' name='safepdf-mark-4' icon='Comment' " ++
+    "coords='10,20,20,20,10,10,20,10'><contents>its comment</contents></text></annots></xfdf>"
+  match readXfdf {} oldForm.toUTF8 (pages := some 5) with
+  | .ok rep =>
+    let (s, ids, _) := importItems {} rep.items
+    let want := (sample.marks.toList.filter fun m => m.id == 3 || m.id == 4)
+    failures := failures + (← check "9.5d comment form imports" (ids == [3, 4] &&
+      s.marks.toList.length == 2 && (s.marks.toList.zip want).all fun (a, b) => a.id == b.id && sameContent a b &&
+      ((s.find? 3).bind s.commentOf).map (·.id) == some 4))
+  | .error e => failures := failures + (← check "9.5d comment form imports" false e.message)
+  -- A foreign popup name (or none) gives the comment a fresh id; a popup with our name for
+  -- another highlight is not taken.
+  let foreign := "<xfdf><annots><highlight page='0' coords='0,1,1,1,0,0,1,0' name='safepdf-mark-7'>" ++
+    "<contents>c</contents><popup page='0' rect='0,0,1,1' name='safepdf-mark-8-popup-20'/></highlight>" ++
+    "<highlight page='0' coords='0,2,1,2,0,0,1,0'><contents>d</contents><popup name='x'/></highlight>" ++
+    "</annots></xfdf>"
+  match readXfdf {} foreign.toUTF8 with
+  | .ok rep => failures := failures + (← check "foreign popup names"
+      ((importItems {} rep.items).2.1 == [7, 8, 9, 10] && rep.items.all (·.name != some "safepdf-mark-20")))
+  | .error e => failures := failures + (← check "foreign popup names" false e.message)
+  -- A page beyond the document is skipped, not an error (the highlight on page 3 with its
+  -- comment is one element).
   match readXfdf {} xml.toUTF8 (pages := some 3) with
   | .ok rep => failures := failures + (← check "page bound" (rep.count == 4 &&
-      rep.skippedCount == 2 && rep.skipped.all (·.reason == "page 3 is not in the document")))
+      rep.skippedCount == 1 && rep.skipped.all (·.reason == "page 3 is not in the document")))
   | .error e => failures := failures + (← check "page bound" false e.message)
   -- 2. Samples.
   for e in samples do
