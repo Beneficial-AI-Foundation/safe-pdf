@@ -22,7 +22,8 @@ The rules follow MuPDF 1.25.1 (`pdf_sync_annots`, `pdf_process_annot`, `pdf_anno
 * `/F` (§12.5.3): Invisible (bit 1) or Hidden (bit 2) → skipped; NoView (bit 6) → skipped
   (usage "View"). Print, NoZoom, NoRotate, ReadOnly, Locked … are ignored for display
   (MuPDF: "TODO: NoZoom and NoRotate"; NoRotate is handled by `pdf_run_annot_with_usage` but
-  not here — a recorded gap). `/OC` (optional content) is ignored (Tier 2).
+  not here — a recorded gap). `/OC` (optional content): hidden in the default configuration →
+  `Skip.ocHidden` (task 8.3c, `ocHidden`).
 * `/Subtype /Widget` is drawn only if both `/FT` and `/T` are found on it or on its `/Parent`
   chain (at most `maxFieldDepth` levels), as MuPDF does.
 * `/Rect` must be an array of four numbers (normalised); otherwise `Skip.badRect`.
@@ -64,7 +65,7 @@ share one `Limits.maxOpsPerPage` (`docAnnots_shared_ops`).
 MuPDF's `-F txt` includes annotation text), item indices continuing after the page's items.
 
 Not done (recorded): `/F` NoZoom and NoRotate (MuPDF: NoRotate in `pdf_run_annot_with_usage`
-only), `/OC` optional content of annotations.
+only).
 
 ## Fonts
 
@@ -219,6 +220,8 @@ inductive Skip where
   | hidden
   /-- `/F` NoView. -/
   | noView
+  /-- `/OC` hidden in the default optional-content configuration (task 8.3c). -/
+  | ocHidden
   /-- A widget without inheritable `/FT` and `/T`. -/
   | noField
   /-- `/Rect` missing or malformed. -/
@@ -295,6 +298,154 @@ def inheritable {σ : Type} (src : Source σ) (k : Name) : Nat → Dict → σ �
         match Run.resolve src s p with
         | (.dict pd, s) => inheritable src k f pd s
         | (_, s) => (false, s)
+
+/-! ### Optional content of annotations (task 8.3c; §8.11, MuPDF `pdf_is_ocg_hidden`)
+
+An annotation whose `/OC` names an optional content group (or membership dictionary) that is
+hidden in the default configuration is not drawn (MuPDF `pdf_process_annot`, usage "View").
+The configuration is read like `pdf_read_ocg` + `pdf_select_layer_config(doc, 0)`: the catalog's
+`/OCProperties`, its `/OCGs` (each initially ON), the configuration `/Configs [0]` if present,
+else `/D` (neither: no optional content at all, as MuPDF's "broken configuration" path);
+`/BaseState /OFF` turns every group off (anything else: on), then `/ON` and `/OFF` (later wins);
+the configuration's `/Intent` is kept.
+
+`ocHidden` follows `pdf_is_ocg_hidden_imp`: no groups described → visible; a name (the
+annotation has no resource dictionary) or nothing → visible; an `/OCG` is hidden when its
+`/Intent` (name, array, or absent = `View`) is not included by the configuration's intent, else
+by `/Usage /View /ViewState` (`/OFF` hidden, `/ON` visible), else by its default state (groups
+are matched by reference, not resolved, as MuPDF); an `/OCMD` with an array `/VE` is visible
+(MuPDF's FIXME), else `/P` (`AllOn`, `AnyOff`, `AllOff`, default `AnyOn`) over `/OCGs` (an array,
+or a single group) with MuPDF's literal `combine` arithmetic, which differs from §8.11.2.2 for
+arrays: `AllOn` is visible when any group is on, `AnyOff` hidden when any group is on
+(pixel-checked against `mutool draw`). Recursion depth is bounded by `maxOCDepth` (MuPDF: a cycle check; a cycle
+or exhausted depth is visible). At most `maxOCGs` groups are read. -/
+
+/-- Most `/OCGs` entries read (local cap). -/
+def maxOCGs : Nat := 4096
+
+/-- Most nesting levels of membership dictionaries followed (local cap). -/
+def maxOCDepth : Nat := 32
+
+/-- The default optional-content configuration (`pdf_ocg_descriptor`). -/
+structure OCDesc where
+  /-- The `/OCGs` entries (as written: references) with their state (`true` = ON). -/
+  ocgs : List (PdfObject × Bool) := []
+  /-- The configuration's `/Intent`, resolved one level (`null` when absent). -/
+  intent : PdfObject := .null
+
+/-- The object number and generation of a reference. -/
+def refKey : PdfObject → Option (Nat × Nat)
+  | .ref n g => some (n, g)
+  | _ => none
+
+/-- An object resolved one level, `null` when absent. -/
+def resolveOpt {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → PdfObject × σ
+  | none => (.null, s)
+  | some o => Run.resolve src s o
+
+/-- **Read the default configuration** from the catalog `cat` (see the section doc). -/
+def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
+  match resolveOpt src s (Dict.get? cat (nm "OCProperties")) with
+  | (.dict prop, s) =>
+    let (groups, s) := match resolveOpt src s (Dict.get? prop (nm "OCGs")) with
+      | (.array xs, s) => (xs.take maxOCGs, s)
+      | (_, s) => ([], s)
+    let (cfg0, s) := match resolveOpt src s (Dict.get? prop (nm "Configs")) with
+      | (.array xs, s) => (xs[0]?, s)
+      | (_, s) => (none, s)
+    match cfg0.or (Dict.get? prop (nm "D")) with
+    | none => ({}, s)
+    | some c =>
+      let (cd, s) := Run.dictOf src s c
+      let (intent, s) := resolveOpt src s (Dict.get? cd (nm "Intent"))
+      let (base, s) := nameOf src s (Dict.get? cd (nm "BaseState"))
+      let keys := fun (s : σ) (k : String) =>
+        match resolveOpt src s (Dict.get? cd (nm k)) with
+        | (.array xs, s) => (xs.filterMap refKey, s)
+        | (_, s) => ([], s)
+      let (onK, s) := keys s "ON"
+      let (offK, s) := keys s "OFF"
+      let st0 := base != some (nm "OFF")
+      let state := fun (o : PdfObject) =>
+        match refKey o with
+        | some k => if offK.contains k then false else if onK.contains k then true else st0
+        | none => st0
+      ({ ocgs := groups.map fun o => (o, state o), intent }, s)
+  | (_, s) => ({}, s)
+
+/-- `ocg_intents_include`: whether intent `n` is included by the configuration's intent. -/
+def intentIncludes (desc : PdfObject) (n : Name) : Bool :=
+  if n = nm "All" then true else
+  match desc with
+  | .null => n = nm "View"
+  | .name i => i = nm "All" || i = n
+  | .array xs => xs.any fun x => match x with
+    | .name i => i = nm "All" || i = n
+    | _ => n = nm ""
+  | _ => false
+
+/-- The `/P` policy of a membership dictionary as MuPDF's `combine` bits (bit 0: AND, bit 1:
+true means off). -/
+def combineOf (p : Option Name) : Nat :=
+  if p = some (nm "AllOn") then 1 else if p = some (nm "AnyOff") then 2
+  else if p = some (nm "AllOff") then 3 else 0
+
+/-- **Whether optional content `o` is hidden** (usage "View"; see the section doc), following
+membership dictionaries at most `fuel` levels deep. -/
+def ocHidden {σ : Type} (src : Source σ) (desc : OCDesc) : Nat → PdfObject → σ → Bool × σ
+  | 0, _, s => (false, s)
+  | f + 1, o, s =>
+    if desc.ocgs.isEmpty then (false, s) else
+    match o with
+    | .null => (false, s)
+    | .name _ => (false, s)
+    | _ =>
+      match Run.resolve src s o with
+      | (.dict d, s) =>
+        let (ty, s) := nameOf src s (Dict.get? d (nm "Type"))
+        if ty = some (nm "OCG") then
+          let dflt := match refKey o with
+            | some k => match desc.ocgs.find? (fun e => refKey e.1 == some k) with
+              | some e => !e.2
+              | none => false
+            | none => false
+          let (it, s) := resolveOpt src s (Dict.get? d (nm "Intent"))
+          let ok := match it with
+            | .name n => intentIncludes desc.intent n
+            | .array xs => xs.any fun x => match x with
+              | .name n => intentIncludes desc.intent n
+              | _ => intentIncludes desc.intent (nm "")
+            | _ => intentIncludes desc.intent (nm "View")
+          if !ok then (true, s) else
+          match resolveOpt src s (Dict.get? d (nm "Usage")) with
+          | (.dict ud, s) =>
+            let (vd, s) := match Dict.get? ud (nm "View") with
+              | some x => Run.dictOf src s x
+              | none => ([], s)
+            let (es, s) := nameOf src s (Dict.get? vd (nm "ViewState"))
+            if es = some (nm "OFF") then (true, s) else if es = some (nm "ON") then (false, s)
+            else (dflt, s)
+          | (_, s) => (dflt, s)
+        else if ty = some (nm "OCMD") then
+          match resolveOpt src s (Dict.get? d (nm "VE")) with
+          | (.array _, s) => (false, s)
+          | (_, s) =>
+            let (p, s) := nameOf src s (Dict.get? d (nm "P"))
+            let cb := combineOf p
+            let flip := fun (h : Bool) => if cb % 2 == 0 then !h else h
+            let raw := (Dict.get? d (nm "OCGs")).getD .null
+            match Run.resolve src s raw with
+            | (.array xs, s) =>
+              let (on, s) := xs.foldl (fun (acc : Bool × σ) x =>
+                let (h, s) := ocHidden src desc f x acc.2
+                let h := flip h
+                (if cb / 2 % 2 == 1 then acc.1 && h else acc.1 || h, s)) (cb % 2 == 1, s)
+              (!on, s)
+            | (_, s) =>
+              let (h, s) := ocHidden src desc f raw s
+              (!(flip h), s)
+        else (false, s)
+      | (_, s) => (false, s)
 
 /-- A normalised rectangle from four numbers. -/
 def rectOf (o : PdfObject) : Option RBox :=
@@ -689,7 +840,8 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
   | (_, s) => (none, s)
 
 /-- Parse one annotation dictionary `ad` (object `num`, position `idx`). -/
-def parseDict {σ : Type} (src : Source σ) (s : σ) (idx num : Nat) (ad : Dict) : Outcome × σ :=
+def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx num : Nat) (ad : Dict) :
+    Outcome × σ :=
   let (sub, s) := nameOf src s (Dict.get? ad (nm "Subtype"))
   let subtype := sub.getD (nm "")
   if subtype = nm "Link" then (.skip .link, s)
@@ -701,6 +853,9 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (idx num : Nat) (ad : Dict)
     let flags := flagsOf fo
     if hasFlag flags flagInvisible || hasFlag flags flagHidden then (.skip .hidden, s)
     else if hasFlag flags flagNoView then (.skip .noView, s)
+    else
+    let (och, s) := ocHidden src oc maxOCDepth ((Dict.get? ad (nm "OC")).getD .null) s
+    if och then (.skip .ocHidden, s)
     else
       let widget := subtype = nm "Widget"
       let (hasFT, s) := inheritable src (nm "FT") maxFieldDepth ad s
@@ -727,16 +882,16 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (idx num : Nat) (ad : Dict)
             (.draw ⟨idx, num, subtype, rect, flags, state, n, g, st, m, widget, false⟩, s)
 
 /-- Parse one `/Annots` element (`seen`: annotation object numbers already listed). -/
-def parseOne {σ : Type} (src : Source σ) (s : σ) (idx : Nat) (seen : List Nat) (o : PdfObject) :
-    Outcome × σ :=
+def parseOne {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx : Nat) (seen : List Nat)
+    (o : PdfObject) : Outcome × σ :=
   match o with
   | .ref n g =>
     if seen.contains n then (.skip .duplicate, s)
     else
       match src.fetch s n g with
-      | (.ok (.obj (.dict ad)), s) => parseDict src s idx n ad
+      | (.ok (.obj (.dict ad)), s) => parseDict src s oc idx n ad
       | (_, s) => (.skip .notDict, s)
-  | .dict ad => parseDict src s idx 0 ad
+  | .dict ad => parseDict src s oc idx 0 ad
   | _ => (.skip .notDict, s)
 
 /-- Object number of a reference (0 otherwise). -/
@@ -745,22 +900,22 @@ def refNum : PdfObject → Nat
   | _ => 0
 
 /-- Parse the elements in order: one outcome per element. -/
-def parseAll {σ : Type} (src : Source σ) :
+def parseAll {σ : Type} (src : Source σ) (oc : OCDesc) :
     Nat → List Nat → List PdfObject → σ → List (Nat × Outcome) × σ
   | _, _, [], s => ([], s)
   | idx, seen, o :: os, s =>
-    let (r, s) := parseOne src s idx seen o
-    let (rs, s) := parseAll src (idx + 1) (refNum o :: seen) os s
+    let (r, s) := parseOne src s oc idx seen o
+    let (rs, s) := parseAll src oc (idx + 1) (refNum o :: seen) os s
     ((idx, r) :: rs, s)
 
 /-- `parseAll` gives exactly one outcome per element. -/
-theorem parseAll_length {σ : Type} (src : Source σ) :
+theorem parseAll_length {σ : Type} (src : Source σ) (oc : OCDesc) :
     ∀ (idx : Nat) (seen : List Nat) (os : List PdfObject) (s : σ),
-      (parseAll src idx seen os s).1.length = os.length
+      (parseAll src oc idx seen os s).1.length = os.length
   | _, _, [], _ => rfl
   | idx, seen, o :: os, s => by
     simp only [parseAll, List.length_cons]
-    rw [parseAll_length src (idx + 1) (refNum o :: seen) os]
+    rw [parseAll_length src oc (idx + 1) (refNum o :: seen) os]
 
 /-- The annotations of a page. -/
 structure Collected where
@@ -782,21 +937,22 @@ theorem widgetsLast_length (ds : List Drawable) : (widgetsLast ds).length = ds.l
   | cons x xs ih => cases h : x.widget <;> simp [h] <;> omega
 
 /-- **Collect the annotations** of a page dictionary `pd` (§12.5; see the module doc). -/
-def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) : Collected × σ :=
+def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {}) :
+    Collected × σ :=
   let (arr, s) := match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
     | none => (.null, s)
   let xs := match arr with
     | .array xs => xs
     | _ => []
-  let (rs, s) := parseAll src 0 [] (xs.take maxAnnots) s
+  let (rs, s) := parseAll src oc 0 [] (xs.take maxAnnots) s
   let over := (List.range (xs.length - maxAnnots)).map fun i => (maxAnnots + i, Skip.overCap)
   ({ drawn := widgetsLast (rs.filterMap (·.2.drawable?)),
      skipped := rs.filterMap (fun (i, r) => r.skip?.map (i, ·)) ++ over }, s)
 
 /-- **Annotation count bound**: at most `maxAnnots` annotations are drawn per page. -/
-theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) :
-    (collect src s pd).1.drawn.length ≤ maxAnnots := by
+theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc) :
+    (collect src s pd oc).1.drawn.length ≤ maxAnnots := by
   simp only [collect]
   generalize (match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
@@ -805,8 +961,8 @@ theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) :
   generalize (match arr with
     | .array xs => xs
     | _ => []) = xs
-  have hl := parseAll_length src 0 [] (xs.take maxAnnots) s1
-  generalize parseAll src 0 [] (xs.take maxAnnots) s1 = p at hl
+  have hl := parseAll_length src oc 0 [] (xs.take maxAnnots) s1
+  generalize parseAll src oc 0 [] (xs.take maxAnnots) s1 = p at hl
   obtain ⟨rs, s2⟩ := p
   simp only at hl ⊢
   rw [widgetsLast_length]
@@ -997,8 +1153,8 @@ structure AnnotPage where
 /-- **Annotations of a page** (page dictionary `pd`, resources `pageRes`, the page's font
 table `pageFonts`), run under the budget `bud`. Total. -/
 def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) : AnnotPage × σ :=
-  let (c, s) := collect src s pd
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc := {}) : AnnotPage × σ :=
+  let (c, s) := collect src s pd oc
   let (roots, s) := apRoots src s c.drawn
   let (fonts, s) := loadAnnotFonts limits src s pageFonts roots
   let st := runAppearances (Text.textEnv limits src fonts) bud pageRes c.drawn s ()
@@ -1007,11 +1163,12 @@ def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd page
 /-- **Bounds of `pageAnnots`**: at most `maxAnnots` annotations drawn, at most `bud.ops`
 operators and `Paint.maxItems · bud.ops` items. -/
 theorem pageAnnots_bounds {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) :
-    (pageAnnots limits src s pd pageRes pageFonts bud).1.collected.drawn.length ≤ maxAnnots ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud).1.ops ≤ bud.ops ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud).1.items.size ≤ Paint.maxItems * bud.ops :=
-  ⟨collect_drawn_le src s pd, runAppearances_ops_le _ _ _ _ _ _,
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc) :
+    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.collected.drawn.length ≤ maxAnnots ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.ops ≤ bud.ops ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.items.size ≤
+      Paint.maxItems * bud.ops :=
+  ⟨collect_drawn_le src s pd oc, runAppearances_ops_le _ _ _ _ _ _,
    runAppearances_items_le _ _ _ _ _ _⟩
 
 /-- **Annotations of a page of an opened document**, charging the decode `budget`; `pageFonts`
@@ -1021,7 +1178,8 @@ def docAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (pageFonts : T
     (bud : Budget) (budget : Filter.Budget) : AnnotPage × Filter.Budget :=
   let src := Text.docSource limits doc
   let (pd, b) := Run.dictOf src budget (.ref page.num page.gen)
-  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud
+  let (oc, b) := readOC src b doc.catalog
+  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc
 
 /-- **The shared budget** (task 8.3b): what the page run `pt` left of `Limits.maxOpsPerPage`
 and `Limits.maxFormsPerPage`. -/
@@ -1037,8 +1195,10 @@ theorem docAnnots_shared_ops (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
   dsimp only [docAnnots]
   generalize Run.dictOf (Text.docSource limits doc) b (.ref page.num page.gen) = r
   obtain ⟨pd, b'⟩ := r
-  have := (pageAnnots_bounds limits (Text.docSource limits doc) b' pd
-    (page.resources.getD []) pt.fonts (Budget.after limits pt)).2.1
+  generalize readOC (Text.docSource limits doc) b' doc.catalog = q
+  obtain ⟨oc, b''⟩ := q
+  have := (pageAnnots_bounds limits (Text.docSource limits doc) b'' pd
+    (page.resources.getD []) pt.fonts (Budget.after limits pt) oc).2.1
   simp only [Budget.after] at this ⊢
   omega
 
