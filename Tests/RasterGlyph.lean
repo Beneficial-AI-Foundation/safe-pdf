@@ -18,9 +18,14 @@ fixtures of Phase 6 (`Tests/fonts/`):
   nothing (no substitute fonts: documented gap); a CFF page renders without failure;
 * task 7.3f (end to end): `sh` with `ca 0.5` and `/BM /Multiply`, an image inside a
   luminosity soft-mask group, an inline image with a named colour space inside a form,
-  text filled with a shading pattern.
+  text filled with a shading pattern;
+* task 7.3j (Type 3 fonts, a hand-built font, `type3Cases`): a coloured `d0` path glyph keeps
+  its own colour; an uncoloured `d1` inline stencil image mask and a `d1` path take the fill
+  colour (the charproc's colour operators ignored); positions with `TJ`; a rotated CTM; modes
+  3 and 7; a clip; fill alpha; a glyph that shows its own font terminates (depth cap).
 
-Set `SAFEPDF_PPM_DIR=<dir>` to also write the rendered pages as PPM files there.
+Set `SAFEPDF_PPM_DIR=<dir>` to also write the rendered pages as PPM files there (and the
+Type 3 pages as `glyph-t3-*.pdf`, for a pixel comparison with `mutool draw`).
 -/
 
 namespace SafePdf.Tests.RasterGlyph
@@ -149,6 +154,74 @@ def displayListGaps (ttf : ByteArray) : List (String × Option Clip.Image × (Cl
     -- The glyph (≈ 1400 px) filled with the red shading pattern.
     ("pattern-text", render txt, fun img => near (redCount img) 1400 5) ]
 
+/-- Number of green pixels (`G > 200`, `R, B < 50`). -/
+def greenCount (img : Clip.Image) : Nat := Id.run do
+  let mut n := 0
+  for i in [0:img.w * img.h] do
+    let p := pxAt img (i % img.w) (i / img.w)
+    if p.2.1 > 200 && p.1 < 50 && p.2.2 < 50 then n := n + 1
+  return n
+
+/-- A hand-built Type 3 font (task 7.3j) as object 5, its charprocs 6–8: `A` a coloured (`d0`)
+red square filling the em, `B` an uncoloured (`d1`) 4 × 4 stencil image mask whose top half
+paints (its `1 0 0 rg` must be ignored), `C` (`d1`) a path triangle; `/FontMatrix` 0.01, so
+1 em = 100 glyph units. `extraRes`: more font resources (`/Resources` of the font). -/
+def type3Font (extraRes : String := "") : List String :=
+  [ "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 100 100] /FontMatrix [0.01 0 0 0.01 0 0] " ++
+      "/CharProcs << /sq 6 0 R /im 7 0 R /tri 8 0 R >> " ++
+      "/Encoding << /Type /Encoding /Differences [65 /sq /im /tri] >> /FirstChar 65 /LastChar 67 " ++
+      s!"/Widths [100 100 100] /Resources << {extraRes} >> >>",
+    strmObj "" "100 0 d0 1 0 0 rg 0 0 100 100 re f",
+    strmObj "" ("100 0 0 0 100 100 d1 1 0 0 rg q 100 0 0 100 0 0 cm " ++
+      "BI /W 4 /H 4 /IM true /BPC 1 /F /AHx ID 00 00 F0 F0> EI Q"),
+    strmObj "" "100 0 0 0 100 100 d1 0 0 m 100 0 l 0 100 l h f" ]
+
+/-- A page showing `c` with the Type 3 font as `/F3`. -/
+def type3Page (c : String) (extraRes : String := "") : ByteArray :=
+  resPage "<< /Font << /F3 5 0 R >> >>" c (type3Font extraRes)
+
+/-- Task 7.3j end-to-end Type 3 pages: name, rendered page, check. At 50 pt, one glyph is a
+50 × 50 px em. -/
+def type3Cases : List (String × ByteArray × (Clip.Image → Bool)) :=
+  [ -- d0: the glyph's own red, not the green fill colour: 2500 px.
+    ("t3-d0-coloured", (type3Page "BT /F3 50 Tf 0 1 0 rg 20 20 Td (A) Tj ET"),
+      fun img => near (redCount img) 2500 2 && greenCount img == 0),
+    -- d1 stencil: the top half (50 × 25 px) in the fill colour green, no red.
+    ("t3-d1-image-mask", (type3Page "BT /F3 50 Tf 0 1 0 rg 20 20 Td (B) Tj ET"),
+      fun img => near (greenCount img) 1250 3 && redCount img == 0 &&
+        pxAt img 45 (200 - 60) == (0, 255, 0) && pxAt img 45 (200 - 30) == (255, 255, 255)),
+    -- d1 path: the triangle (1250 px) in green.
+    ("t3-d1-path", (type3Page "BT /F3 50 Tf 0 1 0 rg 20 20 Td (C) Tj ET"),
+      fun img => near (greenCount img) 1250 3 && redCount img == 0),
+    -- Positions: `ABC` side by side (advance 1 em), then a TJ gap of 1 em before `A`.
+    ("t3-run", (type3Page "BT /F3 30 Tf 0 1 0 rg 10 20 Td [(ABC) -1000 (A)] TJ ET"),
+      fun img => near (redCount img) 1800 3 && near (greenCount img) 900 4 &&
+        pxAt img 145 (200 - 30) == (255, 0, 0) && pxAt img 115 (200 - 30) == (255, 255, 255)),
+    -- Scaled and rotated by the CTM: still 2500 px of red at 0.5 scale × 100 pt.
+    ("t3-ctm", (type3Page "q 0 0.5 -0.5 0 150 20 cm BT /F3 100 Tf (A) Tj ET Q"),
+      fun img => near (redCount img) 2500 3),
+    -- Modes 3 and 7 paint nothing.
+    ("t3-invisible", (type3Page "BT /F3 50 Tf 3 Tr 20 20 Td (AB) Tj ET"),
+      fun img => redCount img == 0 && ink img == 0),
+    ("t3-clip-mode", (type3Page "BT /F3 50 Tf 7 Tr 20 20 Td (AB) Tj ET"),
+      fun img => ink img == 0),
+    -- Clipped to the left half of the square.
+    ("t3-clipped", (type3Page "0 0 45 200 re W n BT /F3 50 Tf 20 20 Td (A) Tj ET"),
+      fun img => near (redCount img) 1250 3),
+    -- Fill alpha 0.5 over white: the stencil half is (127/128, 255, 127/128).
+    ("t3-alpha", (resPage "<< /Font << /F3 5 0 R >> /ExtGState << /G << /ca 0.5 >> >> >>"
+        "/G gs BT /F3 50 Tf 0 1 0 rg 20 20 Td (B) Tj ET" (type3Font)),
+      fun img => let p := pxAt img 45 (200 - 60); 126 ≤ p.1 && p.1 ≤ 129 && p.2.1 == 255),
+    -- A glyph showing its own font (`A` inside `A`'s charproc via the font's resources): the
+    -- nesting stops at the depth cap; the page renders.
+    ("t3-recursive", (resPage "<< /Font << /F3 5 0 R >> >>"
+        "BT /F3 50 Tf 20 20 Td (A) Tj ET"
+        [ "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 100 100] /FontMatrix [0.01 0 0 0.01 0 0] " ++
+            "/CharProcs << /sq 6 0 R >> /Encoding << /Differences [65 /sq] >> /FirstChar 65 " ++
+            "/LastChar 65 /Widths [100] /Resources << /Font << /F3 5 0 R >> >> >>",
+          strmObj "" "100 0 d0 1 0 0 rg 0 0 100 50 re f BT /F3 50 Tf 0 50 Td (A) Tj ET" ]),
+      fun img => 0 < redCount img) ]
+
 /-- Run the checks; the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -214,10 +287,24 @@ def run : IO Nat := do
         failures := failures + 1
         report s!"{name}: {pxAt img 100 100}, red {redCount img}"
     | none => failures := failures + 1; report s!"{name}: render failed"
+  -- 5. Type 3 fonts (task 7.3j)
+  let mut pdfs : Array (String × ByteArray) := #[]
+  for (name, pdf, ok) in type3Cases do
+    pdfs := pdfs.push (name, pdf)
+    match render pdf with
+    | some img =>
+      dumps := dumps.push (name, img)
+      if !ok img then
+        failures := failures + 1
+        report s!"{name}: red {redCount img}, green {greenCount img}, ink {ink img}"
+    | none => failures := failures + 1; report s!"{name}: render failed"
   if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
     IO.FS.createDirAll dir
     for (name, img) in dumps do
       writePpm (System.FilePath.mk dir / s!"glyph-{name}.ppm") img
+    -- the Type 3 pages too, for a pixel comparison with `mutool draw`
+    for (name, pdf) in pdfs do
+      IO.FS.writeBinFile (System.FilePath.mk dir / s!"glyph-{name}.pdf") pdf
   return failures
 
 end SafePdf.Tests.RasterGlyph
