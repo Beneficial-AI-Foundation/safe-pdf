@@ -8,7 +8,8 @@ constant Tcl script that runs it (`::safepdf::emit …` back into Lean, or a con
 and an enabled rule over a small view of the viewer state (`Ctx`).
 
 * **Menubar** (`menubar`): File (Open…, Close, Quit), Edit (Copy, Select all, Highlight
-  selection, the Highlight colour cascade, Add note…, Delete mark, Find…; marks: task 9.4), View
+  selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
+  entries Highlight tool and Show all highlights: task 9.8; Find…), View
   (Outline, zoom in/out, actual size, fit page/width, rotate), Go (previous/next/first/last
   page, Go to page…, Back, Forward). The viewer builds the Tk menus from this list
   (`Viewer.buildMenus`) and keeps every entry's `-state` in step with `Cmd.enabled`
@@ -50,6 +51,11 @@ inductive Cmd where
   | addNote
   /-- Delete the selected mark (task 9.4). -/
   | deleteMark
+  /-- Turn the Highlight tool on or off (task 9.8: with it on, selecting text highlights it;
+  its pop-over opens with it). -/
+  | hlTool
+  /-- Show or hide all highlights (task 9.8, the pop-over's "Show all"). -/
+  | showAll
   /-- Show/hide the outline panel. -/
   | outline
   /-- Zoom in one step. -/
@@ -84,7 +90,8 @@ inductive Cmd where
 
 /-- Every command, in menubar order. -/
 def Cmd.all : List Cmd :=
-  [.openFile, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .find, .outline, .zoomIn, .zoomOut,
+  [.openFile, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
+   .showAll, .find, .outline, .zoomIn, .zoomOut,
    .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .prevPage, .nextPage, .firstPage,
    .lastPage, .gotoPage, .back, .forward]
 
@@ -99,6 +106,8 @@ def Cmd.label : Cmd → String
   | .highlight => "Highlight selection"
   | .addNote => "Add note..."
   | .deleteMark => "Delete mark"
+  | .hlTool => "Highlight tool"
+  | .showAll => "Show all highlights"
   | .outline => "Outline"
   | .zoomIn => "Zoom in"
   | .zoomOut => "Zoom out"
@@ -126,6 +135,8 @@ def Cmd.accel : Cmd → String
   | .highlight => "H"
   | .addNote => ""
   | .deleteMark => "Delete"
+  | .hlTool => ""
+  | .showAll => ""
   | .outline => "F9"
   | .zoomIn => "+"
   | .zoomOut => "-"
@@ -153,6 +164,8 @@ def Cmd.underline : Cmd → Nat
   | .highlight => 0
   | .addNote => 4
   | .deleteMark => 0
+  | .hlTool => 10
+  | .showAll => 0
   | .outline => 0
   | .zoomIn => 5
   | .zoomOut => 5
@@ -181,6 +194,8 @@ def Cmd.script : Cmd → String
   | .highlight => "::safepdf::emit highlight"
   | .addNote => "::safepdf::emit note"
   | .deleteMark => "::safepdf::emit markDelete"
+  | .hlTool => "::safepdf::emit hlTool"
+  | .showAll => "::safepdf::emit showAll"
   | .outline => "::safepdf::emit outlineToggle"
   | .zoomIn => "::safepdf::emit zoom in"
   | .zoomOut => "::safepdf::emit zoom out"
@@ -228,7 +243,7 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages
   | .back => c.hasDoc && c.canBack
   | .forward => c.hasDoc && c.canForward
-  | .close | .selectAll | .find | .addNote | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
+  | .close | .selectAll | .find | .addNote | .hlTool | .showAll | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
   | .rotateCw | .rotateCcw | .gotoPage => c.hasDoc
 
 /-- A menu entry. -/
@@ -266,12 +281,19 @@ def barPath : String := ".menubar"
 /-- Tcl variable that mirrors whether the outline panel is shown (View → Outline check). -/
 def outlineVar : String := "::safepdf::outlineOn"
 
+/-- Tcl variable that mirrors whether the Highlight tool is on (Edit → Highlight tool). -/
+def hlToolVar : String := "::safepdf::hlTool"
+
+/-- Tcl variable that mirrors "Show all" (Edit → Show all highlights, the pop-over switch). -/
+def showAllVar : String := "::safepdf::showAll"
+
 /-- The menubar: File / Edit / View / Go. -/
 def menubar : List Menu :=
   [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .close, .sep, .cmd .quit]⟩,
     ⟨".menubar.edit", "Edit", 0,
       [.cmd .copy, .cmd .selectAll, .sep, .cmd .highlight, .colors ".menubar.edit.hl",
-       .cmd .addNote, .cmd .deleteMark, .sep, .cmd .find]⟩,
+       .cmd .addNote, .cmd .deleteMark, .sep, .check .hlTool hlToolVar,
+       .check .showAll showAllVar, .sep, .cmd .find]⟩,
     ⟨".menubar.view", "View", 0,
       [.check .outline outlineVar, .sep, .cmd .zoomIn, .cmd .zoomOut, .cmd .actualSize,
        .cmd .fitPage, .cmd .fitWidth, .sep, .cmd .rotateCw, .cmd .rotateCcw]⟩,
@@ -341,7 +363,9 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 #guard locate .zoomIn == some (".menubar.view", 2)
 #guard locate .highlight == some (".menubar.edit", 3)
 #guard locate .deleteMark == some (".menubar.edit", 6)
-#guard locate .find == some (".menubar.edit", 8)
+#guard locate .hlTool == some (".menubar.edit", 8)
+#guard locate .showAll == some (".menubar.edit", 9)
+#guard locate .find == some (".menubar.edit", 11)
 #guard Cmd.addNote.popScript != Cmd.addNote.script && Cmd.copy.popScript == Cmd.copy.script
 -- Enabled rules.
 #guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit]
@@ -349,7 +373,8 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
   !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c &&
   Cmd.lastPage.enabled c && !Cmd.copy.enabled c && !Cmd.outline.enabled c &&
   !Cmd.back.enabled c && Cmd.zoomIn.enabled c && !Cmd.highlight.enabled c &&
-  Cmd.addNote.enabled c && !Cmd.deleteMark.enabled c
+  Cmd.addNote.enabled c && !Cmd.deleteMark.enabled c && Cmd.hlTool.enabled c &&
+  Cmd.showAll.enabled c
 #guard let c : Ctx :=
     { hasDoc := true, page := 2, pages := 3, hasSel := true, hasOutline := true, canBack := true }
   Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c && !Cmd.lastPage.enabled c &&

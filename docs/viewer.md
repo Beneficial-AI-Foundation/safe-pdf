@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.4 highlights and notes, 9.7 PDF.js look)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.4 highlights and notes, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -86,7 +86,7 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 | Menu | Entries (accelerator) |
 |---|---|
 | File | Open… (Ctrl+O), Close (Ctrl+W), Quit (Ctrl+Q) |
-| Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Find… (Ctrl+F) |
+| Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Highlight tool (check, 9.8), Show all highlights (check, 9.8), Find… (Ctrl+F) |
 | View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`) |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
 
@@ -123,8 +123,9 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     300 %, 400 % (`Toolbar.ZoomChoice.presets`, radio entries). A zoom reached with − / +, the
     keys or Ctrl+wheel that is not in the list (33 %, 67 %, 600 %, …) shows as its percentage
     with no entry checked (PDF.js's custom option).
-  * *right*: Highlight (works since 9.4: highlights the selection in the current colour, or
-    without a selection opens the colour menu; see *Highlights and notes*), Comment, Text,
+  * *right*: Highlight (works since 9.4: highlights the selection in the current colour;
+    without a selection it turns the Highlight tool on and opens its pop-over, or off (9.8);
+    see *Selection bubble and Highlight pop-over*), Comment, Text,
     Draw, Image, then Print and Save — **disabled placeholders** until their tasks land
     (Comment, Text, Draw 9.9, Save 9.5c; Print and Image after M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
@@ -148,8 +149,7 @@ attachment views, "find current outline item"), no thumbnails; the menubar stays
 toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
-the Highlight pop-over (swatches, thickness, "Show all"), selection bubble and the other
-annotation tools are later tasks (9.8/9.9).
+the other annotation tools are later tasks (9.9).
 
 ## Wheel scrolling across pages (9.2)
 
@@ -190,9 +190,9 @@ back from a file with its own id).
 
 * **Colours**: PDF.js's highlight palette (`web/app_options.js`, `highlightEditorColors`):
   yellow `#FFFF98` (default), green `#53FFBC`, blue `#80EBFF`, pink `#FFCBE6`, red `#FF4F5F`.
-  The colour menus (Edit → Highlight colour, the context menu's Highlight cascade, and the
-  menu the toolbar's Highlight button opens without a selection) show a swatch per colour and
-  share one radio variable (`::safepdf::hlColor`): the checked colour is the current one.
+  The colour menus (Edit → Highlight colour, the context menu's Highlight cascade) show a
+  swatch per colour and share one radio variable (`::safepdf::hlColor`): the checked colour is
+  the current one (the Highlight pop-over's swatches set it too, 9.8).
 * **Highlight**: select text (drag, double-click, Ctrl+A), then the toolbar's Highlight
   button, `h`, Edit → Highlight selection, or a colour in a colour menu (which also makes it
   the current colour). The quads are the selection's C3 glyph boxes, one per line run
@@ -216,24 +216,83 @@ back from a file with its own id).
   The text enters Tk by variable substitution and comes back as one event word, never parsed
   as script.
 * **Selecting, recolouring, deleting**: a click (press and release in place) on a mark selects
-  it (icons before highlights, the newest first; marks before links) and a note's click
+  it (icons before highlights, the newest first, except that a highlight wins over its comment
+  on its quads (9.8); marks before links) and a note's click
   opens its popup; a right click on a mark selects it, on empty paper deselects. A colour
   entry recolours the selected highlight; **Delete**, Edit → Delete mark or the context menu's
   Delete mark removes it (the note popup's Delete removes its note).
 * Marks are stored in page space, so they follow zoom, rotation and page changes; a page's
   marks are drawn whenever it is shown.
 
-Not done here: the PDF.js selection bubble and the Highlight pop-over with swatches,
-thickness slider and "Show all" (task 9.8; `Viewer.highlight` and `Viewer.addNote` are the
-hooks), free (drawn) highlights, saving (9.5b/9.5c), undo. The selected-mark outline is drawn
-per quad (PDF.js outlines the union shape).
+Not done here: free (drawn) highlights, saving (9.5b/9.5c), undo. The selected-mark outline
+is drawn per quad (PDF.js outlines the union shape).
 
 | Key / mouse | Action |
 |---|---|
-| `h`, toolbar Highlight | highlight the selection in the current colour (toolbar without a selection: colour menu) |
+| `h`, toolbar Highlight | highlight the selection in the current colour (toolbar without a selection: Highlight tool on/off, 9.8) |
 | click on a mark | select it (a note opens its popup) |
 | `Delete` | delete the selected mark |
 | right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
+
+## Selection bubble and Highlight pop-over (9.8)
+
+Pure logic in `SafePdf/Shell/App/Bubble.lean` (Tk-free, `#guard` checks; theorems
+`place_inside`: a placed bubble stays inside its area, `Ui.escape_closes`). Reference: PDF.js
+`src/display/editor/toolbar.js` (`FloatingToolbar`, `EditorToolbar`), `color_picker.js`,
+`highlight.js` and `web/annotation_editor_layer_builder.css` (`.editToolbar`, `.colorPicker`,
+`#highlightParamsToolbarContainer`), fetched read-only; nothing is copied, everything is drawn
+with Tk canvas items; colours sampled from the Firefox screenshot
+`docs/viewer-reference/pdfjs-firefox.png` (icons `#6a5b92`, borders `#d0cfd5`, accent
+`#6b45d3`).
+
+* **Float bubble**: after a text selection (mouse-up of a drag, a double click, Ctrl+A) a
+  small rounded bubble with the Highlight icon; its right edge is at the end of the lowest
+  selected line and its top 6 px below it (PDF.js `#getLastPoint`,
+  `--editor-toolbar-vert-offset`), above the selection when it would leave the scroll region
+  at the bottom, and clamped into it (`Bubble.place`). Clicking it highlights in the current
+  colour (Edit → Highlight selection's script, `Bubble.Btn.cmd?`).
+* **Edit bubble**: on a selected highlight (after creating it, or a click on it): the colour
+  swatch with a chevron, Comment and Delete, separated by dividers. The chevron opens the
+  colour picker (five swatches in a column under the button, the highlight's colour ringed;
+  above the bubble when it does not fit below); a row recolours the highlight. Comment opens
+  the highlight's note (the note anchored to exactly its quads, `Marks.Store.noteOn`) or adds
+  one in its colour (`Viewer.addNote`; Edit → Add note… on a selected highlight does the
+  same); Delete removes the highlight (Edit → Delete mark's script). On its quads a commented
+  highlight is selected before its note; the note is reached through its icon.
+* Bubbles are canvas items (tag `bub`) in canvas coordinates, so they scroll with the page;
+  every redraw (zoom, rotation, page change, mark change) places them again. They go away on
+  Escape, on a click elsewhere (which clears the selection and the selected mark) and on a page
+  change. A press on a bubble is not a text selection; nor is the second click of a double
+  click on it.
+* **Highlight tool and pop-over**: the toolbar's Highlight button without a selection (or Edit
+  → Highlight tool) turns the tool on — the button looks toggled — and opens the pop-over under
+  the button, right-aligned with it (a canvas `.hlbar` placed over the window): "Highlight
+  color" with the five 24 px swatches (the current one ringed; a click makes it current and
+  recolours a selected highlight, as PDF.js applies parameters to the selected editor),
+  "Thickness" with the small and large example dots and a slider 8–24 (default 12; press or
+  drag; the value is kept in `Bubble.Ui.thickness` for free highlights, a later task), a
+  divider, and the "Show all" switch, which hides all highlights of the page view (the page
+  image is composited without them; notes stay; a hidden highlight cannot be selected) and
+  shows them again (also Edit → Show all highlights). While the tool is on, a mouse-up that
+  leaves a selection (drag or double click) highlights it at once, as PDF.js does. Escape
+  closes the pop-over (the tool stays on); the button turns the tool off. With a selection the
+  button highlights it instead (as in 9.4), without toggling the tool — PDF.js also switches
+  to the highlight mode there.
+
+Not done (visible differences from the reference): Tk on X11 draws no antialiasing and no
+real shadow (a 2 px offset grey shape stands in), so the pill-shaped bubble and the round
+swatches have jagged edges; the bubble buttons have no hover background or tooltips; the
+pop-over is a rectangle window, so its rounded corners show the canvas colour behind them
+(`#f0f0f4`); the toolbar's toggled Highlight button is grey, not PDF.js's lavender; fonts are
+Tk's default; a comment is a separate note mark anchored to the highlight's quads (PDF.js
+keeps the comment in the highlight annotation), so deleting the highlight leaves its note.
+
+| Key / mouse | Action |
+|---|---|
+| mouse-up after selecting | float bubble (with the Highlight tool on: highlight at once) |
+| bubble buttons | Highlight; colour ▾ (picker), Comment, Delete |
+| toolbar Highlight without a selection | Highlight tool and pop-over on / off |
+| `Escape` | close the pop-over and the picker, dismiss the bubble (clears the selection and the selected mark) |
 
 ## Selection, copy and search (8.2c)
 
@@ -355,6 +414,7 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
 | `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
 | `SafePdf/Shell/App/Marks.lean` | Tk-free model of highlights and notes with `#guard` checks: PDF.js colours, marks with stable ids and `/NM` names, quads and `/QuadPoints`, note icon boxes, the store (add, remove, recolour, edit, restore), hit-testing, the multiply blend into the page image (task 9.4). |
+| `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js, placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
 | `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
@@ -469,6 +529,22 @@ back, the pixels and the icon are still right; Edit → Delete mark removes the 
 ids are never reused. (In smoke mode the context menu and the toolbar's colour menu are not
 posted — their entries are invoked directly — so that no menu grab blocks the generated
 events.)
+
+The selection bubble and the Highlight pop-over (9.8) run in a seventh variant
+(`SAFEPDF_VIEWER_SMOKE_MODE=bubble`, `Viewer.smokeBubble`) on the same text PDF: a drag over
+`world` shows the float bubble with its right edge and top at the selection's last point; its
+Highlight button turns the pixels yellow and the edit bubble replaces it; a click on blank
+paper dismisses it; a click on the highlight brings it back and it follows a zoom; its colour
+button opens the picker, whose blue row turns the pixels `128 235 255`; Delete makes them
+white again. The toolbar's Highlight button without a selection opens the pop-over
+(right-aligned with the button), the tool's check variable and the toggled look follow; its
+pink swatch makes pink current; a drag over `safe` then highlights at once in pink; a press
+on the slider sets thickness 20 and a drag to the right 24; the "Show all" switch makes the
+paper white (and the highlight unselectable) and pink again; the edit bubble's Comment opens a
+note anchored to the highlight's quads, which a second Comment reopens with its text; Escape
+closes the pop-over and dismisses the bubble with the tool still on; Edit → Highlight tool
+turns it off; a new selection's bubble goes on Escape and on End (page 2). Generated clicks
+carry `-time` and are spaced past Tk's double-click time where two land close together.
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
