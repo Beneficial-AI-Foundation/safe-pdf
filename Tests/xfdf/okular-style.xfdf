@@ -6,7 +6,7 @@
      namespace prefix, lower-case colours, counter-clockwise quad order (LL, LR, UR, UL),
      white space in coords, a CDATA comment, a <fields> element outside <annots>.
      Expected (Tests/Xfdf.lean): 3 marks (blue highlight, its CDATA comment, a note at a
-     point with a two-line text), skipped 1 (ink), ignored 1 (fields). -->
+     point with a two-line text, and since task 9.9 its ink drawing), skipped 0, ignored 1 (fields). -->
 <x:xfdf xmlns:x='http://ns.adobe.com/xfdf/' xml:space='preserve'>
   <x:annots>
     <x:highlight page='4' color='#8ae9fc' name='okular-{1}' flags='print' rect='90,400,250,412' coords='90, 400, 250, 400, 250, 412, 90, 412'>

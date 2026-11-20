@@ -13,6 +13,10 @@ what needs files or large inputs:
   a `<popup name="safepdf-mark-H-popup-C">` inside the `<highlight>`, with no `<text>` of its
   own, and comes back with its id; 9.5d's form (a separate `<text>` with `coords`) is still
   imported, as is a foreign popup without our name (fresh id);
+* free text and ink (task 9.9): `<freetext>` with `<contents>` and `<defaultappearance>`,
+  `<ink>` with `<inklist><gesture>` — export → file → import is the identity (text with
+  markup characters and a non-WinAnsi character, position, size, colour; strokes in order,
+  thickness, opacity, colour), and re-import adds nothing;
 * the samples under `Tests/xfdf/` in the styles of Acrobat, Foxit, an Okular-style and a
   PDF.js-style variant (each file's header comment says where its conventions come from and
   what it must import): marks, colours, pages, quads, comments, skipped and ignored counts;
@@ -49,6 +53,16 @@ def sample : Store :=
   let (s, _) := s.addNote 3 .green "its comment" (.quads [⟨10, 10, 20, 20⟩])
   let (s, _) := s.addNote 1 .red "on a selection" (.quads [⟨1, 2, 3, 4⟩, ⟨5, 6, 7, 8⟩])
   let (s, _) := s.addNote 2 .blue "" (.point ⟨50, 60⟩)
+  s
+
+/-- Free text and ink (task 9.9): two text boxes (one multi-line with markup characters and a
+non-WinAnsi character) and two drawings (several strokes, a one-point stroke, opacity). -/
+def sampleEd : Store :=
+  let s : Store := {}
+  let (s, _) := s.add 0 .yellow (.freeText "Typed <b> & \"q\" ✓\nsecond line" ⟨72.5, 700.25⟩ 14 (215, 0, 34))
+  let (s, _) := s.add 0 .yellow (.freeText "x" ⟨300, 100⟩ 5 (0, 0, 0))
+  let (s, _) := s.add 1 .yellow (.ink [[⟨10, 10⟩, ⟨20.25, 30⟩, ⟨40, 35.5⟩], [⟨5, 5⟩]] 3 40 (0, 96, 223))
+  let (s, _) := s.add 1 .yellow (.ink [[⟨100, 100⟩, ⟨200, 200⟩]] 20 100 (128, 0, 215))
   s
 
 /-- Whether two stores hold the same marks (ids, pages, colours, kinds), in order. -/
@@ -89,15 +103,18 @@ def samples : List Expect :=
     { file := "okular-style.xfdf",
       marks := [⟨0, 4, .blue, .highlight [⟨90, 400, 250, 412⟩]⟩,
                 ⟨0, 4, .blue, .note "a <CDATA> comment & more" (.quads [⟨90, 400, 250, 412⟩])⟩,
-                ⟨0, 4, .yellow, .note "line one\nline two" (.point ⟨300, 324⟩)⟩],
-      skipped := ["ink"], ignored := 1 },
+                ⟨0, 4, .yellow, .note "line one\nline two" (.point ⟨300, 324⟩)⟩,
+                ⟨0, 4, .yellow, .ink [[⟨1, 1⟩, ⟨2, 2⟩]] 1 100 (0, 0, 0)⟩],
+      skipped := [], ignored := 1 },
     { file := "pdfjs-style.xfdf",
       marks := [⟨0, 0, .red, .highlight [⟨72, 616, 300, 628⟩, ⟨72, 600, 180, 612⟩]⟩,
                 ⟨0, 0, .red, .note "📌 pinned\ttab\rand CR — “quotes”"
                   (.quads [⟨72, 616, 300, 628⟩, ⟨72, 600, 180, 612⟩])⟩,
                 ⟨0, 1, .pink, .highlight [⟨10, 10, 50, 20⟩]⟩,
-                ⟨0, 1, .blue, .note "日本語のメモ" (.point ⟨100, 220⟩)⟩],
-      skipped := ["freetext", "ink"], ignored := 0 } ]
+                ⟨0, 1, .blue, .note "日本語のメモ" (.point ⟨100, 220⟩)⟩,
+                ⟨0, 1, .yellow, .freeText "typed" ⟨0, 20⟩ 10 (0, 0, 0)⟩,
+                ⟨0, 1, .yellow, .ink [[⟨1, 1⟩, ⟨2, 2⟩]] 1 100 (0, 0, 0)⟩],
+      skipped := [], ignored := 0 } ]
 
 /-- Runs `f` and returns its result and the elapsed milliseconds. -/
 def timed {α : Type} (f : Unit → α) : IO (α × Nat) := do
@@ -140,6 +157,28 @@ def run : IO Nat := do
     let (s2, ids2, dups2) := importItems s rep.items
     failures := failures + (← check "re-import idempotent"
       (ids2.isEmpty && dups2 == 6 && s2.marks.size == 6))
+  -- 1a. Free text and ink (task 9.9).
+  let xmlEd := toXfdf sampleEd (fun _ => some ⟨0, 0, 612, 792⟩) "D:20261120120000Z" none
+  let (h, pathEd) ← IO.FS.createTempFile
+  h.putStr xmlEd
+  h.flush
+  let rEd ← readFile {} pathEd.toString (pages := some 2)
+  IO.FS.removeFile pathEd
+  match rEd with
+  | .error e => failures := failures + (← check "free text / ink read back" false e)
+  | .ok rep =>
+    let (s, ids, dups) := importItems {} rep.items
+    failures := failures + (← check "free text / ink round trip" (sameMarks s sampleEd &&
+      ids == [1, 2, 3, 4] && dups == 0 && rep.skippedCount == 0)
+      s!"{reprStr (rep.items.map (·.kind))}")
+    let (_, ids2, dups2) := importItems s rep.items
+    failures := failures + (← check "free text / ink re-import" (ids2.isEmpty && dups2 == 4))
+  failures := failures + (← check "freetext element" ((xmlEd.splitOn (
+    "<freetext page=\"0\" rect=\"72.5,658.45,186.064,700.25\" name=\"safepdf-mark-1\" flags=\"print\" " ++
+    "date=\"D:20261120120000Z\"><contents>Typed &lt;b&gt; &amp; &quot;q&quot; ✓\nsecond line</contents>" ++
+    "<defaultappearance>/Helv 14 Tf 0.8431 0 0.1333 rg</defaultappearance></freetext>")).length == 2) xmlEd)
+  failures := failures + (← check "ink element" ((xmlEd.splitOn "\n").any (·.startsWith
+    "<ink page=\"1\" rect=\"2,2,43,38.5\" color=\"#0060DF\" name=\"safepdf-mark-3\" flags=\"print\" date=\"D:20261120120000Z\" width=\"3\" opacity=\"0.4\"><inklist><gesture>10,10;20.25,30;40,35.5</gesture><gesture>5,5</gesture></inklist></ink>")))
   -- 1b. The standard comment form (task 9.11): mark 4 is the comment of highlight 3.
   let hl3 := (xml.splitOn "\n").find? (·.startsWith "<highlight page=\"3\"")
   failures := failures + (← check "comment inside its highlight" (hl3.any fun l =>
