@@ -36,6 +36,12 @@ cubics + 12 quadratics, fractional coordinates) mapped to device paths by the re
 `Glyph.outlineToD` (exact `Rat`) and by `Glyph.outlineToDF` (64-bit fixed point, per-glyph
 translation by `GTx`, as `Glyph.glyphStepF` does it); the device-path checksums must be equal.
 
+Task 7.2j adds `text-fills-3000`: 3000 glyph-size fills (`o`, `l`, `b`, `e`-like outlines at
+10 pt, one `fillEdgesCounted` call each, as a text page after `Glyph.columnGroups`) through
+the fast and the reference filler, whose checksums must be equal. Options: `--stages` times
+the flattening and each stage of the bucketed filler on that scene; `--text-loop N` repeats the
+scene (a steady load for gdb sampling).
+
 Run it compiled, not interpreted (the interpreter is far slower):
 
     scripts/bench-raster.sh [--reps N]
@@ -176,6 +182,51 @@ no compositing; returns the summed coverage). -/
   let es := Raster.Stroke.strokeEdges view gridStroke.1 gridStroke.2 {}
   let m := fillEdgesSpec es .nonzero ⟨0, 0, 612, 792⟩ {}
   let n := m.total + (if u == () then 0 else 1)
+  let t1 ← IO.monoNanosNow
+  pure (n, t1 - t0)
+
+/-! ## Text-size glyph fills (task 7.2j) -/
+
+/-- Circle of centre `(cx, cy)` and radius `r` (thousandths of a point), 4 cubics, clockwise
+(the counter of an `o`). -/
+def circleRev (cx cy r : Int) : Array Segment :=
+  let k : Int := r * 5523 / 10000
+  #[.moveTo (ptm (cx + r) cy),
+    .curveTo (ptm (cx + r) (cy - k)) (ptm (cx + k) (cy - r)) (ptm cx (cy - r)),
+    .curveTo (ptm (cx - k) (cy - r)) (ptm (cx - r) (cy - k)) (ptm (cx - r) cy),
+    .curveTo (ptm (cx - r) (cy + k)) (ptm (cx - k) (cy + r)) (ptm cx (cy + r)),
+    .curveTo (ptm (cx + k) (cy + r)) (ptm (cx + r) (cy + k)) (ptm (cx + r) cy),
+    .closePath]
+
+/-- Rectangle in thousandths of a point. -/
+def rectM (x0 y0 x1 y1 : Int) : Array Segment :=
+  #[.moveTo (ptm x0 y0), .lineTo (ptm x1 y0), .lineTo (ptm x1 y1), .lineTo (ptm x0 y1), .closePath]
+
+/-- A 10 pt glyph-like outline at `(x, y)` (thousandths of a point, baseline left): `o` (ring),
+`l` (stem), `b` (stem + ring), `e`-like (ring + bar), cycling with `k`; fractional offsets so
+edges fall between pixels. -/
+def glyphAt (k : Nat) (x y : Int) : Path :=
+  let o := (circleM (x + 2400) (y + 2300) 2300).segs ++ circleRev (x + 2400) (y + 2300) 1650
+  match k % 4 with
+  | 0 => ⟨o⟩
+  | 1 => ⟨rectM (x + 600) y (x + 1300) (y + 7000)⟩
+  | 2 => ⟨rectM x y (x + 700) (y + 7000) ++ (circleM (x + 2900) (y + 2300) 2300).segs ++
+      circleRev (x + 2900) (y + 2300) 1650⟩
+  | _ => ⟨o ++ rectM (x + 500) (y + 2100) (x + 4300) (y + 2550)⟩
+
+/-- The text-size scene: 3000 glyph-like fills (60 per line, 50 lines, 5.3 pt apart, 12 pt
+leading), each its own `fillCounted` over the page window — the shape of a pdfTeX text page
+after `Glyph.columnGroups` (one small fill per glyph). `spec`: the reference filler
+(`fillEdgesCountedSpec`) on the same edges. -/
+def timeTextFills (spec : Bool) : IO (Nat × Nat) := do
+  let win : IRect := ⟨0, 0, 612, 792⟩
+  let paths : Array Path := (Array.range 3000).map fun i =>
+    glyphAt i (((i % 60) * 9917 + 36137 : Nat)) (750000 - ((i / 60) * 12000 : Nat) - 173)
+  let dps := paths.map fun p => flatten {} win (ofContentPath view p {})
+  let t0 ← IO.monoNanosNow
+  let n := dps.foldl (fun acc es =>
+    acc + (if spec then fillEdgesCountedSpec es .nonzero win {} else
+      fillEdgesCounted es .nonzero win {}).1.total) 0
   let t1 ← IO.monoNanosNow
   pure (n, t1 - t0)
 
@@ -335,6 +386,59 @@ def main (args : List String) : IO UInt32 := do
   let reps := match args with
     | "--reps" :: n :: _ => n.toNat?.getD 5
     | _ => 5
+  -- `--stages`: the text-size scene's flattening and the bucketed filler's stages, timed
+  -- separately (each stage forced before the clock is read; 3 rounds)
+  if let "--stages" :: _ := args then
+    let win : IRect := ⟨0, 0, 612, 792⟩
+    let paths : Array Path := (Array.range 3000).map fun i =>
+      glyphAt i (((i % 60) * 9917 + 36137 : Nat)) (750000 - ((i / 60) * 12000 : Nat) - 173)
+    let dpaths := paths.map fun p => ofContentPath view p {}
+    let sink ← IO.mkRef (0 : Nat)
+    sink.modify (· + dpaths.size)
+    let tf0 ← IO.monoNanosNow
+    let dps := dpaths.map fun p => flatten {} win p
+    sink.modify (· + dps.foldl (fun a e => a + e.size) 0)
+    let tf1 ← IO.monoNanosNow
+    IO.println s!"flatten x3000: {(tf1 - tf0).toFloat / 1e6} ms"
+    let S := 4
+    for _ in [0:3] do
+      let t0 ← IO.monoNanosNow
+      let rcs := dps.map fun es => maskRect es win
+      sink.modify (· + rcs.size + (rcs[0]?.map (·.2.2.1)).getD 0)
+      let t1 ← IO.monoNanosNow
+      let oks := (dps.zip rcs).map fun (es, rc) => fastOK es rc && bucketShape S rc
+      sink.modify (· + (oks.filter id).size)
+      let t2 ← IO.monoNanosNow
+      let scs := (dps.zip rcs).map fun (es, rc) =>
+        scanB rc.2.2.2 S.toInt64 rc.2.2.2.toInt64 rc.2.1.toInt64 es es.size 0
+          (Array.replicate (rc.2.2.2 * S + 1) 0) 0 0
+      sink.modify (· + scs.foldl (fun a s => a + s.n) 0)
+      let t3 ← IO.monoNanosNow
+      let prs := (scs.zip rcs).map fun (sc, rc) => prefB (rc.2.2.2 * S) 0 0 0 0 sc.cur
+      sink.modify (· + prs.foldl (fun a p => a + p.2.toNat) 0)
+      let t4 ← IO.monoNanosNow
+      let ems := ((dps.zip rcs).zip (scs.zip prs)).map fun ((es, rc), (sc, pr)) =>
+        emitB es S S.toInt64 rc.2.2.2.toInt64 rc.2.1.toInt64 (rc.1 * subUnit).toInt64
+          (rc.2.2.1.toInt64 * 256) 64 (es.size + sc.n + 1) 0 0 0 0 0 0 0 0 0 0 0 0 0 0 pr.1
+          (Array.replicate sc.n 0)
+      sink.modify (· + ems.foldl (fun a e => a + e.2.size) 0)
+      let t5 ← IO.monoNanosNow
+      let xss := (ems.zip rcs).map fun (em, rc) => sortB em.1 (rc.2.2.2 * S) 0 0 em.2
+      sink.modify (· + xss.foldl (fun a e => a + (e[0]?.getD 0).toNat) 0)
+      let t6 ← IO.monoNanosNow
+      let outs := ((xss.zip ems).zip rcs).map fun ((xs, em), rc) =>
+        rowsB false S rc.2.2.1 (256 * S).toUInt32 xs em.1 rc.2.2.2 0
+          (Array.replicate (rc.2.2.1 + 2) 0) (ByteArray.emptyWithCapacity (rc.2.2.2 * rc.2.2.1))
+      sink.modify (· + outs.foldl (fun a o => a + o.size) 0)
+      let t7 ← IO.monoNanosNow
+      let ck := outs.foldl (fun a o => a + o.size) 0 + (oks.filter id).size
+      IO.println s!"maskRect {(t1 - t0).toFloat / 1e6} fastOK {(t2 - t1).toFloat / 1e6} scanB {(t3 - t2).toFloat / 1e6} prefB {(t4 - t3).toFloat / 1e6} emitB {(t5 - t4).toFloat / 1e6} sortB {(t6 - t5).toFloat / 1e6} rowsB {(t7 - t6).toFloat / 1e6} ({ck}; crossings {scs.foldl (fun a s => a + s.n) 0}, pixels {rcs.foldl (fun a r => a + r.2.2.1 * r.2.2.2) 0}, edges {dps.foldl (fun a e => a + e.size) 0})"
+    return 0
+  -- `--text-loop N`: only the text-size fills, N times (a steady load for gdb sampling)
+  if let "--text-loop" :: n :: _ := args then
+    let r ← bestOfSum (n.toNat?.getD 100) (fun _ => timeTextFills false)
+    IO.println s!"text-fills-3000: {r.2.toFloat / 1.0e6} ms (checksum {r.1})"
+    return 0
   let scenes : List (String × DisplayList) :=
     [("empty (white page + checksum)", #[]), ("full-fill", fullFill), ("circles-1000", circles), ("grid-119", grid),
       ("clipped-rects-1000", clippedRects)]
@@ -357,7 +461,10 @@ def main (args : List String) : IO UInt32 := do
   IO.println s!"circles-1000, fill masks only: {cm.2.toFloat / 1.0e6} ms (best of {reps}; checksum {cm.1})"
   let cmr ← bestOfSum reps (fun _ => timeCircleMasksSpec circles)
   IO.println s!"circles-1000, fill masks, reference filler: {cmr.2.toFloat / 1.0e6} ms (best of {reps}; checksum {cmr.1})"
-  if sm.1 != smr.1 || cm.1 != cmr.1 then
+  let tf ← bestOfSum reps (fun _ => timeTextFills false)
+  let tfr ← bestOfSum reps (fun _ => timeTextFills true)
+  IO.println s!"text-fills-3000, fill masks only (flattened edges in hand): {tf.2.toFloat / 1.0e6} ms; reference filler {tfr.2.toFloat / 1.0e6} ms (best of {reps}; checksum {tf.1})"
+  if sm.1 != smr.1 || cm.1 != cmr.1 || tf.1 != tfr.1 then
     IO.println "MISMATCH: fast and reference masks differ"
     return 1
   let gs ← bestOfSum 1 (fun _ => timeGlyphs false)
