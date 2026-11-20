@@ -233,7 +233,7 @@ def run (argPage : Option Nat) : IO UInt32 := do
   else
     match Save.build d.limits d.doc s (← Save.nowDate) with
     | .error e => failed "put" s!"cannot re-save: {e}"
-    | .ok (bytes, got) =>
+    | .ok (bytes, got, _) =>
       if bytes.size > Annots.maxPutBytes then
         failed "put" s!"{bytes.size} bytes is more than 64 MiB"
       else
