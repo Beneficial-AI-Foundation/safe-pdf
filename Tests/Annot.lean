@@ -44,6 +44,21 @@ Task 8.3c adds (`run83c`):
   Sound icons (`synth2Fixture`, 17 annotations): recomputed rectangles, the form box of Caret
   and icons, pixels sampled from `mutool draw -r 72`; the whole page differs from MuPDF in
   0.024% of pixels (22 of 90,000) under `pixels.py` (`SAFEPDF_PPM_DIR` writes `synth2.pdf`).
+
+Task 8.3d adds (`run83d`):
+
+* NoRotate on pages with `/Rotate` 0, 90, 180, 270 (`noRotFixture`): the flagged annotation stays
+  upright, hanging from its rectangle's upper-left corner; sampled pixels identical to
+  `mutool draw -r 72`, and the whole renders identical (0 of 40,000 pixels differ, each rotation).
+* synthesised FreeText and Stamp (`textFixture`, seven annotations): `/DA` fonts, sizes and
+  colours, `/Q` alignment, `/RD`, a callout, `/Rotate 90`, three stamps; rectangles, the
+  pseudo-owner base-14 font resources, the first line's offsets (equal to MuPDF's
+  `-F stext` line origins), the text lines of `mutool draw -F txt`, and pixels away from the
+  text sampled from `mutool draw -r 72`. Every differing pixel of the whole page lies in a text
+  run (the rasterizer does not draw non-embedded base-14 glyphs yet) or on a 1-pixel edge of the
+  turned stamp frames (`SAFEPDF_PPM_DIR` writes `text.pdf`).
+* Line `/Cap` captions (`capFixture`: inline, `/CP /Top`, too long, `/CO`): the inline origin
+  and line gap against MuPDF's `-F stext`, pixels; every differing pixel lies in a text run.
 -/
 
 namespace SafePdf.Tests.Annot
@@ -410,6 +425,168 @@ def run83c : IO Nat := do
       IO.FS.writeBinFile (System.FilePath.mk dir / "synth2.pdf") synth2Fixture
   return failures
 
+/-- Task 8.3d (1): NoRotate on a page with `/Rotate rot`. Two 40 × 20 annotations whose
+appearance fills the left half red (`/BBox [0 0 40 20]`): (0) with `/F 16` (NoRotate),
+(1) without. -/
+def noRotFixture (rot : Nat) : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  s!"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] /Rotate {rot} >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [6 0 R 7 0 R] >>",
+  strmObj "" "",
+  strmObj "/Type /XObject /Subtype /Form /BBox [0 0 40 20]" "1 0 0 rg 0 0 20 20 re f",
+  "<< /Type /Annot /Subtype /Square /F 16 /Rect [40 100 80 120] /AP << /N 5 0 R >> >>",
+  "<< /Type /Annot /Subtype /Square /Rect [120 100 160 120] /AP << /N 5 0 R >> >>"]
+
+/-- Task 8.3d (2, 3): FreeText and Stamp without `/AP`: (0) centred, wrapping Helvetica on a
+filled box with a 2-point border; (1) right-aligned Times at `/DA` size 0 (→ 12) with a line
+break and `/RD`; (2) a callout with an open arrow, Courier; (3) text turned by `/Rotate 90`;
+(4) an `Approved` stamp; (5) the default `Draft` stamp at half opacity; (6) a two-line stamp. -/
+def textFixture : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R " ++
+    "/Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R] >>",
+  strmObj "" "",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 20 180 80] /C [1 1 0.8] /BS << /W 2 >> /Q 1 " ++
+    "/DA (/Helv 12 Tf 0 0 1 rg) /Contents (Hello world, this text is long enough to wrap) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [200 20 290 80] /C [0.9] /Q 2 /RD [2 2 2 2] " ++
+    "/DA (/TiRo 0 Tf 1 0 0 rg) /Contents (First line\\nSecond) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 100 100 140] /IT /FreeTextCallout " ++
+    "/CL [150 170 120 150 100 120] /LE /OpenArrow /DA (/Cour 9 Tf 0 g) /Contents (Callout) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [200 100 240 180] /Rotate 90 /C [0.8 0.9 1] " ++
+    "/DA (/Helv 10 Tf 0 g) /Contents (Turned) >>",
+  "<< /Type /Annot /Subtype /Stamp /Rect [20 200 160 280] /Name /Approved /C [0 0.5 0] >>",
+  "<< /Type /Annot /Subtype /Stamp /Rect [180 200 290 240] /CA 0.5 >>",
+  "<< /Type /Annot /Subtype /Stamp /Rect [180 250 290 290] /Name /NotForPublicRelease " ++
+    "/C [0.8 0 0] >>"]
+
+/-- Task 8.3d (4): Line `/Cap` captions: (0) inline (the line broken by the gap), (1) `/CP /Top`
+on a slanted line, (2) too long for its line (drawn on top), (3) an offset `/CO` with endings. -/
+def capFixture : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>",
+  strmObj "" "",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 50 280 50] /Cap true " ++
+    "/Contents (Inline caption) /C [0 0 1] >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 100 280 140] /Cap true /CP /Top " ++
+    "/Contents (Top caption) /C [1 0 0] /BS << /W 2 >> >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 180 60 180] /Cap true " ++
+    "/Contents (Too long to fit) /C [0 0.5 0] >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [100 220 280 220] /Cap true /CO [10 -5] " ++
+    "/Contents (Offset) /LE [/OpenArrow /Circle] /C [0 0 0] >>"]
+
+/-- Task 8.3d checks. -/
+def run83d : IO Nat := do
+  let mut failures := 0
+  -- (1) NoRotate: pixels sampled from `mutool draw -r 72` (device space of the rotated page)
+  let cases : List (Nat × List (Nat × Nat × (Nat × Nat × Nat))) := [
+    (0, [(50, 90, (255, 0, 0)), (70, 90, (255, 255, 255))]),
+    (90, [(130, 50, (255, 0, 0)), (150, 50, (255, 255, 255)), (110, 130, (255, 0, 0))]),
+    (180, [(170, 130, (255, 0, 0)), (190, 130, (255, 255, 255)), (70, 110, (255, 0, 0))]),
+    (270, [(90, 170, (255, 0, 0)), (110, 170, (255, 255, 255)), (90, 70, (255, 0, 0))])]
+  for (rot, samples) in cases do
+    let pdf := noRotFixture rot
+    match process pdf with
+    | none => failures := failures + (← check s!"norot {rot} processes" false)
+    | some o =>
+      for (x, y, c) in samples do
+        failures := failures + (← check s!"norot {rot} px ({x}, {y})" (pxAt o.img x y == c))
+      if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+        writePpm (System.FilePath.mk dir / s!"norot{rot}.ppm") o.img
+        IO.FS.writeBinFile (System.FilePath.mk dir / s!"norot{rot}.pdf") pdf
+  -- (2, 3) FreeText and Stamp
+  match process textFixture with
+  | none => failures := failures + (← check "text fixture processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "text all drawn"
+      (ds.length == 7 && ds.all (·.synth) && o.ap.collected.skipped.isEmpty))
+    let rects := ds.map (·.rect)
+    -- /RD insets the rectangle; the callout grows it; the stamp keeps the 190 : 50 aspect
+    failures := failures + (← check "freetext rd rect" (rects[1]? == some ⟨202, 22, 288, 78⟩))
+    failures := failures + (← check "freetext callout rect"
+      (rects[2]? == some ⟨19, 99, 151, 171⟩))
+    failures := failures + (← check "stamp rect"
+      (rects[4]? == some ⟨20, 4210 / 19, 160, 4910 / 19⟩ &&
+       (ds[4]?.map (·.matrix)) == some (Annot.aOf ⟨20, 4210 / 19, 160, 4910 / 19⟩
+         ⟨0, 0, 190, 50⟩).matrix))
+    -- the synthesised base-14 fonts are in the annotation font table (pseudo owner)
+    failures := failures + (← check "synth fonts"
+      ([(0, "Helv"), (1, "TiRo"), (2, "Cour"), (4, "Times")].all fun (i, n) =>
+        o.ap.fonts.any fun (k, _) => k == .res (Annot.synthNum i) (Name.ofString n)))
+    -- content: centred first line (MuPDF's `mutool draw -F stext` line starts at x 27.31)
+    failures := failures + (← check "freetext layout"
+      (match ds[0]? with
+       | some d => has ((String.fromUTF8? d.ap.data).getD "")
+           "4.000000 60.800000 Td\n3.310000 -14.400000 Td\n/Helv 12.000000 Tf\n"
+       | none => false))
+    -- pixels sampled from `mutool draw -r 72` away from the text (device y = 300 − page y)
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("fill", 100, 270, (255, 255, 204)), ("border", 100, 279, (0, 0, 255)),
+      ("gray rd fill", 245, 270, (229, 229, 229)), ("da border", 202, 250, (255, 0, 0)),
+      ("rotated fill", 230, 150, (204, 229, 255)), ("rotated border", 200, 190, (0, 0, 0)),
+      ("callout", 135, 140, (184, 184, 184)), ("stamp frame", 100, 76, (33, 144, 33)),
+      ("stamp half opacity", 230, 92, (154, 154, 154)), ("white", 235, 30, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"text px {n}" (near (pxAt o.img x y) c))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "text.ppm") o.img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "text.pdf") textFixture
+    -- text: the lines of `mutool draw -F txt` (MuPDF 1.25.1), blank lines aside
+    match firstPage textFixture with
+    | none => failures := failures + 1
+    | some (d, p) =>
+      match (Annot.extractDocPageAnnots {} d p (Filter.Budget.init {})).1 with
+      | .ok t =>
+        failures := failures + (← check "freetext/stamp text"
+          ((t.text.splitOn "\n").filter (· != "") == ["Hello world, this text is long ",
+            "enough to wrap", "First line", "Second", "Callout", "Turned", "APPROVED", "DRAFT",
+            "NOT FOR", "PUBLIC RELEASE"]))
+      | .error _ => failures := failures + (← check "text extracts" false)
+  -- (4) line captions
+  match process capFixture with
+  | none => failures := failures + (← check "cap fixture processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "cap all drawn" (ds.length == 4 && ds.all (·.synth)))
+    failures := failures + (← check "cap inline rect"
+      ((ds[0]?.map (·.rect)) == some ⟨7, 167 / 5, 293, 63⟩))
+    -- the inline caption starts where MuPDF's `-F stext` line does (x 114.648); the line is
+    -- broken by the gap `(tw + 6) / 2` about the middle
+    failures := failures + (← check "cap inline content"
+      (match ds[0]? with
+       | some d =>
+         let c := (String.fromUTF8? d.ap.data).getD ""
+         has c "114.648000 46.400000 cm\n0 g\nBT\n/Helv 12.000000 Tf\n(Inline caption) Tj" &&
+           has c "20.000000 50.000000 m\n111.648000 50.000000 l\n188.352000 50.000000 m"
+       | none => false))
+    failures := failures + (← check "cap font" (o.ap.fonts.any fun (k, _) =>
+      k == .res (Annot.synthNum 0) (Name.ofString "Helv")))
+    -- pixels from `mutool draw -r 72` (device y = 300 − page y): line, gap, slanted top line
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("line", 100, 250, (118, 118, 255)), ("gap", 113, 250, (255, 255, 255)),
+      ("line after gap", 190, 250, (118, 118, 255)), ("no gap when on top", 40, 120,
+        (118, 186, 118)), ("offset line", 250, 80, (118, 118, 118)),
+      ("white", 150, 200, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"cap px {n}" (near (pxAt o.img x y) c))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "cap.ppm") o.img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "cap.pdf") capFixture
+    match firstPage capFixture with
+    | none => failures := failures + 1
+    | some (d, p) =>
+      match (Annot.extractDocPageAnnots {} d p (Filter.Budget.init {})).1 with
+      | .ok t =>
+        -- MuPDF prints "Inline caption", "Top caption", "Too long to fi", "Offset" (our layout
+        -- splits the slanted line; MuPDF drops the last glyph of the third)
+        failures := failures + (← check "cap text"
+          (String.join ((t.text.splitOn "\n")) ==
+            "Inline captionTop captionToo long to fitOffset"))
+      | .error _ => failures := failures + (← check "cap text extracts" false)
+  return failures
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -469,6 +646,7 @@ def run : IO Nat := do
     failures := failures + (← check "tiny budget" (o.ap.truncated && o.ap.ops ≤ 2))
   failures := failures + (← run83b pdf)
   failures := failures + (← run83c)
+  failures := failures + (← run83d)
   return failures
 
 end SafePdf.Tests.Annot

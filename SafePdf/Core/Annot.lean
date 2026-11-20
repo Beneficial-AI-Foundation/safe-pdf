@@ -20,10 +20,11 @@ The rules follow MuPDF 1.25.1 (`pdf_sync_annots`, `pdf_process_annot`, `pdf_anno
 * `/Subtype /Link` and `/Subtype /Popup` are never drawn (`pdf_sync_annots` does not even load
   them).
 * `/F` (§12.5.3): Invisible (bit 1) or Hidden (bit 2) → skipped; NoView (bit 6) → skipped
-  (usage "View"). Print, NoZoom, NoRotate, ReadOnly, Locked … are ignored for display
-  (MuPDF: "TODO: NoZoom and NoRotate"; NoRotate is handled by `pdf_run_annot_with_usage` but
-  not here — a recorded gap). `/OC` (optional content): hidden in the default configuration →
-  `Skip.ocHidden` (task 8.3c, `ocHidden`).
+  (usage "View"). NoRotate (bit 5, task 8.3d): on a page with `/Rotate`, A is followed by
+  `noRotateMatrix` (as `pdf_run_annot_with_usage`; we use the page's effective rotation, MuPDF
+  the raw `/Rotate`: they differ only for a value that is not a multiple of 90). NoZoom, Print,
+  ReadOnly, Locked … are ignored for display (MuPDF: "TODO: NoZoom"). `/OC` (optional
+  content): hidden in the default configuration → `Skip.ocHidden` (task 8.3c, `ocHidden`).
 * `/Subtype /Widget` is drawn only if both `/FT` and `/T` are found on it or on its `/Parent`
   chain (at most `maxFieldDepth` levels), as MuPDF does.
 * `/Rect` must be an array of four numbers (normalised); otherwise `Skip.badRect`.
@@ -32,9 +33,9 @@ The rules follow MuPDF 1.25.1 (`pdf_sync_annots`, `pdf_process_annot`, `pdf_anno
   appearance states and the entry named by `/AS` (which must be a reference to a stream) is
   used. No `/AS`, or no stream: a non-widget Square, Circle, Line, Ink, Highlight, Underline,
   StrikeOut (task 8.3b), Polygon, PolyLine, Squiggly, Caret, Text, FileAttachment or Sound
-  (task 8.3c) gets a **synthesised** appearance (`synthesize`, as MuPDF's
-  `pdf_update_appearance`); anything else is `Skip.noAppearance` (MuPDF also synthesises
-  FreeText, Stamp, Redact and widgets: not done here).
+  (task 8.3c), FreeText or Stamp (task 8.3d) gets a **synthesised** appearance (`synthesize`,
+  as MuPDF's `pdf_update_appearance`); anything else is `Skip.noAppearance` (MuPDF also
+  synthesises Redact and widgets: not done here).
 * **Order**: MuPDF runs the page's non-widget annotations, then its widgets, each in `/Annots`
   order; `collect` returns them in that order (`Collected.drawn`).
 
@@ -65,8 +66,7 @@ share one `Limits.maxOpsPerPage` (`docAnnots_shared_ops`).
 `extractDocPageAnnots` appends the glyphs of the annotation items to the page's (`withAnnots`;
 MuPDF's `-F txt` includes annotation text), item indices continuing after the page's items.
 
-Not done (recorded): `/F` NoZoom and NoRotate (MuPDF: NoRotate in `pdf_run_annot_with_usage`
-only).
+Not done (recorded): `/F` NoZoom (MuPDF ignores it too).
 
 ## Fonts
 
@@ -109,6 +109,8 @@ def flagInvisible : Nat := 1
 def flagHidden : Nat := 2
 /-- Print. -/
 def flagPrint : Nat := 4
+/-- NoRotate (task 8.3d). -/
+def flagNoRotate : Nat := 16
 /-- NoView. -/
 def flagNoView : Nat := 32
 
@@ -203,6 +205,33 @@ def annotMatrix (rect : RBox) (bbox : Option (Fixed × Fixed × Fixed × Fixed))
     | none => ⟨0, 0, 0, 0⟩
   (aOf rect (tBox fm b)).matrix
 
+/-- `(cos θ, sin θ)` of the page rotation `θ` (exact). -/
+def rotCS : Doc.Rotation → Rat × Rat
+  | .r0 => (1, 0)
+  | .r90 => (0, 1)
+  | .r180 => (-1, 0)
+  | .r270 => (0, -1)
+
+/-- **NoRotate** (task 8.3d; MuPDF 1.25.1 `pdf_run_annot_with_usage`): in device space MuPDF
+turns the annotation by `−/Rotate` about the device image of the rectangle's upper-left corner
+`(x0, y1)`. As the page-to-device map is a rotation by `−/Rotate` after a y-flip, the same map in
+page space is `fz_rotate(/Rotate)` about `(x0, y1)`: `T(−p) · R · T(p)` (row vectors), to be
+applied after A. Exact (integer rotation entries). -/
+def noRotateMatrix (rot : Doc.Rotation) (r : RBox) : Matrix :=
+  let (c, s) := rotCS rot
+  let px := r.x0
+  let py := r.y1
+  ⟨fixOfRat c, fixOfRat s, fixOfRat (-s), fixOfRat c,
+   fixOfRat (px - px * c + py * s), fixOfRat (py - px * s - py * c)⟩
+
+/-- `noRotateMatrix` fixes the corner `(x0, y1)` it turns about (exactly, over `ℚ`). -/
+theorem noRotate_fixes_corner (rot : Doc.Rotation) (r : RBox) :
+    r.x0 * (rotCS rot).1 + r.y1 * (-(rotCS rot).2) +
+        (r.x0 - r.x0 * (rotCS rot).1 + r.y1 * (rotCS rot).2) = r.x0 ∧
+      r.x0 * (rotCS rot).2 + r.y1 * (rotCS rot).1 +
+        (r.y1 - r.x0 * (rotCS rot).2 - r.y1 * (rotCS rot).1) = r.y1 :=
+  ⟨by grind, by grind⟩
+
 /-! ## 3. Collecting a page's annotations -/
 
 /-- Why an annotation is not drawn. -/
@@ -228,7 +257,7 @@ inductive Skip where
   /-- `/Rect` missing or malformed. -/
   | badRect
   /-- No usable normal appearance (`/AP /N` stream, or state entry chosen by `/AS`) and no
-  synthesised one; MuPDF synthesises FreeText, Stamp, Redact and widgets (not done here). -/
+  synthesised one; MuPDF also synthesises Redact and widgets (not done here). -/
   | noAppearance
   deriving DecidableEq, Repr, Inhabited
 
@@ -508,9 +537,9 @@ Sound annotations (`iconAp`, `/Name`, MuPDF's 8 × 8 open-iconic paths). Caret a
 written in a fixed form box (`[0 0 20 14]`, `[0 0 16 16]`) mapped into the recomputed
 rectangle by matrix A; everything else has `/BBox` = rectangle and A = identity. Trigonometry
 is exact: the arrow and slash directions come from the normalised line vector (`dirOf`, MuPDF's
-`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Recorded gaps: Line `/Cap` captions and
-FreeText/Stamp (need text layout with a synthesised standard-14 font), cloudy borders (`/BE /S
-/C`: drawn as plain borders), Redact and widgets (`Skip.noAppearance`). -/
+`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Recorded gaps: cloudy borders (`/BE /S
+/C`: drawn as plain borders), Redact and widgets (`Skip.noAppearance`). FreeText, Stamp and
+Line `/Cap` captions (`captionStr`): task 8.3d, below. -/
 
 /-- Most numbers read from one `/InkList` stroke or `/QuadPoints` array, and most strokes
 (local cap). -/
@@ -775,7 +804,8 @@ def endsStr (r : OBox) (le : List PdfObject) (w : Rat) (sc ic : Bool)
 
 /-- Line (`pdf_write_line_appearance` without `/Cap` captions): leader lines `/LL`, `/LLE`,
 `/LLO`, line endings `/LE`; the box grown by `max 1 w`. -/
-def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject := []) :
+def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject := [])
+    (caption : Option ((Rat × Rat) → (Rat × Rat) → OBox → String × OBox × Rat) := none) :
     String × OBox :=
   let (pre, sc, ic) := prelude st true
   let (ax, ay, bx, by_) := (nth l 0, nth l 1, nth l 2, nth l 3)
@@ -794,8 +824,18 @@ def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject :
     let b := (bx - dy * (llo + ll), by_ + dx * (llo + ll))
     (segStr aa.1 aa.2 ab.1 ab.2 ++ segStr ba.1 ba.2 bb.1 bb.2, a, b,
       ((((r0.incl a.1 a.2).incl b.1 b.2).incl ab.1 ab.2).incl bb.1 bb.2))
+  -- `/Cap` (task 8.3d): the caption, and the line broken by its gap when it is inline
+  let (capS, segs, r) := match caption with
+    | none => ("", segStr a.1 a.2 b.1 b.2, r)
+    | some f =>
+      let (t, r, gap) := f a b r
+      if gap > 0 then
+        let m := ((a.1 + b.1) / 2, (a.2 + b.2) / 2)
+        (t, segStr a.1 a.2 (m.1 - dx * gap) (m.2 - dy * gap) ++
+          segStr (m.1 + dx * gap) (m.2 + dy * gap) b.1 b.2, r)
+      else (t, segStr a.1 a.2 b.1 b.2, r)
   let (ends, r) := endsStr r le st.lw sc ic a b b a
-  (pre ++ lead ++ segStr a.1 a.2 b.1 b.2 ++ strokeStr sc ++ ends, r.expand (max 1 st.lw))
+  (pre ++ lead ++ capS ++ segs ++ strokeStr sc ++ ends, r.expand (max 1 st.lw))
 
 /-- One ink stroke: its path and the box. -/
 def inkStroke (r : OBox) (pts : List Rat) : String × OBox :=
@@ -1261,6 +1301,396 @@ def iconAp (st : Style) (name : Name) (orect : RBox) : String × RBox × RBox :=
     (if darkFill st.c then "1 g\n" else "0 g\n") ++ iconPath name,
     ⟨xc - 9, yc - 9, xc + 9, yc + 9⟩, ⟨0, 0, 16, 16⟩)
 
+/-! ### FreeText and Stamp (task 8.3d; MuPDF `pdf_write_free_text_appearance`,
+`pdf_write_stamp_appearance`)
+
+**FreeText.** `/Contents` (a text string: UTF-16 or UTF-8 with a byte-order mark, else
+PDFDocEncoding; at most `maxSynthText` characters) is laid out like MuPDF's
+`write_variable_text` (multi-line, `break_string`: break at the last space once a line is wider
+than the box, at `\n` and `\r`), aligned by `/Q` (0 left, 1 centre, 2 right; other values 0),
+first baseline `0.8 · size` below the top of the padded box, lines `1.2 · size` apart. `/DA` (on
+the annotation or its `/Parent` chain, `pdf_parse_default_appearance`: the first 99 bytes,
+whitespace-separated tokens, `/Name`, `Tf`, `g`, `rg`, `k`, a four-slot operand stack with
+`strtof` prefixes) gives the font (`Helv`, `Cour`, `TiRo`, `Symb`, `ZaDb`; anything else
+`Helv`), the size (0 → 12) and the text and border colour. The box is `/Rect` inset by `/RD`;
+`/C` fills it, the border (`/BS /W`, `/Border`, else 1; dash) is stroked inside it, the text is
+clipped to the box less the border, padded by twice the border width; `/Rotate` 90, 180, 270
+turns the text inside the box; a `/IT /FreeTextCallout` with a 4- or 6-number `/CL` draws the
+callout line with the `/LE` ending and grows the rectangle. The font resource is MuPDF's
+`pdf_add_simple_font` of a base-14 font: `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica
+/Encoding /WinAnsiEncoding >>` under the resource name; widths are the AFM widths
+(`Std14.width?`; MuPDF's URW fonts are metric-compatible). Characters outside Windows-1252 are
+written as `0xB7` (MuPDF: Greek, Cyrillic and CJK go through extra fonts — a recorded gap).
+
+**Stamp.** MuPDF's built-in stamp: `/Name` (default `Draft`) selects the text (`APPROVED`, `AS
+IS`, …, two lines for the public-release stamps, the name itself otherwise), Times-Bold, centred
+in a `[0 0 190 50]` form box with a 2-point frame, all turned by 0.6°; `/C` is the fill and
+stroke colour; the rectangle is shrunk to the box's aspect ratio about its centre.
+
+Recorded gaps: rich text `/RC` and `/DS` (MuPDF's HTML engine), the catalog's `/AcroForm /DA`
+fallback, FreeText `/Rotate` other than multiples of 90 (left unturned). The rasterizer does not
+draw text of non-embedded base-14 fonts yet; text extraction sees it. -/
+
+/-- Most characters of `/Contents` laid out (local cap). -/
+def maxSynthText : Nat := 65536
+
+/-- Swap the bytes of each pair (UTF-16LE → UTF-16BE). -/
+def swapPairs : List UInt8 → List UInt8
+  | a :: b :: r => b :: a :: swapPairs r
+  | r => r
+
+/-- A PDFDocEncoding byte as a character (unassigned: the byte as Latin-1). -/
+def pdfDocChar (b : UInt8) : Char :=
+  let n := b.toNat
+  match Font.pdfDocNames[n]? with
+  | some g =>
+    if g.isEmpty then Char.ofNat n
+    else ((Font.glyphToUnicode g).bind (·.toList.head?)).getD (Char.ofNat n)
+  | none => Char.ofNat n
+
+/-- UTF-8 bytes as characters (invalid: Latin-1). -/
+def utf8Chars (bs : List UInt8) : List Char :=
+  match String.fromUTF8? ⟨bs.toArray⟩ with
+  | some s => s.toList
+  | none => bs.map fun b => Char.ofNat b.toNat
+
+/-- **A text string** (§7.9.2.2, `pdf_to_text_string`). -/
+def textOf (bs : List UInt8) : List Char :=
+  match bs with
+  | 0xFE :: 0xFF :: rest => Font.CMap.utf16 rest
+  | 0xFF :: 0xFE :: rest => Font.CMap.utf16 (swapPairs rest)
+  | 0xEF :: 0xBB :: 0xBF :: rest => utf8Chars rest
+  | _ => bs.map pdfDocChar
+
+/-- `fz_windows_1252_from_unicode`: the Windows-1252 code of a character, if any. -/
+def win1252 (u : Char) : Option Nat :=
+  let n := u.toNat
+  if n < 128 then some n
+  else if 0xA0 ≤ n ∧ n ≤ 0xFF then some n
+  else ((List.range 32).map (· + 128)).find? fun c =>
+    !([0x81, 0x8D, 0x8F, 0x90, 0x9D] : List Nat).contains c &&
+      match Font.winAnsiNames[c]? with
+      | some g => Font.glyphToUnicode g == some (String.singleton u)
+      | none => false
+
+/-- The code written for a character (`REPLACEMENT` 0xB7 outside Windows-1252). -/
+def code1252 (u : Char) : Nat := (win1252 u).getD 0xB7
+
+/-- The advance (em) of character `u` in base-14 font `f` (0 when not encodable or no glyph). -/
+def charWidth (f : Font.Std14) (u : Char) : Rat :=
+  match win1252 u with
+  | none => 0
+  | some c =>
+    let g := match f with
+      | .symbol => (Font.symbolNames[c]?).getD ""
+      | .zapfDingbats => (Font.zapfDingbatsNames[c]?).getD ""
+      | _ => (Font.winAnsiNames[c]?).getD ""
+    (((Font.Std14.width? f g).getD 0 : Nat) : Rat) / 1000
+
+/-- An octal digit. -/
+def octDigit (d : Nat) : Char := Char.ofNat (48 + d % 8)
+
+/-- One byte inside a literal string: `(`, `)`, `\` escaped, other bytes outside printable
+ASCII as `\ooo` (the same string as MuPDF's raw byte). -/
+def strByte (c : Nat) : String :=
+  if c == 40 || c == 41 || c == 92 then "\\" ++ String.singleton (Char.ofNat c)
+  else if c < 32 || c ≥ 127 then
+    String.ofList ['\\', octDigit (c / 64), octDigit (c / 8), octDigit c]
+  else String.singleton (Char.ofNat c)
+
+/-- A literal string of the Windows-1252 codes of `cs`. -/
+def litStr (cs : List Char) : String :=
+  "(" ++ String.join (cs.map fun u => strByte (code1252 u)) ++ ")"
+
+/-- What `/DA` gives (`pdf_parse_default_appearance`). -/
+structure DAInfo where
+  /-- Font resource name: `Helv`, `Cour`, `TiRo`, `Symb` or `ZaDb`. -/
+  font : String := "Helv"
+  /-- Font size. -/
+  size : Rat := 12
+  /-- Colour (0, 1, 3 or 4 components). -/
+  color : List Rat := []
+
+/-- The parser state: what was read, the four operand slots and their top. -/
+structure DAState where
+  /-- What was read. -/
+  info : DAInfo := {}
+  /-- Operand slots. -/
+  stack : List Rat := [0, 0, 0, 0]
+  /-- Next slot. -/
+  top : Nat := 0
+
+/-- Decimal digits at the front: value, count, rest. -/
+def takeDigits : List Char → Nat × Nat × List Char
+  | c :: cs =>
+    if c.isDigit then
+      let (v, n, r) := takeDigits cs
+      ((c.toNat - 48) * 10 ^ n + v, n + 1, r)
+    else (0, 0, c :: cs)
+  | [] => (0, 0, [])
+
+/-- `strtof` on a token: the value of its longest `[±]digits[.digits]` prefix (0 if none), and
+whether that prefix is the whole token. (Exponents, `inf`, `nan` and hex floats are not read.) -/
+def strtof (cs : List Char) : Rat × Bool :=
+  let (neg, cs1) := match cs with
+    | '-' :: r => (true, r)
+    | '+' :: r => (false, r)
+    | _ => (false, cs)
+  let (iv, ni, r1) := takeDigits cs1
+  let (fv, nf, rest) := match r1 with
+    | '.' :: r => takeDigits r
+    | _ => (0, 0, r1)
+  if ni + nf = 0 then (0, false)
+  else
+    let v : Rat := (iv : Rat) + (fv : Rat) / ((10 ^ nf : Nat) : Rat)
+    (if neg then -v else v, rest.isEmpty)
+
+/-- One `/DA` token. -/
+def daStep (st : DAState) (tok : List Char) : DAState :=
+  let s := fun (i : Nat) => nth st.stack i
+  match tok with
+  | '/' :: n => { st with info := { st.info with font := String.ofList n } }
+  | _ =>
+    let t := String.ofList tok
+    if t == "Tf" then { st with info := { st.info with size := s 0 }, top := 0 }
+    else if t == "g" then { st with info := { st.info with color := [s 0] }, top := 0 }
+    else if t == "rg" then { st with info := { st.info with color := [s 0, s 1, s 2] }, top := 0 }
+    else if t == "k" then
+      { st with info := { st.info with color := [s 0, s 1, s 2, s 3] }, top := 0 }
+    else
+      let (v, full) := strtof tok
+      { st with stack := if st.top < 4 then st.stack.set st.top v else st.stack,
+                top := if full then st.top + 1 else 0 }
+
+/-- `/DA` whitespace. -/
+def isDAWs (c : Char) : Bool := c == ' ' || c == '\n' || c == '\r' || c == '\t'
+
+/-- Split at whitespace, dropping empty tokens (`cur`: the current token, reversed). -/
+def splitWs : List Char → List Char → List (List Char)
+  | [], cur => if cur.isEmpty then [] else [cur.reverse]
+  | c :: cs, cur =>
+    if isDAWs c then (if cur.isEmpty then splitWs cs [] else cur.reverse :: splitWs cs [])
+    else splitWs cs (c :: cur)
+
+/-- **Parse a default appearance string** (C string: up to the first NUL, first 99 bytes). -/
+def parseDA (bs : List UInt8) : DAInfo :=
+  let cs := ((bs.takeWhile (· != 0)).take 99).map fun b => Char.ofNat b.toNat
+  let st := (splitWs cs []).foldl daStep {}
+  let f := st.info.font
+  { st.info with
+    font := if ["Cour", "Helv", "TiRo", "Symb", "ZaDb"].contains f then f else "Helv" }
+
+/-- The base-14 font and `/BaseFont` of a `/DA` font name (`full_font_name`). -/
+def stdOf (n : String) : Font.Std14 × String :=
+  if n == "Cour" then (.courier, "Courier")
+  else if n == "TiRo" then (.timesRoman, "Times-Roman")
+  else if n == "Symb" then (.symbol, "Symbol")
+  else if n == "ZaDb" then (.zapfDingbats, "ZapfDingbats")
+  else (.helvetica, "Helvetica")
+
+/-- MuPDF's font dictionary for a built-in base-14 font (`pdf_add_simple_font`, Latin). -/
+def stdFontDict (base : String) : PdfObject :=
+  .dict [(nm "Type", .name (nm "Font")), (nm "Subtype", .name (nm "Type1")),
+    (nm "BaseFont", .name (nm base)), (nm "Encoding", .name (nm "WinAnsiEncoding"))]
+
+/-- `write_color0`: a colour operator, black for no colour. -/
+def color0Str (c : List Rat) (stroke : Bool) : String :=
+  if c.isEmpty then (if stroke then "0 G\n" else "0 g\n") else (colorStr c stroke).getD ""
+
+/-- **`break_string`**: characters consumed by the next line (a line break included) and its
+width; breaks after the last space once the width exceeds `maxw`. -/
+def breakLine (wd : Char → Rat) (size maxw : Rat) :
+    List Char → Nat → Rat → Option (Nat × Rat) → Nat × Rat
+  | [], i, x, _ => (i, x)
+  | u :: us, i, x, sp =>
+    if u == '\n' || u == '\r' then (i + 1, x)
+    else
+      let sp := if u == ' ' then some (i + 1, x) else sp
+      let x := x + wd u * size
+      match sp with
+      | some p => if x > maxw then p else breakLine wd size maxw us (i + 1) x sp
+      | none => breakLine wd size maxw us (i + 1) x sp
+
+/-- The lines of `cs` (`write_string_with_quadding`): text without its line break, and width. -/
+def layoutLines (wd : Char → Rat) (size maxw : Rat) : Nat → List Char → List (List Char × Rat)
+  | 0, _ => []
+  | _, [] => []
+  | f + 1, cs =>
+    let (k, w) := breakLine wd size maxw cs 0 0 none
+    let k := max k 1
+    let line := cs.take k
+    let body := match line.getLast? with
+      | some c => if c == '\n' || c == '\r' then line.dropLast else line
+      | none => line
+    (body, w) :: layoutLines wd size maxw f (cs.drop k)
+
+/-- The text lines, aligned by `q` in width `maxw`, each a `Td` down by `lh` then
+`/font size Tf (…) Tj` (an empty line writes no string). -/
+def linesStr (f : Font.Std14) (font : String) (size lh maxw : Rat) (q : Nat) (cs : List Char) :
+    String :=
+  let (out, _) := (layoutLines (charWidth f) size maxw cs.length cs).foldl
+    (fun (acc : String × Rat) (line, w) =>
+      let x := if q == 1 then (maxw - w) / 2 else if q == 2 then maxw - w else 0
+      (acc.1 ++ pts [x - acc.2, -lh] ++ " Td\n" ++
+        (if line.isEmpty then "" else "/" ++ font ++ " " ++ fmt size ++ " Tf\n" ++ litStr line ++
+          " Tj\n"), x)) ("", 0)
+  out
+
+/-- `fz_rotate` entries `(a, b, c, d)` for a multiple of 90° (else the identity). -/
+def rotEntries (r : Int) : Rat × Rat × Rat × Rat :=
+  let m := r % 360
+  if m = 90 then (0, 1, -1, 0) else if m = 180 then (-1, 0, 0, -1)
+  else if m = 270 then (0, -1, 1, 0) else (1, 0, 0, 1)
+
+/-- **FreeText** (`pdf_write_free_text_appearance` without rich text; see the section doc):
+content, resources and the rectangle (also the form box). -/
+def freeTextAp (st : Style) (orect : RBox) (text : List Char) (q : Nat) (da : DAInfo)
+    (rd : List Rat) (r : Int) (callout : List Rat) (le : PdfObject) : String × Dict × OBox :=
+  let tb : RBox := ⟨orect.x0 + nth rd 0, orect.y0 + nth rd 1, orect.x1 - nth rd 2,
+    orect.y1 - nth rd 3⟩
+  let w := tb.x1 - tb.x0
+  let h := tb.y1 - tb.y0
+  let (gs, res) := opacityRes false st.ca
+  let ic := colorStr st.c false
+  let b := st.lw
+  let head := gs ++ dashStr st.dash ++ ic.getD "" ++ color0Str da.color true ++ fmt b ++ " w\n"
+  let (call, rect) : String × OBox :=
+    if callout.length = 4 ∨ callout.length = 6 then
+      let ps := (List.range (callout.length / 2)).map fun k =>
+        (nth callout (2 * k), nth callout (2 * k + 1))
+      let rect := ps.foldl (fun (r : OBox) p => r.incl p.1 p.2) (some tb)
+      let path := (match ps with
+        | p0 :: rest => pts [p0.1, p0.2] ++ " m\n" ++
+            String.join (rest.map fun p => pts [p.1, p.2] ++ " l\n")
+        | [] => "") ++ "S\n"
+      let (cap, rect) := capStr rect (nth callout 0) (nth callout 1)
+        (nth callout 2 - nth callout 0) (nth callout 3 - nth callout 1) b true ic.isSome le
+      (path ++ cap, rect)
+    else ("", some tb)
+  let bg := if ic.isSome then pts [tb.x0, tb.y0, w, h] ++ " re\nf\n" else ""
+  let border := if b > 0 then pts [tb.x0 + b / 2, tb.y0 + b / 2, w - b, h - b] ++ " re\nS\n"
+    else ""
+  let clip := pts [tb.x0 + b, tb.y0 + b, w - b * 2, h - b * 2] ++ " re\nW\nn\n"
+  let (w, h) := if r = 90 ∨ r = 270 then (h, w) else (w, h)
+  let (ra, rb, rc, rdd) := rotEntries r
+  let (e, f) : Rat × Rat :=
+    if r = 270 then (0, w) else if r = 90 then (h, 0) else if r = 180 then (w, h) else (0, 0)
+  let cm := "q\n" ++ pts [ra, rb, rc, rdd, e + tb.x0, f + tb.y0] ++ " cm\n"
+  let pad := b * 2
+  let tw := w - pad * 2
+  let th := h - pad * 2
+  let size := if da.size = 0 then 12 else da.size
+  let lh := size * 6 / 5
+  let (f14, _) := stdOf da.font
+  let body := "BT\n" ++ color0Str da.color false ++ pts [pad, pad + th - size * 4 / 5 + lh] ++
+    " Td\n" ++ linesStr f14 da.font size lh tw q text ++ "ET\n"
+  let fontRes : Dict := [(nm "Font", .dict [(nm da.font, stdFontDict (stdOf da.font).2)])]
+  (head ++ call ++ bg ++ border ++ clip ++ cm ++ body ++ "Q\n", res ++ fontRes, rect)
+
+/-- The texts of MuPDF's built-in stamps: `(text, baseline, size)`. -/
+def stampTexts (n : String) : List (String × Rat × Rat) :=
+  let big := fun (t : String) => [(t, (13 : Rat), (30 : Rat))]
+  let small := fun (t : String) => [(t, (17 : Rat), (20 : Rat))]
+  if n == "Approved" then big "APPROVED" else if n == "AsIs" then big "AS IS"
+  else if n == "Confidential" then small "CONFIDENTIAL"
+  else if n == "Departmental" then small "DEPARTMENTAL"
+  else if n == "Experimental" then small "EXPERIMENTAL"
+  else if n == "Expired" then big "EXPIRED" else if n == "Final" then big "FINAL"
+  else if n == "ForComment" then small "FOR COMMENT"
+  else if n == "ForPublicRelease" then [("FOR PUBLIC", 26, 18), ("RELEASE", 17 / 2, 18)]
+  else if n == "NotApproved" then small "NOT APPROVED"
+  else if n == "NotForPublicRelease" then [("NOT FOR", 26, 18), ("PUBLIC RELEASE", 17 / 2, 18)]
+  else if n == "Sold" then big "SOLD" else if n == "TopSecret" then [("TOP SECRET", 14, 26)]
+  else if n == "Draft" then big "DRAFT"
+  else small n
+
+/-- `write_stamp`: one line of Times-Bold at `h` points centred in the 190-wide box. -/
+def stampLine (t : List Char) (y h : Rat) : String :=
+  let tw := (t.map fun u => charWidth .timesBold (if (win1252 u).isSome then u else '·')).foldl
+    (· + ·) 0 * h
+  "BT\n/Times " ++ fmt h ++ " Tf\n" ++ pts [(190 - tw) / 2, y] ++ " Td\n" ++ litStr t ++
+    " Tj\nET\n"
+
+/-- **Stamp** (`pdf_write_stamp_appearance`; `name`: the `/Name` text, `Draft` when absent):
+content, resources, the new rectangle and the form box `[0 0 190 50]`. -/
+def stampAp (st : Style) (orect : RBox) (name : String) : String × Dict × RBox × RBox :=
+  let (gs, res) := opacityRes false st.ca
+  let lines := (stampTexts name).map fun (t, y, h) => stampLine t.toList y h
+  let c := gs ++ (colorStr st.c false).getD "" ++ (colorStr st.c true).getD "" ++
+    "0.999945 0.010472 -0.010472 0.999945 0 0 cm\n2 w\n2 2 186 44 re\nS\n" ++ String.join lines
+  let w := orect.x1 - orect.x0
+  let h := orect.y1 - orect.y0
+  let xs := w / 190
+  let ys := h / 50
+  let r : RBox := if xs > ys then
+      let xc := (orect.x1 + orect.x0) / 2
+      { orect with x0 := xc - 95 * ys, x1 := xc + 95 * ys }
+    else
+      let yc := (orect.y1 + orect.y0) / 2
+      { orect with y0 := yc - 25 * xs, y1 := yc + 25 * xs }
+  (c, res ++ [(nm "Font", .dict [(nm "Times", stdFontDict "Times-Bold")])], r, ⟨0, 0, 190, 50⟩)
+
+/-- **Line caption** (`pdf_write_line_caption`, task 8.3d): `/Contents` in Helvetica 12, black,
+along the line from `a` to `b` (turned to its direction), centred on its middle; inline (0.3 ·
+size below the line's axis, the line broken by the returned gap) unless `/CP /Top`, an offset
+`/CO`, or the text does not fit (`top`: 0.2 · size above, no gap). The rectangle grows to the
+text's ends, expanded by the size. -/
+def captionStr (text : List Char) (cpTop : Bool) (cox coy : Rat) (a b : Rat × Rat) (r : OBox) :
+    String × OBox × Rat :=
+  let len := rsqrt ((b.1 - a.1) * (b.1 - a.1) + (b.2 - a.2) * (b.2 - a.2))
+  let dx := (b.1 - a.1) / len
+  let dy := (b.2 - a.2) / len
+  let size : Rat := 12
+  let tw := (text.map (charWidth .helvetica)).foldl (· + ·) 0 * size
+  let top := cpTop || tw + size > len
+  let e := (a.1 + b.1) / 2 - dx * (tw / 2)
+  let f := (a.2 + b.2) / 2 - dy * (tw / 2)
+  let (top, e, f) :=
+    if cox ≠ 0 ∨ coy ≠ 0 then
+      let coy := if coy < 0 then coy - size else coy
+      (true, e + cox * dx - coy * dy, f + cox * dy + coy * dx)
+    else if top then (top, e - dy * size / 5, f + dx * size / 5)
+    else (top, e + dy * size * 3 / 10, f - dx * size * 3 / 10)
+  let t := "q\n" ++ pts [dx, dy, -dy, dx, e, f] ++ " cm\n0 g\nBT\n" ++
+    (if text.isEmpty then "" else "/Helv " ++ fmt size ++ " Tf\n" ++ litStr text ++ " Tj\n") ++
+    "ET\nQ\n"
+  let r := ((r.incl (e - dx * tw / 2) (f - dy * tw / 2)).incl (e + dx * tw / 2)
+    (f + dy * tw / 2)).expand size
+  (t, r, if top then 0 else (tw + size / 2) / 2)
+
+/-- The value of key `k` on `d` or its `/Parent` chain (`pdf_dict_get_inheritable`), resolved
+one level; at most `fuel` levels up. -/
+def inheritGet {σ : Type} (src : Source σ) (k : Name) : Nat → Dict → σ → Option PdfObject × σ
+  | 0, d, s => match Dict.get? d k with
+    | some o => let (v, s) := Run.resolve src s o; (some v, s)
+    | none => (none, s)
+  | f + 1, d, s =>
+    match Dict.get? d k with
+    | some o => let (v, s) := Run.resolve src s o; (some v, s)
+    | none =>
+      match Dict.get? d (nm "Parent") with
+      | none => (none, s)
+      | some p =>
+        match Run.resolve src s p with
+        | (.dict pd, s) => inheritGet src k f pd s
+        | (_, s) => (none, s)
+
+/-- A string value's bytes (resolved one level; anything else: empty). -/
+def strOf {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → List UInt8 × σ
+  | none => ([], s)
+  | some o => match Run.resolve src s o with
+    | (.string b, s) => (b, s)
+    | (_, s) => ([], s)
+
+/-- An integer value (`pdf_dict_get_int`: a real is truncated; anything else 0). -/
+def intOf {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → Int × σ
+  | none => (0, s)
+  | some o => match Run.resolve src s o with
+    | (.int i, s) => (i, s)
+    | (v, s) => match Run.numOf v with
+      | some x => (x.raw / 1000000 + (if x.raw < 0 ∧ x.raw % 1000000 ≠ 0 then 1 else 0), s)
+      | none => (0, s)
+
 /-- A stream dictionary for a synthesised appearance with `/BBox` `r` and resources `res`. -/
 def synthDict (r : RBox) (res : Dict) : Dict :=
   [(nm "Type", .name (nm "XObject")), (nm "Subtype", .name (nm "Form")),
@@ -1295,6 +1725,18 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
       let (lle, s) := realOpt src s (Dict.get? ad (nm "LLE"))
       let (llo, s) := realOpt src s (Dict.get? ad (nm "LLO"))
       let (e, s) := le s
+      let (cap, s) := resolveOpt src s (Dict.get? ad (nm "Cap"))
+      if cap == .bool true then
+        let (contents, s) := strOf src s (Dict.get? ad (nm "Contents"))
+        let (cp, s) := nameOf src s (Dict.get? ad (nm "CP"))
+        let (co, s) := arrOf src s (Dict.get? ad (nm "CO"))
+        let (co, s) := realsOf src s ((co.getD []).take 2)
+        let f := captionStr ((textOf contents).take maxSynthText) (cp = some (nm "Top"))
+          (nth co 0) (nth co 1)
+        let (c, r) := lineAp st l (ll.getD 0) (lle.getD 0) (llo.getD 0) e (some f)
+        (some (gs ++ c, res ++ [(nm "Font", .dict [(nm "Helv", stdFontDict "Helvetica")])], r,
+          none), s)
+      else
       let (c, r) := lineAp st l (ll.getD 0) (lle.getD 0) (llo.getD 0) e
       (some (gs ++ c, res, r, none), s)
     else if sub = nm "Ink" then
@@ -1340,6 +1782,33 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
           | (none, s) => (nm "", s)
       let (c, r, bb) := iconAp st n orect
       (some (gs ++ c, res, some r, some bb), s)
+    else if sub = nm "FreeText" then
+      let (contents, s) := strOf src s (Dict.get? ad (nm "Contents"))
+      let (q, s) := intOf src s (Dict.get? ad (nm "Q"))
+      let (daO, s) := inheritGet src (nm "DA") maxFieldDepth ad s
+      let (daB, s) := strOf src s daO
+      let (rd, s) := arrOf src s (Dict.get? ad (nm "RD"))
+      let (rd, s) := realsOf src s ((rd.getD []).take 4)
+      let (rot, s) := intOf src s (Dict.get? ad (nm "Rotate"))
+      let (it, s) := nameOf src s (Dict.get? ad (nm "IT"))
+      let (cl, s) := if it = some (nm "FreeTextCallout") then
+          match arrOf src s (Dict.get? ad (nm "CL")) with
+          | (some xs, s) => realsOf src s (xs.take 7)
+          | (none, s) => ([], s)
+        else ([], s)
+      let (leO, s) := resolveOpt src s (Dict.get? ad (nm "LE"))
+      let qn := if q < 0 ∨ q > 2 then 0 else q.toNat
+      let (c, res, r) := freeTextAp st orect ((textOf contents).take maxSynthText) qn
+        (parseDA daB) rd rot cl leO
+      (some (c, res, r, none), s)
+    else if sub = nm "Stamp" then
+      let (name, s) := match Dict.get? ad (nm "Name") with
+        | none => ("Draft", s)
+        | some o => match nameOf src s (some o) with
+          | (some n, s) => (String.ofList (utf8Chars n.bytes), s)
+          | (none, s) => ("", s)
+      let (c, res, r, bb) := stampAp st orect name
+      (some (c, res, some r, some bb), s)
     else (none, s)
   match out with
   | (some (c, res, some r, bb), s) =>
@@ -1347,8 +1816,22 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
     (some (r, bb, ⟨synthDict bb res, c.toUTF8⟩), s)
   | (_, s) => (none, s)
 
-/-- Parse one annotation dictionary `ad` (object `num`, position `idx`). -/
-def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx num : Nat) (ad : Dict) :
+/-- First pseudo object number of synthesised appearances: above every object number a document
+can have (`Limits.maxObjects` < 2²³), so the owner of a synthesised appearance's direct font
+resources (`FontId.res`) never clashes with the page's (0) or a form's. -/
+def synthBase : Nat := 1099511627776
+
+/-- The pseudo object number of the synthesised appearance of `/Annots` element `idx`. -/
+def synthNum (idx : Nat) : Nat := synthBase + idx
+
+/-- Matrix A followed by the NoRotate turn when flag NoRotate is set and the page is rotated
+(`noRotateMatrix` about the rectangle `r`'s upper-left corner); else A. -/
+def noRotate (flags : Nat) (rot : Doc.Rotation) (r : RBox) (a : Matrix) : Matrix :=
+  if hasFlag flags flagNoRotate && rot != .r0 then Matrix.mul a (noRotateMatrix rot r) else a
+
+/-- Parse one annotation dictionary `ad` (object `num`, position `idx`) on a page with rotation
+`rot`. -/
+def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (rot : Doc.Rotation) (idx num : Nat) (ad : Dict) :
     Outcome × σ :=
   let (sub, s) := nameOf src s (Dict.get? ad (nm "Subtype"))
   let subtype := sub.getD (nm "")
@@ -1384,22 +1867,24 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx num : Na
             | (none, s) => (.skip .noAppearance, s)
             | (some (r, bb, st), s) =>
               let m := if r = bb then Matrix.identity else (aOf r bb).matrix
-              (.draw ⟨idx, num, subtype, r, flags, state, 0, 0, st, m, widget, true⟩, s)
+              (.draw ⟨idx, num, subtype, r, flags, state, synthNum idx, 0, st,
+                noRotate flags rot r m, widget, true⟩, s)
           | (some (n, g, st), s) =>
             let m := annotMatrix rect (Run.bboxOf st.dict) (Run.formMatrix st.dict)
-            (.draw ⟨idx, num, subtype, rect, flags, state, n, g, st, m, widget, false⟩, s)
+            (.draw ⟨idx, num, subtype, rect, flags, state, n, g, st, noRotate flags rot rect m,
+              widget, false⟩, s)
 
 /-- Parse one `/Annots` element (`seen`: annotation object numbers already listed). -/
-def parseOne {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx : Nat) (seen : List Nat)
+def parseOne {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (rot : Doc.Rotation) (idx : Nat) (seen : List Nat)
     (o : PdfObject) : Outcome × σ :=
   match o with
   | .ref n g =>
     if seen.contains n then (.skip .duplicate, s)
     else
       match src.fetch s n g with
-      | (.ok (.obj (.dict ad)), s) => parseDict src s oc idx n ad
+      | (.ok (.obj (.dict ad)), s) => parseDict src s oc rot idx n ad
       | (_, s) => (.skip .notDict, s)
-  | .dict ad => parseDict src s oc idx 0 ad
+  | .dict ad => parseDict src s oc rot idx 0 ad
   | _ => (.skip .notDict, s)
 
 /-- Object number of a reference (0 otherwise). -/
@@ -1408,22 +1893,22 @@ def refNum : PdfObject → Nat
   | _ => 0
 
 /-- Parse the elements in order: one outcome per element. -/
-def parseAll {σ : Type} (src : Source σ) (oc : OCDesc) :
+def parseAll {σ : Type} (src : Source σ) (oc : OCDesc) (rot : Doc.Rotation) :
     Nat → List Nat → List PdfObject → σ → List (Nat × Outcome) × σ
   | _, _, [], s => ([], s)
   | idx, seen, o :: os, s =>
-    let (r, s) := parseOne src s oc idx seen o
-    let (rs, s) := parseAll src oc (idx + 1) (refNum o :: seen) os s
+    let (r, s) := parseOne src s oc rot idx seen o
+    let (rs, s) := parseAll src oc rot (idx + 1) (refNum o :: seen) os s
     ((idx, r) :: rs, s)
 
 /-- `parseAll` gives exactly one outcome per element. -/
-theorem parseAll_length {σ : Type} (src : Source σ) (oc : OCDesc) :
+theorem parseAll_length {σ : Type} (src : Source σ) (oc : OCDesc) (rot : Doc.Rotation) :
     ∀ (idx : Nat) (seen : List Nat) (os : List PdfObject) (s : σ),
-      (parseAll src oc idx seen os s).1.length = os.length
+      (parseAll src oc rot idx seen os s).1.length = os.length
   | _, _, [], _ => rfl
   | idx, seen, o :: os, s => by
     simp only [parseAll, List.length_cons]
-    rw [parseAll_length src oc (idx + 1) (refNum o :: seen) os]
+    rw [parseAll_length src oc rot (idx + 1) (refNum o :: seen) os]
 
 /-- The annotations of a page. -/
 structure Collected where
@@ -1445,7 +1930,8 @@ theorem widgetsLast_length (ds : List Drawable) : (widgetsLast ds).length = ds.l
   | cons x xs ih => cases h : x.widget <;> simp [h] <;> omega
 
 /-- **Collect the annotations** of a page dictionary `pd` (§12.5; see the module doc). -/
-def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {}) :
+def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {})
+    (rot : Doc.Rotation := .r0) :
     Collected × σ :=
   let (arr, s) := match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
@@ -1453,14 +1939,15 @@ def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {
   let xs := match arr with
     | .array xs => xs
     | _ => []
-  let (rs, s) := parseAll src oc 0 [] (xs.take maxAnnots) s
+  let (rs, s) := parseAll src oc rot 0 [] (xs.take maxAnnots) s
   let over := (List.range (xs.length - maxAnnots)).map fun i => (maxAnnots + i, Skip.overCap)
   ({ drawn := widgetsLast (rs.filterMap (·.2.drawable?)),
      skipped := rs.filterMap (fun (i, r) => r.skip?.map (i, ·)) ++ over }, s)
 
 /-- **Annotation count bound**: at most `maxAnnots` annotations are drawn per page. -/
-theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc) :
-    (collect src s pd oc).1.drawn.length ≤ maxAnnots := by
+theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc)
+    (rot : Doc.Rotation) :
+    (collect src s pd oc rot).1.drawn.length ≤ maxAnnots := by
   simp only [collect]
   generalize (match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
@@ -1469,8 +1956,8 @@ theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc 
   generalize (match arr with
     | .array xs => xs
     | _ => []) = xs
-  have hl := parseAll_length src oc 0 [] (xs.take maxAnnots) s1
-  generalize parseAll src oc 0 [] (xs.take maxAnnots) s1 = p at hl
+  have hl := parseAll_length src oc rot 0 [] (xs.take maxAnnots) s1
+  generalize parseAll src oc rot 0 [] (xs.take maxAnnots) s1 = p at hl
   obtain ⟨rs, s2⟩ := p
   simp only at hl ⊢
   rw [widgetsLast_length]
@@ -1661,8 +2148,9 @@ structure AnnotPage where
 /-- **Annotations of a page** (page dictionary `pd`, resources `pageRes`, the page's font
 table `pageFonts`), run under the budget `bud`. Total. -/
 def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc := {}) : AnnotPage × σ :=
-  let (c, s) := collect src s pd oc
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc := {}) (rot : Doc.Rotation := .r0) :
+    AnnotPage × σ :=
+  let (c, s) := collect src s pd oc rot
   let (roots, s) := apRoots src s c.drawn
   let (fonts, s) := loadAnnotFonts limits src s pageFonts roots
   let st := runAppearances (Text.textEnv limits src fonts) bud pageRes c.drawn s ()
@@ -1671,12 +2159,12 @@ def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd page
 /-- **Bounds of `pageAnnots`**: at most `maxAnnots` annotations drawn, at most `bud.ops`
 operators and `Paint.maxItems · bud.ops` items. -/
 theorem pageAnnots_bounds {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc) :
-    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.collected.drawn.length ≤ maxAnnots ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.ops ≤ bud.ops ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.items.size ≤
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc) (rot : Doc.Rotation) :
+    (pageAnnots limits src s pd pageRes pageFonts bud oc rot).1.collected.drawn.length ≤ maxAnnots ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc rot).1.ops ≤ bud.ops ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc rot).1.items.size ≤
       Paint.maxItems * bud.ops :=
-  ⟨collect_drawn_le src s pd oc, runAppearances_ops_le _ _ _ _ _ _,
+  ⟨collect_drawn_le src s pd oc rot, runAppearances_ops_le _ _ _ _ _ _,
    runAppearances_items_le _ _ _ _ _ _⟩
 
 /-- **Annotations of a page of an opened document**, charging the decode `budget`; `pageFonts`
@@ -1687,7 +2175,7 @@ def docAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (pageFonts : T
   let src := Text.docSource limits doc
   let (pd, b) := Run.dictOf src budget (.ref page.num page.gen)
   let (oc, b) := readOC src b doc.catalog
-  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc
+  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc page.rotate
 
 /-- **The shared budget** (task 8.3b): what the page run `pt` left of `Limits.maxOpsPerPage`
 and `Limits.maxFormsPerPage`. -/
@@ -1706,7 +2194,7 @@ theorem docAnnots_shared_ops (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
   generalize readOC (Text.docSource limits doc) b' doc.catalog = q
   obtain ⟨oc, b''⟩ := q
   have := (pageAnnots_bounds limits (Text.docSource limits doc) b'' pd
-    (page.resources.getD []) pt.fonts (Budget.after limits pt) oc).2.1
+    (page.resources.getD []) pt.fonts (Budget.after limits pt) oc page.rotate).2.1
   simp only [Budget.after] at this ⊢
   omega
 
@@ -1753,6 +2241,18 @@ def extractDocPageAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
 #guard rsqrt 225 == 15 && rsqrt (-1) == 0
 #guard colorStr [1, 0, 0] true == some "1.000000 0.000000 0.000000 RG\n" && colorStr [] false == none
 #guard (quadsOf [1, 2, 3, 4, 5, 6, 7, 8, 9]).length == 2
+-- task 8.3d: `/DA` parsing, `strtof` prefixes, text strings, Windows-1252, line breaking
+#guard (parseDA "/Helv 0 Tf 0 0 1 rg".toUTF8.toList).size == 0 &&
+  (parseDA "/Helv 0 Tf 0 0 1 rg".toUTF8.toList).color == [0, 0, 1]
+#guard (parseDA "/Foo 9 Tf".toUTF8.toList).font == "Helv" &&
+  (parseDA "/Cour 9 Tf".toUTF8.toList).font == "Cour" && (parseDA []).size == 12
+#guard strtof "1.5".toList == (3 / 2, true) && strtof "-2x".toList == (-2, false) &&
+  strtof "x".toList == (0, false)
+#guard textOf [0xFE, 0xFF, 0, 65, 0x20, 0xAC] == ['A', '€'] && textOf [65, 66] == ['A', 'B']
+#guard win1252 '€' == some 0x80 && win1252 'é' == some 0xE9 && win1252 'Ω' == none
+#guard breakLine (fun _ => 1 / 2) 10 12 "ab cd".toList 0 0 none == (3, 10)
+#guard (layoutLines (fun _ => 1 / 2) 10 100 5 "a\nb".toList).map (·.1) == [['a'], ['b']]
+#guard litStr ['(', 'é'] == "(\\(\\351)"
 #guard (boxAp false { ca := 1, c := [1, 0, 0], ic := [], lw := 3, dash := [] }
   (RBox.mk 20 20 80 60) []).2 == some (RBox.mk 20 20 80 60)
 
