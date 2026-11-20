@@ -25,6 +25,7 @@ import Tests.RasterComposite
 import Tests.RasterSubst
 import Tests.RasterType3Fax
 import Tests.WriteIncremental
+import Tests.WriteAnnots
 import Tests.RasterImage
 import Tests.RasterTransparency
 import Tests.RasterShading
@@ -77,6 +78,7 @@ def suites : List Suite :=
     { name := "raster-subst", run := SafePdf.Tests.RasterSubst.run },
     { name := "raster-type3-fax", run := SafePdf.Tests.RasterType3Fax.run },
     { name := "write-incremental", run := SafePdf.Tests.WriteIncremental.run },
+    { name := "write-annots", run := SafePdf.Tests.WriteAnnots.run },
     { name := "raster-image", run := SafePdf.Tests.RasterImage.run },
     { name := "raster-transparency", run := SafePdf.Tests.RasterTransparency.run },
     { name := "raster-shading", run := SafePdf.Tests.RasterShading.run },
