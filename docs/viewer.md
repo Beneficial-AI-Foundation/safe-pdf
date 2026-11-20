@@ -53,7 +53,7 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   at most `View.cacheBytes` = 256 MiB of images and `View.cacheEntries` = 64 entries; results
   above half the budget are not cached. 100 ms after a page is shown, the next page (in the
   facing view: the next spread) is rendered into the cache when it is at most
-  `Viewer.prefetchPixels` (2²² px); no threads. Each page on the canvas has its own Tk photo
+  `Viewer.prefetchPixels` (2²² px), on a worker thread (8.8). Each page on the canvas has its own Tk photo
   (`::safepdf::pgN`), kept only while the page is in view or next to it (9.3).
 * Errors never crash the viewer: unreadable files, parse errors (e.g. a `/Kids` cycle), render
   errors and Tcl errors go to the status line.
@@ -237,13 +237,12 @@ starts).
   the continuous modes the wheel simply scrolls the document (`View.wheelStep` without page
   crossing).
 * **Rendering and memory**: the current page — in the facing view its whole spread — is
-  rendered at once, as before; the other pages in view and one more place before and after
-  them (`View.wantedPages`) are rendered one per event-loop turn (`after 1 … renderMore`,
-  nearest to the current page first), so scrolling never waits for a slow page: a page not
-  rendered yet shows as its white frame. Photos of pages that leave that set are deleted
-  (`image delete`), so Tk holds at most the pages in view plus two; the rendered images stay in
-  the LRU cache (256 MiB, 64 entries) at the current zoom. Rendering stays synchronous (no
-  threads): one slow page still blocks the event loop while it renders.
+  shown first; the other pages in view and one more place before and after them
+  (`View.wantedPages`) follow (`renderMore`, nearest to the current page first). Since 8.8 all
+  rendering runs on worker threads (next section), so no page blocks the window; a page not
+  rendered yet shows its white frame with "Rendering…". Photos of pages that leave that set
+  are deleted (`image delete`), so Tk holds at most the pages in view plus two; the rendered
+  images stay in the LRU cache (256 MiB, 64 entries) at the current zoom.
 * **Everything per page works in every mode**: positions are mapped through the slot of the
   page under the pointer (`Viewer.pagePointAt`; a drag stays on the page where it started),
   so selection, double click, links and their hover, highlights and notes (drawn on every page
@@ -260,7 +259,37 @@ starts).
   modes hold up to three more page photos (≈ 5.8 MB each at this size).
 
 Not done (PDF.js has them): Wrapped and Horizontal scrolling, the per-document memory of the
-mode, a spinner in pages being rendered, rendering in a background thread.
+mode, an animated spinner (the placeholder is a static "Rendering…").
+
+## Rendering on worker threads (8.8)
+
+* `Viewer.submit` starts a page render with `IO.asTask (prio := .dedicated)`: the task runs
+  only the pure renderer (`renderDocPage` on the document, or the 9.5g preview, with the
+  substitute fonts) and returns the image and its render time. **Tk stays on the main thread**:
+  the workers never call Tcl; a `poll` event (`after 15`, `Viewer.pollMs`, scheduled only while
+  renders run) takes finished renders (`IO.hasFinished`), puts them into the page cache and
+  shows them.
+* **Bounded**: at most `Viewer.maxJobs` = 4 renders at once; neighbours and the prefetch leave
+  one slot for the current page. A render of a key already running is not started twice (the
+  prefetch of the next page and the Next key share it).
+* **Short wait, then placeholder**: an event that must show the current page (open, page
+  keys, zoom, rotation, view mode, resize) waits for its render at most
+  `State.syncWaitMs` = 100 ms, so a typical page (median 64 ms) appears without a flash;
+  a slower one shows its white frame with a small grey "Rendering…" (canvas text, tag
+  `pwait wN`, after PDF.js's loading state) and the event returns. The status line says
+  `rendering...` until the page arrives, then `rendered in N ms`.
+* **Stale results**: a result is shown only when the open document (generation), the page's
+  zoom and rotation still match its cache key (`Viewer.keyOf`) and the page is still in view;
+  otherwise it is dropped (`State.staleDropped`; a result for the open document still goes
+  into the cache, e.g. a page that scrolled away). A pure render cannot be interrupted, so a
+  stale render keeps its slot until it ends; `Viewer.main` therefore exits the process as soon
+  as the window is closed instead of letting the runtime wait for it (the `--biblean` path
+  in `Main.lean` still returns normally after its flush).
+* Everything per page is unchanged: selection, highlights (multiplied in when the photo
+  arrives), search hits, links, bubbles and the overlays work on pages with a photo; the
+  overlays are redrawn whenever a page arrives.
+* Smoke mode waits for every render (`syncWaitMs = none`, `settle` waits for all running
+  renders), so its steps see the pages at once; the `async` case runs with no wait at all.
 
 ## Highlights and notes (9.4)
 
@@ -608,6 +637,47 @@ through `Tk_PhotoPutBlock`; event arguments come back as separate words. The onl
 is the constant UI setup (`Viewer.setupScript`). The smoke test opens a file named
 `odd [exit 7] $HOME {x" \.pdf` and checks that the title shows it verbatim.
 
+**No Tcl from other X clients** (task 8.7, defence in depth). A PDF never reaches Tcl as
+script (above), but two Tk mechanisms let *other clients of the X display* do it, and the
+viewer closes both:
+
+* **Tk `send`.** A Tk application registers its name on the display, and any client the X
+  server admits can `send` it a script, evaluated at global level (`exec` included). Right
+  after Tk starts, before the event loop ever runs, `Viewer.mainWith` evaluates
+  `Viewer.sendOffScript` (`rename ::send {}`); Tk's delete callback of `send` also removes the
+  application from the display's registry, so `winfo interps` elsewhere no longer lists it and
+  `send tk …` fails with "no application named". (Setting `tk appname` would register it again;
+  the viewer never does.) The **test hook** `SAFEPDF_VIEWER_DRIVE=1` keeps `send`:
+  `scripts/viewer-corpus.sh` sets it because its driver works through `send`; nothing else
+  should.
+* **The X resource database.** Tk fills every widget option not given at creation from the
+  option database, loaded from the display's `RESOURCE_MANAGER` property (which any client can
+  set, e.g. with `xrdb`) or `~/.Xdefaults`. Several options are scripts: `-command`,
+  `-validatecommand` (with `-validate`), `-invalidcommand`, `-postcommand`, `-tearoffcommand`,
+  `-x/yscrollcommand`, `-takefocus` (evaluated by keyboard traversal); others link variables
+  (`-textvariable`, `-listvariable`) or re-parent a toplevel (`-use`, `-screen`,
+  `-container`). Verified before the fix: `*Entry.validateCommand: exec touch …` ran in the
+  viewer. `Viewer.resourceGuardScript`, the first lines of `setupScript`, adds `*NAME {}` (and
+  `*validate none`, `*container 0`) at priority `interactive` (80); Tk ranks option entries by
+  priority before specificity and loads resources at `userDefault` (60), so they no longer reach
+  any widget (the main window's `-takefocus` is reset explicitly; it existed before). `option
+  clear` does not help: Tk reloads the resources on the next lookup.
+
+Reviewed and found safe (all data reaches Tcl as quoted words of `Tcl.cmd` via `Viewer.run`,
+or as variables inside constant procs, never as script): document and outline titles
+(`wm title`, `.ol.t insert` in `fillOutline`), link URIs (`::safepdf::askUri` inserts them into
+a text widget by variable; `clipboard append --`), file names (title, status line, dialogs'
+`-initialdir`/`-initialfile` through `::safepdf::askSavePath`/`askXfdf*` arguments), note and
+comment text (`::safepdf::noteEdit` inserts it by variable; it comes back as one `emit` word),
+XFDF content (parsed in Lean, `Xfdf.readFile`; only marks reach Tk, as above), search and
+go-to text (`emit … $::safepdf::query` is one word), render errors (`-text` of a canvas item).
+Every `after`/`-command`/`bind` script is a constant (`Menu.Cmd.script`, `Toolbar` tool
+scripts name constant icons), Tcl-side `expr` calls are braced, and the toolbar's
+`uplevel #0` runs only the constant command stored when the button was built. Other X-level
+inputs only trigger UI actions (`WM_DELETE_WINDOW` → Quit, which asks about unsaved marks;
+synthetic key events), and clipboard/selection requests from other clients only read data.
+The smoke test's `lockdown` case checks all of this from a second interpreter on the display.
+
 **Threads.** The shim's interpreter is used only from the thread running Lean's `main`. On
 macOS (Cocoa must run on the main thread) the shim sets `LEAN_MAIN_USE_THREAD=0` from a
 constructor, as bib-lean does; on Linux Lean's `main` keeps its large-stack thread.
@@ -791,6 +861,25 @@ Screenshots for comparison with the reference can be taken under Xvfb at the ref
 e.g. `Xvfb :97 -screen 0 1900x940x24 &`, then
 `DISPLAY=:97 SAFEPDF_VIEWER_GEOMETRY=1900x940 .lake/build/bin/viewer FILE.pdf &` and
 `DISPLAY=:97 import -window root shot.png` (ImageMagick).
+
+The `async` case (8.8, `Viewer.smokeAsync`) opens `viewer-smoke-pdf.py --slow 3000` (page 1:
+3000 stroked curves, about 2 s per render at 125–150 %; page 2 light) with `syncWaitMs = 0`:
+page 1 shows the placeholder while it renders; a Tcl timer every 20 ms keeps firing; `+`,
+`End` and `Home` return within 250 ms (measured ~0–3 ms); after the zoom change two renders
+run (old and new zoom); `End` shows page 2 (page field 2) while page 1 still renders; at the
+end the old zoom's result was dropped (`stale ≥ 1`) and page 1's photo has the size of its
+slot at the new zoom.
+
+The `lockdown` case (8.7, `Viewer.smokeLockdown`) runs the viewer with `HOME` holding a
+hostile `~/.Xdefaults` (`*Entry.validateCommand`, `*TEntry.validateCommand`,
+`*Menu.postCommand`, `*Menu.tearOffCommand`, `*takeFocus` that would `exec touch pwned`,
+`*Entry.textVariable` pointing at a toolbar command, `*Toplevel.container: 1`) together with a
+second `wish` on the same display: the viewer records that `send` is gone and that the page
+field, the overflow menu, `.` and fresh probe widgets carry none of the resources, types into
+the entries, posts the menu and runs keyboard traversal; the `wish` checks that it got the
+resources itself (control), lists `winfo interps` (only itself) and tries `send` to every
+interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A second run with
+`SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the

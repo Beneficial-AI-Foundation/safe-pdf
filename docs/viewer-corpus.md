@@ -36,16 +36,19 @@ takes about 5 minutes on the sandbox (8 cores, one file at a time).
   through which every Tk event reaches the Lean code — is renamed and wrapped by a procedure
   that times each event (`clock microseconds`), and execution traces on `image` and `.c` note
   which page photos (`image create photo ::safepdf::pgN`) or render-error texts (canvas items
-  tagged `perr eN`) each event created. The viewer's synchronous rendering is therefore
-  measured exactly where the user waits: an event that renders a page blocks the window for
-  its whole duration.
+  tagged `perr eN`) each event created. Before task 8.8 rendering was synchronous, so the
+  event time was the time-to-display and the time the window was blocked. Since 8.8 pages are
+  rendered on worker threads and shown by a later `poll` event; the viewer records each page's
+  time from the request of its render to its display in `::safepdf::ttd(N)`, which the
+  wrapper logs with the event, and that is the page's time-to-display; the event times now
+  only say how long the window was blocked (`max event`).
 * `File > Open` is answered by the driver (`tk_getOpenFile` is replaced in the viewer's
   interpreter by a procedure returning the file), so the measured open starts with an empty
   cache, exactly like opening from the menu (the file was opened once at start-up from the
   command line, which warms the OS file cache).
 * **Corpus pass.** Open; then `Go > Next page` until the last page; after each step the
   driver waits (polling with `send`) until the new current page is on screen and no deferred
-  render (`after … renderMore`) is pending, i.e. the pages in view and one more each side are
+  render (`after … renderMore` or `after … poll`) is pending, i.e. the pages in view and one more each side are
   rendered (`View.wantedPages`). Recorded per file: whether it opened (status line without
   `cannot open`/`cannot read`, at least one page), the page count, for every page the
   **time-to-display** = the duration of the event that put the page on screen (render +
@@ -74,8 +77,8 @@ takes about 5 minutes on the sandbox (8 cores, one file at a time).
 ### Limits of the method
 
 * `send` must work: Tk refuses it when the X server's access control is off (`xhost +`); the
-  private Xvfb started here has it on. If the viewer ever disables `send` (see *Findings*),
-  this script needs an equivalent hook.
+  private Xvfb started here has it on. Since task 8.7 the viewer deletes `send` at start-up
+  unless the test hook `SAFEPDF_VIEWER_DRIVE=1` is set, which this script sets.
 * Times are wall-clock on a shared machine (the sandbox: 8 cores, one viewer at a time); they
   are rendering times of the verified core plus Tk's photo upload, not frame timings.
 * Pages are visited front to back with Next page; scrolling with the wheel inside a page
@@ -152,12 +155,22 @@ the threshold is left at 1 GiB on purpose (see *Findings*, F1).
   rendering is synchronous, the window is frozen for that time (docs/viewer.md, "Not done:
   rendering in a background thread"); in continuous mode this usually happens while the
   page is still a neighbour below the view, i.e. on the Next-page step before it.
+  **Fixed by 8.8** (rendering on worker threads, docs/viewer.md): on the three files, the
+  longest event (the window blocked) went from 2,806 / 2,196 / 1,756 ms
+  (`arxiv-2307.09288` / `arxiv-2210.00002` / `arxiv-1303.5076`, all `renderMore`) to 76 / 56 /
+  116 ms (open, 1dae337 vs 8.8, same machine); every page displayed, 0 hangs, peak RSS
+  506 → 536 MiB. Time-to-display (now from the render's request to its display, so it
+  includes waiting behind other renders and the 15 ms poll) is about the same: median 100 →
+  110 ms, p95 474 → 520 ms, max 2.8 → 3.5 s (up to four renders share the cores, so a single
+  slow page takes a little longer). The 3-paper session passes 3/3 with it.
 * **F3 — Tk `send` is enabled in the viewer (defence in depth).** The viewer's interpreter
   registers as Tk application `tk`, and any X client of the same display that Tk's `send`
   access check admits can evaluate arbitrary Tcl in it (`exec` included) — this script relies
   on exactly that. A PDF cannot reach it, so it is outside the threat model of the core, but a
   shell meant to be safe could `rename send {}` in `Viewer.setupScript` unless a test hook asks for it; this script would then need such a
-  hook (e.g. keep `send` only when `SAFEPDF_VIEWER_DRIVE=1`).
+  hook (e.g. keep `send` only when `SAFEPDF_VIEWER_DRIVE=1`). **Fixed by 8.7:** `send` is deleted
+  unless `SAFEPDF_VIEWER_DRIVE=1`; X resources can no longer set script-valued widget options
+  either (docs/viewer.md, "No Tcl from other X clients").
 * No crash, no hang, no render error, no stderr output, no failed session step. The encrypted
   NTSB file (AES-256, R6) saves by incremental update (9.5f) and reopens with its marks.
 

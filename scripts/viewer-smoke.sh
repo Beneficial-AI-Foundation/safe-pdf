@@ -49,6 +49,12 @@
 #      3 scrolled into view), continuous facing (pages 1|2 side by side, the highlight drawn),
 #      facing (two pages, Next/Previous by two, a wheel notch turns a spread), even spreads
 #      (1 alone, then 2|3), back to single page (9.3);
+#   1l. Tcl lockdown (SAFEPDF_VIEWER_SMOKE_MODE=lockdown): Tk send from another interpreter on
+#      the display fails and hostile X resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1
+#      send works (8.7);
+#   1m. non-blocking rendering (SAFEPDF_VIEWER_SMOKE_MODE=async) on a PDF with a slow page 1
+#      (viewer-smoke-pdf.py --slow): placeholder, a timer runs and zoom/End/Home return at once
+#      while it renders, End shows page 2 meanwhile, the old zoom's render is discarded (8.8);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -985,6 +991,141 @@ except (KeyError, ValueError) as e:
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-modes/modes.txt" || fail=1
+
+# 1l. Tcl lockdown (task 8.7; SAFEPDF_VIEWER_SMOKE_MODE=lockdown): HOME holds a hostile
+#     ~/.Xdefaults (script-valued resources that would create the file `pwned`), and a second
+#     Tk interpreter on the same display tries `send` into the viewer. Without the test hook
+#     the viewer has no `send` command, is not in `winfo interps`, every send fails, and the
+#     resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1 the send works (the corpus
+#     driver's path). The other interpreter also checks that it got the hostile resources
+#     itself (so the guard, not a missing resource file, is what the test sees).
+lockwish=""
+for w in wish9.0 wish8.6 wish; do
+  if command -v "$w" >/dev/null; then lockwish="$w"; break; fi
+done
+if [ -z "$lockwish" ]; then
+  echo "viewer-smoke: wish missing, lockdown case skipped"
+else
+  cat > "$work/attacker.tcl" <<'TCL'
+wm withdraw .
+lassign $argv dir
+namespace eval ::safepdf {}
+set t0 [clock milliseconds]
+while {![file exists $dir/up] && [clock milliseconds] - $t0 < 40000} { after 50 }
+set f [open $dir/attack.txt w]
+entry .ctl
+puts $f "control-resources: [.ctl cget -validate] [.ctl cget -validatecommand]"
+.ctl configure -validate none
+puts $f "interps: [winfo interps]"
+set ok 0
+foreach i [lsort -unique [concat [winfo interps] tk viewer safe-pdf]] {
+  if {$i eq [tk appname]} continue
+  set code [catch {send $i {set ::safepdf::lockSent 1}} r]
+  puts $f "send $i: $code $r"
+  if {$code == 0} { incr ok }
+}
+puts $f "sends-ok: $ok"
+close $f
+close [open $dir/attacked w]
+exit
+TCL
+  # lock_run DIR [ENV...]: the viewer (smoke mode lockdown) and the attacker on one display.
+  lock_run() {
+    local d="$1"; shift
+    mkdir -p "$d/home"
+    cat > "$d/home/.Xdefaults" <<XD
+*Entry.validate: all
+*Entry.validateCommand: exec touch $d/pwned
+*TEntry.validate: all
+*TEntry.validateCommand: exec touch $d/pwned
+*Menu.postCommand: exec touch $d/pwned
+*Menu.tearOffCommand: exec touch $d/pwned
+*takeFocus: exec touch $d/pwned
+*Entry.textVariable: ::safepdf::btn(cmd,.bar.save)
+*Toplevel.container: 1
+XD
+    env HOME="$d/home" SAFEPDF_VIEWER_SMOKE="$d" SAFEPDF_VIEWER_SMOKE_MODE=lockdown "$@" \
+      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5"; wait $v' _ \
+      "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d"
+  }
+  lock_run "$work/out-lock" || { echo "FAIL: lockdown run failed" >&2; fail=1; }
+  cat "$work/out-lock/lockdown.txt" "$work/out-lock/attack.txt" 2>/dev/null || true
+  python3 -I -c '
+import os, sys
+d = sys.argv[1]
+def kv(name):
+    try:
+        text = open(os.path.join(d, name), encoding="utf-8").read()
+    except FileNotFoundError:
+        return {}
+    return dict(l.split(": ", 1) for l in text.splitlines() if ": " in l)
+v, a = kv("lockdown.txt"), kv("attack.txt")
+want = {"send-command": "[]", "pg-validate": "[none] []", "more-postcommand": "[]",
+        "root-takefocus": "[]", "probe-entry": "[none] [] [] []", "probe-menu": "[] []",
+        "probe-toplevel": "[] [] [0]", "attacked-file": "true"}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+if a.get("sends-ok") != "0": errs.append("a send into the viewer worked: %r" % a)
+if not a.get("control-resources", "").startswith("all exec touch"):
+    errs.append("the hostile resources were not loaded (control): %r" % a.get("control-resources"))
+if a.get("interps", "").split() not in ([], ["attacker.tcl"]):
+    errs.append("the viewer is still registered: %r" % a.get("interps"))
+if os.path.exists(os.path.join(d, "pwned")): errs.append("a hostile resource ran (pwned exists)")
+for e in errs: print("FAIL: lockdown: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-lock" || fail=1
+  lock_run "$work/out-drive" SAFEPDF_VIEWER_DRIVE=1 || { echo "FAIL: drive-hook run failed" >&2; fail=1; }
+  cat "$work/out-drive/attack.txt" 2>/dev/null || true
+  grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null \
+    || { echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1; }
+  [ ! -e "$work/out-drive/pwned" ] || { echo "FAIL: a hostile resource ran with the hook" >&2; fail=1; }
+fi
+
+# 1m. Non-blocking rendering (task 8.8; SAFEPDF_VIEWER_SMOKE_MODE=async, no event waits for a
+#     render): page 1 of the generated PDF strokes 3000 curves and takes the renderer seconds.
+#     While it renders the window shows the placeholder, a 20 ms Tcl timer keeps firing, a
+#     zoom change returns at once, and End shows the light page 2 (page field 2) while page 1
+#     still renders; the render for the old zoom is discarded (stale) and page 1 finally shows
+#     at the new zoom.
+python3 -I "$here/viewer-smoke-pdf.py" --slow 3000 "$work/slow.pdf"
+SAFEPDF_VIEWER_SMOKE_MODE=async run_viewer "$work/out-async" "$work/slow.pdf" \
+  || { echo "FAIL: async run failed" >&2; fail=1; }
+cat "$work/out-async/async.txt" 2>/dev/null || true
+python3 -I -c '
+import re, sys
+try:
+    t = open(sys.argv[1], encoding="utf-8").read()
+except FileNotFoundError:
+    t = "error: no async.txt"
+v = dict(l.split(": ", 1) for l in t.splitlines() if ": " in l)
+errs = []
+def need(cond, msg):
+    if not cond: errs.append(msg)
+def num(k, rx, i=1):
+    m = re.search(rx, v.get(k, ""))
+    return int(m.group(i)) if m else -1
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+need(re.match(r"page 1 photo false jobs [1-9]\d* placeholders 1$", v.get("start", "")),
+     "no placeholder while page 1 renders: %r" % v.get("start"))
+need(0 <= num("zoom-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v.get("zoom-event-ms"))
+need(v.get("after-zoom") == "jobs 2 photo false placeholders 1",
+     "after zoom: %r (expected the old and the new render running)" % v.get("after-zoom"))
+need(num("ticks", r"(\d+)") >= 5, "the timer did not run while rendering: %r" % v.get("ticks"))
+need(v.get("during") == "jobs 2 photo false placeholders 1", "during: %r" % v.get("during"))
+need(0 <= num("end-event-ms", r"(\d+)") < 250, "End blocked: %r" % v.get("end-event-ms"))
+need(re.match(r"page 2 field 2 photo true slow-jobs [1-9]", v.get("page2", "")),
+     "page 2 not shown while page 1 renders: %r" % v.get("page2"))
+need(0 <= num("home-event-ms", r"(\d+)") < 250, "Home blocked: %r" % v.get("home-event-ms"))
+need(num("final", r"stale (\d+)") >= 1, "no stale render discarded: %r" % v.get("final"))
+need(re.match(r"page 1 jobs 0 ", v.get("final", "")), "final: %r" % v.get("final"))
+m = re.match(r"(\d+)x(\d+) slot (\d+)x(\d+)$", v.get("final-photo", ""))
+need(m and m.group(1) == m.group(3) and m.group(2) == m.group(4),
+     "page 1 photo does not match its slot (new zoom): %r" % v.get("final-photo"))
+need("rendered in" in v.get("status", ""), "status: %r" % v.get("status"))
+need("done" in t, "the run did not finish")
+for e in errs: print("FAIL: async: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-async/async.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
