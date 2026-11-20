@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Hand-written in the style of Adobe Acrobat's "Comments > Export to Data File" (XFDF):
+     attribute set and rich-text body as in Adobe's "XML Forms Data Format Specification"
+     3.0 (2009), section "Annotations" (highlight, text, popup, contents-richtext) and
+     ISO 19444-1; colour Acrobat's default highlight yellow #FFFF00; coords in QuadPoints
+     order (UL, UR, LL, LR); a reply as <text inreplyto=...>; <f href> and <ids> after
+     <annots>.
+     Expected (Tests/Xfdf.lean): 3 marks (highlight + its rich-text comment, a note),
+     skipped 2 (reply, underline), ignored 0. -->
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+<annots>
+<highlight color="#FFFF00" creationdate="D:20261120101500+01'00'" flags="print" date="D:20261120101532+01'00'" name="2b8f6a1e-5c0d-4f2b-9c1e-0a7d3e4b5f60" page="0" coords="72.024,715.33,301.66,715.33,72.024,703.21,301.66,703.21" rect="71.5,702.8,302.1,715.9" subject="Highlight" title="Reader" opacity="1"><contents-richtext><body xmlns="http://www.w3.org/1999/xhtml" xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/" xfa:APIVersion="Acrobat:23.6.0" xfa:spec="2.0.2"><p>Key result &#8212; see <span style="font-weight:bold">Table 2</span></p><p>check eq. (3)</p></body></contents-richtext><popup flags="print,nozoom,norotate" open="no" page="0" rect="612,595.33,792,715.33"/></highlight>
+<text color="#FFFF00" creationdate="D:20261120101610+01'00'" flags="print,nozoom,norotate" date="D:20261120101622+01'00'" name="7a1c9e0b-1111-4c22-8d33-444455556666" icon="Comment" page="1" rect="400.5,600.25,420.5,620.25" subject="Sticky Note" title="Reader"><contents-richtext><body xmlns="http://www.w3.org/1999/xhtml" xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/" xfa:APIVersion="Acrobat:23.6.0" xfa:spec="2.0.2"><p>Typo here?</p></body></contents-richtext><popup flags="print,nozoom,norotate" open="no" page="1" rect="612,500.25,792,620.25"/></text>
+<text color="#FFFF00" creationdate="D:20261120101700+01'00'" flags="print,nozoom,norotate" date="D:20261120101700+01'00'" name="a0b1c2d3-0000-4000-8000-000000000001" icon="Comment" inreplyto="2b8f6a1e-5c0d-4f2b-9c1e-0a7d3e4b5f60" page="0" rect="71.5,702.8,302.1,715.9" subject="Sticky Note" title="Reader"><contents>Agreed.</contents></text>
+<underline color="#00C000" creationdate="D:20261120101800+01'00'" flags="print" date="D:20261120101800+01'00'" name="u-1" page="0" coords="72,690,200,690,72,680,200,680" rect="72,680,200,690" subject="Underline" title="Reader"/>
+</annots>
+<f href="paper.pdf"/>
+<ids original="1A2B3C4D5E6F708192A3B4C5D6E7F801" modified="0F1E2D3C4B5A69788796A5B4C3D2E1F0"/>
+</xfdf>
