@@ -2666,8 +2666,9 @@ of annotation appearances): annotation glyphs after the page's, their item indic
 after the page's items, the font table and counts combined, lines laid out again. -/
 def withAnnots (o : Text.Options) (pt : Text.PageText) (ap : AnnotPage) : Text.PageText :=
   let gs := pt.glyphs ++ Text.extractAux ap.fonts pt.items.size ap.items.toList
-  let (lines, text) := Text.layout o gs
-  { fonts := ap.fonts, items := pt.items ++ ap.items, glyphs := gs, lines, text,
+  let sh := pt.shown ++ Text.shownItems.shownAux ap.fonts o.pageBox pt.items.size ap.items.toList
+  let (lines, text) := Text.layout o sh
+  { fonts := ap.fonts, items := pt.items ++ ap.items, glyphs := gs, shown := sh, lines, text,
     warnings := pt.warnings + ap.warnings, ops := pt.ops + ap.ops, forms := pt.forms + ap.forms }
 
 /-- **Annotation glyphs (same pass)**: the glyphs of `withAnnots` are the page's glyphs followed

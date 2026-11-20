@@ -1,0 +1,49 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> >> /Properties << /MC0 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 967 >>
+stream
+BT /F1 1 Tf 12 0 0 12 72 700 Tm (Contents) Tj
+/Span<</ActualText<FEFF002E>>> BDC 12 0 0 12 125.36 700 Tm ( )Tj EMC
+0.167 0 Td (..........) Tj ET
+BT /F1 12 Tf 72 686 Td (Two shows: ) Tj
+/Span <</ActualText (ab)>> BDC (x) Tj (y) Tj EMC ( end) Tj ET
+BT /F1 12 Tf 72 672 Td (Fewer: ) Tj /Span <</ActualText (k)>> BDC (xyz) Tj EMC ET
+BT /F1 12 Tf 72 658 Td (More: ) Tj /Span <</ActualText (klm)>> BDC (x) Tj EMC
+( after) Tj ET
+BT /F1 12 Tf 72 644 Td (Empty:) Tj /Span <</ActualText ()>> BDC (!) Tj EMC
+(kept) Tj ET
+BT /F1 12 Tf 72 630 Td (Nested: ) Tj /Span <</ActualText (OUTER)>> BDC
+/Span <</ActualText (in)>> BDC (zz) Tj EMC (w) Tj EMC ET
+BT /F1 12 Tf 72 616 Td (Named: ) Tj /Span /MC0 BDC (q) Tj EMC ET
+BT /F1 12 Tf 72 602 Td (Ligature: ) Tj /Span <</ActualText <FEFFFB01>>> BDC (f) Tj EMC
+(ne) Tj ET
+/P <</MCID 1>> BDC /Artifact BMC BT /F1 12 Tf 72 588 Td (Plain marked) Tj ET EMC EMC EMC
+BT /F1 12 Tf 72 574 Td (Open: ) Tj /Span <</ActualText (xyz)>> BDC (w) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /ActualText (Q) >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000139 00000 n 
+0000000346 00000 n 
+0000001364 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1401
+%%EOF

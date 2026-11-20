@@ -55,6 +55,10 @@ displayed" (C6) becomes a property of this one structure.
   content, §8.7.3); an inline image's resource-name `/ColorSpace` is replaced by the
   definition from the current resources. So loaders never need the page's resources alone,
   and `DisplayList.foldDeep` reaches items nested in soft masks.
+* **`/ActualText` marked content** (task 6.8d, §14.9.4): a `BDC` whose property list carries
+  `/ActualText` emits `actualTextBegin text`, its matching `EMC` `actualTextEnd` (other marked
+  content emits nothing; the interpreter matches `EMC`s, so the pairs nest like brackets within
+  one content stream). Only text extraction reads them; renderers skip them.
 * **Unknown operators** become `unsupported op`, logged for the coverage report (M5), never a
   failure.
 * **Length bound.** `DisplayList` is a plain `Array`; that its length is at most the number
@@ -260,6 +264,14 @@ inductive DisplayItem where
   through the mask. Nested, so consumers that do not know masks (text extraction, SVG) skip the
   mask's contents automatically. -/
   | softMask (id : Nat) (info : SoftMaskInfo) (items : Array DisplayItem)
+  /-- Start of a marked-content sequence with an `/ActualText` entry (task 6.8d, ISO 32000-2
+  §14.9.4): `text` is the entry's raw string (a PDF text string, decoded by its consumer). The
+  glyphs shown up to the matching `actualTextEnd` are replaced by these characters in text
+  extraction (as MuPDF's structured-text device); painting ignores the item. -/
+  | actualTextBegin (text : List UInt8)
+  /-- End of the innermost open `/ActualText` sequence (the `EMC` matching an
+  `actualTextBegin`). -/
+  | actualTextEnd
 
 instance : Inhabited DisplayItem := ⟨.unsupported []⟩
 
@@ -350,6 +362,8 @@ def DisplayItem.kind : DisplayItem → String
   | .groupBegin _ => "groupBegin"
   | .groupEnd => "groupEnd"
   | .softMask .. => "softMask"
+  | .actualTextBegin _ => "actualTextBegin"
+  | .actualTextEnd => "actualTextEnd"
 
 /-! ## Samples, one per constructor -/
 
@@ -393,6 +407,8 @@ private def sampleRun : GlyphRun :=
 #guard (DisplayItem.groupBegin {}).kind == "groupBegin"
 #guard DisplayItem.groupEnd.kind == "groupEnd"
 #guard (DisplayItem.softMask 3 { kind := .luminosity } #[.groupEnd]).kind == "softMask"
+#guard (DisplayItem.actualTextBegin [46]).kind == "actualTextBegin"
+#guard DisplayItem.actualTextEnd.kind == "actualTextEnd"
 #guard ({ ({} : GState) with blendMode := .multiply, softMask := some 4 }).fillStyle.smask
     == some 4
 

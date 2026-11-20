@@ -52,8 +52,13 @@ display items `is`. It has three constructors:
   `'`. Without a font, `Tj`/`TJ` are skipped while `'`/`"` still perform their `T*`
   (and `Tw`/`Tc`) parts (`quoteNoFont`, `dquoteNoFont`), as the impl does.
 * **`Do`, `sh`, `BI`**: emit an image/shading placeholder with the CTM, fill snapshot and clip.
-* **`BX`/`EX`** count the compatibility nesting; **`gs d0 d1 BMC BDC EMC MP DP`** change
-  nothing (`IgnoredKw`; ExtGState resolution is task 5.2b).
+* **`BX`/`EX`** count the compatibility nesting; **`gs d0 d1 MP DP`** change nothing
+  (`IgnoredKw`; ExtGState resolution is task 5.2b).
+* **Marked content** (task 6.8d, §14.6): `BMC`/`BDC` push a sequence onto `Core.marks` while
+  fewer than `Limits.maxMarkedDepth` are open (`true` and an `actualTextBegin` item for a `BDC`
+  whose property list has `/ActualText`, `Interp.actualTextOf`), else count it in `markOver`;
+  `EMC` closes a counted sequence first, else pops `marks` (an `actualTextEnd` item for a
+  `true` entry), and with nothing open changes nothing.
 
 Every one of the 71 operators the impl knows is specified declaratively; there is **no**
 catch-all constructor deferring to `exec`. Operand decoding is shared with the impl (the
@@ -74,7 +79,7 @@ Not covered: the warning and unknown-operator *counts* of `Result` (only the sta
 display items are specified).
 
 Proof note: `simple_match_fallthrough` names the auxiliary matcher of `Interp.simple`'s operator
-dispatch (`Interp.simple.match_33`) and walks its decision tree, because Lean cannot generate
+dispatch (`Interp.simple.match_32`) and walks its decision tree, because Lean cannot generate
 the matcher's equation lemmas or splitter within the default heartbeat budget (57 `List UInt8`
 literal patterns). If `Interp.simple` is edited, that name and `simpleKws` may need updating.
 -/
@@ -152,7 +157,7 @@ inductive ColourKw : List UInt8 → Bool → Prop
   | scn : ColourKw [115, 99, 110] false
 
 /-- Known operators that change nothing in the state modelled here: `gs` (ExtGState,
-resolved in 5.2b), `d0`/`d1` (Type 3 glyph metrics), marked content (§14.6). -/
+resolved in 5.2b), `d0`/`d1` (Type 3 glyph metrics), marked-content points `MP`/`DP` (§14.6). -/
 inductive IgnoredKw : List UInt8 → Prop
   /-- `gs` -/
   | gs : IgnoredKw [103, 115]
@@ -160,12 +165,6 @@ inductive IgnoredKw : List UInt8 → Prop
   | d0 : IgnoredKw [100, 48]
   /-- `d1` -/
   | d1 : IgnoredKw [100, 49]
-  /-- `BMC` -/
-  | BMC : IgnoredKw [66, 77, 67]
-  /-- `BDC` -/
-  | BDC : IgnoredKw [66, 68, 67]
-  /-- `EMC` -/
-  | EMC : IgnoredKw [69, 77, 67]
   /-- `MP` -/
   | MP : IgnoredKw [77, 80]
   /-- `DP` -/
@@ -348,7 +347,7 @@ inductive SimpleStep (cfg : Config) : Core → Op → Core → List DisplayItem 
   | i {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {x : Fixed}
       (h : Interp.nums 1 o = some [x]) :
       SimpleStep cfg c ⟨o, [105], off, dat⟩ { c with gs := { c.gs with flatness := x } } []
-  /-- `gs d0 d1 BMC BDC EMC MP DP`: no change. -/
+  /-- `gs d0 d1 MP DP`: no change. -/
   | ignored {c : Core} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
       (hkw : IgnoredKw kw) : SimpleStep cfg c ⟨o, kw, off, dat⟩ c []
   /-- `/N CS`, `/N cs`: set the space and its initial colour (§8.6.8). -/
@@ -519,6 +518,41 @@ inductive SimpleStep (cfg : Config) : Core → Op → Core → List DisplayItem 
   | EX {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {n : Nat}
       (h : c.bxDepth = n + 1) :
       SimpleStep cfg c ⟨o, [69, 88], off, dat⟩ { c with bxDepth := n } []
+  /-- `/Tag BMC` below the nesting limit: open a sequence without `/ActualText`. -/
+  | BMC {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      (h : c.marks.length < cfg.limits.maxMarkedDepth) :
+      SimpleStep cfg c ⟨o, [66, 77, 67], off, dat⟩ { c with marks := false :: c.marks } []
+  /-- `/Tag props BDC` below the nesting limit: open a sequence, marked `true` with an
+  `actualTextBegin` item when the property list has `/ActualText`. -/
+  | BDC {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      (h : c.marks.length < cfg.limits.maxMarkedDepth) :
+      SimpleStep cfg c ⟨o, [66, 68, 67], off, dat⟩
+        { c with marks := (Interp.actualTextOf o).isSome :: c.marks }
+        ((Interp.actualTextOf o).map DisplayItem.actualTextBegin).toList
+  /-- `BMC` at the nesting limit: only counted. -/
+  | BMCDeep {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      (h : ¬ c.marks.length < cfg.limits.maxMarkedDepth) :
+      SimpleStep cfg c ⟨o, [66, 77, 67], off, dat⟩ { c with markOver := c.markOver + 1 } []
+  /-- `BDC` at the nesting limit: only counted (its `/ActualText` is ignored). -/
+  | BDCDeep {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      (h : ¬ c.marks.length < cfg.limits.maxMarkedDepth) :
+      SimpleStep cfg c ⟨o, [66, 68, 67], off, dat⟩ { c with markOver := c.markOver + 1 } []
+  /-- `EMC` closing a counted (over-limit) sequence. -/
+  | EMCDeep {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray} {n : Nat}
+      (h : c.markOver = n + 1) :
+      SimpleStep cfg c ⟨o, [69, 77, 67], off, dat⟩ { c with markOver := n } []
+  /-- `EMC` closing an `/ActualText` sequence: `actualTextEnd`. -/
+  | EMCActual {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      {rest : List Bool} (h0 : c.markOver = 0) (h : c.marks = true :: rest) :
+      SimpleStep cfg c ⟨o, [69, 77, 67], off, dat⟩ { c with marks := rest } [.actualTextEnd]
+  /-- `EMC` closing another sequence. -/
+  | EMCPlain {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      {rest : List Bool} (h0 : c.markOver = 0) (h : c.marks = false :: rest) :
+      SimpleStep cfg c ⟨o, [69, 77, 67], off, dat⟩ { c with marks := rest } []
+  /-- `EMC` with no open sequence: no change (as MuPDF). -/
+  | EMCStray {c : Core} {o : List PdfObject} {off : Nat} {dat : ByteArray}
+      (h0 : c.markOver = 0) (h : c.marks = []) :
+      SimpleStep cfg c ⟨o, [69, 77, 67], off, dat⟩ c []
 
 /-- The specified effect of a known operator on the whole machine. -/
 inductive Effect (cfg : Config) : Machine → Op → Machine → List DisplayItem → Prop
@@ -580,7 +614,7 @@ theorem foldl_push {α : Type} (a : Array α) (l : List α) :
 /-- The impl's segment appending is `extendPath`. -/
 theorem addSegs_eq (c : Core) (segs : List Segment) (cur start : Option Point) :
     Interp.addSegs c segs cur start = extendPath c segs cur start := by
-  obtain ⟨gs, tm, path, cur0, start0, it, bx⟩ := c
+  obtain ⟨gs, tm, path, cur0, start0, it, bx, mk, mo⟩ := c
   simp only [Interp.addSegs, extendPath, foldl_push]
 
 /-- The impl's subpath closing is `closeSubpath`. -/
@@ -609,8 +643,8 @@ abstract alternatives): an operator outside `simpleKws` reaches the last alterna
 by walking the matcher's decision tree (`dite` on each byte, `List` cases on the rest). -/
 theorem simple_match_fallthrough {α : Type} (kw : List UInt8) (hk : kw ∉ simpleKws)
     (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24 a25 a26 a27 a28 a29 a30 a31 a32 a33 a34 a35 a36 a37 a38 a39 a40 a41 a42 a43 a44 a45 a46 a47 a48 a49 a50 a51 a52 a53 a54 a55 a56 : Unit → α) (f : List UInt8 → α) :
-    Interp.simple.match_33 (fun _ => α) kw a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24 a25 a26 a27 a28 a29 a30 a31 a32 a33 a34 a35 a36 a37 a38 a39 a40 a41 a42 a43 a44 a45 a46 a47 a48 a49 a50 a51 a52 a53 a54 a55 a56 f = f kw := by
-  delta Interp.simple.match_33
+    Interp.simple.match_32 (fun _ => α) kw a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24 a25 a26 a27 a28 a29 a30 a31 a32 a33 a34 a35 a36 a37 a38 a39 a40 a41 a42 a43 a44 a45 a46 a47 a48 a49 a50 a51 a52 a53 a54 a55 a56 f = f kw := by
+  delta Interp.simple.match_32
   rcases kw with _ | ⟨x, xs⟩
   · rfl
   dsimp only [Interp.deviceColor._sparseCasesOn_1]
@@ -648,12 +682,53 @@ theorem exec_simple_eq (cfg : Config) (m : Machine) (op : Op)
   unfold Interp.exec
   rw [h]
 
+/-- `BMC` in `Interp.simple` is `openMark` without `/ActualText`. -/
+theorem simple_BMC (cfg : Config) (c : Core) (o : List PdfObject) (off : Nat) (dat : ByteArray) :
+    Interp.simple cfg c ⟨o, [66, 77, 67], off, dat⟩ =
+      Interp.openMark cfg.limits.maxMarkedDepth c none := rfl
+
+/-- `BDC` in `Interp.simple` is `openMark` with the property list's `/ActualText`. -/
+theorem simple_BDC (cfg : Config) (c : Core) (o : List PdfObject) (off : Nat) (dat : ByteArray) :
+    Interp.simple cfg c ⟨o, [66, 68, 67], off, dat⟩ =
+      Interp.openMark cfg.limits.maxMarkedDepth c (Interp.actualTextOf o) := rfl
+
+/-- `EMC` in `Interp.simple` is `closeMark`. -/
+theorem simple_EMC (cfg : Config) (c : Core) (o : List PdfObject) (off : Nat) (dat : ByteArray) :
+    Interp.simple cfg c ⟨o, [69, 77, 67], off, dat⟩ = Interp.closeMark c := rfl
+
+/-- Every state has a specified marked-content transition for `BMC`, `BDC`, `EMC`. -/
+theorem mark_step (cfg : Config) (c : Core) (o : List PdfObject) (kw : List UInt8) (off : Nat)
+    (dat : ByteArray) (hm : kw = [66, 77, 67] ∨ kw = [66, 68, 67] ∨ kw = [69, 77, 67]) :
+    ∃ c' is, SimpleStep cfg c ⟨o, kw, off, dat⟩ c' is := by
+  rcases hm with rfl | rfl | rfl
+  · by_cases h : c.marks.length < cfg.limits.maxMarkedDepth
+    · exact ⟨_, _, .BMC h⟩
+    · exact ⟨_, _, .BMCDeep h⟩
+  · by_cases h : c.marks.length < cfg.limits.maxMarkedDepth
+    · exact ⟨_, _, .BDC h⟩
+    · exact ⟨_, _, .BDCDeep h⟩
+  · rcases h0 : c.markOver with _ | n
+    · rcases h1 : c.marks with _ | ⟨b, rest⟩
+      · exact ⟨_, _, .EMCStray h0 h1⟩
+      · cases b
+        · exact ⟨_, _, .EMCPlain h0 h1⟩
+        · exact ⟨_, _, .EMCActual h0 h1⟩
+    · exact ⟨_, _, .EMCDeep h0⟩
+
 /-- **Spec ⇒ impl** for the simple operators: a specified transition is what `Interp.simple`
 computes. -/
 theorem simple_of_step {cfg : Config} {c : Core} {op : Op} {c' : Core} {is : List DisplayItem}
     (h : SimpleStep cfg c op c' is) :
     (Interp.simple cfg c op).1 = c' ∧ (Interp.simple cfg c op).2.1.toList = is := by
   cases h
+  case BMC h => rw [simple_BMC]; simp [Interp.openMark, h]
+  case BDC h => rw [simple_BDC]; simp [Interp.openMark, h]
+  case BMCDeep h => rw [simple_BMC]; simp [Interp.openMark, Interp.ok, h]
+  case BDCDeep h => rw [simple_BDC]; simp [Interp.openMark, Interp.ok, h]
+  case EMCDeep h => rw [simple_EMC]; simp [Interp.closeMark, Interp.ok, h]
+  case EMCActual h0 h => rw [simple_EMC]; simp [Interp.closeMark, h0, h]
+  case EMCPlain h0 h => rw [simple_EMC]; simp [Interp.closeMark, h0, h]
+  case EMCStray h0 h => rw [simple_EMC]; simp [Interp.closeMark, Interp.ok, h0, h]
   all_goals (try cases ‹IgnoredKw _›)
   all_goals (try cases ‹SpaceKw _ _›)
   all_goals (try cases ‹ColourKw _ _›)
@@ -677,9 +752,12 @@ theorem simple_cases (cfg : Config) (c : Core) (o : List PdfObject) (kw : List U
     (∃ c' is, SimpleStep cfg c ⟨o, kw, off, dat⟩ c' is) ∨
       ((Interp.simple cfg c ⟨o, kw, off, dat⟩).1 = c ∧
         (Interp.simple cfg c ⟨o, kw, off, dat⟩).2.1 = none) := by
+  by_cases hm : kw = [66, 77, 67] ∨ kw = [66, 68, 67] ∨ kw = [69, 77, 67]
+  · exact Or.inl (mark_step cfg c o kw off dat hm)
   generalize hs : Interp.simple cfg c ⟨o, kw, off, dat⟩ = r
   simp only [simpleKws, List.mem_cons, List.not_mem_nil, or_false] at hk
   rcases hk with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals (try (exfalso; simp at hm; done))
   all_goals (conv at hs => lhs; whnf)
   all_goals subst hs
   all_goals (try unfold Interp.showText)
@@ -753,7 +831,7 @@ theorem paintStep_eq (m : Machine) (p : Option Paint) (close : Bool) :
     cases close <;> simp [closeIf, closeCore_eq]
   simp only [Interp.paintStep, hc]
   generalize closeIf close c0 = c
-  obtain ⟨gs, tm, path, cur, start, it, bx⟩ := c
+  obtain ⟨gs, tm, path, cur, start, it, bx, mk, mo⟩ := c
   cases pending <;> cases p <;> by_cases he : path.segs.isEmpty = true <;>
     simp [he, afterPaint, paintOutput, Interp.paintItemsOf, paintItems_eq]
 
