@@ -52,6 +52,9 @@
 #   1l. Tcl lockdown (SAFEPDF_VIEWER_SMOKE_MODE=lockdown): Tk send from another interpreter on
 #      the display fails and hostile X resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1
 #      send works (8.7);
+#   1m. non-blocking rendering (SAFEPDF_VIEWER_SMOKE_MODE=async) on a PDF with a slow page 1
+#      (viewer-smoke-pdf.py --slow): placeholder, a timer runs and zoom/End/Home return at once
+#      while it renders, End shows page 2 meanwhile, the old zoom's render is discarded (8.8);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1077,6 +1080,52 @@ sys.exit(1 if errs else 0)
     || { echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1; }
   [ ! -e "$work/out-drive/pwned" ] || { echo "FAIL: a hostile resource ran with the hook" >&2; fail=1; }
 fi
+
+# 1m. Non-blocking rendering (task 8.8; SAFEPDF_VIEWER_SMOKE_MODE=async, no event waits for a
+#     render): page 1 of the generated PDF strokes 3000 curves and takes the renderer seconds.
+#     While it renders the window shows the placeholder, a 20 ms Tcl timer keeps firing, a
+#     zoom change returns at once, and End shows the light page 2 (page field 2) while page 1
+#     still renders; the render for the old zoom is discarded (stale) and page 1 finally shows
+#     at the new zoom.
+python3 -I "$here/viewer-smoke-pdf.py" --slow 3000 "$work/slow.pdf"
+SAFEPDF_VIEWER_SMOKE_MODE=async run_viewer "$work/out-async" "$work/slow.pdf" \
+  || { echo "FAIL: async run failed" >&2; fail=1; }
+cat "$work/out-async/async.txt" 2>/dev/null || true
+python3 -I -c '
+import re, sys
+try:
+    t = open(sys.argv[1], encoding="utf-8").read()
+except FileNotFoundError:
+    t = "error: no async.txt"
+v = dict(l.split(": ", 1) for l in t.splitlines() if ": " in l)
+errs = []
+def need(cond, msg):
+    if not cond: errs.append(msg)
+def num(k, rx, i=1):
+    m = re.search(rx, v.get(k, ""))
+    return int(m.group(i)) if m else -1
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+need(re.match(r"page 1 photo false jobs [1-9]\d* placeholders 1$", v.get("start", "")),
+     "no placeholder while page 1 renders: %r" % v.get("start"))
+need(0 <= num("zoom-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v.get("zoom-event-ms"))
+need(v.get("after-zoom") == "jobs 2 photo false placeholders 1",
+     "after zoom: %r (expected the old and the new render running)" % v.get("after-zoom"))
+need(num("ticks", r"(\d+)") >= 5, "the timer did not run while rendering: %r" % v.get("ticks"))
+need(v.get("during") == "jobs 2 photo false placeholders 1", "during: %r" % v.get("during"))
+need(0 <= num("end-event-ms", r"(\d+)") < 250, "End blocked: %r" % v.get("end-event-ms"))
+need(re.match(r"page 2 field 2 photo true slow-jobs [1-9]", v.get("page2", "")),
+     "page 2 not shown while page 1 renders: %r" % v.get("page2"))
+need(0 <= num("home-event-ms", r"(\d+)") < 250, "Home blocked: %r" % v.get("home-event-ms"))
+need(num("final", r"stale (\d+)") >= 1, "no stale render discarded: %r" % v.get("final"))
+need(re.match(r"page 1 jobs 0 ", v.get("final", "")), "final: %r" % v.get("final"))
+m = re.match(r"(\d+)x(\d+) slot (\d+)x(\d+)$", v.get("final-photo", ""))
+need(m and m.group(1) == m.group(3) and m.group(2) == m.group(4),
+     "page 1 photo does not match its slot (new zoom): %r" % v.get("final-photo"))
+need("rendered in" in v.get("status", ""), "status: %r" % v.get("status"))
+need("done" in t, "the run did not finish")
+for e in errs: print("FAIL: async: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-async/async.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"

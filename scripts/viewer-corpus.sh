@@ -158,16 +158,22 @@ v {
   proc ::safepdf::emit {args} {
     set outer $::m85::new
     set ::m85::new {}
+    # ::safepdf::ttd(N): ms from the request of page N's render to its display (task 8.8:
+    # renders run on worker threads and are shown by a later `poll` event).
+    set outerTtd [array get ::safepdf::ttd]
+    array unset ::safepdf::ttd
     set t0 [clock microseconds]
     set code [catch {::m85::emit0 {*}$args} res opts]
     set dt [expr {[clock microseconds] - $t0}]
-    lappend ::m85::log [list $t0 $dt $args $::m85::new]
+    lappend ::m85::log [list $t0 $dt $args $::m85::new [array get ::safepdf::ttd]]
+    array set ::safepdf::ttd $outerTtd
     set ::m85::new [concat $outer $::m85::new]
     return -options $opts $res
   }
   proc ::m85::busy {} {
     foreach id [after info] {
-      if {[string match *renderMore* [lindex [after info $id] 0]]} { return 1 }
+      set script [lindex [after info $id] 0]
+      if {[string match *renderMore* $script] || [string match {*emit poll*} $script]} { return 1 }
     }
     return 0
   }
@@ -200,8 +206,8 @@ proc waitPage {p t limit} {
 }
 proc dumpLog {} {
   foreach e [v {set ::m85::log}] {
-    lassign $e t0 dt args new
-    rec ev [ms $dt] $new $args
+    lassign $e t0 dt args new ttd
+    rec ev [ms $dt] $new $args $ttd
   }
   v {set ::m85::log {}}
 }
@@ -596,6 +602,9 @@ def parse_corpus(name, log):
             dt = float(rec[1])
             new = tcl_list(rec[2])
             ev = rec[3] if len(rec) > 3 else ""
+            # Task 8.8: pages shown by a `poll` event carry their time from request to display.
+            tw = tcl_list(rec[4]) if len(rec) > 4 else []
+            ttd = {int(tw[i]): float(tw[i + 1]) for i in range(0, len(tw) - 1, 2)}
             if dt > r["max_event_ms"]:
                 r["max_event_ms"], r["max_event"] = dt, ev
             if dt > HANG_MS:
@@ -604,7 +613,7 @@ def parse_corpus(name, log):
                 err = x.startswith("e")
                 idx = int(x[1:] if err else x)
                 if idx not in first:
-                    first[idx] = (dt, ev, err)
+                    first[idx] = (dt if err else ttd.get(idx, dt), ev, err)
         elif k == "hwm":
             hwm = max(hwm, int(rec[1]))
         elif k == "fatal":
