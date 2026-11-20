@@ -56,13 +56,16 @@ charstring run fuel-bounded.
 
 ## Bounds and caps
 
-All caps are local named constants (`Limits` has no font-specific `LimitKind`; exceeding a cap
-is `Error.malformed`, as in `Font.Type1`): argument stack `maxStack = 48` (TN #5177 App. B),
-subroutine nesting `maxCallDepth = 10`, `glyphFuel = 20000` steps per glyph, `maxGlyphs =
-65535` (the 16-bit INDEX count), `maxFDs = 256`, and a **font-wide** charstring budget
-`fontFuel = 2²⁵` steps: once it is spent, the remaining glyphs are rejected, so parsing a font
-costs at most `fontFuel` interpreter steps however many glyphs it has. A glyph that fails is
-charged the whole fuel it was given. Input ≤ `Limits.maxDecodedStreamBytes`. For scale: the
+Resource caps come from `Limits` (task 6.2b): `maxCFFGlyphs` (default 65535, the 16-bit
+INDEX count) charstrings, else `Error.limitExceeded .fontGlyphs`; `maxFontSubrs` (default
+32768) entries per Global or local Subrs INDEX, else `.fontSubrs`; `maxFontDicts` (default
+256) Font DICTs in the `FDArray`, else `.fontDicts`; `glyphFuel` (20000) steps per glyph; and
+a **font-wide** charstring budget `fontFuel` (2²⁵) steps: once it is spent, the remaining
+glyphs are rejected (not fatal, like `glyphFuel`), so parsing a font costs at most `fontFuel`
+interpreter steps however many glyphs it has. A glyph that fails is charged the whole fuel it
+was given. Format constants stay local (exceeding them is `Error.malformed`): argument stack
+`maxStack = 48` (TN #5177 App. B), subroutine nesting `maxCallDepth = 10`, DICT operands
+`maxDictOperands = 48`, the 16-bit Name/Top/String INDEX counts `maxStrings`. Input ≤ `Limits.maxDecodedStreamBytes`. For scale: the
 twelve Source Sans Pro 3.006 CFFs (1795–2194 glyphs) need about 200 000 steps in all, at most
 322 for one glyph, and every width matches their `hmtx` table.
 
@@ -111,24 +114,9 @@ def maxStack : Nat := 48
 /-- Maximum subroutine nesting (TN #5177 Appendix B: 10). -/
 def maxCallDepth : Nat := 10
 
-/-- Maximum interpreter steps (operands and operators, subroutines included) per glyph. -/
-def glyphFuel : Nat := 20000
-
-/-- Maximum interpreter steps for all glyphs of one font together (`2²⁵`). -/
-def fontFuel : Nat := 1 <<< 25
-
-/-- Maximum number of glyphs (the CharStrings INDEX count is 16-bit, so this is the format's
-own bound). -/
-def maxGlyphs : Nat := 65535
-
-/-- Maximum number of subroutines in a Global or local Subrs INDEX. -/
-def maxSubrs : Nat := 65535
-
-/-- Maximum number of entries in the String INDEX (SIDs are 16-bit). -/
+/-- Maximum number of entries in the Name, Top DICT and String INDEXes: the format's own
+bound (INDEX counts and SIDs are 16-bit), so it never rejects a well-formed font. -/
 def maxStrings : Nat := 65535
-
-/-- Maximum number of Font DICTs in a CID-keyed font's `FDArray` (FDSelect stores bytes). -/
-def maxFDs : Nat := 256
 
 /-- Maximum operands before one DICT operator (TN #5176 Appendix B: 48). -/
 def maxDictOperands : Nat := 48
@@ -202,6 +190,11 @@ def toI32 (v : Nat) : Int := if v < 2147483648 then (v : Int) else (v : Int) - 4
 /-- Bytes as a string, one character per byte (always valid). -/
 def latin1 (b : ByteArray) : String := String.ofList (b.toList.map fun x => Char.ofNat x.toNat)
 
+/-- Turn an internal error message into a `SafePdf.Error`. -/
+def liftE {α : Type} : Except String α → Except Error α
+  | .ok a => .ok a
+  | .error e => .error (.malformed 0 ("CFF: " ++ e))
+
 /-! ## INDEX (§5) -/
 
 /-- A parsed INDEX: item `i` occupies `[dataBase + offsets[i], dataBase + offsets[i+1])` of the
@@ -270,6 +263,14 @@ def parseIndex (b : ByteArray) (pos cap : Nat) :
             else .error "INDEX offsets not increasing from 1"
         else .error "bad INDEX offSize"
     else .error s!"INDEX has more than {cap} items"
+
+/-- Parse the INDEX at `pos` under a **resource limit** `cap` (a `Limits` field): an INDEX
+whose count exceeds `cap` is `Error.limitExceeded kind`; other defects are `malformed`. -/
+def limitIndex (b : ByteArray) (pos cap : Nat) (kind : LimitKind) :
+    Except Error {ix : Index // ix.Valid b.size cap} :=
+  match u16 b pos with
+  | some count => if cap < count then .error (.limitExceeded kind) else liftE (parseIndex b pos cap)
+  | none => liftE (parseIndex b pos cap)
 
 /-- Item `i` of an INDEX. -/
 def Index.item (b : ByteArray) (ix : Index) (i : Nat) : Option ByteArray :=
@@ -732,29 +733,30 @@ def dictFixed (es : List DictEntry) (k : Nat) : Except String Fixed :=
   | some _ => .error s!"DICT operator {k}: expected one operand"
 
 /-- The Private DICT named by the `Private` (18) entry of `es` (a Top or Font DICT), with its
-local subroutines. A DICT without `Private` gets zero widths and no subroutines. -/
-def parsePrivate (b : ByteArray) (es : List DictEntry) : Except String PrivInfo :=
+local subroutines (at most `maxSubrs` of them, else `Error.limitExceeded .fontSubrs`). A DICT
+without `Private` gets zero widths and no subroutines. -/
+def parsePrivate (maxSubrs : Nat) (b : ByteArray) (es : List DictEntry) : Except Error PrivInfo :=
   match dictGet es 18 with
   | none => .ok {}
   | some [sz, off] =>
     match decToNat? sz, decToNat? off with
     | some size, some off =>
       if off + size ≤ b.size then do
-        let pes ← parseDict (b.extract off (off + size)) 0 [] []
-        let defaultW ← dictFixed pes 20
-        let nominalW ← dictFixed pes 21
+        let pes ← liftE (parseDict (b.extract off (off + size)) 0 [] [])
+        let defaultW ← liftE (dictFixed pes 20)
+        let nominalW ← liftE (dictFixed pes 21)
         let subrs ← match dictGet pes 19 with
           | none => pure #[]
           | some [o] => match decToNat? o with
             | some o => do
-              let ⟨ix, _⟩ ← parseIndex b (off + o) maxSubrs
+              let ⟨ix, _⟩ ← limitIndex b (off + o) maxSubrs .fontSubrs
               pure (ix.items b)
-            | none => throw "bad Subrs offset"
-          | some _ => throw "bad Subrs operand"
+            | none => liftE (.error "bad Subrs offset")
+          | some _ => liftE (.error "bad Subrs operand")
         pure { defaultW, nominalW, subrs }
-      else .error "Private DICT out of bounds"
-    | _, _ => .error "bad Private operands"
-  | some _ => .error "bad Private operands"
+      else liftE (.error "Private DICT out of bounds")
+    | _, _ => liftE (.error "bad Private operands")
+  | some _ => liftE (.error "bad Private operands")
 
 /-! ## Type 2 charstring interpreter (TN #5177) -/
 
@@ -1003,32 +1005,36 @@ def evalGlyph (gsubrs : Array ByteArray) (priv : PrivInfo) (fuel : Nat) (code : 
   | .error e => .error e
 
 /-- Evaluate the charstrings `(gid, code)` in order with a remaining font-wide `budget` of
-steps; each glyph gets `min glyphFuel budget` steps and is charged what it used (all of it on
-failure). Pushes one entry per charstring. -/
-def evalList (gsubrs : Array ByteArray) (privs : Array PrivInfo) (fdOf : Nat → Nat) :
+steps (initially `Limits.fontFuel`); each glyph gets `min glyphFuel budget` steps
+(`Limits.glyphFuel`) and is charged what it used (all of it on failure). Pushes one entry per
+charstring. -/
+def evalList (glyphFuel : Nat) (gsubrs : Array ByteArray) (privs : Array PrivInfo)
+    (fdOf : Nat → Nat) :
     List (Nat × ByteArray) → Nat → Array (Option Glyph) → Array (Nat × String) →
     Array (Option Glyph) × Array (Nat × String)
   | [], _, gs, rs => (gs, rs)
   | (gid, code) :: rest, budget, gs, rs =>
     match privs[fdOf gid]? with
-    | none => evalList gsubrs privs fdOf rest budget (gs.push none)
+    | none => evalList glyphFuel gsubrs privs fdOf rest budget (gs.push none)
         (rs.push (gid, "FDSelect names a missing Font DICT"))
     | some priv =>
       let fuel := min glyphFuel budget
       if fuel = 0 then
-        evalList gsubrs privs fdOf rest budget (gs.push none)
+        evalList glyphFuel gsubrs privs fdOf rest budget (gs.push none)
           (rs.push (gid, "font charstring budget exhausted"))
       else
         match evalGlyph gsubrs priv fuel code with
-        | .ok (g, used) => evalList gsubrs privs fdOf rest (budget - used) (gs.push (some g)) rs
-        | .error e => evalList gsubrs privs fdOf rest (budget - fuel) (gs.push none)
+        | .ok (g, used) =>
+          evalList glyphFuel gsubrs privs fdOf rest (budget - used) (gs.push (some g)) rs
+        | .error e => evalList glyphFuel gsubrs privs fdOf rest (budget - fuel) (gs.push none)
             (rs.push (gid, e))
 
 /-- `evalList` pushes exactly one glyph entry per charstring. -/
-theorem evalList_size (gsubrs : Array ByteArray) (privs : Array PrivInfo) (fdOf : Nat → Nat) :
+theorem evalList_size (glyphFuel : Nat) (gsubrs : Array ByteArray) (privs : Array PrivInfo)
+    (fdOf : Nat → Nat) :
     ∀ (l : List (Nat × ByteArray)) (budget : Nat) (gs : Array (Option Glyph))
       (rs : Array (Nat × String)),
-      (evalList gsubrs privs fdOf l budget gs rs).1.size = gs.size + l.length := by
+      (evalList glyphFuel gsubrs privs fdOf l budget gs rs).1.size = gs.size + l.length := by
   intro l
   induction l with
   | nil => intro _ _ _; simp [evalList]
@@ -1079,6 +1085,8 @@ structure CFFFont where
   bbox : BBox
   /-- Number of glyphs (CharStrings INDEX count). -/
   numGlyphs : Nat
+  /-- The glyph cap the font was parsed under (`Limits.maxCFFGlyphs`). -/
+  maxGlyphs : Nat
   /-- The glyph count respects `maxGlyphs`. -/
   numGlyphs_le : numGlyphs ≤ maxGlyphs
   /-- The charset: GID ↦ SID (name-keyed) or CID (CID-keyed). -/
@@ -1160,12 +1168,7 @@ theorem CFFFont.advance_eq (f : CFFFont) (code : UInt8) :
   | some g => simp only [Option.bind_some, Option.map_map]; rfl
 
 /-- **Glyph-count cap** of a parsed font. -/
-theorem CFFFont.numGlyphs_le_max (f : CFFFont) : f.numGlyphs ≤ maxGlyphs := f.numGlyphs_le
-
-/-- Turn an internal error message into a `SafePdf.Error`. -/
-def liftE {α : Type} : Except String α → Except Error α
-  | .ok a => .ok a
-  | .error e => .error (.malformed 0 ("CFF: " ++ e))
+theorem CFFFont.numGlyphs_le_max (f : CFFFont) : f.numGlyphs ≤ f.maxGlyphs := f.numGlyphs_le
 
 /-- The `a` entry of the composition of a Font DICT matrix `fd` with the Top DICT matrix
 `top` (glyph space → FD matrix → top matrix): `fd.a·top.a + fd.b·top.c`. -/
@@ -1175,8 +1178,12 @@ def composeA (fd top : List Decimal) : Decimal :=
 
 /-- Parse an embedded CFF font program (`/FontFile3` with `/Subtype /Type1C` or
 `/CIDFontType0C`, Flate already decoded). Fails only when the structure is broken (header,
-INDEXes, DICTs, charset, encoding, FDSelect), a cap is exceeded, or no glyph is valid;
-individual bad charstrings are listed in `rejected`. -/
+INDEXes, DICTs, charset, encoding, FDSelect; `malformed`), a limit is exceeded
+(`limitExceeded`: `.decodedStreamBytes`, `.fontGlyphs` for more than `limits.maxCFFGlyphs`
+charstrings, `.fontSubrs` for a Subrs INDEX of more than `limits.maxFontSubrs` entries,
+`.fontDicts` for more than `limits.maxFontDicts` Font DICTs), or no glyph is valid; individual
+bad charstrings are listed in `rejected` (including those left when `limits.fontFuel` is
+spent). -/
 def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
   if limits.maxDecodedStreamBytes < bytes.size then throw (.limitExceeded .decodedStreamBytes)
   let b := bytes
@@ -1187,7 +1194,7 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
   let ⟨nameIx, _⟩ ← liftE (parseIndex b hdrSize maxStrings)
   let ⟨topIx, _⟩ ← liftE (parseIndex b nameIx.endPos maxStrings)
   let ⟨strIx, _⟩ ← liftE (parseIndex b topIx.endPos maxStrings)
-  let ⟨gsubrIx, _⟩ ← liftE (parseIndex b strIx.endPos maxSubrs)
+  let ⟨gsubrIx, _⟩ ← limitIndex b strIx.endPos limits.maxFontSubrs .fontSubrs
   let some name := nameIx.item b 0 | throw (.malformed 0 "CFF: empty Name INDEX")
   let some topData := topIx.item b 0 | throw (.malformed 0 "CFF: empty Top DICT INDEX")
   let top ← liftE (parseDict topData 0 [] [])
@@ -1197,7 +1204,7 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
   if csType != 2 then throw (.unsupported s!"CFF CharstringType {csType}")
   let some [csOffD] := dictGet top 17 | throw (.malformed 0 "CFF: no CharStrings")
   let some csOff := decToNat? csOffD | throw (.malformed 0 "CFF: bad CharStrings offset")
-  let ⟨csIx, csValid⟩ ← liftE (parseIndex b csOff maxGlyphs)
+  let ⟨csIx, csValid⟩ ← limitIndex b csOff limits.maxCFFGlyphs .fontGlyphs
   let nGlyphs := csIx.count
   if nGlyphs = 0 then throw (.malformed 0 "CFF: no glyphs")
   let rosOps := dictGet top 1230
@@ -1223,9 +1230,9 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
       let some [fdsD] := dictGet top 1237 | throw (.malformed 0 "CFF: CID font without FDSelect")
       let (some fdaOff, some fdsOff) := (decToNat? fdaD, decToNat? fdsD)
         | throw (.malformed 0 "CFF: bad FDArray/FDSelect offset")
-      let ⟨fdIx, _⟩ ← liftE (parseIndex b fdaOff maxFDs)
+      let ⟨fdIx, _⟩ ← limitIndex b fdaOff limits.maxFontDicts .fontDicts
       let fdDicts ← liftE ((fdIx.items b).mapM fun d => parseDict d 0 [] [])
-      let privs ← liftE (fdDicts.mapM (parsePrivate b))
+      let privs ← fdDicts.mapM (parsePrivate limits.maxFontSubrs b)
       let mats ← liftE (fdDicts.mapM dictMatrix?)
       let fdA := mats.map fun
         | some m => if topM.isSome then composeA m dm else m.getD 0 z
@@ -1233,11 +1240,11 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
       let sel ← liftE (parseFDSelect b fdsOff nGlyphs)
       pure (privs, sel, fdA)
     else do
-      let p ← liftE (parsePrivate b top)
+      let p ← parsePrivate limits.maxFontSubrs b top
       pure (#[p], #[], #[])
-  let fdOf (gid : Nat) : Nat := if isCID then fdSelect.getD gid maxFDs else 0
+  let fdOf (gid : Nat) : Nat := if isCID then fdSelect.getD gid privs.size else 0
   let codes := (Array.ofFn (n := nGlyphs) fun i => (i.val, (csIx.item b i.val).getD .empty)).toList
-  let ev := evalList gsubrs privs fdOf codes fontFuel #[] #[]
+  let ev := evalList limits.glyphFuel gsubrs privs fdOf codes limits.fontFuel #[] #[]
   let glyphs := ev.1
   if glyphs.all Option.isNone then throw (.malformed 0 "CFF: no valid charstring")
   let fx (k : Nat) : Fixed := Fixed.ofDecimal (dm.getD k z)
@@ -1250,6 +1257,7 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
     matrixA := dm.getD 0 z
     bbox := ⟨bx 0, bx 1, bx 2, bx 3⟩
     numGlyphs := nGlyphs
+    maxGlyphs := limits.maxCFFGlyphs
     numGlyphs_le := csValid.1
     charset, inverse, strings
     encoding := enc.1
@@ -1257,7 +1265,7 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error CFFFont := do
     fdSelect, fdMatrixA
     glyphs
     glyphs_size := by
-      have h := evalList_size gsubrs privs fdOf codes fontFuel #[] #[]
+      have h := evalList_size limits.glyphFuel gsubrs privs fdOf codes limits.fontFuel #[] #[]
       simp only [codes, Array.length_toList, Array.size_ofFn, List.size_toArray,
         List.length_nil, Nat.zero_add] at h
       exact h
@@ -1330,7 +1338,7 @@ private def fails (r : Except Error CFFFont) : Bool := r.toOption.isNone
 
 /-- Run one charstring alone (no subroutines, zero widths) and return its width; test helper. -/
 private def width1 (code : List UInt8) (g : Array ByteArray := #[]) : Option Int :=
-  (evalGlyph g {} glyphFuel ⟨code.toArray⟩).toOption.map (·.1.width.raw)
+  (evalGlyph g {} Limits.default.glyphFuel ⟨code.toArray⟩).toOption.map (·.1.width.raw)
 
 #guard tinyCff.size == 252
 #guard tinyCid.size == 245
@@ -1417,7 +1425,25 @@ private def width1 (code : List UInt8) (g : Array ByteArray := #[]) : Option Int
 #guard (evalGlyph #[] {} 5 ⟨#[139, 139, 21, 14]⟩).toOption.map (·.2) == some 4
 
 -- the font-wide budget rejects glyphs once spent
-#guard (evalList #[] #[{}] (fun _ => 0) [(0, ⟨#[139, 14]⟩), (1, ⟨#[14]⟩)] 2 #[] #[]).2.map
+#guard (evalList Limits.default.glyphFuel #[] #[{}] (fun _ => 0)
+  [(0, ⟨#[139, 14]⟩), (1, ⟨#[14]⟩)] 2 #[] #[]).2.map
   (·.1) == #[1]
+
+-- resource limits (task 6.2b): glyph count, Subrs count, Font DICT count, font-wide fuel
+#guard match parse { maxCFFGlyphs := 6 } tinyCff with
+  | .error (.limitExceeded .fontGlyphs) => true
+  | _ => false
+#guard (parse { maxCFFGlyphs := 7 } tinyCff).toOption.map (·.maxGlyphs) == some 7
+#guard match parse { maxFontSubrs := 0 } tinyCff with
+  | .error (.limitExceeded .fontSubrs) => true
+  | _ => false
+#guard match parse { maxFontDicts := 1 } tinyCid with
+  | .error (.limitExceeded .fontDicts) => true
+  | _ => false
+#guard (parse { maxFontDicts := 2 } tinyCid).toOption.isSome
+#guard (parse { fontFuel := 1 } tinyCff).toOption.isNone
+#guard (parse { fontFuel := 40 } tinyCff).toOption.map (·.rejected.toList.map (·.1)) ==
+  some [5, 6]
+#guard (parse { glyphFuel := 1 } tinyCff).toOption.isSome == false
 
 end SafePdf.Core.Font.CFF
