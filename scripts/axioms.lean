@@ -915,3 +915,42 @@ import SafePdf
 #print axioms SafePdf.Core.Raster.Shading.renderShading_steps_le
 #print axioms SafePdf.Core.Raster.Shading.renderPatternFill_size
 #print axioms SafePdf.Core.Raster.Shading.renderFill_size
+
+-- Phase 7, task 7.3f: display-list gaps
+#print axioms SafePdf.Core.Content.Run.annotAll_length
+#print axioms SafePdf.Core.Raster.Shading.paintPattern_size
+#print axioms SafePdf.Core.Raster.Shading.renderStroke_size
+
+-- Phase 7, task 7.3g: tiling patterns (SafePdf/Core/Raster/Tiling.lean)
+#print axioms SafePdf.Core.Raster.Tiling.blitRow_size
+#print axioms SafePdf.Core.Raster.Tiling.blitRows_size
+#print axioms SafePdf.Core.Raster.Tiling.blit_size
+#print axioms SafePdf.Core.Raster.Tiling.forTiles_inv
+#print axioms SafePdf.Core.Raster.Tiling.meanFill_size
+#print axioms SafePdf.Core.Raster.Tiling.modeA_size
+#print axioms SafePdf.Core.Raster.Tiling.modeB_size
+#print axioms SafePdf.Core.Raster.Tiling.renderTiling_size
+#print axioms SafePdf.Core.Raster.Tiling.renderTilingFill_size
+
+-- Phase 7, task 7.2g: layer dirty rects, fast combine
+#print axioms SafePdf.Core.Raster.Clip.u8_eq
+#print axioms SafePdf.Core.Raster.Clip.toNat_u8_le
+#print axioms SafePdf.Core.Raster.Clip.blend_eq
+#print axioms SafePdf.Core.Raster.Transparency.combinePxF_size
+#print axioms SafePdf.Core.Raster.Transparency.spanF_size
+#print axioms SafePdf.Core.Raster.Transparency.spansF_size
+#print axioms SafePdf.Core.Raster.Transparency.combineFast_size
+#print axioms SafePdf.Core.Raster.Transparency.openCount_touchStack
+#print axioms SafePdf.Core.Raster.Transparency.touchStack_ok
+#print axioms SafePdf.Core.Raster.Transparency.touch_sized
+#print axioms SafePdf.Core.Raster.Transparency.pushN_size
+#print axioms SafePdf.Core.Raster.Transparency.appendN_size
+#print axioms SafePdf.Core.Raster.Transparency.copySlice_size
+#print axioms SafePdf.Core.Raster.Transparency.copyIn_size
+#print axioms SafePdf.Core.Raster.Transparency.copyRows_size
+#print axioms SafePdf.Core.Raster.Transparency.fillRows_size
+#print axioms SafePdf.Core.Raster.Transparency.beginItem_size
+#print axioms SafePdf.Core.Raster.Transparency.beginItem_open_le
+#print axioms SafePdf.Core.Raster.Transparency.lumLoop_size
+#print axioms SafePdf.Core.Raster.Transparency.alphaLoop_size
+#print axioms SafePdf.Core.Raster.Transparency.maskFromSpec_size

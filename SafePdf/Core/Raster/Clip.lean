@@ -814,7 +814,7 @@ def itemBound (cfg : Config) (m : Aff) (W H : Nat) : DisplayItem → IRect
   | .strokePath _ _ clip => clipBound cfg m W H clip
   | .glyphRun _ clip => clipBound cfg m W H clip
   | .image _ ctm _ clip => (unitBound m ctm).inter (clipBound cfg m W H clip)
-  | .shading _ _ clip => clipBound cfg m W H clip
+  | .shading _ _ _ _ clip => clipBound cfg m W H clip
   | _ => emptyRect
 
 /-- An opaque white RGBA buffer of `W · H` pixels. -/
