@@ -66,7 +66,7 @@ session start, so start Claude Code from the main checkout after adding it.
 
 * `SafePdf.lean` — umbrella imports of every module under `SafePdf/` (except `Shell/`).
 * `Tests/Main.lean` — the `suites` list of test suites.
-* `lakefile.toml` — targets and options. Every module under `Tests/` belongs to lib `Tests` via `globs = ["Tests.+"]`, so new test modules need no lakefile line.
+* `lakefile.lean` — targets and options (was `lakefile.toml` until 8.2a). Every module under `Tests/` belongs to lib `Tests` via ``globs := #[.submodules `Tests]``, so new test modules need no lakefile line. The `viewer` exe (Tk) is not a default target; see `docs/viewer.md`.
 * `progress.md` — the ledger (orchestrator only).
 
 ## Layout (Plan.md §10)
