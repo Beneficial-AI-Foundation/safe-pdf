@@ -345,6 +345,13 @@ def run : IO Nat := do
     | .ok img =>
       let t1 ← IO.monoNanosNow
       IO.println s!"  dct: {path} {img.w}x{img.h}x{img.nc} decoded in {(t1 - t0) / 1000000} ms"
+      let refPath := (System.FilePath.mk path).withExtension "ref"
+      if ← refPath.pathExists then
+        match parseRef (← IO.FS.readBinFile refPath) with
+        | some (_, _, _, exp) =>
+          let (n, mx) := diff img.data exp
+          IO.println s!"  dct: {refPath}: {n} samples differ (max {mx})"
+        | none => IO.println s!"  dct: {refPath}: bad reference file"
     | .error e => IO.println s!"  dct: {path}: {repr e}"
   return failures
 
