@@ -70,6 +70,7 @@ import SafePdf.Core.Raster.Tiling
 import SafePdf.Core.Raster.Type3
 import SafePdf.Core.Raster.Subst
 import SafePdf.Quarantine.DCT
+import SafePdf.Quarantine.CCITT
 import SafePdf.Core.Annot
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text

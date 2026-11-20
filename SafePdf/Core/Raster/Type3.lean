@@ -279,7 +279,8 @@ def itemBox : DisplayItem → GBox
   | .image _ ctm _ _ =>
     let m := Aff.ofMatrix ctm
     GBox.ofPts [m.apply ⟨0, 0⟩, m.apply ⟨1, 0⟩, m.apply ⟨0, 1⟩, m.apply ⟨1, 1⟩]
-  | .clip .. | .groupBegin _ | .groupEnd | .unsupported _ => .empty
+  | .clip .. | .groupBegin _ | .groupEnd | .unsupported _
+  | .actualTextBegin _ | .actualTextEnd => .empty
   | _ => .all
 
 /-- The glyph box: the items' bound, else (unbounded) the `d1` box, else `/FontBBox`, else
