@@ -19,16 +19,19 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.7 PDF.js look)
 
-* Window: menubar (File, Edit, View, Go; see *Menubar* below), toolbar (Open…, Outline, Back, Forward, `< Prev`, `Next >`, Go to…, `-`, `+`, `100%`, `Fit page`, `Fit width`,
-  `Rotate left`, `Rotate right`, "page k of n", zoom %), a scrollable canvas (scroll bars)
-  with the current page, a status line (file, page, zoom, rotation, pixel size, render time
-  or "from cache", notes, or the error).
+* Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
+  (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
+  PDF.js (see *Toolbar and sidebar* below), a scrollable canvas (scroll bars) with the current
+  page, a status line (file, page, zoom, rotation, pixel size, render time or "from cache",
+  notes, or the error).
 * Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
-* **Zoom** (`View.Mode`): fit page (default), fit width, or a fixed percentage of actual size,
+* **Zoom** (`Toolbar.ZoomChoice` over `View.Mode`): Automatic Zoom (default, as in PDF.js:
+  the page width for a portrait page, the whole page for a landscape one, at most 125 %), fit
+  page, fit width, or a fixed percentage of actual size,
   where 100 % = 72 dpi × the screen scale factor (`tk scaling`, pixels per point). Steps
   25, 33, 50, 67, 75, 100, 125, 150, 200, 300, 400, 600, 800 %. Effective zooms are multiples
   of 1/64 pixel per point. Zooming keeps a point fixed: the page point under the mouse
@@ -77,7 +80,8 @@ The model is Tk-free: `SafePdf/Shell/App/Menu.lean` lists the commands (`Menu.Cm
 accelerator text, the constant Tcl script that runs it, an enabled rule) and the menus; the
 viewer builds the Tk menus from it (`Viewer.buildMenus`) and after every event sets the
 `-state` of each entry and of the toolbar buttons Prev/Next/Back/Forward/Outline whose rule
-changed (`Viewer.syncMenus`). Task 9.7 rebuilds the toolbar after PDF.js on the same commands.
+changed (`Viewer.syncMenus`, over `Toolbar.targets`/`Toolbar.states`: menubar entries, the
+toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the same commands.
 
 | Menu | Entries (accelerator) |
 |---|---|
@@ -89,8 +93,60 @@ changed (`Viewer.syncMenus`). Task 9.7 rebuilds the toolbar after PDF.js on the 
 Disabled: everything but Open… and Quit without a document; Copy without a selection;
 Outline when the document has none; Previous/First on the first page, Next/Last on the last;
 Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
-Outline button stays on the toolbar (it becomes the PDF.js sidebar button in 9.7). *Close*
-empties the window (as when started without a file).
+Outline command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
+when started without a file).
+
+## Toolbar and sidebar (9.7)
+
+**Design reference: PDF.js**, the PDF viewer built into Firefox (Mozilla, Apache License 2.0,
+<https://github.com/mozilla/pdf.js>, files `web/viewer.html`, `web/viewer.css`,
+`web/toolbar.js`, `web/sidebar.js`), and the screenshot `docs/viewer-reference/pdfjs-firefox.png`.
+Layout, sizes, spacing, colours and behaviour are re-created in Tk; **no PDF.js code and no
+icon file is copied** — the icons are drawn with Tk canvas lines and polygons
+(`::safepdf::icon::*` in `Viewer.setupScript`). The Tk-free model is in
+`SafePdf/Shell/App/Toolbar.lean` and `SafePdf/Shell/App/Sidebar.lean` (`#guard` checks).
+
+* **Toolbar** (`.bar`, 40 px, background `#f9f9fa`, a 1 px line below; `Toolbar.layout`):
+  * *left*: the sidebar toggle (shown only when the document has an outline; drawn pressed
+    while the sidebar is open), ∧ / ∨ previous / next page (disabled on the first / last page),
+    the page field and its label. The field shows the page number and `of N`, or, when the
+    document has page labels, the label and `(k of N)` (as PDF.js). **Enter** jumps to an exact
+    label, else a page number `1..N`, else a label ignoring case (`Toolbar.pageEntry`; the jump
+    is recorded in the back/forward history as PDF.js does); an out-of-range number or other
+    text reverts the field to the current page (and says so in the status line); Escape or
+    leaving the field reverts it too. The field follows every page change (arrows, keys, wheel,
+    links, outline). The entry has its own bind tags, so typing does not trigger viewer keys.
+  * *centre* (centred in the window): − / + (zoom out / in one step, as the keys) and the zoom
+    drop-down, a rounded button showing the current choice; clicking it opens a menu with
+    Automatic Zoom, Actual Size, Page Fit, Page Width, 50 %, 75 %, 100 %, 125 %, 150 %, 200 %,
+    300 %, 400 % (`Toolbar.ZoomChoice.presets`, radio entries). A zoom reached with − / +, the
+    keys or Ctrl+wheel that is not in the list (33 %, 67 %, 600 %, …) shows as its percentage
+    with no entry checked (PDF.js's custom option).
+  * *right*: Highlight, Comment, Text, Draw, Image, then Print and Save — **disabled
+    placeholders** until their tasks land (Highlight 9.8, Comment 9.9, Save 9.5c; Print and
+    Image after M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
+    page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
+    buttons). Document properties are not available yet.
+  * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
+    16 px icons in `#3b3b44`, dimmed when disabled (PDF.js: opacity 0.5); a tooltip appears
+    after 600 ms; separators are 1 px × 20 px.
+* **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`): a white panel titled
+  *Document outline* on the `#f0f0f4` background. It **opens on load only when the document
+  has an outline**; without one it stays closed and the toggle is hidden (F9 and View → Outline
+  do nothing then). The outline is a text widget drawn as a tree: one row per entry, indented
+  20 px per level, long titles wrapped; entries with children have a disclosure triangle (▼
+  open, ▶ closed; entries with a positive `/Count` start open); clicking a triangle collapses
+  or expands the subtree (`Sidebar.toggle`: the rows of a closed entry's subtree are elided
+  through one tag per ancestor), clicking a title jumps to its destination and marks the row;
+  rows highlight under the pointer. The scroll bar appears only when the tree does not fit.
+* **Page area**: background `#f0f0f4`, the page with a 1 px grey border.
+
+Not done (visible differences from the reference): no outline header buttons (thumbnail /
+attachment views, "find current outline item"), no thumbnails; the menubar stays above the
+toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
+instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
+corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
+the Highlight pop-over, selection bubble and annotation tools are later tasks (9.8/9.9).
 
 ## Wheel scrolling across pages (9.2)
 
@@ -170,7 +226,7 @@ Pure logic in `SafePdf/Shell/App/Links.lean` (Tk-free, `#guard` checks and theor
 data comes from the verified navigation layer `Core.Doc.Nav` (task 4.2: visited sets cut
 outline and name-tree cycles, every walk is bounded by the object count).
 
-* **Outline panel**: a `ttk::treeview` in the left pane of a paned window (drag the sash to
+* **Outline panel**: a tree in the left pane of a paned window (restyled after PDF.js in 9.7, see above; drag the sash to
   resize). It opens automatically when the document has an outline; **F9**, the *Outline*
   button or the right-button menu toggle it. Items come from `Nav.outline` (flat preorder list
   with depths; a depth more than one below the previous item is clamped so that every item has
@@ -236,8 +292,10 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
-| `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, toolbar buttons that follow the rules, entry indices (task 9.1). |
-| `SafePdf/Shell/App/Viewer.lean` | State, menubar, rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
+| `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1). |
+| `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
+| `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
+| `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
 **No data in script text.** Every Tcl command that carries data (file names, error text,
@@ -260,7 +318,8 @@ system library directories as `-Wl,-L…` (searched after the toolchain's) plus
 
 Builds `viewer`, then runs it with `SAFEPDF_VIEWER_SMOKE=DIR` (uses `$DISPLAY` when an X
 server answers, else `xvfb-run -a`). In smoke mode the viewer drives itself with Tk key
-events (`event generate`) and writes photos and state files (`Viewer.smoke`): `page-1.ppm`,
+events (`event generate`) and writes photos and state files (`Viewer.smoke`): `f` (fit page;
+the viewer opens in Automatic Zoom), `page-1.ppm`,
 `Next`, `page-2.ppm` + `state.txt` (title, status, page), `Home` `0` → `zoom-100.ppm`, `+` →
 `zoom-in.ppm`, `-` `-` → `zoom-out.ppm`, `r` → `rot.ppm`, then `R` and `+`×4 (200 %) and a
 scroll sequence recorded in `view.txt`. The script checks, on a generated two-page vector PDF
@@ -315,6 +374,27 @@ the view reaches the bottom and exactly one notch more turns to the top of page 
 1/12-notch deltas up leave page 2, the twelfth turns to the bottom of page 1; twelve 1/12
 notches scroll as far as one notch (within 1.5 px); `<Button-5>`/`<Button-4>` scroll down and
 back; Shift+wheel scrolls horizontally to the right edge and the page stays.
+
+The toolbar and sidebar (9.7) run in a fifth variant (`SAFEPDF_VIEWER_SMOKE_MODE=toolbar`,
+`Viewer.smokeToolbar`), once on the three-page labelled PDF with an outline and once on the
+two-page PDF without one. It checks: the packed widgets of the three toolbar groups (the
+sidebar toggle only with an outline); the sidebar open with an outline (panes `.ol .v`, toggle
+drawn pressed) and absent without (`.v`, toggle unmapped); the page field `i` / `(1 of 3)`
+(labels) and `1` / `of 2`; generated clicks on ∨ and ∧ page and stop at the ends (∧ disabled on
+page 1); Enter in the field with the last page number jumps, `999` and `abc` revert to the
+current page, the first page's label jumps back, both jumps are in the history, leaving the
+field reverts typed text; End/Home update the field; the zoom menu lists the twelve PDF.js
+choices; choosing Page Width, Page Fit, Actual Size (≈ 100 %), 150 % shows those labels and
+radio values, + gives `200%`, − − gives `125%`, 50 % then − gives the custom `33%` with no
+radio value, Automatic Zoom returns; the overflow menu lists Open… … Rotate left and its Last /
+First page entries page; all seven tool buttons are disabled and a click on Highlight changes
+nothing; clicking the disclosure triangle of `Chapter` hides `Section` and a second click
+shows it again; the toggle button hides the sidebar and shows it again.
+
+Screenshots for comparison with the reference can be taken under Xvfb at the reference size,
+e.g. `Xvfb :97 -screen 0 1900x940x24 &`, then
+`DISPLAY=:97 SAFEPDF_VIEWER_GEOMETRY=1900x940 .lake/build/bin/viewer FILE.pdf &` and
+`DISPLAY=:97 import -window root shot.png` (ImageMagick).
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
