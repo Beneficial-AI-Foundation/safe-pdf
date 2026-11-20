@@ -107,7 +107,7 @@ def process (b : ByteArray) (bud : Annot.Budget := { ops := 1000000, forms := 10
         let (srcs, _) := ap.roots.foldl (fun (acc : Glyph.SourceTable × Filter.Budget) r =>
           let (t, b) := Glyph.loadSources lim src acc.2 r.2
           (acc.1 ++ t, b)) (srcs, b2)
-        let img := Glyph.renderPage p 1 .r0 ⟨ap.fonts, srcs, {}, {}⟩ items
+        let img := Glyph.renderPage p 1 .r0 { fonts := ap.fonts, sources := srcs } items
         some ⟨p, pt, ap, img⟩
 
 /-- RGB at device pixel `(x, y)`. -/
