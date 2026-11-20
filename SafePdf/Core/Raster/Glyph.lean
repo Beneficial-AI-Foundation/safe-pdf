@@ -6,6 +6,7 @@ import SafePdf.Core.Raster.Transparency
 import SafePdf.Core.Raster.Shading
 import SafePdf.Core.Raster.Tiling
 import SafePdf.Core.Raster.Type3
+import SafePdf.Core.Raster.Subst
 import SafePdf.Core.Annot
 
 /-!
@@ -34,9 +35,13 @@ bounds"), ISO 32000-2 §9.4.4 (text rendering matrix), §9.3.6 (text rendering m
    effective matrix's `a` entry (`CFFFont.matrixAOf`: the Font DICT matrix composed with the
    Top DICT matrix; only `a` is kept by 6.2, so skewed Font DICT matrices are not rendered
    exactly — recorded as a gap).
-   **Not rendered** (draw nothing): fonts without an embedded program (the standard 14 and
-   other non-embedded fonts — MuPDF substitutes URW fonts; we ship none: a gap),
-   OpenType-wrapped CFF, glyphs a font rejects. Type 3 fonts (task 7.3j) have no outlines:
+   **Substitutes** (task 7.7, `substFor`, `Subst`): a non-embedded simple font (the standard
+   14, aliases such as Arial, any other non-embedded `/Type1`, `/MMType1`, `/TrueType`) and the
+   "hail mary" font of a `Tf` naming no font (`PageFonts.fallback`) are painted with the
+   substitute program MuPDF 1.25.1 would choose, when the Shell found one on the system
+   (`renderDocPage … (subst := …)`; the default empty table paints nothing, as before).
+   **Not rendered** (draw nothing): non-embedded fonts without a substitute program,
+   non-embedded CIDFonts, OpenType-wrapped CFF, glyphs a font rejects. Type 3 fonts (task 7.3j) have no outlines:
    their source records the font object (`GlyphSource.t3obj`), `loadType3` runs their
    charprocs (`Type3.loadFont`) and their runs are drawn by `Type3.renderRun`.
 2. **Positions** come from `Text.layoutParts` with the page's `FontTable` (the same widths,
@@ -218,13 +223,131 @@ def cidTTSource (f : Font.TrueType.TTFont) (m : Text.CIDToGID) : GlyphSource :=
     matrix _ := fm
     desc := "CIDFontType2 FontFile2" }
 
+/-! ### Substitute fonts (task 7.7)
+
+A non-embedded simple font is painted with a substitute program (`Subst`): glyphs by name
+through the font's encoding (whose implicit base is the substitute's built-in encoding), a
+name the program lacks (or no name) falling back to the code's glyph in the program's
+built-in encoding — MuPDF's `etable` for a Type 1 face (`ft_char_index` through the built-in
+charmap, then `ft_name_index` per encoding name; `.notdef` never selected). When the choice
+stretches (`Subst.Choice.stretch`), each glyph is scaled horizontally in glyph space by
+`w / realw` (`fz_adjust_ft_glyph_width`), `w` the maximum PDF width of the codes selecting the
+glyph (else `/MissingWidth`), `realw` the program's advance, both in glyph units per 1000. -/
+
+/-- The per-glyph PDF widths of a substitute (MuPDF's `width_table`): for each glyph index
+below `n`, the maximum width of the codes of `wt` that select it (`codeG`). -/
+def substWidths (n : Nat) (codeG : Array (Option Nat)) (wt : List (Nat × Int)) :
+    Array (Option Int) :=
+  wt.foldl (fun a (c, w) =>
+    match codeG[c]?.join with
+    | some g => a.modify g fun o => some (match o with
+      | some v => max v w
+      | none => w)
+    | none => a) (Array.replicate n none)
+
+/-- The horizontal stretch of glyph `g`: `(w / 1000) / realw` (text space) when both are
+positive, else 1. -/
+def stretchOf (ws : Array (Option Int)) (dflt : Int) (g : Nat) (realw : Option Fixed) : Rat :=
+  let w := (ws[g]?.join).getD dflt
+  match realw with
+  | some r =>
+    let rq := Fixed.toRat r
+    if 0 < rq ∧ 0 < w then ((w : Rat) / 1000) / rq else 1
+  | none => 1
+
+/-- The code → glyph table of a substitute: by name through `enc` (`byName`), else through the
+program's built-in encoding (`builtin`). -/
+def substCodes (byName : String → Option Nat) (builtin : Nat → Option Nat) (enc : Font.Encoding) :
+    Array (Option Nat) :=
+  Array.ofFn fun (k : Fin 256) => ((enc.glyph k.val).bind byName).orElse fun _ => builtin k.val
+
+/-- The 256-entry code table has 256 entries. -/
+theorem substCodes_size (byName : String → Option Nat) (builtin : Nat → Option Nat)
+    (enc : Font.Encoding) : (substCodes byName builtin enc).size = 256 := Array.size_ofFn
+
+/-- The glyph matrix of a substitute glyph: the font matrix, pre-scaled horizontally by `sx`
+when `sx ≠ 1`. -/
+def stretchMatrix (fm : Aff) (sx : Rat) : Aff := if sx = 1 then fm else Aff.scale sx 1 * fm
+
+/-- **A substitute font's glyph source**: program `p`, the font's encoding `enc`, the PDF
+width table `wt` when the glyphs are stretched (`Subst.widthTable`). Glyphs are keyed by
+`.gid` = the glyph's index in the Type 1 program's glyph array, or the CFF GID. -/
+def substSource (p : Subst.Program) (enc : Font.Encoding) (wt : Option (List (Nat × Int) × Int)) :
+    GlyphSource :=
+  match p with
+  | .type1 f =>
+    let byName := fun (n : String) =>
+      if n == ".notdef" then .none else f.glyphs.findIdx? (·.name == n)
+    let codeG := substCodes byName (fun k => (f.encoding[k]?.join).bind byName) enc
+    let fm := Aff.ofMatrix f.fontMatrix
+    let ws := match wt with
+      | some (t, _) => substWidths f.glyphs.size codeG t
+      | .none => #[]
+    { glyphOf c := (oneByte c).bind fun b => (codeG[b.toNat]?.join).map .gid
+      outline
+        | .gid i => (f.glyphs[i]?).bind fun g => f.outline g.name
+        | .name _ => .none
+      matrix
+        | .gid i => match wt with
+          | some (_, dflt) =>
+            stretchMatrix fm (stretchOf ws dflt i ((f.glyphs[i]?).map fun g =>
+              Font.Type1.textAdvance f.matrixA f.matrixC g.wx g.wy))
+          | .none => fm
+        | .name _ => fm
+      desc := s!"substitute Type1 {f.name}" }
+  | .cff f =>
+    let byName := fun (n : String) =>
+      if n == ".notdef" then .none else
+      match f.gidOfName? n with
+      | some 0 => .none
+      | g => g
+    let codeG := substCodes byName (fun k =>
+      match f.gidOfCode k.toUInt8 with
+      | some 0 => .none
+      | g => g) enc
+    let fm := Aff.ofMatrix f.fontMatrix
+    let ws := match wt with
+      | some (t, _) => substWidths f.numGlyphs codeG t
+      | .none => #[]
+    { glyphOf c := (oneByte c).bind fun b => (codeG[b.toNat]?.join).map .gid
+      outline
+        | .gid g => f.outline g
+        | .name _ => .none
+      matrix
+        | .gid g => match wt with
+          | some (_, dflt) => stretchMatrix fm (stretchOf ws dflt g (f.advanceOfGid g))
+          | .none => fm
+        | .name _ => fm
+      desc := s!"substitute CFF {f.name}" }
+
+/-- **The substitute glyph source of a simple font dictionary** (`Subst.chooseFor`), if the
+font is non-embedded and the table has a program for the chosen face. -/
+def substFor (subst : Subst.SubstFonts) (resolve : PdfObject → PdfObject) (fd : Dict) :
+    Option GlyphSource := do
+  let ch ← Subst.chooseFor resolve fd
+  let p ← subst.get? ch.face
+  let enc := (Font.SimpleMetrics.ofDict resolve fd (some p.builtin)).encoding
+  some (substSource p enc (if ch.stretch then Subst.widthTable resolve fd else .none))
+
+/-- The "hail mary" substitute (`Text.hailMaryDict`: Times-Roman, `StandardEncoding`), for a
+`Tf` naming no font or a font object that is not a dictionary (as `Text.FontInfo.unknown`). -/
+def hailMarySource (subst : Subst.SubstFonts) : Option GlyphSource :=
+  substFor subst id Text.hailMaryDict
+
 /-- The glyph source of a font object (see the module doc). -/
-def buildSource {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj : PdfObject) :
-    GlyphSource × σ :=
+def buildSource {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj : PdfObject)
+    (subst : Subst.SubstFonts := {}) : GlyphSource × σ :=
   let resolve := fun o => (Run.resolve src s0 o).1
+  let isDict := match resolve fontObj with
+    | .dict _ => true
+    | _ => false
   let fd : Dict := match resolve fontObj with
     | .dict d => d
     | _ => []
+  -- Task 7.7: a non-embedded simple font (or no font dictionary at all) gets a substitute.
+  let orSubst (g : GlyphSource) : GlyphSource :=
+    ((if isDict then substFor subst resolve fd else hailMarySource subst)).getD g
+  if !isDict then (orSubst (GlyphSource.none "not a font dictionary"), s0) else
   let subtype := (Text.nameStr? (Font.getR resolve fd "Subtype")).getD ""
   if subtype == "Type0" then
     let desc : Dict :=
@@ -254,14 +377,14 @@ def buildSource {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontO
       match Text.loadCFF limits src s resolve fd ["Type1C"] with
       | (some f, s) =>
         (cffSource f (Font.SimpleMetrics.ofDict resolve fd (some (Text.cffEncoding f))).encoding, s)
-      | (.none, s) => (GlyphSource.none s!"{subtype} (not embedded)", s)
+      | (.none, s) => (orSubst (GlyphSource.none s!"{subtype} (not embedded)"), s)
   else if subtype == "TrueType" then
     match Text.loadTT limits src s0 resolve fd with
     | (some f, s) =>
       (ttSource f (Text.isSymbolic resolve fd) (Font.SimpleMetrics.ofDict resolve fd .none).encoding, s)
-    | (.none, s) => (GlyphSource.none "TrueType (not embedded)", s)
+    | (.none, s) => (orSubst (GlyphSource.none "TrueType (not embedded)"), s)
   else if subtype == "Type3" then ({ GlyphSource.none "Type3" with t3obj := some fontObj }, s0)
-  else (GlyphSource.none s!"{subtype} (not rendered)", s0)
+  else (orSubst (GlyphSource.none s!"{subtype} (not rendered)"), s0)
 
 /-- Glyph sources by font key (the keys of `Text.FontTable`). -/
 abbrev SourceTable := List (FontKey × GlyphSource)
@@ -276,7 +399,7 @@ def SourceTable.get (t : SourceTable) (f : FontRef) : Option GlyphSource :=
 /-- **Glyph sources of a page**: every font `Text.scanFonts` collects from the page resources,
 each font object built once, at most `Text.maxFonts` (as `Text.loadFonts`). -/
 def loadSources {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict)
-    (owner : Nat := 0) : SourceTable × σ :=
+    (owner : Nat := 0) (subst : Subst.SubstFonts := {}) : SourceTable × σ :=
   let (es, s) := Text.scanFonts src (Text.maxFormFonts + 1) [(owner, res)] [] [] s
   let (t, _, s) := es.foldl (fun (acc : SourceTable × Nat × σ) (e : Text.FontEntry) =>
     let (t, k, s) := acc
@@ -288,7 +411,7 @@ def loadSources {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : 
     | .none =>
       if Text.maxFonts ≤ k then acc
       else
-        let (g, s') := buildSource limits src s o
+        let (g, s') := buildSource limits src s o subst
         (add g, k + 1, s')) (([] : SourceTable), 0, s)
   (t, s)
 
@@ -855,6 +978,13 @@ structure PageFonts where
   shadings : Shading.ShadingTable := {}
   /-- Tiling patterns of the page and nested in its cells (tasks 7.3h1, 7.3h2). -/
   tilings : Tiling.TilingTable := {}
+  /-- The glyphs of a run whose font has no source (a `Tf` naming no font resource): the
+  "hail mary" substitute (task 7.7, `hailMarySource`), when the Shell found one. -/
+  fallback : Option GlyphSource := .none
+
+/-- The glyph source of a run's font: its own, else the fallback (task 7.7). -/
+def PageFonts.source (pf : PageFonts) (f : FontRef) : Option GlyphSource :=
+  (pf.sources.get f).orElse fun _ => pf.fallback
 
 /-- **Per-run hook**: the coverage masks of a glyph run inside the device window `win`, in
 painting order, each with its colour, alpha and counted work: the fill (modes 0, 2, 4, 6) then
@@ -862,7 +992,7 @@ the stroke (modes 1, 2, 5, 6); nothing for modes 3 and 7 or a font without outli
 def runMasks (cfg : Fill.Config) (view : Aff) (win : IRect) (pf : PageFonts) (cache : Cache)
     (r : GlyphRun) : List (Mask × Color × Comp × Nat) × Cache :=
   if !r.renderMode.paints then ([], cache) else
-  match pf.sources.get r.font with
+  match pf.source r.font with
   | .none => ([], cache)
   | some gs =>
     let (dp, cache) := runPath cfg view (pf.fonts.get r.font) (Text.fontKey r.font) gs r cache
@@ -1151,7 +1281,8 @@ theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf 
 the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
 `budget` for every decoded stream. -/
 def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
-    (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config := Fill.Config.ofLimits limits) :
+    (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config := Fill.Config.ofLimits limits)
+    (subst : Subst.SubstFonts := {}) :
     (Except Error Clip.Image) × Filter.Budget :=
   match Text.extractDocPage limits doc page budget with
   | (.error e, b) => (.error e, b)
@@ -1160,9 +1291,9 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- They share the page's op/form budget (task 8.3b, `Annot.Budget.after`).
     let (ap, b) := Annot.docAnnots limits doc page pt.fonts (Annot.Budget.after limits pt) b
     let items := pt.items ++ ap.items
-    let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD [])
+    let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD []) 0 subst
     let (srcs, b) := ap.roots.foldl (fun (acc : SourceTable × Filter.Budget) r =>
-      let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2 r.1; (acc.1 ++ t, b)) (srcs, b)
+      let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2 r.1 subst; (acc.1 ++ t, b)) (srcs, b)
     -- Tiling patterns (tasks 7.3h1, 7.3h2): the cells of the patterns that fills, strokes and
     -- glyph runs name (page and annotation items, inside soft masks too, nested patterns for
     -- `Tiling.maxTileDepth + 1` levels) are run under what the page content and the
@@ -1173,7 +1304,7 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
       (fun (ft : FontTable × SourceTable) => Text.textEnv limits (Text.docSource limits doc) ft.1)
       (fun ft b num res =>
         let (fonts, b) := Annot.loadAnnotFonts limits (Text.docSource limits doc) b ft.1 [(num, res)]
-        let (t, b) := loadSources limits (Text.docSource limits doc) b res num
+        let (t, b) := loadSources limits (Text.docSource limits doc) b res num subst
         ((fonts, ft.2 ++ t), b))
       (ap.fonts, srcs) b ()
       { ops := limits.maxOpsPerPage - pt.ops - ap.ops, forms := limits.maxFormsPerPage - pt.forms - ap.forms }
@@ -1189,7 +1320,8 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
     (.ok (renderPage page zoom rot
-      { fonts := ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls } items cfg), b)
+      { fonts := ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls
+        fallback := hailMarySource subst } items cfg), b)
 
 /-! ## 6. Checks -/
 
