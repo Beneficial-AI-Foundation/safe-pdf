@@ -1162,3 +1162,19 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Raster.Stroke.abs64_toNat
 #print axioms SafePdf.Core.Raster.Stroke.IMatW.of_ok
 #print axioms SafePdf.Core.Raster.Stroke.ratW_eq
+-- Phase 9, task 9.5e: C7 at the value level
+#print axioms SafePdf.Spec.Write.writeUpdate_value
+#print axioms SafePdf.Spec.Write.writeAnnots_value
+#print axioms SafePdf.Spec.Write.c7Value
+#print axioms SafePdf.Spec.Write.c7Value_plain
+#print axioms SafePdf.Spec.Write.c7ValueAnnots
+#print axioms SafePdf.Spec.Write.openFile_self
+#print axioms SafePdf.Spec.Write.keys_notLen
+#print axioms SafePdf.Spec.WritePrefix.resolveLengthAux_transfer
+#print axioms SafePdf.Spec.WritePrefix.resolveLengthAux_det
+#print axioms SafePdf.Spec.WritePrefix.parseIndirectResolved_transfer
+#print axioms SafePdf.Spec.WritePrefix.fetchCompressed_transfer
+#print axioms SafePdf.Spec.WritePrefix.getObject_transfer
+#print axioms SafePdf.Spec.WritePrefix.notLen_of_dict
+#print axioms SafePdf.Spec.WritePrefix.lookup_eq
+#print axioms SafePdf.Spec.WritePrefix.crypt_eq_of_ref
