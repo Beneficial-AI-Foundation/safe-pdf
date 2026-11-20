@@ -5646,6 +5646,345 @@ def smokeEditorsShot (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile ((dir : System.FilePath) / "ready.txt") "ready\n"
   discard <| run ["after", "20000", "destroy ."]
 
+/-! ### The consolidated Phase 9 / M9 smoke run (task 9.6) -/
+
+/-- `R G B` text as numbers. -/
+def m9Rgb (s : String) : Option (Nat × Nat × Nat) :=
+  match (s.splitOn " ").filterMap String.toNat? with
+  | [r, g, b] => some (r, g, b)
+  | _ => none
+
+/-- A highlight's or note's yellow (`#FFFF98` multiplied over paper, or the note's fill). -/
+def m9Yellow (c : Nat × Nat × Nat) : Bool := c.1 > 200 && c.2.1 > 200 && c.2.2 < 200
+
+/-- The red of the M9 free text (`#D70022`). -/
+def m9Red (c : Nat × Nat × Nat) : Bool := c.1 > 150 && c.2.1 < 90 && c.2.2 < 110
+
+/-- The blue of the M9 drawing (`#0000FF`-ish, PDF.js blue). -/
+def m9Blue (c : Nat × Nat × Nat) : Bool := c.2.2 > 150 && c.1 < 100
+
+/-- How many of the points `ps` (page space, shown page) have a pixel satisfying `pred`. -/
+def m9CountAt (k : SaveKit) (ps : List Pt) (pred : Nat × Nat × Nat → Bool) : IO Nat := do
+  let mut n := 0
+  for q in ps do
+    if let some c := m9Rgb (← k.px q) then
+      if pred c then n := n + 1
+  return n
+
+/-- A 12 × 6 grid of points inside a box. -/
+def m9Grid (b : Box) : List Pt :=
+  (List.range 12).flatMap fun (i : Nat) => (List.range 6).map fun (j : Nat) =>
+    (⟨b.llx + (b.urx - b.llx) * ((i : Rat) + 1) / 13,
+      b.lly + (b.ury - b.lly) * ((j : Rat) + 1) / 7⟩ : Pt)
+
+/-- The coloured pixels of each of the marks `ms` on the shown page, summed per kind:
+`hl=… note=… text=… ink=…` (highlights and notes yellow, the free text red, the drawing blue). -/
+def m9Pixels (st : IO.Ref State) (ms : List Marks.Mark) : IO String := do
+  let k := saveKit st
+  let s ← st.get
+  let some bx := shownBox s | return "no page"
+  let mut hl := 0
+  let mut note := 0
+  let mut text := 0
+  let mut ink := 0
+  for m in ms do
+    match m.kind with
+    | .highlight qs =>
+      hl := hl + (← m9CountAt k (qs.flatMap m9Grid) m9Yellow)
+    | .note .. =>
+      if let some ib := m.iconBox bx then note := note + (← m9CountAt k (m9Grid ib) m9Yellow)
+    | .freeText .. =>
+      if let some b := m.box then text := text + (← m9CountAt k (m9Grid b) m9Red)
+    | .ink ss .. =>
+      ink := ink + (← m9CountAt k ss.flatten m9Blue)
+  return s!"hl={hl} note={note} text={text} ink={ink}"
+
+/-- A mark as a rounded, order-free description (kind, colour, text, rounded geometry), to
+compare marks across save, reopen and an XFDF round trip. -/
+def m9Desc (m : Marks.Mark) : String :=
+  let r (x : Rat) : String := toString x.floor
+  match m.kind with
+  | .highlight qs => s!"highlight {m.page} {m.color.name} {qs.length}"
+  | .note t _ => s!"note {m.page} {m.color.name} {t}"
+  | .freeText t p z c => s!"text {m.page} {t} {r p.x} {r p.y} {z} {Marks.rgbHex c}"
+  | .ink ss w o c => s!"ink {m.page} {ss.length} {ss.map List.length} {w} {o} {Marks.rgbHex c}"
+
+/-- Every mark of the store, described (`m9Desc`), sorted, joined by ` | `. -/
+def m9Marks (st : IO.Ref State) : IO String := do
+  let ds := (← st.get).marks.marks.toList.map m9Desc
+  return " | ".intercalate (ds.toArray.qsort (· < ·)).toList
+
+/-- Page-space boxes of the marks for the script's `mutool` check: one `kind llx lly urx ury`
+per mark (a note's icon box; a drawing's bounding box). -/
+def m9Boxes (st : IO.Ref State) : IO String := do
+  let s ← st.get
+  let some bx := shownBox s | return ""
+  let f (b : Box) : String := s!"{num b.llx} {num b.lly} {num b.urx} {num b.ury}"
+  let parts := s.marks.marks.toList.filterMap fun m =>
+    match m.kind with
+    | .highlight qs => qs.head?.map fun b => s!"hl {f b}"
+    | .note .. => (m.iconBox bx).map fun b => s!"note {f b}"
+    | .freeText .. => m.box.map fun b => s!"text {f b}"
+    | .ink .. => m.box.map fun b => s!"ink {f b}"
+  return ";".intercalate parts
+
+/-- Scrolls the whole document from its first page with generated wheel notches only, in the
+current view mode, until the view shows the bottom of the last spread (task 9.6, M9 "a paper
+reads end to end with the wheel"). Returns a `key: value` line: the 1-based spreads the current
+page passed through, the spread count, notches, whether (spread, view top) never went back,
+the page field and whether it names a page of the last spread, the final `yview`. -/
+def m9WheelThrough (st : IO.Ref State) (label : String) : IO String := do
+  sendKey "Home"
+  settle st
+  let s0 ← st.get
+  let n := s0.pageCount
+  let sp := s0.spread
+  let lastK := View.spreadOf sp (n - 1)
+  let top : IO Rat := do return ((viewFracs (← run [".c", "yview"])).map (·.1)).getD 0
+  let bottomOk : IO Bool := do return ((viewFracs (← run [".c", "yview"])).map (fun f => decide (f.2 ≥ 1))).getD false
+  let mut seen : Array Nat := #[View.spreadOf sp s0.page]
+  let mut notches := 0
+  let mut monotone := true
+  let mut stuck := 0
+  let mut k0 := View.spreadOf sp s0.page
+  let mut t0 ← top
+  for _ in [0:80 * n + 100] do
+    if k0 == lastK && (← bottomOk) then break
+    sendEvent ".c" "<MouseWheel>" ["-delta", "-120", "-x", "300", "-y", "300"]
+    notches := notches + 1
+    settle st
+    let k1 := View.spreadOf sp (← st.get).page
+    let t1 ← top
+    if k1 < k0 || (k1 == k0 && t1 < t0) || (s0.scroll == .vertical && t1 < t0) then
+      monotone := false
+    if k1 == k0 && t1 == t0 then stuck := stuck + 1 else stuck := 0
+    if stuck ≥ 3 then break
+    if seen.back? != some k1 then seen := seen.push k1
+    k0 := k1
+    t0 := t1
+  let s ← st.get
+  let field ← run ["set", "::safepdf::pageText"]
+  let fieldOk := field == Toolbar.entryText s.labels s.page &&
+    (View.spreadPages sp n lastK).contains s.page
+  return s!"wheel-{label}: seen={",".intercalate (seen.toList.map (toString ∘ (· + 1)))} \
+    spreads={View.spreadCount sp n} notches={notches} monotone={monotone} field={field} \
+    last={fieldOk} bottom={← bottomOk}"
+
+/-- **The consolidated Phase 9 smoke run** (`SAFEPDF_VIEWER_SMOKE_MODE=m9`, task 9.6), on any
+document with text on page 1 (the generated fixtures and real corpus papers): the menubar
+(every command at its place with its label); the toolbar page box (Enter on the last page,
+text reverts, back to 1), its arrows and the zoom drop-down (Page Width, Page Fit, Automatic
+Zoom); the wheel alone through the whole document in each of the four view modes (single page,
+continuous, facing, continuous facing; `m9WheelThrough`); then, at Page Fit on page 1: a drag
+over the first word of five letters or more, the float bubble's Highlight; a note in the top
+right corner; an Add text box (red, size 16) and a Draw drawing (blue, thickness 4, two strokes)
+near the bottom; Ctrl+S (`FILE-annotated.pdf`, reopened), File → Close, reopened from disk
+(`openFile`): the four marks restored equal (`m9Desc`) and drawn by the renderer (`m9Pixels`);
+File → Export annotations… (`m9.xfdf`), every mark deleted (no coloured pixels left), the file
+imported again (the same four marks). Results in `m9.txt`; the window is closed without saving
+the import. -/
+def smokeM9 (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let s0 ← st.get
+  let n := s0.pageCount
+  out := out.push s!"pages: {n}"
+  out := out.push s!"outline: {!s0.outline.isEmpty} {s0.outlineShown}"
+  -- 1. Menubar: attached, four menus, every command at its place with its label.
+  out := out.push s!"menubar: {← run [".", "cget", "-menu"]}"
+  let mut menus : Array String := #[]
+  let mn := (← run [".menubar", "index", "end"]).toNat?.getD 0
+  for i in [0:mn + 1] do menus := menus.push (← run [".menubar", "entrycget", toString i, "-label"])
+  out := out.push s!"menus: {",".intercalate menus.toList}"
+  let mut bad : Array String := #[]
+  for c in Menu.Cmd.all do
+    match Menu.locate c with
+    | some (m, i) =>
+      let l ← try run [m, "entrycget", toString i, "-label"] catch _ => pure "?"
+      if l != c.label then bad := bad.push c.label
+    | none => bad := bad.push c.label
+  out := out.push s!"menu-entries: {Menu.Cmd.all.length} bad={",".intercalate bad.toList}"
+  -- 2. Toolbar: page box, arrows, zoom drop-down.
+  let page : IO Nat := return (← st.get).page + 1
+  let field : IO String := run ["set", "::safepdf::pageText"]
+  let enter (txt : String) : IO Unit := do
+    sendEvent ".bar.pg.e" "<FocusIn>"
+    discard <| run ["set", "::safepdf::pageText", txt]
+    sendEvent ".bar.pg.e" "<Key-Return>"
+    settle st
+  let click (w : String) : IO Unit := do
+    sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+    sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+    settle st
+  enter (Toolbar.entryText s0.labels (n - 1))
+  out := out.push s!"pagebox-last: {← page} {← field} {← run [".bar.of", "cget", "-text"]}"
+  enter "abc"
+  out := out.push s!"pagebox-abc: {← page} {← field}"
+  enter (Toolbar.entryText s0.labels 0)
+  out := out.push s!"pagebox-first: {← page} {← field}"
+  click ".bar.next"
+  out := out.push s!"arrow-next: {← page}"
+  click ".bar.prev"
+  out := out.push s!"arrow-prev: {← page}"
+  let zoomNow : IO String := do
+    let s ← st.get
+    return s!"{← run [".bar.zoom", "itemcget", "label", "-text"]}|{View.zoomPct s.shownZoom s.scaling}"
+  let choose (lbl : String) : IO Unit := do
+    discard <| run [".zoommenu", "invoke", lbl]
+    settle st
+  choose "Page Width"
+  out := out.push s!"zoom-width: {← zoomNow}"
+  choose "Page Fit"
+  out := out.push s!"zoom-fit: {← zoomNow}"
+  choose "Automatic Zoom"
+  out := out.push s!"zoom-auto: {← zoomNow}"
+  -- 3. The wheel through the whole document in every view mode (View menu entries).
+  let invoke (c : Menu.Cmd) : IO Unit := do
+    let some (m, _) := Menu.locate c | return
+    discard <| run [m, "invoke", c.label]
+    settle st
+  invoke .scrollPage; invoke .spreadNone
+  out := out.push (← m9WheelThrough st "single")
+  invoke .scrollVertical
+  out := out.push (← m9WheelThrough st "continuous")
+  invoke .scrollPage; invoke .spreadOdd
+  out := out.push (← m9WheelThrough st "facing")
+  invoke .scrollVertical
+  out := out.push (← m9WheelThrough st "cfacing")
+  invoke .scrollPage; invoke .spreadNone
+  invoke .firstPage
+  choose "Page Fit"
+  out := out.push s!"back-to-single: {← page} {(← st.get).slots.size}"
+  -- 4. Selection bubble → highlight on the first word of five letters or more.
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text on page 1")
+  let some bx := shownBox (← st.get) | throw (IO.userError "page 1 not shown")
+  let word : Option (Nat × Nat) := Id.run do
+    for i in [0:ix.cells.size] do
+      let (a, b) := Select.wordAt ix.cells i
+      if a == i && b ≥ a + 4 &&
+          (ix.cells.extract a (b + 1)).all (fun c => c.text.all Char.isAlpha && c.text.length == 1) then
+        return some (a, b)
+    return none
+  let some (wa, wb) := word | throw (IO.userError "no word of five letters on page 1")
+  out := out.push s!"word: {String.join ((ix.cells.extract wa (wb + 1)).toList.map (·.text))}"
+  if let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix wb) then
+    sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+    sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    discard <| run ["update"]
+  let bubbleKind : IO String := return match (← st.get).bubble with
+    | some (.float, _) => "float"
+    | some (.edit, _) => "edit"
+    | some (.editor, _) => "editor"
+    | none => "none"
+  out := out.push s!"bubble: {← bubbleKind} {(← st.get).sel.isSome}"
+  if let some (kd, r) := (← st.get).bubble then
+    if let some (_, x0, x1) := kd.layout.find? (·.1 == .highlight) then
+      let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+      let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+      let w := (toString (r.x0 + (x0 + x1) / 2 - vx).floor, toString ((r.y0 + r.y1) / 2 - vy).floor)
+      let t := toString (← IO.monoMsNow)
+      sendEvent ".c" "<ButtonPress-1>" ["-x", w.1, "-y", w.2, "-time", t]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", w.1, "-y", w.2, "-time", t]
+      discard <| run ["update"]
+  out := out.push s!"bubble-highlight: {(← st.get).marks.marks.size} {← bubbleKind}"
+  sendKey "Escape"
+  -- 5. A note in the top right corner.
+  smokeNoteAt st (bx.urx - 45) (bx.ury - 45) "M9 note ✓ [x]"
+  discard <| run ["destroy", ".note"]
+  out := out.push s!"note: {(← st.get).marks.marks.size}"
+  -- 6. Add text (red, 16) near the bottom left; Draw (blue, 4) near the bottom right.
+  let winAt (x y : Rat) : IO (String × String) := do
+    let some pos ← boxWindowPos st ⟨x, y, x, y⟩ | throw (IO.userError "page not shown")
+    return pos
+  let edAt (x y : Rat) : IO Unit := do
+    sendEvent ".edbar" "<ButtonPress-1>" ["-x", toString x.floor, "-y", toString y.floor]
+    sendEvent ".edbar" "<ButtonRelease-1>" ["-x", toString x.floor, "-y", toString y.floor]
+  click ".bar.text"
+  discard <| run ["update"]
+  edAt (Bubble.EdPop.swatchX 1) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.fontSize.thumbX 16) (Bubble.EdPop.ctrlY 1)
+  let tp ← winAt (bx.llx + 60) (bx.lly + 60)
+  sendEvent ".c" "<ButtonPress-1>" ["-x", tp.1, "-y", tp.2]
+  sendEvent ".c" "<ButtonRelease-1>" ["-x", tp.1, "-y", tp.2]
+  discard <| run ["update"]
+  discard <| run [".c.ft", "insert", "end", "M9 text"]
+  discard <| run ["update"]
+  sendEvent ".c.ft" "<Key-Escape>"
+  out := out.push s!"text: {(← st.get).marks.marks.size} {editorDesc ((← st.get).marks.marks.toList.find? isFt)}"
+  click ".bar.draw"
+  discard <| run ["update"]
+  edAt (Bubble.EdPop.swatchX 2) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.thickness.thumbX 4) (Bubble.EdPop.ctrlY 1)
+  for y in [(bx.lly + 70 : Rat), bx.lly + 50] do
+    let ws ← [(0 : Rat), 20, 40, 60, 80].mapM fun dx => winAt (bx.urx - 170 + dx) (y + dx / 8)
+    if let some w0 := ws.head? then
+      sendEvent ".c" "<ButtonPress-1>" ["-x", w0.1, "-y", w0.2]
+    for w in ws.drop 1 do sendEvent ".c" "<Motion>" ["-x", w.1, "-y", w.2, "-state", "256"]
+    if let some wl := ws.getLast? then
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", wl.1, "-y", wl.2, "-state", "256"]
+  sendKey "Escape"
+  click ".bar.draw"
+  out := out.push s!"draw: {(← st.get).marks.marks.size} {editorDesc ((← st.get).marks.marks.toList.find? isInk)} {(← st.get).ui.editor == .none}"
+  let before ← m9Marks st
+  out := out.push s!"marks-before: {before}"
+  -- 7. Save (Ctrl+S), close, reopen from disk.
+  let orig := (← st.get).path.getD ""
+  let target := Save.defaultTarget orig
+  sendEvent ".c" "<Control-Key-s>"
+  settle st
+  out := out.push s!"saved: {(← st.get).path == some target} {(← st.get).marks.dirty} {← fileMarks target}"
+  out := out.push s!"saved-status: {← k.status}"
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.close.label]
+  out := out.push s!"closed: {(← st.get).doc.isNone} {(← st.get).marks.marks.size} {← run ["wm", "title", "."]}"
+  openFile st target
+  choose "Page Fit"
+  let s1 ← st.get
+  out := out.push s!"reopened: {s1.path == some target} {s1.marks.marks.size} {s1.marks.saved.length} {s1.marks.dirty} {← k.star}"
+  out := out.push s!"marks-reopened: {← m9Marks st}"
+  out := out.push s!"canvas-items: {← tagCount "note"} {← tagCount "ft"} {← tagCount "ink"}"
+  let saved := s1.marks.marks.toList
+  out := out.push s!"pixels-reopened: {← m9Pixels st saved}"
+  out := out.push s!"boxes: {← m9Boxes st}"
+  out := out.push s!"cropbox: {match shownBox s1 with
+    | some b => s!"{num b.llx} {num b.lly} {num b.urx} {num b.ury}" | none => "none"}"
+  -- 8. XFDF: export, delete every mark, import.
+  discard <| run ["set", "::safepdf::autoPath", file "m9.xfdf"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  out := out.push s!"export: {← k.status}"
+  for m in saved do deleteMark st m.id
+  settle st
+  out := out.push s!"removed: {(← st.get).marks.marks.size} {← m9Pixels st saved}"
+  discard <| run ["set", "::safepdf::autoPath", file "m9.xfdf"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.importXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  settle st
+  out := out.push s!"import: {← k.status}"
+  out := out.push s!"marks-imported: {← m9Marks st}"
+  out := out.push s!"imported-hl: {← m9Pixels st ((← st.get).marks.marks.toList.filter (!·.isNote))}"
+  out := out.push s!"imported-canvas: {← tagCount "note"} {← tagCount "ft"} {← tagCount "ink"}"
+  IO.FS.writeFile (file "m9.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The second half of the M9 run (`SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen`, task 9.6): a fresh
+viewer process on the `FILE-annotated.pdf` of `smokeM9` restores the four marks (equal
+descriptions) and the renderer draws them (pixels), at Page Fit. Results in `m9-reopen.txt`. -/
+def smokeM9Reopen (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  discard <| run [".zoommenu", "invoke", "Page Fit"]
+  settle st
+  let s ← st.get
+  let mut out : Array String := #[]
+  out := out.push s!"restored: {s.marks.marks.size} {s.marks.saved.length} {s.marks.dirty}"
+  out := out.push s!"marks: {← m9Marks st}"
+  out := out.push s!"pixels: {← m9Pixels st s.marks.marks.toList}"
+  out := out.push s!"status: {← run [".status", "cget", "-text"]}"
+  IO.FS.writeFile ((dir : System.FilePath) / "m9-reopen.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -5720,6 +6059,14 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "editors" then smokeEditors st dir else smokeEditorsShot st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "editors.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "m9" || s.smokeMode == "m9-reopen" then
+    let name := s!"{s.smokeMode}.txt"
+    try
+      if s.smokeMode == "m9" then smokeM9 st dir else smokeM9Reopen st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "marks" then

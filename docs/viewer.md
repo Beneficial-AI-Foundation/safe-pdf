@@ -924,6 +924,37 @@ page 3, one up back to 1|2. Even Spreads: page 1 alone, Next → 2|3 (Next disab
 highlight drawn. No Spreads: back to one frame. `SAFEPDF_VIEWER_SMOKE_MODE=scroll` is the
 benchmark above (not run by the script).
 
+The consolidated Phase 9 run (9.6, the M9 clause "a paper reads end-to-end with the wheel in
+every view mode; a highlight and a note survive close/reopen inside the PDF" as an automated
+check) is the variant `m9` (`Viewer.smokeM9`) followed by `m9-reopen` (`Viewer.smokeM9Reopen`,
+a fresh process). It needs no particular words, so the script runs it on two generated fixtures
+(three and four Helvetica pages, so that the last facing spread is once single and once a pair)
+and on real papers: `SAFEPDF_SMOKE_PAPERS` (space-separated paths; empty skips), by default the
+git-ignored `corpus/files/arxiv-1706.03762.pdf` when it exists (copy it from the corpus). The
+run checks: the menubar is attached with File / Edit / View / Go and every command of
+`Menu.Cmd.all` sits at its `Menu.locate` index with its label; the toolbar page box (Enter on
+the last page jumps, `abc` reverts, the first page's label goes back), ∨/∧ and the zoom
+drop-down (Page Width, Page Fit, Automatic Zoom); then, in each of the four view modes chosen
+through the View menu (Page Scrolling + No Spreads, Vertical Scrolling, Page Scrolling + Odd
+Spreads, Vertical Scrolling + Odd Spreads), from Home the wheel alone (`<MouseWheel>` −120 per
+notch, `m9WheelThrough`) until the view shows the bottom of the last spread: every spread is
+passed in order, (spread, view top) never goes back, the page box ends on a page of the last
+spread with its own label, the `yview` ends at 1. At Page Fit on page 1: a drag over the first
+word of five or more letters shows the float bubble, its Highlight makes the highlight (edit
+bubble shown); a note (context menu, top right); Add text with the pop-over's red swatch and
+size 16 (bottom left); Draw with blue, thickness 4, two strokes (bottom right). Ctrl+S writes
+`FILE-annotated.pdf` (4 marks read back strictly), File → Close empties the window, `openFile`
+reopens it from disk: the four marks are restored with equal descriptions (`m9Desc`: kind,
+colour, text, rounded geometry), no canvas items (the renderer draws them all) and coloured
+pixels in the photo for each (yellow highlight and note icon, red text, blue strokes); File →
+Export annotations… writes `m9.xfdf`, every mark is deleted (no coloured pixel left), File →
+Import annotations… brings the same four back (`4 imported`). The fresh process on the saved
+file restores the same four with pixels. The script then checks `qpdf --check`, that the
+original is unchanged and a byte prefix of the saved file, and that `mutool draw` (72 dpi)
+shows each mark in its colour inside its box. On arxiv-1706.03762 (15 pages) the wheel passes
+pages 1…15 in 72 notches (single page, Automatic Zoom), 186 (continuous), spreads 1…8 in 7
+(facing) and 42 (continuous facing); the whole M9 pair runs in about 4 s.
+
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
 popup.

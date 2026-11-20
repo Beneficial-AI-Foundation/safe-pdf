@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7–9.9, 9.11; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -60,6 +60,12 @@
 #   1m. non-blocking rendering (SAFEPDF_VIEWER_SMOKE_MODE=async) on a PDF with a slow page 1
 #      (viewer-smoke-pdf.py --slow): placeholder, a timer runs and zoom/End/Home return at once
 #      while it renders, End shows page 2 meanwhile, the old zoom's render is discarded (8.8);
+#   1n. the consolidated Phase 9 / M9 run (SAFEPDF_VIEWER_SMOKE_MODE=m9, then =m9-reopen) on two
+#      generated fixtures and on real papers (SAFEPDF_SMOKE_PAPERS, default the git-ignored
+#      corpus/files/arxiv-1706.03762.pdf when present): menubar, page box, zoom drop-down, the
+#      wheel end to end in all four view modes, bubble highlight + note + Add text + Draw, Save ->
+#      Close -> reopen (pixels), XFDF export/import round trip, a fresh process on the saved file,
+#      qpdf, byte prefix, mutool (9.6);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1217,6 +1223,172 @@ need("done" in t, "the run did not finish")
 for e in errs: print("FAIL: async: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-async/async.txt" || fail=1
+
+# 1n. The consolidated Phase 9 / M9 run (task 9.6; SAFEPDF_VIEWER_SMOKE_MODE=m9, then =m9-reopen
+#     in a fresh process; `Viewer.smokeM9`): menubar entries; toolbar page box, arrows and zoom
+#     drop-down; the wheel alone reads the document end to end in single, continuous, facing and
+#     continuous facing mode (every spread passed in order, the page box ends on the last
+#     page's spread, the view at its bottom); the selection bubble's Highlight on the first
+#     five-letter word, a note, Add text (red) and Draw (blue); Ctrl+S, File → Close, reopened
+#     from disk: the four marks equal and drawn by the renderer (pixels); XFDF export, every
+#     mark deleted (no colour left), import brings the same four back; a second process on
+#     the saved file restores them (pixels); qpdf --check, the original a byte prefix, and
+#     `mutool draw` shows all four. Runs on two generated fixtures (3 and 4 pages: an odd and
+#     an even last spread) and on real papers: SAFEPDF_SMOKE_PAPERS (space-separated paths),
+#     default corpus/files/arxiv-1706.03762.pdf when present (git-ignored; skipped otherwise).
+m9_fixture() {  # m9_fixture OUT NPAGES
+  python3 -I -c '
+import sys
+n = int(sys.argv[2])
+words = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]
+pages = [b"BT /F1 18 Tf 72 700 Td (%s on page %d of the fixture) Tj ET\n" % (words[i % 6].encode(), i + 1)
+         for i in range(n)]
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"%d 0 R" % (3 + 2 * i) for i in range(n)), n)]
+for i, c in enumerate(pages):
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R "
+                b"/Resources << /Font << /F1 %d 0 R >> >> >>" % (4 + 2 * i, 3 + 2 * n))
+    objs.append(b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream")
+objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$1" "$2"
+}
+# m9_case NAME SOURCE: the whole M9 sequence on a copy of SOURCE in $work/m9-NAME.
+m9_case() {
+  local d="$work/m9-$1" src="$2"
+  mkdir -p "$d/out" "$d/out2"
+  cp "$src" "$d/$1.pdf"
+  echo "viewer-smoke: M9 run on $1 ($(basename "$src"))"
+  SAFEPDF_VIEWER_SMOKE_MODE=m9 run_viewer "$d/out" "$d/$1.pdf" || { echo "FAIL: m9 $1: run failed" >&2; fail=1; }
+  if [ -f "$d/$1-annotated.pdf" ]; then
+    SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen run_viewer "$d/out2" "$d/$1-annotated.pdf" \
+      || { echo "FAIL: m9 $1: reopen run failed" >&2; fail=1; }
+  fi
+  cat "$d/out/m9.txt" "$d/out2/m9-reopen.txt" 2>/dev/null | grep -v '^saved-status' || true
+  python3 -I -c '
+import sys
+def kv(p):
+    try:
+        t = open(p, encoding="utf-8").read()
+    except FileNotFoundError:
+        return {"error": "missing %s" % p}
+    return dict(l.split(": ", 1) for l in t.splitlines() if ": " in l)
+name, v, r = sys.argv[1], kv(sys.argv[2]), kv(sys.argv[3])
+errs = []
+def need(c, msg):
+    if not c: errs.append(msg)
+for x in (v, r):
+    if "error" in x: errs.append("smoke step failed: %s" % x["error"])
+try:
+    n = int(v.get("pages", "0"))
+    need(n >= 2, "pages: %r" % v.get("pages"))
+    want = {"menubar": ".menubar", "menus": "File,Edit,View,Go", "arrow-next": "2", "arrow-prev": "1",
+            "bubble": "float true", "bubble-highlight": "1 edit", "note": "2",
+            "saved": "true false 4 4", "closed": "true 0 safe-pdf", "reopened": "true 4 4 false false",
+            "canvas-items": "0 0 0", "export": "exported 4 mark(s) to m9.xfdf",
+            "removed": "0 hl=0 note=0 text=0 ink=0", "back-to-single": "1 1",
+            "import": "m9.xfdf: 4 imported, 0 already present, 0 skipped"}
+    for k, w in want.items(): need(v.get(k) == w, "%s: %r, expected %r" % (k, v.get(k), w))
+    need(v.get("menu-entries", "").endswith(" bad="), "menu entries: %r" % v.get("menu-entries"))
+    last = v.get("pagebox-last", "").split()
+    need(last[:1] == [str(n)], "page box Enter on the last page: %r" % v.get("pagebox-last"))
+    need(v.get("pagebox-abc", "").split() == last[:2], "page box text did not revert: %r" % v.get("pagebox-abc"))
+    need(v.get("pagebox-first", "").startswith("1 "), "page box back to 1: %r" % v.get("pagebox-first"))
+    for k, lbl in (("zoom-width", "Page Width|"), ("zoom-fit", "Page Fit|"), ("zoom-auto", "Automatic Zoom|")):
+        need(v.get(k, "").startswith(lbl), "%s: %r" % (k, v.get(k)))
+    for mode, spreads in (("single", n), ("continuous", n), ("facing", (n - 1) // 2 + 1), ("cfacing", (n - 1) // 2 + 1)):
+        w = dict(t.split("=", 1) for t in v.get("wheel-" + mode, "").split() if "=" in t)
+        ok = (w.get("seen") == ",".join(str(i) for i in range(1, spreads + 1)) and
+              w.get("spreads") == str(spreads) and w.get("monotone") == "true" and
+              w.get("last") == "true" and w.get("bottom") == "true")
+        need(ok, "the wheel did not read the document end to end in %s mode: %r" % (mode, v.get("wheel-" + mode)))
+    t = v.get("text", "")
+    need(t.startswith("3 text M9 text ") and t.endswith(" 16 #D70022"), "text: %r" % t)
+    dr = v.get("draw", "")
+    need(dr.startswith("4 ink 2 [5, 5] 4 100 ") and dr.endswith(" true"), "draw: %r" % dr)
+    before = v.get("marks-before", "")
+    need(before.count(" | ") == 3, "marks-before: %r" % before)
+    for k, x in (("marks-reopened", v), ("marks-imported", v), ("marks (fresh process)", r)):
+        got = x.get(k.split()[0])
+        need(got == before, "%s differ: %r vs %r" % (k, got, before))
+    need(r.get("restored") == "4 4 false", "fresh process restored: %r" % r.get("restored"))
+    def px(s):
+        return {a: int(b) for a, b in (t.split("=") for t in s.split())}
+    for k, x in (("pixels-reopened", v), ("pixels", r)):
+        p = px(x.get(k, "hl=0 note=0 text=0 ink=0"))
+        need(p["hl"] >= 5 and p["note"] >= 5 and p["text"] >= 3 and p["ink"] >= 3,
+             "%s: a mark is not drawn: %r" % (k, x.get(k)))
+    need(px(v.get("imported-hl", "hl=0"))["hl"] >= 5, "imported highlight not drawn: %r" % v.get("imported-hl"))
+    c = [int(t) for t in v.get("imported-canvas", "0 0 0").split()]
+    need(all(x >= 1 for x in c), "imported note/text/drawing not on the canvas: %r" % c)
+except (KeyError, ValueError, IndexError) as e:
+    errs.append("missing or bad value: %r" % e)
+for e in errs: print("FAIL: m9 %s: %s" % (name, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$1" "$d/out/m9.txt" "$d/out2/m9-reopen.txt" || fail=1
+  [ -f "$d/$1-annotated.pdf" ] || { echo "FAIL: m9 $1: nothing saved" >&2; fail=1; return; }
+  if command -v qpdf >/dev/null 2>&1; then
+    qpdf --check "$d/$1-annotated.pdf" >/dev/null 2>&1 || { echo "FAIL: m9 $1: qpdf --check" >&2; fail=1; }
+  else echo "viewer-smoke: qpdf missing, check skipped"; fi
+  cmp -s "$src" "$d/$1.pdf" || { echo "FAIL: m9 $1: the original changed" >&2; fail=1; }
+  cmp -n "$(stat -c %s "$d/$1.pdf")" "$d/$1.pdf" "$d/$1-annotated.pdf" \
+    || { echo "FAIL: m9 $1: the original is not a prefix of the saved file" >&2; fail=1; }
+  if command -v mutool >/dev/null 2>&1; then
+    mutool draw -q -r 72 -c rgb -F pnm -o "$d/mutool.ppm" "$d/$1-annotated.pdf" 1
+    python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+parts, i = [], 0
+while len(parts) < 4:
+    while d[i:i+1].isspace(): i += 1
+    j = i
+    while not d[j:j+1].isspace(): j += 1
+    parts.append(d[i:j]); i = j
+i += 1
+w, h = int(parts[1]), int(parts[2])
+px = d[i:]
+v = dict(l.split(": ", 1) for l in open(sys.argv[2], encoding="utf-8").read().splitlines() if ": " in l)
+cx0, cy0, cx1, cy1 = (float(t) for t in v["cropbox"].split())
+tests = {"hl": lambda r, g, b: r > 200 and g > 200 and b < 200,
+         "note": lambda r, g, b: r > 200 and g > 200 and b < 200,
+         "text": lambda r, g, b: r > 150 and g < 90 and b < 110,
+         "ink": lambda r, g, b: b > 150 and r < 100}
+need = {"hl": 5, "note": 5, "text": 3, "ink": 3}
+got = {}
+for part in v["boxes"].split(";"):
+    kind, *nums = part.split()
+    x0, y0, x1, y1 = (float(t) for t in nums)
+    n = 0
+    for y in range(max(0, int(cy1 - y1)), min(h, int(cy1 - y0) + 1)):
+        for x in range(max(0, int(x0 - cx0)), min(w, int(x1 - cx0) + 1)):
+            k = 3 * (y * w + x)
+            if tests[kind](px[k], px[k + 1], px[k + 2]): n += 1
+    got[kind] = n
+print("mutool: coloured pixels per mark: %r" % got)
+bad = [k for k in need if got.get(k, 0) < need[k]]
+if bad: print("FAIL: mutool does not show %s" % bad, file=sys.stderr)
+sys.exit(1 if bad else 0)
+' "$d/mutool.ppm" "$d/out/m9.txt" || { echo "FAIL: m9 $1: mutool check" >&2; fail=1; }
+  else echo "viewer-smoke: mutool missing, check skipped"; fi
+}
+m9_fixture "$work/m9three.pdf" 3
+m9_fixture "$work/m9four.pdf" 4
+m9_case three "$work/m9three.pdf"
+m9_case four "$work/m9four.pdf"
+m9papers="${SAFEPDF_SMOKE_PAPERS-corpus/files/arxiv-1706.03762.pdf}"
+for p in $m9papers; do
+  if [ -f "$p" ]; then m9_case "paper-$(basename "$p" .pdf)" "$p"
+  else echo "viewer-smoke: $p missing, M9 paper run skipped"; fi
+done
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
