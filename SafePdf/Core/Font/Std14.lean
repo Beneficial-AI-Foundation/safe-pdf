@@ -16,9 +16,10 @@ font names (Arial, Times New Roman, Courier New, subset prefixes, style suffixes
   (task 6.4b): Helvetica and Helvetica-Bold 556, all four Times styles 500, Courier 600. These
   are the `Euro` entries of the Core 14 AFM set as redistributed by the open-source viewers
   (pdf.js `metrics.js`, PDFBox, MuPDF) and agree with the fonts' design (Euro at the figure
-  width: Helvetica/Times figures are 556/500). Re-checked from memory in 6.4b, without access
-  to the AFM files; they match what pdfium and MuPDF use, which is what the M6 comparison
-  measures.
+  width: Helvetica/Times figures are 556/500). **Verified (6.4c)**: every width of every row
+  (the 229 glyphs × 12 text fonts, `Euro` included) equals the `WX` of the Adobe Core14 AFMs as redistributed by Apache PDFBox 3.0.3 (`pdfbox/src/main/resources/org/apache/pdfbox/resources/afm/`); no
+  mismatch. (Adobe's 1997 text-font AFMs have no `Euro`; the redistributed files add it as an
+  unencoded `C -1` entry with the values above.)
 * **Composites.** Accented letters (`Aacute`, `ccedilla`, `Scaron`, …) were not transcribed
   per font: their width is that of the base letter, which holds for every composite of these AFMs
   (`iacute`, `icircumflex`, `idieresis`, `igrave` take the width of `dotlessi`, e.g.
@@ -27,11 +28,12 @@ font names (Arial, Times New Roman, Courier New, subset prefixes, style suffixes
 * **Courier** (all four styles) is monospaced: every glyph of the table is 600. The Oblique
   styles of Helvetica share the upright widths.
 * **Symbol and ZapfDingbats** (task 6.4b): `symbolWidths` and `zapfDingbatsWidths` are the
-  `WX` values of Adobe's `Symbol.afm` (001.008) and `ZapfDingbats.afm` (002.000), transcribed
-  from memory and indexed by **code** of the fonts' built-in encodings (`symbolNames`,
-  `zapfDingbatsNames` in `Font.Encoding`): every glyph of these two AFMs is encoded, so the
-  built-in encoding names exactly the glyphs that have widths. `width?` looks the glyph name
-  up there.
+  `WX` values of Adobe's `Symbol.afm` (001.008) and `ZapfDingbats.afm` (002.000), indexed by
+  **code** of the fonts' built-in encodings (`symbolNames`, `zapfDingbatsNames` in
+  `Font.Encoding`); written from memory in 6.4b, verified code by code against the AFMs in
+  6.4c (one fix: Symbol `0xF0` is unassigned). Every glyph of these two AFMs is encoded except
+  Symbol's `apple` (`C -1`, `WX 790`), so `width?` looks the glyph name up in the built-in
+  encoding and special-cases `apple` (`symbolAppleWidth`).
 * **Substitution** (`Std14.ofBaseFont`): a subset tag `ABCDEF+` (six upper-case letters and
   `+`, §9.9.2) is stripped, spaces are removed, then the family is recognised by prefix
   (`Helvetica`/`Arial` → Helvetica, `TimesNewRoman`/`Times` → Times, `CourierNew`/`Courier`
@@ -259,7 +261,11 @@ def symbolWidths : Array Nat := #[
   823, 686, 795, 987, 768, 768, 823, 768, 768, 713, 713, 713, 713, 713, 713, 713,
   768, 713, 790, 790, 890, 823, 549, 250, 713, 603, 603, 1042, 987, 603, 987, 603,
   494, 329, 790, 790, 786, 713, 384, 384, 384, 384, 384, 384, 494, 494, 494, 494,
-  790, 329, 274, 686, 686, 686, 384, 384, 384, 384, 384, 384, 494, 494, 494, 0]
+  0, 329, 274, 686, 686, 686, 384, 384, 384, 384, 384, 384, 494, 494, 494, 0]
+
+/-- Width of Symbol's one unencoded glyph, `apple` (`Symbol.afm`: `C -1 ; WX 790 ; N apple`). It
+is reachable only through `/Differences`. -/
+def symbolAppleWidth : Nat := 790
 
 /-- ZapfDingbats AFM widths by **code** (parallel to `zapfDingbatsNames`, the built-in
 encoding; `0` where unassigned). -/
@@ -333,7 +339,7 @@ glyph outside `std14GlyphNames` (Helvetica, Times, Courier) or outside the built
 (Symbol, ZapfDingbats). -/
 def width? (f : Std14) (g : GlyphName) : Option Nat :=
   match f with
-  | symbol => widthByCode symbolNames symbolWidths g
+  | symbol => if g == "apple" then some symbolAppleWidth else widthByCode symbolNames symbolWidths g
   | zapfDingbats => widthByCode zapfDingbatsNames zapfDingbatsWidths g
   | _ =>
     match std14GlyphNames.findIdx? (· == g) with
@@ -462,6 +468,18 @@ def Std14.ofBaseFont (name : String) : Option Std14 :=
 #guard Std14.zapfDingbats.width? "a82" == some 138
 #guard Std14.zapfDingbats.width? "a191" == some 918
 #guard Std14.zapfDingbats.width? "alpha" == none
+#guard Std14.symbol.width? "braceex" == some 494
+#guard Std14.symbol.width? "angleright" == some 329
+#guard Std14.symbol.width? "Upsilon1" == some 620
+#guard Std14.zapfDingbats.width? "a89" == some 390
+#guard Std14.zapfDingbats.width? "a205" == some 509
+#guard Std14.zapfDingbats.width? "a96" == some 334
+#guard Std14.zapfDingbats.width? "a101" == some 732
+#guard Std14.timesItalic.width? "Euro" == some 500
+#guard Std14.timesBold.width? "Euro" == some 500
+#guard Std14.helveticaOblique.width? "Euro" == some 556
+#guard Std14.helveticaBoldOblique.width? "Euro" == some 556
+#guard Std14.courierBoldOblique.width? "Euro" == some 600
 -- Every encoded Symbol / ZapfDingbats glyph has a non-zero width, and no unassigned code has one.
 #guard (List.range 256).all fun c =>
   (symbolEncoding.glyph c).isSome == (symbolWidths.getD c 0 != 0)
