@@ -45,7 +45,7 @@ open SafePdf.Quarantine
 def fixtures : List String :=
   ["gray", "s444", "s422", "s420", "s440", "s411", "narrow", "rst", "rgb", "q100", "scans",
    "cmyk", "ycck", "pgray", "p444", "p422", "p420", "pnarrow", "prst", "pq100", "pscans",
-   "pscanrst", "pscangray", "psmooth", "pcmyk"]
+   "pscanrst", "pscangray", "psmooth", "pcmyk", "nodht", "nodhtgray", "ts420", "trst", "tgray"]
 
 /-- Parse a reference file: header line `W H NC`, then the samples. -/
 def parseRef (b : ByteArray) : Option (Nat × Nat × Nat × ByteArray) := do
