@@ -1208,3 +1208,10 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Write.Annots.slots_freeText_ink
 #print axioms SafePdf.Shell.App.Bubble.Ui.selectEditor_exclusive
 #print axioms SafePdf.Shell.App.Bubble.Ui.toolClick_exclusive
+-- Phase 8, task 8.10: pre-sized Flate output, filled buffers
+#print axioms SafePdf.Core.Filter.applyStages_cap
+#print axioms SafePdf.Core.Filter.applyStagesB_cap
+#print axioms SafePdf.Core.Filter.decodeStream_eq
+#print axioms SafePdf.Core.Filter.decodeOne_cap
+#print axioms SafePdf.Core.Filter.Flate.flateDecode_cap
+#print axioms SafePdf.Core.Raster.Clip.filledBuf_eq
