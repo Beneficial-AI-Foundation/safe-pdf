@@ -2,6 +2,7 @@
 """Generate the JPEG fixtures of the DCT decoder (tasks 7.6a baseline, 7.6b progressive).
 
     python3 -I Tests/images/gen_jpegs.py [OUTDIR]      (default: Tests/images)
+    python3 -I Tests/images/gen_jpegs.py --scaled-only [OUTDIR]   (only NAME-sK.ref)
 
 Stdlib only; needs libjpeg-turbo's `cjpeg` and `djpeg` (Debian: libjpeg-turbo-progs) and
 skips cleanly when they are missing.  For every fixture NAME it writes
@@ -23,6 +24,9 @@ custom `-scans` scripts (refinement-heavy: up to three AC refinement passes, int
 refinements, single-coefficient bands), restart intervals, odd sizes, quality 100, a smooth
 image (long end-of-band runs), and `jpegtran -progressive` of the CMYK fixture (a lossless
 transcode, so its reference is the CMYK one).
+
+Reduced-size references (task 7.10): for the fixtures in SCALED, NAME-sK.ref is
+`djpeg -dct int -scale 1/2^K` (K = 1, 2, 3), libjpeg's scaled decode as MuPDF requests it.
 
 The synthetic source images are deterministic (gradients, edges, a disc, LCG noise).
 """
@@ -150,6 +154,33 @@ def djpeg(jpg, strict=True):
     return read_pnm(r.stdout)
 
 
+def djpeg_scaled(jpg, k):
+    """djpeg's reduced-size decode by 2**k (`-scale 1/2**k`: libjpeg `scale_num/scale_denom`,
+    what MuPDF requests through its l2factor, task 7.10); tolerant of truncated input."""
+    r = subprocess.run(["djpeg", "-dct", "int", "-scale", "1/%d" % (1 << k), "-pnm"], input=jpg,
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ENV)
+    return read_pnm(r.stdout)
+
+
+# Fixtures whose reduced-size decodes (1/2, 1/4, 1/8) are references too: NAME-sK.ref.
+SCALED = ["gray", "s444", "s422", "s420", "s440", "s411", "narrow", "rst", "q100", "scans",
+          "pgray", "p420", "pscans", "psmooth", "tp420", "dcp420", "nodht"]
+
+
+def write_scaled(outdir):
+    """Write NAME-sK.ref (K = 1, 2, 3) for the SCALED fixtures already in `outdir`."""
+    total = 0
+    for name in SCALED:
+        with open(os.path.join(outdir, name + ".jpg"), "rb") as f:
+            jpg = f.read()
+        for k in (1, 2, 3):
+            w, h, nc, data = djpeg_scaled(jpg, k)
+            with open(os.path.join(outdir, "%s-s%d.ref" % (name, k)), "wb") as f:
+                f.write(b"%d %d %d\n" % (w, h, nc) + data)
+            total += len(data)
+    print("gen_jpegs: %d scaled references, %d bytes" % (3 * len(SCALED), total))
+
+
 def marker_segments(jpg):
     """(start, end, marker) of every marker segment before the first SOS."""
     i, out = 2, []
@@ -246,9 +277,13 @@ def ycc_rgb(y, cb, cr):
 
 
 def main():
-    outdir = sys.argv[1] if len(sys.argv) > 1 else os.path.join("Tests", "images")
+    args = [a for a in sys.argv[1:] if a != "--scaled-only"]
+    outdir = args[0] if args else os.path.join("Tests", "images")
     if not (shutil.which("cjpeg") and shutil.which("djpeg")):
         print("gen_jpegs: cjpeg/djpeg missing (libjpeg-turbo-progs); skipped")
+        return 0
+    if "--scaled-only" in sys.argv[1:]:
+        write_scaled(outdir)
         return 0
     os.makedirs(outdir, exist_ok=True)
     fixtures = []
@@ -346,6 +381,7 @@ def main():
             f.write(b"%d %d %d\n" % (w, h, nc) + data)
         total += len(jpg) + len(data)
     print("gen_jpegs: %d fixtures, %d bytes" % (len(fixtures), total))
+    write_scaled(outdir)
     return 0
 
 
