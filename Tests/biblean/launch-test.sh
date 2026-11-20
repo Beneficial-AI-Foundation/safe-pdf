@@ -90,12 +90,12 @@ import json, sys
 log = [json.loads(l) for l in open(sys.argv[1])]
 att, parent = sys.argv[2], sys.argv[3]
 want = [("GET", f"/api/attachments/{att}/file"), ("GET", f"/api/items/{att}"),
-        ("GET", f"/api/items/{parent}")]
+        ("GET", f"/api/items/{parent}"), ("POST", f"/api/attachments/{att}/fulltext")]
 got = [(r["method"], r["path"]) for r in log]
 assert got == want, got
 assert all(r["auth"] == "ok" and r["status"] == 200 and not r["origin"] for r in log), log
 EOF
-check $? "L5 the server saw file + item + parent requests, all with the right token, no Origin" \
+check $? "L5 the server saw file + item + parent requests (+ the full text, task 10.3), all with the right token, no Origin" \
   "$(cat "$work/log")"
 ! grep -qF "$token" "$work/p1.out" "$work/p1.err"
 check $? "L6 the token is not in the viewer's output"
