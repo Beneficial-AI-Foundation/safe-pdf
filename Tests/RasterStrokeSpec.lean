@@ -26,8 +26,18 @@ pseudo-random inputs (fixed seed):
   (zooms, all four rotations); for 300 of them also the masks (`strokePath` vs `fillEdges` of
   the reference edges).
 
-Guards check that most cases produce edges and that the `Int` fallbacks (frames outside the
-64-bit bounds) are exercised.
+* **64-bit chord geometry** (task 7.9c, 16000 cases, at least 5000 of them on the 64-bit
+  path; the random pens are harsher than real pages, whose chords take it 75–90% of the
+  time): `mkSeg` (whose 64-bit path `mkSegW` applies when its range guards hold) vs
+  `mkSegExact` and `mkSegSpec`, for the random pens above and page-like pens (`Fixed` CTMs ×
+  zooms × the y flip), `Fixed` widths (any, and of three significant digits), hairlines (user
+  metric), chords of one subpixel, very short, axis-aligned, 45°, all four directions and at
+  the `2³⁰` guard; plus 3000 kernel checks (`isqrtW` vs `Nat.sqrt` up to `Y = 2⁸² − 1`,
+  `mul128` vs the product up to `2⁶⁴ − 1`, `rdiv36` vs `roundDivI` for divisors from 1 to
+  `2⁶²`, `gcd64` vs `Nat.gcd`).
+
+Guards check that most cases produce edges, that the `Int` fallbacks (frames outside the
+64-bit bounds) are exercised, and that both chord paths (64-bit and exact) are taken.
 -/
 
 namespace SafePdf.Tests.RasterStrokeSpec
@@ -293,6 +303,129 @@ def pageCase (s : UInt64) (masks : Bool) : Option String × Bool × UInt64 :=
     else (some s!"page path masks differ ({mf.w}×{mf.h} vs {mr.w}×{mr.h})", r.size > 0, s)
   else (none, r.size > 0, s)
 
+/-! ## 64-bit chord geometry (task 7.9c) -/
+
+/-- A pen map like those of real pages: `CTM × view × 256` with `Fixed` (10⁻⁶) CTM entries
+of three significant figures, `0.0001` to `9.99` (uniform and non-uniform scales, the y flip,
+90° rotations, small shears), zooms 1, 3/2, 25/18. -/
+def randPageMap (s : UInt64) : Aff × UInt64 :=
+  let (k, s) := rand s 6
+  let (a, s) := randI s 1 999
+  let (b, s) := randI s 1 999
+  let (c, s) := randI s (-200) 200
+  let (ea, s) := rand s 4
+  let (eb, s) := rand s 4
+  let (z, s) := rand s 3
+  let a := a * 10 ^ (ea + 1)
+  let b := b * 10 ^ (eb + 1)
+  let c := c * 1000
+  let fx := fun (n : Int) => (n : Rat) / 1000000
+  let zoom : Rat := match z with | 0 => 1 | 1 => 3 / 2 | _ => 25 / 18
+  let ctm : Aff := match k with
+    | 0 => ⟨fx a, 0, 0, fx a, 0, 0⟩
+    | 1 => ⟨fx a, 0, 0, -fx a, 0, 0⟩
+    | 2 => ⟨fx a, 0, 0, fx b, 0, 0⟩
+    | 3 => ⟨0, fx a, -fx a, 0, 0, 0⟩
+    | 4 => ⟨fx a, fx c, 0, fx b, 0, 0⟩
+    | _ => ⟨1, 0, 0, 1, 0, 0⟩
+  (ctm * Aff.scale zoom (-zoom), s)
+
+/-- A chord for the 64-bit tests: random, near-zero length, axis-aligned, 45°, negative, and
+lengths at the `2³⁰` fallback boundary. -/
+def randChord (s : UInt64) : FPt × FPt × UInt64 :=
+  let (k, s) := rand s 12
+  let (p, s) := randPt s 1
+  let (lk, s) := rand s 6
+  let (l, s) := randI s 1 (4 * 10 ^ lk)
+  let (sg, s) := rand s 4
+  let sx : Int := if sg % 2 = 0 then 1 else -1
+  let sy : Int := if sg / 2 = 0 then 1 else -1
+  let (e, s) := randI s (-2) 2
+  let (dx, dy) : Int × Int := match k with
+    | 0 => (sx, 0)                                                  -- one subpixel
+    | 1 => (sx, sy)
+    | 2 => (0, sy * l)                                              -- axis-aligned
+    | 3 => (sx * l, 0)
+    | 4 => (sx * l, sy * l)                                         -- 45°
+    | 5 => (sx * (1073741824 + e), sy * l)                          -- at the 2³⁰ guard
+    | 6 => (sx * l, sy * (1073741824 + e))
+    | 7 => (sx * (1073741824 + e), sy * (1073741824 + e))
+    | 8 => (sx * (l % 8 + 1), sy * (l % 5))                         -- very short
+    | _ =>
+      let (x, _) := randI s (-300000) 300000
+      (x, sy * l)
+  (p, ⟨p.x + dx, p.y + dy⟩, s)
+
+/-- One 64-bit chord case: `mkSeg` (fast path when it applies) vs `mkSegExact` and
+`mkSegSpec`; `(failure, fast path taken)`. -/
+def segWCase (s : UInt64) : Option String × Bool × UInt64 :=
+  let (mk, s) := rand s 3
+  let (m, s) := if mk = 0 then randMap s else randPageMap s
+  let (wk, s) := rand s 8
+  let (wr, s) := randI s 0 5000000
+  let (w3, s) := randI s 1 999
+  let (we, s) := rand s 4
+  let (w, s) : Rat × UInt64 := match wk with
+    | 0 => (0, s)                                                   -- hairline, user metric
+    | 1 => randWidth s
+    | 2 | 3 => ((wr : Rat) / 1000000, s)                            -- any `Fixed` width
+    | _ => ((w3 * 10 ^ we : Int) / (1000000 : Rat), s)              -- three digits
+  let (p, q, s) := randChord s
+  let geo := Geo.make (m * Aff.scale subUnit subUnit) w {}
+  if p = q then (none, false, s) else
+  let fast := (mkSegW geo.pen geo.metric p q false).isSome
+  let a := mkSeg geo.pen geo.metric p q false
+  let b := mkSegExact geo.pen geo.metric p q false
+  let c := mkSegSpec geo.pen geo.metric p q false
+  if segEq a b && segEq a c then (none, fast, s)
+  else
+    let fr := fun (g : SegG) => s!"({g.ax},{g.ay},{g.nx},{g.ny},{g.tx},{g.ty}) len {g.len}"
+    (some s!"mkSeg 64-bit ({p.x},{p.y})→({q.x},{q.y}) w={w} fast={fast}: {fr a} vs exact {fr b} vs spec {fr c}", fast, s)
+
+/-- Kernel checks: `isqrtW` vs `Nat.sqrt`, `mul128` vs the product, `rdiv36` vs `roundDivI`,
+`gcd64` vs `Nat.gcd` at random and boundary arguments; the number of mismatches. -/
+def kernelCases (s : UInt64) (n : Nat) : Nat × UInt64 := Id.run do
+  let mut s := s
+  let mut bad := 0
+  for i in [0:n] do
+    let (y, s1) := randI s 0 4611686018427387903
+    let (e, s2) := randI s1 0 3
+    let (z, s3) := randI s2 0 4611686018427387903
+    let (hk, s4) := rand s3 4
+    s := s4
+    -- radicand Y = hi·2⁶⁴ + lo: small, random, and at the 2⁸² bound
+    let y : Nat := if i % 4 = 0 then 4 * y.toNat + e.toNat else
+      if i % 4 = 1 then (y.toNat % 1000) else y.toNat
+    let hi : Nat := match hk with
+      | 0 => 0
+      | 1 => 262143
+      | 2 => z.toNat % 262144
+      | _ => z.toNat % 64
+    if (isqrtW hi.toUInt64 y.toUInt64).toNat != Nat.sqrt ((hi * 2 ^ 64 + y) * 2 ^ 40) then
+      bad := bad + 1
+    let (pa, s5) := randI s 0 4611686018427387903
+    let (pb, s6) := randI s5 0 4611686018427387903
+    s := s6
+    let pa : Nat := if i % 3 = 0 then 18446744073709551615 - pa.toNat % 7 else 4 * pa.toNat + e.toNat
+    let (h, l) := mul128 pa.toUInt64 pb.toNat.toUInt64
+    if h.toNat * 2 ^ 64 + l.toNat != pa * pb.toNat then bad := bad + 1
+    let (bk, s3) := randI s 1 4611686018427387904
+    let (sh, s4) := rand s3 62
+    let (a, s5) := randI s4 0 4611686018427387903
+    let (ng, s6) := rand s5 2
+    s := s6
+    let B : Nat := max 1 (bk.toNat / 2 ^ sh)
+    let A : Nat := a.toNat % (B * 67108864)
+    let A64 := A.toUInt64
+    let B64 := B.toUInt64
+    if rfit A64 B64 then
+      let x : Int := (A : Int) * 68719476736
+      let want := roundDivI (if ng = 1 then -x else x) B
+      if (rdiv36 (ng = 1) A64 B64).toInt != want then bad := bad + 1
+    else bad := bad + 1
+    if (gcd64 96 A64 B64).toNat != Nat.gcd A B then bad := bad + 1
+  return (bad, s)
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let mut failures := 0
@@ -331,6 +464,23 @@ def run : IO Nat := do
       if failures ≤ 10 then report msg
   if paintedP < 500 then
     failures := failures + 1; report s!"only {paintedP} of 1000 page paths produced edges"
+  -- 64-bit chord geometry (task 7.9c).
+  let mut fastN := 0
+  for _ in [0:16000] do
+    let (res, fast, s1) := segWCase s
+    s := s1
+    if fast then fastN := fastN + 1
+    if let some msg := res then
+      failures := failures + 1
+      if failures ≤ 10 then report msg
+  if fastN < 5000 || fastN > 15000 then
+    failures := failures + 1
+    report s!"64-bit chord path taken {fastN} of 16000 times (expected 5000–15000: both paths)"
+  let (bad, s1) := kernelCases s 3000
+  s := s1
+  IO.println s!"  raster-stroke-spec: 16000 chords, {fastN} on the 64-bit path; 3000 kernel cases, {bad} kernel mismatches"
+  if bad > 0 then
+    failures := failures + 1; report s!"{bad} 64-bit kernel mismatches"
   return failures
 
 end SafePdf.Tests.RasterStrokeSpec

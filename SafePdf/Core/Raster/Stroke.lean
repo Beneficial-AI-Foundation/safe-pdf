@@ -65,7 +65,14 @@ that are handed, all together, to 7.2a's scanline filler with the **nonzero** ru
    These run in `Int64` when the frame is small (`SegG.small`: offsets ≤ 2⁴⁴ grid units, i.e.
    pen radii up to 2²⁰ px; chords ≤ 2³⁰ units) and otherwise in exact `Int`, with the same
    result. The chord geometry itself (`mkSeg`) evaluates the exact rationals on
-   common-denominator integer forms (`IMat`), normalising only `|u|²` for `sqrtQ`.
+   common-denominator integer forms (`IMat`), normalising only `|u|²` for `sqrtQ`; since
+   task 7.9c it runs in `UInt64`/`Int64` (`mkSegW`: `gcd64`, the 128-bit radicand
+   `mul128`, the digit-by-digit root `isqrtW`, the rounded divisions `rdiv36`) whenever
+   range guards hold, and falls back to the exact `Int`/`Rat` evaluation `mkSegExact`
+   otherwise. 64-bit arithmetic wraps modulo `2⁶⁴`; the guards are exactly the hypotheses of
+   the kernel theorems (`mulW_toNat`, `mul128_eq`, `isqrtW_eq`, `gcd64_eq`, `rdiv36_eq`,
+   `lin64_toInt`, `abs64_toNat`, `IMatW.of_ok`, `ratW_eq`), under which no operation wraps
+   and every kernel returns the exact value, so both paths give the same segment.
    **Specification:** section 10 writes the same pipeline in plain `Rat` arithmetic
    (`strokeEdgesSpec`, `strokeDPathSpec`, `mkSegSpec`); the suite `raster-stroke-spec` checks
    edge-for-edge equality on 8000 pseudo-random cases. Rounding to the grid moves a point by
@@ -99,6 +106,11 @@ that are handed, all together, to 7.2a's scanline filler with the **nonzero** ru
   `polyCap = 4·arcCap` vertices (a runtime guard in `emit`, never hit by construction: the
   largest polygon is the pen with `4·m ≤ 4·arcCap` points). Combined
   with `Fill.fillEdgesCounted_steps_le` this bounds the whole stroke rasterization.
+* **64-bit chord kernels** (task 7.9c): `isqrtW_eq` (`⌊√(Y·2⁴⁰)⌋` for `Y < 2⁸²`),
+  `mul128_eq`, `gcd64_eq`, `rdiv36_eq` (`roundDivI (±A·2³⁶) B` under `rfit`),
+  `mulW_toNat`, `lin64_toInt`, `abs64_toNat`, `IMatW.of_ok`, `ratW_eq`. The composition in
+  `mkSegW` (that its formulas are `mkSegExact`'s) is tested, not proven: `raster-stroke-spec`
+  compares `mkSeg`, `mkSegExact` and `mkSegSpec` on 16000 chords.
 * **Totality** by construction (folds, structural recursion, fuel with proven bounds).
 
 ## Tested (`#guard`s below, suites `Tests/RasterStroke.lean`, `Tests/RasterStrokeSpec.lean`)
@@ -374,6 +386,599 @@ def circleTable (m : Nat) : Array Pt :=
     | 2 => ⟨-c, -s⟩
     | _ => ⟨s, -c⟩
 
+/-! ### 64-bit kernels for the chord geometry (task 7.9c)
+
+`UInt64`/`Int64` arithmetic wraps modulo `2⁶⁴`. Each kernel below states the range under
+which it computes the exact `Nat`/`Int` value (theorems `mulW_toNat`, `mul128_eq`,
+`isqrtW_eq`, `gcd64_eq`, `rdiv36_eq`, `lin64_toInt`, `abs64_toNat`); the chord geometry `mkSeg` (section 4) checks those
+ranges at run time and otherwise falls back to the exact `Int`/`Rat` path `mkSegExact`. -/
+
+/-- `2⁶² − 1`: guarded 64-bit products stay at or below it. -/
+def lim62 : UInt64 := 4611686018427387903
+
+/-- `a · b ≤ 2⁶² − 1` (checked with one division; `b = 0` always passes). -/
+@[inline] def mulOk (a b : UInt64) : Bool := b == 0 || a ≤ lim62 / b
+
+/-- Under `mulOk` the 64-bit product is the `Nat` product (no wrap-around). -/
+theorem mulW_toNat {a b : UInt64} (h : mulOk a b = true) :
+    (a * b).toNat = a.toNat * b.toNat ∧ a.toNat * b.toNat ≤ 4611686018427387903 := by
+  simp only [mulOk, Bool.or_eq_true, beq_iff_eq] at h
+  have hb : b = 0 ∨ a.toNat ≤ 4611686018427387903 / b.toNat := by
+    rcases h with h | h
+    · exact .inl h
+    · right; have := UInt64.le_iff_toNat_le.mp (of_decide_eq_true h)
+      simpa [lim62, UInt64.toNat_div] using this
+  have hle : a.toNat * b.toNat ≤ 4611686018427387903 := by
+    rcases hb with hb | hb
+    · simp [hb]
+    · by_cases h0 : b.toNat = 0
+      · simp [h0]
+      · exact (Nat.le_div_iff_mul_le (Nat.pos_of_ne_zero h0)).mp hb
+  refine ⟨?_, hle⟩
+  rw [UInt64.toNat_mul, Nat.mod_eq_of_lt (by omega)]
+
+/-- The full 64 × 64 → 128-bit product `(hi, lo)`, from 32-bit halves (`mul128_eq`). -/
+def mul128 (a b : UInt64) : UInt64 × UInt64 :=
+  let a0 := a % 4294967296
+  let a1 := a / 4294967296
+  let b0 := b % 4294967296
+  let b1 := b / 4294967296
+  let p00 := a0 * b0
+  let p01 := a0 * b1
+  let p10 := a1 * b0
+  let p11 := a1 * b1
+  let mid := p00 / 4294967296 + p01 % 4294967296 + p10 % 4294967296
+  (p11 + p01 / 4294967296 + p10 / 4294967296 + mid / 4294967296,
+    mid * 4294967296 + p00 % 4294967296)
+
+/-- One base-4 digit of the radicand `(hi·2⁶⁴ + lo) · 4²⁰` of `isqrtW`: digit `k` (`k = 0`
+least significant). -/
+@[inline] def sqDigit (hi lo : UInt64) (k : Nat) : UInt64 :=
+  if k < 20 then 0
+  else if k < 52 then (lo >>> (2 * (k - 20)).toUInt64) % 4
+  else (hi >>> (2 * (k - 52)).toUInt64) % 4
+
+/-- Digit-by-digit integer square root: `k` more base-4 digits of the radicand to bring down,
+`root = ⌊√Z⌋` and `rem = Z − root²` for the digits `Z` consumed so far. -/
+def isqLoop (hi lo : UInt64) : Nat → UInt64 → UInt64 → UInt64
+  | 0, root, _ => root
+  | k + 1, root, rem =>
+    let r4 := rem * 4 + sqDigit hi lo k
+    let t := root * 4 + 1
+    if t ≤ r4 then isqLoop hi lo k (root * 2 + 1) (r4 - t) else isqLoop hi lo k (root * 2) r4
+
+/-- `⌊√(Y · 2⁴⁰)⌋` for the 128-bit `Y = hi·2⁶⁴ + lo`, in 64-bit arithmetic, exact for
+`hi < 2¹⁸` (`Y < 2⁸²`, `isqrtW_eq`): the root stays below `2⁶¹` and the remainder below
+`2⁶²`, so no step wraps. -/
+def isqrtW (hi lo : UInt64) : UInt64 := isqLoop hi lo (if hi = 0 then 52 else 61) 0 0
+
+/-- Euclid's algorithm on `UInt64` with fuel (`0` when the fuel runs out; 96 steps suffice
+for 64-bit inputs). -/
+def gcd64 : Nat → UInt64 → UInt64 → UInt64
+  | 0, _, _ => 0
+  | f + 1, a, b => if b = 0 then a else gcd64 f b (a % b)
+
+/-- The rounding step of `rdiv36`: `q + 1` when the remainder is at least half the divisor
+(`neg`: more than half), negated for `neg`. -/
+@[inline] def rdivFin (B : UInt64) (neg : Bool) (q r : UInt64) : Int64 :=
+  if neg then -((q + (if B < 2 * r then 1 else 0)).toInt64)
+  else (q + (if B ≤ 2 * r then 1 else 0)).toInt64
+
+/-- Long division by `B` in chunks of `c` bits: `n` more chunks to shift in, partial quotient
+`q`, remainder `r < B`; then `rdivFin`. Needs `B · 2^c ≤ 2⁶⁴`. -/
+def shLoop (B c : UInt64) (neg : Bool) : Nat → UInt64 → UInt64 → Int64
+  | 0, q, r => rdivFin B neg q r
+  | n + 1, q, r =>
+    let t := r <<< c
+    shLoop B c neg n ((q <<< c) + t / B) (t % B)
+
+/-- The range of `rdiv36`: `0 < B ≤ 2⁶²` and `A / B < 2²⁶` (so the quotient is below
+`2⁶²`). -/
+@[inline] def rfit (A B : UInt64) : Bool := B != 0 && B ≤ 4611686018427387904 && A / B < 67108864
+
+/-- `roundDivI (±A · 2³⁶) B` in 64-bit arithmetic (`rdiv36_eq`, under `rfit A B`): the
+quotient of `A` is shifted by 36 bits in chunks small enough that `remainder · 2^c` fits. -/
+def rdiv36 (neg : Bool) (A B : UInt64) : Int64 :=
+  let q := A / B
+  let r := A % B
+  if B ≤ 268435456 then shLoop B 36 neg 1 q r
+  else if B ≤ 70368744177664 then shLoop B 18 neg 2 q r
+  else if B ≤ 4503599627370496 then shLoop B 12 neg 3 q r
+  else if B ≤ 36028797018963968 then shLoop B 9 neg 4 q r
+  else if B ≤ 288230376151711744 then shLoop B 6 neg 6 q r
+  else if B ≤ 1152921504606846976 then shLoop B 4 neg 9 q r
+  else if B ≤ 2305843009213693952 then shLoop B 3 neg 12 q r
+  else shLoop B 2 neg 18 q r
+
+/-- `|x|` of a 64-bit integer as an unsigned value (exact unless `x = −2⁶³`). -/
+@[inline] def abs64 (x : Int64) : UInt64 := if x < 0 then (-x).toUInt64 else x.toUInt64
+
+/-! #### Kernel correctness -/
+/-- `gcd64` computes `Nat.gcd` whenever it returns a non-zero value (fuel not exhausted). -/
+theorem gcd64_eq : ∀ (f : Nat) (a b : UInt64), gcd64 f a b ≠ 0 →
+    (gcd64 f a b).toNat = Nat.gcd a.toNat b.toNat
+  | 0, _, _, h => absurd rfl h
+  | f + 1, a, b, h => by
+    simp only [gcd64] at h ⊢
+    split
+    · next hb => subst hb; simp
+    · next hb =>
+      simp only [hb, ↓reduceIte] at h
+      rw [gcd64_eq f b (a % b) h, UInt64.toNat_mod, Nat.gcd_comm a.toNat b.toNat,
+        Nat.gcd_rec b.toNat a.toNat, Nat.gcd_comm]
+
+/-- Invariant of the digit-by-digit square root: `s = ⌊√Z⌋` and `r = Z − s²`. -/
+def SqInv (Z s r : Nat) : Prop := s * s ≤ Z ∧ Z < (s + 1) * (s + 1) ∧ r + s * s = Z
+
+/-- One digit step of the square root keeps the invariant. -/
+theorem sqInv_step (Z s r d : Nat) (h : SqInv Z s r) (hd : d < 4) :
+    (4 * s + 1 ≤ 4 * r + d → SqInv (4 * Z + d) (2 * s + 1) (4 * r + d - (4 * s + 1))) ∧
+    (¬ 4 * s + 1 ≤ 4 * r + d → SqInv (4 * Z + d) (2 * s) (4 * r + d)) := by
+  obtain ⟨h1, h2, h3⟩ := h
+  have e1 : (2 * s + 1) * (2 * s + 1) = 4 * (s * s) + 4 * s + 1 := by grind
+  have e2 : (2 * s + 1 + 1) * (2 * s + 1 + 1) = 4 * (s * s) + 8 * s + 4 := by grind
+  have e3 : (2 * s) * (2 * s) = 4 * (s * s) := by grind
+  have e4 : (s + 1) * (s + 1) = s * s + 2 * s + 1 := by grind
+  refine ⟨fun hc => ⟨?_, ?_, ?_⟩, fun hc => ⟨?_, ?_, ?_⟩⟩ <;> omega
+
+/-- The invariant determines `Nat.sqrt`. -/
+theorem sqInv_sqrt {Z s r : Nat} (h : SqInv Z s r) : s = Nat.sqrt Z := by
+  obtain ⟨h1, h2, _⟩ := h
+  have a1 := Nat.sqrt_le Z
+  have a2 := Nat.lt_succ_sqrt Z
+  rcases Nat.lt_trichotomy s (Nat.sqrt Z) with hl | he | hg
+  · have : (s + 1) * (s + 1) ≤ Nat.sqrt Z * Nat.sqrt Z := Nat.mul_le_mul hl hl
+    omega
+  · exact he
+  · have : (Nat.sqrt Z + 1) * (Nat.sqrt Z + 1) ≤ s * s := Nat.mul_le_mul hg hg
+    simp only [Nat.succ_eq_add_one] at a2
+    omega
+
+/-- `mul128` is the exact product. -/
+theorem mul128_eq (a b : UInt64) :
+    (mul128 a b).1.toNat * 2 ^ 64 + (mul128 a b).2.toNat = a.toNat * b.toNat := by
+  have ha := Nat.div_add_mod a.toNat 4294967296
+  have hb := Nat.div_add_mod b.toNat 4294967296
+  have ha0 := Nat.mod_lt a.toNat (show 0 < 4294967296 by decide)
+  have hb0 := Nat.mod_lt b.toNat (show 0 < 4294967296 by decide)
+  have ha1 : a.toNat / 4294967296 < 4294967296 := by
+    have := a.toNat_lt; omega
+  have hb1 : b.toNat / 4294967296 < 4294967296 := by
+    have := b.toNat_lt; omega
+  simp only [mul128]
+  generalize hA0 : a.toNat % 4294967296 = A0 at *
+  generalize hA1 : a.toNat / 4294967296 = A1 at *
+  generalize hB0 : b.toNat % 4294967296 = B0 at *
+  generalize hB1 : b.toNat / 4294967296 = B1 at *
+  have m : ∀ x y : Nat, x < 4294967296 → y < 4294967296 → x * y ≤ 18446744065119617025 := by
+    intro x y hx hy
+    have := Nat.mul_le_mul (show x ≤ 4294967295 by omega) (show y ≤ 4294967295 by omega)
+    omega
+  have e00 := m A0 B0 ha0 hb0
+  have e01 := m A0 B1 ha0 hb1
+  have e10 := m A1 B0 ha1 hb0
+  have e11 := m A1 B1 ha1 hb1
+  simp only [UInt64.toNat_add, UInt64.toNat_mul, UInt64.toNat_div, UInt64.toNat_mod,
+    UInt64.reduceToNat, hA0, hA1, hB0, hB1]
+  rw [Nat.mod_eq_of_lt (a := A0 * B0) (by omega), Nat.mod_eq_of_lt (a := A0 * B1) (by omega),
+    Nat.mod_eq_of_lt (a := A1 * B0) (by omega), Nat.mod_eq_of_lt (a := A1 * B1) (by omega)]
+  have q00 := Nat.div_add_mod (A0 * B0) 4294967296
+  have q01 := Nat.div_add_mod (A0 * B1) 4294967296
+  have q10 := Nat.div_add_mod (A1 * B0) 4294967296
+  have r00 := Nat.mod_lt (A0 * B0) (show 0 < 4294967296 by decide)
+  have r01 := Nat.mod_lt (A0 * B1) (show 0 < 4294967296 by decide)
+  have r10 := Nat.mod_lt (A1 * B0) (show 0 < 4294967296 by decide)
+  generalize A0 * B0 / 4294967296 = d00 at *
+  generalize A0 * B1 / 4294967296 = d01 at *
+  generalize A1 * B0 / 4294967296 = d10 at *
+  generalize A0 * B0 % 4294967296 = m00 at *
+  generalize A0 * B1 % 4294967296 = m01 at *
+  generalize A1 * B0 % 4294967296 = m10 at *
+  have hd00 : d00 < 4294967296 := by omega
+  have hd01 : d01 < 4294967296 := by omega
+  have hd10 : d10 < 4294967296 := by omega
+  rw [Nat.mod_eq_of_lt (a := d00 + m01) (by omega), Nat.mod_eq_of_lt (a := d00 + m01 + m10) (by omega)]
+  have qm := Nat.div_add_mod (d00 + m01 + m10) 4294967296
+  have rm := Nat.mod_lt (d00 + m01 + m10) (show 0 < 4294967296 by decide)
+  generalize hmid : d00 + m01 + m10 = mid at *
+  have hmd : mid / 4294967296 ≤ 2 := by omega
+  generalize mid / 4294967296 = mh at *
+  generalize mid % 4294967296 = ml at *
+  -- low word
+  have hlo : (mid * 4294967296 % 18446744073709551616 + m00) % 18446744073709551616 =
+      ml * 4294967296 + m00 := by
+    rw [← qm]
+    have : (4294967296 * mh + ml) * 4294967296 = mh * 18446744073709551616 + ml * 4294967296 := by
+      grind
+    rw [this]; omega
+  rw [hlo]
+  rw [Nat.mod_eq_of_lt (a := A1 * B1 + d01) (by omega),
+    Nat.mod_eq_of_lt (a := A1 * B1 + d01 + d10) (by omega),
+    Nat.mod_eq_of_lt (a := A1 * B1 + d01 + d10 + mh) (by omega)]
+  rw [← ha, ← hb]
+  grind
+
+private theorem shr_toNat (x : UInt64) (j : Nat) (hj : j < 32) :
+    ((x >>> (2 * j).toUInt64) % 4).toNat = x.toNat / 2 ^ (2 * j) % 4 := by
+  have hs : (2 * j).toUInt64.toNat % 64 = 2 * j := by
+    simp only [Nat.toUInt64, UInt64.toNat_ofNat']
+    omega
+  rw [UInt64.toNat_mod, UInt64.toNat_shiftRight, hs, Nat.shiftRight_eq_div_pow]
+  rfl
+
+/-- `sqDigit hi lo k` is base-4 digit `k` of `(hi·2⁶⁴ + lo) · 2⁴⁰` (for `k ≤ 60`). -/
+theorem sqDigit_toNat (hi lo : UInt64) (k : Nat) (hk : k ≤ 60) :
+    (sqDigit hi lo k).toNat = (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 / 2 ^ (2 * k) % 4 := by
+  unfold sqDigit
+  split
+  · next h =>
+    have : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 / 2 ^ (2 * k) =
+        (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ (38 - 2 * k) * 4 := by
+      have e : 2 ^ 40 = 2 ^ (2 * k) * (2 ^ (38 - 2 * k) * 4) := by
+        rw [show (4 : Nat) = 2 ^ 2 from rfl, ← Nat.pow_add, ← Nat.pow_add]; congr 1; omega
+      rw [e, ← Nat.mul_assoc, Nat.mul_comm _ (2 ^ (2 * k)), Nat.mul_assoc,
+        Nat.mul_div_cancel_left _ (Nat.two_pow_pos _), Nat.mul_assoc]
+    rw [this, Nat.mul_mod_left]
+    rfl
+  have hY : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 / 2 ^ (2 * k) =
+      (hi.toNat * 2 ^ 64 + lo.toNat) / 2 ^ (2 * (k - 20)) := by
+    have : 2 ^ (2 * k) = 2 ^ 40 * 2 ^ (2 * (k - 20)) := by
+      rw [← Nat.pow_add]; congr 1; omega
+    rw [this, Nat.mul_comm _ (2 ^ 40), Nat.mul_div_mul_left _ _ (by decide)]
+  rw [hY]
+  split
+  · next h' =>
+    rw [shr_toNat lo (k - 20) (by omega)]
+    have e : hi.toNat * 2 ^ 64 =
+        2 ^ (2 * (k - 20)) * (4 * (hi.toNat * 2 ^ (62 - 2 * (k - 20)))) := by
+      have : 2 ^ 64 = 2 ^ (2 * (k - 20)) * (4 * 2 ^ (62 - 2 * (k - 20))) := by
+        rw [show (4 : Nat) = 2 ^ 2 from rfl, ← Nat.pow_add, ← Nat.pow_add]; congr 1; omega
+      rw [this]; grind
+    rw [e, Nat.mul_add_div (Nat.two_pow_pos _), Nat.mul_add_mod]
+  · next h' =>
+    rw [shr_toNat hi (k - 52) (by omega)]
+    have : 2 ^ (2 * (k - 20)) = 2 ^ 64 * 2 ^ (2 * (k - 52)) := by
+      rw [← Nat.pow_add]; congr 1; omega
+    rw [this, ← Nat.div_div_eq_div_mul, Nat.mul_comm hi.toNat,
+      Nat.mul_add_div (Nat.two_pow_pos _), Nat.div_eq_of_lt lo.toNat_lt, Nat.add_zero]
+
+/-- The digit loop computes `Nat.sqrt (Y · 2⁴⁰)`, `Y = hi·2⁶⁴ + lo < 2⁸²`, from a state
+satisfying the invariant (no step wraps: root `< 2⁶¹`, remainder `≤ 2·root`). -/
+theorem isqLoop_eq (hi lo : UInt64) (hy : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 < 2 ^ 122) :
+    ∀ (k : Nat) (root rem : UInt64), k ≤ 61 →
+    SqInv ((hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 / 2 ^ (2 * k)) root.toNat rem.toNat →
+    (isqLoop hi lo k root rem).toNat = Nat.sqrt ((hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40)
+  | 0, root, rem, _, h => by simpa [isqLoop] using sqInv_sqrt h
+  | k + 1, root, rem, hk, h => by
+    have ih := isqLoop_eq hi lo hy k
+    have hd := sqDigit_toNat hi lo k (by omega)
+    generalize hYd : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 = Y at *
+    have hZ : Y / 2 ^ (2 * (k + 1)) ≤ Y := Nat.div_le_self _ _
+    obtain ⟨h1, h2, h3⟩ := h
+    have hs : root.toNat < 2 ^ 61 := by
+      false_or_by_contra
+      have : 2 ^ 61 * 2 ^ 61 ≤ root.toNat * root.toNat := Nat.mul_le_mul (by omega) (by omega)
+      rw [← Nat.pow_add] at this
+      omega
+    have e4 : (root.toNat + 1) * (root.toNat + 1) =
+        root.toNat * root.toNat + 2 * root.toNat + 1 := by
+      grind
+    have hr : rem.toNat ≤ 2 * root.toNat := by omega
+    have hd4 : (sqDigit hi lo k).toNat < 4 := by rw [hd]; exact Nat.mod_lt _ (by decide)
+    have hsplit : Y / 2 ^ (2 * k) = 4 * (Y / 2 ^ (2 * (k + 1))) + (sqDigit hi lo k).toNat := by
+      rw [hd, show 2 * (k + 1) = 2 * k + 2 by omega, Nat.pow_add, ← Nat.div_div_eq_div_mul]
+      exact (Nat.div_add_mod _ 4).symm
+    have hr4 : (rem * 4 + sqDigit hi lo k).toNat = rem.toNat * 4 + (sqDigit hi lo k).toNat := by
+      rw [UInt64.toNat_add, UInt64.toNat_mul]
+      simp only [UInt64.reduceToNat]
+      rw [Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)]
+    have ht : (root * 4 + 1).toNat = 4 * root.toNat + 1 := by
+      rw [UInt64.toNat_add, UInt64.toNat_mul]
+      simp only [UInt64.reduceToNat]
+      rw [Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)]; omega
+    have st := sqInv_step _ _ _ _ ⟨h1, h2, h3⟩ hd4
+    simp only [isqLoop]
+    split
+    · next hc =>
+      have hc' : 4 * root.toNat + 1 ≤ 4 * rem.toNat + (sqDigit hi lo k).toNat := by
+        have := UInt64.le_iff_toNat_le.mp hc; rw [hr4, ht] at this; omega
+      apply ih _ _ (by omega)
+      have hs1 : (root * 2 + 1).toNat = 2 * root.toNat + 1 := by
+        rw [UInt64.toNat_add, UInt64.toNat_mul]
+        simp only [UInt64.reduceToNat]
+        rw [Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)]; omega
+      have hs2 : (rem * 4 + sqDigit hi lo k - (root * 4 + 1)).toNat =
+          4 * rem.toNat + (sqDigit hi lo k).toNat - (4 * root.toNat + 1) := by
+        rw [UInt64.toNat_sub_of_le _ _ hc, hr4, ht]; omega
+      rw [hs1, hs2, hsplit]
+      exact st.1 hc'
+    · next hc =>
+      have hc' : ¬ 4 * root.toNat + 1 ≤ 4 * rem.toNat + (sqDigit hi lo k).toNat := by
+        intro h'; apply hc; apply UInt64.le_iff_toNat_le.mpr; rw [hr4, ht]; omega
+      apply ih _ _ (by omega)
+      have hs1 : (root * 2).toNat = 2 * root.toNat := by
+        rw [UInt64.toNat_mul]
+        simp only [UInt64.reduceToNat]
+        rw [Nat.mod_eq_of_lt (by omega)]; omega
+      rw [hs1, hr4, hsplit, show rem.toNat * 4 = 4 * rem.toNat by omega]
+      exact st.2 hc'
+
+/-- **64-bit square root.** For `Y = hi·2⁶⁴ + lo` with `hi < 2¹⁸`,
+`isqrtW hi lo = ⌊√(Y · 2⁴⁰)⌋`. -/
+theorem isqrtW_eq (hi lo : UInt64) (hy : hi.toNat < 2 ^ 18) :
+    (isqrtW hi lo).toNat = Nat.sqrt ((hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40) := by
+  have hl := lo.toNat_lt
+  have hY : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 < 2 ^ 122 := by
+    have : hi.toNat * 2 ^ 64 + lo.toNat < 2 ^ 82 := by omega
+    have := Nat.mul_lt_mul_of_pos_right this (Nat.two_pow_pos 40)
+    rwa [← Nat.pow_add] at this
+  unfold isqrtW
+  split
+  · next h0 =>
+    have h0' : hi.toNat = 0 := by simp [h0]
+    apply isqLoop_eq hi lo hY 52 0 0 (by omega)
+    have : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 / 2 ^ (2 * 52) = 0 := by
+      apply Nat.div_eq_of_lt
+      have := Nat.mul_lt_mul_of_pos_right hl (Nat.two_pow_pos 40)
+      rw [h0', Nat.zero_mul, Nat.zero_add, show 2 * 52 = 64 + 40 from rfl, Nat.pow_add]
+      exact this
+    rw [this]; simp [SqInv]
+  · apply isqLoop_eq hi lo hY 61 0 0 (Nat.le_refl _)
+    have : (hi.toNat * 2 ^ 64 + lo.toNat) * 2 ^ 40 / 2 ^ (2 * 61) = 0 := Nat.div_eq_of_lt hY
+    rw [this]; simp [SqInv]
+
+private theorem ediv_of {a b q r : Int} (hb : 0 < b) (h : r + b * q = a) (h0 : 0 ≤ r) (h1 : r < b) :
+    a / b = q := ((Int.ediv_emod_unique hb).mpr ⟨h, h0, h1⟩).1
+
+/-- `roundDivI` of `±(Q·B + R)` with `0 ≤ R < B`: `Q` plus one when `2R ≥ B` (resp. minus one
+more when `2R > B` for the negative value; halves round up). -/
+theorem roundDivI_qr (Q R B : Nat) (hB : 0 < B) (hR : R < B) :
+    roundDivI ((Q * B + R : Nat) : Int) B = ((Q + (if B ≤ 2 * R then 1 else 0) : Nat) : Int) ∧
+    roundDivI (-((Q * B + R : Nat) : Int)) B = -((Q + (if B < 2 * R then 1 else 0) : Nat) : Int) := by
+  unfold roundDivI
+  have hB' : (0 : Int) < 2 * B := by omega
+  constructor
+  · split
+    · next h => exact ediv_of (r := 2 * R - B) hB' (by push_cast; grind) (by omega) (by omega)
+    · next h => exact ediv_of (r := 2 * R + B) hB' (by push_cast; grind) (by omega) (by omega)
+  · split
+    · next h => exact ediv_of (r := 3 * B - 2 * R) hB' (by push_cast; grind) (by omega) (by omega)
+    · next h => exact ediv_of (r := B - 2 * R) hB' (by push_cast; grind) (by omega) (by omega)
+
+private theorem toInt64_toInt (u : UInt64) (h : u.toNat < 2 ^ 63) : u.toInt64.toInt = u.toNat := by
+  have : u.toInt64 = Int64.ofNat u.toNat := by
+    conv => lhs; rw [← UInt64.ofNat_toNat (x := u)]
+    rfl
+  rw [this]; exact Int64.toInt_ofNat_of_lt h
+
+private theorem neg_toInt64_toInt (u : UInt64) (h : u.toNat < 2 ^ 63) :
+    (-u.toInt64).toInt = -(u.toNat : Int) := by
+  have : u.toInt64 = Int64.ofNat u.toNat := by
+    conv => lhs; rw [← UInt64.ofNat_toNat (x := u)]
+    rfl
+  rw [this]; exact Int64.toInt_neg_ofNat_of_le (by omega)
+
+/-- The signed value `±x`. -/
+def sgnI (neg : Bool) (x : Nat) : Int := if neg then -(x : Int) else x
+
+/-- The final rounding step of `rdiv36` is `roundDivI` of `±(q·B + r)`. -/
+theorem rdivFin_eq (B : UInt64) (neg : Bool) (q r : UInt64) (hB0 : 0 < B.toNat)
+    (hB : B.toNat ≤ 2 ^ 62) (hr : r.toNat < B.toNat) (hq : q.toNat + 1 ≤ 2 ^ 62) :
+    (rdivFin B neg q r).toInt = roundDivI (sgnI neg (q.toNat * B.toNat + r.toNat)) B.toNat := by
+  have h2r : (2 * r).toNat = 2 * r.toNat := by
+    rw [UInt64.toNat_mul]; simp only [UInt64.reduceToNat]; rw [Nat.mod_eq_of_lt (by omega)]
+  have hadd : ∀ (b : Bool), (q + (if b then 1 else 0)).toNat = q.toNat + (if b then 1 else 0) := by
+    intro b; rw [UInt64.toNat_add]; split <;> simp only [UInt64.reduceToNat] <;> omega
+  have hrd := roundDivI_qr q.toNat r.toNat B.toNat hB0 hr
+  unfold rdivFin sgnI
+  cases neg
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    rw [hrd.1]
+    have e := hadd (decide (B ≤ 2 * r))
+    simp only [decide_eq_true_eq] at e
+    rw [toInt64_toInt _ (by rw [e]; split <;> omega), e]
+    simp only [UInt64.le_iff_toNat_le, h2r]
+  · simp only [↓reduceIte]
+    rw [hrd.2]
+    have e := hadd (decide (B < 2 * r))
+    simp only [decide_eq_true_eq] at e
+    rw [neg_toInt64_toInt _ (by rw [e]; split <;> omega), e]
+    simp only [UInt64.lt_iff_toNat_lt, h2r]
+
+/-- The chunked long division: with `B·2^c ≤ 2⁶⁴`, `r < B` and `(q + 1)·2^(c·n) ≤ 2⁶²`, no
+shift or sum wraps and the result is `roundDivI (±(q·2^(cn)·B + r·2^(cn))) B`. -/
+theorem shLoop_eq (B c : UInt64) (neg : Bool) (hB0 : 0 < B.toNat) (hB : B.toNat ≤ 2 ^ 62)
+    (hc : c.toNat < 64) (hBc : B.toNat * 2 ^ c.toNat ≤ 2 ^ 64) :
+    ∀ (n : Nat) (q r : UInt64), r.toNat < B.toNat → (q.toNat + 1) * 2 ^ (c.toNat * n) ≤ 2 ^ 62 →
+    (shLoop B c neg n q r).toInt = roundDivI (sgnI neg
+      (q.toNat * 2 ^ (c.toNat * n) * B.toNat + r.toNat * 2 ^ (c.toNat * n))) B.toNat
+  | 0, q, r, hr, hq => by
+    simp only [shLoop, Nat.mul_zero, Nat.pow_zero, Nat.mul_one] at hq ⊢
+    exact rdivFin_eq B neg q r hB0 hB hr hq
+  | n + 1, q, r, hr, hq => by
+    have hP : 0 < 2 ^ c.toNat := Nat.two_pow_pos _
+    have hPn : 1 ≤ 2 ^ (c.toNat * n) := Nat.two_pow_pos _
+    have hpow : 2 ^ (c.toNat * (n + 1)) = 2 ^ c.toNat * 2 ^ (c.toNat * n) := by
+      rw [← Nat.pow_add]; congr 1; rw [Nat.mul_succ]; omega
+    rw [hpow] at hq
+    have hqP : (q.toNat + 1) * 2 ^ c.toNat ≤ 2 ^ 62 := by
+      have := Nat.mul_le_mul_left ((q.toNat + 1) * 2 ^ c.toNat) hPn
+      rw [Nat.mul_one] at this
+      have e : (q.toNat + 1) * (2 ^ c.toNat * 2 ^ (c.toNat * n)) =
+          (q.toNat + 1) * 2 ^ c.toNat * 2 ^ (c.toNat * n) := by rw [Nat.mul_assoc]
+      omega
+    have hrP : r.toNat * 2 ^ c.toNat < B.toNat * 2 ^ c.toNat := Nat.mul_lt_mul_of_pos_right hr hP
+    have ht : (r <<< c).toNat = r.toNat * 2 ^ c.toNat := by
+      rw [UInt64.toNat_shiftLeft, Nat.mod_eq_of_lt hc, Nat.shiftLeft_eq, Nat.mod_eq_of_lt (by omega)]
+    have hqs : (q <<< c).toNat = q.toNat * 2 ^ c.toNat := by
+      rw [UInt64.toNat_shiftLeft, Nat.mod_eq_of_lt hc, Nat.shiftLeft_eq, Nat.mod_eq_of_lt (by
+        rw [Nat.add_mul] at hqP; omega)]
+    have hdiv : r.toNat * 2 ^ c.toNat / B.toNat < 2 ^ c.toNat :=
+      Nat.div_lt_of_lt_mul hrP
+    have hq' : ((q <<< c) + (r <<< c) / B).toNat =
+        q.toNat * 2 ^ c.toNat + r.toNat * 2 ^ c.toNat / B.toNat := by
+      rw [UInt64.toNat_add, hqs, UInt64.toNat_div, ht, Nat.mod_eq_of_lt (by
+        rw [Nat.add_mul] at hqP; omega)]
+    have hr' : ((r <<< c) % B).toNat = r.toNat * 2 ^ c.toNat % B.toNat := by
+      rw [UInt64.toNat_mod, ht]
+    simp only [shLoop]
+    rw [shLoop_eq B c neg hB0 hB hc hBc n _ _ (by rw [hr']; exact Nat.mod_lt _ hB0) (by
+      rw [hq']
+      have : q.toNat * 2 ^ c.toNat + r.toNat * 2 ^ c.toNat / B.toNat + 1 ≤
+          (q.toNat + 1) * 2 ^ c.toNat := by rw [Nat.add_mul]; omega
+      have := Nat.mul_le_mul_right (2 ^ (c.toNat * n)) this
+      rw [Nat.mul_assoc] at this; omega)]
+    rw [hq', hr', hpow]
+    congr 2
+    have e := Nat.div_add_mod (r.toNat * 2 ^ c.toNat) B.toNat
+    generalize r.toNat * 2 ^ c.toNat / B.toNat = a at e
+    generalize r.toNat * 2 ^ c.toNat % B.toNat = b at e
+    grind
+
+/-- **64-bit rounded division.** Under `rfit A B`,
+`rdiv36 neg A B = roundDivI (±(A · 2³⁶)) B`. -/
+theorem rdiv36_eq (neg : Bool) (A B : UInt64) (h : rfit A B = true) :
+    (rdiv36 neg A B).toInt = roundDivI (sgnI neg (A.toNat * 2 ^ 36)) B.toNat := by
+  simp only [rfit, Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq] at h
+  obtain ⟨⟨hB0, hB⟩, hq⟩ := h
+  have hB0' : 0 < B.toNat := by
+    have : B.toNat ≠ 0 := fun e => hB0 (UInt64.toNat_inj.mp (by simpa using e))
+    omega
+  have hB' : B.toNat ≤ 2 ^ 62 := UInt64.le_iff_toNat_le.mp hB
+  have hq' : A.toNat / B.toNat < 2 ^ 26 := by
+    have := UInt64.lt_iff_toNat_lt.mp hq; rwa [UInt64.toNat_div] at this
+  have key : ∀ (c : UInt64) (n : Nat), c.toNat * n = 36 → c.toNat < 64 →
+      B.toNat * 2 ^ c.toNat ≤ 2 ^ 64 →
+      (shLoop B c neg n (A / B) (A % B)).toInt = roundDivI (sgnI neg (A.toNat * 2 ^ 36)) B.toNat := by
+    intro c n hcn hc hBc
+    rw [shLoop_eq B c neg hB0' hB' hc hBc n _ _ (by rw [UInt64.toNat_mod]; exact Nat.mod_lt _ hB0')
+      (by rw [hcn, UInt64.toNat_div]
+          have := Nat.mul_le_mul_right (2 ^ 36) (show A.toNat / B.toNat + 1 ≤ 2 ^ 26 by omega)
+          omega)]
+    rw [hcn, UInt64.toNat_div, UInt64.toNat_mod]
+    congr 2
+    have e := Nat.div_add_mod A.toNat B.toNat
+    generalize A.toNat / B.toNat = a at e
+    generalize A.toNat % B.toNat = b at e
+    rw [← e]
+    grind
+  unfold rdiv36
+  simp only [UInt64.le_iff_toNat_le, UInt64.reduceToNat]
+  split
+  · exact key 36 1 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  split
+  · exact key 18 2 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  split
+  · exact key 12 3 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  split
+  · exact key 9 4 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  split
+  · exact key 6 6 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  split
+  · exact key 4 9 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  split
+  · exact key 3 12 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+  · exact key 2 18 rfl (by decide) (by simp only [UInt64.reduceToNat]; omega)
+
+/-- A 64-bit product of a factor below `2³¹` and one at most `2³⁰` does not wrap. -/
+theorem mul64_toInt (a x : Int64) (ha : a.toInt.natAbs < 2 ^ 31) (hx : x.toInt.natAbs ≤ 2 ^ 30) :
+    (a * x).toInt = a.toInt * x.toInt ∧ (a.toInt * x.toInt).natAbs < 2 ^ 61 := by
+  have hb : (a.toInt * x.toInt).natAbs < 2 ^ 61 := by
+    rw [Int.natAbs_mul]
+    have := Nat.mul_le_mul (show a.toInt.natAbs ≤ 2 ^ 31 - 1 by omega) hx
+    omega
+  refine ⟨?_, hb⟩
+  rw [Int64.toInt_mul]
+  apply Int.bmod_eq_of_le <;> omega
+
+/-- **64-bit linear form.** `a·x + c·y` does not wrap for `|a|, |c| < 2³¹`, `|x|, |y| ≤ 2³⁰`
+(the `IMatW.ok` and chord guards of `mkSegW`). -/
+theorem lin64_toInt (a c x y : Int64) (ha : a.toInt.natAbs < 2 ^ 31) (hc : c.toInt.natAbs < 2 ^ 31)
+    (hx : x.toInt.natAbs ≤ 2 ^ 30) (hy : y.toInt.natAbs ≤ 2 ^ 30) :
+    (a * x + c * y).toInt = a.toInt * x.toInt + c.toInt * y.toInt ∧
+      (a.toInt * x.toInt + c.toInt * y.toInt).natAbs < 2 ^ 62 := by
+  obtain ⟨h1, b1⟩ := mul64_toInt a x ha hx
+  obtain ⟨h2, b2⟩ := mul64_toInt c y hc hy
+  have hb : (a.toInt * x.toInt + c.toInt * y.toInt).natAbs < 2 ^ 62 := by omega
+  refine ⟨?_, hb⟩
+  rw [Int64.toInt_add, h1, h2]
+  apply Int.bmod_eq_of_le <;> omega
+
+/-- `abs64 x = |x|` for `x ≠ −2⁶³`. -/
+theorem abs64_toNat (x : Int64) (hx : x.toInt.natAbs < 2 ^ 63) :
+    (abs64 x).toNat = x.toInt.natAbs := by
+  unfold abs64
+  split
+  · next h =>
+    have hlt : x.toInt < 0 := Int64.lt_iff_toInt_lt.mp h
+    have hn : (-x).toInt = -x.toInt := by
+      rw [Int64.toInt_neg]; apply Int.bmod_eq_of_le <;> omega
+    have h0 : 0 ≤ -x := by apply Int64.le_iff_toInt_le.mpr; rw [hn]; simp; omega
+    rw [Int64.toNat_toUInt64_of_le h0, Int64.toNatClampNeg, hn]; omega
+  · next h =>
+    have hge : 0 ≤ x := by
+      apply Int64.le_iff_toInt_le.mpr
+      have : ¬ x.toInt < (0 : Int64).toInt := fun h' => h (Int64.lt_iff_toInt_lt.mpr h')
+      simp at this ⊢; omega
+    have : 0 ≤ x.toInt := by have := Int64.le_iff_toInt_le.mp hge; simpa using this
+    rw [Int64.toNat_toUInt64_of_le hge, Int64.toNatClampNeg]; omega
+
+/-- `|x| < 2³¹` (as a range test on `Int`, done once per pen). -/
+def fits31 (x : Int) : Bool := decide (-2147483648 < x ∧ x < 2147483648)
+
+/-- The 64-bit copy of an `IMat` (meaningful when `ok`: entries and `den` below `2³¹`, so
+`den² < 2⁶²` and `a·dx + c·dy` cannot wrap for `|dx|, |dy| ≤ 2³⁰`). -/
+structure IMatW where
+  /-- `IMat.a`. -/
+  a : Int64
+  /-- `IMat.b`. -/
+  b : Int64
+  /-- `IMat.c`. -/
+  c : Int64
+  /-- `IMat.d`. -/
+  d : Int64
+  /-- `IMat.den`. -/
+  den : UInt64
+  /-- `den²`. -/
+  den2 : UInt64
+  /-- All of the above are exact copies within the stated ranges. -/
+  ok : Bool
+  deriving Inhabited
+
+/-- The 64-bit copy of the matrix `(a, b, c, d) / den`. -/
+def IMatW.of (a b c d : Int) (den : Nat) : IMatW :=
+  let ok := fits31 a && fits31 b && fits31 c && fits31 d && decide (0 < den) &&
+    decide (den < 2147483648)
+  if ok then ⟨a.toInt64, b.toInt64, c.toInt64, d.toInt64, den.toUInt64,
+    den.toUInt64 * den.toUInt64, true⟩
+  else default
+
+/-- When `IMatW.of` reports `ok`, its fields are exact copies (`|entries| < 2³¹`,
+`0 < den < 2³¹`, `den2 = den²`). -/
+theorem IMatW.of_ok (a b c d : Int) (den : Nat) (h : (IMatW.of a b c d den).ok = true) :
+    (IMatW.of a b c d den).a.toInt = a ∧ (IMatW.of a b c d den).b.toInt = b ∧
+    (IMatW.of a b c d den).c.toInt = c ∧ (IMatW.of a b c d den).d.toInt = d ∧
+    (IMatW.of a b c d den).den.toNat = den ∧ (IMatW.of a b c d den).den2.toNat = den * den ∧
+    a.natAbs < 2 ^ 31 ∧ b.natAbs < 2 ^ 31 ∧ c.natAbs < 2 ^ 31 ∧ d.natAbs < 2 ^ 31 ∧
+    0 < den ∧ den < 2 ^ 31 := by
+  unfold IMatW.of at h ⊢
+  dsimp only at h ⊢
+  by_cases hok : (fits31 a && fits31 b && fits31 c && fits31 d && decide (0 < den) &&
+      decide (den < 2147483648)) = true
+  · simp only [hok, ↓reduceIte]
+    simp only [fits31, Bool.and_eq_true, decide_eq_true_eq] at hok
+    obtain ⟨⟨⟨⟨⟨⟨ha1, ha2⟩, hb1, hb2⟩, hc1, hc2⟩, hd1, hd2⟩, h0⟩, h1⟩ := hok
+    have cv : ∀ x : Int, -2147483648 < x → x < 2147483648 → x.toInt64.toInt = x := fun x h1 h2 =>
+      Int64.toInt_ofInt_of_le (by omega) (by omega)
+    have hden : den.toUInt64.toNat = den := by
+      simp only [Nat.toUInt64, UInt64.toNat_ofNat']; omega
+    refine ⟨cv a ha1 ha2, cv b hb1 hb2, cv c hc1 hc2, cv d hd1 hd2, hden, ?_, by omega, by omega,
+      by omega, by omega, h0, by omega⟩
+    rw [UInt64.toNat_mul, hden, Nat.mod_eq_of_lt]
+    have := Nat.mul_le_mul (Nat.le_of_lt h1) (Nat.le_of_lt h1)
+    omega
+  · simp only [hok, Bool.false_eq_true, ↓reduceIte] at h; exact absurd h (by decide)
+
 /-- A linear map over a common denominator: `x' = (a·x + c·y)/den`, `y' = (b·x + d·y)/den`
 (row-vector convention, as `lin`), `den > 0`. Lets the stroker evaluate `lin m v` on integer
 vectors without normalising intermediate fractions. -/
@@ -388,13 +993,19 @@ structure IMat where
   d : Int
   /-- The common denominator (lcm of the four denominators). -/
   den : Nat
+  /-- The 64-bit copy (task 7.9c; `IMatW.of`, unusable unless `w.ok`). -/
+  w : IMatW := default
   deriving Inhabited
 
 /-- The linear part of `m` over the lcm of its four denominators. -/
 def IMat.ofAff (m : Aff) : IMat :=
   let dm : Nat := Nat.lcm m.a.den (Nat.lcm m.b.den (Nat.lcm m.c.den m.d.den))
   let sc := fun (q : Rat) => q.num * ((dm / q.den : Nat) : Int)
-  ⟨sc m.a, sc m.b, sc m.c, sc m.d, dm⟩
+  let a := sc m.a
+  let b := sc m.b
+  let c := sc m.c
+  let d := sc m.d
+  { a, b, c, d, den := dm, w := IMatW.of a b c d dm }
 
 /-- The linear map `v ↦ lin m (perp (lin inv v))` as an `Aff` (rows: images of the unit
 vectors; no translation). -/
@@ -426,6 +1037,12 @@ structure Pen where
   invI : IMat := default
   /-- `normalMap map inv` (`d ↦ L·J·L⁻¹·d`) over a common denominator. -/
   nrmI : IMat := default
+  /-- `r.num` as a 64-bit value (meaningful when `rOk`). -/
+  rN : UInt64 := 0
+  /-- `r.den` as a 64-bit value (meaningful when `rOk`). -/
+  rD : UInt64 := 0
+  /-- `0 ≤ r.num < 2³¹` and `r.den < 2³¹` (task 7.9c's 64-bit chord geometry applies). -/
+  rOk : Bool := false
   deriving Inhabited
 
 /-- How dash lengths are measured: in pen space (the usual case, pen = user space), through a
@@ -468,7 +1085,9 @@ def Pen.make (map : Aff) (r : Rat) (cfg : Config) : Pen :=
   let inv := map.inv
   { map, inv, r, circM, polyCap := cfg.polyCap, lim := cfg.coordLimit,
     detPos := decide (0 < map.det), circI := circleTableI circM,
-    invI := IMat.ofAff inv, nrmI := IMat.ofAff (normalMap map inv) }
+    invI := IMat.ofAff inv, nrmI := IMat.ofAff (normalMap map inv),
+    rN := r.num.toNat.toUInt64, rD := r.den.toUInt64,
+    rOk := decide (0 ≤ r.num ∧ r.num < 2147483648 ∧ r.den < 2147483648) }
 
 /-- The hairline pen: a device circle of diameter one pixel. -/
 def hairPen (cfg : Config) : Pen := Pen.make Aff.id (subUnit / 2 : Int) cfg
@@ -581,11 +1200,12 @@ def lenI (m : IMat) (dx dy : Int) : Rat :=
   let uy := m.b * dx + m.d * dy
   sqrtQ (mkRat (ux * ux + uy * uy) (m.den * m.den))
 
-/-- The geometry of the chord `p → q`: the values of `mkSegSpec` (equal by construction —
-the same exact rationals — and tested in `raster-stroke-spec`), computed on
-common-denominator integer forms: `u = L⁻¹·d` via `pen.invI`, `L·J·u` via `pen.nrmI`. Only
-`|u|²` is normalised (for `sqrtQ`), and each grid value is one rounded division (`gridND`). -/
-def mkSeg (pen : Pen) (metric : Metric) (p q : FPt) (smooth : Bool) : SegG :=
+/-- The exact geometry of the chord `p → q` (the path of task 7.2i, now `mkSeg`'s fallback):
+the values of `mkSegSpec` (equal by construction — the same exact rationals — and tested in
+`raster-stroke-spec`), computed on common-denominator integer forms: `u = L⁻¹·d` via
+`pen.invI`, `L·J·u` via `pen.nrmI`. Only `|u|²` is normalised (for `sqrtQ`), and each grid
+value is one rounded division (`gridND`). -/
+def mkSegExact (pen : Pen) (metric : Metric) (p q : FPt) (smooth : Bool) : SegG :=
   let dx := q.x - p.x
   let dy := q.y - p.y
   let m := pen.invI
@@ -609,6 +1229,125 @@ def mkSeg (pen : Pen) (metric : Metric) (p q : FPt) (smooth : Bool) : SegG :=
     mkFrame p q len smooth pen.lim (gridND (hn * dx) hd) (gridND (hn * dy) hd)
       (gridND (hn * bx) hk) (gridND (hn * by') hk)
       (gridND (ux * (pl.den : Int)) td) (gridND (uy * (pl.den : Int)) td)
+
+/-- `sqrtQ (mkRat N D2)` in 64-bit arithmetic, as `(S, P)` with value `S / P`: `g = gcd(N, D2)`
+normalises the fraction (as `mkRat` does), `Y = (N/g)·(D2/g)` (128 bits, `mul128`, guarded
+below `2⁸²`), `S = ⌊√(Y·2⁴⁰)⌋ < 2⁶¹` (`isqrtW`), `P = (D2/g)·2²⁰` (the `sqrtDen`). `(0, 0)` when a guard fails
+(`N = 0` included). -/
+@[inline] def sqrtW (N D2 : UInt64) : UInt64 × UInt64 :=
+  let g := gcd64 96 N D2
+  if N == 0 || g == 0 then (0, 0) else
+  let qn := N / g
+  let qd := D2 / g
+  if qd < 8796093022208 then
+    let (hi, lo) := mul128 qn qd
+    if hi < 262144 then (isqrtW hi lo, qd * 1048576) else (0, 0)
+  else (0, 0)
+
+/-- `S / P` as a normalised `Rat`, the gcd taken in 64 bits (`ratW_eq`: it is `mkRat S P`). -/
+def ratW (S P : UInt64) : Rat :=
+  if h : gcd64 96 S P ≠ 0 ∧ P.toNat ≠ 0 then
+    { num := ((S / gcd64 96 S P).toNat : Int), den := (P / gcd64 96 S P).toNat
+      den_nz := by
+        rw [UInt64.toNat_div, gcd64_eq 96 S P h.1]
+        exact Nat.ne_of_gt (Nat.div_pos (Nat.gcd_le_right _ (Nat.pos_of_ne_zero h.2))
+          (Nat.gcd_pos_of_pos_right _ (Nat.pos_of_ne_zero h.2)))
+      reduced := by
+        rw [Int.natAbs_natCast, UInt64.toNat_div, UInt64.toNat_div, gcd64_eq 96 S P h.1]
+        exact Nat.coprime_div_gcd_div_gcd (Nat.gcd_pos_of_pos_right _ (Nat.pos_of_ne_zero h.2)) }
+  else mkRat (S.toNat : Int) P.toNat
+
+/-- `ratW` is `mkRat`. -/
+theorem ratW_eq (S P : UInt64) : ratW S P = mkRat (S.toNat : Int) P.toNat := by
+  unfold ratW
+  split
+  · next h =>
+    have hg := gcd64_eq 96 S P h.1
+    simp only [Rat.mkRat_def, h.2, ↓reduceDIte, Rat.normalize_eq, UInt64.toNat_div, hg,
+      Int.natAbs_natCast]
+    congr 1
+  · rfl
+
+/-- `|lin m d|²` numerator `ux² + uy²` (over `den²`) in 64 bits, `0` when it does not fit
+(`|ux|, |uy| < 2³¹`). -/
+@[inline] def norm2W (w : IMatW) (dx dy : Int64) : UInt64 :=
+  let ux := abs64 (w.a * dx + w.c * dy)
+  let uy := abs64 (w.b * dx + w.d * dy)
+  if ux < 2147483648 && uy < 2147483648 then ux * ux + uy * uy else 0
+
+/-- The 64-bit fast path of `mkSeg` (task 7.9c), `none` when a range guard fails. Every
+product is guarded by `mulOk`, every rounded division by `rfit`, the square root by
+`sqrtW`'s `Y < 2⁸²`, the linear maps by `IMatW.ok` and `|dx|, |dy| ≤ 2³⁰`; within those
+ranges no `UInt64`/`Int64` operation wraps (theorems `mulW_toNat`, `mul128_eq`,
+`isqrtW_eq`, `gcd64_eq`, `rdiv36_eq`, `lin64_toInt`, `abs64_toNat`, `IMatW.of_ok`,
+`ratW_eq`), so the values are those of `mkSegExact`: with `pl = S / P` (`P = qd·2²⁰`),
+`ax = roundDivI(2¹⁶·r·P·dx, r.den·S) = roundDivI(±(r.num·qd·|dx|)·2³⁶, r.den·S)` (`roundDivI`
+depends only on the value of the fraction), likewise `nx` (divisor `·k.den`) and
+`tx = roundDivI(±(|ux|·qd/g')·2³⁶, (m.den/g')·S)` with `g' = gcd(qd, m.den)`. Tested against
+`mkSegExact` and `mkSegSpec` in `raster-stroke-spec`. -/
+def mkSegW (pen : Pen) (metric : Metric) (p q : FPt) (smooth : Bool) : Option SegG :=
+  let dx := q.x - p.x
+  let dy := q.y - p.y
+  let m := pen.invI.w
+  let k := pen.nrmI.w
+  if !(m.ok && k.ok && pen.rOk && -1073741824 ≤ dx && dx ≤ 1073741824 &&
+      -1073741824 ≤ dy && dy ≤ 1073741824) then none else
+  let dx6 := dx.toInt64
+  let dy6 := dy.toInt64
+  let ux := m.a * dx6 + m.c * dy6
+  let uy := m.b * dx6 + m.d * dy6
+  let N := norm2W m dx6 dy6
+  let (S, P) := sqrtW N m.den2
+  if S == 0 then none else
+  let len? : Option Rat := match metric with
+    | .pen => some (ratW S P)
+    | .none => some (ratW S P)
+    | .user _ im =>
+      let (S', P') := if im.w.ok then sqrtW (norm2W im.w dx6 dy6) im.w.den2 else (0, 0)
+      if S' == 0 then none else some (ratW S' P')
+  match len? with
+  | none => none
+  | some len =>
+  let qd := P / 1048576
+  let bx := k.a * dx6 + k.c * dy6
+  let by' := k.b * dx6 + k.d * dy6
+  let adx := abs64 dx6
+  let ady := abs64 dy6
+  let abx := abs64 bx
+  let aby := abs64 by'
+  let aux := abs64 ux
+  let auy := abs64 uy
+  let rq := pen.rN * qd
+  let hd := pen.rD * S
+  let hk := hd * k.den
+  -- `tx = roundDivI(2³⁶·ux·qd, den·S)`; `qd ≈ den²` (the gcd `g` is small), so cancel
+  -- `gcd(qd, den)` first to keep the divisor within 64 bits.
+  let g' := gcd64 96 qd m.den
+  let qd' := qd / g'
+  let td := (m.den / g') * S
+  if !(g' != 0 && mulOk pen.rN qd && mulOk rq adx && mulOk rq ady && mulOk rq abx &&
+      mulOk rq aby && mulOk aux qd' && mulOk auy qd' && mulOk pen.rD S && mulOk hd k.den &&
+      mulOk (m.den / g') S) then
+    none else
+  let Ax := rq * adx
+  let Ay := rq * ady
+  let Bx := rq * abx
+  let By := rq * aby
+  let Tx := aux * qd'
+  let Ty := auy * qd'
+  if !(rfit Ax hd && rfit Ay hd && rfit Bx hk && rfit By hk && rfit Tx td && rfit Ty td) then
+    none else
+  some (mkFrame p q len smooth pen.lim (rdiv36 (dx6 < 0) Ax hd).toInt
+    (rdiv36 (dy6 < 0) Ay hd).toInt (rdiv36 (bx < 0) Bx hk).toInt
+    (rdiv36 (by' < 0) By hk).toInt (rdiv36 (ux < 0) Tx td).toInt
+    (rdiv36 (uy < 0) Ty td).toInt)
+
+/-- The geometry of the chord `p → q`: the 64-bit path `mkSegW` when its range guards hold,
+else the exact `mkSegExact` (task 7.9c; the two agree — see `mkSegW`). -/
+def mkSeg (pen : Pen) (metric : Metric) (p q : FPt) (smooth : Bool) : SegG :=
+  match mkSegW pen metric p q smooth with
+  | some g => g
+  | none => mkSegExact pen metric p q smooth
 
 /-- The point at user length `s` along the segment. -/
 def along (g : SegG) (s : Rat) : Pt := padd (toPt g.p) (psc (s / g.len) g.d)
