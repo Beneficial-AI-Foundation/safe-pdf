@@ -2,7 +2,7 @@ import SafePdf.Core.Limits
 import SafePdf.Core.Error
 
 /-!
-# Baseline JPEG decoder (`/DCTDecode`, task 7.6a)
+# JPEG decoder (`/DCTDecode`, tasks 7.6a baseline, 7.6b progressive)
 
 Plan.md §3 (the quarantine zone: "DCT (JPEG), JPEG 2000, JBIG2 decoding"; design rule 4: the
 decoder's output is re-validated — dimensions, size — before it enters the core), §6 Phase 3
@@ -13,14 +13,27 @@ under the rules of `Core/` (no `partial`, `unsafe`, `panic!`, `!` indexing, `sor
 loop is a `for` over a range or a recursion on explicit fuel bounded by the input or the
 output size.
 
-ITU-T T.81 (ISO/IEC 10918-1), sequential DCT with Huffman coding:
+ITU-T T.81 (ISO/IEC 10918-1), sequential and progressive DCT with Huffman coding:
 
 * **Markers** (B.1, B.2): `SOI`, `APP0` (JFIF), `APP14` (Adobe: colour transform), other
-  `APPn`/`COM` skipped, `DQT` (8- and 16-bit tables), `SOF0`/`SOF1` (8-bit precision, 1–4
-  components, sampling factors 1–4), `DHT`, `SOS` (one or several scans; a scan of one
-  component is non-interleaved), `DRI`/`RSTn` (restart intervals), `EOI`. Progressive
-  (`SOF2`/`SOF6`/`SOF10`/`SOF14`), lossless, arithmetic-coded frames, 12-bit precision and
-  `DNL` (height 0) are `Error.unsupported`: the image layer then draws the placeholder.
+  `APPn`/`COM` skipped, `DQT` (8- and 16-bit tables), `SOF0`/`SOF1`/`SOF2` (8-bit precision,
+  1–4 components, sampling factors 1–4), `DHT`, `SOS` (one or several scans; a scan of one
+  component is non-interleaved), `DRI`/`RSTn` (restart intervals), `EOI`. Lossless,
+  hierarchical and arithmetic-coded frames (`SOF3`, `SOF5`–`SOF7`, `SOF9`–`SOF15`), 12-bit
+  precision and `DNL` (height 0) are `Error.unsupported`: the image layer then draws the
+  placeholder.
+* **Progressive frames** (`SOF2`, Annex G, libjpeg-turbo `jdphuff.c`): all coefficients are
+  kept (16-bit `JCOEF` semantics) until `EOI`, then dequantised with each component's table
+  latched at its first scan and inverse-transformed. Scans: DC first (interleaved or not) and
+  DC refinement, AC first with `ZRL` and end-of-band runs `EOBr`, AC refinement (correction
+  bits, newly nonzero coefficients, runs) — spectral selection `Ss…Se`, successive
+  approximation `Ah`/`Al`. Scan parameters are checked like `start_pass_phuff_decoder`
+  (else malformed); inconsistent scan *sequences* (libjpeg warnings) decode as they come.
+  After a read past the end of a segment, the remaining MCUs of the restart interval are
+  left unchanged (libjpeg `insufficient_data`). **Deviation**: libjpeg's interblock
+  smoothing (`do_block_smoothing`, applied at output when the scans leave the DC or the
+  first AC coefficients short of full precision — truncated files, unusual scripts) is not
+  reproduced: such images differ slightly from MuPDF (complete files are bit-exact).
 * **Entropy decoding** (F.2.2): canonical Huffman tables validated as libjpeg does
   (`jpeg_make_d_derived_tbl`: at most 256 symbols, no code overflow — the all-ones code is
   rejected — DC symbols ≤ 15), decoded through a 16-bit lookup table; byte stuffing
@@ -51,9 +64,12 @@ reproduced: this decoder always decodes at full size.
 
 `/Width · /Height ≤ Limits.maxImagePixels` (else `Error.limitExceeded .imagePixels`); the
 component planes (padded to whole MCUs) and the output buffer each hold at most
-`Limits.maxDecodedStreamBytes` bytes (else `.decodedStreamBytes`); at most one scan per
-component is decoded (a scan after every component has been decoded ends decoding, like a
-sequential libjpeg stream); the marker loop runs at most once per input byte. The decoded
+`Limits.maxDecodedStreamBytes` bytes (else `.decodedStreamBytes`); in a sequential frame at
+most one scan per component is decoded (a scan after every component has been decoded ends
+decoding, like a sequential libjpeg stream); a progressive frame's coefficient buffer is
+charged `coefBytes` = 8 bytes per coefficient against `maxDecodedStreamBytes`, and at most
+`maxScans` = 256 progressive scans are decoded (each one pass over its blocks; more is
+`Error.unsupported`); the marker loop runs at most once per input byte. The decoded
 image carries its size law (`Image.size_eq`, `Image.nc_le`), and `decode_pixels` proves the
 pixel bound.
 
