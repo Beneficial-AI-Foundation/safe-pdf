@@ -152,7 +152,9 @@ def nm_names(b):
     out = {m.decode() for m in re.findall(rb"/NM\s*\((safepdf-mark-\d+)\)", b)}
     for h in re.findall(rb"/NM\s*<([0-9A-Fa-f\s]*)>", b):
         v = bytes.fromhex(re.sub(rb"\s", b"", h).decode())
-        if v.startswith(b"safepdf-mark-"):
+        # A highlight's comment popup (9.5g, pdf.js form) is named
+        # safepdf-mark-ID-popup-CID; it belongs to the highlight and is not a mark.
+        if v.startswith(b"safepdf-mark-") and b"-popup-" not in v:
             out.add(v.decode())
     return out
 log = [json.loads(l) for l in open(sys.argv[1])]
@@ -179,7 +181,10 @@ put = open(sys.argv[3], "rb").read()
 orig = open(sys.argv[4], "rb").read()
 assert put.startswith(orig) and len(put) > len(orig), (len(put), len(orig))
 assert put.rstrip().endswith(b"%%EOF"), put[-40:]
-assert nm_names(put) == {"safepdf-mark-%d" % n for n in (1, 2, 3, 4)}, nm_names(put)
+# Mark 2 is the highlight's comment: since 9.5g it is written as highlight 1's
+# /Contents + /Popup (pdf.js form), whose popup is named safepdf-mark-1-popup-2.
+assert nm_names(put) == {"safepdf-mark-%d" % n for n in (1, 3, 4)}, nm_names(put)
+assert b"safepdf-mark-1-popup-2" in put or bytes("safepdf-mark-1-popup-2", "ascii").hex().upper().encode() in put.upper(), "popup of mark 1"
 json.dump({"hl": hl, "note": note}, open(sys.argv[6], "w"))
 EOF
 }
@@ -296,7 +301,9 @@ def nm_names(b):
     out = {m.decode() for m in re.findall(rb"/NM\s*\((safepdf-mark-\d+)\)", b)}
     for h in re.findall(rb"/NM\s*<([0-9A-Fa-f\s]*)>", b):
         v = bytes.fromhex(re.sub(rb"\s", b"", h).decode())
-        if v.startswith(b"safepdf-mark-"):
+        # A highlight's comment popup (9.5g, pdf.js form) is named
+        # safepdf-mark-ID-popup-CID; it belongs to the highlight and is not a mark.
+        if v.startswith(b"safepdf-mark-") and b"-popup-" not in v:
             out.add(v.decode())
     return out
 log = [json.loads(l) for l in open(sys.argv[1])]

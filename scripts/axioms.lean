@@ -1129,3 +1129,18 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Content.Run.FormCache.code_fst_eq
 #print axioms SafePdf.Core.Content.runPageUncached_ops_le
 #print axioms SafePdf.Core.Content.runPageUncached_items_le
+-- Phase 9, task 9.5g: edits and removals of saved marks (writer rule W11)
+#print axioms SafePdf.Spec.Write.c7Update
+#print axioms SafePdf.Spec.Write.writeUpdate_prefix
+#print axioms SafePdf.Spec.Write.writeUpdate_chain
+#print axioms SafePdf.Spec.Write.writeUpdate_untouched
+#print axioms SafePdf.Spec.Write.writeUpdate_open
+#print axioms SafePdf.Spec.Write.writeUpdate_annots
+#print axioms SafePdf.Spec.Write.writeUpdate_sups
+#print axioms SafePdf.Spec.Write.writeUpdate_aux
+#print axioms SafePdf.Spec.Write.writeUpdate_crypt
+#print axioms SafePdf.Spec.Write.planUpdate_edits
+#print axioms SafePdf.Spec.Write.plan_removed
+#print axioms SafePdf.Spec.Write.plan_sups
+#print axioms SafePdf.Spec.Write.mem_kept
+#print axioms SafePdf.Spec.Write.newDict_annots_kept
