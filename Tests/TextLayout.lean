@@ -21,6 +21,8 @@ Hand-built PDFs:
   stacked sub/superscripts, and a far-away raised glyph that must not join; the expected texts
   are MuPDF's (`mutool draw -F txt`) except for the stacked case (see `layoutCases`).
 
+* **Clipping** (task 6.8f, `clipCases`): text outside the bounding box of the clip.
+
 Each case checks glyph texts and origins (x in thousandths) or the page text.
 -/
 
@@ -230,6 +232,21 @@ def orderCases : List (String × String × String) :=
     ("prose: a 0.13 em gap is below MuPDF's 0.15 em",
       "BT /F1 10 Tf 72 700 Td [(tight) -130 (gap) -160 (wide)] TJ ET", "tightgap wide") ]
 
+/-- Clipped text (task 6.8f), as MuPDF 1.25.1 under `FZ_STEXT_CLIP` (`mutool draw -F txt` on
+the same `mixedDoc` pages): a glyph whose box lies entirely outside the bounding box of the
+current clip (the intersection of all clip paths' boxes) is not extracted; a glyph straddling
+the clip's edge is. -/
+def clipCases : List (String × String × String) :=
+  [ ("text outside the clip is hidden",
+      "q 0 0 100 100 re W n BT /F1 10 Tf 200 700 Td (Hidden) Tj ET " ++
+        "BT /F1 10 Tf 10 50 Td (Inside) Tj ET Q BT /F1 10 Tf 72 600 Td (Shown) Tj ET",
+      "Inside\n\nShown"),
+    ("glyphs past the clip edge are hidden, a straddling one is kept",
+      "q 0 0 100 100 re W n BT /F1 10 Tf 85 50 Td (Edge) Tj ET Q", "Edg"),
+    ("nested clips intersect",
+      "q 0 0 300 300 re W n q 200 0 100 100 re W n BT /F1 10 Tf 10 50 Td (Gone) Tj ET " ++
+        "BT /F1 10 Tf 210 50 Td (Kept) Tj ET Q Q", "Kept") ]
+
 /-- Run the cases; the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -253,7 +270,7 @@ def run : IO Nat := do
     | none =>
       IO.println s!"  FAIL {label}: extraction failed"
       bad := bad + 1
-  for (label, c, text) in orderCases do
+  for (label, c, text) in orderCases ++ clipCases do
     match extract (mixedDoc c) with
     | some (_, t, _) =>
       if t != text then
