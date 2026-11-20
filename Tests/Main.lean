@@ -23,6 +23,8 @@ import Tests.RasterComposite
 import Tests.RasterImage
 import Tests.RasterTransparency
 import Tests.RasterShading
+import Tests.RasterTiling
+import Tests.RasterTxFast
 
 /-!
 # Test runner
@@ -65,7 +67,9 @@ def suites : List Suite :=
     { name := "raster-composite", run := SafePdf.Tests.RasterComposite.run },
     { name := "raster-image", run := SafePdf.Tests.RasterImage.run },
     { name := "raster-transparency", run := SafePdf.Tests.RasterTransparency.run },
-    { name := "raster-shading", run := SafePdf.Tests.RasterShading.run } ]
+    { name := "raster-shading", run := SafePdf.Tests.RasterShading.run },
+    { name := "raster-tiling", run := SafePdf.Tests.RasterTiling.run },
+    { name := "raster-tx-fast", run := SafePdf.Tests.RasterTxFast.run } ]
 
 end SafePdf.Tests
 

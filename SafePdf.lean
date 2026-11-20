@@ -66,5 +66,6 @@ import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Raster.Image
 import SafePdf.Core.Raster.Transparency
 import SafePdf.Core.Raster.Shading
+import SafePdf.Core.Raster.Tiling
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text

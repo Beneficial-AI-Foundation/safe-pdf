@@ -531,6 +531,7 @@ def painterG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) 
   tx := (·.tx)
   setTx := fun st t => { st with tx := t }
   paint := renderItemG cfg m W H stroke pf
+  bound := fun it => some (Clip.itemBound cfg m W H it)
 
 /-- `painterG` is lawful. -/
 theorem painterG_lawful (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
