@@ -1178,3 +1178,13 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Spec.WritePrefix.notLen_of_dict
 #print axioms SafePdf.Spec.WritePrefix.lookup_eq
 #print axioms SafePdf.Spec.WritePrefix.crypt_eq_of_ref
+-- Phase 9, task 9.5e2: value-level C7 without side condition
+#print axioms SafePdf.Spec.Write.sameHandler_ok
+#print axioms SafePdf.Spec.Write.sameState_ok
+#print axioms SafePdf.Spec.Write.checkObjects_crypt
+#print axioms SafePdf.Spec.Write.writeUpdate_crypt_eq
+#print axioms SafePdf.Spec.Write.writeAnnots_crypt_eq
+#print axioms SafePdf.Spec.Write.writeUpdate_value'
+#print axioms SafePdf.Spec.Write.writeAnnots_value'
+#print axioms SafePdf.Spec.Write.c7Value'
+#print axioms SafePdf.Spec.Write.c7ValueAnnots'
