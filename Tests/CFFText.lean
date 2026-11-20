@@ -95,9 +95,10 @@ def cases (cff cid : ByteArray) : List (String × ByteArray × List (String × I
   -- supplement), so its text is "A"
   [ ("Type1C, no /Widths, no ToUnicode", simpleDoc cff "" "BT /F1 10 Tf 72 700 Td (AB Ca) Tj ET",
       [("A", 72000), ("B", 78500), (" ", 85500), ("C", 88000), ("A", 94100)], "AB CA"),
-    -- `foo` is not in the AGL: code 102 falls back to ASCII `f`; width 600.5
+    -- `foo` is not in the glyph list: U+FFFD (no ASCII guess outside Type 3, as MuPDF;
+    -- task 6.7b); width 600.5
     ("Type1C, glyph without AGL name", simpleDoc cff "" "BT /F1 10 Tf 72 700 Td (fA) Tj ET",
-      [("f", 72000), ("A", 78005)], "fA"),
+      [(replacementStr, 72000), ("A", 78005)], replacementStr ++ "A"),
     ("Type1C, /Differences over the built-in encoding",
       simpleDoc cff "/Encoding << /Differences [65 /B 66 /C] >>"
         "BT /F1 10 Tf 72 700 Td (ABC) Tj ET",

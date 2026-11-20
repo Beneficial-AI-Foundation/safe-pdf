@@ -13,6 +13,7 @@ import Tests.FontIdentity
 import Tests.RasterGeom
 import Tests.CFFText
 import Tests.RasterFill
+import Tests.TextUnicode
 
 /-!
 # Test runner
@@ -45,7 +46,8 @@ def suites : List Suite :=
     { name := "font-identity", run := SafePdf.Tests.FontIdentity.run },
     { name := "raster-geom", run := SafePdf.Tests.RasterGeom.run },
     { name := "cff-text", run := SafePdf.Tests.CFFText.run },
-    { name := "raster-fill", run := SafePdf.Tests.RasterFill.run } ]
+    { name := "raster-fill", run := SafePdf.Tests.RasterFill.run },
+    { name := "text-unicode", run := SafePdf.Tests.TextUnicode.run } ]
 
 end SafePdf.Tests
 
