@@ -4,6 +4,7 @@ import SafePdf.Core.Font.Outline
 import SafePdf.Core.Raster.Image
 import SafePdf.Core.Raster.Transparency
 import SafePdf.Core.Raster.Shading
+import SafePdf.Core.Raster.Tiling
 import SafePdf.Core.Annot
 
 /-!
@@ -79,6 +80,18 @@ Task 7.3f: a glyph mask whose colour is a shading-pattern colour is painted with
 through `Shading.renderStroke` (pattern strokes); `sh` items are painted with their `ca`, and
 those with a blend mode or soft mask are bracketed by a one-item transparency group before
 the transparency driver sees them (`liftSh`; nested soft masks included).
+
+Task 7.3h1 (tiling fills): `renderDocPage` loads `PageFonts.tilings` (`Tiling.loadTilings`:
+the tiling patterns named by `fillPath` colours of the page and annotation items, inside soft
+masks too, found through `PatternUse.res` and `Run.resLookup`; the cells run under what the
+annotations left of their op/form budget — the page run's own counts are not exposed by
+`Text.PageText`, so page content, annotations and cells run at most twice the page caps).
+A `fillPath` whose colour is a loaded tiling pattern is painted by `Tiling.renderTilingFill`
+(pattern matrix `Matrix.mul pat.matrix use.base`, PaintType 2 colour `use.under`, cells by the
+path-only `Tiling.pathPainter`); everything else as before. The fill's bound for the
+transparency driver (`Clip.itemBound`: path box ∩ clip) still holds, since the tiling paints
+only through the fill ∩ clip mask. Pattern strokes, pattern text and full cell painters
+(text/images in cells) are task 7.3h2.
 -/
 
 namespace SafePdf.Core.Raster.Glyph
@@ -779,6 +792,9 @@ structure PageFonts where
   images : Image.ImageTable := {}
   /-- Shadings and shading patterns of the page (task 7.3d). -/
   shadings : Shading.ShadingTable := {}
+  /-- Tiling patterns of the page (task 7.3h1; fills only, cells painted by
+  `Tiling.pathPainter`). -/
+  tilings : Tiling.TilingTable := {}
 
 /-- **Per-run hook**: the coverage masks of a glyph run inside the device window `win`, in
 painting order, each with its colour, alpha and counted work: the fill (modes 0, 2, 4, 6) then
@@ -852,7 +868,13 @@ def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeF
   | .image src ctm fill clip => { st with rs := Image.renderImage cfg m W H pf.images st.rs src ctm fill clip }
   | .shading name r ctm fill clip =>
     { st with rs := Shading.renderShading cfg m W H pf.shadings st.rs r name ctm fill.alpha clip }
-  | .fillPath p rule style clip => { st with rs := Shading.renderFill cfg m W H pf.shadings st.rs p rule style clip }
+  | .fillPath p rule style clip =>
+    match pf.tilings.tileOf style.color style.pattern with
+    | some (pat, pm, uc) =>
+      let rs := Tiling.renderTilingFill cfg (Tiling.pathPainter cfg) m W H st.rs pat pm uc p rule
+        style.alpha clip
+      { st with rs }
+    | none => { st with rs := Shading.renderFill cfg m W H pf.shadings st.rs p rule style clip }
   | .strokePath p style clip =>
     { st with rs := Shading.renderStroke cfg m W H stroke pf.shadings st.rs p style clip }
   | it => { st with rs := Clip.renderItem cfg m W H stroke st.rs it }
@@ -883,7 +905,11 @@ theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Cli
   | image src ctm fill clip => simp only [renderItemG]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
   | shading name r ctm fill clip =>
     simp only [renderItemG]; exact Shading.renderShading_size _ _ _ _ _ _ _ _ _ _ _
-  | fillPath p rule style clip => simp only [renderItemG]; exact Shading.renderFill_size _ _ _ _ _ _ _ _ _ _
+  | fillPath p rule style clip =>
+    simp only [renderItemG]
+    split
+    · exact Tiling.renderTilingFill_size _ _ _ _ _ _ _ _ _ _ _ _ _
+    · exact Shading.renderFill_size _ _ _ _ _ _ _ _ _ _
   | strokePath p style clip =>
     simp only [renderItemG]; exact Shading.renderStroke_size _ _ _ _ _ _ _ _ _ _
   | _ => simp only [renderItemG]; exact Clip.renderItem_size _ _ _ _ _ _ _
@@ -988,7 +1014,14 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
       let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2; (acc.1 ++ t, b)) (srcs, b)
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) items
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) items
-    (.ok (renderPage page zoom rot ⟨ap.fonts, srcs, imgs, shs⟩ items cfg), b)
+    -- Tiling patterns (task 7.3h1): the cells of the patterns that fills name (page and
+    -- annotation items, inside soft masks too) are run under what the annotations left of
+    -- their op/form budget (the page run's own counts are not exposed by `PageText`, so the
+    -- page content, the annotations and the cells together run at most twice the page caps).
+    let (tls, b, _) := Tiling.loadTilings (Text.textEnv limits (Text.docSource limits doc) ap.fonts) b ()
+      { ops := limits.maxOpsPerPage - ap.ops, forms := limits.maxFormsPerPage - ap.forms }
+      (page.resources.getD []) items
+    (.ok (renderPage page zoom rot ⟨ap.fonts, srcs, imgs, shs, tls⟩ items cfg), b)
 
 /-! ## 6. Checks -/
 
