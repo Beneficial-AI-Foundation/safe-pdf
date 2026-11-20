@@ -50,6 +50,13 @@ Task 8.3d adds (`run83d`):
 * NoRotate on pages with `/Rotate` 0, 90, 180, 270 (`noRotFixture`): the flagged annotation stays
   upright, hanging from its rectangle's upper-left corner; sampled pixels identical to
   `mutool draw -r 72`, and the whole renders identical (0 of 40,000 pixels differ, each rotation).
+* synthesised FreeText and Stamp (`textFixture`, seven annotations): `/DA` fonts, sizes and
+  colours, `/Q` alignment, `/RD`, a callout, `/Rotate 90`, three stamps; rectangles, the
+  pseudo-owner base-14 font resources, the first line's offsets (equal to MuPDF's
+  `-F stext` line origins), the text lines of `mutool draw -F txt`, and pixels away from the
+  text sampled from `mutool draw -r 72`. Every differing pixel of the whole page lies in a text
+  run (the rasterizer does not draw non-embedded base-14 glyphs yet) or on a 1-pixel edge of the
+  turned stamp frames (`SAFEPDF_PPM_DIR` writes `text.pdf`).
 -/
 
 namespace SafePdf.Tests.Annot
@@ -428,6 +435,29 @@ def noRotFixture (rot : Nat) : ByteArray := mkPdf [
   "<< /Type /Annot /Subtype /Square /F 16 /Rect [40 100 80 120] /AP << /N 5 0 R >> >>",
   "<< /Type /Annot /Subtype /Square /Rect [120 100 160 120] /AP << /N 5 0 R >> >>"]
 
+/-- Task 8.3d (2, 3): FreeText and Stamp without `/AP`: (0) centred, wrapping Helvetica on a
+filled box with a 2-point border; (1) right-aligned Times at `/DA` size 0 (→ 12) with a line
+break and `/RD`; (2) a callout with an open arrow, Courier; (3) text turned by `/Rotate 90`;
+(4) an `Approved` stamp; (5) the default `Draft` stamp at half opacity; (6) a two-line stamp. -/
+def textFixture : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R " ++
+    "/Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R] >>",
+  strmObj "" "",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 20 180 80] /C [1 1 0.8] /BS << /W 2 >> /Q 1 " ++
+    "/DA (/Helv 12 Tf 0 0 1 rg) /Contents (Hello world, this text is long enough to wrap) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [200 20 290 80] /C [0.9] /Q 2 /RD [2 2 2 2] " ++
+    "/DA (/TiRo 0 Tf 1 0 0 rg) /Contents (First line\\nSecond) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 100 100 140] /IT /FreeTextCallout " ++
+    "/CL [150 170 120 150 100 120] /LE /OpenArrow /DA (/Cour 9 Tf 0 g) /Contents (Callout) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [200 100 240 180] /Rotate 90 /C [0.8 0.9 1] " ++
+    "/DA (/Helv 10 Tf 0 g) /Contents (Turned) >>",
+  "<< /Type /Annot /Subtype /Stamp /Rect [20 200 160 280] /Name /Approved /C [0 0.5 0] >>",
+  "<< /Type /Annot /Subtype /Stamp /Rect [180 200 290 240] /CA 0.5 >>",
+  "<< /Type /Annot /Subtype /Stamp /Rect [180 250 290 290] /Name /NotForPublicRelease " ++
+    "/C [0.8 0 0] >>"]
+
 /-- Task 8.3d checks. -/
 def run83d : IO Nat := do
   let mut failures := 0
@@ -447,6 +477,55 @@ def run83d : IO Nat := do
       if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
         writePpm (System.FilePath.mk dir / s!"norot{rot}.ppm") o.img
         IO.FS.writeBinFile (System.FilePath.mk dir / s!"norot{rot}.pdf") pdf
+  -- (2, 3) FreeText and Stamp
+  match process textFixture with
+  | none => failures := failures + (← check "text fixture processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "text all drawn"
+      (ds.length == 7 && ds.all (·.synth) && o.ap.collected.skipped.isEmpty))
+    let rects := ds.map (·.rect)
+    -- /RD insets the rectangle; the callout grows it; the stamp keeps the 190 : 50 aspect
+    failures := failures + (← check "freetext rd rect" (rects[1]? == some ⟨202, 22, 288, 78⟩))
+    failures := failures + (← check "freetext callout rect"
+      (rects[2]? == some ⟨19, 99, 151, 171⟩))
+    failures := failures + (← check "stamp rect"
+      (rects[4]? == some ⟨20, 4210 / 19, 160, 4910 / 19⟩ &&
+       (ds[4]?.map (·.matrix)) == some (Annot.aOf ⟨20, 4210 / 19, 160, 4910 / 19⟩
+         ⟨0, 0, 190, 50⟩).matrix))
+    -- the synthesised base-14 fonts are in the annotation font table (pseudo owner)
+    failures := failures + (← check "synth fonts"
+      ([(0, "Helv"), (1, "TiRo"), (2, "Cour"), (4, "Times")].all fun (i, n) =>
+        o.ap.fonts.any fun (k, _) => k == .res (Annot.synthNum i) (Name.ofString n)))
+    -- content: centred first line (MuPDF's `mutool draw -F stext` line starts at x 27.31)
+    failures := failures + (← check "freetext layout"
+      (match ds[0]? with
+       | some d => has ((String.fromUTF8? d.ap.data).getD "")
+           "4.000000 60.800000 Td\n3.310000 -14.400000 Td\n/Helv 12.000000 Tf\n"
+       | none => false))
+    -- pixels sampled from `mutool draw -r 72` away from the text (device y = 300 − page y)
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("fill", 100, 270, (255, 255, 204)), ("border", 100, 279, (0, 0, 255)),
+      ("gray rd fill", 245, 270, (229, 229, 229)), ("da border", 202, 250, (255, 0, 0)),
+      ("rotated fill", 230, 150, (204, 229, 255)), ("rotated border", 200, 190, (0, 0, 0)),
+      ("callout", 135, 140, (184, 184, 184)), ("stamp frame", 100, 76, (33, 144, 33)),
+      ("stamp half opacity", 230, 92, (154, 154, 154)), ("white", 235, 30, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"text px {n}" (near (pxAt o.img x y) c))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "text.ppm") o.img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "text.pdf") textFixture
+    -- text: the lines of `mutool draw -F txt` (MuPDF 1.25.1), blank lines aside
+    match firstPage textFixture with
+    | none => failures := failures + 1
+    | some (d, p) =>
+      match (Annot.extractDocPageAnnots {} d p (Filter.Budget.init {})).1 with
+      | .ok t =>
+        failures := failures + (← check "freetext/stamp text"
+          ((t.text.splitOn "\n").filter (· != "") == ["Hello world, this text is long ",
+            "enough to wrap", "First line", "Second", "Callout", "Turned", "APPROVED", "DRAFT",
+            "NOT FOR", "PUBLIC RELEASE"]))
+      | .error _ => failures := failures + (← check "text extracts" false)
   return failures
 
 /-- Run the suite; returns the number of failures. -/
