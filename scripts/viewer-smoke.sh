@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7, 9.8, 9.11; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7–9.9, 9.11; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -43,6 +43,11 @@
 #      every mark deleted, import brings them back (pixels, texts, status counts), re-import
 #      adds nothing, hostile files (Tests/xfdf/) and broken ones show an error and change
 #      nothing (9.11);
+#   1j'''. Add text and Draw (SAFEPDF_VIEWER_SMOKE_MODE=editors) on a copy of the text PDF: a
+#      text box placed, typed, edited (double click), recoloured and resized from the pop-over;
+#      two strokes drawn as one drawing; saved and reopened (read back, painted by the
+#      renderer); the text box moved by dragging and saved; both deleted and saved; qpdf
+#      --check, prefixes, mutool shows the text and the strokes (9.9);
 #   1k. view modes (SAFEPDF_VIEWER_SMOKE_MODE=modes) on a generated three-page text PDF, each mode
 #      chosen through the View menu: continuous (three page frames, the wheel scrolls the
 #      document and the page field follows 1, 2, 3, a highlight on page 2, a search hit on page
@@ -458,8 +463,8 @@ sys.exit(1 if errs else 0)
 # jumps (number, label), an out-of-range number or text reverts to the current page, leaving
 # the field reverts it; End/Home update the field; the zoom drop-down lists the twelve PDF.js
 # choices, shows the chosen one, and shows custom zooms reached with -/+ as a percentage; the
-# overflow menu pages; Highlight is enabled (9.4), the other tool buttons are disabled and
-# ignore clicks; a disclosure triangle
+# overflow menu pages; Highlight (9.4), Add comment, Add text and Draw (9.9) are enabled,
+# Add image and Print are disabled and ignore clicks; a disclosure triangle
 # collapses and expands its subtree; the toggle button hides and shows the sidebar.
 mkdir -p "$work/out-tb-nav" "$work/out-tb-two"
 SAFEPDF_VIEWER_SMOKE_MODE=toolbar run_viewer "$work/out-tb-nav" "$work/nav.pdf"
@@ -479,8 +484,8 @@ common = {
     "more-menu": "Open...|Import annotations...|Export annotations...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left|"
                  "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
-    "tools": ".bar.highlight=normal," + ",".join(w + "=disabled" for w in [
-        ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),  # Save: no unsaved marks
+    "tools": ".bar.highlight=normal,.bar.comment=normal,.bar.text=normal,.bar.draw=normal," +
+        ",".join(w + "=disabled" for w in [".bar.image", ".bar.print", ".bar.save"]),  # Save: no unsaved marks
     "status-unchanged-after-tool": "true",
     "history-after-entry": "2",
 }
@@ -927,6 +932,92 @@ if x.count("<text ") != 1 or "name=\"safepdf-mark-2\"" in x:
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-xfdf/xfdf.txt" "$work/out-xfdf/marks.xfdf" || fail=1
+
+# 1j'''. Add text and Draw (task 9.9, SAFEPDF_VIEWER_SMOKE_MODE=editors, `Viewer.smokeEditors`)
+# on a copy of the text PDF (substitute fonts on, so the saved free text is painted): Add text
+# turns its mode and pop-over on; a click at (100, 400) opens a text box, typed text + Escape
+# make a free-text mark; a double click edits it, a click elsewhere commits; the pop-over's red
+# swatch and size slider restyle it; Draw: blue, thickness 4, two strokes = one drawing;
+# Ctrl+S writes text-annotated.pdf and reopens it (both marks read back exactly, drawn by the
+# renderer: text pixels, a blue stroke pixel); the text box dragged 50 units right, saved;
+# Delete and the drawing's bubble Delete remove both, saved (none left, white paper).
+# Externally: qpdf --check, the original a prefix of the first save and that of the final
+# file, and mutool draws the red text and the blue strokes of the first save.
+mkdir -p "$work/editors" "$work/out-editors"
+cp "$work/text.pdf" "$work/editors/text.pdf"
+SAFEPDF_VIEWER_SMOKE_MODE=editors run_viewer "$work/out-editors" "$work/editors/text.pdf"
+cat "$work/out-editors/editors.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+want = {
+    "text-mode": "true 1 normal", "editor-open": "1 true", "edit-open": "true",
+    "draw-mode": "true 1 normal", "drawn": "2 ink 2 [5, 4] 4 100 #0060DF 2",
+    "modes-off": "true 0", "saved": "2 2 false 2 2",
+    "after-save-ink": "ink 2 [5, 4] 4 100 #0060DF", "canvas-after-save": "0 0",
+    "moved": "true true", "moved-saved": "true false 2 2",
+    "text-selected": "true (some true)", "ink-selected": "true (some true)",
+    "deleted": "0 true true", "deleted-saved": "0 false 0 0",
+    "after-delete-pixels": "0 255 255 255",
+}
+errs = ["editors %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+starts = {"text-added": ("1 text Hello text ", " 10 #000000 1 0"),
+          "text-edited": ("text Edited text ✓ ", " 10 #000000 true"),
+          "text-styled": ("text Edited text ✓ ", " 20 #D70022 20"),
+          "after-save-text": ("text Edited text ✓ ", " 20 #D70022")}
+for k, (a, b) in starts.items():
+    x = v.get(k, "")
+    if not (x.startswith(a) and x.endswith(b)):
+        errs.append("editors %s: %r, expected %r...%r" % (k, x, a, b))
+if v.get("subst") == "true" and v.get("text-pixels") != "true":
+    errs.append("editors: the saved free text is not painted")
+px = [int(t) for t in v.get("ink-px", "255 255 255").split()]
+if not (px[2] > 150 and px[0] < 100):
+    errs.append("editors: the saved stroke is not blue: %r" % v.get("ink-px"))
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-editors/editors.txt" || fail=1
+for f in "$work/out-editors/editors1.pdf" "$work/editors/text-annotated.pdf"; do
+  if command -v qpdf >/dev/null 2>&1; then
+    qpdf --check "$f" >/dev/null 2>&1 || { echo "FAIL: qpdf --check $f" >&2; fail=1; }
+  else echo "viewer-smoke: qpdf missing, check skipped"; fi
+done
+for pair in "editors/text.pdf out-editors/editors1.pdf" "out-editors/editors1.pdf editors/text-annotated.pdf"; do
+  set -- $pair
+  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+    || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
+done
+if command -v mutool >/dev/null 2>&1; then
+  mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-editors/mutool.ppm" "$work/out-editors/editors1.pdf" 1
+  python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+parts, i = [], 0
+while len(parts) < 4:
+    while d[i:i+1].isspace(): i += 1
+    j = i
+    while not d[j:j+1].isspace(): j += 1
+    parts.append(d[i:j]); i = j
+i += 1
+w, h = int(parts[1]), int(parts[2])
+px = d[i:]
+v = dict(l.split(": ", 1) for l in open(sys.argv[2], encoding="utf-8").read().splitlines() if ": " in l)
+x0, y0, x1, y1 = (float(t) for t in v["text-box"].split())
+red = n = 0
+for y in range(int(792 - y1), int(792 - y0)):
+    for x in range(int(x0), int(x1)):
+        k = 3 * (y * w + x); r, g, b = px[k], px[k + 1], px[k + 2]; n += 1
+        if r > 150 and g < 90 and b < 110: red += 1
+mx, my = (float(t) for t in v["ink-mid"].split())
+blue = 0
+for y in range(int(792 - my) - 1, int(792 - my) + 2):
+    for x in range(int(mx) - 1, int(mx) + 2):
+        k = 3 * (y * w + x)
+        if px[k + 2] > 150 and px[k] < 100: blue += 1
+print("mutool: %d/%d red pixels in the text box, %d/9 blue at the stroke" % (red, n, blue))
+sys.exit(0 if red > 20 and blue >= 5 else 1)
+' "$work/out-editors/mutool.ppm" "$work/out-editors/editors.txt" || { echo "FAIL: mutool does not show the free text and the strokes" >&2; fail=1; }
+else echo "viewer-smoke: mutool missing, check skipped"; fi
 
 # 1k. View modes (task 9.3) on a three-page text PDF (Helvetica, substitute fonts off: white
 # pages): `Alpha` on page 1, `Bravo` on page 2 (y 400), `zebra` on page 3. Every mode through its

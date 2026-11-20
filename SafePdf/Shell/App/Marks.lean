@@ -1,4 +1,5 @@
 import SafePdf.Core.Raster.Geom
+import SafePdf.Core.Write.Annots
 
 /-!
 # User marks: highlights and notes (task 9.4; Plan.md §6 Phase 9 "User highlights in colors", "Notes", "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
@@ -37,6 +38,16 @@ the PDF and restores them from it.
   (`Store.removeWithComment`). Operations: add, remove, recolour, edit the
   text, find, the marks of a page, hit-testing (`Store.hitAt`: the topmost mark whose icon
   or quads contain a page point; icons are above highlights).
+* **Free text and ink** (task 9.9, PDF.js's "Add text" and "Draw" editors): a free-text mark
+  holds its text, the page point of its box's upper-left corner, the font size (5–100, PDF.js
+  default 10) and a text colour of its own (any RGB, `Rgb`); its box is
+  `Core.Write.Annots.freeTextBox` (Helvetica metrics, the box Save writes as `/Rect`). An ink
+  mark holds its strokes (page-space points, in drawing order; one mark per drawing session,
+  as PDF.js groups them), the thickness (1–20), the opacity in percent and a colour; its box
+  is `Core.Write.Annots.inkBox`. Their `Mark.color` is unused (yellow). Both are drawn as
+  canvas items while unsaved, are hit-tested by their boxes (above highlights), and can be
+  moved (`Store.translate`), edited (`setText`, `setRgb`, `setSize`, `setOpacity`,
+  `addStroke`) and deleted.
 * **Pixels** (`multiplyRect`, `pixelRect`, `composite`): highlights are blended into the
   rendered page image with the *multiply* blend mode, as PDF.js draws them
   (`web/draw_layer_builder.css`: `mix-blend-mode: multiply`, fill opacity 1): white paper
@@ -125,12 +136,27 @@ inductive Anchor where
   | point (p : Pt)
   deriving Repr, Inhabited
 
+/-- An RGB colour as bytes (free text and ink, task 9.9). -/
+abbrev Rgb := Nat × Nat × Nat
+
+/-- `#RRGGBB` of an RGB colour. -/
+def rgbHex (c : Rgb) : String := "#" ++ hex2 c.1 ++ hex2 c.2.1 ++ hex2 c.2.2
+
+/-- An RGB colour as `/C` components in `[0, 1]`. -/
+def rgbUnit (c : Rgb) : Rat × Rat × Rat :=
+  ((c.1 : Rat) / 255, (c.2.1 : Rat) / 255, (c.2.2 : Rat) / 255)
+
 /-- The kind of a mark. -/
 inductive Kind where
   /-- A highlight over `quads` (page space, one per line run). -/
   | highlight (quads : List Box)
   /-- A note with its text and anchor. -/
   | note (text : String) (anchor : Anchor)
+  /-- Free text (task 9.9): the text, the upper-left corner of its box (page space), the font
+  size and the text colour. -/
+  | freeText (text : String) (pos : Pt) (size : Nat) (rgb : Rgb)
+  /-- Ink (task 9.9): strokes of page points, thickness, opacity (percent) and colour. -/
+  | ink (strokes : List (List Pt)) (width : Nat) (opacity : Nat) (rgb : Rgb)
   deriving Repr, Inhabited
 
 /-- A user mark. -/
@@ -159,20 +185,54 @@ def idOfNm (s : String) : Option Nat :=
 def Mark.isNote (m : Mark) : Bool :=
   match m.kind with
   | .note .. => true
-  | .highlight _ => false
+  | _ => false
 
-/-- The note text (empty for a highlight). -/
+/-- Whether the mark is a highlight. -/
+def Mark.isHighlight (m : Mark) : Bool :=
+  match m.kind with
+  | .highlight _ => true
+  | _ => false
+
+/-- Whether the mark is free text or ink (an editor of task 9.9: moved, not anchored). -/
+def Mark.isEditor (m : Mark) : Bool :=
+  match m.kind with
+  | .freeText .. | .ink .. => true
+  | _ => false
+
+/-- The note or free text (empty for a highlight and ink). -/
 def Mark.text (m : Mark) : String :=
   match m.kind with
   | .note t _ => t
-  | .highlight _ => ""
+  | .freeText t .. => t
+  | _ => ""
 
-/-- The quads of a mark (none for a note at a point). -/
+/-- The quads of a mark (none for a note at a point, free text and ink). -/
 def Mark.quads (m : Mark) : List Box :=
   match m.kind with
   | .highlight qs => qs
   | .note _ (.quads qs) => qs
-  | .note _ (.point _) => []
+  | _ => []
+
+/-- The colour the viewer draws the mark in: the palette colour, or a free text's or ink's
+own colour. -/
+def Mark.hex (m : Mark) : String :=
+  match m.kind with
+  | .freeText _ _ _ c | .ink _ _ _ c => rgbHex c
+  | _ => m.color.hex
+
+/-- A page point as a Core point. -/
+def ptPair (p : Pt) : Rat × Rat := (p.x, p.y)
+
+/-- A Core rectangle as a box. -/
+def boxOfRect (r : Core.Write.Annots.Rect) : Box := ⟨r.x0, r.y0, r.x1, r.y1⟩
+
+/-- The page-space box of free text or ink (`Core.Write.Annots.freeTextBox` / `inkBox`, the
+`/Rect` Save writes); `none` for other marks and ink without points. -/
+def Mark.box (m : Mark) : Option Box :=
+  match m.kind with
+  | .freeText t p sz _ => some (boxOfRect (Core.Write.Annots.freeTextBox p.x p.y sz t))
+  | .ink ss w _ _ => (Core.Write.Annots.inkBox (ss.map (·.map ptPair)) w).map boxOfRect
+  | _ => none
 
 /-- Side of a note icon in page units (a `/Text` annotation's usual 20 × 20 icon). -/
 def noteSize : Rat := 20
@@ -199,7 +259,7 @@ def Mark.iconBox (pb : Box) (m : Mark) : Option Box :=
     let y := clampInto pb.lly pb.ury noteSize (yTop - noteSize)
     ⟨x, y, x + noteSize, y + noteSize⟩
   match m.kind with
-  | .highlight _ => none
+  | .highlight _ | .freeText .. | .ink .. => none
   | .note _ (.point p) => some (place p.x p.y)
   | .note _ (.quads qs) =>
     match qs with
@@ -217,6 +277,7 @@ def Mark.rect (pb : Box) (m : Mark) : Option Box :=
   match m.kind with
   | .highlight qs => unionAll qs
   | .note _ _ => m.iconBox pb
+  | _ => m.box
 
 /-! ## Store -/
 
@@ -275,11 +336,24 @@ def Store.unsaved (s : Store) : List Mark :=
 def Store.find? (s : Store) (id : Nat) : Option Mark :=
   s.marks.find? (·.id == id)
 
-/-- Whether two marks are the same in everything Save writes (id, page, colour, kind, text,
-quads). -/
+/-- Whether two kinds agree in everything Save writes: a highlight's quads; a note's text
+and quads; free text's text, position, size and colour; ink's strokes, thickness, opacity and
+colour. -/
+def Kind.same : Kind → Kind → Bool
+  | .highlight a, .highlight b => a == b
+  | .note t a, .note u b =>
+    t == u && (match a, b with
+      | .quads x, .quads y => x == y
+      | .point _, .point _ => true
+      | _, _ => false)
+  | .freeText t p z c, .freeText u q y d => t == u && p == q && z == y && c == d
+  | .ink s w o c, .ink t v p d => s == t && w == v && o == p && c == d
+  | _, _ => false
+
+/-- Whether two marks are the same in everything Save writes (id, page, colour, kind with its
+text, quads, position, strokes, sizes and colours). -/
 def Mark.same (a b : Mark) : Bool :=
-  a.id == b.id && a.page == b.page && a.color == b.color && a.isNote == b.isNote &&
-    a.text == b.text && a.quads == b.quads
+  a.id == b.id && a.page == b.page && a.color == b.color && a.kind.same b.kind
 
 /-- Saved marks that differ from their state in the file (recoloured, text edited; 9.5g). -/
 def Store.changedSaved (s : Store) : List Mark :=
@@ -350,14 +424,54 @@ def Store.removeWithComment (s : Store) (id : Nat) : Store :=
 def Store.recolor (s : Store) (id : Nat) (c : Color) : Store :=
   { s with marks := s.marks.map fun m => if m.id == id then { m with color := c } else m }
 
-/-- Replaces the text of note `id` (highlights are left alone). -/
+/-- Replaces the text of note or free text `id` (other marks are left alone). -/
 def Store.setText (s : Store) (id : Nat) (t : String) : Store :=
   { s with marks := s.marks.map fun m =>
       if m.id == id then
         match m.kind with
         | .note _ a => { m with kind := .note t a }
-        | .highlight _ => m
+        | .freeText _ p z c => { m with kind := .freeText t p z c }
+        | _ => m
       else m }
+
+/-- Changes mark `id` with `f` on its kind. -/
+def Store.mapKind (s : Store) (id : Nat) (f : Kind → Kind) : Store :=
+  { s with marks := s.marks.map fun m => if m.id == id then { m with kind := f m.kind } else m }
+
+/-- Sets the colour of free text or ink `id`. -/
+def Store.setRgb (s : Store) (id : Nat) (c : Rgb) : Store :=
+  s.mapKind id fun
+    | .freeText t p z _ => .freeText t p z c
+    | .ink ss w o _ => .ink ss w o c
+    | k => k
+
+/-- Sets the font size of free text `id`, or the thickness of ink `id`. -/
+def Store.setSize (s : Store) (id : Nat) (n : Nat) : Store :=
+  s.mapKind id fun
+    | .freeText t p _ c => .freeText t p n c
+    | .ink ss _ o c => .ink ss n o c
+    | k => k
+
+/-- Sets the opacity (percent) of ink `id`. -/
+def Store.setOpacity (s : Store) (id : Nat) (o : Nat) : Store :=
+  s.mapKind id fun
+    | .ink ss w _ c => .ink ss w o c
+    | k => k
+
+/-- Appends a stroke to ink `id` (task 9.9: the strokes of one drawing session form one
+mark). -/
+def Store.addStroke (s : Store) (id : Nat) (st : List Pt) : Store :=
+  s.mapKind id fun
+    | .ink ss w o c => .ink (ss ++ [st]) w o c
+    | k => k
+
+/-- Moves free text or ink `id` by `(dx, dy)` page units. -/
+def Store.translate (s : Store) (id : Nat) (dx dy : Rat) : Store :=
+  let mv (p : Pt) : Pt := ⟨p.x + dx, p.y + dy⟩
+  s.mapKind id fun
+    | .freeText t p z c => .freeText t (mv p) z c
+    | .ink ss w o c => .ink (ss.map (·.map mv)) w o c
+    | k => k
 
 /-- The marks of page `p`, oldest first. -/
 def Store.onPage (s : Store) (p : Nat) : List Mark :=
@@ -373,7 +487,8 @@ earlier ones; on the quads of a highlight with a comment (a note anchored to the
 the highlight. -/
 def Store.hitAt (s : Store) (pb : Box) (page : Nat) (pt : Pt) : Option Nat :=
   let ms := (s.onPage page).reverse
-  let icon := ms.find? fun m => (m.iconBox pb).any (Box.contains · pt)
+  let icon := ms.find? fun m =>
+    (m.iconBox pb).any (Box.contains · pt) || m.box.any (Box.contains · pt)
   let quad := ms.find? fun m => m.quads.any (Box.contains · pt)
   -- On the quads of a commented highlight (a note anchored to exactly its quads, task 9.8)
   -- the highlight wins; the comment is reached through its icon.
@@ -428,7 +543,7 @@ def composite (z : Rat) (rot : Doc.Rotation) (pb : Box) (w h : Nat) (data : Byte
         match pixelRect z rot pb w h q with
         | some (x0, y0, x1, y1) => multiplyRect d w x0 y0 x1 y1 m.color.rgb
         | none => d) d
-    | .note .. => d) data
+    | _ => d) data
 
 /-! ## Checks -/
 
@@ -505,6 +620,25 @@ private def sample : Store :=
 -- A highlight's comment (same quads) does not hide the highlight; its icon selects it.
 #guard let s := (sample.addNote 1 .green "comment" (.quads [q2])).1
   s.hitAt pb 1 ⟨105, 690⟩ == some 3 && s.hitAt pb 1 ⟨120, 690⟩ == some 5
+-- Free text and ink (task 9.9): boxes from the Core layout, hit above highlights, edits.
+private def ed : Store :=
+  let (s, _) := sample.add 0 .yellow (.freeText "Hi" ⟨100, 710⟩ 12 (255, 0, 0))
+  let (s, _) := s.add 0 .yellow (.ink [[⟨400, 400⟩, ⟨420, 430⟩]] 2 100 (0, 0, 255))
+  s
+
+private def ftKind (t : String) (sz : Nat) (c : Rgb) : Kind := .freeText t ⟨100, 710⟩ sz c
+
+#guard ((ed.find? 6).bind Mark.box) == some ⟨398, 398, 422, 432⟩
+#guard ed.hitAt pb 0 ⟨105, 700⟩ == some 5 && ed.hitAt pb 0 ⟨410, 410⟩ == some 6
+#guard ((ed.find? 5).map Mark.hex) == some "#FF0000" && ((ed.find? 6).map Mark.text) == some ""
+#guard ((((ed.setText 5 "Bye").setRgb 5 (0, 0, 0)).setSize 5 20).find? 5).map
+  (·.kind.same (ftKind "Bye" 20 (0, 0, 0))) == some true
+#guard (((ed.translate 6 10 (-5)).addStroke 6 [⟨1, 1⟩]).find? 6).map (·.kind.same
+  (.ink [[⟨410, 395⟩, ⟨430, 425⟩], [⟨1, 1⟩]] 2 100 (0, 0, 255))) == some true
+#guard ((ed.setOpacity 6 50).find? 6).map
+  (·.kind.same (.ink [[⟨400, 400⟩, ⟨420, 430⟩]] 2 50 (0, 0, 255))) == some true
+#guard let s := Store.load [⟨7, 0, .yellow, .freeText "x" ⟨1, 2⟩ 10 (0, 0, 0)⟩]
+  !s.dirty && (s.translate 7 1 0).dirty && (s.setSize 7 11).dirty && !(s.setOpacity 7 3).dirty
 -- Multiply: white takes the colour, black stays black, alpha is kept.
 #guard mul8 255 0x98 == 0x98 && mul8 0 0xFF == 0 && mul8 128 128 == 64
 #guard (multiplyRect (ByteArray.mk #[255, 255, 255, 255, 0, 0, 0, 255]) 2 0 0 2 1

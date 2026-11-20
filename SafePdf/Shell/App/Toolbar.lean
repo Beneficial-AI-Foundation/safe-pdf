@@ -16,7 +16,9 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
   document since task 9.4: with a selection it highlights it in the current colour, without
   one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
-  Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save
+  Add comment: a note on the selection or at the window centre, `Menu.Cmd.addNote`; Add text
+  and Draw: the FreeText and Ink editors with their pop-over, task 9.9 `Bubble.Ui.selectEditor`;
+  Add image: disabled, after M9), Print (disabled, after M9), Save
   (task 9.5c: the command `Menu.Cmd.save`, PDF.js's download icon, enabled with unsaved marks)
   and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
   Open, Import / Export annotations (XFDF, task 9.11), and the scroll and spread modes of
@@ -212,11 +214,11 @@ the command `Menu.Cmd.save` since task 9.5c). -/
 inductive Tool where
   /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8, `Bubble`). -/
   | highlight
-  /-- Add a comment / note (task 9.9). -/
+  /-- Add a comment / note (task 9.9: Add note…). -/
   | comment
-  /-- Add text (FreeText; after the annotation tasks). -/
+  /-- Add text (FreeText, task 9.9). -/
   | text
-  /-- Draw (ink; after the annotation tasks). -/
+  /-- Draw (ink, task 9.9). -/
   | draw
   /-- Add an image (stamp; after M9). -/
   | image
@@ -236,15 +238,14 @@ def Tool.tip : Tool → String
 /-- The task that brings the tool (shown when the disabled button is asked for). -/
 def Tool.task : Tool → String
   | .highlight => "9.4"
-  | .comment => "9.9"
-  | .text | .draw => "a later Phase 9 task"
+  | .comment | .text | .draw => "9.9"
   | .image | .print => "after M9"
 
-/-- Whether the tool can be used: Highlight with a document (task 9.4); the others not yet
-(their tasks have not landed). -/
+/-- Whether the tool can be used: Highlight (task 9.4), Add comment, Add text and Draw (task
+9.9) with a document; Add image and Print not yet (after M9). -/
 def Tool.enabled (c : Ctx) : Tool → Bool
-  | .highlight => c.hasDoc
-  | _ => false
+  | .highlight | .comment | .text | .draw => c.hasDoc
+  | .image | .print => false
 
 /-- What a button does. -/
 inductive Act where
@@ -390,11 +391,12 @@ def states (c : Ctx) : List Bool :=
 -- Without a document only Open, Quit and the overflow button work; the sidebar toggle hides.
 #guard (buttons.filter (·.enabled {})).map (·.path) == [".bar.more"]
 #guard (buttons.filter (·.visible {})).length == buttons.length - 1
--- First page of three with an outline: prev disabled, next enabled, of the tools only
--- Highlight.
+-- First page of three with an outline: prev disabled, next enabled, of the tools Highlight,
+-- Add comment, Add text and Draw (Add image and Print after M9).
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3, hasOutline := true }
   (buttons.filter (·.enabled c)).map (·.path) ==
-    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.more"] &&
+    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.comment",
+     ".bar.text", ".bar.draw", ".bar.more"] &&
   buttons.all (·.visible c)
 -- No outline: the toggle is hidden.
 #guard let c : Ctx := { hasDoc := true, page := 1, pages := 3 }

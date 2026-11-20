@@ -1,6 +1,7 @@
 import SafePdf
 import SafePdf.Core.Write.Annots
 import Tests.RasterSubst
+import SafePdf.Shell.App.Save
 
 /-!
 # Annotation dictionaries for user marks (task 9.5b)
@@ -47,6 +48,21 @@ our render shows highlight 1 green and page 2 without the blue; `mutool` shows i
 `qpdf --check`; no plaintext in an encrypted update. A third update on top drops highlight
 2's comment: its popup reference leaves `/Annots`, `/Contents` and `/Popup` leave the
 dictionary.
+
+Free text and ink (task 9.9, rules A12–A15, `runEditors`), on the plain fixture and on every
+encrypted one: page 2 gets a red free text with a non-WinAnsi character ("Text Box ✓", size
+20), an opaque blue drawing (a three-point stroke and a one-point stroke, width 6) and a green
+drawing at opacity 0.4. Checked: the original is a prefix; strict reopen not repaired; the raw
+dictionaries (`/Subtype`, `/Contents` in UTF-16, `/DA`, `/Rect` = the Core layout, `/InkList`
+one array per stroke with two numbers per point, `/BS /W`, `/C`, `/CA` only below 1, `/F 4`)
+and appearance streams (Helvetica `/Helv` resource, the ✓ drawn as `\267`, round caps, `/R0
+gs`); the shell's read-back (`Shell.App.Save.readMarks`) gives the same free text (text,
+position, size, colour) and drawings (strokes, width, opacity, colour); our render (with the
+system's substitute fonts; skipped without them) and `mutool draw` show red text pixels in
+the text box, the blue stroke and the half-transparent green; `qpdf --check`; nothing of the
+new strings in the clear when encrypted. Then one update moves and re-words the free text
+(superseded under its own number, W11) and removes the green drawing: read back moved and
+re-worded, the green gone, the blue kept; `qpdf --check`.
 
 Environment: `SAFEPDF_WRITEANNOTS_CORPUS=FILE` also writes a highlight over the first text
 line of page 1 of `FILE` plus a note, and checks reopen, read-back and our render;
@@ -522,6 +538,151 @@ def runEdits (ctx : String) (orig : System.FilePath) (out1 : ByteArray) (enc : B
       [(r1.1, r1.2, [(nm "A", PdfObject.int 1)]), (r1.1, r1.2, [(nm "A", PdfObject.int 2)])])))
   return f
 
+/-! ## Free text and ink (task 9.9) -/
+
+/-- The free text of `edMarks` (a non-WinAnsi character). -/
+def ftText : String := "Text Box ✓"
+
+/-- Free text and ink on page 2 (task 9.9). -/
+def edMarks : List Mark :=
+  [ { page := 1, kind := .freeText, quads := [], rect := ⟨40, 110, 40, 110⟩,
+      color := (215 / 255, 0, 34 / 255), id := 11, date, contents := ftText, fontSize := 20 },
+    { page := 1, kind := .ink, quads := [], rect := ⟨0, 0, 0, 0⟩,
+      color := (0, 96 / 255, 223 / 255), id := 12, date,
+      strokes := [[(150, 40), (170, 95), (190, 50)], [(130, 60)]], lineWidth := 6 },
+    { page := 1, kind := .ink, quads := [], rect := ⟨0, 0, 0, 0⟩,
+      color := (5 / 255, 139 / 255, 0), opacity := 2 / 5, id := 13, date,
+      strokes := [[(30, 40), (110, 40)]], lineWidth := 3 } ]
+
+/-- Our render of page `i` at zoom 2 with the system's substitute fonts (`none` without the
+Helvetica substitute or when the page does not render). -/
+def oursSubst (bytes : ByteArray) (i : Nat) : IO (Option Rgb) := do
+  let files ← SafePdf.Shell.Fonts.findFiles
+  if !files.any (·.1 == Font.Std14.helvetica) then return none
+  let subst := Raster.Subst.SubstFonts.ofBytes {} (files.map fun (f, _, b) => (f, b))
+  match Api.openBytes bytes with
+  | .ok d => match d.doc.pages[i]? with
+    | some p => match (Raster.Glyph.renderDocPage d.limits d.doc p 2 .r0
+          (Filter.Budget.init d.limits) (subst := subst)).1 with
+      | .ok img => return some (Rgb.ofImage img)
+      | .error _ => return none
+    | none => return none
+  | .error _ => return none
+
+/-- Render checks of page 2 with the free text and ink: red text in the box, the blue stroke
+(around the middle of its first segment), the half-transparent green line. -/
+def edRenderChecks (who : String) (m : Rgb) (text : Bool) : IO Nat := do
+  let mut f := 0
+  if text then
+    let (n, red, _, _) := stats m 2 200 42 80 130 108 (215, 0, 34) 0
+    f := f + (← check s!"{who}: red free text in its box" (red * 20 ≥ n && red > 30)
+      s!"{red}/{n} red")
+  let (n2, blue, _, _) := stats m 2 200 158 66 162 70 (0, 96, 223) 0
+  f := f + (← check s!"{who}: blue ink stroke" (blue * 2 ≥ n2) s!"{blue}/{n2} blue")
+  let (n3, green, _, _) := stats m 2 200 60 39 80 41 (155, 208, 153) 0
+  f := f + (← check s!"{who}: half-transparent green ink" (green * 2 ≥ n3) s!"{green}/{n3}")
+  let (n4, _, _, w4) := stats m 2 200 60 110 100 140 (0, 0, 0) 0
+  f := f + (← check s!"{who}: paper above the text box stays white" (w4 == n4) s!"{w4}/{n4}")
+  return f
+
+/-- **Free text and ink** (task 9.9; see the module doc) written into `orig` (`ctx` names the
+run; `enc`: the document is encrypted). -/
+def runEditors (ctx : String) (orig : System.FilePath) (enc : Bool) : IO Nat := do
+  let lim := Limits.default
+  let bytes ← IO.FS.readBinFile orig
+  let .ok d := Api.openBytes bytes | check s!"{ctx}: open" false
+  let mut f := 0
+  let .ok out := writeMarks lim d.doc edMarks | check s!"{ctx}: writeMarks" false
+  f := f + (← check s!"{ctx}: original is a prefix" (out.extract 0 bytes.size == bytes))
+  if enc then
+    let upd := (out.extract bytes.size out.size).toList
+    f := f + (← check s!"{ctx}: no plaintext appearance in the update"
+      (!contains upd (ascii "150. 40. m") && !contains upd (ascii "/Helv 20. Tf")))
+  match Open.openFile lim out with
+  | .ok od => f := f + (← check s!"{ctx}: strict reopen not repaired" (!od.repaired))
+  | .error _ => f := f + (← check s!"{ctx}: strict reopen" false)
+  let .ok d2 := Api.openBytes out | check s!"{ctx}: reopen" false
+  let doc := d2.doc
+  let some ft := edMarks[0]? | check s!"{ctx}: marks" false
+  let some k1 := edMarks[1]? | check s!"{ctx}: marks" false
+  match rawByNm doc lim 1 "safepdf-mark-11", rawByNm doc lim 1 "safepdf-mark-12",
+      rawByNm doc lim 1 "safepdf-mark-13" with
+  | some t, some i1, some i2 =>
+    f := f + (← check s!"{ctx}: free text dictionary" (Dict.get? t kSubtype ==
+      some (.name (nm "FreeText")) && Dict.get? t kContents == some (.string (textBytes ftText)) &&
+      Dict.get? t kDA == some (.string (daBytes ft)) &&
+      Dict.get? t kRect == some (rectObj ft.annotRect) && Dict.get? t (nm "F") == some (.int 4) &&
+      Dict.get? t kC == none))
+    f := f + (← check s!"{ctx}: /DA text" (daBytes ft == ascii "/Helv 20. Tf 0.8431 0. 0.1333 rg"))
+    f := f + (← check s!"{ctx}: ink dictionary" (Dict.get? i1 kSubtype == some (.name (nm "Ink")) &&
+      Dict.get? i1 kInkList == some (.array (inkListObj k1.strokes)) &&
+      Dict.get? i1 (nm "BS") == some (.dict [(nm "W", .real ⟨6, 0⟩)]) &&
+      Dict.get? i1 (nm "CA") == none && Dict.get? i2 (nm "CA") == some (.real ⟨4, 1⟩)))
+    f := f + (← check s!"{ctx}: /InkList 1:1" (match Dict.get? i1 kInkList with
+      | some (.array [.array a, .array b]) => a.length == 6 && b.length == 2
+      | _ => false))
+    match apStream doc lim t, apStream doc lim i1, apStream doc lim i2 with
+    | some at', some a1, some a2 =>
+      f := f + (← check s!"{ctx}: free-text appearance" (contains
+        (Print.printObj (.dict at'.dict)) (ascii "/BaseFont /Helvetica") &&
+        contains at'.data.toList (ascii "(Text Box \\267) Tj")))
+      f := f + (← check s!"{ctx}: ink appearance" (contains a1.data.toList (ascii "1 J\n1 j\n") &&
+        contains a1.data.toList (ascii "150. 40. m\n170. 95. l\n190. 50. l\nS\n") &&
+        contains a1.data.toList (ascii "130. 60. m\n130. 60. l\nS\n") &&
+        contains a2.data.toList (ascii "/R0 gs")))
+    | _, _, _ => f := f + (← check s!"{ctx}: appearance streams resolve" false)
+  | _, _, _ => f := f + (← check s!"{ctx}: free text / ink dictionaries" false)
+  -- the shell's read-back
+  let got := SafePdf.Shell.App.Save.readMarks doc lim
+  let kindOf (id : Nat) : Option SafePdf.Shell.App.Marks.Kind := (got.find? (·.id == id)).map (·.kind)
+  f := f + (← check s!"{ctx}: read back free text" ((kindOf 11).any (·.same
+    (.freeText ftText ⟨40, 110⟩ 20 (215, 0, 34)))) (reprStr (kindOf 11)))
+  f := f + (← check s!"{ctx}: read back ink" ((kindOf 12).any (·.same
+    (.ink [[⟨150, 40⟩, ⟨170, 95⟩, ⟨190, 50⟩], [⟨130, 60⟩]] 6 100 (0, 96, 223))) &&
+    (kindOf 13).any (·.same (.ink [[⟨30, 40⟩, ⟨110, 40⟩]] 3 40 (5, 139, 0)))) (reprStr (kindOf 12)))
+  -- renders
+  match ← oursSubst out 1 with
+  | some m => f := f + (← edRenderChecks s!"{ctx} ours" m true)
+  | none =>
+    IO.println "  write-annots: no Helvetica substitute, our free-text render check skipped"
+    match ours out 1 with
+    | some m => f := f + (← edRenderChecks s!"{ctx} ours" m false)
+    | none => f := f + (← check s!"{ctx}: our render" false)
+  let (path, tmp) ← place s!"annots-editors-{ctx}.pdf" out
+  match ← qpdfCheck path with
+  | some code => f := f + (← check s!"{ctx}: qpdf --check" (code == 0) s!"exit {code}")
+  | none => IO.println "  write-annots: qpdf not found, skipped"
+  match ← mutool path 1 with
+  | some m => f := f + (← edRenderChecks s!"{ctx} mutool" m true)
+  | none => IO.println "  write-annots: mutool not found, editor render check skipped"
+  if tmp then IO.FS.removeFile path
+  -- an update: the free text moved and re-worded (superseded), the green drawing removed
+  match refByNm doc lim 1 "safepdf-mark-11", refByNm doc lim 1 "safepdf-mark-13" with
+  | some (r11, _), some (r13, _) =>
+    let moved : Mark := { ft with rect := ⟨40, 140, 40, 140⟩, contents := "Moved", date := date2,
+                                  created := date }
+    match writeEdits lim doc { sups := [⟨moved, r11, none⟩], removes := [(1, r13.1, r13.2)] } with
+    | .error e => f := f + (← check s!"{ctx}: edit update" false (Api.Error.message (.pdf e)))
+    | .ok out2 =>
+      f := f + (← check s!"{ctx}: edit: first file is a prefix" (out2.extract 0 out.size == out))
+      match Api.openBytes out2 with
+      | .error e => f := f + (← check s!"{ctx}: edit reopen" false e.message)
+      | .ok d3 =>
+        let got2 := SafePdf.Shell.App.Save.readMarks d3.doc lim
+        f := f + (← check s!"{ctx}: edit read back" (got2.length == 2 &&
+          (got2.find? (·.id == 11)).any (·.kind.same (.freeText "Moved" ⟨40, 140⟩ 20 (215, 0, 34))) &&
+          (got2.find? (·.id == 12)).isSome && (got2.find? (·.id == 13)).isNone)
+          (reprStr (got2.map (·.id))))
+        f := f + (← check s!"{ctx}: edit keeps the object number" ((refByNm d3.doc lim 1
+          "safepdf-mark-11").any (·.1 == r11)))
+        let (p2, tmp2) ← place s!"annots-editors-edit-{ctx}.pdf" out2
+        match ← qpdfCheck p2 with
+        | some code => f := f + (← check s!"{ctx}: edit qpdf --check" (code == 0) s!"exit {code}")
+        | none => pure ()
+        if tmp2 then IO.FS.removeFile p2
+  | _, _ => f := f + (← check s!"{ctx}: references of the free text / ink" false)
+  return f
+
 /-- Encrypted variants of the fixture (task 9.5f; `Tests/fixtures-write/encrypted/`,
 `generate.py`): RC4-40, RC4-128, AES-128, AES-256, and AES-256 with an xref stream. -/
 def encFixtures : List String :=
@@ -569,6 +730,7 @@ def runEncrypted (name : String) : IO Nat := do
       | _, _ => f := f + (← check s!"{ctx}: our render" false)
       f := f + (← external s!"annots-enc-{name}" path out true)
       f := f + (← runEdits s!"enc-{name}" path out true)
+      f := f + (← runEditors s!"enc-{name}" path true)
       match Api.openBytes out with
       | .ok d2 =>
         let more : List Mark :=
@@ -618,6 +780,12 @@ def run : IO Nat := do
     f := f + (← check "refuse highlight without quads" (isErr (writeMarks lim d.doc
       [{ page := 0, kind := .highlight, quads := [], rect := ⟨0, 0, 20, 20⟩,
          color := (1, 1, 0), id := 9, date := date }])))
+    let ink0 : Mark :=
+      { page := 0, kind := .ink, quads := [], rect := ⟨0, 0, 0, 0⟩, color := (0, 0, 0), id := 9,
+        date := date }
+    f := f + (← check "refuse ink without strokes / with an empty stroke"
+      (isErr (writeMarks lim d.doc [ink0]) &&
+       isErr (writeMarks lim d.doc [{ ink0 with strokes := [[(1, 1)], []] }])))
     match writeMarks lim d.doc marks with
     | .error e => f := f + (← check "writeMarks" false (Api.Error.message (.pdf e)))
     | .ok out =>
@@ -634,6 +802,7 @@ def run : IO Nat := do
       | none => f := f + (← check "our render page 2" false)
       f := f + (← external "annots-text.pdf" fixture out true)
       f := f + (← runEdits "plain" fixture out false)
+      f := f + (← runEditors "plain" fixture false)
       -- a second update on top of the first
       match Api.openBytes out with
       | .ok d2 =>

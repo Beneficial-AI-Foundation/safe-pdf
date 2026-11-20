@@ -23,6 +23,14 @@ checks and stores.
   notes are `/Text` annotations with `/QuadPoints` for their anchor (rule A2). Files saved by
   older builds (9.5c: the comment as a separate `/Text`) are still read; their comment note is
   moved into the highlight on the next save (its `/Text` reference removed).
+* **Free text and ink** (task 9.9): free text becomes `/FreeText` (rules A12/A13: `/Contents`,
+  `/DA` with the font size and colour, the box `Core.Write.Annots.freeTextBox` at its
+  upper-left corner, a Helvetica appearance), ink becomes `/Ink` (rules A14/A15: `/InkList`
+  one array per stroke, `/BS /W`, `/C`, `/CA` from the opacity percentage). Read back: the
+  text from `/Contents`, size and colour from `/DA` (`Core.Annot.parseDA`, size and bytes
+  rounded), the position from `/Rect`'s upper-left corner; the strokes from `/InkList`, the
+  thickness from `/BS /W`, colour from `/C`, opacity from `/CA` (1 when absent). Moving,
+  editing the text or changing size/colour supersedes the annotation (W11) like a recolour.
 * **Date** (`pdfDate`): the current UTC time as `D:YYYYMMDDHHmmSSZ` (§7.9.4), from
   `Std.Time.Timestamp.now` (wall clock) and the civil-from-days conversion `civil`.
   **Author**: none — no `/T` is written, so a saved file does not carry the login name.
@@ -137,6 +145,14 @@ def toCore (pb : Box) (date : String) (m : Mark) (comment : Option Mark := none)
       { page := m.page, kind := .note, quads := m.quads.map quadOf,
         rect := ⟨ib.llx, ib.lly, ib.urx, ib.ury⟩, color := m.color.unit, contents := t,
         id := m.id, date }
+  | .freeText t p sz c =>
+    some { page := m.page, kind := .freeText, quads := [], rect := ⟨p.x, p.y, p.x, p.y⟩,
+           color := Marks.rgbUnit c, contents := t, fontSize := sz, id := m.id, date }
+  | .ink ss w o c =>
+    if ss.isEmpty || ss.any List.isEmpty then none
+    else some { page := m.page, kind := .ink, quads := [], rect := ⟨0, 0, 0, 0⟩,
+                color := Marks.rgbUnit c, opacity := (o : Rat) / 100,
+                strokes := ss.map (·.map Marks.ptPair), lineWidth := w, id := m.id, date }
 
 /-- The CropBox of page `i` (the box the viewer places note icons in). -/
 def pageBox (doc : Doc.Doc) (i : Nat) : Option Box :=
@@ -158,6 +174,24 @@ def nearestColor (cs : List Rat) : Color :=
 #guard Color.all.all fun c => let (r, g, b) := c.unit; nearestColor [r, g, b] == c
 #guard nearestColor [1, 1, 5961 / 10000] == .yellow && nearestColor [1, 0, 0] == .red &&
   nearestColor [] == .yellow
+
+/-- A number rounded to the nearest natural number (negative: 0). -/
+def roundNat (q : Rat) : Nat := (q + 1 / 2).floor.toNat
+
+/-- Colour components in `[0, 1]` as bytes (black when not three numbers). -/
+def rgbOf (cs : List Rat) : Marks.Rgb :=
+  let b (q : Rat) : Nat := min 255 (roundNat (q * 255))
+  match cs with
+  | [r, g, bl] => (b r, b g, b bl)
+  | _ => (0, 0, 0)
+
+#guard rgbOf [1, 0, 5961 / 10000] == (255, 0, 152) && rgbOf [] == (0, 0, 0)
+#guard (List.range 256).all fun n => rgbOf [Raster.Geom.decimalToRat (Core.Write.Annots.decRound 4 ((n : Rat) / 255)), 0, 0] == (n, 0, 0)
+
+/-- The points of a flat number list `x1 y1 x2 y2 …` (a trailing odd number is ignored). -/
+def pointsOf : List Rat → List Pt
+  | x :: y :: rest => ⟨x, y⟩ :: pointsOf rest
+  | _ => []
 
 /-- The page-space boxes of `/QuadPoints` (8 numbers per quad; the bounding box of each
 quad's four points; a trailing partial quad is ignored). -/
@@ -198,6 +232,28 @@ def markOf (doc : Doc.Doc) (limits : Limits) (page : Nat) (ad : Dict) : Option M
         let b := Box.ofRect r
         some ⟨id, page, color, .note text (.point ⟨b.llx, b.ury⟩)⟩
       else some ⟨id, page, color, .note text (.quads quads)⟩
+    else if n == Name.ofString "FreeText" then
+      let r ← Doc.rectOf (get "Rect")
+      let b := Box.ofRect r
+      let da := match get "DA" with
+        | .string bs => Annot.parseDA bs
+        | _ => {}
+      some ⟨id, page, .yellow, .freeText (textOf (get "Contents")) ⟨b.llx, b.ury⟩
+        (max 1 (roundNat da.size)) (rgbOf da.color)⟩
+    else if n == Name.ofString "Ink" then
+      let strokes := match get "InkList" with
+        | .array xs => xs.map fun x => pointsOf (nums (Doc.Nav.res doc limits x))
+        | _ => []
+      if strokes.isEmpty || strokes.any List.isEmpty then none
+      let w := match get "BS" with
+        | .dict bs => match (Doc.numOf (Doc.Nav.getL doc limits bs "W")) with
+          | some d => roundNat (Raster.Geom.decimalToRat d)
+          | none => 1
+        | _ => 1
+      let o := match Doc.numOf (get "CA") with
+        | some d => min 100 (roundNat (Raster.Geom.decimalToRat d * 100))
+        | none => 100
+      some ⟨id, page, .yellow, .ink strokes w o (rgbOf (nums (get "C")))⟩
     else none
   | _ => none
 
@@ -235,7 +291,7 @@ def entryOf (doc : Doc.Doc) (limits : Limits) (page : Nat) (a : PdfObject) : Opt
   let created := match Doc.Nav.getL doc limits ad "CreationDate" with
     | .string bs => String.fromUTF8? ⟨bs.toArray⟩ |>.getD ""
     | _ => ""
-  if m.isNote then return { mark := m, ref, created }
+  if !m.isHighlight then return { mark := m, ref, created }
   let popup := match Doc.Nav.raw ad "Popup" with
     | some (.ref n g) => some (n, g)
     | _ => none
@@ -290,12 +346,25 @@ def close (a b : List Rat) : Bool :=
 /-- A box as four numbers. -/
 def boxNums (b : Box) : List Rat := [b.llx, b.lly, b.urx, b.ury]
 
+/-- The numbers of free text or ink that the writer rounds (position; stroke points), and
+those it keeps exactly (size, thickness, opacity, colour bytes). -/
+def editorNums (k : Marks.Kind) : List Rat × List Nat :=
+  match k with
+  | .freeText _ p z (r, g, b) => ([p.x, p.y], [0, z, r, g, b])
+  | .ink ss w o (r, g, b) =>
+    (ss.flatMap (·.flatMap fun p => [p.x, p.y]), [1, w, o, r, g, b] ++ ss.map List.length)
+  | _ => ([], [])
+
 /-- Whether `got` (read back) is the mark `m` (page box `pb`): id, page, colour, kind, text,
-quads and note icon box. -/
+quads and note icon box; free text and ink: position and points within `tol`, the rest
+exactly. -/
 def sameMark (pb : Box) (m got : Mark) : Bool :=
   m.id == got.id && m.page == got.page && m.color == got.color && m.isNote == got.isNote &&
+  m.isEditor == got.isEditor &&
   m.text == got.text && close m.quadPoints got.quadPoints &&
-  close ((m.iconBox pb).map boxNums |>.getD []) ((got.iconBox pb).map boxNums |>.getD [])
+  close ((m.iconBox pb).map boxNums |>.getD []) ((got.iconBox pb).map boxNums |>.getD []) &&
+  close (editorNums m.kind).1 (editorNums got.kind).1 &&
+  (editorNums m.kind).2 == (editorNums got.kind).2
 
 /-- The first problem of a read-back: `got` must contain every mark of `want` (`sameMark`),
 the ones in `fresh` (the ids just written) exactly once, and none of `gone` (the ids just
@@ -415,8 +484,9 @@ def edits (doc : Doc.Doc) (file : List Entry) (store : Store) (date : String)
     | some e =>
       let fileComment := if e.comment.isEmpty then none else some (e.commentId, e.comment)
       let wantComment := comment.map fun n => (some n.id, n.text)
-      let same := e.mark.color == m.color && e.mark.text == m.text &&
-        (m.isNote || fileComment == wantComment)
+      let same := if m.isEditor then e.mark.kind.same m.kind
+        else e.mark.color == m.color && e.mark.text == m.text &&
+          (m.isNote || fileComment == wantComment)
       if !same then
         let some ref := e.ref
           | throw s!"mark {m.id} is stored directly in the page's /Annots and cannot be changed"
