@@ -1,6 +1,7 @@
 import SafePdf.Core.Write.Serialize
 import SafePdf.Core.Doc
 import SafePdf.Core.Crypt.Md5
+import SafePdf.Core.Write.Encrypt
 
 /-!
 # Incremental-update writer (Plan.md §4 S8/C7, §6 Phase 9 "Persistence"; task 9.5a)
@@ -20,13 +21,23 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
 
 ## Rules and decisions
 
-* W1. **Strictly opened, unencrypted input only.** A repaired document (`repaired = true`)
+* W1. **Strictly opened input only.** A repaired document (`repaired = true`)
   is refused (`Error.unsupported`): its cross-reference chain is broken, so a `/Prev` to it
-  would extend a file that the strict parser does not accept. An encrypted document
-  (`/Encrypt` in the trailer or a decryption state) is refused with `Error.unsupported`
-  (decision of task 9.5a, recorded in the ledger): encrypting the new objects needs the
-  string/stream encryption of every handler (RC4, AES-CBC with a fresh IV per string, which a
-  pure core cannot draw) and is left to a follow-up.
+  would extend a file that the strict parser does not accept. (Task 9.5a also refused
+  encrypted documents; task 9.5f lifted that, rule W10. A document with `/Encrypt` in the
+  trailer but no decryption state is still refused: it cannot occur after a strict open.)
+* W10. **Encrypted documents** (task 9.5f): the written objects are encrypted with the
+  document's own security handler and file key (`Core.Write.Encrypt`, rules E1-E7: per-object
+  key by Algorithm 1, RC4 / AES-128 / AES-256 by `/StrF` and `/StmF`, a deterministic AES IV
+  derived by SHA-256 since the core has no randomness). The plan keeps both forms: the
+  plaintext objects (`Plan.objects`, `Plan.aux` — what the reader must see) and the written
+  ones (`Plan.wire`, `Plan.auxWire`). An auxiliary stream's `/Length` is that of its written
+  data, so its decrypted body is `auxBody` (with `/Length` = `Encrypt.encLen`). The trailer
+  keeps `/Encrypt` and the first `/ID` string (the file key depends on it, W6, W7); the
+  update's xref stream is never encrypted. The self-check (W8) re-opens the result, which
+  decrypts every written object, and compares with the plaintext — so the C7 theorems hold
+  for encrypted documents as stated — and checks that the result's decryption state has the
+  original's file key and methods (`sameCrypt`).
 * W2. The page indices of `marks` are distinct and in range; each annotation dictionary is
   canonical with in-range references (the printer's round-trip hypotheses,
   `Spec.RoundTripCore.parseObject_print`) and nests within `limits.maxObjectDepth`.
@@ -50,7 +61,7 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
   an xref-stream file — still reads it.
 * W6. **Trailer.** Classic: `/Size`, then every entry of the old trailer except `/Size`,
   `/Prev` and `/XRefStm`, then `/Prev`. Xref stream: `/Type /XRef`, `/Size`, `/Index`, `/W`,
-  then `/Root`, `/Info`, `/ID` of the old trailer (the other keys of an xref-stream
+  then `/Root`, `/Info`, `/ID`, `/Encrypt` (task 9.5f) of the old trailer (the other keys of an xref-stream
   dictionary describe that stream, §7.5.8.2), then `/Prev` and `/Length`.
 * W7. **`/ID`** (§14.4): when the old trailer has `/ID [a b]` of two strings, the first is kept
   and the second becomes the MD5 of `b` followed by the bytes of the new objects (a
@@ -177,6 +188,16 @@ def AuxStream.fullDict (a : AuxStream) : Dict := setKey a.dict nameLength (.int 
 /-- The body the strict parser must return for an auxiliary stream. -/
 def AuxStream.body (a : AuxStream) : IndirectBody := .stream ⟨a.fullDict, ⟨a.data.toArray⟩⟩
 
+/-- The body the strict parser must return for an auxiliary stream of a document with
+decryption state `st` (rule W10): the stream's dictionary with `/Length` set to the length of
+the *written* data (`Encrypt.encLen`), and its plaintext data. -/
+def auxBody (st : Option Crypt.State) (a : AuxStream) : IndirectBody :=
+  .stream ⟨setKey a.dict nameLength (.int (Encrypt.encLen st a.dict a.data.length)),
+    ⟨a.data.toArray⟩⟩
+
+/-- Without encryption, `auxBody` is the stream's own body (rule W9). -/
+theorem auxBody_none (a : AuxStream) : auxBody none a = a.body := rfl
+
 /-- Number auxiliary streams consecutively from `n` (rule W9). -/
 def numberAux : Nat → List AuxStream → List (Nat × AuxStream)
   | _, [] => []
@@ -260,6 +281,12 @@ structure Plan where
   trailer : Dict
   /-- The auxiliary streams with their object numbers (rule W9). -/
   aux : List (Nat × AuxStream) := []
+  /-- The document's decryption state (rule W10; `none` when unencrypted). -/
+  crypt : Option Crypt.State := none
+  /-- The objects as written (encrypted under `crypt`; rule W10), in write order. -/
+  wire : List (Nat × Nat × PdfObject) := []
+  /-- The auxiliary streams as written: number, dictionary with `/Length`, data (rule W10). -/
+  auxWire : List (Nat × Dict × List UInt8) := []
 
 /-- The objects of the update, in write order. -/
 def Plan.objects (p : Plan) : List (Nat × Nat × PdfObject) := p.pages.flatMap PagePlan.objects
@@ -273,13 +300,38 @@ def Plan.xrefNum (p : Plan) : Nat := p.size + p.annotCount + p.aux.length
 /-- The new `/Size`. -/
 def Plan.newSize (p : Plan) : Nat := p.xrefNum + (if p.stream then 1 else 0)
 
+/-- The bodies the strict parser must return for the auxiliary streams (rule W10). -/
+def Plan.auxExpected (p : Plan) : List (Nat × IndirectBody) :=
+  p.aux.map fun a => (a.1, auxBody p.crypt a.2)
+
+/-- One object as written (rule W10): encrypted under `st`, if any. -/
+def wireObject (st : Option Crypt.State) (o : Nat × Nat × PdfObject) :
+    Except Error (Nat × Nat × PdfObject) :=
+  match st with
+  | none => .ok o
+  | some s =>
+    match Encrypt.encryptObject s o.1 o.2.1 o.2.2 with
+    | .ok o' => .ok (o.1, o.2.1, o')
+    | .error e => .error e
+
+/-- One auxiliary stream as written (rules W9, W10): dictionary (strings encrypted under `st`)
+with `/Length` of the written data, and the (encrypted) data. -/
+def wireAux (st : Option Crypt.State) (a : Nat × AuxStream) :
+    Except Error (Nat × Dict × List UInt8) :=
+  match st with
+  | none => .ok (a.1, a.2.fullDict, a.2.data)
+  | some s =>
+    match Encrypt.encryptStream s a.1 0 a.2.dict a.2.data with
+    | .ok (d, data) => .ok (a.1, setKey d nameLength (.int data.length), data)
+    | .error e => .error e
+
 /-- **Planning** (rules W1–W3, W9): checks the input and reads the pages. -/
 def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
     Except Error Plan :=
   let d := doc.file
   if d.repaired then .error (.unsupported "incremental update of a repaired document")
-  else if d.trailer.encrypted || d.crypt.isSome then
-    .error (.unsupported "incremental update of an encrypted document")
+  else if d.trailer.encrypted && d.crypt.isNone then
+    .error (.unsupported "incremental update of an encrypted document without decryption state")
   else if !(marks.map Prod.fst).Nodup then
     .error (.malformed 0 "a page index occurs twice in the marks")
   else if !aux.all (fun a => markOk limits a.fullDict) then
@@ -293,9 +345,13 @@ def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream
       | .ok pps =>
         let n0 := d.trailer.size + (pps.map fun pp => pp.annots.length).sum
         let p : Plan := ⟨start, !Xref.matchAt d.bytes start Xref.kwXref, d.trailer.size, pps,
-          d.trailer.dict, numberAux n0 aux⟩
+          d.trailer.dict, numberAux n0 aux, d.crypt, [], []⟩
         if limits.maxObjects + 1 < p.newSize then .error (.limitExceeded .objects)
-        else .ok p
+        else
+          match p.objects.mapM (wireObject d.crypt), p.aux.mapM (wireAux d.crypt) with
+          | .ok w, .ok wa => .ok { p with wire := w, auxWire := wa }
+          | .error e, _ => .error e
+          | _, .error e => .error e
 
 /-! ## Layout -/
 
@@ -308,11 +364,12 @@ def emit (pos : Nat) : List (Nat × Nat × PdfObject) → List (Nat × Nat × Na
     let r := emit (pos + b.length) rest
     ((n, pos, g) :: r.1, b ++ r.2)
 
-/-- Write the auxiliary streams starting at byte offset `pos` (rule W9). -/
-def emitAux (pos : Nat) : List (Nat × AuxStream) → List (Nat × Nat × Nat) × List UInt8
+/-- Write the auxiliary streams (as written, rule W10) starting at byte offset `pos`
+(rule W9). -/
+def emitAux (pos : Nat) : List (Nat × Dict × List UInt8) → List (Nat × Nat × Nat) × List UInt8
   | [] => ([], [])
-  | (n, a) :: rest =>
-    let b := streamObj n 0 a.fullDict a.data
+  | (n, d, data) :: rest =>
+    let b := streamObj n 0 d data
     let r := emitAux (pos + b.length) rest
     ((n, pos, 0) :: r.1, b ++ r.2)
 
@@ -331,9 +388,10 @@ def bumpId (d : Dict) (seed : List UInt8) : Dict :=
 def carriedClassic (d : Dict) : Dict :=
   d.filter fun e => e.1 != Xref.nameSize && e.1 != Xref.namePrev && e.1 != Xref.nameXRefStm
 
-/-- Rule W6, xref stream: `/Root`, `/Info`, `/ID` of the old trailer. -/
+/-- Rule W6, xref stream: `/Root`, `/Info`, `/ID`, `/Encrypt` of the old trailer. -/
 def carriedStream (d : Dict) : Dict :=
-  d.filter fun e => e.1 == Xref.nameRoot || e.1 == nameInfo || e.1 == nameID
+  d.filter fun e => e.1 == Xref.nameRoot || e.1 == nameInfo || e.1 == nameID ||
+    e.1 == Xref.nameEncrypt
 
 /-- The object numbers of the update's section, ascending. -/
 def Plan.keys (p : Plan) : List Nat :=
@@ -343,8 +401,8 @@ def Plan.keys (p : Plan) : List Nat :=
 /-- **The update bytes** for an original of `base` bytes. -/
 def update (base : Nat) (p : Plan) : List UInt8 :=
   let objStart := base + 1
-  let r0 := emit objStart p.objects
-  let ra := emitAux (objStart + r0.2.length) p.aux
+  let r0 := emit objStart p.wire
+  let ra := emitAux (objStart + r0.2.length) p.auxWire
   let r := (r0.1 ++ ra.1, r0.2 ++ ra.2)
   let xoff := objStart + r.2.length
   if p.stream then
@@ -386,19 +444,29 @@ def bodyIs (r : Except Error IndirectBody) (o : PdfObject) : Bool :=
   | .ok b => decide (b = .obj o)
   | .error _ => false
 
-/-- Whether a fetch returned exactly the auxiliary stream `a` (rule W9). -/
-def auxIs (r : Except Error IndirectBody) (a : AuxStream) : Bool :=
+/-- Whether a fetch returned exactly the body `b` (rule W9: an auxiliary stream). -/
+def auxIs (r : Except Error IndirectBody) (b : IndirectBody) : Bool :=
   match r with
-  | .ok b => decide (b = a.body)
+  | .ok b' => decide (b' = b)
   | .error _ => false
 
-/-- The object check: the result opens strictly and returns every written object and every
-auxiliary stream. -/
+/-- Whether two decryption states agree (rule W10): both absent, or the same file key,
+string and stream methods and encryption-dictionary object. -/
+def sameCrypt : Option Crypt.State → Option Crypt.State → Bool
+  | none, none => true
+  | some a, some b =>
+    a.fileKey.data == b.fileKey.data && decide (a.handler.strF = b.handler.strF) &&
+      decide (a.handler.stmF = b.handler.stmF) && decide (a.encRef = b.encRef)
+  | _, _ => false
+
+/-- The object check: the result opens strictly with the decryption state `crypt` of the
+original (`sameCrypt`) and returns every written object and every auxiliary stream (as
+decrypted bodies, rule W10). -/
 def checkObjects (limits : Limits) (out : ByteArray) (objs : List (Nat × Nat × PdfObject))
-    (aux : List (Nat × AuxStream) := []) : Bool :=
+    (aux : List (Nat × IndirectBody) := []) (crypt : Option Crypt.State := none) : Bool :=
   match Open.openFile limits out with
   | .ok d' => !d'.repaired && objs.all (fun o => bodyIs (d'.getObject limits o.1 o.2.1) o.2.2) &&
-      aux.all fun a => auxIs (d'.getObject limits a.1 0) a.2
+      aux.all (fun a => auxIs (d'.getObject limits a.1 0) a.2) && sameCrypt d'.crypt crypt
   | .error _ => false
 
 /-! ## Entry point -/
@@ -417,7 +485,7 @@ def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List Au
   | .ok p =>
     let out := result doc.file.bytes p
     if checkChain limits doc.file.bytes out p.start p.keys &&
-      checkObjects limits out p.objects p.aux
+      checkObjects limits out p.objects p.auxExpected p.crypt
     then .ok out
     else .error (.malformed doc.file.bytes.size
       "incremental update failed its strict re-parse (internal writer error)")

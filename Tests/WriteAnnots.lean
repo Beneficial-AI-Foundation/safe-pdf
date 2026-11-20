@@ -28,6 +28,12 @@ half-transparent blue highlight — go through `Annots.build` and
 * `qpdf --check` exits 0 (skipped when `qpdf` is missing);
 * refusals: a page index out of range, a highlight without quads.
 
+Encrypted documents (task 9.5f, `runEncrypted`): the same marks are written into the fixture
+encrypted with RC4-40, RC4-128, AES-128, AES-256 and AES-256 with an xref stream
+(`Tests/fixtures-write/encrypted/`, made by qpdf); the result passes every read-back and
+render check above (our rasterizer and `mutool`), `qpdf --check`, keeps the file key, has no
+mark string or appearance-stream content in the clear, and takes a second update.
+
 Environment: `SAFEPDF_WRITEANNOTS_CORPUS=FILE` also writes a highlight over the first text
 line of page 1 of `FILE` plus a note, and checks reopen, read-back and our render;
 `SAFEPDF_WRITE_OUT=DIR` keeps the written files (`DIR/annots-*.pdf`).
@@ -330,22 +336,97 @@ def corpus (file : String) : IO Nat := do
                   ["safepdf-mark-1", "safepdf-mark-1-popup", "safepdf-mark-2"] &&
                   (mine.find? (·.subtype == "Text")).bind (·.contents) == some "note ✓"))
             | .error _ => f := f + (← check s!"corpus {file}: annotations" false)
-            match ours out 0 with
-            | some img =>
-              -- the line box's middle row: yellow paper somewhere on it
-              let y := 2 * ((d'.doc.pages[0]?.map (fun p =>
-                Raster.Geom.decimalToRat p.cropBox.ury)).getD 0 - (b.lly + b.ury) / 2)
-              let yi := y.floor.toNat
+            match ours bytes 0, ours out 0 with
+            | some img0, some img =>
+              -- multiply by the highlight colour (1, 1, 152/255): pixels whose red and green
+              -- stay and whose blue drops to 152/255 of the original. Compared with the
+              -- original render, anywhere on the page, so it holds on coloured paper, under
+              -- /Rotate and with any CropBox origin (task 9.5f: NTSB headers, AAR0501).
               let mut yel := 0
-              for x in [(2 * b.llx).floor.toNat : (2 * b.urx).floor.toNat] do
-                if img.at x yi 0 > 240 && img.at x yi 1 > 240 && img.at x yi 2 < 175 &&
-                  img.at x yi 2 > 130 then yel := yel + 1
+              if img0.w == img.w && img0.h == img.h then
+                for y in [0:img.h] do
+                  for x in [0:img.w] do
+                    let b0 := img0.at x y 2
+                    let near (a e : Nat) : Bool := a + 8 ≥ e && a ≤ e + 8
+                    if b0 > 60 && near (img.at x y 0) (img0.at x y 0) &&
+                        near (img.at x y 1) (img0.at x y 1) &&
+                        near (img.at x y 2) (b0 * 152 / 255) then
+                      yel := yel + 1
               f := f + (← check s!"corpus {file}: highlight visible in our render" (yel > 10)
-                s!"{yel} yellow pixels")
-            | none => f := f + (← check s!"corpus {file}: render" false)
+                s!"{yel} multiplied pixels")
+            | _, _ => f := f + (← check s!"corpus {file}: render" false)
           f := f + (← external "annots-corpus.pdf" file out false)
           IO.println s!"  write-annots corpus {file}: {if f == 0 then "ok" else "FAIL"}"
           return f
+
+/-- Encrypted variants of the fixture (task 9.5f; `Tests/fixtures-write/encrypted/`,
+`generate.py`): RC4-40, RC4-128, AES-128, AES-256, and AES-256 with an xref stream. -/
+def encFixtures : List String :=
+  ["rc4-40.pdf", "rc4-128.pdf", "aes-128.pdf", "aes-256.pdf", "aes-256-objstm.pdf"]
+
+/-- One encrypted fixture (task 9.5f): the fixture's marks are written with `writeMarks`; the
+result reopens strictly with the same file key, reads back exactly as the unencrypted
+fixture (`readBack`: `/Contents` incl. UTF-16, appearance streams, …), renders the
+highlight (ours and `mutool`), passes `qpdf --check`; the update holds none of the new
+strings or appearance-stream data in the clear; a second update on top works. -/
+def runEncrypted (name : String) : IO Nat := do
+  let lim := Limits.default
+  let path : System.FilePath := "Tests" / "fixtures-write" / "encrypted" / name
+  let bytes ← IO.FS.readBinFile path
+  let ctx := s!"encrypted {name}"
+  match Api.openBytes bytes with
+  | .error e => check s!"{ctx}: open" false e.message
+  | .ok d =>
+    let mut f := 0
+    f := f + (← check s!"{ctx}: original is encrypted" d.doc.file.crypt.isSome)
+    match writeMarks lim d.doc marks with
+    | .error e => return f + (← check s!"{ctx}: writeMarks" false (Api.Error.message (.pdf e)))
+    | .ok out =>
+      f := f + (← check s!"{ctx}: original is a prefix" (out.extract 0 bytes.size == bytes))
+      let upd := (out.extract bytes.size out.size).toList
+      f := f + (← check s!"{ctx}: no plaintext /NM in the update"
+        (!contains upd (ascii "safepdf-mark")))
+      f := f + (← check s!"{ctx}: no plaintext /M date in the update"
+        (!contains upd (ascii "D:2026")))
+      f := f + (← check s!"{ctx}: no plaintext appearance stream in the update"
+        (!contains upd (ascii "38. 136. m")))
+      f := f + (← check s!"{ctx}: /Encrypt kept in the new trailer"
+        (contains upd (ascii "/Encrypt")))
+      match Open.openFile lim out with
+      | .ok od => f := f + (← check s!"{ctx}: same file key after reopen"
+          (match od.crypt, d.doc.file.crypt with
+            | some a, some b => a.fileKey.data == b.fileKey.data
+            | _, _ => false))
+      | .error _ => f := f + (← check s!"{ctx}: strict reopen" false)
+      let rb ← readBack out
+      if rb > 0 then IO.println s!"  ({ctx}: {rb} read-back failure(s) above)"
+      f := f + rb
+      match ours bytes 0, ours out 0 with
+      | some b, some a => f := f + (← renderChecks s!"{ctx} ours" b a)
+      | _, _ => f := f + (← check s!"{ctx}: our render" false)
+      f := f + (← external s!"annots-enc-{name}" path out true)
+      match Api.openBytes out with
+      | .ok d2 =>
+        let more : List Mark :=
+          [{ page := 1, kind := .note, quads := [], rect := ⟨10, 10, 30, 30⟩,
+             color := (1, 79 / 255, 95 / 255), id := 6, date := date,
+             contents := "zweite Sicherung ✓" }]
+        match writeMarks lim d2.doc more with
+        | .ok out2 =>
+          match Api.openBytes out2 with
+          | .ok d3 => match Api.pageAnnotations d3 1 with
+            | .ok as => f := f + (← check s!"{ctx}: second update read back"
+                ((as.filterMap (·.name)) == ["safepdf-mark-4", "safepdf-mark-5",
+                  "safepdf-mark-6"] &&
+                  (as.find? (·.name == some "safepdf-mark-6")).bind (·.contents) ==
+                    some "zweite Sicherung ✓") (toString (as.filterMap (·.name))))
+            | .error _ => f := f + (← check s!"{ctx}: second update annotations" false)
+          | .error e => f := f + (← check s!"{ctx}: second update reopen" false e.message)
+          f := f + (← external s!"annots-enc2-{name}" path out2 false)
+        | .error e =>
+          f := f + (← check s!"{ctx}: second update" false (Api.Error.message (.pdf e)))
+      | .error e => f := f + (← check s!"{ctx}: reopen for second update" false e.message)
+      return f
 
 /-- **Suite entry point.** -/
 def run : IO Nat := do
@@ -405,6 +486,8 @@ def run : IO Nat := do
           | .error e => f := f + (← check "second update reopen" false e.message)
         | .error e => f := f + (← check "second update" false (Api.Error.message (.pdf e)))
       | .error e => f := f + (← check "reopen for second update" false e.message)
+  for name in encFixtures do
+    f := f + (← runEncrypted name)
   match ← IO.getEnv "SAFEPDF_WRITEANNOTS_CORPUS" with
   | some file => f := f + (← corpus file)
   | none => pure ()
