@@ -12,6 +12,7 @@ This file is outside the library and is never imported.
 -/
 import SafePdf
 import SafePdf.Shell.App.TclLemmas
+import SafePdf.Shell.App.View
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -988,3 +989,10 @@ import SafePdf.Shell.App.TclLemmas
 #print axioms SafePdf.Core.Raster.Fill.bezNum_fd0
 #print axioms SafePdf.Core.Raster.Fill.cubicLoopFD_eq
 #print axioms SafePdf.Core.Raster.Fill.cubicFD_eq
+
+-- Phase 8, task 8.2b: viewer zoom anchoring
+#print axioms SafePdf.Shell.App.View.reanchor_self
+
+-- Phase 8, task 8.3b: shared annotation budget, annotation text
+#print axioms SafePdf.Core.Annot.docAnnots_shared_ops
+#print axioms SafePdf.Core.Annot.withAnnots_glyphs

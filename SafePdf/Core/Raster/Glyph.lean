@@ -251,9 +251,9 @@ def SourceTable.get (t : SourceTable) (f : FontRef) : Option GlyphSource :=
 
 /-- **Glyph sources of a page**: every font `Text.scanFonts` collects from the page resources,
 each font object built once, at most `Text.maxFonts` (as `Text.loadFonts`). -/
-def loadSources {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict) :
-    SourceTable × σ :=
-  let (es, s) := Text.scanFonts src (Text.maxFormFonts + 1) [(0, res)] [] [] s
+def loadSources {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict)
+    (owner : Nat := 0) : SourceTable × σ :=
+  let (es, s) := Text.scanFonts src (Text.maxFormFonts + 1) [(owner, res)] [] [] s
   let (t, _, s) := es.foldl (fun (acc : SourceTable × Nat × σ) (e : Text.FontEntry) =>
     let (t, k, s) := acc
     let (key, keys, o) := e
@@ -1005,21 +1005,19 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
     -- Annotation appearance streams (task 8.3), drawn after the page content in MuPDF order.
-    -- They get their own op/form budget (the page run's counts are not exposed by `PageText`).
-    let (ap, b) := Annot.docAnnots limits doc page pt.fonts
-      { ops := limits.maxOpsPerPage, forms := limits.maxFormsPerPage } b
+    -- They share the page's op/form budget (task 8.3b, `Annot.Budget.after`).
+    let (ap, b) := Annot.docAnnots limits doc page pt.fonts (Annot.Budget.after limits pt) b
     let items := pt.items ++ ap.items
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD [])
     let (srcs, b) := ap.roots.foldl (fun (acc : SourceTable × Filter.Budget) r =>
-      let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2; (acc.1 ++ t, b)) (srcs, b)
+      let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2 r.1; (acc.1 ++ t, b)) (srcs, b)
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) items
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) items
     -- Tiling patterns (task 7.3h1): the cells of the patterns that fills name (page and
-    -- annotation items, inside soft masks too) are run under what the annotations left of
-    -- their op/form budget (the page run's own counts are not exposed by `PageText`, so the
-    -- page content, the annotations and the cells together run at most twice the page caps).
+    -- annotation items, inside soft masks too) are run under what the page content and the
+    -- annotations left of the page's op/form budget (task 8.3b shared budget).
     let (tls, b, _) := Tiling.loadTilings (Text.textEnv limits (Text.docSource limits doc) ap.fonts) b ()
-      { ops := limits.maxOpsPerPage - ap.ops, forms := limits.maxFormsPerPage - ap.forms }
+      { ops := limits.maxOpsPerPage - pt.ops - ap.ops, forms := limits.maxFormsPerPage - pt.forms - ap.forms }
       (page.resources.getD []) items
     (.ok (renderPage page zoom rot ⟨ap.fonts, srcs, imgs, shs, tls⟩ items cfg), b)
 

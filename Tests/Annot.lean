@@ -117,7 +117,7 @@ def process (b : ByteArray) (bud : Annot.Budget := { ops := 1000000, forms := 10
         let (srcs, b2) := Glyph.loadSources lim src b1 (p.resources.getD [])
         -- glyph sources of the appearance fonts (indirect fonts: keys do not depend on owner)
         let (srcs, _) := ap.roots.foldl (fun (acc : Glyph.SourceTable × Filter.Budget) r =>
-          let (t, b) := Glyph.loadSources lim src acc.2 r.2
+          let (t, b) := Glyph.loadSources lim src acc.2 r.2 r.1
           (acc.1 ++ t, b)) (srcs, b2)
         let img := Glyph.renderPage p 1 .r0 { fonts := ap.fonts, sources := srcs } items
         some ⟨p, pt, ap, img⟩
