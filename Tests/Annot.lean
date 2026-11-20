@@ -17,8 +17,8 @@ Plan.md §6 Phase 8 ("display existing annotations via appearance streams"), ISO
 * (d) a `/Stamp` whose `/BBox` and rotating `/Matrix` need A (§12.5.5) to fit its `/Rect`;
 * (e) a `/FreeText` showing text with a font of its own appearance resources (an embedded
   TrueType font object the page does not use): glyph positions with the font's advances;
-* skips: `/Link`, `/Popup`, a `/Text` without `/AP` (not synthesised), a widget without `/FT`,
-  a duplicate reference;
+* skips: `/Link`, `/Popup`, a `/Watermark` without `/AP` (not synthesised; MuPDF cannot
+  either), a widget without `/FT`, a duplicate reference;
 * the shared operator budget (a tiny budget truncates; `Budget.after` leaves the page run's
   remainder);
 * pixels of the full render (`Glyph.renderPage` over page items ++ annotation items).
@@ -39,7 +39,11 @@ Task 8.3c adds (`run83c`):
 
 * optional content `/OC` (`ocFixture`, three configurations: `/D`, `/Configs [0]` winning over
   `/D`, no groups): which squares are drawn, sampled pixels identical to `mutool draw -r 72`
-  (including MuPDF's literal `AllOn`/`AnyOff` arithmetic).
+  (including MuPDF's literal `AllOn`/`AnyOff` arithmetic);
+* synthesised Polygon, PolyLine, all nine line endings, Squiggly, Caret and Text/FileAttachment/
+  Sound icons (`synth2Fixture`, 17 annotations): recomputed rectangles, the form box of Caret
+  and icons, pixels sampled from `mutool draw -r 72`; the whole page differs from MuPDF in
+  0.024% of pixels (22 of 90,000) under `pixels.py` (`SAFEPDF_PPM_DIR` writes `synth2.pdf`).
 -/
 
 namespace SafePdf.Tests.Annot
@@ -74,10 +78,10 @@ def fixture (ttf : ByteArray) : ByteArray := mkPdf [
   "<< /Type /Annot /Subtype /Stamp /Rect [100 20 120 60] /AP << /N 19 0 R >> >>",
   -- 14: free text (e)
   "<< /Type /Annot /Subtype /FreeText /Rect [20 150 120 170] /AP << /N 20 0 R >> >>",
-  -- 15: link, 16: popup, 17: text (note) without /AP: not synthesised
+  -- 15: link, 16: popup, 17: watermark without /AP: not synthesised
   "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /AP << /N 8 0 R >> >>",
   "<< /Type /Annot /Subtype /Popup /Rect [0 0 10 10] /AP << /N 8 0 R >> >>",
-  "<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] >>",
+  "<< /Type /Annot /Subtype /Watermark /Rect [0 0 10 10] >>",
   -- 18: blue /Off appearance (never drawn here)
   strmObj "/Type /XObject /Subtype /Form /BBox [0 0 20 20]" "0 0 1 rg 0 0 20 20 re f",
   -- 19: BBox 40 × 20 rotated by 90°; fills form y ∈ [0, 10]
@@ -309,6 +313,49 @@ def ocFixture (ocProps : String) : ByteArray := mkPdf [
 def ocCentres : List (Nat × Nat) :=
   [(20, 180), (50, 180), (80, 180), (110, 180), (140, 180), (170, 180), (20, 150), (50, 150)]
 
+/-- Task 8.3c (2, 3): annotations without `/AP` synthesised like MuPDF: Polygon, PolyLine with
+line endings, Lines with every `/LE` style, Squiggly, Caret, Text icons (Note; Comment on a dark
+fill), FileAttachment (default PushPin), Sound with an unknown name (star). -/
+def synth2Fixture : ByteArray := mkPdf ([
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [" ++
+    " ".intercalate ((List.range 17).map fun i => s!"{i + 5} 0 R") ++ "] >>",
+  strmObj "" "",
+  -- 5 polygon (filled), 6 polyline with endings
+  "<< /Type /Annot /Subtype /Polygon /Rect [0 0 1 1] /Vertices [20 20 80 20 90 60 40 80] " ++
+    "/C [0 0 1] /IC [1 1 0] /BS << /W 2 >> >>",
+  "<< /Type /Annot /Subtype /PolyLine /Rect [0 0 1 1] /Vertices [110 20 150 60 190 30 230 70] " ++
+    "/C [1 0 0] /IC [0 1 0] /LE [/ClosedArrow /Circle] /BS << /W 1.5 >> >>",
+  -- 7–11 lines with endings
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 110 120 110] /C [0 0 0] " ++
+    "/LE [/Square /Diamond] /IC [0 0.6 1] >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [150 110 260 130] /C [0 0.5 0] " ++
+    "/LE [/OpenArrow /ROpenArrow] /BS << /W 2 >> >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 140 120 160] /C [0.5 0 0.5] " ++
+    "/LE [/Butt /Slash] /BS << /W 1 >> >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [150 150 260 150] /C [0 0 1] " ++
+    "/LE [/RClosedArrow /None] /IC [1 0 0] >>",
+  "<< /Type /Annot /Subtype /Line /Rect [0 0 1 1] /L [20 180 120 200] /C [1 0.5 0] /LL 10 " ++
+    "/LE [/Circle /ClosedArrow] >>",
+  -- 12 squiggly over a gray box
+  "<< /Type /Annot /Subtype /Squiggly /Rect [0 0 1 1] " ++
+    "/QuadPoints [150 195 260 195 150 180 260 180] /C [1 0 0] >>",
+  -- 13 caret
+  "<< /Type /Annot /Subtype /Caret /Rect [20 220 50 240] /C [0 0 1] >>",
+  -- 14–19 icons
+  "<< /Type /Annot /Subtype /Text /Rect [70 220 90 240] /C [1 1 0] >>",
+  "<< /Type /Annot /Subtype /Text /Rect [110 220 130 240] /Name /Comment /C [0 0 0.4] >>",
+  "<< /Type /Annot /Subtype /FileAttachment /Rect [150 220 170 240] /C [0.8 0.9 1] >>",
+  "<< /Type /Annot /Subtype /Sound /Rect [190 220 210 240] /Name /Whatever >>",
+  "<< /Type /Annot /Subtype /Text /Rect [230 220 250 240] /Name /Help /C [0.2 0.1 0 0] >>",
+  "<< /Type /Annot /Subtype /Text /Rect [20 260 40 280] /Name /Key /C [1 0.8 0.8] /CA 0.5 >>",
+  -- 20, 21: polygon given clockwise (written reversed), dashed polyline with butt ends
+  "<< /Type /Annot /Subtype /Polygon /Rect [0 0 1 1] /Vertices [180 250 220 290 260 250] " ++
+    "/C [0 0 0] /IC [0.5 0.5 1] >>",
+  "<< /Type /Annot /Subtype /PolyLine /Rect [0 0 1 1] /Vertices [60 260 140 270] " ++
+    "/C [0 0 0] /LE [/Butt /Square] /Border [0 0 2 [4 2]] >>"])
+
 /-- Task 8.3c checks (`SAFEPDF_PPM_DIR` writes `oc-d.pdf`, `oc-configs.pdf` and their renders). -/
 def run83c : IO Nat := do
   let mut failures := 0
@@ -333,6 +380,34 @@ def run83c : IO Nat := do
       if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
         writePpm (System.FilePath.mk dir / s!"{name}.ppm") o.img
         IO.FS.writeBinFile (System.FilePath.mk dir / s!"{name}.pdf") pdf
+  -- (3) Polygon, PolyLine, line endings, Squiggly, Caret, icons
+  match process synth2Fixture with
+  | none => failures := failures + (← check "synth2 processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "synth2 all drawn"
+      (ds.length == 17 && ds.all (·.synth) && o.ap.collected.skipped.isEmpty))
+    -- caret: 20 × 14 centred on /Rect, form box [0 0 20 14] mapped by a translation
+    failures := failures + (← check "synth2 caret rect"
+      ((ds[8]?.map (·.rect)) == some ⟨25, 223, 45, 237⟩ &&
+       (ds[8]?.map (·.matrix)) == some (Annot.aOf ⟨25, 223, 45, 237⟩ ⟨0, 0, 20, 14⟩).matrix))
+    -- icon: 18 × 18 centred on /Rect, form box 16 × 16 (scale 9/8)
+    failures := failures + (← check "synth2 icon rect"
+      ((ds[9]?.map (·.rect)) == some ⟨71, 221, 89, 239⟩ &&
+       (ds[9]?.map (·.ap.dict)).bind Content.Run.bboxOf ==
+         some (Content.Fixed.zero, Content.Fixed.zero, Content.Fixed.ofInt 16, Content.Fixed.ofInt 16)))
+    -- pixels sampled from `mutool draw -r 72` (device y = 300 − page y)
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("polygon interior", 50, 260, (255, 255, 0)), ("closed arrow interior", 115, 272, (0, 255, 0)),
+      ("reversed polygon", 220, 30, (127, 127, 255)), ("square ending", 20, 190, (0, 153, 255)),
+      ("diamond ending", 120, 190, (0, 153, 255)), ("note stripe", 80, 70, (0, 0, 0)),
+      ("attachment fill", 160, 70, (204, 229, 255)), ("star", 200, 70, (0, 0, 0)),
+      ("help cmyk fill", 240, 70, (71, 80, 89)), ("white", 260, 190, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"synth2 px {n}" (near (pxAt o.img x y) c))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "synth2.ppm") o.img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "synth2.pdf") synth2Fixture
   return failures
 
 /-- Run the suite; returns the number of failures. -/
