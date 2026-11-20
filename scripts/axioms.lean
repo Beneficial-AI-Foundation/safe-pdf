@@ -718,3 +718,42 @@ import SafePdf
 #print axioms SafePdf.Core.Text.runGlyphs_codes
 #print axioms SafePdf.Core.Text.extractPage_glyphs
 #print axioms SafePdf.Core.Text.extractPage_items
+
+-- Phase 6, task 6.4b: Symbol/ZapfDingbats encodings (SafePdf/Core/Font/Encoding.lean)
+#print axioms SafePdf.Core.Font.symbolEncoding_size
+#print axioms SafePdf.Core.Font.zapfDingbatsEncoding_size
+#print axioms SafePdf.Core.Font.symbolicBuiltin?_size
+#print axioms SafePdf.Core.Font.implicitBase_size
+#print axioms SafePdf.Core.Font.symbolic_rows_size
+
+-- Phase 7, task 7.1: ℚ geometry and C2 (SafePdf/Core/Raster/Geom.lean)
+#print axioms SafePdf.Core.Raster.Geom.Aff.mul_assoc
+#print axioms SafePdf.Core.Raster.Geom.Aff.apply_mul
+#print axioms SafePdf.Core.Raster.Geom.Aff.inv_apply_apply
+#print axioms SafePdf.Core.Raster.Geom.Aff.apply_inv_apply
+#print axioms SafePdf.Core.Raster.Geom.Fixed.toRat_injective
+#print axioms SafePdf.Core.Raster.Geom.Aff.ofMatrix_mul_exact
+#print axioms SafePdf.Core.Raster.Geom.Matrix.apply_x_err
+#print axioms SafePdf.Core.Raster.Geom.Matrix.apply_y_err
+#print axioms SafePdf.Core.Raster.Geom.rotAdd_assoc
+#print axioms SafePdf.Core.Raster.Geom.rotationOfInt_degrees_add
+#print axioms SafePdf.Core.Raster.Geom.toPage_toScreen
+#print axioms SafePdf.Core.Raster.Geom.toScreen_toPage
+#print axioms SafePdf.Core.Raster.Geom.toPageView_toScreenView
+#print axioms SafePdf.Core.Raster.Geom.toScreenView_toPageView
+#print axioms SafePdf.Core.Raster.Geom.toScreen_rotAdd_r90
+#print axioms SafePdf.Core.Raster.Geom.toScreen_mem
+
+-- Phase 6, task 6.2: CFF (SafePdf/Core/Font/CFF.lean)
+#print axioms SafePdf.Core.Font.CFF.u8_lt
+#print axioms SafePdf.Core.Font.CFF.readBE_lt
+#print axioms SafePdf.Core.Font.CFF.Index.item_end_le
+#print axioms SafePdf.Core.Font.CFF.Index.count_le
+#print axioms SafePdf.Core.Font.CFF.Index.items_size
+#print axioms SafePdf.Core.Font.CFF.bias_pos
+#print axioms SafePdf.Core.Font.CFF.run_stack_le
+#print axioms SafePdf.Core.Font.CFF.run_calls_le
+#print axioms SafePdf.Core.Font.CFF.run_steps_le
+#print axioms SafePdf.Core.Font.CFF.evalList_size
+#print axioms SafePdf.Core.Font.CFF.CFFFont.advance_eq
+#print axioms SafePdf.Core.Font.CFF.CFFFont.numGlyphs_le_max
