@@ -73,17 +73,23 @@ most a window each in mode B). The cell painter's own work is bounded by the pai
 `pathPainter`, `Clip.renderItem_steps_le` on a `w × h` cell). Local caps (candidates for `Limits`): `maxCellPixels` 2²⁰,
 `maxTiles` 2²⁰, `maxTileWork` 2²⁷, `maxDirectTiles` 64.
 
+## Task 7.3h2 (strokes, text, full cells, nesting)
+
+`loadTilingsWith` looks up the patterns of fill **and stroke** colours of paths and glyph
+runs (`itemKeys`), and, for `maxTileDepth + 1` levels, the patterns used inside the cells just
+loaded (found by the cell's own `ResRef`: the runner records `.form num 0` or `.ref` for a
+pattern named in the pattern's `/Resources`); a key is loaded once, so a pattern using
+itself terminates. Before a cell runs, a caller-supplied `grow` extends a context (the page
+renderer adds the fonts of the pattern's resources). `renderTilingStroke` paints a stroke
+mask with a tiling, `paintTilingMask` any coverage mask (glyph runs). Full cell painters
+(text, images, shadings, transparency in cells; nested patterns painted at one depth less,
+depth 0 by `pathPainter` = mid grey) are `Glyph.cellPainterD`.
+
 ## Gaps
 
-* Patterns inside a cell are whatever the painter does with them (with `pathPainter`: mid
-  grey; the page renderer must not recurse without a depth).
-* Only `fillPath` items are looked up by `loadTilings` (pattern strokes and text are not:
-  task 7.3h2). Task 7.3h1 wires fills into the page renderer (`Glyph.renderItemG`, cells
-  painted by `pathPainter`); `TilingTable` is keyed by `(ResRef, name)` (`PatternUse.res`,
-  found by `Run.resLookup`) and `TilingTable.tileOf` gives the pattern matrix
-  `Matrix.mul pat.matrix use.base` and the PaintType 2 colour `use.under`.
 * The cell's graphics state starts from the default state, not the pattern's parent's (the
   CTM is the pattern matrix; line width etc. reset — ISO 32000-2 §8.7.3.1 says inherited).
+* Patterns nested deeper than `maxTileDepth` paint mid grey (MuPDF has no such cap).
 -/
 
 namespace SafePdf.Core.Raster.Tiling
@@ -175,27 +181,39 @@ def runCell {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) 
   let r := Content.Run.runOps env' lim.maxXObjectDepth ⟨res, [num], num, 0, Matrix.identity⟩ (St.init s obs) t.ops
   (r.items, r.s, r.obs, { ops := bud.ops - r.ops, forms := bud.forms - r.forms })
 
+/-- **Load a tiling pattern** with a growing context (task 7.3h2): as `loadTiling`, but
+before the cell runs, `grow fa s num res` extends the context `fa` with what the cell's
+resources need (e.g. their fonts, so the cell's text is positioned with real advances), and
+the cell runs in `envOf fa`. -/
+def loadTilingWith {α σ ω : Type} (envOf : α → Env σ ω) (grow : α → σ → Nat → Dict → α × σ)
+    (fa : α) (s : σ) (obs : ω) (bud : Budget) (o : PdfObject) :
+    Option Tiling × α × σ × ω × Budget :=
+  let src := (envOf fa).src
+  match o with
+  | .ref n g =>
+    match src.fetch s n g with
+    | (.ok (.stream st), s) =>
+      match header st.dict with
+      | none => (none, fa, s, obs, bud)
+      | some (pt, bb, xs, ys) =>
+        match src.decode s n st with
+        | (.ok bytes, s) =>
+          let (res, s) := match Dict.get? st.dict (Content.Run.nm "Resources") with
+            | some r => Content.Run.dictOf src s r
+            | none => ([], s)
+          let (fa, s) := grow fa s n res
+          let (items, s, obs, bud) := runCell (envOf fa) s obs bud n res bytes
+          (some ⟨n, pt, bb, xs, ys, Content.Run.formMatrix st.dict, res, items⟩, fa, s, obs, bud)
+        | (.error _, s) => (none, fa, s, obs, bud)
+    | (_, s) => (none, fa, s, obs, bud)
+  | _ => (none, fa, s, obs, bud)
+
 /-- **Load a tiling pattern** from its (indirect) object: parse the dictionary, decode the
 stream, run the cell. `none` for anything that is not a well-formed tiling pattern. -/
 def loadTiling {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) (o : PdfObject) :
     Option Tiling × σ × ω × Budget :=
-  match o with
-  | .ref n g =>
-    match env.src.fetch s n g with
-    | (.ok (.stream st), s) =>
-      match header st.dict with
-      | none => (none, s, obs, bud)
-      | some (pt, bb, xs, ys) =>
-        match env.src.decode s n st with
-        | (.ok bytes, s) =>
-          let (res, s) := match Dict.get? st.dict (Content.Run.nm "Resources") with
-            | some r => Content.Run.dictOf env.src s r
-            | none => ([], s)
-          let (items, s, obs, bud) := runCell env s obs bud n res bytes
-          (some ⟨n, pt, bb, xs, ys, Content.Run.formMatrix st.dict, res, items⟩, s, obs, bud)
-        | (.error _, s) => (none, s, obs, bud)
-    | (_, s) => (none, s, obs, bud)
-  | _ => (none, s, obs, bud)
+  let r := loadTilingWith (fun (_ : Unit) => env) (fun u s _ _ => (u, s)) () s obs bud o
+  (r.1, r.2.2)
 
 /-- The tiling patterns of a page **by resource** (task 7.3h): keyed by where the pattern
 resource lives and its name (`PatternUse.res`, the colour's name), as
@@ -237,27 +255,88 @@ def TilingTable.tileOf (t : TilingTable) (c : Color) (u : Option PatternUse) :
         underOf u)
   | none => none
 
-/-- **Load the tiling patterns of a display list**: every pattern named by a fill colour
-(items nested in soft masks too, `DisplayList.foldDeep` with `Limits.maxXObjectDepth` levels),
-once per `(ResRef, name)`, looked up by `Run.resLookup` (`pageRes`: the page's resources),
-charging the shared budget `bud`. -/
+/-- Largest nesting of tiling patterns painted with their full cells (task 7.3h2): the page's
+patterns are depth `maxTileDepth`, a pattern used inside one of their cells one less, …; the
+cells of a depth-0 pattern are painted by `pathPainter` (patterns in them: mid grey). Patterns
+are loaded for `maxTileDepth + 1` levels. -/
+def maxTileDepth : Nat := 2
+
+/-- The pattern keys an item's colours name (task 7.3h2): fill and stroke colours of paths and
+glyph runs. -/
+def itemKeys : DisplayItem → List (ResRef × Name)
+  | .fillPath _ _ style _ => (patternKey style.color style.pattern).toList
+  | .strokePath _ style _ => (patternKey style.color style.pattern).toList
+  | .glyphRun r _ =>
+    (patternKey r.fill.color r.fill.pattern).toList ++
+      (patternKey r.stroke.color r.stroke.pattern).toList
+  | _ => []
+
+/-- Accumulator of `loadTilingsWith`: the table, the context, the source and observer states,
+and the items of the cells loaded at the current level (the next level's input). -/
+structure LoadAcc (α σ ω : Type) where
+  /-- Patterns loaded so far. -/
+  tab : TilingTable
+  /-- The context (`loadTilingWith`). -/
+  fa : α
+  /-- Source state. -/
+  s : σ
+  /-- Observer state. -/
+  obs : ω
+  /-- Items of the cells loaded at this level. -/
+  fresh : DisplayList
+
+/-- Load the pattern `key` (once: a key already in the table is skipped, so a pattern using
+itself is loaded once). -/
+def loadKey {α σ ω : Type} (envOf : α → Env σ ω) (grow : α → σ → Nat → Dict → α × σ)
+    (pageRes : Dict) (acc : LoadAcc α σ ω) (key : ResRef × Name) : LoadAcc α σ ω :=
+  if acc.tab.patterns.any (·.1 == key) then acc else
+  let (o, s) := Content.Run.resLookup (envOf acc.fa).src acc.s pageRes "Pattern" key.1 key.2
+  match o with
+  | some o =>
+    let (p, fa, s, obs, b) := loadTilingWith envOf grow acc.fa s acc.obs acc.tab.budget o
+    { tab := { patterns := (key, p) :: acc.tab.patterns, budget := b }, fa, s, obs,
+      fresh := match p with
+        | some t => acc.fresh ++ t.items
+        | none => acc.fresh }
+  | none => { acc with s, tab := { acc.tab with patterns := (key, none) :: acc.tab.patterns } }
+
+/-- Load the patterns named by `items` (inside soft masks too), then, `n − 1` more levels, those
+named by the cells just loaded. -/
+def loadLevels {α σ ω : Type} (envOf : α → Env σ ω) (grow : α → σ → Nat → Dict → α × σ)
+    (pageRes : Dict) (fuel : Nat) : Nat → DisplayList → LoadAcc α σ ω → LoadAcc α σ ω
+  | 0, _, acc => acc
+  | n + 1, items, acc =>
+    let acc := Content.DisplayList.foldDeep (fun acc it =>
+      (itemKeys it).foldl (loadKey envOf grow pageRes) acc) fuel { acc with fresh := #[] } items
+    loadLevels envOf grow pageRes fuel n acc.fresh acc
+
+/-- **Load the tiling patterns of a display list** with a growing context (task 7.3h2): every
+pattern named by a fill or stroke colour of a path or glyph run (items nested in soft masks
+too, `DisplayList.foldDeep` with `Limits.maxXObjectDepth` levels), once per `(ResRef, name)`,
+looked up by `Run.resLookup` (`pageRes`: the page's resources; patterns used in a cell are
+found through the cell's `ResRef`, `.form num 0` or `.ref`), charging the shared budget
+`bud`; nested patterns for `maxTileDepth + 1` levels. Before each cell runs, `grow` extends
+the context (e.g. with the fonts of the pattern's resources). Returns the table, the final
+context, the source and observer states. -/
+def loadTilingsWith {α σ ω : Type} (envOf : α → Env σ ω) (grow : α → σ → Nat → Dict → α × σ)
+    (fa : α) (s : σ) (obs : ω) (bud : Budget) (pageRes : Dict) (items : DisplayList) :
+    TilingTable × α × σ × ω :=
+  let acc := loadLevels envOf grow pageRes (envOf fa).cfg.limits.maxXObjectDepth
+    (maxTileDepth + 1) items ⟨{ budget := bud }, fa, s, obs, #[]⟩
+  (acc.tab, acc.fa, acc.s, acc.obs)
+
+/-- **Load the tiling patterns of a display list** (`loadTilingsWith` without a context). -/
 def loadTilings {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) (pageRes : Dict)
     (items : DisplayList) : TilingTable × σ × ω :=
-  Content.DisplayList.foldDeep (fun (acc : TilingTable × σ × ω) it =>
-    match it with
-    | .fillPath _ _ style _ =>
-      match patternKey style.color style.pattern with
-      | some key =>
-        let (t, s, obs) := acc
-        if t.patterns.any (·.1 == key) then acc else
-        let (o, s) := Content.Run.resLookup env.src s pageRes "Pattern" key.1 key.2
-        match o with
-        | some o =>
-          let (p, s, obs, b) := loadTiling env s obs t.budget o
-          ({ patterns := (key, p) :: t.patterns, budget := b }, s, obs)
-        | none => ({ t with patterns := (key, none) :: t.patterns }, s, obs)
-      | none => acc
-    | _ => acc) env.cfg.limits.maxXObjectDepth ({ budget := bud }, s, obs) items
+  let r := loadTilingsWith (fun (_ : Unit) => env) (fun u s _ _ => (u, s)) () s obs bud pageRes
+    items
+  (r.1, r.2.2)
+
+/-- The items of every loaded cell (for the loaders of images and shadings, task 7.3h2). -/
+def TilingTable.cellItems (t : TilingTable) : DisplayList :=
+  t.patterns.foldl (fun acc e => match e.2 with
+    | some p => acc ++ p.items
+    | none => acc) #[]
 
 /-! ## 3. Cell layers -/
 
@@ -608,6 +687,45 @@ theorem renderTilingFill_size (cfg : Config) (paint : CellPainter) (m : Aff) (W 
     (renderTilingFill cfg paint m W H st pat pm color p rule alpha clip).buf.size =
       st.buf.size := by
   unfold renderTilingFill
+  exact renderTiling_size _ _ _ _ _ _ _ _ _ _
+
+/-- **Paint a path stroked with a tiling pattern** (task 7.3h2; `DisplayItem.strokePath p style
+clip` with `style.color = .pattern _`): stroke mask (by `stroke`, as `Clip.renderItem`) ∩
+clip, then `renderTiling` with the stroke alpha. -/
+def renderTilingStroke (cfg : Config) (paint : CellPainter) (stroke : Clip.StrokeFn) (m : Aff)
+    (W H : Nat) (st : Clip.RState) (pat : Tiling) (pm : Aff) (color : Color) (p : Path)
+    (style : Content.StrokeStyle) (clip : Clip) : Clip.RState :=
+  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let fm := stroke cfg m (Clip.itemWindow W H c.1) p style
+  let mk := Clip.combine fm c.1
+  renderTiling paint m W H { st with cache := c.2.1, steps := st.steps + c.2.2 + mk.area } pat pm
+    color mk (Clip.compByte style.alpha)
+
+/-- Painting a tiling-pattern stroke preserves the buffer size. -/
+theorem renderTilingStroke_size (cfg : Config) (paint : CellPainter) (stroke : Clip.StrokeFn)
+    (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Tiling) (pm : Aff) (color : Color) (p : Path)
+    (style : Content.StrokeStyle) (clip : Clip) :
+    (renderTilingStroke cfg paint stroke m W H st pat pm color p style clip).buf.size =
+      st.buf.size := by
+  unfold renderTilingStroke
+  exact renderTiling_size _ _ _ _ _ _ _ _ _ _
+
+/-- **Paint a coverage mask with a tiling pattern** (task 7.3h2: pattern-coloured text): the
+mask `mk` ∩ the clip mask `cm`, then `renderTiling`; `cc`/`s`: the clip cache and the work
+already counted (as `Clip.paintMask`). -/
+def paintTilingMask (paint : CellPainter) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Tiling)
+    (pm : Aff) (color : Color) (cm : Option Mask) (mk : Mask) (alpha : Comp) (cc : Clip.ClipCache)
+    (s : Nat) : Clip.RState :=
+  let mk := Clip.combine mk cm
+  renderTiling paint m W H { st with cache := cc, steps := st.steps + s + mk.area } pat pm color mk
+    (Clip.compByte alpha)
+
+/-- Painting a mask with a tiling pattern preserves the buffer size. -/
+theorem paintTilingMask_size (paint : CellPainter) (m : Aff) (W H : Nat) (st : Clip.RState)
+    (pat : Tiling) (pm : Aff) (color : Color) (cm : Option Mask) (mk : Mask) (alpha : Comp)
+    (cc : Clip.ClipCache) (s : Nat) :
+    (paintTilingMask paint m W H st pat pm color cm mk alpha cc s).buf.size = st.buf.size := by
+  unfold paintTilingMask
   exact renderTiling_size _ _ _ _ _ _ _ _ _ _
 
 /-! ## 7. Checks -/
