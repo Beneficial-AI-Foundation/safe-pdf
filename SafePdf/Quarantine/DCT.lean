@@ -76,8 +76,9 @@ JPEG) when an image is drawn at `1 / 2^k` of its size or less. The output is
 (`scaledSize`: `8 / 2^k`, doubled for subsampled chroma while the sampling factors allow, so
 4:2:0 chroma needs no upsampling) and the matching `jidctred.c` transform (`idctScaled`:
 4 × 4, 2 × 2, 1 × 1, bit-exact); fancy upsampling is off at 1/8 (`do_fancy` needs
-`min_DCT_scaled_size > 1`). The entropy decoding and a progressive frame's coefficient buffer
-are unchanged (full size); only the planes shrink, by `4^k`.
+`min_DCT_scaled_size > 1`). The entropy decoding is unchanged (full size); the planes shrink
+by `4^k`, and so does a progressive frame's coefficient store (task 8.6, `CLay`: only the
+coefficients the scaled IDCT reads keep their 16-bit value, the others one nonzero bit).
 
 ## Bounds
 
@@ -85,8 +86,10 @@ are unchanged (full size); only the planes shrink, by `4^k`.
 component planes (padded to whole MCUs) and the output buffer each hold at most
 `Limits.maxDecodedStreamBytes` bytes (else `.decodedStreamBytes`); in a sequential frame at
 most one scan per component is decoded (a scan after every component has been decoded ends
-decoding, like a sequential libjpeg stream); a progressive frame's coefficient buffer is
-charged `coefBytes` = 8 bytes per coefficient against `maxDecodedStreamBytes`, and at most
+decoding, like a sequential libjpeg stream); a progressive frame's coefficient store
+(`CLay.bb` bytes per block: 2 bytes per coefficient at full size, 10 bytes per block at 1/8)
+holds at most `maxDecodedStreamBytes` bytes (all three checked at the frame header, before
+any scan, so a caller can retry cheaply at a smaller scale), and at most
 `maxScans` = 256 progressive scans are decoded (each one pass over its blocks; more is
 `Error.unsupported`); the marker loop runs at most once per input byte. The decoded
 image carries its size law (`Image.size_eq`, `Image.nc_le`), and `decode_pixels` proves the
@@ -129,6 +132,87 @@ def natural : Array Nat :=
     58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63]
 
+/-! ### Coefficient storage of progressive frames (task 8.6)
+
+A progressive frame keeps every block's coefficients until the end of the data. They are
+stored as 16-bit two's-complement values (libjpeg's `JCOEF`; every stored value is already
+wrapped by `wrap16`) in a `ByteArray`, and **only the coefficients the component's IDCT reads
+are stored with their value**: all 64 at full size, the 49 outside row and column 4 for the
+4 × 4 transform, the 25 in rows and columns {0, 1, 3, 5, 7} for the 2 × 2 transform, the DC
+alone for 1 × 1 (`keeps`). For every other position the block keeps one bit: whether the
+coefficient is nonzero. That is all the entropy decoder needs of them: AC refinement reads a
+correction bit exactly for the nonzero coefficients, and a correction never makes a nonzero
+coefficient zero (`Al ≤ 13`: `x ± 2^Al` stays inside `(−2¹⁶, 2¹⁶) ∖ {0}` modulo 2¹⁶ for a
+16-bit `x ≠ 0` whose bit `Al` is clear). Block smoothing writes only coefficients that the
+transform then reads, so it never needs the others' values either. A block takes
+`CLay.bb` bytes: 128 at full size, 106 at 1/2, 58 at 1/4, 10 at 1/8 (was 512: one boxed
+`Int` per coefficient). -/
+
+/-- Does the `ss × ss` scaled IDCT (`idctScaled`) read the coefficient at natural position
+`p`? -/
+def keeps (ss p : Nat) : Bool :=
+  let r := p / 8
+  let c := p % 8
+  if ss = 8 then true
+  else if ss = 4 then r ≠ 4 ∧ c ≠ 4
+  else if ss = 2 then (r = 0 ∨ r = 1 ∨ r = 3 ∨ r = 5 ∨ r = 7) ∧ (c = 0 ∨ c = 1 ∨ c = 3 ∨ c = 5 ∨ c = 7)
+  else p = 0
+
+/-- The storage layout of one component's coefficient blocks. -/
+structure CLay where
+  /-- Slot of each natural position (`64`: not stored, only its nonzero bit). -/
+  slot : Array Nat := (Array.range 64)
+  /-- Number of stored positions. -/
+  nk : Nat := 64
+  deriving Inhabited
+
+/-- The layout for a component decoded with scaled block size `ss`. -/
+def CLay.ofSize (ss : Nat) : CLay :=
+  let (slot, nk) := (List.range 64).foldl (fun (acc : Array Nat × Nat) p =>
+    if keeps ss p then (acc.1.push acc.2, acc.2 + 1) else (acc.1.push 64, acc.2)) (#[], 0)
+  { slot, nk }
+
+/-- Bytes per block: two per stored coefficient, plus a 64-bit nonzero map when some
+positions are not stored. -/
+def CLay.bb (l : CLay) : Nat := 2 * l.nk + (if l.nk < 64 then 8 else 0)
+
+/-- Coefficient at natural position `p` of the block at byte `base` of the store: its value
+when stored; otherwise `1` if it is nonzero, else `0` (only its being nonzero matters). -/
+@[inline] def cget (l : CLay) (cb : ByteArray) (base p : Nat) : Int :=
+  let s := l.slot.getD p 64
+  if s < 64 then
+    let u := rd cb (base + 2 * s) + 256 * rd cb (base + 2 * s + 1)
+    if u < 32768 then (u : Int) else (u : Int) - 65536
+  else if (rd cb (base + 2 * l.nk + p / 8) >>> (p % 8)) % 2 = 1 then 1 else 0
+
+/-- Coefficient at natural position `p` as the IDCT reads it: its value when stored, `0`
+otherwise (the transform does not read it). -/
+@[inline] def cval (l : CLay) (cb : ByteArray) (base p : Nat) : Int :=
+  if l.slot.getD p 64 < 64 then cget l cb base p else 0
+
+/-- Store the 16-bit coefficient `v` at natural position `p` of the block at byte `base`
+(an unstored position keeps only `v ≠ 0`). -/
+@[inline] def cset (l : CLay) (cb : ByteArray) (base p : Nat) (v : Int) : ByteArray :=
+  let s := l.slot.getD p 64
+  if s < 64 then
+    let u := (v % 65536).toNat
+    setB (setB cb (base + 2 * s) (UInt8.ofNat (u % 256))) (base + 2 * s + 1) (UInt8.ofNat (u / 256))
+  else
+    let i := base + 2 * l.nk + p / 8
+    let old := (rd cb i).toUInt8
+    let bit : UInt8 := (1 : UInt8) <<< (p % 8).toUInt8
+    setB cb i (if v = 0 then old &&& ~~~bit else old ||| bit)
+
+-- Round trips: stored values (both signs), the nonzero bit of an unstored position.
+#guard cget {} (cset {} (ByteArray.mk (Array.replicate 128 0)) 0 9 (-1234)) 0 9 == -1234
+#guard (CLay.ofSize 4).nk == 49 && (CLay.ofSize 2).nk == 25 && (CLay.ofSize 1).nk == 1
+#guard (CLay.ofSize 8).bb == 128 && (CLay.ofSize 1).bb == 10
+#guard
+  let l := CLay.ofSize 2
+  let b := cset l (ByteArray.mk (Array.replicate l.bb 0)) 0 2 (-5)
+  cget l b 0 2 == 1 && cval l b 0 2 == 0 && cget l (cset l b 0 2 0) 0 2 == 0 &&
+    cget l (cset l b 0 1 300) 0 1 == 300
+
 /-- A frame component (T.81 B.2.2). -/
 structure Comp where
   /-- Component identifier `Cᵢ`. -/
@@ -160,21 +244,27 @@ structure Frame where
   mcusX : Nat
   /-- MCU rows, `⌈Y / (8 · Vmax)⌉`. -/
   mcusY : Nat
-  /-- Offset of each component's plane in the plane buffer (also of its coefficients in the
-  coefficient buffer of a progressive frame: a block holds as many coefficients as samples). -/
+  /-- Progressive frames: byte offset of each component's blocks in the coefficient store
+  (task 8.6; `CLay.bb` bytes per block, `Frame.bstride` blocks per row). -/
   offs : Array Nat
   /-- A progressive frame (`SOF2`). -/
   prog : Bool := false
   /-- The output scale: output samples per 8 image samples (libjpeg `min_DCT_scaled_size`;
   8 at full size, 4, 2 or 1 in a reduced-size decode). -/
   mins : Nat := 8
-  /-- Offset of each component's plane in the plane buffer (equal to `offs` at full size). -/
+  /-- Offset of each component's plane in the plane buffer. -/
   poffs : Array Nat := #[]
+  /-- Progressive frames: each component's coefficient layout (`CLay.ofSize` of its scaled
+  block size). -/
+  lays : Array CLay := #[]
   deriving Inhabited
 
-/-- Width in samples of component `c`'s plane at full size (whole MCUs); also the row
-stride of a progressive frame's coefficient buffer. -/
+/-- Width in samples of component `c`'s plane at full size (whole MCUs). -/
 def Frame.stride (f : Frame) (c : Comp) : Nat := f.mcusX * c.h * 8
+
+/-- Blocks per row of component `c` (whole MCUs): the row stride, in blocks, of a
+progressive frame's coefficient store. -/
+def Frame.bstride (f : Frame) (c : Comp) : Nat := f.mcusX * c.h
 
 /-- Height in samples of component `c`'s plane at full size. -/
 def Frame.rows (f : Frame) (c : Comp) : Nat := f.mcusY * c.v * 8
@@ -226,10 +316,10 @@ structure St where
   done : Array Bool := #[]
   /-- Number of scans decoded. -/
   scans : Nat := 0
-  /-- Progressive frames: the quantised coefficients (16-bit values, natural order within a
-  block), laid out like the planes: block `(bx, by)` of component `c` starts at
-  `offs[c] + by · 8 · stride + bx · 64`. Empty for sequential frames. -/
-  coef : Array Int := #[]
+  /-- Progressive frames: the quantised coefficients (task 8.6 store: 16-bit values of the
+  positions the IDCT reads, nonzero bits of the others): block `(bx, by)` of component `c`
+  starts at byte `offs[c] + (by · bstride + bx) · lays[c].bb`. Empty for sequential frames. -/
+  coef : ByteArray := ByteArray.empty
   /-- Progressive frames: each component's quantisation table, latched at its first scan
   (libjpeg `latch_quant_tables`; `#[]`: not yet scanned). -/
   qlat : Array (Array Int) := #[]
@@ -672,6 +762,9 @@ structure SComp where
   q : Array Int
   /-- Scaled block size in the plane (`Comp.ss`; sequential scans only). -/
   ss : Nat := 8
+  /-- Progressive scans: the layout of the component's coefficient blocks (`off` is then the
+  byte offset of its blocks in the coefficient store, `stride` its blocks per row). -/
+  lay : CLay := {}
   deriving Inhabited
 
 /-- Find the next marker from `i` (at most `fuel` bytes): skips data bytes, stuffed `FF 00`
@@ -730,8 +823,8 @@ def decodeScan (d : ByteArray) (cs : Array SComp) (mcusX mcusY ri pos : Nat) (bu
 /-! ## 5b. Progressive scans (T.81 Annex G, libjpeg-turbo `jdphuff.c`)
 
 Coefficients are kept as libjpeg's `JCOEF` (16-bit two's complement): every store wraps
-(`wrap16`). A block's coefficients live at `base … base + 63` of the coefficient buffer, in
-natural order. -/
+(`wrap16`). A block lives at byte `base` of the coefficient store, in its component's layout
+`CLay` (`cget`/`cset` by natural position). -/
 
 /-- Wrap to a signed 16-bit value (C's `(JCOEF)` conversion). -/
 @[inline] def wrap16 (x : Int) : Int := (x + 32768) % 65536 - 32768
@@ -749,28 +842,28 @@ natural order. -/
 prediction `pred`; the coefficient is the new prediction shifted left by `al`. Returns the
 reader, the new prediction and the coefficients. -/
 @[inline] def dcFirst (d : ByteArray) (lut : Array UInt32) (al : Nat) (br : BR) (pred : Int)
-    (coef : Array Int) (base : Nat) : BR × Int × Array Int :=
+    (l : CLay) (coef : ByteArray) (base : Nat) : BR × Int × ByteArray :=
   let br := refill d br
   let (s, br) := decodeSym lut br
   let (diff, br) := receiveExtend br s
   let dc := pred + diff
-  (br, dc, coef.setIfInBounds base (wrap16 (dc * (2 ^ al : Nat))))
+  (br, dc, cset l coef base 0 (wrap16 (dc * (2 ^ al : Nat))))
 
 /-- DC refinement scan, one block (`decode_mcu_DC_refine`): one bit, OR-ed in at bit `al`. -/
-@[inline] def dcRefine (d : ByteArray) (al : Nat) (br : BR) (coef : Array Int) (base : Nat) :
-    BR × Array Int :=
+@[inline] def dcRefine (d : ByteArray) (al : Nat) (br : BR) (l : CLay) (coef : ByteArray)
+    (base : Nat) : BR × ByteArray :=
   let br := refill d br
   let (b, br) := getBits br 1
   if b = 1 then
-    let x := g coef base
-    (br, if bitAt x al then coef else coef.setIfInBounds base (wrap16 (x + (2 ^ al : Nat))))
+    let x := cget l coef base 0
+    (br, if bitAt x al then coef else cset l coef base 0 (wrap16 (x + (2 ^ al : Nat))))
   else (br, coef)
 
 /-- AC first scan, the codes of one block from zig-zag index `k` to `se` (at most `fuel`
 codes; each advances `k`): returns the reader, the new end-of-band run (`0` if the band
 ended without `EOBr`) and the coefficients. -/
-def acFirstLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
-    (fuel k : Nat) → BR → Array Int → BR × Nat × Array Int
+def acFirstLoop (d : ByteArray) (lut : Array UInt32) (se al : Nat) (l : CLay) (base : Nat) :
+    (fuel k : Nat) → BR → ByteArray → BR × Nat × ByteArray
   | 0, _, br, coef => (br, 0, coef)
   | fuel + 1, k, br, coef =>
     if se < k then (br, 0, coef) else
@@ -781,9 +874,9 @@ def acFirstLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
     if s ≠ 0 then
       let k := k + r
       let (v, br) := receiveExtend br s
-      acFirstLoop d lut se al base fuel (k + 1) br
-        (coef.setIfInBounds (base + natural.getD k 63) (wrap16 (v * (2 ^ al : Nat))))
-    else if r = 15 then acFirstLoop d lut se al base fuel (k + 16) br coef
+      acFirstLoop d lut se al l base fuel (k + 1) br
+        (cset l coef base (natural.getD k 63) (wrap16 (v * (2 ^ al : Nat))))
+    else if r = 15 then acFirstLoop d lut se al l base fuel (k + 16) br coef
     else
       -- `EOBr`: this block and `2^r + bits − 1` more end here.
       let (x, br) := if r = 0 then (0, br) else getBits br r
@@ -793,26 +886,26 @@ def acFirstLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
 coefficient and skip `r` zero coefficients more; stop at the next zero coefficient
 (returned `k`) or after `se` (`k = se + 1`). The inner `do … while` of
 `decode_mcu_AC_refine`. -/
-def advance (d : ByteArray) (se al base : Nat) :
-    (fuel k r : Nat) → BR → Array Int → BR × Nat × Array Int
+def advance (d : ByteArray) (se al : Nat) (l : CLay) (base : Nat) :
+    (fuel k r : Nat) → BR → ByteArray → BR × Nat × ByteArray
   | 0, k, _, br, coef => (br, k, coef)
   | fuel + 1, k, r, br, coef =>
-    let pos := base + natural.getD k 63
-    let x := g coef pos
+    let pos := natural.getD k 63
+    let x := cget l coef base pos
     if x ≠ 0 then
       let br := refill d br
       let (b, br) := getBits br 1
-      let coef := if b = 1 then coef.setIfInBounds pos (correct x b al) else coef
-      if se < k + 1 then (br, k + 1, coef) else advance d se al base fuel (k + 1) r br coef
+      let coef := if b = 1 then cset l coef base pos (correct x b al) else coef
+      if se < k + 1 then (br, k + 1, coef) else advance d se al l base fuel (k + 1) r br coef
     else if r = 0 then (br, k, coef)
     else if se < k + 1 then (br, k + 1, coef)
-    else advance d se al base fuel (k + 1) (r - 1) br coef
+    else advance d se al l base fuel (k + 1) (r - 1) br coef
 
 /-- AC refinement, the codes of one block from `k` (at most `fuel` codes): returns the
 reader, the position where an `EOBr` code was read (or `se + 1`), the new end-of-band run
 (`0`: none) and the coefficients. -/
-def refLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
-    (fuel k : Nat) → BR → Array Int → BR × Nat × Nat × Array Int
+def refLoop (d : ByteArray) (lut : Array UInt32) (se al : Nat) (l : CLay) (base : Nat) :
+    (fuel k : Nat) → BR → ByteArray → BR × Nat × Nat × ByteArray
   | 0, k, br, coef => (br, k, 0, coef)
   | fuel + 1, k, br, coef =>
     if se < k then (br, k, 0, coef) else
@@ -829,33 +922,35 @@ def refLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
           let (b, br) := getBits br 1
           (if b = 1 then ((2 ^ al : Nat) : Int) else -((2 ^ al : Nat) : Int), br)
         else (0, br)
-      let ev := advance d se al base 64 k r br coef
+      let ev := advance d se al l base 64 k r br coef
       let k := ev.2.1
-      let coef := if s ≠ 0 then ev.2.2.setIfInBounds (base + natural.getD k 63) nv else ev.2.2
-      refLoop d lut se al base fuel (k + 1) ev.1 coef
+      let coef := if s ≠ 0 then cset l ev.2.2 base (natural.getD k 63) nv else ev.2.2
+      refLoop d lut se al l base fuel (k + 1) ev.1 coef
 
 /-- AC refinement after an end of band: a correction bit for each nonzero coefficient from
 `k` to `se`. -/
-def refTail (d : ByteArray) (se al base : Nat) : (fuel k : Nat) → BR → Array Int → BR × Array Int
+def refTail (d : ByteArray) (se al : Nat) (l : CLay) (base : Nat) :
+    (fuel k : Nat) → BR → ByteArray → BR × ByteArray
   | 0, _, br, coef => (br, coef)
   | fuel + 1, k, br, coef =>
     if se < k then (br, coef) else
-    let pos := base + natural.getD k 63
-    let x := g coef pos
+    let pos := natural.getD k 63
+    let x := cget l coef base pos
     if x ≠ 0 then
       let br := refill d br
       let (b, br) := getBits br 1
-      refTail d se al base fuel (k + 1) br (if b = 1 then coef.setIfInBounds pos (correct x b al) else coef)
-    else refTail d se al base fuel (k + 1) br coef
+      refTail d se al l base fuel (k + 1) br
+        (if b = 1 then cset l coef base pos (correct x b al) else coef)
+    else refTail d se al l base fuel (k + 1) br coef
 
 /-- AC refinement scan, one block (`decode_mcu_AC_refine`) with the pending end-of-band run
 `eob`: returns the reader, the new run and the coefficients. -/
-def acRefine (d : ByteArray) (lut : Array UInt32) (ss se al eob base : Nat) (br : BR)
-    (coef : Array Int) : BR × Nat × Array Int :=
-  let (br, k, eob, coef) := if eob = 0 then refLoop d lut se al base 64 ss br coef
+def acRefine (d : ByteArray) (lut : Array UInt32) (ss se al eob : Nat) (l : CLay) (base : Nat)
+    (br : BR) (coef : ByteArray) : BR × Nat × ByteArray :=
+  let (br, k, eob, coef) := if eob = 0 then refLoop d lut se al l base 64 ss br coef
     else (br, ss, eob, coef)
   if 0 < eob then
-    let (br, coef) := refTail d se al base 64 k br coef
+    let (br, coef) := refTail d se al l base 64 k br coef
     (br, eob - 1, coef)
   else (br, 0, coef)
 
@@ -878,7 +973,7 @@ of the segment, the following MCUs of the restart interval are left unchanged. A
 leaving the 32-bit range is an error (`JERR_BAD_DCT_COEF`). Returns the coefficients and the
 position where the reader stopped. -/
 def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX mcusY ri pos : Nat)
-    (coef : Array Int) (rowDiv : Nat := 1) : Except Error (Array Int × Nat × Nat) := do
+    (coef : ByteArray) (rowDiv : Nat := 1) : Except Error (ByteArray × Nat × Nat) := do
   let mut br : BR := { pos }
   let mut preds : Array Int := Array.replicate cs.size 0
   let mut eob := 0
@@ -900,28 +995,28 @@ def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX m
           let c := cs.getD ci default
           for by_ in [0:c.v] do
             for bx in [0:c.h] do
-              let base := c.off + (my * c.v + by_) * 8 * c.stride + (mx * c.h + bx) * 64
+              let base := c.off + ((my * c.v + by_) * c.stride + (mx * c.h + bx)) * c.lay.bb
               match mode with
               | .dcFirst =>
-                let r := dcFirst d c.dc al br (preds.getD ci 0) coef base
+                let r := dcFirst d c.dc al br (preds.getD ci 0) c.lay coef base
                 if r.2.1 < -2147483648 ∨ 2147483647 < r.2.1 then
                   throw (bad r.1.pos "DC coefficient out of range")
                 br := r.1
                 preds := preds.setIfInBounds ci r.2.1
                 coef := r.2.2
               | .dcRefine =>
-                let r := dcRefine d al br coef base
+                let r := dcRefine d al br c.lay coef base
                 br := r.1
                 coef := r.2
               | .acFirst =>
                 if 0 < eob then eob := eob - 1
                 else
-                  let r := acFirstLoop d c.ac se al base 64 ss br coef
+                  let r := acFirstLoop d c.ac se al c.lay base 64 ss br coef
                   br := r.1
                   eob := r.2.1
                   coef := r.2.2
               | .acRefine =>
-                let r := acRefine d c.ac ss se al eob base br coef
+                let r := acRefine d c.ac ss se al eob c.lay base br coef
                 br := r.1
                 eob := r.2.1
                 coef := r.2.2
@@ -929,20 +1024,21 @@ def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX m
 
 /-- Dequantise and inverse-transform every block of a progressive frame into the planes
 (blocks of `Comp.ss` samples). -/
-def idctAll (f : Frame) (coef : Array Int) (qlat : Array (Array Int)) (buf : ByteArray) :
+def idctAll (f : Frame) (coef : ByteArray) (qlat : Array (Array Int)) (buf : ByteArray) :
     ByteArray := Id.run do
   let mut buf := buf
   for ci in [0:f.comps.size] do
     let c := f.comps.getD ci default
     let off := f.offs.getD ci 0
-    let st := f.stride c
+    let st := f.bstride c
+    let l := f.lays.getD ci {}
     let poff := f.poffs.getD ci 0
     let pst := f.pstride c
     let q := qlat.getD ci #[]
     for by_ in [0:f.mcusY * c.v] do
       for bx in [0:f.mcusX * c.h] do
-        let base := off + by_ * 8 * st + bx * 64
-        let blk := (Array.range 64).map fun i => g coef (base + i) * g q i
+        let base := off + (by_ * st + bx) * l.bb
+        let blk := (Array.range 64).map fun i => cval l coef base i * g q i
         buf := idctScaled c.ss blk buf (poff + by_ * c.ss * pst + bx * c.ss) pst
   return buf
 
@@ -1018,11 +1114,12 @@ def smoothBlock (ws : Array Int) (dc : Nat → Int) (q : Array Int) (bits : Arra
 after the last scan / before it, used for the iMCU rows up to / after `lastGood` (the last
 iMCU row the final scan reached with data). Neighbour rows and the sliding window of DC
 columns follow libjpeg's edge rules exactly (including its quirks at iMCU-row borders). -/
-def smoothComp (f : Frame) (coef : Array Int) (q : Array Int) (cb pb : Array Int)
+def smoothComp (f : Frame) (coef : ByteArray) (q : Array Int) (cb pb : Array Int)
     (lastGood ci : Nat) (buf : ByteArray) : ByteArray := Id.run do
   let c := f.comps.getD ci default
   let off := f.offs.getD ci 0
-  let st := f.stride c
+  let st := f.bstride c
+  let l := f.lays.getD ci {}
   let poff := f.poffs.getD ci 0
   let pst := f.pstride c
   let hb := (f.dh c + 7) / 8
@@ -1048,9 +1145,9 @@ def smoothComp (f : Frame) (coef : Array Int) (q : Array Int) (cb pb : Array Int
         let cs := cols
         let dc := fun (i : Nat) =>
           let i := i - 1
-          g coef (off + rows.getD (i / 5) 0 * 8 * st + cs.getD (i % 5) 0 * 64)
-        let base := off + r * 8 * st + b * 64
-        let ws := (Array.range 64).map fun i => g coef (base + i)
+          cget l coef (off + (rows.getD (i / 5) 0 * st + cs.getD (i % 5) 0) * l.bb) 0
+        let base := off + (r * st + b) * l.bb
+        let ws := (Array.range 64).map fun i => cval l coef base i
         let ws := smoothBlock ws dc q bits chg
         let blk := (Array.range 64).map fun i => g ws i * g q i
         buf := idctScaled c.ss blk buf (poff + r * c.ss * pst + b * c.ss) pst
@@ -1111,18 +1208,18 @@ def parseDHT (d : ByteArray) (a e : Nat) (st : St) : Except Error St := do
     p := p + 17 + total
   return st
 
-/-- Bytes charged per coefficient of a progressive frame against
-`Limits.maxDecodedStreamBytes` (a boxed-scalar `Array Int` slot): a progressive frame keeps all
-its coefficients — as many as plane samples — so its planes may hold at most
-`maxDecodedStreamBytes / 8` samples (32 Mi with the defaults, e.g. a 4:2:0 image of about
-22 megapixels), against `maxDecodedStreamBytes` for a sequential frame. -/
-def coefBytes : Nat := 8
-
 /-- At most this many progressive scans are decoded per image (more: `Error.unsupported`).
 Every scan visits each block of its components once, so this bounds the decoding work by
 `maxScans` passes over the coefficients; encoders write about 10 (`cjpeg -progressive`: 10
 for colour, 6 for gray). -/
 def maxScans : Nat := 256
+
+/-- `n` bytes `v` appended to `b`. (Task 8.6: `ByteArray.mk (Array.replicate n v)` first builds
+an `Array UInt8` of boxed elements, 8 bytes per byte — a transient 8× peak for the plane and
+coefficient buffers.) -/
+def fillBytes (v : UInt8) : Nat → ByteArray → ByteArray
+  | 0, b => b
+  | n + 1, b => fillBytes v n (b.push v)
 
 /-- libjpeg's per-component scaled block size (`jpeg_calc_output_dimensions`): starting from
 the output scale `mins`, a component's IDCT size is doubled (up to 8) while that still divides
@@ -1174,23 +1271,30 @@ def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) (prog : B
   comps := comps.map fun c => { c with ss := scaledSize hmax vmax mins c }
   let mcusX := (w + 8 * hmax - 1) / (8 * hmax)
   let mcusY := (h + 8 * vmax - 1) / (8 * vmax)
+  let lays := comps.map fun c => CLay.ofSize c.ss
   let mut offs : Array Nat := #[]
   let mut total := 0
   let mut poffs : Array Nat := #[]
   let mut ptotal := 0
-  for c in comps do
+  for ci in [0:comps.size] do
+    let c := comps.getD ci default
     offs := offs.push total
-    total := total + mcusX * c.h * 8 * (mcusY * c.v * 8)
+    total := total + mcusX * c.h * (mcusY * c.v) * (lays.getD ci {}).bb
     poffs := poffs.push ptotal
     ptotal := ptotal + mcusX * c.h * c.ss * (mcusY * c.v * c.ss)
   if limits.maxDecodedStreamBytes < ptotal then throw (.limitExceeded .decodedStreamBytes)
-  if prog ∧ limits.maxDecodedStreamBytes < coefBytes * total then
+  -- The output buffer (checked again by `finalize`), here before any scan is decoded so that
+  -- a decode over the limit fails at once and the image layer can retry at a smaller scale.
+  let ow := (w * mins + 7) / 8
+  let oh := (h * mins + 7) / 8
+  if limits.maxDecodedStreamBytes < ow * oh * nf then throw (.limitExceeded .decodedStreamBytes)
+  if prog ∧ limits.maxDecodedStreamBytes < total then
     throw (.limitExceeded .decodedStreamBytes)
   return { st with
-    frame := some { w, h, comps, hmax, vmax, mcusX, mcusY, offs, prog, mins, poffs }
-    buf := ByteArray.mk (Array.replicate ptotal 128)
+    frame := some { w, h, comps, hmax, vmax, mcusX, mcusY, offs, prog, mins, poffs, lays }
+    buf := fillBytes 128 ptotal (ByteArray.emptyWithCapacity ptotal)
     done := Array.replicate nf false
-    coef := if prog then Array.replicate total 0 else #[]
+    coef := if prog then fillBytes 0 total (ByteArray.emptyWithCapacity total) else ByteArray.empty
     qlat := Array.replicate nf #[]
     cbits := Array.replicate (nf * savedCoefs) (-1)
     pbits := Array.replicate (nf * savedCoefs) (-1) }
@@ -1230,7 +1334,7 @@ def parseSOSProg (d : ByteArray) (f : Frame) (a len e : Nat) (st : St) : Except 
       let q := st.qt.getD c.tq #[]
       if q.size ≠ 64 then throw (bad b "quantisation table not defined")
       qlat := qlat.setIfInBounds idx q
-    cs := cs.push { idx, off := f.offs.getD idx 0, stride := f.stride c,
+    cs := cs.push { idx, off := f.offs.getD idx 0, stride := f.bstride c, lay := f.lays.getD idx {},
                     h := if ns = 1 then 1 else c.h, v := if ns = 1 then 1 else c.v,
                     dc := dcT, ac := acT, q := #[] }
   let (mx, my) : Nat × Nat :=
@@ -1251,7 +1355,7 @@ def parseSOSProg (d : ByteArray) (f : Frame) (a len e : Nat) (st : St) : Except 
       cbits := cbits.setIfInBounds (b + k) (al : Int)
   let rowDiv := if ns = 1 then (f.comps.getD ((cs.getD 0 default).idx) default).v else 1
   let coef := st.coef
-  let st := { st with coef := #[] }
+  let st := { st with coef := ByteArray.empty }
   let (coef, pos, lastGood) ← progScan d cs mode ss se al mx my st.ri e coef rowDiv
   let done := cs.foldl (fun dn c => dn.setIfInBounds c.idx true) st.done
   return ({ st with coef, qlat, done, cbits, pbits, lastGood, scans := st.scans + 1 }, pos)
@@ -1593,7 +1697,7 @@ def St.flush (st : St) : St :=
             buf := smoothComp f st.coef (st.qlat.getD ci #[]) cb pb st.lastGood ci buf
           return buf
         else buf
-      { st with buf, coef := #[] }
+      { st with buf, coef := ByteArray.empty }
     else st
   | none => st
 

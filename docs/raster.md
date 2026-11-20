@@ -263,11 +263,11 @@ at ≈ 1.2 GB RSS. MuPDF never decodes it at full size: `fz_get_pixmap_from_imag
   (`scaledSize`: 4:2:0 chroma needs no upsampling at a reduced scale), the `jidctred.c`
   transforms (`idctScaled`: 4 × 4, 2 × 2, 1 × 1), no fancy upsampling at 1/8. Bit-exact
   against `djpeg -dct int -scale 1/2^k` on 17 fixtures × 3 scales (suite `dct`). A progressive
-  frame still keeps its full-size coefficient buffer (8 bytes per coefficient).
+  frame kept its full-size coefficient buffer (8 bytes per coefficient) until task 8.6.
 * `Raster/Image.lean`: `imageExtents` (largest squared device extents of each image XObject
   over its page/annotation uses at the render's zoom; images also used in tiling cells or
   Type 3 glyphs are excluded), `l2Factor` (MuPDF's rule in exact arithmetic), `dctScale`;
-  `Glyph.renderDocPage` passes the extents to `loadImages`. Not reduced: soft masks, images
+  `Glyph.renderDocPage` passes the extents to `loadImages`. Not reduced (until 8.6, below): soft masks, images
   whose soft mask has a `/Matte` (MuPDF), inline images.
 * **One step less than MuPDF** (`dctScale l = min 3 (l − 1)`): with MuPDF's own factor, 15 of
   the 21 other changed pages of the sample got slightly worse (`arxiv-1105.2345` p8, a
@@ -291,6 +291,68 @@ and after: 8 pages changed, all with downscaled JPEGs, all within τ, each by at
 +0.03 points (`pixels.py`: 1105.2345 p5 0.193 → 0.205%, 1602.03837 p3 0.393 → 0.394%,
 p4 0.427 → 0.429%, p2 identical %, 2010.11929 p21 0.226 → 0.219%, 2412.19437 p47
 0.243 → 0.256%, 2501.12948 p43 0.364 → 0.389%, p44 0.244 → 0.246%).
+
+## Memory bound for huge images (task 8.6)
+
+M8 (`docs/viewer-corpus.md`) bounds the peak RSS at 1 GiB per file. After 7.10 the remaining
+risks were: a progressive JPEG's full-size coefficient buffer, Flate/LZW/raw images decoded and
+converted at full size (decoded stream + sample buffer + RGBA ≈ 3.3 bytes per RGB sample), the
+images 7.10 did not reduce, and the grey placeholder whenever a full-size decode was over
+`maxDecodedStreamBytes`.
+
+* **Progressive coefficients** (`Quarantine/DCT.lean`, `CLay`): stored as 16-bit values in a
+  `ByteArray`, and only the positions the component's (scaled) IDCT reads keep their value —
+  64 at full size, 49 at 1/2, 25 at 1/4, the DC at 1/8; every other position keeps one
+  nonzero bit, which is all AC refinement needs (a correction never zeroes a nonzero
+  coefficient for `Al ≤ 13`). Bytes per block: 128 / 106 / 58 / 10 (was 512 at every scale).
+  Bit-exact on every progressive fixture of suite `dct` (incl. the scaled references).
+  The plane and coefficient buffers are no longer built with `ByteArray.mk (Array.replicate
+  n v)`, which first allocates a boxed `Array UInt8` (8 bytes per byte).
+* **Row-by-row conversion, decoded at the drawn size** (`Raster/Image.lean`, `Src`, `fused`):
+  no image-size sample or RGBA buffer; an image drawn smaller than its size is box-filtered
+  while decoding to exactly the size, blocks and rounding the placement's `boxDown` would use
+  (`Extent.t`: `⌈√…⌉` of the grid-fitted device extents of the largest use, computed by
+  `imageExtents` through the page → device matrix), with colour key, masks (on `withMask`'s
+  grid) and `/Matte` applied per pixel in the old order. One output row needs one source row
+  of the image and of its mask plus `tw` running sums. The placement then finds the pixmap at
+  its target and paints the same pixels. JPEGs keep 7.10's reduced libjpeg decode before
+  that. Soft masks and `/Mask` stencils take part in the same pass; inline images use the
+  target of their one use.
+* **Retry instead of the placeholder**: a JPEG over the limit (planes, coefficients or output,
+  checked at the frame header) is decoded again at the next scale, up to 1/8; a pixmap whose
+  RGBA would exceed `maxDecodedStreamBytes` is decoded at the first `⌈n / 2^j⌉` that fits
+  (`fitTarget`). The page's image budget `maxPageImagePixels` is now 2²⁶ pixels (256 MiB of
+  RGBA, was 1 GiB) and each image is decoded under what is left of it (reduced to fit).
+* **Not reduced** (full size, as before; the retry still applies): images also drawn in tiling
+  cells or Type 3 glyphs (cell/glyph matrices, not page matrices; Type 3 images go through
+  MuPDF's stencil scaler). **Still full size in memory**: the decoded filter output of an
+  XObject and of its soft mask (`Source.decode`; the byte filters are not streaming, and
+  Flate's output grows by doubling, so a 144 MB stream peaks near 2×).
+
+Pixels (72 dpi, all 81 corpus files, 2,450 page PPMs hashed before = eb78544 and after):
+**2,445 pages byte-identical**; the 5 others (1810.04805 p3, p15; 2112.10752 p1; 2412.19437
+p16; cs_0410012 p3) draw one image at two sizes — the smaller use is now box-filtered twice —
+and change by at most +0.004 points (`pixels.py`: worst 2412.19437 p16 0.395 → 0.399%), all
+within τ. (A first version that averaged `2^k × 2^k` blocks while decoding, as MuPDF's
+`fz_subsample_pixmap`, changed 70 pages, 49 of them worse by up to +0.19 points and
+ntsb-AAR0701 p157 to 1.02%, outside τ: the double box filter blurs; it was dropped.)
+
+Peak RSS of `inspect --view raster` (whole file, 72 dpi, `Tests/differential/peak_rss.py`;
+the five corpus files with the largest images):
+
+| file (largest image) | before | after |
+|---|---|---|
+| arxiv-2501.12948 (11881 × 7646 JPEG) | 87 MiB | 73 MiB |
+| ntsb AAR0501 (5464 × 5050 Indexed Flate) | 207 MiB | 98 MiB |
+| arxiv-2005.14165 (4568 × 4248 RGB Flate) | 323 MiB | 197 MiB |
+| arxiv-2307.09288 (5215 × 2605 JPEG, 4096 × 1644 Flate) | 172 MiB | 126 MiB |
+| arxiv-2401.00001 (4592 × 2250 RGB Flate) | 195 MiB | 116 MiB |
+
+Render times unchanged (same totals within noise). Generated stress files (scratch, not
+committed): an 8192 × 6144 4:2:0 progressive JPEG drawn 400 × 300 pt — before: the grey
+placeholder (coefficients over the limit), 26 MiB; after: decoded at 1/8, 65 MiB, 1.3 s; an
+8000 × 6000 RGB Flate image drawn 400 × 300 pt — 515 → 413 MiB (what remains is the 144 MB
+decoded stream and its growth).
 
 ## Issues found (Core; not fixed here — other tasks own the files)
 
