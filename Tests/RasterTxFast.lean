@@ -18,7 +18,13 @@ pseudo-random inputs (fixed seed), that the bytes are identical:
   clips, strokes, all blend modes, soft-mask references, groups (alpha, blend, soft mask;
   nested up to 11 deep, beyond `maxLayerDepth`; sometimes unbalanced; a third of them knockout
   groups, task 7.3i), soft-mask definitions (luminosity with a backdrop colour, alpha; nested)
-  — 1500 scenes.
+  — 1500 scenes;
+* task 7.9: every pixel of 1500 random strokes (widths 0–12 px, skewed CTMs, caps, joins,
+  miter limits 1–30, dashes, curves) lies inside `Clip.strokeBound`; 1000 strokes through a
+  stroke geometry table built from a translated copy of their style (`Stroke.strokePathT`)
+  give `Stroke.strokePath`'s mask; `renderTx` vs
+  `renderTxSpec` on 300 scenes of knockout groups with wide strokes on pages of up to 96 × 96
+  pixels (lazy knockout frames `Transparency.knockL`, item bounds smaller than the page).
 -/
 
 namespace SafePdf.Tests.RasterTxFast
@@ -251,6 +257,125 @@ def sceneCase (s : UInt64) : Option String × Bool × UInt64 :=
   else (some s!"scene W={W} H={H} items={items.size} bounded-equal={fast == spec} unbounded-equal={slow == spec}",
     layered, s)
 
+/-! ## Stroke bounds and lazy knockout frames (task 7.9) -/
+
+/-- A random open or closed polyline (2–7 points, any turn, sometimes a curve) over a `W × H`
+page. -/
+def randLine (W H : Nat) (s : UInt64) : Path × UInt64 := Id.run do
+  let (n, s1) := rand s 6
+  let (x, s1) := randI s1 0 (W * 1000)
+  let (y, s1) := randI s1 0 (H * 1000)
+  let mut s := s1
+  let mut segs : Array Content.Segment := #[.moveTo (ptm x y)]
+  for _ in [0:n + 1] do
+    let (k, s1) := rand s 5
+    let (x, s1) := randI s1 0 (W * 1000)
+    let (y, s1) := randI s1 0 (H * 1000)
+    let (cx, s1) := randI s1 0 (W * 1000)
+    let (cy, s1) := randI s1 0 (H * 1000)
+    s := s1
+    segs := segs.push (if k = 0 then .curveTo (ptm cx cy) (ptm x y) (ptm x y) else .lineTo (ptm x y))
+  let (c, s1) := rand s 3
+  s := s1
+  if c = 0 then segs := segs.push .closePath
+  return (⟨segs⟩, s)
+
+/-- A random stroke style: width 0–12 px, CTM scaled 0.2–3 and skewed (its translation never
+matters), caps, joins, miter limits 1–30, sometimes dashed. -/
+def randLineStyle (s : UInt64) : StrokeStyle × UInt64 :=
+  let (w, s) := rand s 12001
+  let (a, s) := randI s 200 3000
+  let (d, s) := randI s 200 3000
+  let (b, s) := randI s (-1500) 1500
+  let (c, s) := randI s (-1500) 1500
+  let (cap, s) := rand s 3
+  let (join, s) := rand s 3
+  let (ml, s) := randI s 1000 30000
+  let (dk, s) := rand s 4
+  let (dl, s) := randI s 500 6000
+  let (color, s) := randColor s
+  let (alpha, s) := randAlpha s
+  let fx := fun (v : Int) => Content.Fixed.clamp (v * 1000)
+  let line : Content.LineStyle :=
+    { width := fx w, miterLimit := fx ml,
+      cap := if cap = 0 then .butt else if cap = 1 then .round else .square,
+      join := if join = 0 then .miter else if join = 1 then .round else .bevel,
+      dash := if dk = 0 then { array := [fx dl, fx (dl / 2)] } else {} }
+  ({ color, alpha, line, ctm := ⟨fx a, fx b, fx c, fx d, fx 17, fx (-5)⟩ }, s)
+
+/-- One stroke: every pixel the stroker covers lies inside `Clip.strokeBound`. -/
+def strokeBoundCase (s : UInt64) : Option String × UInt64 :=
+  let W := 120
+  let H := 100
+  let (p, s) := randLine W H s
+  let (st, s) := randLineStyle s
+  let mk := Raster.Stroke.strokePath Aff.id p st (pageRect W H) {}
+  let b := strokeBound {} Aff.id p st
+  let out := (List.range mk.h).any fun j => (List.range mk.w).any fun i =>
+    let x : Int := mk.x0 + i
+    let y : Int := mk.y0 + j
+    mk.get x y ≠ 0 && !(b.x0 ≤ x && x < b.x1 && b.y0 ≤ y && y < b.y1)
+  if out then (some s!"stroke outside its bound: {repr st.line} bound {repr b}", s) else (none, s)
+
+/-- A random scene for the lazy knockout frames: knockout groups (some translucent, some
+nested, some unbalanced) of translucent and opaque wide strokes and fills on a page of up to
+96 × 96 pixels, so that item bounds are much smaller than the page. -/
+def randKScene (W H : Nat) (n : Nat) (s : UInt64) : Array DisplayItem × UInt64 := Id.run do
+  let mut s := s
+  let mut out : Array DisplayItem := #[]
+  let mut depth := 0
+  for _ in [0:n] do
+    let (k, s1) := rand s 10
+    s := s1
+    if k ≤ 1 && depth < 6 then
+      let (alpha, s1) := randAlpha s
+      let (ko, s1) := rand s1 4
+      s := s1
+      out := out.push (.groupBegin { alpha, knockout := ko ≠ 0 })
+      depth := depth + 1
+    else if k = 2 && depth > 0 then
+      out := out.push .groupEnd
+      depth := depth - 1
+    else if k ≤ 5 then
+      let (p, s1) := randLine W H s
+      let (st, s1) := randLineStyle s1
+      let (ck, s1) := rand s1 4
+      let (cp, s1) := randPath W H s1
+      s := s1
+      out := out.push (.strokePath p st (if ck = 0 then [⟨cp, .nonzero⟩] else []))
+    else
+      let (it, s1) := randPaint W H s
+      s := s1
+      out := out.push it
+  for _ in [0:depth] do out := out.push .groupEnd
+  return (out, s)
+
+/-- One lazy-knockout scene: the fast driver (with bounds) equals the reference driver. -/
+def kSceneCase (s : UInt64) : Option String × UInt64 :=
+  let (W, s) := rand s 72; let W := W + 25
+  let (H, s) := rand s 72; let H := H + 25
+  let (n, s) := rand s 40
+  let (items, s) := randKScene W H (n + 1) s
+  if renderFast W H true items == renderSpec W H items then (none, s)
+  else (some s!"knockout scene W={W} H={H} items={items.size}", s)
+
+/-- Masks with the same rectangle and bytes. -/
+def sameMask (a b : Mask) : Bool := a.x0 == b.x0 && a.y0 == b.y0 && a.w == b.w && a.h == b.h && a.data == b.data
+
+/-- One stroke through a geometry table (`Stroke.strokePathT`) made from a translated copy of
+its style and another style: the mask of `Stroke.strokePath`. -/
+def geoTableCase (s : UInt64) : Option String × UInt64 :=
+  let (p, s) := randLine 120 100 s
+  let (st, s) := randLineStyle s
+  let (other, s) := randLineStyle s
+  let (dx, s) := randI s (-50000) 50000
+  let moved : StrokeStyle :=
+    { st with ctm := { st.ctm with e := Content.Fixed.clamp (dx * 1000), f := Content.Fixed.clamp (-dx * 300) } }
+  let t : Raster.Stroke.GeoTable := ((({ view := Aff.id, cfg := {} } : Raster.Stroke.GeoTable).add other).add moved)
+  let a := Raster.Stroke.strokePathT t Aff.id p st (pageRect 120 100) {}
+  let b := Raster.Stroke.strokePath Aff.id p st (pageRect 120 100) {}
+  if sameMask a b then (none, s) else (some s!"geometry table: {repr st.line}", s)
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let mut failures := 0
@@ -274,7 +399,27 @@ def run : IO Nat := do
   if 2 * layered < n then
     failures := failures + 1
     IO.println s!"  FAIL raster-tx-fast: only {layered} of {n} scenes use layers"
-  IO.println s!"  raster-tx-fast: 3000 combine cases, {n} scenes ({layered} with layers), {failures} mismatches"
+  -- task 7.9: stroke bounds, lazy knockout frames on larger pages
+  for _ in [0:1500] do
+    let (res, s') := strokeBoundCase s
+    s := s'
+    if let some msg := res then
+      failures := failures + 1
+      if failures ≤ 10 then IO.println s!"  FAIL raster-tx-fast: {msg}"
+  for _ in [0:1000] do
+    let (res, s') := geoTableCase s
+    s := s'
+    if let some msg := res then
+      failures := failures + 1
+      if failures ≤ 10 then IO.println s!"  FAIL raster-tx-fast: {msg}"
+  for _ in [0:300] do
+    let s0 := s
+    let (res, s') := kSceneCase s
+    s := s'
+    if let some msg := res then
+      failures := failures + 1
+      if failures ≤ 10 then IO.println s!"  FAIL raster-tx-fast: {msg} seed={s0}"
+  IO.println s!"  raster-tx-fast: 3000 combine cases, {n} scenes ({layered} with layers), 1500 stroke bounds, 1000 geometry-table strokes, 300 knockout scenes, {failures} mismatches"
   return failures
 
 end SafePdf.Tests.RasterTxFast

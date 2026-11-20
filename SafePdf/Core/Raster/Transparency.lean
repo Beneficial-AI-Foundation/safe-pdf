@@ -111,6 +111,9 @@ as the specification `renderTxSpec` (section 7); `renderTx` gives the same bytes
   byte reads), `lumLoop`/`alphaLoop`, row-copy `fillBuf`/`solidBuf`.
 * The transparency state is taken out of the renderer state before a layer is opened or
   closed, so the buffers it holds are written in place (no copy-on-write of the page).
+* **Lazy knockout frames** (task 7.9, `Layer.knockL`, `knockItemL`): a knockout group keeps
+  patches of the rectangles changed since it began instead of a page copy, and each knockout
+  element is painted, shaped and merged only over its bound, in reused scratch buffers.
 
 `scripts/bench-raster.sh` (612 × 792, compiled): 100 groups at alpha 0.5: 1586 → 9 ms
 (167 ms without bounds); luminosity-masked full-page fill: 62 → 9 ms; 1000 `Multiply`
@@ -482,6 +485,13 @@ inductive Layer where
   earlier items of the group (`knockItem`). Painting passes through it to the enclosing open
   layer (like `skipped`); it counts as an open layer (it holds a page buffer). -/
   | knock (base : ByteArray)
+  /-- A **lazy knockout** frame (task 7.9, fast driver only): the group's initial content is
+  the current buffer except over the saved rectangles `patches` (oldest first), which hold the
+  bytes the rectangle had before its first change since the frame was pushed (the oldest patch
+  containing a pixel wins). Saves the page-size copy of `knock` per group; turned into a
+  `knock` frame (`materializeTop`) before anything that could change the buffer without a
+  patch. Counts as an open layer, like `knock`. -/
+  | knockL (patches : List (IRect × ByteArray))
 
 /-- Transparency state of a page render. -/
 structure TxState where
@@ -492,6 +502,8 @@ structure TxState where
   /-- A page buffer to reuse as the scratch buffer of the next item layer (the scratch buffer
   of the last closed layer; its content is irrelevant), so that item layers allocate nothing. -/
   spare : ByteArray := ByteArray.empty
+  /-- Scratch page buffers of knockout elements (task 7.9, `knockItemL`; contents irrelevant). -/
+  kbufs : List ByteArray := []
 
 /-- Number of open (buffer-holding) layers. -/
 def openCount : List Layer → Nat
@@ -499,12 +511,14 @@ def openCount : List Layer → Nat
   | .opened .. :: rest => openCount rest + 1
   | .skipped :: rest => openCount rest
   | .knock _ :: rest => openCount rest + 1
+  | .knockL _ :: rest => openCount rest + 1
 
 /-- A layer's saved backdrop has the page size (or there is none). -/
 def Layer.Ok (W H : Nat) : Layer → Prop
   | .opened back _ _ => back.size = 4 * W * H
   | .skipped => True
   | .knock base => base.size = 4 * W * H
+  | .knockL _ => True
 
 /-- Every saved backdrop has the page size. -/
 def TxState.Sized (W H : Nat) (t : TxState) : Prop := ∀ l ∈ t.stack, l.Ok W H
@@ -543,6 +557,7 @@ def touchStack (r : Option IRect) : List Layer → List Layer
   | [] => []
   | .skipped :: rest => .skipped :: touchStack r rest
   | .knock b :: rest => .knock b :: touchStack r rest
+  | .knockL ps :: rest => .knockL ps :: touchStack r rest
   | .opened back fx d :: rest => .opened back fx (addDirty d r) :: rest
 
 /-- Record that the pixels within `r` may have changed in the current buffer. -/
@@ -579,6 +594,11 @@ theorem touchStack_ok (W H : Nat) (r : Option IRect) (l : List Layer)
       rcases hx with rfl | hx
       · exact h (.knock b) (List.mem_cons_self ..)
       · exact ih (fun z hz => h z (List.mem_cons_of_mem _ hz)) x hx
+    | knockL ps =>
+      simp only [touchStack, List.mem_cons] at hx
+      rcases hx with rfl | hx
+      · trivial
+      · exact ih (fun z hz => h z (List.mem_cons_of_mem _ hz)) x hx
 
 /-- Touching keeps the `Sized` invariant. -/
 theorem touch_sized (W H : Nat) (t : TxState) (r : Option IRect) (h : t.Sized W H) :
@@ -611,12 +631,16 @@ theorem appendN_size (row : ByteArray) (n : Nat) (b : ByteArray) :
   | succ n ih => simp only [appendN, ih, ByteArray.size_append, Nat.succ_mul]; omega
 
 /-- A buffer of `W · H` pixels, every byte `v` (one row, then `H` row copies). -/
-def fillBuf (W H v : Nat) : ByteArray := appendN (pushN (UInt8.ofNat v) (4 * W) .empty) H .empty
+def fillBuf (W H v : Nat) : ByteArray :=
+  -- reserved capacity: each row append is in place (task 7.9: from `.empty` every append
+  -- reallocated, quadratic in the rows — 1.9 MB pages took milliseconds each)
+  appendN (pushN (UInt8.ofNat v) (4 * W) .empty) H (ByteArray.emptyWithCapacity (4 * W * H))
 
 /-- `fillBuf` has the page size. -/
 theorem fillBuf_size (W H v : Nat) : (fillBuf W H v).size = 4 * W * H := by
   simp only [fillBuf, appendN_size, pushN_size, ByteArray.size_empty, Nat.zero_add]
-  rw [Nat.mul_comm]
+  have : (ByteArray.emptyWithCapacity (4 * W * H)).size = 0 := rfl
+  rw [this, Nat.zero_add, Nat.mul_comm]
 
 /-- The 7.3c definition of `fillBuf` (kept for the reference driver; same bytes). -/
 def fillBufSpec (W H v : Nat) : ByteArray :=
@@ -691,6 +715,7 @@ def endLayer (W H : Nat) (r : IRect) (t : TxState) (buf : ByteArray) : TxState �
   | [] => (t, buf)
   | .skipped :: rest => ({ t with stack := rest }, buf)
   | .knock _ :: rest => ({ t with stack := rest }, buf)
+  | .knockL _ :: rest => ({ t with stack := rest }, buf)
   | .opened back fx d :: rest =>
     let rr := (match d with | some d => r.inter d | none => r).inter (pageRect W H)
     let t' := { t with stack := touchStack (some rr) rest, spare := buf }
@@ -738,6 +763,9 @@ theorem endLayer_size (W H : Nat) (r : IRect) (t : TxState) (buf : ByteArray)
     refine ⟨hb, fun l hl => ht l ?_⟩
     simp [heq, hl]
   · rename_i rest heq
+    refine ⟨hb, fun l hl => ht l ?_⟩
+    simp [heq, hl]
+  · rename_i ps rest heq
     refine ⟨hb, fun l hl => ht l ?_⟩
     simp [heq, hl]
   · rename_i back fx d rest heq
@@ -812,11 +840,32 @@ def pushKnock (k : Bool) (r : TxState × ByteArray) : TxState × ByteArray :=
     ({ r.1 with stack := .knock r.2 :: r.1.stack }, r.2)
   else r
 
+/-- `pushKnock` for the fast driver: a lazy knockout frame (`Layer.knockL`, task 7.9). -/
+def pushKnockL (k : Bool) (r : TxState × ByteArray) : TxState × ByteArray :=
+  if k ∧ openCount r.1.stack < maxLayerDepth then
+    ({ r.1 with stack := .knockL [] :: r.1.stack }, r.2)
+  else r
+
+/-- Pushing a lazy knockout frame keeps the page size and the `Sized` invariant. -/
+theorem pushKnockL_size (W H : Nat) (k : Bool) (r : TxState × ByteArray)
+    (hb : r.2.size = 4 * W * H) (ht : r.1.Sized W H) :
+    (pushKnockL k r).2.size = 4 * W * H ∧ (pushKnockL k r).1.Sized W H := by
+  unfold pushKnockL
+  split
+  · refine ⟨hb, ?_⟩
+    intro l hl
+    simp only [List.mem_cons] at hl
+    rcases hl with rfl | hl
+    · trivial
+    · exact ht l hl
+  · exact ⟨hb, ht⟩
+
 /-- Drop a `knock` frame on top of the stack (the end of a knockout group, before its own frame
 is closed). -/
 def popKnock (t : TxState) : TxState :=
   match t.stack with
   | .knock _ :: rest => { t with stack := rest }
+  | .knockL _ :: rest => { t with stack := rest }
   | _ => t
 
 /-- The base buffer of the innermost frame when it is a `knock` frame. -/
@@ -846,6 +895,9 @@ theorem popKnock_sized (W H : Nat) (t : TxState) (ht : t.Sized W H) : (popKnock 
   · rename_i b rest heq
     intro l hl
     exact ht l (by simp [heq, hl])
+  · rename_i ps rest heq
+    intro l hl
+    exact ht l (by simp [heq, hl])
   · exact ht
 
 /-- A transparency group's layer: alpha `ca`, blend mode and soft mask of the group. A group
@@ -853,7 +905,7 @@ with alpha 1, `Normal` and no (kept) mask is painted directly (`.skipped`; exact
 knockout). A knockout group (`/K true`, task 7.3i) then gets a `knock` frame (`pushKnock`). -/
 def beginGroup (W H : Nat) (t : TxState) (buf : ByteArray) (g : GroupInfo) : TxState × ByteArray :=
   let fx : Fx := { alpha := compByte g.alpha, blend := g.blend, mask := g.smask.bind t.mask? }
-  pushKnock g.knockout <|
+  pushKnockL g.knockout <|
     if fx.alpha = 255 ∧ fx.blend = .normal ∧ fx.mask.isNone then
       ({ t with stack := .skipped :: t.stack }, buf)
     else beginLayer W H t buf fx
@@ -864,7 +916,7 @@ theorem beginGroup_size (W H : Nat) (t : TxState) (buf : ByteArray) (g : GroupIn
     (beginGroup W H t buf g).2.size = 4 * W * H ∧ (beginGroup W H t buf g).1.Sized W H := by
   unfold beginGroup
   simp only
-  apply pushKnock_size
+  apply pushKnockL_size
   · split
     · exact hb
     · exact (beginLayer_size W H t buf _ hb ht).1
@@ -1121,9 +1173,13 @@ def knockPx (c r0 r1 : ByteArray) (i : Nat) (dest : ByteArray) : ByteArray :=
   let q := if sa ≤ sb then (sb - sa + 1) / 3 else 0
   let sh := 255 - min 255 q
   if sh = 0 then dest else
-  let d := setB dest o (Clip.blend (getB c o) (getB dest o) sh)
-  let d := setB d (o + 1) (Clip.blend (getB c (o + 1)) (getB dest (o + 1)) sh)
-  setB d (o + 2) (Clip.blend (getB c (o + 2)) (getB dest (o + 2)) sh)
+  -- every byte is read before the first write, so `dest` is not alive across a `setB` and is
+  -- updated in place (task 7.9: reading `dest` after writing `d` copied the page buffer three
+  -- times per pixel — 40 s on a page of knockout text)
+  let v0 := Clip.blend (getB c o) (getB dest o) sh
+  let v1 := Clip.blend (getB c (o + 1)) (getB dest (o + 1)) sh
+  let v2 := Clip.blend (getB c (o + 2)) (getB dest (o + 2)) sh
+  setB (setB (setB dest o v0) (o + 1) v1) (o + 2) v2
 
 /-- `knockPx` preserves the size. -/
 theorem knockPx_size (c r0 r1 : ByteArray) (i : Nat) (dest : ByteArray) :
@@ -1263,12 +1319,285 @@ theorem paintKT_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
     · exact hC s it h
   · exact paintK_inv P hP W H paintC hC fast s it h
 
+/-! ### Lazy knockout frames (task 7.9)
+
+A `knock` frame keeps a page-size copy of the group's initial content, and `knockItem` paints
+every element onto a fresh page copy of it and two fresh page-size shape buffers: a plot of
+10⁴ translucent markers (each `B` with `CA < 1` is a knockout group, task 7.3i1) spent 40 s
+copying page buffers. The fast driver pushes a `knockL` frame instead: before a rectangle of
+the current buffer changes, its bytes are saved as a patch, so the initial content over any
+rectangle is the current buffer with the patches put back (`restoreAll`, oldest last). A
+knockout element (`knockItemL`) builds that content, and its two shape renders, only over its
+bound, in reused scratch buffers (`TxState.kbufs`); a direct paint (alpha 1) saves its bound
+first. Unknown bounds, more than `maxPatches` patches, nested groups and split glyph runs turn
+the frame into a `knock` frame first (`materializeTop`). Same bytes as the reference driver
+(suite `raster-tx-fast`); like the dirty rectangles of 7.2g this relies on `Painter.bound`. -/
+
+/-- Most patches a lazy knockout frame keeps before it is materialised. -/
+def maxPatches : Nat := 32
+
+/-- A rectangle clamped to the `W × H` page: `(x0, y0, width, height)`. -/
+def clampR (W H : Nat) (r : IRect) : Nat × Nat × Nat × Nat :=
+  let x0 := (max r.x0 0).toNat
+  let x1 := (min r.x1 W).toNat
+  let y0 := (max r.y0 0).toNat
+  let y1 := (min r.y1 H).toNat
+  (x0, y0, x1 - x0, y1 - y0)
+
+/-- Rows `y, y + 1, …` (`n` of them), columns `[x0, x0 + cw)` of `src` (width `W`) appended to
+`acc`. -/
+def extractRows (W : Nat) (src : ByteArray) (x0 cw : Nat) : (n y : Nat) → ByteArray → ByteArray
+  | 0, _, acc => acc
+  | n + 1, y, acc =>
+    extractRows W src x0 cw n (y + 1) (src.copySlice (4 * (y * W + x0)) acc acc.size (4 * cw))
+
+/-- The bytes of the page rectangle `r` (clamped) of `src`, row by row. -/
+def extractRect (W H : Nat) (src : ByteArray) (r : IRect) : ByteArray :=
+  let (x0, y0, cw, ch) := clampR W H r
+  extractRows W src x0 cw ch y0 (ByteArray.emptyWithCapacity (4 * cw * ch))
+
+/-- Rows of a patch put back into `dst`: for rows `y, …` (`n` of them) of the rectangle
+`[qx, qx + qw)`, the bytes come from the patch `pb` of rectangle `(px, py, pw)`. -/
+def restoreRows (W : Nat) (pb : ByteArray) (px py pw qx qw : Nat) :
+    (n y : Nat) → ByteArray → ByteArray
+  | 0, _, d => d
+  | n + 1, y, d =>
+    restoreRows W pb px py pw qx qw n (y + 1)
+      (copyIn pb d (4 * ((y - py) * pw + (qx - px))) (4 * (y * W + qx)) (4 * qw))
+
+/-- `restoreRows` keeps the size. -/
+theorem restoreRows_size (W : Nat) (pb : ByteArray) (px py pw qx qw n y : Nat) (d : ByteArray) :
+    (restoreRows W pb px py pw qx qw n y d).size = d.size := by
+  induction n generalizing y d with
+  | zero => rfl
+  | succ n ih => simp only [restoreRows, ih, copyIn_size]
+
+/-- Put a patch back into `dst` over its rectangle ∩ `clip`. -/
+def restorePatch (W H : Nat) (clip : IRect) (p : IRect × ByteArray) (dst : ByteArray) : ByteArray :=
+  let (px, py, pw, _) := clampR W H p.1
+  let (qx, qy, qw, qh) := clampR W H (p.1.inter clip)
+  restoreRows W p.2 px py pw qx qw qh qy dst
+
+/-- `restorePatch` keeps the size. -/
+theorem restorePatch_size (W H : Nat) (clip : IRect) (p : IRect × ByteArray) (dst : ByteArray) :
+    (restorePatch W H clip p dst).size = dst.size := by
+  simp only [restorePatch, restoreRows_size]
+
+/-- Every patch put back over `clip`, the oldest last (so the oldest saved byte wins). -/
+def restoreAll (W H : Nat) (clip : IRect) (ps : List (IRect × ByteArray)) (dst : ByteArray) :
+    ByteArray :=
+  ps.foldr (restorePatch W H clip) dst
+
+/-- `restoreAll` keeps the size. -/
+theorem restoreAll_size (W H : Nat) (clip : IRect) (ps : List (IRect × ByteArray))
+    (dst : ByteArray) : (restoreAll W H clip ps dst).size = dst.size := by
+  induction ps with
+  | nil => rfl
+  | cons p ps ih => simp only [restoreAll, List.foldr_cons] at ih ⊢; rw [restorePatch_size, ih]
+
+/-- Turn a lazy knockout frame on top of the stack into a `knock` frame holding the group's
+initial content (`buf` with every patch put back; a copy only when there are patches). -/
+def materializeTop (W H : Nat) (t : TxState) (buf : ByteArray) : TxState :=
+  match t.stack with
+  | .knockL ps :: rest => { t with stack := .knock (restoreAll W H (Clip.pageRect W H) ps buf) :: rest }
+  | _ => t
+
+/-- Materialising keeps the `Sized` invariant. -/
+theorem materializeTop_sized (W H : Nat) (t : TxState) (buf : ByteArray)
+    (hb : buf.size = 4 * W * H) (ht : t.Sized W H) : (materializeTop W H t buf).Sized W H := by
+  unfold materializeTop
+  split
+  · rename_i ps rest heq
+    intro l hl
+    simp only [List.mem_cons] at hl
+    rcases hl with rfl | hl
+    · show (restoreAll W H _ ps buf).size = _
+      rw [restoreAll_size]; exact hb
+    · exact ht l (by simp [heq, hl])
+  · exact ht
+
+/-- Materialising keeps the number of open layers. -/
+theorem openCount_materializeTop (W H : Nat) (t : TxState) (buf : ByteArray) :
+    openCount (materializeTop W H t buf).stack = openCount t.stack := by
+  unfold materializeTop
+  split
+  · rename_i ps rest heq; simp [heq, openCount]
+  · rfl
+
+/-- `materializeTop` on a painter state. -/
+def materializeS {S : Type} (P : Painter S) (W H : Nat) (s : S) : S :=
+  match (P.tx s).stack with
+  | .knockL _ :: _ => P.setTx s (materializeTop W H (P.tx s) (P.buf s))
+  | _ => s
+
+/-- `materializeS` keeps the invariant. -/
+theorem materializeS_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat) (s : S)
+    (h : Inv P W H s) : Inv P W H (materializeS P W H s) := by
+  unfold materializeS
+  split
+  · exact ⟨by rw [hP.buf_setTx]; exact h.1,
+      by rw [hP.tx_setTx]; exact materializeTop_sized W H _ _ h.1 h.2⟩
+  · exact h
+
+/-- A page-size scratch buffer from the list (any content), or a fresh one. -/
+def takeBuf (W H : Nat) : List ByteArray → ByteArray × List ByteArray
+  | b :: rest => if b.size = 4 * W * H then (b, rest) else (fillBuf W H 0, rest)
+  | [] => (fillBuf W H 0, [])
+
+/-- **A knockout element under a lazy frame** (`knockItem` over the rectangle `r`, the item's
+bound ∩ page): the initial content over `r` (current buffer + patches) in a scratch buffer,
+the item painted onto it with `paintC` (a scratch buffer as its layer spare), its two opaque
+shape renders over 0 / 255 initialised over `r` only, the bytes of `r` saved as a patch, then
+the merge into the current buffer. The transparency state is taken out of `s` first, so that
+the scratch buffers and the current buffer are unshared (written in place). -/
+def knockItemL {S : Type} (P : Painter S) (W H : Nat) (paintC : S → DisplayItem → S) (r : IRect)
+    (ps : List (IRect × ByteArray)) (rest : List Layer) (s : S) (it : DisplayItem) : S :=
+  let masks := (P.tx s).masks
+  let spare := (P.tx s).spare
+  let ks := (P.tx s).kbufs
+  let dest := P.buf s
+  let s := P.setTx s {}
+  let (x0, y0, cw, ch) := clampR W H r
+  let (b0, ks) := takeBuf W H ks
+  let (b1, ks) := takeBuf W H ks
+  let (b2, ks) := takeBuf W H ks
+  let (b3, _) := takeBuf W H ks
+  let base := restoreAll W H r ps (copyRows W dest x0 cw ch y0 b0)
+  let s1 := paintC (P.setBuf (P.setTx s { masks := masks, spare := b3 }) base) it
+  let c := P.buf s1
+  let sp := (P.tx s1).spare
+  let op := opaqueItem it
+  let s2 := P.paint (P.setBuf (P.setTx s1 {}) (fillRows W (pushN 0 (4 * cw) .empty) x0 cw ch y0 b1)) op
+  let r0 := P.buf s2
+  let s3 := P.paint (P.setBuf s2 (fillRows W (pushN 255 (4 * cw) .empty) x0 cw ch y0 b2)) op
+  let r1 := P.buf s3
+  let patch := (r, extractRect W H dest r)
+  let merged := knockMerge W H r dest c r0 r1
+  let st := touchStack (P.bound it) (Layer.knockL (ps ++ [patch]) :: rest)
+  let t' : TxState := { stack := st, masks := masks, spare := spare, kbufs := [c, r0, r1, sp] }
+  P.setBuf (P.setTx s3 t') merged
+
+/-- `knockItemL` keeps the invariant. -/
+theorem knockItemL_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
+    (paintC : S → DisplayItem → S) (r : IRect) (ps : List (IRect × ByteArray)) (rest : List Layer)
+    (s : S) (it : DisplayItem) (h : Inv P W H s) (hr : ∀ l ∈ rest, l.Ok W H) :
+    Inv P W H (knockItemL P W H paintC r ps rest s it) := by
+  unfold knockItemL
+  dsimp only
+  refine ⟨?_, ?_⟩
+  · rw [hP.buf_setBuf, knockMerge_size]; exact h.1
+  · rw [hP.tx_setBuf, hP.tx_setTx]
+    show ∀ l ∈ touchStack _ (.knockL _ :: rest), l.Ok W H
+    apply touchStack_ok
+    intro l hl
+    simp only [List.mem_cons] at hl
+    rcases hl with rfl | hl
+    · trivial
+    · exact hr l hl
+
+/-- Whether `paintFx` may change pixels outside the item's bound: a blend mode without an exact
+neutral byte (`hardLight`) combines its layer over the whole page (`beginItem`). -/
+def pageWide (t : TxState) (it : DisplayItem) : Bool :=
+  match itemFx t it with
+  | some fx => !exactNeutral fx.blend
+  | none => false
+
+/-- **Paint an item under a lazy knockout frame** (fast driver; other frames: `paintK`): an
+element of alpha ≠ 1 with a known bound by `knockItemL`, an item of alpha 1 with a known bound
+painted directly after saving its bound as a patch; otherwise (unknown bound, too many
+patches, a page-wide blend `pageWide`) the frame is materialised and `paintK` paints. `paintC`
+must change the buffer only within `P.bound` unless `pageWide` (as `paintFx`). -/
+def paintKL {S : Type} (P : Painter S) (W H : Nat) (paintC : S → DisplayItem → S) (s : S)
+    (it : DisplayItem) : S :=
+  match (P.tx s).stack, P.bound it with
+  | .knockL ps :: rest, some b =>
+    if ps.length < maxPatches ∧ !pageWide (P.tx s) it then
+      let r := b.inter (Clip.pageRect W H)
+      if itemAlpha it = 255 then
+        if rectEmpty r then paintC s it
+        else
+          let patch := (r, extractRect W H (P.buf s) r)
+          paintC (P.setTx s { P.tx s with stack := .knockL (ps ++ [patch]) :: rest }) it
+      else knockItemL P W H paintC r ps rest s it
+    else paintK P W H paintC true (materializeS P W H s) it
+  | .knockL _ :: _, none => paintK P W H paintC true (materializeS P W H s) it
+  | _, _ => paintK P W H paintC true s it
+
+/-- `paintKL` keeps the invariant, given that `paintC` does. -/
+theorem paintKL_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
+    (paintC : S → DisplayItem → S) (hC : ∀ s it, Inv P W H s → Inv P W H (paintC s it))
+    (s : S) (it : DisplayItem) (h : Inv P W H s) :
+    Inv P W H (paintKL P W H paintC s it) := by
+  unfold paintKL
+  split
+  · rename_i ps rest b heq _
+    have hr : ∀ l ∈ rest, l.Ok W H := fun l hl => h.2 l (by rw [heq]; exact List.mem_cons_of_mem _ hl)
+    split
+    · dsimp only
+      split
+      · split
+        · exact hC s it h
+        · apply hC
+          refine ⟨by rw [hP.buf_setTx]; exact h.1, ?_⟩
+          rw [hP.tx_setTx]
+          intro l hl
+          simp only [List.mem_cons] at hl
+          rcases hl with rfl | hl
+          · trivial
+          · exact hr l hl
+      · exact knockItemL_inv P hP W H paintC _ ps rest s it h hr
+    · exact paintK_inv P hP W H paintC hC true _ it (materializeS_inv P hP W H s h)
+  · exact paintK_inv P hP W H paintC hC true _ it (materializeS_inv P hP W H s h)
+  · exact paintK_inv P hP W H paintC hC true s it h
+
+/-- `paintKT` for the fast driver: a glyph run that fills and strokes gets a lazy knockout
+frame (an enclosing lazy frame is materialised first), everything else goes to `paintKL`. -/
+def paintKTL {S : Type} (P : Painter S) (W H : Nat) (paintC : S → DisplayItem → S) (s : S)
+    (it : DisplayItem) : S :=
+  match splitRun? it with
+  | some (fi, si) =>
+    let s := materializeS P W H s
+    let t := P.tx s
+    if openCount t.stack < maxLayerDepth then
+      let s1 := P.setTx s { t with stack := .knockL [] :: t.stack }
+      let s2 := paintKL P W H paintC (paintKL P W H paintC s1 fi) si
+      P.setTx s2 (popKnock (P.tx s2))
+    else paintC s it
+  | none => paintKL P W H paintC s it
+
+/-- `paintKTL` keeps the invariant, given that `paintC` does. -/
+theorem paintKTL_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
+    (paintC : S → DisplayItem → S) (hC : ∀ s it, Inv P W H s → Inv P W H (paintC s it))
+    (s : S) (it : DisplayItem) (h : Inv P W H s) :
+    Inv P W H (paintKTL P W H paintC s it) := by
+  unfold paintKTL
+  split
+  · rename_i fi si _
+    dsimp only
+    have hm := materializeS_inv P hP W H s h
+    split
+    · have h1 : Inv P W H (P.setTx (materializeS P W H s)
+          { P.tx (materializeS P W H s) with
+            stack := .knockL [] :: (P.tx (materializeS P W H s)).stack }) := by
+        refine ⟨by rw [hP.buf_setTx]; exact hm.1, ?_⟩
+        rw [hP.tx_setTx]
+        intro l hl
+        simp only [List.mem_cons] at hl
+        rcases hl with rfl | hl
+        · trivial
+        · exact hm.2 l hl
+      have h2 := paintKL_inv P hP W H paintC hC _ si (paintKL_inv P hP W H paintC hC _ fi h1)
+      exact ⟨by rw [hP.buf_setTx]; exact h2.1, by rw [hP.tx_setTx]; exact popKnock_sized W H _ h2.2⟩
+    · exact hC _ it hm
+  · exact paintKL_inv P hP W H paintC hC s it h
+
 /-- **The transparency driver** for one item (fuel: soft-mask nesting): groups open and close
 layers, soft-mask items define masks (their items drawn by the driver at one less fuel into
 a fresh buffer, with an empty layer stack), painting items with a blend mode or soft mask are
 painted inside a layer, everything else goes to `P.paint`. -/
 def renderTx {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayItem → S
   | _, s, .groupBegin g =>
+    let s := materializeS P W H s
     let r := beginGroup W H (P.tx s) (P.buf s) g
     P.setBuf (P.setTx s r.1) r.2
   | _, s, .groupEnd =>
@@ -1281,7 +1610,7 @@ def renderTx {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayItem 
     let draw : ByteArray → ByteArray := fun base =>
       P.buf (items.foldl (renderTx P W H f) (P.setBuf (P.setTx s { masks := (P.tx s).masks }) base))
     P.setTx s ((P.tx s).addMask id (maskFrom info W H draw))
-  | _, s, it => paintKT P W H (paintFx P W H) true s it
+  | _, s, it => paintKTL P W H (paintFx P W H) s it
 
 /-- `addMask` keeps the layer stack. -/
 theorem addMask_stack (t : TxState) (id : Nat) (m : ByteArray) : (t.addMask id m).stack = t.stack :=
@@ -1323,7 +1652,8 @@ theorem renderTx_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat) :
   cases it with
   | groupBegin g =>
     simp only [renderTx]
-    have := beginGroup_size W H (P.tx s) (P.buf s) g h.1 h.2
+    have hm := materializeS_inv P hP W H s h
+    have := beginGroup_size W H (P.tx (materializeS P W H s)) (P.buf (materializeS P W H s)) g hm.1 hm.2
     exact ⟨by rw [hP.buf_setBuf]; exact this.1, by rw [hP.tx_setBuf, hP.tx_setTx]; exact this.2⟩
   | groupEnd =>
     simp only [renderTx]
@@ -1342,7 +1672,7 @@ theorem renderTx_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat) :
       exact h.2 l hl
   | _ =>
     all_goals
-      have hk := paintKT_inv P hP W H _ (paintFx_inv P hP W H) true s
+      have hk := paintKTL_inv P hP W H _ (paintFx_inv P hP W H) s
       cases f <;> (simp only [renderTx]; exact hk _ h)
 
 /-- Folding the driver keeps the invariant. -/
@@ -1384,6 +1714,7 @@ def endLayerSpec (W H : Nat) (r : IRect) (t : TxState) (buf : ByteArray) : TxSta
   | [] => (t, buf)
   | .skipped :: rest => ({ t with stack := rest }, buf)
   | .knock _ :: rest => ({ t with stack := rest }, buf)
+  | .knockL _ :: rest => ({ t with stack := rest }, buf)
   | .opened back fx _ :: rest => ({ t with stack := rest }, combine W H r back buf fx)
 
 /-- `beginGroup` of 7.3c, with the knockout frame of task 7.3i. -/

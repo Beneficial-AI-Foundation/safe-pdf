@@ -149,6 +149,73 @@ supported (every rendered page within τ); the failures are Type 3 fonts and del
 refusals. The timing half (**median < 100 ms**) is **not met on text-heavy pages**
 (≈ 210 ms); see issue 1.
 
+## Render-time tail (task 7.9)
+
+    python3 -I scripts/corpus/timing.py [--files GLOB] [--dpi D] [--top N] [--jobs J]
+        [--file-timeout S] [--page-timeout S] [--json OUT] [--compare OLD.json]
+
+One `inspect --view raster --json` process per file (the view times every page); a file run
+over the timeout is killed and its remaining pages are run one process per page; a page
+still over the page timeout counts as `timeout` with the timeout as its time (a lower
+bound). Prints median / p95 / p99 / max, the pages over 500 ms and 5 s, and the slowest pages
+(`--compare`: with their earlier time).
+
+**Measured** (2026-11-20, aarch64 sandbox, 72 dpi, all 81 corpus files, 2,450 pages,
+`--jobs 2` on a shared machine: ±10% noise):
+
+| build | median | p95 | p99 | max | > 500 ms | > 5 s |
+|---|---|---|---|---|---|---|
+| d575fd9 (before) | 81 ms | 4,115 ms | 6,449 ms | 44,525 ms | 357 | 59 |
+| 7.9 (this branch) | 77 ms | 2,927 ms | 4,386 ms | 5,967 ms | 349 | 7 |
+| 7.9 + `Text.lean` width-table patch (below) | 64 ms | **262 ms** | 826 ms | **4,417 ms** | 54 | 0 |
+
+The rendered pixels are byte-identical before and after (every page's PPM hashed, all three
+builds). The target (p95 ≤ 500 ms, max ≤ 5 s) is met only with the `Text.lean` patch, which
+belongs to task 6.8e's file in wave 44.
+
+**What the tail was** (perf on the compiled inspector; `perf` needs
+`LD_PRELOAD=/lib/aarch64-linux-gnu/libtinfo.so.6` in this sandbox):
+
+1. **TrueType advance table recomputed per glyph** (`Text.buildFontDict`): `let tbl :=
+   ttWidthTable …; fun code => tbl.getD code 0` inside a function-typed `match` is
+   eta-expanded by the compiler, so every `codeAdvance` rebuilt the 256-code table (256 cmap
+   look-ups + AGL linear searches, ~1 ms). Simple TrueType fonts whose `/Widths` leave codes
+   unknown (Word-made NTSB reports, several arXiv papers): 300 pages of 2–11 s. Fix
+   (`Text.lean`, not in this branch): make the table a data value (`Option (Array Fixed)`)
+   and match on it in `width`; 1409.0003 p14 4,022 → 72 ms. This branch tabulates the
+   one-byte advances once per page for the renderer's own layout (`Glyph.tabulateWidths`),
+   which halves those pages; text extraction still pays per glyph.
+2. **Knockout groups copied page buffers per pixel and per element** (matplotlib scatter
+   plots: every `B` with `CA < 1` is a knockout group, 21,878 on 2307.09288 p25):
+   `knockPx` read `dest` after writing it (three page copies per pixel; fixed by reading
+   first), `fillBuf` appended rows to an unreserved buffer (quadratic), and each element made
+   three page-size buffers. Now: lazy knockout frames (`Transparency.knockL`: patches instead
+   of a page copy; elements shaped and merged over their bound in reused scratch buffers),
+   stroke bounds from the pen's reach (`Clip.strokeBound`, so a stroke's bound is no longer
+   its clip), the last stroke mask reused (`Clip.RState.smemo`: the element is painted
+   three times), the clip cache evicts the least recently used entry (the axes clip shared by
+   every marker was evicted every 16 markers). p25 44.5 s → 4.4 s, p64 6.6 s → 0.7 s,
+   1807.06209 p61 9.9 s → 0.16 s.
+3. **Pen geometry per stroke** (`Stroke.Geo.make` over `Rat`, ~20 µs; 1303.5076 p21–23 have
+   200,000 strokes): the chord count in integers (`arcCountGoI`, `arcCount_eq`), the pen's
+   circle table rounded in integers (`circleTableI`, `#guard` = the `Rat` table for every
+   `m ≤ 64`; the `Rat` table only for the reference stroker), and a per-page table of
+   geometries by CTM linear part and width (`Stroke.GeoTable`, `Clip.tableStroke`).
+   6.5 s → 1.8 s.
+
+**What remains above 500 ms** (54 pages with the patch; none above 5 s):
+
+* 2307.09288 p25 (4.4 s): half is text extraction of 21,879 form XObjects, each `Do`
+  decoding the same Flate stream again (`Content/Run`: a per-page cache of decoded form
+  streams would remove ~2 s); the rest is three stroke renders per marker (`Stroke.mkSeg`).
+* Long polylines and dense strokes (2210.00002 p30/31/36 1.5–2.7 s, 1303.5076 p21–23
+  1.4–1.8 s): `Stroke.mkSeg` per chord (`sqrtQ` and grid divisions on bignum common
+  denominators: the inverse pen map has denominators ~10¹²) and the scanline fill. Needs a
+  64-bit fast path for `mkSeg` (with `mkSegSpec` as the reference, as 7.2i did for points).
+* Image decoding at full resolution (2112.10752, 2006.11239, 2501.12948, 2005.14165:
+  0.7–1.4 s): JPEG (`Quarantine/DCT`, MuPDF decodes at reduced size, task 7.6d), Flate
+  (Adler-32, `Filter`), and per-sample `ByteArray.push` in `Image.samplesLoop`/`blockRow`.
+
 ## Issues found (Core; not fixed here — other tasks own the files)
 
 1. **Glyph geometry in `Rat` dominates text pages.** gdb stack sampling of `inspect --view

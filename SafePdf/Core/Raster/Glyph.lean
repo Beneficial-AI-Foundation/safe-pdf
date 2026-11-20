@@ -1277,6 +1277,33 @@ theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf 
   exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ (liftSh Transparency.maxMaskDepth items) _
     (by show (Clip.whiteBuf _ _).size = _; simp [Clip.whiteBuf, ByteArray.size]) rfl
 
+/-- The 256 one-byte advances of a font, tabulated (`tabulateWidths`). -/
+def widthTable (fi : FontInfo) : Array Fixed :=
+  Array.ofFn (n := 256) fun i => fi.width [i.val.toUInt8]
+
+/-- A font's advances through a precomputed table of its one-byte codes (same values: the
+table entry of byte `b` is `fi.width [b]`). -/
+def tabulatedFont (fi : FontInfo) (tbl : Array Fixed) : FontInfo :=
+  { fi with width := fun c => match c with
+    | [b] => tbl.getD b.toNat Fixed.zero
+    | _ => fi.width c }
+
+/-- The page's fonts with the advances of one-byte fonts tabulated once per page (task 7.9):
+the glyph layout asks for an advance per glyph, and a font's `width` may be expensive per call
+(a simple TrueType font whose `/Widths` leave codes unknown rebuilds its 256-code table on
+every call, ~1 ms). Same advances. -/
+def tabulateWidths (t : FontTable) : FontTable :=
+  t.map fun e => match e.2.split with
+    | .one => (e.1, tabulatedFont e.2 (widthTable e.2))
+    | _ => e
+
+/-- The stroke geometries of a page's stroke items (task 7.9, `Stroke.GeoTable`; items nested in
+soft masks too) for the view `view`. -/
+def pageGeoTable (cfg : Fill.Config) (view : Aff) (items : DisplayList) : Stroke.GeoTable :=
+  DisplayList.foldDeep (fun (t : Stroke.GeoTable) it => match it with
+      | .strokePath _ s _ => t.add s
+      | _ => t) Transparency.maxMaskDepth { view, cfg } items
+
 /-- **Render a page of an opened document**: decode its content, build the display list with
 the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
 `budget` for every decoded stream. -/
@@ -1319,9 +1346,10 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     let all := items ++ tls.cellItems ++ type3Items srcs
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
+    let view := viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)
     (.ok (renderPage page zoom rot
-      { fonts := ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls
-        fallback := hailMarySource subst } items cfg), b)
+      { fonts := tabulateWidths ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls
+        fallback := hailMarySource subst } items cfg (Clip.tableStroke (pageGeoTable cfg view items))), b)
 
 /-! ## 6. Checks -/
 
