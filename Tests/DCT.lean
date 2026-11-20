@@ -20,6 +20,8 @@ Plan.md §3 (quarantine zone, revalidation), §6 Phase 7. Checks `SafePdf.Quaran
   `djpeg -dct int`, i.e. libjpeg-turbo with MuPDF's settings (islow IDCT, fancy upsampling).
   Expected: **bit-exact** (the count of differing samples and the largest difference are
   printed on failure);
+* **reduced-size decoding** (task 7.10): 17 fixtures decoded at 1/2, 1/4 and 1/8 against
+  `Tests/images/NAME-sK.ref` (`djpeg -dct int -scale 1/2^K`), bit-exact;
 * **malformed input** is an error, never a crash: no `SOI`, a truncated header, a
   lossless / arithmetic `SOF`, a sequential scan in a progressive frame, bad progression
   parameters (`Al > 13`, an AC band of two components, `Se < Ss`), more than
@@ -50,6 +52,12 @@ def fixtures : List String :=
    "pscanrst", "pscangray", "psmooth", "pcmyk", "nodht", "nodhtgray", "ts420", "trst", "tgray",
    "tp420", "tp420b", "tp444", "tpgray", "tprst", "tpscans", "tpscanrst", "tpscangray", "tpsmooth",
    "tpnarrow", "tdhtp", "tdhts", "dcp420", "dcpgray"]
+
+/-- Fixtures with reduced-size references `NAME-sK.ref` (`djpeg -scale 1/2^K`, task 7.10;
+the list `SCALED` of `gen_jpegs.py`). -/
+def scaledFixtures : List String :=
+  ["gray", "s444", "s422", "s420", "s440", "s411", "narrow", "rst", "q100", "scans",
+   "pgray", "p420", "pscans", "psmooth", "tp420", "dcp420", "nodht"]
 
 /-- Parse a reference file: header line `W H NC`, then the samples. -/
 def parseRef (b : ByteArray) : Option (Nat × Nat × Nat × ByteArray) := do
@@ -250,6 +258,19 @@ def run : IO Nat := do
         report s!"{name}: {img.w}x{img.h}x{img.nc} vs {w}x{h}x{nc}, {n} samples differ (max {mx})"
     | none, _ => failures := failures + 1; report s!"{name}: bad reference file"
     | _, .error e => failures := failures + 1; report s!"{name}: {repr e}"
+  -- 1b. Reduced-size decodes (task 7.10), bit-exact against `djpeg -scale 1/2^k`.
+  for name in scaledFixtures do
+    let jpg ← IO.FS.readBinFile (dir / s!"{name}.jpg")
+    for k in [1, 2, 3] do
+      let ref ← IO.FS.readBinFile (dir / s!"{name}-s{k}.ref")
+      match parseRef ref, DCT.decode {} none jpg k with
+      | some (w, h, nc, exp), .ok img =>
+        let (n, mx) := diff img.data exp
+        if img.w != w || img.h != h || img.nc != nc || n != 0 then
+          failures := failures + 1
+          report s!"{name} 1/{2 ^ k}: {img.w}x{img.h}x{img.nc} vs {w}x{h}x{nc}, {n} samples differ (max {mx})"
+      | none, _ => failures := failures + 1; report s!"{name}-s{k}: bad reference file"
+      | _, .error e => failures := failures + 1; report s!"{name} 1/{2 ^ k}: {repr e}"
   -- 2. Malformed input.
   let s420 ← IO.FS.readBinFile (dir / "s420.jpg")
   let sof := (findMarker s420 0xC0).getD 0

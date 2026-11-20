@@ -247,6 +247,51 @@ inside `renderDocPage` (`Text.extractDocPage`, 26–39%).
   0.7–1.4 s): JPEG (`Quarantine/DCT`, MuPDF decodes at reduced size, task 7.6d), Flate
   (Adler-32, `Filter`), and per-sample `ByteArray.push` in `Image.samplesLoop`/`blockRow`.
 
+## Reduced-size JPEG decoding (task 7.10)
+
+`arxiv-2501.12948` p16 differed 26.2% from MuPDF (the only corpus page above 1.81%): its
+figure is one 11881 × 7646 RGB `/DCTDecode` image drawn 453 × 292 pt. The full decode needs
+272.5 MB of output (and ≈ 136 MB of planes), above `Limits.maxDecodedStreamBytes` (256 MiB),
+so `decodeDCT` failed and the figure was the grey placeholder; the failed attempt still peaked
+at ≈ 1.2 GB RSS. MuPDF never decodes it at full size: `fz_get_pixmap_from_image` picks
+`l2factor` = the largest `l ≤ 6` with `w >> l ≥ ⌊device width⌋ + 2` (same for heights; here
+4), and for JPEG passes up to 3 of it to libjpeg (`scale_num = 8 / 2^l`), which decodes at
+1/8 through its scaled IDCTs.
+
+* `Quarantine/DCT.lean`: `decode … (scale := k)` is libjpeg's reduced decode: output
+  `⌈w / 2^k⌉ × ⌈h / 2^k⌉`, per-component scaled block sizes as `jpeg_calc_output_dimensions`
+  (`scaledSize`: 4:2:0 chroma needs no upsampling at a reduced scale), the `jidctred.c`
+  transforms (`idctScaled`: 4 × 4, 2 × 2, 1 × 1), no fancy upsampling at 1/8. Bit-exact
+  against `djpeg -dct int -scale 1/2^k` on 17 fixtures × 3 scales (suite `dct`). A progressive
+  frame still keeps its full-size coefficient buffer (8 bytes per coefficient).
+* `Raster/Image.lean`: `imageExtents` (largest squared device extents of each image XObject
+  over its page/annotation uses at the render's zoom; images also used in tiling cells or
+  Type 3 glyphs are excluded), `l2Factor` (MuPDF's rule in exact arithmetic), `dctScale`;
+  `Glyph.renderDocPage` passes the extents to `loadImages`. Not reduced: soft masks, images
+  whose soft mask has a `/Matte` (MuPDF), inline images.
+* **One step less than MuPDF** (`dctScale l = min 3 (l − 1)`): with MuPDF's own factor, 15 of
+  the 21 other changed pages of the sample got slightly worse (`arxiv-1105.2345` p8, a
+  noise-like sky map drawn at 0.36 of its size: 0.78% → 1.08%, outside τ), because MuPDF
+  finishes the reduction with a tent filter and our placement with an area-averaging box
+  filter, which barely smooths below two samples per device pixel. With one step less the
+  box filter always averages ≥ 2 samples per pixel; the corpus image still decodes at 1/8.
+
+Measured (72 dpi; 11 corpus files, 316 pages; before = 29b1a74):
+
+| | before | after |
+|---|---|---|
+| 2501.12948 p16 | 26.24% | **0.36%** |
+| 2501.12948 (86 pages) | 85 within, worst 26.24% | 86 within, worst 0.67% |
+| p16 render time | 1,041 ms | 393 ms |
+| p16 peak RSS, 72 / 150 dpi | 1,220 / 1,213 MiB | 81 / 123 MiB |
+
+Every page PPM of the 10 other files (2010.11929, 1810.04805, cond-mat_0410550, 1602.03837,
+1105.2345, ntsb MIR2301, ntsb AAR1201, 2412.19437, 1512.03385, 1706.00001) was hashed before
+and after: 8 pages changed, all with downscaled JPEGs, all within τ, each by at most
++0.03 points (`pixels.py`: 1105.2345 p5 0.193 → 0.205%, 1602.03837 p3 0.393 → 0.394%,
+p4 0.427 → 0.429%, p2 identical %, 2010.11929 p21 0.226 → 0.219%, 2412.19437 p47
+0.243 → 0.256%, 2501.12948 p43 0.364 → 0.389%, p44 0.244 → 0.246%).
+
 ## Issues found (Core; not fixed here — other tasks own the files)
 
 1. **Glyph geometry in `Rat` dominates text pages.** gdb stack sampling of `inspect --view

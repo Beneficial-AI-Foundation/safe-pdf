@@ -67,9 +67,17 @@ ITU-T T.81 (ISO/IEC 10918-1), sequential and progressive DCT with Huffman coding
 The reference is MuPDF 1.25.1 as installed (Debian's build links libjpeg-turbo 2.1.5:
 `JDCT_ISLOW`, fancy upsampling, no merged upsampler), its C code paths: libjpeg-turbo's SIMD
 islow IDCT (16-bit lanes) differs from its C IDCT, which this decoder follows, only on
-blocks whose coefficients overflow (garbage from truncated progressive data). MuPDF's reduced-size decoding
-(`scale_num = 8 / 2^l2factor` when an image is drawn much smaller than its size) is not
-reproduced: this decoder always decodes at full size.
+blocks whose coefficients overflow (garbage from truncated progressive data).
+
+**Reduced-size decoding** (task 7.10): `decode … (scale := k)`, `k ≤ 3`, is libjpeg's decode
+with `scale_num = 8 / 2^k`, `scale_denom = 8` — what MuPDF asks for (`l2factor`, at most 3 for
+JPEG) when an image is drawn at `1 / 2^k` of its size or less. The output is
+`⌈w / 2^k⌉ × ⌈h / 2^k⌉` (`output_width`); each component gets libjpeg's scaled block size
+(`scaledSize`: `8 / 2^k`, doubled for subsampled chroma while the sampling factors allow, so
+4:2:0 chroma needs no upsampling) and the matching `jidctred.c` transform (`idctScaled`:
+4 × 4, 2 × 2, 1 × 1, bit-exact); fancy upsampling is off at 1/8 (`do_fancy` needs
+`min_DCT_scaled_size > 1`). The entropy decoding and a progressive frame's coefficient buffer
+are unchanged (full size); only the planes shrink, by `4^k`.
 
 ## Bounds
 
@@ -131,6 +139,9 @@ structure Comp where
   v : Nat
   /-- Quantisation table selector `Tqᵢ` (0–3). -/
   tq : Nat
+  /-- Scaled block size: the samples per block side this component's IDCT produces (libjpeg
+  `DCT_scaled_size`: 8 at full size; 1, 2 or 4 in a reduced-size decode, task 7.10). -/
+  ss : Nat := 8
   deriving Inhabited, Repr
 
 /-- A frame header (`SOF0`/`SOF1`). -/
@@ -154,13 +165,38 @@ structure Frame where
   offs : Array Nat
   /-- A progressive frame (`SOF2`). -/
   prog : Bool := false
+  /-- The output scale: output samples per 8 image samples (libjpeg `min_DCT_scaled_size`;
+  8 at full size, 4, 2 or 1 in a reduced-size decode). -/
+  mins : Nat := 8
+  /-- Offset of each component's plane in the plane buffer (equal to `offs` at full size). -/
+  poffs : Array Nat := #[]
   deriving Inhabited
 
-/-- Width in samples of component `c`'s plane (whole MCUs). -/
+/-- Width in samples of component `c`'s plane at full size (whole MCUs); also the row
+stride of a progressive frame's coefficient buffer. -/
 def Frame.stride (f : Frame) (c : Comp) : Nat := f.mcusX * c.h * 8
 
-/-- Height in samples of component `c`'s plane. -/
+/-- Height in samples of component `c`'s plane at full size. -/
 def Frame.rows (f : Frame) (c : Comp) : Nat := f.mcusY * c.v * 8
+
+/-- Width in samples of component `c`'s plane as decoded (blocks of `c.ss` samples). -/
+def Frame.pstride (f : Frame) (c : Comp) : Nat := f.mcusX * c.h * c.ss
+
+/-- Height in samples of component `c`'s plane as decoded. -/
+def Frame.prows (f : Frame) (c : Comp) : Nat := f.mcusY * c.v * c.ss
+
+/-- Output width `⌈X · mins / 8⌉` (libjpeg `output_width`). -/
+def Frame.ow (f : Frame) : Nat := (f.w * f.mins + 7) / 8
+
+/-- Output height `⌈Y · mins / 8⌉`. -/
+def Frame.oh (f : Frame) : Nat := (f.h * f.mins + 7) / 8
+
+/-- Downsampled width after IDCT scaling, `⌈X · Hᵢ · ssᵢ / (Hmax · 8)⌉` (libjpeg
+`downsampled_width` in `jpeg_calc_output_dimensions`). -/
+def Frame.sdw (f : Frame) (c : Comp) : Nat := (f.w * c.h * c.ss + f.hmax * 8 - 1) / (f.hmax * 8)
+
+/-- Downsampled height after IDCT scaling. -/
+def Frame.sdh (f : Frame) (c : Comp) : Nat := (f.h * c.v * c.ss + f.vmax * 8 - 1) / (f.vmax * 8)
 
 /-- Downsampled width `⌈X · Hᵢ / Hmax⌉` (libjpeg `downsampled_width`). -/
 def Frame.dw (f : Frame) (c : Comp) : Nat := (f.w * c.h + f.hmax - 1) / f.hmax
@@ -515,6 +551,104 @@ def idctStore (coef : Array Int) (buf : ByteArray) (o stride : Nat) : ByteArray 
     buf := pass2 ws row buf (o + row * stride)
   return buf
 
+/-! ### Reduced-size IDCTs (task 7.10, libjpeg-turbo 2.1 `jidctred.c`)
+
+MuPDF asks libjpeg for a reduced-size decode (`scale_num = 8 / 2^l2factor`) when an image is
+drawn at half its size or less; libjpeg then runs these transforms, which produce a 4 × 4,
+2 × 2 or 1 × 1 block straight from the 8 × 8 coefficients (bit-exact ports of
+`jpeg_idct_4x4`, `jpeg_idct_2x2`, `jpeg_idct_1x1`; input dequantised, natural order). -/
+
+/-- `jpeg_idct_4x4` pass 1 on column `col` (column 4 is skipped: pass 2 never reads it). -/
+def pass1r4 (c : Array Int) (col : Nat) (ws : Array Int) : Array Int :=
+  if col = 4 then ws else
+  if g c (col + 8) == 0 && g c (col + 16) == 0 && g c (col + 24) == 0 && g c (col + 40) == 0 &&
+      g c (col + 48) == 0 && g c (col + 56) == 0 then
+    let dc := g c col * 4
+    (((ws.setIfInBounds col dc).setIfInBounds (col + 8) dc).setIfInBounds (col + 16) dc
+      ).setIfInBounds (col + 24) dc
+  else
+    let tmp0 := g c col * 16384
+    let tmp2 := g c (col + 16) * 15137 + g c (col + 48) * (-6270)
+    let tmp10 := tmp0 + tmp2
+    let tmp12 := tmp0 - tmp2
+    let z1 := g c (col + 56)
+    let z2 := g c (col + 40)
+    let z3 := g c (col + 24)
+    let z4 := g c (col + 8)
+    let t0 := z1 * (-1730) + z2 * 11893 + z3 * (-17799) + z4 * 8697
+    let t2 := z1 * (-4176) + z2 * (-4926) + z3 * 7373 + z4 * 20995
+    (((ws.setIfInBounds col (descale (tmp10 + t2) 12)).setIfInBounds (col + 24)
+      (descale (tmp10 - t2) 12)).setIfInBounds (col + 8) (descale (tmp12 + t0) 12)
+      ).setIfInBounds (col + 16) (descale (tmp12 - t0) 12)
+
+/-- `jpeg_idct_4x4` pass 2 on workspace row `row`: four samples at byte `o` of `buf`. -/
+def pass2r4 (ws : Array Int) (row : Nat) (buf : ByteArray) (o : Nat) : ByteArray :=
+  let b := row * 8
+  let w := fun (i : Nat) => g ws (b + i)
+  if w 1 == 0 && w 2 == 0 && w 3 == 0 && w 5 == 0 && w 6 == 0 && w 7 == 0 then
+    let v := rangeLimit (descale (w 0) 5)
+    setB (setB (setB (setB buf o v) (o + 1) v) (o + 2) v) (o + 3) v
+  else
+    let tmp0 := w 0 * 16384
+    let tmp2 := w 2 * 15137 + w 6 * (-6270)
+    let tmp10 := tmp0 + tmp2
+    let tmp12 := tmp0 - tmp2
+    let t0 := w 7 * (-1730) + w 5 * 11893 + w 3 * (-17799) + w 1 * 8697
+    let t2 := w 7 * (-4176) + w 5 * (-4926) + w 3 * 7373 + w 1 * 20995
+    let buf := setB buf o (rangeLimit (descale (tmp10 + t2) 19))
+    let buf := setB buf (o + 3) (rangeLimit (descale (tmp10 - t2) 19))
+    let buf := setB buf (o + 1) (rangeLimit (descale (tmp12 + t0) 19))
+    setB buf (o + 2) (rangeLimit (descale (tmp12 - t0) 19))
+
+/-- `jpeg_idct_2x2` pass 1 on column `col` (columns 2, 4, 6 are skipped). -/
+def pass1r2 (c : Array Int) (col : Nat) (ws : Array Int) : Array Int :=
+  if col = 2 ∨ col = 4 ∨ col = 6 then ws else
+  if g c (col + 8) == 0 && g c (col + 24) == 0 && g c (col + 40) == 0 && g c (col + 56) == 0 then
+    let dc := g c col * 4
+    (ws.setIfInBounds col dc).setIfInBounds (col + 8) dc
+  else
+    let tmp10 := g c col * 32768
+    let t0 := g c (col + 56) * (-5906) + g c (col + 40) * 6967 + g c (col + 24) * (-10426) +
+      g c (col + 8) * 29692
+    (ws.setIfInBounds col (descale (tmp10 + t0) 13)).setIfInBounds (col + 8)
+      (descale (tmp10 - t0) 13)
+
+/-- `jpeg_idct_2x2` pass 2 on workspace row `row`: two samples at byte `o` of `buf`. -/
+def pass2r2 (ws : Array Int) (row : Nat) (buf : ByteArray) (o : Nat) : ByteArray :=
+  let b := row * 8
+  let w := fun (i : Nat) => g ws (b + i)
+  if w 1 == 0 && w 3 == 0 && w 5 == 0 && w 7 == 0 then
+    let v := rangeLimit (descale (w 0) 5)
+    setB (setB buf o v) (o + 1) v
+  else
+    let tmp10 := w 0 * 32768
+    let t0 := w 7 * (-5906) + w 5 * 6967 + w 3 * (-10426) + w 1 * 29692
+    setB (setB buf o (rangeLimit (descale (tmp10 + t0) 20))) (o + 1)
+      (rangeLimit (descale (tmp10 - t0) 20))
+
+/-- **Inverse DCT to an `ss × ss` block** (`ss` ∈ {8, 4, 2, 1}: `jpeg_idct_islow`,
+`jpeg_idct_4x4`, `jpeg_idct_2x2`, `jpeg_idct_1x1`) into `buf` at byte `o`, rows `stride`
+bytes apart. Any other size is treated as 1. -/
+def idctScaled (ss : Nat) (coef : Array Int) (buf : ByteArray) (o stride : Nat) : ByteArray :=
+  if ss = 8 then idctStore coef buf o stride
+  else if ss = 4 then Id.run do
+    let mut ws : Array Int := Array.replicate 32 0
+    for col in [0:8] do
+      ws := pass1r4 coef col ws
+    let mut buf := buf
+    for row in [0:4] do
+      buf := pass2r4 ws row buf (o + row * stride)
+    return buf
+  else if ss = 2 then Id.run do
+    let mut ws : Array Int := Array.replicate 16 0
+    for col in [0:8] do
+      ws := pass1r2 coef col ws
+    let mut buf := buf
+    for row in [0:2] do
+      buf := pass2r2 ws row buf (o + row * stride)
+    return buf
+  else setB buf o (rangeLimit (descale (g coef 0) 3))
+
 /-! ## 5. Scans -/
 
 /-- A component of a scan: plane offset and stride, blocks per MCU (`h × v`; `1 × 1` in a
@@ -536,6 +670,8 @@ structure SComp where
   ac : Array UInt32
   /-- Quantisation table (natural order). -/
   q : Array Int
+  /-- Scaled block size in the plane (`Comp.ss`; sequential scans only). -/
+  ss : Nat := 8
   deriving Inhabited
 
 /-- Find the next marker from `i` (at most `fuel` bytes): skips data bytes, stuffed `FF 00`
@@ -587,8 +723,8 @@ def decodeScan (d : ByteArray) (cs : Array SComp) (mcusX mcusY ri pos : Nat) (bu
             let r := decodeBlock d c.dc c.ac c.q br (preds.getD ci 0)
             br := r.1
             preds := preds.setIfInBounds ci r.2.1
-            buf := idctStore r.2.2 buf
-              (c.off + ((my * c.v + by_) * 8) * c.stride + (mx * c.h + bx) * 8) c.stride
+            buf := idctScaled c.ss r.2.2 buf
+              (c.off + ((my * c.v + by_) * c.ss) * c.stride + (mx * c.h + bx) * c.ss) c.stride
   return (buf, br.pos)
 
 /-! ## 5b. Progressive scans (T.81 Annex G, libjpeg-turbo `jdphuff.c`)
@@ -791,7 +927,8 @@ def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX m
                 coef := r.2.2
   return (coef, br.pos, lastGood)
 
-/-- Dequantise and inverse-transform every block of a progressive frame into the planes. -/
+/-- Dequantise and inverse-transform every block of a progressive frame into the planes
+(blocks of `Comp.ss` samples). -/
 def idctAll (f : Frame) (coef : Array Int) (qlat : Array (Array Int)) (buf : ByteArray) :
     ByteArray := Id.run do
   let mut buf := buf
@@ -799,12 +936,14 @@ def idctAll (f : Frame) (coef : Array Int) (qlat : Array (Array Int)) (buf : Byt
     let c := f.comps.getD ci default
     let off := f.offs.getD ci 0
     let st := f.stride c
+    let poff := f.poffs.getD ci 0
+    let pst := f.pstride c
     let q := qlat.getD ci #[]
     for by_ in [0:f.mcusY * c.v] do
       for bx in [0:f.mcusX * c.h] do
         let base := off + by_ * 8 * st + bx * 64
         let blk := (Array.range 64).map fun i => g coef (base + i) * g q i
-        buf := idctStore blk buf (off + by_ * 8 * st + bx * 8) st
+        buf := idctScaled c.ss blk buf (poff + by_ * c.ss * pst + bx * c.ss) pst
   return buf
 
 /-! ## 5c. Block smoothing (libjpeg-turbo 2.1 `jdcoefct.c`, `decompress_smooth_data`)
@@ -884,6 +1023,8 @@ def smoothComp (f : Frame) (coef : Array Int) (q : Array Int) (cb pb : Array Int
   let c := f.comps.getD ci default
   let off := f.offs.getD ci 0
   let st := f.stride c
+  let poff := f.poffs.getD ci 0
+  let pst := f.pstride c
   let hb := (f.dh c + 7) / 8
   let wb := (f.dw c + 7) / 8
   let lastI := f.mcusY - 1
@@ -912,7 +1053,7 @@ def smoothComp (f : Frame) (coef : Array Int) (q : Array Int) (cb pb : Array Int
         let ws := (Array.range 64).map fun i => g coef (base + i)
         let ws := smoothBlock ws dc q bits chg
         let blk := (Array.range 64).map fun i => g ws i * g q i
-        buf := idctStore blk buf (off + r * 8 * st + b * 8) st
+        buf := idctScaled c.ss blk buf (poff + r * c.ss * pst + b * c.ss) pst
         cols := #[cs.getD 1 0, cs.getD 2 0, cs.getD 3 0, cs.getD 4 0, cs.getD 4 0]
   return buf
 
@@ -983,11 +1124,28 @@ Every scan visits each block of its components once, so this bounds the decoding
 for colour, 6 for gray). -/
 def maxScans : Nat := 256
 
+/-- libjpeg's per-component scaled block size (`jpeg_calc_output_dimensions`): starting from
+the output scale `mins`, a component's IDCT size is doubled (up to 8) while that still divides
+the maximal sampling factors, so subsampled chroma is enlarged by the IDCT rather than by the
+upsampler (with 4:2:0 at a reduced scale the chroma needs no upsampling at all). At full size
+(`mins = 8`) every component keeps 8. -/
+def scaledSize (hmax vmax mins : Nat) (c : Comp) : Nat := go 3 mins
+where
+  /-- At most `fuel` doublings from `ss`. -/
+  go : Nat → Nat → Nat
+    | 0, ss => ss
+    | fuel + 1, ss =>
+      if ss < 8 ∧ (hmax * mins) % (c.h * ss * 2) = 0 ∧ (vmax * mins) % (c.v * ss * 2) = 0 then
+        go fuel (ss * 2)
+      else ss
+
 /-- Parse a frame header body at `a` (length `len`), check it against the limits, and
 allocate the component planes (filled with 128, the level of an all-zero block) and, for a
-progressive frame (`prog`), the coefficient buffer. -/
-def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) (prog : Bool := false) :
-    Except Error St := do
+progressive frame (`prog`), the coefficient buffer. `scale` (0–3, task 7.10) asks for a
+reduced-size decode by `2^scale` (libjpeg `scale_num = 8 / 2^scale`, `scale_denom = 8`, as
+MuPDF's `l2factor`): the planes then hold blocks of `Comp.ss` samples. -/
+def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) (prog : Bool := false)
+    (scale : Nat := 0) : Except Error St := do
   if st.frame.isSome then throw (bad a "several frame headers")
   if len < 6 then throw (bad a "SOF segment too short")
   let prec := rd d a
@@ -1012,19 +1170,25 @@ def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) (prog : B
   let vmax := comps.foldl (fun m c => max m c.v) 1
   if comps.any (fun c => hmax % c.h ≠ 0 ∨ vmax % c.v ≠ 0) then
     throw (.unsupported "DCT: fractional sampling")
+  let mins := 8 >>> (min scale 3)
+  comps := comps.map fun c => { c with ss := scaledSize hmax vmax mins c }
   let mcusX := (w + 8 * hmax - 1) / (8 * hmax)
   let mcusY := (h + 8 * vmax - 1) / (8 * vmax)
   let mut offs : Array Nat := #[]
   let mut total := 0
+  let mut poffs : Array Nat := #[]
+  let mut ptotal := 0
   for c in comps do
     offs := offs.push total
     total := total + mcusX * c.h * 8 * (mcusY * c.v * 8)
-  if limits.maxDecodedStreamBytes < total then throw (.limitExceeded .decodedStreamBytes)
+    poffs := poffs.push ptotal
+    ptotal := ptotal + mcusX * c.h * c.ss * (mcusY * c.v * c.ss)
+  if limits.maxDecodedStreamBytes < ptotal then throw (.limitExceeded .decodedStreamBytes)
   if prog ∧ limits.maxDecodedStreamBytes < coefBytes * total then
     throw (.limitExceeded .decodedStreamBytes)
   return { st with
-    frame := some { w, h, comps, hmax, vmax, mcusX, mcusY, offs, prog }
-    buf := ByteArray.mk (Array.replicate total 128)
+    frame := some { w, h, comps, hmax, vmax, mcusX, mcusY, offs, prog, mins, poffs }
+    buf := ByteArray.mk (Array.replicate ptotal 128)
     done := Array.replicate nf false
     coef := if prog then Array.replicate total 0 else #[]
     qlat := Array.replicate nf #[]
@@ -1112,9 +1276,9 @@ def parseSOS (d : ByteArray) (a len e : Nat) (st : St) : Except Error (St × Nat
     if dcT.size ≠ 65536 ∨ acT.size ≠ 65536 then throw (bad b "Huffman table not defined")
     let q := st.qt.getD c.tq #[]
     if q.size ≠ 64 then throw (bad b "quantisation table not defined")
-    cs := cs.push { idx, off := f.offs.getD idx 0, stride := f.stride c,
+    cs := cs.push { idx, off := f.poffs.getD idx 0, stride := f.pstride c,
                     h := if ns = 1 then 1 else c.h, v := if ns = 1 then 1 else c.v,
-                    dc := dcT, ac := acT, q }
+                    dc := dcT, ac := acT, q, ss := c.ss }
   let (mx, my) : Nat × Nat :=
     if ns = 1 then
       let c := f.comps.getD ((cs.getD 0 default).idx) default
@@ -1184,8 +1348,9 @@ def truncatedSeg (d : ByteArray) (m p : Nat) : Option Error := Id.run do
   return none
 
 /-- **The marker loop** from byte `pos` (at most `fuel` segments): reads markers and
-segments until `EOI`, the end of the data, or every component has been decoded. -/
-def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Except Error St
+segments until `EOI`, the end of the data, or every component has been decoded; `scale` is
+passed to `parseSOF`. -/
+def segLoop (limits : Limits) (d : ByteArray) (scale : Nat) : (fuel pos : Nat) → St → Except Error St
   | 0, _, st => .ok st
   | fuel + 1, pos, st =>
     if st.complete then .ok st else
@@ -1193,7 +1358,7 @@ def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Exce
     | none => .ok st
     | some (m, p) =>
       if m = 0xD9 then .ok st
-      else if (0xD0 ≤ m ∧ m ≤ 0xD8) ∨ m = 0x01 then segLoop limits d fuel p st
+      else if (0xD0 ≤ m ∧ m ≤ 0xD8) ∨ m = 0x01 then segLoop limits d scale fuel p st
       else
         let len := rd16 d p
         let e := p + len
@@ -1206,23 +1371,23 @@ def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Exce
           let a := p + 2
           let body := len - 2
           if m = 0xC0 ∨ m = 0xC1 ∨ m = 0xC2 then
-            match parseSOF limits d a body st (m = 0xC2) with
-            | .ok st => segLoop limits d fuel e st
+            match parseSOF limits d a body st (m = 0xC2) scale with
+            | .ok st => segLoop limits d scale fuel e st
             | .error err => .error err
           else if m = 0xC4 then
             match parseDHT d a e st with
-            | .ok st => segLoop limits d fuel e st
+            | .ok st => segLoop limits d scale fuel e st
             | .error err => .error err
           else if m = 0xDB then
             match parseDQT d a e st.qt with
-            | .ok qt => segLoop limits d fuel e { st with qt }
+            | .ok qt => segLoop limits d scale fuel e { st with qt }
             | .error err => .error err
           else if m = 0xDD then
             if body < 2 then .error (bad p "short DRI") else
-            segLoop limits d fuel e { st with ri := rd16 d a }
+            segLoop limits d scale fuel e { st with ri := rd16 d a }
           else if m = 0xDA then
             match parseScan d a body e st with
-            | .ok (st, q) => segLoop limits d fuel (max q e) st
+            | .ok (st, q) => segLoop limits d scale fuel (max q e) st
             | .error err => .error err
           else if 0xC3 ≤ m ∧ m ≤ 0xCF ∧ m ≠ 0xC4 ∧ m ≠ 0xC8 ∧ m ≠ 0xCC then
             .error (.unsupported s!"DCT: SOF{m - 0xC0} (lossless, differential or arithmetic)")
@@ -1230,12 +1395,12 @@ def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Exce
           else if m = 0xE0 then
             let jfif := decide (14 ≤ body ∧ rd d a = 0x4A ∧ rd d (a + 1) = 0x46 ∧ rd d (a + 2) = 0x49 ∧
               rd d (a + 3) = 0x46 ∧ rd d (a + 4) = 0)
-            segLoop limits d fuel e { st with jfif := st.jfif || jfif }
+            segLoop limits d scale fuel e { st with jfif := st.jfif || jfif }
           else if m = 0xEE then
             let adobe := decide (12 ≤ body ∧ rd d a = 0x41 ∧ rd d (a + 1) = 0x64 ∧ rd d (a + 2) = 0x6F ∧
               rd d (a + 3) = 0x62 ∧ rd d (a + 4) = 0x65)
-            segLoop limits d fuel e (if adobe then { st with adobe := some (rd d (a + 11)) } else st)
-          else segLoop limits d fuel e st
+            segLoop limits d scale fuel e (if adobe then { st with adobe := some (rd d (a + 11)) } else st)
+          else segLoop limits d scale fuel e st
 
 /-! ## 7. Upsampling and colour conversion -/
 
@@ -1254,31 +1419,37 @@ inductive Up where
   deriving Inhabited, DecidableEq
 
 /-- The upsampling method of a component with expansion factors `hf × vf` and downsampled
-width `dw`. -/
-def upMode (hf vf dw : Nat) : Up :=
+width `dw`; `fancy` is libjpeg's `do_fancy` (`do_fancy_upsampling && min_DCT_scaled_size > 1`:
+off in a 1/8 decode, where every method is replication). -/
+def upMode (hf vf dw : Nat) (fancy : Bool := true) : Up :=
   if hf = 1 ∧ vf = 1 then .full
-  else if hf = 2 ∧ vf = 1 ∧ 2 < dw then .h2v1
-  else if hf = 1 ∧ vf = 2 then .h1v2
-  else if hf = 2 ∧ vf = 2 ∧ 2 < dw then .h2v2
+  else if fancy ∧ hf = 2 ∧ vf = 1 ∧ 2 < dw then .h2v1
+  else if fancy ∧ hf = 1 ∧ vf = 2 then .h1v2
+  else if fancy ∧ hf = 2 ∧ vf = 2 ∧ 2 < dw then .h2v2
   else .rep hf vf
 
-/-- **Upsample** component `c` of the plane buffer to a `w × h` plane. -/
+/-- **Upsample** component `c` of the plane buffer to an output-size plane (`Frame.ow ×
+Frame.oh`; `w × h` at full size). The expansion factors are libjpeg's `h_out_group /
+h_in_group` with `h_in_group = Hᵢ · ssᵢ / mins` (`jinit_upsampler`). -/
 def upsample (f : Frame) (buf : ByteArray) (ci : Nat) : ByteArray := Id.run do
   let c := f.comps.getD ci default
-  let off := f.offs.getD ci 0
-  let st := f.stride c
-  let dw := f.dw c
-  let dh := f.dh c
-  let mode := upMode (f.hmax / c.h) (f.vmax / c.v) dw
+  let off := f.poffs.getD ci 0
+  let st := f.pstride c
+  let dw := f.sdw c
+  let dh := f.sdh c
+  let ow := f.ow
+  let hin := max 1 (c.h * c.ss / f.mins)
+  let vin := max 1 (c.v * c.ss / f.mins)
+  let mode := upMode (f.hmax / hin) (f.vmax / vin) dw (decide (1 < f.mins))
   let px := fun (r i : Nat) => rd buf (off + r * st + i)
-  let mut out := ByteArray.emptyWithCapacity (f.w * f.h)
-  for y in [0:f.h] do
+  let mut out := ByteArray.emptyWithCapacity (ow * f.oh)
+  for y in [0:f.oh] do
     match mode with
     | .full =>
-      for x in [0:f.w] do
+      for x in [0:ow] do
         out := out.push (UInt8.ofNat (px y x))
     | .h2v1 =>
-      for x in [0:f.w] do
+      for x in [0:ow] do
         let i := x / 2
         let v := 3 * px y i
         let o := if x % 2 = 0 then (v + px y (i - 1) + 1) / 4 else (v + px y (min (i + 1) (dw - 1)) + 2) / 4
@@ -1286,19 +1457,19 @@ def upsample (f : Frame) (buf : ByteArray) (ci : Nat) : ByteArray := Id.run do
     | .h1v2 =>
       let j := y / 2
       let (nb, bias) := if y % 2 = 0 then (j - 1, 1) else (min (j + 1) (dh - 1), 2)
-      for x in [0:f.w] do
+      for x in [0:ow] do
         out := out.push (u8 ((3 * px j x + px nb x + bias) / 4))
     | .h2v2 =>
       let j := y / 2
       let nb := if y % 2 = 0 then j - 1 else min (j + 1) (dh - 1)
       let cs := fun (i : Nat) => 3 * px j i + px nb i
-      for x in [0:f.w] do
+      for x in [0:ow] do
         let i := x / 2
         let o := if x % 2 = 0 then (3 * cs i + cs (i - 1) + 8) / 16
           else (3 * cs i + cs (min (i + 1) (dw - 1)) + 7) / 16
         out := out.push (u8 o)
     | .rep hf vf =>
-      for x in [0:f.w] do
+      for x in [0:ow] do
         out := out.push (UInt8.ofNat (px (y / vf) (x / hf)))
   return out
 
@@ -1426,11 +1597,12 @@ def St.flush (st : St) : St :=
     else st
   | none => st
 
-/-- Decode the planes of a JPEG stream: `SOI`, then the marker loop. -/
-def decodePlanes (limits : Limits) (d : ByteArray) : Except Error St :=
+/-- Decode the planes of a JPEG stream: `SOI`, then the marker loop (`scale`: see
+`parseSOF`). -/
+def decodePlanes (limits : Limits) (d : ByteArray) (scale : Nat := 0) : Except Error St :=
   let p := skipWs d d.size 0
   if rd d p ≠ 0xFF ∨ rd d (p + 1) ≠ 0xD8 then .error (bad p "no SOI marker")
-  else (segLoop limits d d.size (p + 2) {}).map St.flush
+  else (segLoop limits d scale d.size (p + 2) {}).map St.flush
 
 /-- **Re-validate** the decoder's result: a frame with at least one decoded scan, at most
 `Limits.maxImagePixels` pixels, and an output of exactly `w · h · nc` bytes, `nc ≤ 4`. -/
@@ -1439,21 +1611,24 @@ def finalize (limits : Limits) (ct : Option Int) (st : St) : Except Error Image 
   | none => .error (bad 0 "no frame header")
   | some f =>
     if st.scans = 0 then .error (bad 0 "no scan")
-    else if limits.maxImagePixels < f.w * f.h then .error (.limitExceeded .imagePixels)
-    else if limits.maxDecodedStreamBytes < f.w * f.h * f.comps.size then
+    else if limits.maxImagePixels < f.ow * f.oh then .error (.limitExceeded .imagePixels)
+    else if limits.maxDecodedStreamBytes < f.ow * f.oh * f.comps.size then
       .error (.limitExceeded .decodedStreamBytes)
     else
       let planes := (Array.range f.comps.size).map (upsample f st.buf)
       let cv := convOf f.comps.size (f.comps.toList.map (·.id)) st.jfif st.adobe ct
-      let out := convert cv planes (f.w * f.h)
-      if h1 : out.size = f.w * f.h * f.comps.size then
-        if h2 : f.comps.size ≤ 4 then .ok ⟨f.w, f.h, f.comps.size, out, h1, h2⟩
+      let out := convert cv planes (f.ow * f.oh)
+      if h1 : out.size = f.ow * f.oh * f.comps.size then
+        if h2 : f.comps.size ≤ 4 then .ok ⟨f.ow, f.oh, f.comps.size, out, h1, h2⟩
         else .error (bad 0 "too many components")
       else .error (bad 0 "output size mismatch")
 
-/-- **Decode a baseline JPEG** (`/DCTDecode` data, `ct` the PDF `/ColorTransform`). -/
-def decode (limits : Limits) (ct : Option Int) (d : ByteArray) : Except Error Image :=
-  (decodePlanes limits d).bind (finalize limits ct)
+/-- **Decode a JPEG** (`/DCTDecode` data, `ct` the PDF `/ColorTransform`); `scale` (0–3)
+asks for libjpeg's reduced-size decode by `2^scale` (output `⌈w / 2^scale⌉ × ⌈h / 2^scale⌉`),
+as MuPDF requests it for images drawn much smaller than their size (task 7.10). -/
+def decode (limits : Limits) (ct : Option Int) (d : ByteArray) (scale : Nat := 0) :
+    Except Error Image :=
+  (decodePlanes limits d scale).bind (finalize limits ct)
 
 /-- `finalize` re-validates the pixel count. -/
 theorem finalize_pixels {limits : Limits} {ct : Option Int} {st : St} {img : Image}
@@ -1464,9 +1639,9 @@ theorem finalize_pixels {limits : Limits} {ct : Option Int} {st : St} {img : Ima
   · rename_i f _
     by_cases h1 : st.scans = 0
     · simp [h1] at h
-    · by_cases h2 : limits.maxImagePixels < f.w * f.h
+    · by_cases h2 : limits.maxImagePixels < f.ow * f.oh
       · simp [h1, h2] at h
-      · by_cases h3 : limits.maxDecodedStreamBytes < f.w * f.h * f.comps.size
+      · by_cases h3 : limits.maxDecodedStreamBytes < f.ow * f.oh * f.comps.size
         · simp [h1, h2, h3] at h
         · simp only [h1, h2, h3, ite_false] at h
           split at h
@@ -1477,10 +1652,11 @@ theorem finalize_pixels {limits : Limits} {ct : Option Int} {st : St} {img : Ima
 
 /-- **A decoded JPEG has at most `Limits.maxImagePixels` pixels** (and, by construction,
 `w · h · nc` samples with `nc ≤ 4`). -/
-theorem decode_pixels {limits : Limits} {ct : Option Int} {d : ByteArray} {img : Image}
-    (h : decode limits ct d = .ok img) : img.w * img.h ≤ limits.maxImagePixels := by
+theorem decode_pixels {limits : Limits} {ct : Option Int} {d : ByteArray} {scale : Nat}
+    {img : Image} (h : decode limits ct d scale = .ok img) :
+    img.w * img.h ≤ limits.maxImagePixels := by
   unfold decode at h
-  cases hp : decodePlanes limits d with
+  cases hp : decodePlanes limits d scale with
   | error e => rw [hp] at h; cases h
   | ok st => rw [hp] at h; exact finalize_pixels h
 
