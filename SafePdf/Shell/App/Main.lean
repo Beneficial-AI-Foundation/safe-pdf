@@ -48,6 +48,11 @@ environment and fetches the PDF and its title over loopback HTTP. Exit codes (co
   next page); if it is still inside a post, the process exits without waiting for it (after
   the annotations were flushed). A failed post only prints its outcome on stderr
   (status or connection error, nothing from the library).
+
+  The window run always ends with `exitNow` (task 8.9): once the annotations were flushed (or
+  their grace expired) and the text posts had theirs, the process exits through
+  `IO.Process.exit` with the window's code, so a page render still running on a worker thread
+  (task 8.8) never holds it.
 -/
 
 open SafePdf.Shell.App
@@ -138,6 +143,19 @@ def windowInit (o : BibLean.Launch.Opened) (sync : BibLean.Annots.Sync)
     Viewer.setStatus s!"{marks.marks.size - s.marks.marks.size} mark(s) loaded from the library"
   if let some p := o.page then Viewer.goTo st p
 
+/-- Ends the window run of `viewer --biblean` (task 8.9): flushes stdout and stderr, then exits
+the process with `code` (0 after the window closed; anything above 255 becomes 1) through
+`IO.Process.exit`. Returning from `main` instead would make the Lean runtime wait for every
+dedicated task — a page render still running on a worker thread (task 8.8) cannot be
+interrupted and could hold the process for seconds after the window closed. Called only after
+`Sync.flush` returned (everything sent, or its grace expired) and the text posts finished or
+had their grace; nothing else needs to run: the document lives in memory (no temporary file)
+and the token pipe is already closed. -/
+def exitNow {α : Type} (code : UInt32) : IO α := do
+  try (← IO.getStdout).flush catch _ => pure ()
+  try (← IO.getStderr).flush catch _ => pure ()
+  IO.Process.exit (if code > 255 then 1 else code.toUInt8)
+
 /-- `viewer --biblean …` (see the module documentation). -/
 def bibleanMain (args : List String) : IO UInt32 := do
   -- Contract §2: close the token pipe (fd 3) once the token is read (task 10.1b).
@@ -184,14 +202,11 @@ def bibleanMain (args : List String) : IO UInt32 := do
     let sync ← BibLean.Annots.Sync.create o
     let code ← Viewer.mainWith [] (windowInit o sync)
     -- Close/quit: send what is pending; a server that never answers must not hold the process.
-    unless ← sync.flush annotsGraceMs do
-      IO.Process.exit (if code > 255 then 1 else code.toUInt8)
-    let grace ← IO.asTask (IO.sleep textGraceMs)
-    let _ ← IO.waitAny [text, grace]
-    IO.cancel text
-    unless ← IO.hasFinished text do
-      IO.Process.exit (if code > 255 then 1 else code.toUInt8)
-    return code
+    if ← sync.flush annotsGraceMs then
+      let grace ← IO.asTask (IO.sleep textGraceMs)
+      let _ ← IO.waitAny [text, grace]
+      IO.cancel text
+    exitNow code
 
 /-- Entry point of the `viewer` executable. -/
 def main (args : List String) : IO UInt32 :=
