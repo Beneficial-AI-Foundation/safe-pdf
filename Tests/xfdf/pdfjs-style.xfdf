@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PDF.js-style variant. Firefox's PDF.js has no XFDF exporter; this file transcribes what
+     its highlight editor saves into a PDF (pdf.js src/core/annotation.js HighlightAnnotation:
+     /C from the palette of web/app_options.js highlightEditorColors, /QuadPoints UL, UR, LL,
+     LR, /Contents for a comment; FreeText and Ink for its other editors) into ISO 19444-1
+     XFDF. Text with numeric character references, a non-BMP character, a tab and a CR.
+     Expected (Tests/Xfdf.lean): 4 marks (red highlight + comment, pink highlight, blue note),
+     skipped 2 (freetext, ink), ignored 0. -->
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+<annots>
+<highlight page="0" color="#FF4F5F" name="pdfjs_internal_editor_0" rect="72,600,300,628" coords="72,628,300,628,72,616,300,616,72,612,180,612,72,600,180,600" opacity="1"><contents>&#x1F4CC; pinned&#9;tab&#13;and CR — “quotes”</contents></highlight>
+<highlight page="1" color="#FFCBE6" name="pdfjs_internal_editor_1" rect="10,10,50,20" coords="10,20,50,20,10,10,50,10"/>
+<text page="1" color="#80EBFF" name="pdfjs_internal_editor_2" icon="Comment" rect="100,200,120,220"><contents>日本語のメモ</contents></text>
+<freetext page="1" color="#000000" name="pdfjs_internal_editor_3" rect="0,0,100,20"><contents>typed</contents><defaultappearance>/Helv 10 Tf 0 g</defaultappearance></freetext>
+<ink page="1" color="#000000" name="pdfjs_internal_editor_4" rect="0,0,10,10"><inklist><gesture>1,1;2,2</gesture></inklist></ink>
+</annots>
+</xfdf>
