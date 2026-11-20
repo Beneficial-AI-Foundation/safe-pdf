@@ -1344,7 +1344,11 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- Images and shadings of the page, of every loaded cell (task 7.3h2) and of every Type 3
     -- glyph (task 7.3j).
     let all := items ++ tls.cellItems ++ type3Items srcs
-    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all
+    -- Task 7.10: JPEGs drawn much smaller than their size are decoded at a reduced size, as
+    -- MuPDF does (`Image.imageExtents`: page and annotation uses at this zoom).
+    let exts := Image.imageExtents limits.maxXObjectDepth zoom items
+      (tls.cellItems ++ type3Items srcs)
+    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all exts
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
     let view := viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)
     (.ok (renderPage page zoom rot

@@ -39,6 +39,15 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    Any decoder error (progressive, arithmetic, 12-bit, malformed, over a limit) or a
    component mismatch yields the placeholder (S7); a DCT soft mask that fails is dropped.
    DCT stencil masks (`/ImageMask true`) stay the placeholder.
+   **Reduced-size JPEG decoding** (task 7.10): a JPEG XObject drawn on the page at a quarter of its
+   size or less is decoded at `1 / 2^k` of its size, `k = dctScale (l2Factor …)` — MuPDF's
+   `l2factor` (`fz_get_pixmap_from_image`) from the largest device extents of its uses
+   (`imageExtents`, at the render's zoom), one step less (`dctScale`: the box filter needs two
+   samples per pixel), as libjpeg's `scale_num = 8 / 2^k` — so
+   the raster is `⌈/Width / 2^k⌉ × ⌈/Height / 2^k⌉` (`ImgDict.reduce`); the remaining
+   reduction is the placement's area-averaging downscale. Not reduced: images also drawn in
+   tiling cells or Type 3 glyphs, soft masks, images whose soft mask has a `/Matte`, inline
+   images.
    **`/CCITTFaxDecode`** (task 7.8) is decoded by `SafePdf.Quarantine.CCITT` (MuPDF's
    `filter-fax.c` ported): a chain `pre ++ [/CCITTFaxDecode]` (`ccittSplit`) is decoded up to
    the codec, then `decodeCCITT` decodes at most `/Height` rows with the parameters of its
@@ -656,19 +665,28 @@ def jpegSpace (nc : Nat) : Option CSInfo :=
   else if nc = 4 then some (.dev .cmyk (.gray Comp.zero))
   else none
 
+/-- The dictionary of an image decoded at `1 / 2^k` of its size: `⌈/Width / 2^k⌉ ×
+⌈/Height / 2^k⌉` (MuPDF `fz_decomp_image_from_stream`, `w = (w + f − 1) >> l2factor`). -/
+def ImgDict.reduce (p : ImgDict) (k : Nat) : ImgDict :=
+  let f := 2 ^ k
+  { p with w := (p.w + f - 1) / f, h := (p.h + f - 1) / f }
+
 /-- **Decode DCT data and re-validate it against the image dictionary**: the JPEG's
 components must match the colour space (`info`, else `jpegSpace`); the samples become an
 8-bit raster of the dictionary's dimensions through `decodePixmap` (`/Decode`, colour-key
-masking, limits). Errors: the decoder's, a component mismatch, a stencil mask. -/
+masking, limits). Errors: the decoder's, a component mismatch, a stencil mask. `scale`
+(0–3, task 7.10) is a reduced-size decode by `2^scale` (MuPDF's JPEG `l2factor`): the
+raster is then the reduced dictionary (`ImgDict.reduce`). -/
 def decodeDCT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
-    (jpeg : ByteArray) : Except Error Pixmap :=
+    (jpeg : ByteArray) (scale : Nat := 0) : Except Error Pixmap :=
   if p.mask then .error (.unsupported "DCT-encoded stencil mask") else
-  match Quarantine.DCT.decode limits (colorTransformOf parms) jpeg with
+  match Quarantine.DCT.decode limits (colorTransformOf parms) jpeg scale with
   | .error e => .error e
   | .ok img =>
     let info := match info with
       | some i => some i
       | none => jpegSpace img.nc
+    let p := if scale = 0 then p else p.reduce scale
     match info.bind planOf with
     | some (nc, _, _) =>
       if nc = img.nc then decodePixmap limits { p with bpc := some 8 } info img.data
@@ -677,8 +695,8 @@ def decodeDCT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Di
 
 /-- `decodeDCT`, with every error drawn as the placeholder (S7). -/
 def decodeDCTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
-    (jpeg : ByteArray) : Pixmap :=
-  match decodeDCT limits p info parms jpeg with
+    (jpeg : ByteArray) (scale : Nat := 0) : Pixmap :=
+  match decodeDCT limits p info parms jpeg scale with
   | .ok pm => pm
   | .error _ => placeholder
 
@@ -917,11 +935,76 @@ def applyMasks (cap : Nat) (info : Option CSInfo) (sm mk : Option MaskImg) (pm :
   | none, some (m, _) => withMask cap pm m 3
   | none, none => pm
 
+/-! ### Reduced-size decoding of downscaled JPEGs (task 7.10) -/
+
+/-- **MuPDF's `l2factor`** (`fz_get_pixmap_from_image`) for an `iw × ih` image drawn with
+device extents `w = ⌊√qw⌋`, `h = ⌊√qh⌋` (`qw = a² + b²`, `qh = c² + d²` of the image's device
+matrix; MuPDF truncates `sqrtf` to an integer): the largest `l ≤ 6` with
+`iw >> l ≥ w + 2` and `ih >> l ≥ h + 2`, and 0 when `w` or `h` is 0. In exact arithmetic:
+`iw >> l ≥ ⌊√qw⌋ + 2` ⟺ `iw >> l ≥ 2 ∧ qw < (iw >> l − 1)²`. -/
+def l2Factor (iw ih : Nat) (qw qh : Rat) : Nat :=
+  if qw < 1 ∨ qh < 1 then 0 else go 6 0
+where
+  /-- At most `fuel` more steps from factor `l`. -/
+  go : Nat → Nat → Nat
+    | 0, l => l
+    | fuel + 1, l =>
+      let kw := iw >>> (l + 1)
+      let kh := ih >>> (l + 1)
+      if 2 ≤ kw ∧ 2 ≤ kh ∧ qw < (((kw - 1) ^ 2 : Nat) : Rat) ∧ qh < (((kh - 1) ^ 2 : Nat) : Rat)
+      then go fuel (l + 1) else l
+
+/-- **The JPEG reduction actually used** for MuPDF's `l2factor` `l`: `min 3 (l − 1)` (0 for
+`l = 0`). MuPDF decodes at `1 / 2^(min 3 l)` and then filters the rest of the way with a tent
+filter; our placement downscales with an area-averaging box filter (the documented
+approximation), which smooths too little when an image has fewer than two samples per device
+pixel (noise-like images, e.g. sky maps, then differ visibly). One step less keeps at least
+two samples per pixel for the box filter while still bounding the decode (an image drawn at
+1/16 or less decodes at 1/8). Measured on the corpus: with `min 3 l`, 15 of 21 changed pages
+got slightly worse (`arxiv-1105.2345` p8 0.78% → 1.08%); see `docs/raster.md`. -/
+def dctScale (l : Nat) : Nat := min 3 (l - 1)
+
+/-- The squared device extents `(a² + b², c² + d²)` of an image drawn with `ctm` at `zoom`
+(the view's linear part is `zoom` times a rotation by a multiple of 90° and a flip, which
+preserve these lengths). -/
+def extentOf (zoom : Rat) (ctm : Matrix) : Rat × Rat :=
+  let a := Geom.Fixed.toRat ctm.a
+  let b := Geom.Fixed.toRat ctm.b
+  let c := Geom.Fixed.toRat ctm.c
+  let d := Geom.Fixed.toRat ctm.d
+  (zoom * zoom * (a * a + b * b), zoom * zoom * (c * c + d * d))
+
+/-- **Device extents of the image XObjects of a page** for reduced-size decoding: for each
+`(num, gen)` drawn in `items` (page content and annotations, inside soft masks too, `depth`
+levels) the largest squared extents over its uses (a reduced decode must serve the largest
+use: the factor is monotone in both). Images also drawn in `fixed` (tiling cells, Type 3
+glyphs, whose matrices are not page matrices) are left out, i.e. decoded at full size. -/
+def imageExtents (depth : Nat) (zoom : Rat) (items fixed : DisplayList) :
+    List ((Nat × Nat) × (Rat × Rat)) :=
+  let used := Content.DisplayList.foldDeep (fun (acc : List ((Nat × Nat) × (Rat × Rat))) it =>
+    match it with
+    | .image (.xobject _ n g) ctm _ _ =>
+      let (qw, qh) := extentOf zoom ctm
+      match acc.find? (·.1 == (n, g)) with
+      | some (_, (w0, h0)) =>
+        acc.map fun e => if e.1 == (n, g) then (e.1, (max w0 qw, max h0 qh)) else e
+      | none => ((n, g), (qw, qh)) :: acc
+    | _ => acc) depth [] items
+  let excl := Content.DisplayList.foldDeep (fun (acc : List (Nat × Nat)) it =>
+    match it with
+    | .image (.xobject _ n g) _ _ _ => (n, g) :: acc
+    | _ => acc) depth [] fixed
+  used.filter fun e => !excl.contains e.1
+
 /-- **Decode an image XObject** `num gen` through the source (its filters, the session
 budget); `/DCTDecode` through `decodeDCTOr`, `/CCITTFaxDecode` through `decodeCCITTOr`, any other image codec yields the placeholder. Its `/SMask` (else its `/Mask` stream) is
-loaded and applied (`applyMasks`); a soft mask disables colour-key masking (§8.9.6.4). -/
+loaded and applied (`applyMasks`); a soft mask disables colour-key masking (§8.9.6.4).
+`ext` (task 7.10): the image's largest squared device extents on the page (`imageExtents`);
+a JPEG is then decoded at `1 / 2^k` of its size, `k = dctScale (l2Factor …)` (libjpeg
+scales by at most 8; the rest of the reduction is left to the placement's area-averaging
+downscale), except when its soft mask has a `/Matte` (MuPDF decodes those at full size). -/
 def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named : List (Name × CSInfo))
-    (num gen : Nat) : Except Error Pixmap × σ :=
+    (num gen : Nat) (ext : Option (Rat × Rat) := none) : Except Error Pixmap × σ :=
   match src.fetch s num gen with
   | (.ok (.stream st), s) =>
     let (p, s) := imgDictOf src s st.dict
@@ -934,8 +1017,14 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
     let fin := applyMasks limits.maxImagePixels info sm mk
     match dctSplit limits st.dict with
     | some (d', parms) =>
+      let matte := match sm with
+        | some (_, some _) => true
+        | _ => false
+      let scale := match ext with
+        | some (qw, qh) => if matte then 0 else dctScale (l2Factor p.w p.h qw qh)
+        | none => 0
       match src.decode s num { st with dict := d' } with
-      | (.ok bytes, s) => (.ok (fin (decodeDCTOr limits p info parms bytes)), s)
+      | (.ok bytes, s) => (.ok (fin (decodeDCTOr limits p info parms bytes scale)), s)
       | (.error e, s) => (.error e, s)
     | none =>
     match ccittSplit limits st.dict with
@@ -1000,12 +1089,13 @@ def namedSpaces {σ : Type} (src : Source σ) (s : σ) (res : Dict) : List (Name
       | (some i, s) => ((kv.1, i) :: acc.1, s)
       | (none, s) => (acc.1, s)) ([], s)
 
-/-- Add image XObject `num gen` to the table (once). -/
-def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num gen : Nat) :
-    ImageTable × σ :=
+/-- Add image XObject `num gen` to the table (once); `exts` as in `loadImages`. -/
+def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num gen : Nat)
+    (exts : List ((Nat × Nat) × (Rat × Rat)) := []) : ImageTable × σ :=
   let t := acc.1
   if t.xobjs.any (·.1 == (num, gen)) then acc else
   let (r, s) := loadXObject t.limits src acc.2 t.named num gen
+    ((exts.find? (·.1 == (num, gen))).map (·.2))
   match r with
   | .ok pm =>
     let n := pm.w * pm.h
@@ -1016,13 +1106,15 @@ def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num g
 
 /-- **Load the images of a display list**: every distinct image XObject decoded once (in
 first-use order), including images inside soft-mask groups (`DisplayList.foldDeep`, task
-7.3f), the page's named colour spaces resolved (`res`: the page resources). -/
+7.3f), the page's named colour spaces resolved (`res`: the page resources). `exts` (task
+7.10, `imageExtents`): device extents for reduced-size JPEG decoding; images not listed are
+decoded at full size. -/
 def loadImages {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict)
-    (items : DisplayList) : ImageTable × σ :=
+    (items : DisplayList) (exts : List ((Nat × Nat) × (Rat × Rat)) := []) : ImageTable × σ :=
   let (named, s) := namedSpaces src s res
   Content.DisplayList.foldDeep (fun acc it =>
     match it with
-    | .image (.xobject _ n g) _ _ _ => ImageTable.add src acc n g
+    | .image (.xobject _ n g) _ _ _ => ImageTable.add src acc n g exts
     | _ => acc) limits.maxXObjectDepth ({ limits, named }, s) items
 
 /-- The pixmap of an image source (`none`: nothing to draw). Inline images are decoded here. -/
