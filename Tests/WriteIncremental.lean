@@ -23,13 +23,18 @@ the object level are tested here:
 * `Doc.openDoc` on the result gives the same page count;
 * a second update on top of the first works (two stacked updates).
 
-Refusals: encrypted inputs and a document opened through the repair path
-(`Error.unsupported`, rule W1), a page index out of range, a duplicate page index, a
-non-canonical mark (duplicate key), a mark with a reference out of range.
+Encrypted inputs (task 9.5f, rule W10): every encrypted fixture of
+`Tests/adversarial/encrypted/` that opens (RC4 V1/V2/V4, AES-128, AES-256 R5/R6, an object
+stream with an indirect `/Length`, a signature dictionary) goes through the same checks, plus:
+the result keeps the file key, and the update holds no mark string in the clear.
+
+Refusals: a document opened through the repair path (`Error.unsupported`, rule W1; also an
+encrypted one), a page index out of range, a duplicate page index, a non-canonical mark
+(duplicate key), a mark with a reference out of range.
 
 Environment:
 * `SAFEPDF_WRITE_CORPUS=DIR` also runs the checks on every `*.pdf` of `DIR` (encrypted files
-  must be refused with `Error.unsupported`).
+  included, task 9.5f).
 * `SAFEPDF_WRITE_OUT=DIR` writes each result as `DIR/<name>` (for `qpdf --check`,
   `mutool draw`).
 -/
@@ -175,16 +180,62 @@ def runFile (name : String) (bytes : ByteArray) (verbose : Bool := true) : IO Na
     IO.println s!"  {name}: {if f == 0 then "ok" else s!"{f} failure(s)"}"
   return f
 
-/-- An encrypted file must be refused with `Error.unsupported` (rule W1). -/
-def runEncrypted (name : String) (bytes : ByteArray) : IO Nat := do
+/-- An encrypted file (task 9.5f, rule W10): the same checks as `runFile` (every original
+object fetches — decrypted — identically, the marks decrypt back exactly, a second update
+works), plus: the result keeps the file key, and the update holds no mark string in the
+clear. -/
+def runEncrypted (name : String) (bytes : ByteArray) (verbose : Bool := true) : IO Nat := do
   let lim := Limits.default
   match Doc.openDoc lim bytes with
   | .error e => check name "openDoc (encrypted original)" false (errS e)
   | .ok doc =>
-    match writeAnnots lim doc [(0, [square 20 20 60 40])] with
-    | .error (.unsupported _) => return 0
-    | .error e => check name "encrypted: expected unsupported" false (errS e)
-    | .ok _ => check name "encrypted: expected a refusal" false
+    let mut f := 0
+    f := f + (← check name "original has a decryption state" doc.file.crypt.isSome)
+    match writeAnnots lim doc (marksFor doc.pageCount) with
+    | .error e => return f + (← check name "writeAnnots (encrypted)" false (errS e))
+    | .ok out =>
+      let upd := (out.extract bytes.size out.size).toList
+      let pat := "safe-pdf 9.5a".toUTF8.toList
+      let clear := (List.range (upd.length + 1)).any fun i => (upd.drop i).take pat.length == pat
+      f := f + (← check name "mark strings encrypted in the update" (!clear))
+      match Open.openFile lim out with
+      | .ok d' => f := f + (← check name "same file key"
+          (match d'.crypt, doc.file.crypt with
+            | some a, some b => a.fileKey.data == b.fileKey.data
+            | _, _ => false))
+      | .error e => f := f + (← check name "openFile (encrypted result)" false (errS e))
+    return f + (← runFile name bytes verbose)
+
+/-- Unit checks of `Write.Encrypt` (task 9.5f): for every method and data length 0–40,
+`Crypt.decryptBytes` inverts `encryptBytes`, the output length is `methodLen`, AES output is
+IV + whole blocks; the IV is deterministic and differs with counter, kind and plaintext. -/
+def runEncryptUnit : IO Nat := do
+  let mut f := 0
+  let k16 : ByteArray := ⟨(List.range 16).toArray.map (·.toUInt8)⟩
+  let k32 : ByteArray := ⟨(List.range 32).toArray.map (fun i => (3 * i + 1).toUInt8)⟩
+  let cases : List (Crypt.Method × ByteArray) :=
+    [(.identity, k16), (.rc4, ⟨k16.data.extract 0 5⟩), (.rc4, k16), (.aesv2, k16), (.aesv3, k32)]
+  for (m, key) in cases do
+    for n in List.range 41 do
+      let data : ByteArray := ⟨(List.range n).toArray.map (fun i => (7 * i + n).toUInt8)⟩
+      match Write.Encrypt.encryptBytes m k32 key 12 0 n 0x73 data with
+      | .error e => f := f + (← check "encrypt-unit" s!"{reprStr m} n={n} encrypt" false (errS e))
+      | .ok c =>
+        f := f + (← check "encrypt-unit" s!"{reprStr m} n={n} length"
+          (c.size == Write.Encrypt.methodLen m n))
+        match Crypt.decryptBytes m key c with
+        | .ok p => f := f + (← check "encrypt-unit" s!"{reprStr m} n={n} round trip"
+            (p.data == data.data))
+        | .error e => f := f + (← check "encrypt-unit" s!"{reprStr m} n={n} decrypt" false
+            (errS e))
+  let iv (ctr : Nat) (kind : UInt8) (pt : List UInt8) :=
+    (Write.Encrypt.deriveIv k32 12 0 ctr kind ⟨pt.toArray⟩).data
+  f := f + (← check "encrypt-unit" "IV is 16 bytes, deterministic"
+    ((iv 0 0x73 [1, 2]).size == 16 && iv 0 0x73 [1, 2] == iv 0 0x73 [1, 2]))
+  f := f + (← check "encrypt-unit" "IV differs by counter, kind, plaintext"
+    (iv 0 0x73 [1, 2] != iv 1 0x73 [1, 2] && iv 0 0x73 [1, 2] != iv 0 0x53 [1, 2] &&
+      iv 0 0x73 [1, 2] != iv 0 0x73 [1, 3]))
+  return f
 
 /-- Refusals on a plain file. -/
 def runRefusals : IO Nat := do
@@ -217,6 +268,17 @@ def runRefusals : IO Nat := do
         (match writeAnnots lim bdoc [(0, [square 0 0 1 1])] with
           | .error (.unsupported _) => true
           | _ => false))
+    -- an encrypted document opened through the repair path stays refused (rule W1)
+    let rbytes ← IO.FS.readBinFile (encDir / "repair-aesv2.pdf")
+    match Doc.openDoc lim rbytes with
+    | .error e => f := f + (← check "refusals" "openDoc (repair-aesv2)" false (errS e))
+    | .ok rdoc =>
+      f := f + (← check "refusals" "repair-aesv2 opens repaired and decrypted"
+        (rdoc.file.repaired && rdoc.file.crypt.isSome))
+      f := f + (← check "refusals" "repaired encrypted document refused"
+        (match writeAnnots lim rdoc [(0, [square 0 0 1 1])] with
+          | .error (.unsupported _) => true
+          | _ => false))
     return f
 
 /-- Fixture names. -/
@@ -224,9 +286,10 @@ def fixtures : List String :=
   ["classic.pdf", "annots-indirect.pdf", "annots-null.pdf", "updated.pdf", "xrefstream.pdf",
     "hybrid.pdf", "page-gen.pdf", "linearized.pdf"]
 
-/-- Encrypted fixtures (refused). -/
+/-- Encrypted fixtures (written, task 9.5f; every handler of `Tests/adversarial/encrypted/` that opens). -/
 def encrypted : List String :=
-  ["rc4-40.pdf", "rc4-128.pdf", "aesv2.pdf", "aesv3.pdf"]
+  ["rc4-40.pdf", "rc4-128.pdf", "rc4-v4.pdf", "aesv2.pdf", "aesv3.pdf", "aesv3-r5.pdf",
+    "objstm-length-aesv2.pdf", "sig-aesv2.pdf"]
 
 /-- **Suite entry point.** -/
 def run : IO Nat := do
@@ -239,6 +302,7 @@ def run : IO Nat := do
   for name in encrypted do
     f := f + (← runEncrypted name (← IO.FS.readBinFile (encDir / name)))
   f := f + (← runRefusals)
+  f := f + (← runEncryptUnit)
   match ← IO.getEnv "SAFEPDF_WRITE_CORPUS" with
   | none => pure ()
   | some cdir =>
@@ -250,9 +314,9 @@ def run : IO Nat := do
       let enc := match Open.openFile Limits.default bytes with
         | .ok d => d.trailer.encrypted
         | .error _ => false
-      let r ← if enc then runEncrypted name bytes else runFile name bytes false
+      let r ← if enc then runEncrypted name bytes false else runFile name bytes false
       let t1 ← IO.monoMsNow
-      IO.println s!"  corpus {name}: {if r == 0 then (if enc then "refused (encrypted)" else "ok") else "FAIL"} ({t1 - t0} ms)"
+      IO.println s!"  corpus {name}: {if r == 0 then (if enc then "ok (encrypted)" else "ok") else "FAIL"} ({t1 - t0} ms)"
       f := f + r
   return f
 
