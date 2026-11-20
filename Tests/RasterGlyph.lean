@@ -22,7 +22,13 @@ fixtures of Phase 6 (`Tests/fonts/`):
 * task 7.3j (Type 3 fonts, a hand-built font, `type3Cases`): a coloured `d0` path glyph keeps
   its own colour; an uncoloured `d1` inline stencil image mask and a `d1` path take the fill
   colour (the charproc's colour operators ignored); positions with `TJ`; a rotated CTM; modes
-  3 and 7; a clip; fill alpha; a glyph that shows its own font terminates (depth cap).
+  3 and 7; a clip; fill alpha; a glyph that shows its own font terminates (depth cap);
+* task 7.3k (bitmap glyphs scaled as MuPDF): `l2factor`, `mul255` (`/Decode [1 0]`), the
+  fixed-point `make_weights` (`weightsAtI`) against the exact ℚ reference (`weightsAt`) over a
+  parameter grid (at most 0.1% of the pixels' weight lists may differ; inner pixels sum to 256),
+  the glyph cache bound, and a pdfTeX-style bitmap page (`bitmapPage`: a 16 × 16 `/D [1 0]`
+  stencil shown at 3–7.3 pt) whose pixels must be within 4 levels of `mutool draw -r 72`
+  (`bitmapRef`; the coverage is MuPDF's, compositing rounds differently by up to 2).
 
 Set `SAFEPDF_PPM_DIR=<dir>` to also write the rendered pages as PPM files there (and the
 Type 3 pages as `glyph-t3-*.pdf`, for a pixel comparison with `mutool draw`).
@@ -222,6 +228,103 @@ def type3Cases : List (String × ByteArray × (Clip.Image → Bool)) :=
           strmObj "" "100 0 d0 1 0 0 rg 0 0 100 50 re f BT /F3 50 Tf 0 50 Td (A) Tj ET" ]),
       fun img => 0 < redCount img) ]
 
+/-! ### Task 7.3k: bitmap glyphs scaled as MuPDF -/
+
+/-- A pdfTeX-style bitmap Type 3 font as object 5: `D` (charproc 6) a `d1` glyph drawing a
+16 × 16 inline stencil (`/D [1 0]`, as pdfTeX's PK fonts) of concentric squares over the em
+(`/FontMatrix` 0.01). -/
+def bitmapFont : List String :=
+  [ "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 100 100] /FontMatrix [0.01 0 0 0.01 0 0] " ++
+      "/CharProcs << /sq 6 0 R >> /Encoding << /Type /Encoding /Differences [68 /sq] >> " ++
+      "/FirstChar 68 /LastChar 68 /Widths [130] /Resources << >> >>",
+    strmObj "" ("130 0 0 0 100 100 d1 q 100 0 0 100 0 0 cm " ++
+      "BI /W 16 /H 16 /IM true /BPC 1 /D [1 0] /F /AHx ID " ++
+      "FFFF8001BFFDA005AFF5A815ABD5AA55AA55ABD5A815AFF5A005BFFD8001FFFF> EI Q") ]
+
+/-- The bitmap page: `D` at 5, 7.3 and 3 pt at fractional positions (downscaled 16 → 3…7.3 px,
+power-of-two subsampling 1 or 2 in MuPDF). -/
+def bitmapPage : ByteArray :=
+  resPage "<< /Font << /F4 5 0 R >> >>"
+    ("BT /F4 5 Tf 10.3 10.6 Td (DDD) Tj ET BT /F4 7.3 Tf 30.17 10 Td (DD) Tj ET " ++
+      "BT /F4 3 Tf 50.6 10.2 Td (DD) Tj ET") bitmapFont
+
+/-- The checked region of `bitmapPage` (device pixels `x ∈ [10, 60)`, `y ∈ [180, 192)`). -/
+def bitmapRegion : Nat × Nat × Nat × Nat := (10, 180, 60, 192)
+
+/-- `mutool draw -r 72` (MuPDF 1.25.1) red bytes of `bitmapRegion`, row-major, as hex. -/
+def bitmapRef : String :=
+  "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" ++
+  "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" ++
+  "ffffffffffffffffffffffffffffffffffffffffcababababababad8ffefb9bababababab9f9ffffffffffffffffffffffff" ++
+  "ffffffffffffffffffffffffffffffffffffffff7b897d7d7d7c8f90ffc3877b7d7d7d7b79e4ffffffffffffffffffffffff" ++
+  "bfc2c3c3b7eaeab7c3c3c2bfffbfc2c3c3b7eaff887d8380808e7c96ffc37b8e7c8079867de4ffffffffffffffffffffffff" ++
+  "95657e7465dfdf65747e6595ff95657e7465dfff8884837c88828496ffc37c7c91798d7c7de4ffffffffffffffffffffffff" ++
+  "a0745a6380e1e180635a73a0ffa0745a6380e1ff8884828076868496ffc37c7d79987b7c7de4ffffecdfdfececdfdfecffff" ++
+  "a0745a6380e1e180635a73a0ffa0745a6380e1ff8884738289758496ffc37c7a897b7d7c7de4ffffbb6f6fbbbb6f6fbbffff" ++
+  "95657e7465dfdf65747e6595ff95657e7465dfff8872857d7d8a7796ffc37d807d7d7d7580e4ffffc16969c1c16969c1ffff" ++
+  "bfc2c3c3b7eaeab7c3c3c2bfffbfc2c3c3b7eaff77867e7e7e7e8692ffc7767e7e7e7e7e6ae6ffffc79b9bc7c79b9bc7ffff" ++
+  "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" ++
+  "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+/-- The red bytes of a region as hex. -/
+def regionHex (img : Clip.Image) (r : Nat × Nat × Nat × Nat) : String := Id.run do
+  let (x0, y0, x1, y1) := r
+  let mut s := ""
+  for y in [y0:y1] do
+    for x in [x0:x1] do
+      let v := (pxAt img x y).1
+      s := s ++ String.ofList [Nat.digitChar (v / 16), Nat.digitChar (v % 16)]
+  return s
+
+/-- Largest byte difference between two equally long hex strings (`1000` on a length
+mismatch). -/
+def hexMaxDiff (a b : String) : Nat :=
+  let hv := fun (c : Char) => if c.isDigit then c.toNat - 48 else c.toNat - 87
+  let ca := a.toList
+  let cb := b.toList
+  if ca.length != cb.length then 1000 else
+  let rec go : List Char → List Char → Nat → Nat
+    | x1 :: x2 :: xs, y1 :: y2 :: ys, m =>
+      let u := 16 * hv x1 + hv x2
+      let v := 16 * hv y1 + hv y2
+      go xs ys (max m (if u ≤ v then v - u else u - v))
+    | _, _, m => m
+  go ca cb 0
+
+/-- Unit checks of the scaler pieces; the failure messages. -/
+def scalerChecks : List String := Id.run do
+  let mut errs : List String := []
+  -- pdfTeX at 10.9 pt, 72 dpi: a 44 × 64 bitmap shown 5 × 7 px is subsampled by 4
+  if Type3.l2factor 44 64 5 7 != 2 then errs := "l2factor 44 64 5 7" :: errs
+  if Type3.l2factor 16 16 0 3 != 0 then errs := "l2factor with w = 0" :: errs
+  -- /Decode [1 0] (fz_decode_tile): v ↦ 255 + mul255(v, −255) = 255 − v
+  for v in List.range 256 do
+    if Type3.mul255 v (-255) != -(v : Int) then errs := s!"mul255 {v}" :: errs
+  -- the fixed-point weights against the exact ℚ reference over a parameter grid
+  let K : Nat := 1 <<< Type3.wBits
+  let mut tot := 0
+  let mut bad := 0
+  for sw in [3, 8, 11, 16, 23, 40] do
+    for xs in [0, 1, 104, 5243, 333333, 524288, 1000000, K - 1] do
+      for nn in [K + 77, 3 * K + 12345, 5 * K + 4321 * sw, 7 * K / 2, (sw - 1) * K + 999, sw * K,
+          sw * K + 5000] do
+        let dwi := (xs + nn + K - 1) / K
+        for j in List.range dwi do
+          tot := tot + 1
+          let a := Type3.weightsAtI sw xs nn dwi j
+          let b := Type3.weightsAt sw ((xs : Rat) / (K : Rat)) ((nn : Rat) / (K : Rat)) dwi j
+          if a != b then bad := bad + 1
+          -- every inner pixel's weights sum to 256 (check_weights)
+          if 0 < j ∧ j + 1 < dwi ∧ (a.foldl (fun s p => s + p.2) 0) != 256 then
+            errs := s!"weights sum sw {sw} X {xs} N {nn} j {j}" :: errs
+  if bad * 1000 > tot then errs := s!"fixed-point weights differ in {bad} of {tot}" :: errs
+  -- the glyph cache stays bounded
+  let gc := (List.range (Type3.maxGlyphCache + 10)).foldl
+    (fun (gc : Type3.GlyphCache) k => gc.insert (k % 256) (k : Rat) 0 #[]) Type3.GlyphCache.empty
+  if gc.count != Type3.maxGlyphCache then errs := s!"cache count {gc.count}" :: errs
+  if (gc.find? 3 3 0).isNone then errs := "cache lookup" :: errs
+  return errs
+
 /-- Run the checks; the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -298,6 +401,21 @@ def run : IO Nat := do
         failures := failures + 1
         report s!"{name}: red {redCount img}, green {greenCount img}, ink {ink img}"
     | none => failures := failures + 1; report s!"{name}: render failed"
+  -- 6. bitmap glyphs scaled as MuPDF (task 7.3k): MuPDF's coverage; the compositing may differ
+  -- by a few levels (`Clip.composite` vs `fz_paint_glyph` rounding)
+  for e in scalerChecks do
+    failures := failures + 1; report s!"scaler: {e}"
+  pdfs := pdfs.push ("t3-bitmap", bitmapPage)
+  match render bitmapPage with
+  | some img =>
+    dumps := dumps.push ("t3-bitmap", img)
+    let got := regionHex img bitmapRegion
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      IO.FS.writeFile (System.FilePath.mk dir / "glyph-t3-bitmap.hex") got
+    let d := hexMaxDiff got bitmapRef
+    if d > 4 then
+      failures := failures + 1; report s!"t3-bitmap: differs from mutool by up to {d}"
+  | none => failures := failures + 1; report "t3-bitmap: render failed"
   if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
     IO.FS.createDirAll dir
     for (name, img) in dumps do
