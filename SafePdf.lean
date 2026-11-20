@@ -49,6 +49,7 @@ import SafePdf.Core.Content.DisplayList
 import SafePdf.Core.Content.Ops
 import SafePdf.Core.Content.Interp
 import SafePdf.Spec.Content
+import SafePdf.Core.Font.GlyphList
 import SafePdf.Core.Font.Encoding
 import SafePdf.Core.Font.Std14
 import SafePdf.Core.Font.Widths
@@ -59,4 +60,6 @@ import SafePdf.Core.Font.TrueType
 import SafePdf.Core.Font.CMap
 import SafePdf.Core.Raster.Geom
 import SafePdf.Core.Raster.Fill
+import SafePdf.Core.Raster.Stroke
+import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Text
