@@ -1060,3 +1060,14 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Text.shownItems_eq_extract
 #print axioms SafePdf.Spec.Content.mark_step
 #print axioms SafePdf.Core.Content.Interp.markOp_marks_le
+-- Phase 9, task 9.5a: incremental-update writer (C7)
+#print axioms SafePdf.Spec.Write.c7
+#print axioms SafePdf.Spec.Write.writeAnnots_prefix
+#print axioms SafePdf.Spec.Write.writeAnnots_chain
+#print axioms SafePdf.Spec.Write.writeAnnots_untouched
+#print axioms SafePdf.Spec.Write.writeAnnots_open
+#print axioms SafePdf.Spec.Write.writeAnnots_annots
+#print axioms SafePdf.Spec.Write.plan_marks
+#print axioms SafePdf.Spec.Write.plan_page
+#print axioms SafePdf.Spec.Write.newDict_lookup_ne
+#print axioms SafePdf.Spec.Write.serialize_roundtrip
