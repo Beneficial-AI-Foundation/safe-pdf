@@ -58,9 +58,15 @@ the matched pairs, everything else is unmatched on its side (different extractio
 reordered text, missing page).  The alignment is order-preserving: when the
 two sides order blocks differently, only one ordering's characters match (e.g. a
 20 000-char page with its halves swapped matches ~40%); such pages show up as
-unmatched counts, never as distance errors.  Cost: ~4 s for a 20 000-char page.  A matched pair is MEASURED when neither side is a
-tail and the character is not U+FFFD (two unmapped glyphs "agree" by accident);
-its distance is the Euclidean distance of the two origins in pt (user space).
+unmatched counts, never as distance errors.  Anchoring: a matching block shorter
+than ANCHOR_MIN (3) characters is kept only when it lies on the alignment diagonal
+(j - i) of the nearest long block before or after it (page start = diagonal 0, page
+end = len(ref) - len(ours)); otherwise it is a coincidental match between unrelated
+stretches of text -- e.g. a lone '.' picked out of a table whose digits one side
+lost -- and its characters count as unmatched (stat `unanchored`) instead of as a
+far-apart "position error" (anchored_blocks; added in task 6.8c).  Cost: ~4 s for
+a 20 000-char page.  A matched pair is MEASURED when neither side is a tail and the
+character is not U+FFFD (two unmapped glyphs "agree" by accident); its distance is the Euclidean distance of the two origins in pt (user space).
 
 Tolerance.  A measured pair is WITHIN when
     dist <= max(TOL_ABS, TOL_REL * size),   TOL_ABS = 1 pt, TOL_REL = 0.1,
@@ -86,18 +92,22 @@ characters covered by the text comparators' similarity instead.  We also count
 
 Stats per file (summed by run.py): pages, page_count_mismatch, ours_failed,
 chars_ours, chars_ref, matched, unmatched_ours, unmatched_ref, compared (= the
-measured pairs), within, size_mismatch.  Corpus-wide distance statistics (median,
+measured pairs), within, size_mismatch, unanchored, and known_pages / known_compared /
+known_within for pages run.py names as known reference defects
+(known-reference-defects.json; those pages are excluded from every other count and
+reported separately, see docs/corpus.md).  Corpus-wide distance statistics (median,
 p95, max) and the worst glyphs come from the module lists DISTS / WORST.
 
 Status per file: agree (any result, unless below --min-within), disagree (percent
-within below --min-within when given), known (the core does not open the document),
-error (inspector crash / timeout / non-JSON output), skipped (mutool missing, failing
-without any stext page, or timing out -- e.g. Tests/adversarial/xobject-fanout.pdf,
-where mutool 1.25.1 runs for minutes and grows past 6 GB).
+within below --min-within when given), known (the core does not open the document, or
+the file has known-reference-defect pages and otherwise agrees), error (inspector
+crash / timeout / non-JSON output), skipped (mutool missing, failing without any stext
+page, or timing out -- e.g. Tests/adversarial/xobject-fanout.pdf, where mutool 1.25.1 runs for minutes and grows past 6 GB).
 """
 import argparse
 import array
 import atexit
+import bisect
 import difflib
 import heapq
 import html
@@ -115,12 +125,14 @@ TOL_ABS = 1.0
 TOL_REL = 0.1
 SIZE_REL = 0.1
 SYNTHETIC = 4          # FZ_STEXT_SYNTHETIC
+ANCHOR_MIN = 3         # matching blocks shorter than this must sit on a long block's diagonal
 WORST_KEEP = 50
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Filled by check_file (live mode) for run.py's corpus report.
 DISTS = array.array("d")   # every measured distance (pt)
 WORST = []                 # min-heap of (dist, file, page, char, ours(x,y), ref(x,y), size)
+KNOWN = []                 # per file with known-defect pages: {file, pages, compared, within, max, reasons}
 
 
 class Skip(Exception):
@@ -263,6 +275,32 @@ def tolerance(size):
     return max(TOL_ABS, TOL_REL * size)
 
 
+def anchored_blocks(blocks, n_ours, n_ref):
+    """Split SequenceMatcher matching blocks (i, j, k) into (anchored, unanchored).
+
+    A block of at least ANCHOR_MIN characters is always anchored.  A shorter block is
+    anchored only when it lies on the same alignment diagonal (j - i) as the nearest
+    long block before it or after it; the page start (diagonal 0) and the page end
+    (diagonal n_ref - n_ours) count as long blocks.  So a character kept between two
+    substituted ones ("a?b" vs "aXb") stays matched, while a stray '.', '0' or 'R'
+    that the alignment picked out of two unrelated stretches of text (different
+    extraction, wrong mapping, a reference that drops characters) is not paired."""
+    blocks = [b for b in blocks if b[2] > 0]
+    longs = [(i, j - i) for i, j, k in blocks if k >= ANCHOR_MIN]
+    starts = [x[0] for x in longs]
+    good, stray = [], []
+    for i, j, k in blocks:
+        if k < ANCHOR_MIN:
+            q = bisect.bisect_left(starts, i)
+            before = longs[q - 1][1] if q > 0 else 0
+            after = longs[q][1] if q < len(longs) else n_ref - n_ours
+            if j - i not in (before, after):
+                stray.append((i, j, k))
+                continue
+        good.append((i, j, k))
+    return good, stray
+
+
 def compare_page(ours, ref, ctm):
     """-> dict with counts and the measured pairs [(dist, ch, (x,y), (rx,ry), size, ok)]."""
     sm = difflib.SequenceMatcher(None, [c[0] for c in ours], [c[0] for c in ref],
@@ -270,7 +308,8 @@ def compare_page(ours, ref, ctm):
     matched = 0
     pairs = []
     size_mismatch = 0
-    for i, j, k in sm.get_matching_blocks():
+    blocks, stray = anchored_blocks(sm.get_matching_blocks(), len(ours), len(ref))
+    for i, j, k in blocks:
         matched += k
         for t in range(k):
             o, r = ours[i + t], ref[j + t]
@@ -284,6 +323,7 @@ def compare_page(ours, ref, ctm):
             pairs.append((d, o[0], (o[1], o[2]), (rx, ry), size, d <= tolerance(size)))
     return {"chars_ours": len(ours), "chars_ref": len(ref), "matched": matched,
             "unmatched_ours": len(ours) - matched, "unmatched_ref": len(ref) - matched,
+            "unanchored": sum(b[2] for b in stray),
             "pairs": pairs, "size_mismatch": size_mismatch}
 
 
@@ -301,42 +341,68 @@ def dist_summary(ds):
     return {"median": quantile(s, 0.5), "p95": quantile(s, 0.95), "max": s[-1]}
 
 
-def compare(ours_text, stext_text, ctms=None, name="input", min_within=None, notes=()):
+def _totals(rows):
+    pairs = [x for r in rows for x in r["pairs"]]
+    within = sum(1 for x in pairs if x[5])
+    out = {k: sum(r[k] for r in rows) for k in (
+        "chars_ours", "chars_ref", "matched", "unmatched_ours", "unmatched_ref", "unanchored",
+        "size_mismatch")}
+    out.update({"compared": len(pairs), "within": within,
+                "pct_within": 100.0 if not pairs else 100.0 * within / len(pairs)})
+    out.update(dist_summary([x[0] for x in pairs]))
+    return out
+
+
+def compare(ours_text, stext_text, ctms=None, name="input", min_within=None, notes=(),
+            known=None):
+    """Compare one file.  `known` ({page: reason}) names pages with a documented
+    reference defect (run.py, known-reference-defects.json): their rows are moved to
+    rep["known"] and left out of every total, of pct_within and of the status test;
+    a file that would otherwise agree gets status "known"."""
     ours, n_ours, summary = load_ours(ours_text)
     ref, heights = load_stext(stext_text)
     ctms = dict(ctms or {})
+    known = dict(known or {})
     failed = "error" in summary and "pages" not in summary
     n = max([n_ours] + list(ref))
-    rows = []
+    rows, krows = [], []
     for p in range(1, n + 1):
         ctm = ctms.get(p) or [1.0, 0.0, 0.0, -1.0, 0.0, heights.get(p, 0.0)]
         r = compare_page(ours.get(p, []), ref.get(p, []), ctm)
         r["page"] = p
-        rows.append(r)
-    pairs = [x for r in rows for x in r["pairs"]]
-    within = sum(1 for x in pairs if x[5])
-    rep = {
-        "file": name, "pages_ours": n_ours, "pages_ref": len(ref),
-        "ours_failed": summary.get("error") if failed else None,
-        "chars_ours": sum(r["chars_ours"] for r in rows),
-        "chars_ref": sum(r["chars_ref"] for r in rows),
-        "matched": sum(r["matched"] for r in rows),
-        "unmatched_ours": sum(r["unmatched_ours"] for r in rows),
-        "unmatched_ref": sum(r["unmatched_ref"] for r in rows),
-        "compared": len(pairs), "within": within,
-        "size_mismatch": sum(r["size_mismatch"] for r in rows),
-        "pct_within": 100.0 if not pairs else 100.0 * within / len(pairs),
-        "notes": list(notes),
-        "rows": rows,
-    }
-    rep.update(dist_summary([x[0] for x in pairs]))
+        (krows if p in known else rows).append(r)
+    rep = {"file": name, "pages_ours": n_ours, "pages_ref": len(ref),
+           "ours_failed": summary.get("error") if failed else None,
+           "notes": list(notes), "rows": rows}
+    rep.update(_totals(rows))
+    if krows:
+        k = _totals(krows)
+        k["pages"] = [r["page"] for r in krows]
+        k["reasons"] = sorted({known[p] for p in k["pages"]})
+        k["rows"] = krows
+        rep["known"] = k
     if failed:
         rep["status"] = "known"
-    elif min_within is not None and pairs and rep["pct_within"] < min_within:
+    elif min_within is not None and rep["compared"] and rep["pct_within"] < min_within:
         rep["status"] = "disagree"
+    elif krows:
+        rep["status"] = "known"
     else:
         rep["status"] = "agree"
     return rep
+
+
+def page_ranges(pages):
+    """[51, 60, 61, 62] -> 'p51,p60-62'."""
+    out, ps = [], sorted(pages)
+    i = 0
+    while i < len(ps):
+        j = i
+        while j + 1 < len(ps) and ps[j + 1] == ps[j] + 1:
+            j += 1
+        out.append("p%d" % ps[i] + ("" if i == j else "-%d" % ps[j]))
+        i = j + 1
+    return ",".join(out)
 
 
 def _f(x):
@@ -351,6 +417,13 @@ def format_report(rep):
              rep["pages_ours"], rep["pages_ref"]))
     if rep["size_mismatch"]:
         s += "; size-mismatch %d" % rep["size_mismatch"]
+    if rep.get("unanchored"):
+        s += "; unanchored %d" % rep["unanchored"]
+    if rep.get("known"):
+        k = rep["known"]
+        s += ("; KNOWN reference defect on %s (excluded above: measured %d, within %.2f%%, "
+              "max %s pt): %s" % (page_ranges(k["pages"]), k["compared"], k["pct_within"],
+                                  _f(k["max"]), "; ".join(k["reasons"])))
     if rep["notes"]:
         s += " [" + ", ".join(rep["notes"]) + "]"
     if rep["ours_failed"]:
@@ -359,6 +432,8 @@ def format_report(rep):
 
 
 def stats_of(rep):
+    """Per-file ints summed by run.py; `pages` .. `size_mismatch` exclude known pages."""
+    k = rep.get("known")
     return {
         "pages": len(rep["rows"]),
         "page_count_mismatch": int(rep["pages_ours"] != rep["pages_ref"]),
@@ -367,6 +442,10 @@ def stats_of(rep):
         "matched": rep["matched"], "unmatched_ours": rep["unmatched_ours"],
         "unmatched_ref": rep["unmatched_ref"], "compared": rep["compared"],
         "within": rep["within"], "size_mismatch": rep["size_mismatch"],
+        "unanchored": rep["unanchored"],
+        "known_pages": len(k["pages"]) if k else 0,
+        "known_compared": k["compared"] if k else 0,
+        "known_within": k["within"] if k else 0,
     }
 
 
@@ -381,11 +460,30 @@ def worst_line(d, f, page, ch, o, r, size):
         d, f, page, ch, o[0], o[1], r[0], r[1], size, tolerance(size))
 
 
+def known_lines(stats, head):
+    """Separate report of the known-reference-defect pages (not in the corpus numbers)."""
+    if not KNOWN:
+        return [], {"pages": 0, "measured": 0, "within": 0, "files": []}
+    kc, kw = stats.get("known_compared", 0), stats.get("known_within", 0)
+    lines = ["%s known reference defects (EXCLUDED from the corpus numbers above): %d page(s) "
+             "in %d file(s), %d measured pair(s), %s within" % (
+                 head, stats.get("known_pages", 0), len(KNOWN), kc,
+                 "-" if not kc else "%.4f%%" % (100.0 * kw / kc))]
+    for k in KNOWN:
+        lines.append("  %s %s: measured %d, %d outside tolerance, max %s pt -- %s" % (
+            k["file"], page_ranges(k["pages"]), k["compared"], k["compared"] - k["within"],
+            _f(k["max"]), "; ".join(k["reasons"])))
+    return lines, {"pages": stats.get("known_pages", 0), "measured": kc, "within": kw,
+                   "files": list(KNOWN)}
+
+
 def summary_lines(stats, min_within=None, tag="positions"):
     """Corpus report for run.py: (lines, report dict, failed)."""
     head = "%-8s" % tag
+    klines, kreport = known_lines(stats, head)
     if not stats.get("compared", 0):
-        return ["%s no glyph pair measured" % head], {"pct_within": None}, False
+        return (["%s no glyph pair measured" % head] + klines,
+                {"pct_within": None, "known": kreport}, False)
     pct = 100.0 * stats["within"] / stats["compared"]
     ds = dist_summary(DISTS)
     lines = ["%s corpus: %d measured pair(s), %.4f%% within max(%g pt, %g x size); origin "
@@ -402,6 +500,9 @@ def summary_lines(stats, min_within=None, tag="positions"):
     rep.update(ds)
     rep["worst"] = [{"dist": t[0], "file": t[1], "page": t[2], "char": t[3],
                      "ours": list(t[4]), "ref": list(t[5]), "size": t[6]} for t in worst]
+    rep["unanchored"] = stats.get("unanchored", 0)
+    rep["known"] = kreport
+    lines += klines
     fail = min_within is not None and pct < min_within
     if fail:
         lines.append("FAIL --min-within %.4f: corpus %.4f%% within tolerance" % (min_within, pct))
@@ -496,8 +597,9 @@ def ours_box_ctms(inspect, path):
     return out
 
 
-def check_file(inspect, path, min_within=None):
-    """(status, detail, stats) for run.py; records DISTS / WORST."""
+def check_file(inspect, path, min_within=None, known=None):
+    """(status, detail, stats) for run.py; records DISTS / WORST (and KNOWN for the
+    pages of `known`, {page: reason}, which stay out of DISTS / WORST)."""
     if shutil.which("mutool") is None:
         raise Skip("tool missing: mutool")
     try:
@@ -510,7 +612,7 @@ def check_file(inspect, path, min_within=None):
             for p, m in fb.items():
                 ctms.setdefault(p, m)
             notes = notes + ["ctm-ours"]
-        rep = compare(ours, stext, ctms, path, min_within, notes)
+        rep = compare(ours, stext, ctms, path, min_within, notes, known)
     except Bad as e:
         return "error", str(e), {}
     except subprocess.TimeoutExpired as e:
@@ -524,6 +626,12 @@ def check_file(inspect, path, min_within=None):
             elif item[0] > WORST[0][0]:
                 heapq.heapreplace(WORST, item)
         r["pairs"] = []   # free memory; DISTS / WORST keep what run.py reports
+    k = rep.get("known")
+    if k:
+        KNOWN.append({"file": path, "pages": k["pages"], "compared": k["compared"],
+                      "within": k["within"], "max": k["max"], "reasons": k["reasons"]})
+        for r in k["rows"]:
+            r["pairs"] = []
     return rep["status"], format_report(rep), stats_of(rep)
 
 
@@ -589,6 +697,41 @@ def selftest():
          and rep2["unmatched_ours"] == 1 and rep2["unmatched_ref"] == 0
          and abs(rep2["max"] - 3.0) < 0.01 and worst[0][2] == "W"
          and 0.85 < worst[1][0] < 0.95, "diff fixture")
+    # Anchoring: short matching blocks off every long block's diagonal are not paired.
+    for a, b, want_pairs in [
+            ("abcXdefYghi", "abcZdefWghi", 11 - 2),      # substitutions keep the diagonal
+            ("hello.world", "hello?world", 10),           # 1-char swap: all still paired
+            ("Table 2.", "Table .", 7),                   # deletion: '.' sits on the end diagonal
+            ("aaaa.bbbbb", "ccccc.dddd", 0),              # lone '.', unrelated text: dropped
+            ("x9.5yzzzz", "zzzz.q", 4)]:                  # stray '.' after the 'zzzz' block
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        good, stray = anchored_blocks(sm.get_matching_blocks(), len(a), len(b))
+        got = sum(k for _, _, k in good)
+        want(got == want_pairs, "anchored %r %r: %d paired, want %d (stray %r)" % (
+            a, b, got, want_pairs, stray))
+    # A far-apart stray '.' (the 9805201 p64 shape) is unanchored, so never measured.
+    o = [(c, 10.0 * n, 700.0, 10.0, False) for n, c in enumerate("aaaa.bbbbb")]
+    r = [(c, 10.0 * n, 592.0, 10.0, False) for n, c in enumerate("ccccc.dddd")]
+    pg = compare_page(o, r, [1, 0, 0, -1, 0, 792])
+    want(pg["pairs"] == [] and pg["unanchored"] == 1 and pg["matched"] == 0,
+         "stray '.' unanchored: %r" % {k: v for k, v in pg.items() if k != "pairs"})
+    # Known reference defects: the listed pages leave every total and the status test.
+    want(page_ranges([72, 51, 60, 61, 62]) == "p51,p60-62,p72", "page_ranges")
+    repk = compare(_fixture("positions_rot90.ours.jsonl"),
+                   _fixture("positions_diff.stext.xml"), ctms, "diff-known", min_within=100.0,
+                   known={1: "reference drops digits"})
+    print("diff-known: %s: %s" % (repk["status"], format_report(repk)))
+    st = stats_of(repk)
+    want(repk["status"] == "known" and repk["compared"] == 0 and st["compared"] == 0
+         and st["known_pages"] == 1 and st["known_compared"] == rep2["compared"]
+         and st["known_within"] == rep2["within"] and repk["known"]["max"] == rep2["max"]
+         and "KNOWN reference defect on p1" in format_report(repk), "known page excluded")
+    # A known entry for a page that does not exist changes nothing.
+    rep3 = compare(_fixture("positions_rot90.ours.jsonl"),
+                   _fixture("positions_diff.stext.xml"), ctms, "diff", min_within=100.0,
+                   known={7: "x"})
+    want(rep3["status"] == "disagree" and "known" not in rep3
+         and rep3["compared"] == rep2["compared"], "known entry for a missing page is inert")
     print("selftest: %s" % ("ok" if not bad else "%d failure(s)" % len(bad)))
     return 1 if bad else 0
 
@@ -624,6 +767,7 @@ def main(argv=None):
     if a.json:
         out = dict(rep)
         out["rows"] = [{k: v for k, v in r.items() if k != "pairs"} for r in rep["rows"]]
+        out.pop("known", None)
         out["worst"] = [{"dist": t[0], "page": t[1], "char": t[2], "ours": list(t[3]),
                          "ref": list(t[4]), "size": t[5]} for t in worst_of(rep, 50)]
         with open(a.json, "w") as fh:
