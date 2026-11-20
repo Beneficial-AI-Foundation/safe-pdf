@@ -1075,3 +1075,14 @@ import SafePdf.Shell.App.Links
 -- Phase 9, task 9.4: marks model
 #print axioms SafePdf.Shell.App.Marks.Store.add_id
 #print axioms SafePdf.Shell.App.Marks.Store.add_next
+-- Phase 9, task 9.5b: annotation objects for user marks
+#print axioms SafePdf.Spec.Write.writeAnnots_aux
+#print axioms SafePdf.Core.Write.Annots.utf16_utf16be
+#print axioms SafePdf.Core.Write.Annots.textOf_textBytes_utf16
+#print axioms SafePdf.Core.Write.Annots.annotDicts_isAnnot
+#print axioms SafePdf.Core.Write.Annots.IsAnnot.lookup
+#print axioms SafePdf.Core.Write.Annots.build_ok
+#print axioms SafePdf.Core.Write.Annots.quadsOf_quadPoints
+#print axioms SafePdf.Core.Write.Annots.quadPoints_length
+#print axioms SafePdf.Core.Write.Annots.pageDicts_length
+#print axioms SafePdf.Core.Write.Annots.decRound_canonical
