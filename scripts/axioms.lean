@@ -11,6 +11,7 @@ Keep one line per top-level theorem (spec equivalences, totality and bound theor
 This file is outside the library and is never imported.
 -/
 import SafePdf
+import SafePdf.Shell.App.TclLemmas
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -972,3 +973,18 @@ import SafePdf
 -- Phase 7, task 7.2h: fixed-point glyph transforms
 #print axioms SafePdf.Core.Raster.Glyph.outlineToDF_size
 #print axioms SafePdf.Core.Raster.Glyph.runPathSpec_size_le
+
+-- Phase 8, task 8.2a: Tcl quoting (SafePdf/Shell/App/Tcl*.lean, copied from bib-lean)
+#print axioms SafePdf.Shell.App.Tcl.parseWordStr_quote
+#print axioms SafePdf.Shell.App.Tcl.parseWord_quoteList
+#print axioms SafePdf.Shell.App.Tcl.parseWordStr_quote_append
+#print axioms SafePdf.Shell.App.Tcl.parseCmd_render
+#print axioms SafePdf.Shell.App.Tcl.parseScript_render
+#print axioms SafePdf.Shell.App.Tcl.nul_not_mem_quoteList
+
+-- Phase 7, task 7.2j: bucketed filler, forward differences
+#print axioms SafePdf.Core.Raster.Fill.ySort_size
+#print axioms SafePdf.Core.Raster.Fill.bezNum_d3
+#print axioms SafePdf.Core.Raster.Fill.bezNum_fd0
+#print axioms SafePdf.Core.Raster.Fill.cubicLoopFD_eq
+#print axioms SafePdf.Core.Raster.Fill.cubicFD_eq
