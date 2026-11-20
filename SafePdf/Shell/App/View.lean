@@ -3,7 +3,7 @@ import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Limits
 
 /-!
-# Viewer geometry and page cache (task 8.2b; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
+# Viewer geometry, wheel and page cache (tasks 8.2b, 9.2; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
 The pure, Tk-free part of the viewer's viewing logic (unverified shell code, but total and
 checked by `#guard`s): zoom modes and steps, the zoom cap, the C2 re-anchoring that keeps a
@@ -20,6 +20,11 @@ LRU cache of rendered pages bounded by total bytes.
 * **Anchoring (C2).** `reanchor z r z' r' bx q = toScreen z' r' bx (toPage z r bx q)`: the
   screen position, in the new view, of the page point that was at `q` in the old one. By
   `Geom.toPage_toScreen`/`toScreen_toPage` this is the identity when nothing changed.
+* **Wheel across pages** (task 9.2). `wheelStep` turns one wheel/trackpad event into a scroll
+  within the page or a page turn: deltas in notches, lines or pixels (`wheelPixels`), sub-pixel
+  remainders accumulated, the page turned only after the view is at the edge and the user
+  pushes on past it by `wheelThreshold`; trackpad momentum after a turn is swallowed until a
+  pause (`wheelGapMs`).
 * **Cache.** `Cache` keyed by (document generation, page, zoom, rotation); `Cache.insert`
   evicts least-recently-used entries until the total image bytes are at most the budget
   (`cacheBytes`, 256 MiB) and there are at most `cacheEntries` entries.
@@ -232,6 +237,158 @@ def parseDecimal (s : String) : Option Rat :=
 #guard parseDecimal "abc" = none
 #guard parseDecimal "" = none
 #guard parseDecimal "." = none
+
+/-! ## Wheel scrolling across pages (task 9.2) -/
+
+/-- Kind of a wheel event's delta. -/
+inductive WheelKind where
+  /-- `<MouseWheel>` `%D` in 1/120 notches (Tk ≥ 8.7 everywhere, Windows; X11 Button-4/5
+  are sent as ±120). High-resolution wheels and trackpads give smaller deltas. -/
+  | notch
+  /-- `<MouseWheel>` `%D` in whole lines (Tk 8.6 on macOS: ±1 per notch, small values from a
+  trackpad). -/
+  | line
+  /-- Pixels (`<TouchpadScroll>` through `tk::PreciseScrollDeltas`, Tk ≥ 9 on macOS). -/
+  | pixel
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Wheel state between events: unapplied sub-pixel remainder, how far the user has pushed
+past the page edge, when the last event came, and whether trackpad momentum after a page turn
+is being swallowed. -/
+structure Wheel where
+  /-- Pixels not yet scrolled (|acc| < 1; positive = forward, down/right). -/
+  acc : Rat := 0
+  /-- Pixels pushed past the edge in the current direction (positive: past the end). -/
+  push : Rat := 0
+  /-- Time of the last event (ms, monotonic). -/
+  last : Nat := 0
+  /-- A trackpad event turned the page; further trackpad events are ignored until a pause. -/
+  latched : Bool := false
+  deriving DecidableEq, Repr, Inhabited
+
+/-- What a wheel event does. -/
+inductive WheelAct where
+  /-- Nothing (sub-pixel movement, a push not yet past the threshold, swallowed momentum). -/
+  | none
+  /-- Scroll so that the view's top (left) edge is at this pixel of the scroll region. -/
+  | scrollTo (pos : Nat)
+  /-- Turn to the top of the next page. -/
+  | next
+  /-- Turn to the bottom of the previous page. -/
+  | prev
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A pause longer than this (ms) between wheel events forgets the push and the latch. -/
+def wheelGapMs : Nat := 400
+
+/-- Pixels a wheel delta `d` of kind `k` moves, forward positive (Tk's `%D` is positive for
+"up"), where one notch moves a tenth of the view (`view` pixels), as Tk's `scroll 1 units`
+does with the default scroll increment. -/
+def wheelPixels (k : WheelKind) (d : Int) (view : Nat) : Rat :=
+  match k with
+  | .notch => -(d : Rat) * (view : Rat) / 1200
+  | .line => -(d : Rat) * (view : Rat) / 10
+  | .pixel => -(d : Rat)
+
+/-- How far (pixels) the user must keep pushing at a page edge before the page turns: one
+notch for wheels (a tenth of the view), a quarter of the view for trackpads, whose small
+deltas and momentum would otherwise turn pages by accident. -/
+def wheelThreshold (k : WheelKind) (view : Nat) : Rat :=
+  match k with
+  | .pixel => (view : Rat) / 4
+  | _ => (view : Rat) / 10
+
+/-- Integer part towards zero. -/
+def truncRat (r : Rat) : Int := if r < 0 then r.ceil else r.floor
+
+/-- One wheel event of `px` pixels (forward positive) at time `now` (ms) on an axis whose
+scroll region is `region` pixels, the view `view` pixels, its top (left) edge at `top`.
+Fractional pixels accumulate (`acc`); a direction change drops the remainder and the push.
+Within the page the view scrolls, stopping exactly at the edge. Only once it is at the edge
+do further events add their exact deltas to a push (a pause or a direction change resets it);
+when the push reaches `threshold` and `cross` holds (vertical axis), the page turns (`next` / `prev`). A `precise` (trackpad) event that turns the
+page latches: trackpad events are swallowed until a pause of `wheelGapMs`, so momentum
+does not turn several pages. -/
+def wheelStep (w : Wheel) (now : Nat) (px : Rat) (precise cross : Bool) (top view region : Nat)
+    (threshold : Rat) : Wheel × WheelAct :=
+  let idle := now - w.last > wheelGapMs
+  let w := if idle then { w with push := 0, latched := false, acc := 0 } else w
+  let w := { w with last := now }
+  if w.latched && precise then (w, .none)
+  else
+    let w := { w with latched := false }
+    -- A direction change drops the remainder and the push.
+    let w := if px * w.acc < 0 || px * w.push < 0 then { w with acc := 0, push := 0 } else w
+    let maxTop := region - view
+    let atEdge := if px > 0 then top ≥ maxTop else top = 0
+    if px == 0 then (w, .none)
+    else if atEdge then
+      -- At the edge: the exact deltas add up to the push (no rounding), and only a push of
+      -- `threshold` turns the page.
+      if !cross then ({ w with acc := 0, push := 0 }, .none)
+      else
+        let push := w.push + px
+        if push ≥ threshold then ({ w with acc := 0, push := 0, latched := precise }, .next)
+        else if -push ≥ threshold then ({ w with acc := 0, push := 0, latched := precise }, .prev)
+        else ({ w with acc := 0, push }, .none)
+    else
+      let acc := w.acc + px
+      let m := truncRat acc
+      let w := { w with acc := acc - m, push := 0 }
+      if m == 0 then (w, .none)
+      else if m > 0 then (w, .scrollTo (min (top + m.toNat) maxTop))
+      else (w, .scrollTo (top - min m.natAbs top))
+
+/-- Runs `wheelStep` over a list of `(time, pixels)` events with fixed geometry, scrolling
+the top as the actions say (for the `#guard`s). Returns the actions. -/
+def wheelRun (evs : List (Nat × Rat)) (precise : Bool) (top view region : Nat)
+    (threshold : Rat) : List WheelAct :=
+  (evs.foldl (fun (acc : Wheel × Nat × List WheelAct) (t, px) =>
+    let (w, top, out) := acc
+    let (w', a) := wheelStep w t px precise true top view region threshold
+    let top' := match a with
+      | .scrollTo p => p
+      | .next => 0
+      | .prev => region - view
+      | .none => top
+    (w', top', out ++ [a])) ({}, top, [])).2.2
+
+-- Wheel notches (view 100 px, region 250 px: max top 150; a notch is 10 px).
+#guard wheelPixels .notch (-120) 100 = 10
+#guard wheelPixels .notch 120 100 = -10
+#guard wheelPixels .line (-1) 100 = 10
+#guard wheelPixels .pixel 7 100 = -7
+-- Scrolling within the page stops exactly at the edge; one more notch turns the page.
+#guard wheelRun [(0, 100), (10, 100)] false 0 100 250 10 = [.scrollTo 100, .scrollTo 150]
+#guard wheelRun [(0, 10), (10, 10)] false 145 100 250 10 = [.scrollTo 150, .next]
+-- At the edge already: the first notch past it turns the page.
+#guard wheelRun [(0, 10)] false 150 100 250 10 = [.next]
+-- Upwards at the top: the previous page (shown at its bottom).
+#guard wheelRun [(0, -10)] false 0 100 250 10 = [.prev]
+-- A page that fits the view (fit page): every notch turns a page.
+#guard wheelRun [(0, 10), (10, 10), (20, -10)] false 0 100 100 10 = [.next, .next, .prev]
+-- Small deltas accumulate: twelve 1/12 notches are one notch, and a tiny overscroll does not
+-- turn the page (eleven of them stay below the threshold).
+#guard (wheelRun ((List.range 11).map fun i => (i, (10 : Rat) / 12)) false 150 100 250 10).all
+  (· == .none)
+#guard (wheelRun ((List.range 12).map fun i => (i, (10 : Rat) / 12)) false 150 100 250 10).getLast?
+  = some .next
+-- Fractional pixels scroll once they add up to a whole pixel.
+#guard wheelRun [(0, 1 / 2), (1, 1 / 2), (2, 1 / 2)] false 0 100 250 10 =
+  [.none, .scrollTo 1, .none]
+-- A pause forgets a partial push.
+#guard wheelRun [(0, 6), (1000, 6)] false 150 100 250 10 = [.none, .none]
+-- A direction change forgets the push.
+#guard wheelRun [(0, 6), (1, -1 / 2), (2, 6)] false 150 100 250 10 = [.none, .none, .none]
+#guard wheelRun [(0, 6), (2, 6)] false 150 100 250 10 = [.none, .next]
+-- Horizontal (no crossing): the edge just stops.
+#guard (wheelStep {} 0 10 false false 150 100 250 10).2 = .none
+-- Trackpad momentum after a page turn is swallowed until a pause; a wheel event is not.
+#guard wheelRun [(0, 30), (16, 30), (32, 30), (600, 30)] true 0 100 100 25 =
+  [.next, .none, .none, .next]
+#guard
+  let (w, a) := wheelStep {} 0 30 true true 0 100 100 25
+  a == .next && (wheelStep w 16 10 false true 0 100 100 10).2 == .next
 
 /-! ## Page cache -/
 

@@ -39,8 +39,10 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   Keys (Tcl proc `::safepdf::step`): `Down`/`Up` and `Right`/`Left` scroll by a tenth of the window,
   `Next`/`space` and `Prior`/`BackSpace`/`Shift+space` by a window. Past the bottom (right) edge
   they move to the top of the next page; past the top they move to the bottom of the previous
-  page (page-at-a-time). The mouse wheel scrolls (Shift: horizontally), Ctrl+wheel zooms
-  about the mouse pointer.
+  page (page-at-a-time). The mouse wheel does the same (task 9.2, `wheel`, logic in
+  `View.wheelStep`: small deltas accumulate, the page turns only after the view reached the
+  edge and the wheel pushes on past it); Shift+wheel scrolls horizontally without turning
+  pages; Ctrl+wheel zooms about the mouse pointer.
 * **Anchoring (C2).** Before a zoom or rotation change the viewer reads the canvas point under
   the mouse (Ctrl+wheel) or at the window centre, maps it to page space with `Geom.toPage`;
   after the new image is shown it maps that page point back with `Geom.toScreen`
@@ -186,6 +188,8 @@ structure State where
   /-- Enabled states last applied to the menubar entries and toolbar buttons
   (`Menu.entryStates` order; empty: not applied yet). -/
   menuStates : List Bool := []
+  /-- Wheel state: sub-pixel remainder and push past the page edge (task 9.2). -/
+  wheel : View.Wheel := {}
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -345,8 +349,16 @@ proc ::safepdf::step {axis dir what} {
   }
   .c ${axis}view scroll $dir $what
 }
-proc ::safepdf::wheel {axis d} {
-  if {$d > 0} { .c ${axis}view scroll -1 units } elseif {$d < 0} { .c ${axis}view scroll 1 units }
+# Wheel (9.2): the delta goes to Lean (`View.wheelStep`), which scrolls, accumulates small
+# deltas and turns the page after a push past the edge. Kinds: notch (%D in 1/120 notches,
+# Tk >= 8.7 everywhere and Windows), line (Tk 8.6 on macOS: %D in lines), pixel (Tk 9
+# <TouchpadScroll>, macOS trackpads).
+set ::safepdf::wheelKind notch
+if {[tk windowingsystem] eq {aqua} && [package vcompare [package provide Tk] 8.7] < 0} {
+  set ::safepdf::wheelKind line
+}
+proc ::safepdf::wheel {axis kind d} {
+  if {$d != 0} { ::safepdf::emit wheel $axis $kind $d }
 }
 proc ::safepdf::wheelZoom {d x y} {
   if {$d > 0} { ::safepdf::emit zoom in $x $y } elseif {$d < 0} { ::safepdf::emit zoom out $x $y }
@@ -376,13 +388,22 @@ bind . <Key-f> {::safepdf::emit zoom fitpage}
 bind . <Key-w> {::safepdf::emit zoom fitwidth}
 bind . <Key-r> {::safepdf::emit rotate cw}
 bind . <Key-R> {::safepdf::emit rotate ccw}
-bind .c <MouseWheel> {::safepdf::wheel y %D; break}
-bind .c <Shift-MouseWheel> {::safepdf::wheel x %D; break}
+bind .c <MouseWheel> {::safepdf::wheel y $::safepdf::wheelKind %D; break}
+bind .c <Shift-MouseWheel> {::safepdf::wheel x $::safepdf::wheelKind %D; break}
 bind .c <Control-MouseWheel> {::safepdf::wheelZoom %D %x %y; break}
-bind .c <Button-4> {::safepdf::wheel y 1; break}
-bind .c <Button-5> {::safepdf::wheel y -1; break}
-bind .c <Shift-Button-4> {::safepdf::wheel x 1; break}
-bind .c <Shift-Button-5> {::safepdf::wheel x -1; break}
+bind .c <Button-4> {::safepdf::wheel y notch 120; break}
+bind .c <Button-5> {::safepdf::wheel y notch -120; break}
+bind .c <Shift-Button-4> {::safepdf::wheel x notch 120; break}
+bind .c <Shift-Button-5> {::safepdf::wheel x notch -120; break}
+# Tk 9 trackpads (macOS): pixel deltas; Shift is not needed, the gesture has both axes.
+catch {
+  bind .c <TouchpadScroll> {
+    lassign [tk::PreciseScrollDeltas %D] ::safepdf::tdx ::safepdf::tdy
+    ::safepdf::wheel x pixel $::safepdf::tdx
+    ::safepdf::wheel y pixel $::safepdf::tdy
+    break
+  }
+}
 bind .c <Control-Button-4> {::safepdf::wheelZoom 1 %x %y; break}
 bind .c <Control-Button-5> {::safepdf::wheelZoom -1 %x %y; break}
 bind . <Control-o> {::safepdf::emit open}
@@ -764,7 +785,7 @@ def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit :=
   let p := min p (s.pageCount - 1)
   if p != s.page then
     st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none,
-                        hover := none })
+                        hover := none, wheel := {} })
     discard <| run [".c", "configure", "-cursor", ""]
     refresh st
 
@@ -810,6 +831,49 @@ def zoom (st : IO.Ref State) (what : String) (pos : Option (Nat × Nat)) : IO Un
   | "fitpage" => setMode st .fitPage pos
   | "fitwidth" => setMode st .fitWidth pos
   | _ => setStatus s!"internal: unknown zoom {what}"
+
+/-- The two numbers of an `xview`/`yview` result. -/
+def viewFracs (s : String) : Option (Rat × Rat) :=
+  match (s.splitOn " ").filter (!·.isEmpty) with
+  | [a, b] => do return (← View.parseDecimal a, ← View.parseDecimal b)
+  | _ => none
+
+/-- Handles `wheel AXIS KIND D` (task 9.2): a wheel or trackpad delta `D` of kind `KIND`
+(`notch`, `line`, `pixel`; `View.WheelKind`) on axis `x` or `y`. `View.wheelStep` decides:
+scroll within the page (small deltas accumulate), or, on the vertical axis after reaching the
+edge and pushing on past it by `View.wheelThreshold`, turn to the top of the next page or the
+bottom of the previous one, as the keys do. -/
+def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || s.shown.isNone then return
+  let some d := dS.toInt? | return
+  let kind : View.WheelKind ← match kindS with
+    | "notch" => pure .notch
+    | "line" => pure .line
+    | "pixel" => pure .pixel
+    | _ => return
+  let isY := axis == "y"
+  let some (a, b) := viewFracs (← run [".c", if isY then "yview" else "xview"]) | return
+  let region := if isY then s.regionH else s.regionW
+  let r : Rat := region
+  let top := (a * r + 1 / 2).floor.toNat
+  let view := ((b - a) * r + 1 / 2).floor.toNat
+  let now ← IO.monoMsNow
+  let (w, act) := View.wheelStep s.wheel now (View.wheelPixels kind d view) (kind == .pixel) isY
+    top view region (View.wheelThreshold kind view)
+  match act with
+  | .none => st.modify ({ · with wheel := w })
+  | .scrollTo p =>
+    st.modify ({ · with wheel := w })
+    -- Tk rounds `moveto` to the nearest pixel, so the fraction p / region lands on p.
+    discard <| run [".c", if isY then "yview" else "xview", "moveto",
+      fmtFrac ((p : Rat) / (max region 1 : Nat))]
+  | .next =>
+    if s.page + 1 < s.pageCount then goTo st (s.page + 1) .top
+    st.modify ({ · with wheel := w })
+  | .prev =>
+    if s.page > 0 then goTo st (s.page - 1) .bottom
+    st.modify ({ · with wheel := w })
 
 /-- Rotates the view by a quarter turn (`cw` or `ccw`), keeping the window centre's page
 point at the centre. -/
@@ -917,7 +981,7 @@ def showAt (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo) : IO Unit := do
   if s.pageCount == 0 then return
   let p := min p (s.pageCount - 1)
   st.modify fun s => { s with page := p, pending := some whereTo, pressPt := none, hover := none,
-                              sel := if p == s.page then s.sel else none }
+                              sel := if p == s.page then s.sel else none, wheel := {} }
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
 
@@ -1456,6 +1520,68 @@ def smokeMenu (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["::safepdf::hideFind"]
   invoke .selectAll
   out := out.push s!"status-select-all: {← status}"
+  -- Wheel across pages (task 9.2), with generated Tk 9 `<MouseWheel>` events (%D in 1/120
+  -- notches), X11 Button-4/5 and Shift+wheel.
+  let wheelEv (pat : String) (d : Int) : IO Unit :=
+    sendEvent ".c" pat ["-delta", toString d, "-x", "200", "-y", "200"]
+  let yv : IO String := run [".c", "yview"]
+  let xv : IO String := run [".c", "xview"]
+  let first (v : String) : String := ((viewFracs v).map (fun (a, _) => fmtFrac a)).getD "?"
+  invoke .firstPage
+  invoke .fitPage
+  wheelEv "<MouseWheel>" (-120)
+  out := out.push s!"page-after-wheel-fit-down: {← page}"
+  wheelEv "<MouseWheel>" 120
+  out := out.push s!"page-after-wheel-fit-up: {← page}"
+  invoke .actualSize
+  for _ in [0:3] do invoke .zoomIn
+  out := out.push s!"wheel-zoom: {← pct}"
+  discard <| run [".c", "yview", "moveto", "0"]
+  out := out.push s!"y-start: {← yv}"
+  -- Notches down until the page turns: the view must reach the bottom first, and only the
+  -- one notch after that turns the page.
+  let mut n := 0
+  let mut atEnd := 0
+  let mut yLast := ""
+  while (← st.get).page == 0 && n < 200 do
+    yLast ← yv
+    if let some (_, b) := viewFracs yLast then
+      if b ≥ 1 then atEnd := atEnd + 1
+    wheelEv "<MouseWheel>" (-120)
+    n := n + 1
+  out := out.push s!"wheel-down-events: {n}"
+  out := out.push s!"wheel-down-events-at-end: {atEnd}"
+  out := out.push s!"y-before-turn: {yLast}"
+  out := out.push s!"page-after-wheel-down: {← page}"
+  out := out.push s!"y-after-wheel-down: {← yv}"
+  -- Tiny deltas (1/12 notch) upwards at the top of page 2: eleven are not enough to turn
+  -- back, the twelfth (one notch in all) is.
+  for _ in [0:11] do wheelEv "<MouseWheel>" 10
+  out := out.push s!"page-after-11-tiny-up: {← page}"
+  wheelEv "<MouseWheel>" 10
+  out := out.push s!"page-after-12-tiny-up: {← page}"
+  out := out.push s!"y-after-tiny-up: {← yv}"
+  -- Small deltas accumulate: twelve 1/12 notches scroll as far as one notch.
+  let y0 ← yv
+  for _ in [0:12] do wheelEv "<MouseWheel>" 10
+  let y1 ← yv
+  wheelEv "<MouseWheel>" 120
+  let y2 ← yv
+  out := out.push s!"y-frac: {first y0} {first y1} {first y2}"
+  out := out.push s!"region-h: {(← st.get).regionH}"
+  -- X11 legacy wheel buttons (Tk 8.6; Tk 9 turns real wheel buttons into <MouseWheel>).
+  let b0 ← yv
+  sendEvent ".c" "<Button-5>" ["-x", "200", "-y", "200"]
+  let b1 ← yv
+  sendEvent ".c" "<Button-4>" ["-x", "200", "-y", "200"]
+  out := out.push s!"button-5-4: {first b0} {first b1} {first (← yv)}"
+  -- Shift+wheel scrolls horizontally and never turns the page.
+  let x0 ← xv
+  wheelEv "<Shift-MouseWheel>" (-120)
+  let x1 ← xv
+  for _ in [0:60] do wheelEv "<Shift-MouseWheel>" (-120)
+  out := out.push s!"shift-wheel: {first x0} {first x1} {← xv}"
+  out := out.push s!"page-after-shift-wheel: {← page}"
   -- File → Close empties the window and disables the document commands.
   invoke .close
   out := out.push s!"title-after-close: {← run ["wm", "title", "."]}"
@@ -1576,6 +1702,7 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["back"] => histMove st true
   | ["forward"] => histMove st false
   | ["outlineToggle"] => showOutline st (!s.outlineShown)
+  | ["wheel", axis, kind, d] => wheel st axis kind d
   | ["close"] => closeFile st
   | ["outline", id] => outlineClick st id
   | ["goto", txt] => gotoText st txt

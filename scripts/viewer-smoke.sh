@@ -17,7 +17,8 @@
 #      (SAFEPDF_VIEWER_SMOKE_MODE=nav): outline clicks, link hover/click, back/forward, the
 #      URI confirmation dialog and clipboard, Ctrl+G with labels, F9 (8.2d);
 #   1f. the same PDF through the menubar (SAFEPDF_VIEWER_SMOKE_MODE=menu): File / Edit / View /
-#      Go entries invoked by their .menubar paths, enabled states (9.1);
+#      Go entries invoked by their .menubar paths, enabled states (9.1); mouse wheel across page
+#      boundaries both ways, small deltas, Button-4/5, Shift+wheel (9.2);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -333,6 +334,11 @@ sys.exit(1 if errs else 0)
 # action is invoked through `.menubar.*` entries: Go (next, last, first, previous, Go to
 # page..., Back, Forward; entries are disabled where they cannot run), View (Outline check,
 # zoom, fit, rotate), Edit (Find..., Select all), File (Close, then Quit ends the run).
+# Wheel (task 9.2, generated Tk 9 <MouseWheel> events): in fit page one notch turns a page
+# each way; at 200 % notches scroll page 1 to its bottom and only the one notch after that
+# turns to the top of page 2; eleven 1/12-notch deltas up do not turn back, the twelfth does
+# (to the bottom of page 1); twelve 1/12 notches scroll as far as one notch; Button-5/4
+# scroll; Shift+wheel scrolls horizontally to the edge without turning the page.
 mkdir -p "$work/out-menu"
 SAFEPDF_VIEWER_SMOKE_MODE=menu run_viewer "$work/out-menu" "$work/nav.pdf"
 cat "$work/out-menu/menu.txt"
@@ -375,8 +381,34 @@ want = {
     "title-after-close": "safe-pdf",
     "states-after-close": "Close=disabled,Next page=disabled,Zoom in=disabled,Open...=normal,Quit=normal",
 }
+want.update({
+    "page-after-wheel-fit-down": "2",
+    "page-after-wheel-fit-up": "1",
+    "wheel-zoom": "200",
+    "wheel-down-events-at-end": "1",
+    "page-after-wheel-down": "2",
+    "page-after-11-tiny-up": "2",
+    "page-after-12-tiny-up": "1",
+    "page-after-shift-wheel": "1",
+})
 errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 if "no text" not in v.get("status-select-all", ""): errs.append("Select all: %r" % v.get("status-select-all"))
+f = lambda k: [float(x) for x in v.get(k, "").split()] if v.get(k) else []
+try:
+    if int(v["wheel-down-events"]) < 3: errs.append("the wheel turned page 1 without scrolling it")
+    if f("y-before-turn")[1] != 1.0: errs.append("the page turned before its bottom: %r" % v["y-before-turn"])
+    if f("y-after-wheel-down")[0] != 0.0: errs.append("page 2 not shown at its top: %r" % v["y-after-wheel-down"])
+    if f("y-after-tiny-up")[1] != 1.0: errs.append("page 1 not shown at its bottom: %r" % v["y-after-tiny-up"])
+    y0, y1, y2 = f("y-frac")
+    one = 1.5 / int(v["region-h"])
+    if not y0 - y1 > 0.01 or abs((y0 - y1) - (y1 - y2)) > one:
+        errs.append("12 small deltas did not scroll one notch: %r" % v["y-frac"])
+    b0, b1, b2 = f("button-5-4")
+    if not (b1 > b0 and abs(b2 - b0) < 1e-6): errs.append("Button-5/4 did not scroll: %r" % v["button-5-4"])
+    x0, x1, xa, xb = f("shift-wheel")
+    if not (x1 > x0 and xb == 1.0): errs.append("Shift+wheel did not scroll horizontally: %r" % v["shift-wheel"])
+except (KeyError, ValueError) as e:
+    errs.append("wheel results missing: %r" % e)
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-menu/menu.txt" || fail=1
