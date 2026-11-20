@@ -45,9 +45,29 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    (`imageExtents`, at the render's zoom), one step less (`dctScale`: the box filter needs two
    samples per pixel), as libjpeg's `scale_num = 8 / 2^k` — so
    the raster is `⌈/Width / 2^k⌉ × ⌈/Height / 2^k⌉` (`ImgDict.reduce`); the remaining
-   reduction is the placement's area-averaging downscale. Not reduced: images also drawn in
-   tiling cells or Type 3 glyphs, soft masks, images whose soft mask has a `/Matte`, inline
-   images.
+   reduction is the placement's area-averaging downscale.
+   **Every image is decoded at its drawn size** (task 8.6): images are converted row by row
+   (`Src`, `fused`) — no image-size sample or RGBA buffer — and box-filtered **while
+   decoding** to the size the placement would box-filter them to (`Extent.t`: the
+   `⌈√…⌉` of the grid-fitted device extents of the largest use, `imageExtents`, clamped to the
+   image: `targetSide`), with the placement's own blocks and rounding, masks (`/SMask`,
+   `/Mask` stencils, on `withMask`'s grid), colour key and `/Matte` applied per pixel in the
+   old order — so the placement finds the pixmap at its target and paints the pixels it
+   painted before (corpus: 2,445 of 2,450 pages byte-identical; the other 5 draw an image at
+   two sizes, the smaller use now box-filtered twice, ≤ +0.004 points). Inline images get the
+   target of their single use (`inlineExt`). Not reduced (decoded at full size, as before):
+   images also drawn in tiling cells or Type 3 glyphs (their matrices are cell/glyph
+   matrices, not page matrices: the target would need the pattern matrix and the tile
+   raster; Type 3 glyph images go through MuPDF's own stencil scaler, `Type3`). A JPEG
+   whose soft mask has a `/Matte` keeps its full-size JPEG decode (MuPDF), but is
+   box-filtered like any image (exact: the matte is undone per pixel first).
+   **Over a limit, a reduced decode instead of the placeholder** (task 8.6): a JPEG whose
+   planes, coefficients or output exceed `maxDecodedStreamBytes` is decoded again at the next
+   scale (up to 1/8, `dctSrc`); a pixmap whose RGBA (`4 · w · h`) would exceed it is decoded
+   at the first `⌈n / 2^j⌉` that fits (`fitTarget`, `fitScale`). The page's image budget
+   (`maxPageImagePixels`) lowers that cap for each further image (`ImageTable.add`). What
+   stays full size: the decoded filter output of an XObject (`Source.decode`, at most
+   `maxDecodedStreamBytes`; the byte filters are not streaming) and of a soft mask.
    **`/CCITTFaxDecode`** (task 7.8) is decoded by `SafePdf.Quarantine.CCITT` (MuPDF's
    `filter-fax.c` ported): a chain `pre ++ [/CCITTFaxDecode]` (`ccittSplit`) is decoded up to
    the codec, then `decodeCCITT` decodes at most `/Height` rows with the parameters of its
@@ -79,9 +99,10 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    indices, `round(255 · d / 100)` for `Lab` `L*`. The result has exactly `w · h · ncomp`
    bytes (`samples_size`). **Short data is padded with zeros** (as MuPDF does), so every read
    is the total `Clip.getB`; in-range reads hit the expected byte range (`sampleOffset_lt`).
-   The sample buffer is also capped: `w · h · ncomp ≤ Limits.maxDecodedStreamBytes`, else
-   `Error.limitExceeded .decodedStreamBytes`.
-5. **RGBA** (`toRGBA`): `4 · w · h` bytes (`Pixmap.size_eq`, by construction). Stencil masks
+   Since task 8.6 the samples are produced one row at a time (`rowRGBA`), never as an
+   image-size buffer; the pixmap is capped instead: `4 · w · h ≤
+   Limits.maxDecodedStreamBytes` (else a reduced decode, see 1).
+5. **RGBA** (`fullRGBA`, `toRGBA`): `4 · w · h` bytes (`Pixmap.size_eq`, by construction). Stencil masks
    (`/ImageMask true`) keep the coverage `255 − byte(d)` in the alpha byte (default `/Decode
    [0 1]`: sample 0 paints) and take the fill colour at painting time.
 6. **Masks** (§6b). *Colour key* (`applyKey`): a `/Mask` array of `2 · ncomp` integers makes
@@ -89,7 +110,7 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    stream) and *soft mask* (`/SMask`, which wins and disables the colour key): decoded through
    the source like an image (`loadMask`: a stencil with its own `/Decode`, resp. `DeviceGray`
    with its own `/Decode`), then both images are resampled (nearest) to the finer of the two
-   grids (when ≤ `maxImagePixels` pixels, else the image's grid) and the mask value multiplies
+   grids (when ≤ `maxDecodedStreamBytes / 4` pixels, else the image's grid) and the mask value multiplies
    the alpha (`withMask`). `/Matte` un-premultiplies the colours: `c = m + (c' − m) / α`
    (`Pixmap.unmatte`). An undecodable mask (image codec, error) is ignored.
 7. **Placement** (`place`, MuPDF's choices; `smooth := false` keeps plain nearest sampling
@@ -130,7 +151,8 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
 `loadImages limits src s res items` decodes every distinct image XObject of a display list
 once (by object number, also inside soft-mask groups), with its masks, under the session state `σ` (the document budget),
 and resolves the page's named colour spaces; it returns an `ImageTable`. Decoded pixmaps on
-one page are capped at `maxPageImagePixels` pixels in total (further XObjects get the
+one page are capped at `maxPageImagePixels` pixels in total (256 MiB of RGBA; each XObject is
+decoded under what is left, reduced to fit; once it is spent, further XObjects get the
 placeholder). `renderImage cfg m W H tbl st src ctm fill clip : Clip.RState` paints one image
 item (clip mask through `Clip.clipMaskC` and its cache; inline images are decoded here,
 purely). It preserves the buffer size (`renderImage_size`) and adds at most
@@ -550,217 +572,50 @@ def applyKey (p : ImgDict) (bpc nc : Nat) (data : ByteArray) (pm : Pixmap) : Pix
     size_eq := by split <;> simp only [keyLoop_size, pm.size_eq]
     solid := pm.solid && ks.isEmpty }
 
-/-- Decode with a known plan (`bpc` bits, `nc` components, conversion, normalisation): checks
-`/BitsPerComponent` and the sample-buffer cap, then samples, RGBA and colour-key masking. Too
-many components yield the placeholder. -/
-def finish (limits : Limits) (p : ImgDict) (bpc nc : Nat) (cv : Conv) (n : Norm)
-    (data : ByteArray) : Except Error Pixmap :=
-  if !validBpc bpc then .error (.malformed 0 "image: invalid /BitsPerComponent")
-  else if nc = 0 ∨ maxComps < nc then .ok placeholder
-  else if limits.maxDecodedStreamBytes < p.w * p.h * nc then
-    .error (.limitExceeded .decodedStreamBytes)
-  else
-    .ok (applyKey p bpc nc data
-      (toRGBA (samples data (luts n nc bpc (min bpc 8) p.decode) p.w p.h nc bpc (min bpc 8))
-        p.w p.h nc cv p.mask p.interp))
-
-/-- A pixmap from `finish` is the placeholder or has the image's dimensions. -/
-theorem finish_dims {limits : Limits} {p : ImgDict} {bpc nc : Nat} {cv : Conv} {n : Norm}
-    {data : ByteArray} {pm : Pixmap} (h : finish limits p bpc nc cv n data = .ok pm) :
-    pm.w * pm.h = 1 ∨ (pm.w = p.w ∧ pm.h = p.h) := by
-  unfold finish at h
-  by_cases h1 : (!validBpc bpc) = true
-  · simp [h1] at h
-  · by_cases h2 : nc = 0 ∨ maxComps < nc
-    · simp only [h1, h2, ite_true, ite_false, Bool.false_eq_true] at h
-      cases h; exact .inl rfl
-    · by_cases h3 : limits.maxDecodedStreamBytes < p.w * p.h * nc
-      · simp [h1, h2, h3] at h
-      · simp only [h1, h2, h3, ite_false, Bool.false_eq_true] at h
-        cases h; exact .inr ⟨rfl, rfl⟩
-
-/-- **Decode an image** from its parameters, resolved colour space (`none`: missing or not
-understood) and decoded data. Errors: empty or oversized dimensions
-(`limitExceeded .imagePixels`), a sample buffer above `maxDecodedStreamBytes`, an invalid
-`/BitsPerComponent`. An undrawable colour space yields the placeholder. -/
-def decodePixmap (limits : Limits) (p : ImgDict) (info : Option CSInfo) (data : ByteArray) :
-    Except Error Pixmap :=
-  if p.w = 0 ∨ p.h = 0 then .error (.malformed 0 "image: empty /Width or /Height")
-  else if limits.maxImagePixels < p.w * p.h then .error (.limitExceeded .imagePixels)
-  else if p.mask then finish limits p 1 1 .stencil .unit data
-  else
-    match p.bpc, info.bind planOf with
-    | some b, some (nc, cv, n) => finish limits p b nc cv n data
-    | _, _ => .ok placeholder
-
-/-- A successfully decoded image is within `Limits.maxImagePixels` (or is the 1-pixel
-placeholder). -/
-theorem decodePixmap_pixels {limits : Limits} {p : ImgDict} {info : Option CSInfo}
-    {data : ByteArray} {pm : Pixmap} (h : decodePixmap limits p info data = .ok pm) :
-    pm.w * pm.h ≤ limits.maxImagePixels ∨ pm.w * pm.h = 1 := by
-  unfold decodePixmap at h
-  by_cases h1 : p.w = 0 ∨ p.h = 0
-  · simp [h1] at h
-  · by_cases h2 : limits.maxImagePixels < p.w * p.h
-    · simp [h1, h2] at h
-    · have hle : p.w * p.h ≤ limits.maxImagePixels := by omega
-      have fin : ∀ b nc cv n, finish limits p b nc cv n data = .ok pm →
-          pm.w * pm.h ≤ limits.maxImagePixels ∨ pm.w * pm.h = 1 := by
-        intro b nc cv n hf
-        rcases finish_dims hf with e | ⟨e1, e2⟩
-        · exact .inr e
-        · rw [e1, e2]; exact .inl hle
-      simp only [h1, h2, ite_false] at h
-      split at h
-      · exact fin _ _ _ _ h
-      · split at h
-        · exact fin _ _ _ _ h
-        · cases h; exact .inr rfl
-
-/-- Does the filter chain of `d` reach an image codec (DCT, JPX, JBIG2, CCITT)? -/
-def hasCodec (limits : Limits) (d : Dict) : Bool :=
-  match Filter.parseChain limits d with
-  | .ok stages => stages.any fun st => match st.kind with
-    | .image _ => true
-    | .byte _ => false
-  | .error _ => false
-
-/-! ### `/DCTDecode` through the quarantine-zone decoder (task 7.6a) -/
-
-/-- A `/Filter` chain ending in the image codec `c` after byte filters only: the stream
-dictionary with that last stage removed from `/Filter` and `/DecodeParms` (a single filter:
-both keys removed), and the codec stage's parameters. `none` for any other chain. -/
-def codecSplit (c : Filter.ImageCodec) (limits : Limits) (d : Dict) : Option (Dict × Dict) :=
-  match Filter.parseChain limits d with
-  | .ok stages =>
-    match stages.reverse with
-    | ⟨.image c', parms⟩ :: pre =>
-      if c' = c ∧ pre.all (fun st => match st.kind with | .byte _ => true | .image _ => false) then
-        some (d.filterMap fun kv =>
-          if kv.1 = Content.Run.nm "Filter" ∨ kv.1 = Content.Run.nm "DecodeParms" then
-            match kv.2 with
-            | .array xs => if xs.length ≤ 1 then none else some (kv.1, .array xs.dropLast)
-            | _ => none
-          else some kv, parms)
-      else none
-    | _ => none
-  | .error _ => none
-
-/-- `codecSplit` for `/DCTDecode`. -/
-def dctSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) := codecSplit .dct limits d
-
-/-- `codecSplit` for `/CCITTFaxDecode`. -/
-def ccittSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) := codecSplit .ccitt limits d
-
-/-- `/ColorTransform` of the DCT parameters (`none` when absent or not an integer). -/
-def colorTransformOf (parms : Dict) : Option Int :=
-  match Dict.get? parms (Content.Run.nm "ColorTransform") with
-  | some (.int i) => some i
-  | _ => none
-
-/-- The device colour space of a JPEG by its component count (for a missing `/ColorSpace`). -/
-def jpegSpace (nc : Nat) : Option CSInfo :=
-  if nc = 1 then some (.dev .gray (.gray Comp.zero))
-  else if nc = 3 then some (.dev .rgb (.gray Comp.zero))
-  else if nc = 4 then some (.dev .cmyk (.gray Comp.zero))
-  else none
-
 /-- The dictionary of an image decoded at `1 / 2^k` of its size: `⌈/Width / 2^k⌉ ×
 ⌈/Height / 2^k⌉` (MuPDF `fz_decomp_image_from_stream`, `w = (w + f − 1) >> l2factor`). -/
 def ImgDict.reduce (p : ImgDict) (k : Nat) : ImgDict :=
   let f := 2 ^ k
   { p with w := (p.w + f - 1) / f, h := (p.h + f - 1) / f }
 
-/-- **Decode DCT data and re-validate it against the image dictionary**: the JPEG's
-components must match the colour space (`info`, else `jpegSpace`); the samples become an
-8-bit raster of the dictionary's dimensions through `decodePixmap` (`/Decode`, colour-key
-masking, limits). Errors: the decoder's, a component mismatch, a stencil mask. `scale`
-(0–3, task 7.10) is a reduced-size decode by `2^scale` (MuPDF's JPEG `l2factor`): the
-raster is then the reduced dictionary (`ImgDict.reduce`). -/
-def decodeDCT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
-    (jpeg : ByteArray) (scale : Nat := 0) : Except Error Pixmap :=
-  if p.mask then .error (.unsupported "DCT-encoded stencil mask") else
-  match Quarantine.DCT.decode limits (colorTransformOf parms) jpeg scale with
-  | .error e => .error e
-  | .ok img =>
-    let info := match info with
-      | some i => some i
-      | none => jpegSpace img.nc
-    let p := if scale = 0 then p else p.reduce scale
-    match info.bind planOf with
-    | some (nc, _, _) =>
-      if nc = img.nc then decodePixmap limits { p with bpc := some 8 } info img.data
-      else .error (.malformed 0 s!"DCT: {img.nc} components for a {nc}-component colour space")
-    | none => .error (.unsupported "DCT image without a drawable colour space")
+/-- Running sums over a block of pixels: alpha-weighted colour and alpha. -/
+structure Acc where
+  /-- `Σ r · a`. -/
+  r : Nat
+  /-- `Σ g · a`. -/
+  g : Nat
+  /-- `Σ b · a`. -/
+  b : Nat
+  /-- `Σ a`. -/
+  a : Nat
 
-/-- `decodeDCT`, with every error drawn as the placeholder (S7). -/
-def decodeDCTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
-    (jpeg : ByteArray) (scale : Nat := 0) : Pixmap :=
-  match decodeDCT limits p info parms jpeg scale with
-  | .ok pm => pm
-  | .error _ => placeholder
+/-- Add `n` pixels from byte offset `i` to the sums. -/
+def blockRow (d : ByteArray) : (n i r g b a : Nat) → Acc
+  | 0, _, r, g, b, a => ⟨r, g, b, a⟩
+  | n + 1, i, r, g, b, a =>
+    let al := rd d (i + 3)
+    blockRow d n (i + 4) (r + rd d i * al) (g + rd d (i + 1) * al) (b + rd d (i + 2) * al)
+      (a + al)
 
-/-! ### `/CCITTFaxDecode` through the quarantine-zone decoder (task 7.8) -/
+/-- Add `k` rows of `n` pixels (row stride `rs` bytes) from byte offset `i` to the sums. -/
+def blockSum (d : ByteArray) (n rs : Nat) : (k i : Nat) → Acc → Acc
+  | 0, _, s => s
+  | k + 1, i, s => blockSum d n rs k (i + rs) (blockRow d n i s.r s.g s.b s.a)
 
-/-- Resolve every value of a dictionary one level through the source. -/
-def resolveDict {σ : Type} (src : Source σ) (s : σ) (d : Dict) : Dict × σ :=
-  let (acc, s) := d.foldl (fun (acc : Dict × σ) kv =>
-    let (o, s) := Content.Run.resolve src acc.2 kv.2
-    ((kv.1, o) :: acc.1, s)) ([], s)
-  (acc.reverse, s)
+/-- Push the average of a block of `cnt` pixels: colour weighted by alpha (straight colour of
+the premultiplied average), alpha averaged. -/
+def pushAvg (acc : ByteArray) (s : Acc) (cnt : Nat) : ByteArray :=
+  if s.a = 0 then (((acc.push 0).push 0).push 0).push 0
+  else
+    (((acc.push (u8 ((s.r + s.a / 2) / s.a))).push
+      (u8 ((s.g + s.a / 2) / s.a))).push
+      (u8 ((s.b + s.a / 2) / s.a))).push
+      (u8 ((s.a + cnt / 2) / max cnt 1))
 
-/-- The `/CCITTFaxDecode` parameters of a `/DecodeParms` dictionary with MuPDF's defaults
-(`pdf_dict_get_int_default`/`_bool_default`: a value of the wrong type is the default; a real
-is truncated toward zero). -/
-def ccittParams (parms : Dict) : Quarantine.CCITT.Params :=
-  let int (k : String) (dflt : Int) : Int :=
-    match Dict.get? parms (Content.Run.nm k) with
-    | some (.int i) => i
-    | some (.real r) => r.mantissa.tdiv (10 ^ r.scale)
-    | _ => dflt
-  let bool (k : String) (dflt : Bool) : Bool :=
-    match Dict.get? parms (Content.Run.nm k) with
-    | some (.bool b) => b
-    | _ => dflt
-  { k := int "K" 0, endOfLine := bool "EndOfLine" false,
-    byteAlign := bool "EncodedByteAlign" false,
-    columns := (int "Columns" 1728).toNat, rows := (int "Rows" 0).toNat,
-    endOfBlock := bool "EndOfBlock" true, blackIs1 := bool "BlackIs1" false }
-
-/-- **Decode CCITT fax data and read it as the image's samples**: at most `/Height` rows
-(`Quarantine.CCITT.decode`), then `decodePixmap` (dimensions, `/Decode`, stencil masks,
-limits). A negative `/Columns` (MuPDF: an error) is an error. -/
-def decodeCCITT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
-    (fax : ByteArray) : Except Error Pixmap :=
-  match Dict.get? parms (Content.Run.nm "Columns") with
-  | some (.int i) => if i < 0 then .error (.malformed 0 "CCITTFax: negative /Columns") else go
-  | _ => go
-where
-  /-- The decoding proper. -/
-  go : Except Error Pixmap :=
-    match Quarantine.CCITT.decode limits (ccittParams parms) p.h fax with
-    | .ok rows => decodePixmap limits p info rows
-    | .error e => .error e
-
-/-- `decodeCCITT`, with every error drawn as the placeholder (S7). -/
-def decodeCCITTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
-    (fax : ByteArray) : Pixmap :=
-  match decodeCCITT limits p info parms fax with
-  | .ok pm => pm
-  | .error _ => placeholder
-
-/-- The colour space of an image: `Run.csInfo` (device names, arrays, references), else a
-resource name looked up in `named`. -/
-def csOf {σ : Type} (src : Source σ) (s : σ) (named : List (Name × CSInfo)) :
-    Option PdfObject → Option CSInfo × σ
-  | none => (none, s)
-  | some o =>
-    match Content.Run.csInfo src s o with
-    | (some i, s) => (some i, s)
-    | (none, s) =>
-      match o with
-      | .name n => ((named.find? (·.1 == n)).map (·.2), s)
-      | _ => (none, s)
+/-- `pushAvg` pushes four bytes. -/
+theorem pushAvg_size (acc : ByteArray) (s : Acc) (cnt : Nat) :
+    (pushAvg acc s cnt).size = acc.size + 4 := by
+  unfold pushAvg; split <;> simp [ByteArray.size_push]
 
 /-! ## 6b. Resampling, soft masks and explicit masks (§8.9.5.4, §8.9.6.3, §11.6.5.3) -/
 
@@ -877,63 +732,559 @@ def Pixmap.unmatte (pm : Pixmap) (rgb : Nat × Nat × Nat) : Pixmap :=
     data := matteLoop rgb.1 rgb.2.1 rgb.2.2 (pm.w * pm.h) 0 pm.data
     size_eq := by rw [matteLoop_size]; exact pm.size_eq }
 
-/-- `DeviceGray`, the colour space of soft-mask images. -/
-def grayInfo : CSInfo := .dev .gray (.gray Comp.zero)
+/-! ### Streaming decode to the drawn size (task 8.6)
 
-/-- A decoded mask and, for a soft mask, its `/Matte` components. -/
-abbrev MaskImg := Pixmap × Option (List Fixed)
+An image is converted **row by row** — never as an image-size sample or RGBA buffer — and,
+when it is drawn smaller than its size, **box-filtered to its drawn size while decoding**:
+exactly the placement's area-averaging downscale (`boxDown`, same blocks
+`[o · n / t, (o + 1) · n / t)`, same `pushAvg` rounding, same alpha weighting) applied before
+instead of after, so the placement then finds the pixmap at its target size and paints the same
+pixels as before (`place` downscales only an image larger than its target). Masks take part
+per pixel, in the old order: the image's colour key, then both images on the finer grid
+(nearest, `withMask`'s rule), the mask multiplying the alpha, the `/Matte` un-premultiplied,
+then the box filter. One output row needs one source row of the image and of its mask at a
+time plus `tw` running sums (`Acc`).
 
-/-- **Load a mask image** (`/SMask` when `soft`, else a `/Mask` stream) from its reference:
-decoded through the source like an image XObject — a soft mask as `DeviceGray` with its own
-`/Decode` (the mask value is channel 0; `/BitsPerComponent` required), an explicit mask as an
-`/ImageMask` stencil (`/Decode` honoured, coverage in channel 3: sample 0 paints) — plus a soft
-mask's `/Matte` components; a `/DCTDecode` mask goes through `decodeDCT`. `none` for anything
-else (not a stream, another image codec, a decode error): the image is then drawn
-unmasked. -/
-def loadMask {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (soft : Bool) :
-    Option PdfObject → Option MaskImg × σ
-  | some (.ref n g) =>
-    match src.fetch s n g with
-    | (.ok (.stream st), s) =>
-      let dct := dctSplit limits st.dict
-      if hasCodec limits st.dict ∧ dct.isNone then (none, s) else
-      let (p, s) := imgDictOf src s st.dict
-      let (mt, s) := entry src s st.dict "Matte"
-      let matte : Option (List Fixed) := match mt with
-        | some (.array xs) => if soft then xs.mapM Content.Interp.num? else none
-        | _ => none
-      if soft ∧ p.bpc.isNone then (none, s) else
-      let p := { p with mask := !soft, key := none }
-      let st' := match dct with
-        | some (d', _) => { st with dict := d' }
-        | none => st
-      match src.decode s n st' with
-      | (.ok bytes, s) =>
-        let r := match dct with
-          | some (_, parms) => decodeDCT limits p (some grayInfo) parms bytes
-          | none => decodePixmap limits p (some grayInfo) bytes
-        match r with
-        | .ok pm => (some (pm, matte), s)
-        | .error _ => (none, s)
-      | (.error _, s) => (none, s)
-    | (_, s) => (none, s)
-  | _ => (none, s)
+`Src` is an image as sample data with its conversion plan; `fused` builds the pixmap of a
+`Src` (optionally masked) on the grid `gw × gh` reduced to `tw × th`. -/
 
-/-- **Apply an image's masks**: a soft mask (`/SMask`, which takes precedence; `/Matte`
-un-premultiplies the colours, converted through the image's colour space) or an explicit
-`/Mask` stencil. Stencil images (`/ImageMask`) are unmasked. Mask grids at most `cap` pixels
-(`withMask`). -/
-def applyMasks (cap : Nat) (info : Option CSInfo) (sm mk : Option MaskImg) (pm : Pixmap) :
-    Pixmap :=
-  if pm.stencil then pm else
-  match sm, mk with
-  | some (m, matte), _ =>
-    let r := withMask cap pm m 0
-    match matte, info with
-    | some ms, some i => r.unmatte (Clip.deviceRGB (i.color ms))
-    | _, _ => r
-  | none, some (m, _) => withMask cap pm m 3
-  | none, none => pm
+/-- An image ready for row-by-row conversion: `w × h` samples of `nc` components of `bpc`
+bits in `data`, normalised through `lut` (`bits`-bit tables), converted by `cv`, colour-key
+ranges `ks` (raw samples). -/
+structure Src where
+  /-- Width in samples. -/
+  w : Nat
+  /-- Height in samples. -/
+  h : Nat
+  /-- The sample data (short data reads 0). -/
+  data : ByteArray
+  /-- Lookup tables (`luts`). -/
+  lut : ByteArray
+  /-- Components per sample. -/
+  nc : Nat
+  /-- Bits per component. -/
+  bpc : Nat
+  /-- Significant bits per component (`min bpc 8`). -/
+  bits : Nat
+  /-- Colour conversion. -/
+  cv : Conv
+  /-- Colour-key ranges (`keyRanges`). -/
+  ks : List (Nat × Nat)
+  /-- `/ImageMask`. -/
+  stencil : Bool
+  /-- `/Interpolate`. -/
+  interp : Bool
+
+/-- The colour-key ranges of `p` in effect (`applyKey`'s rule). -/
+def keyRanges (p : ImgDict) (bpc nc : Nat) : List (Nat × Nat) :=
+  match p.key with
+  | some k => if k.length = 2 * nc ∧ !p.mask then keyPairs bpc k else []
+  | none => []
+
+/-- The `Src` of image `p` with a known plan (as `finish` decodes it). -/
+def Src.ofPlan (p : ImgDict) (bpc nc : Nat) (cv : Conv) (n : Norm) (data : ByteArray) : Src :=
+  { w := p.w, h := p.h, data, lut := luts n nc bpc (min bpc 8) p.decode, nc, bpc,
+    bits := min bpc 8, cv, ks := keyRanges p bpc nc, stencil := p.mask, interp := p.interp }
+
+/-- The placeholder as a `Src`: one mid-grey (`128`) RGB sample. -/
+def Src.grey : Src :=
+  let p : ImgDict :=
+    { w := 1, h := 1, bpc := some 8, mask := false, decode := none, interp := false, cs := none }
+  Src.ofPlan p 8 3 .rgb .unit (ByteArray.mk #[128, 128, 128])
+
+/-- Append source row `y` of the sample data as RGBA (`4 · w` bytes) to `acc`. -/
+def rowRGBA (data lut : ByteArray) (w nc bpc bits : Nat) (cv : Conv) (y : Nat)
+    (acc : ByteArray) : ByteArray :=
+  let smp := samplesLoop data lut bpc (2 ^ bits) (nc * 2 ^ bits) (y * rowBytes w nc bpc) (w * nc)
+    0 0 (ByteArray.emptyWithCapacity (w * nc))
+  rgbaLoop smp nc cv w 0 acc
+
+/-- `rowRGBA` appends four bytes per pixel. -/
+theorem rowRGBA_size (data lut : ByteArray) (w nc bpc bits : Nat) (cv : Conv) (y : Nat)
+    (acc : ByteArray) : (rowRGBA data lut w nc bpc bits cv y acc).size = acc.size + 4 * w := by
+  simp only [rowRGBA, rgbaLoop_size]
+
+/-- Source row `y` of `s` as RGBA (colour key applied), resampled (nearest) to `gw`
+pixels: `4 · gw` bytes. -/
+def Src.row (s : Src) (gw y : Nat) : ByteArray :=
+  let r := rowRGBA s.data s.lut s.w s.nc s.bpc s.bits s.cv y (ByteArray.emptyWithCapacity (4 * s.w))
+  let r := if s.ks.isEmpty then r
+    else keyLoop s.data s.w s.nc s.bpc (rowBytes s.w s.nc s.bpc) s.ks s.w 0 y 0 r
+  if gw = s.w then r else resCols r s.w gw 0 gw 0 (ByteArray.emptyWithCapacity (4 * gw))
+
+/-- A source row has `4 · gw` bytes. -/
+theorem Src.row_size (s : Src) (gw y : Nat) : (s.row gw y).size = 4 * gw := by
+  unfold Src.row
+  dsimp only
+  split
+  · rename_i h
+    subst h
+    split <;> simp only [keyLoop_size, rowRGBA_size] <;> exact Nat.zero_add _
+  · rw [resCols_size]; exact Nat.zero_add _
+
+/-- Row `y` of the grid `gw × gh`: the image's row `y · h / gh`, its mask's row `y · h' / gh`
+multiplying the alpha (channel `ch`), un-premultiplied against the matte colour. -/
+def gridRow (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh y : Nat) : ByteArray :=
+  let a := img.row gw (y * img.h / gh)
+  let a := match mk with
+    | some (m, ch) => alphaLoop (m.row gw (y * m.h / gh)) ch gw 0 a
+    | none => a
+  match matte with
+  | some (r, g, b) => matteLoop r g b gw 0 a
+  | none => a
+
+/-- A grid row has `4 · gw` bytes. -/
+theorem gridRow_size (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh y : Nat) : (gridRow img mk matte gw gh y).size = 4 * gw := by
+  unfold gridRow
+  dsimp only
+  split <;> split <;> simp only [matteLoop_size, alphaLoop_size, Src.row_size]
+
+/-- Grid rows `y, y + 1, …` (`fuel` of them), appended. -/
+def gridRows (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh : Nat) : (fuel y : Nat) → ByteArray → ByteArray
+  | 0, _, acc => acc
+  | fuel + 1, y, acc => gridRows img mk matte gw gh fuel (y + 1) (acc ++ gridRow img mk matte gw gh y)
+
+/-- `gridRows` appends `4 · gw` bytes per row. -/
+theorem gridRows_size (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh : Nat) : ∀ (fuel y : Nat) (acc : ByteArray),
+      (gridRows img mk matte gw gh fuel y acc).size = acc.size + 4 * gw * fuel
+  | 0, _, _ => rfl
+  | fuel + 1, y, acc => by
+    simp only [gridRows]
+    rw [gridRows_size img mk matte gw gh fuel, ByteArray.size_append, gridRow_size, Nat.mul_succ]
+    omega
+
+/-- Add one grid row (`gw` pixels) to the running sums of output columns `ox, ox + 1, …`
+(`fuel` of them; column `ox` sums the pixels `[ox · gw / tw, (ox + 1) · gw / tw)`). -/
+def addRow (row : ByteArray) (gw tw : Nat) : (fuel ox : Nat) → Array Acc → Array Acc
+  | 0, _, s => s
+  | fuel + 1, ox, s =>
+    let x0 := ox * gw / tw
+    let x1 := (ox + 1) * gw / tw
+    let a := s.getD ox ⟨0, 0, 0, 0⟩
+    addRow row gw tw fuel (ox + 1) (s.setIfInBounds ox (blockRow row (x1 - x0) (4 * x0) a.r a.g a.b a.a))
+
+/-- The sums of grid rows `y, y + 1, …` (`fuel` of them). -/
+def bandSums (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh tw : Nat) : (fuel y : Nat) → Array Acc → Array Acc
+  | 0, _, s => s
+  | fuel + 1, y, s =>
+    bandSums img mk matte gw gh tw fuel (y + 1) (addRow (gridRow img mk matte gw gh y) gw tw tw 0 s)
+
+/-- Push the averages of output columns `ox, …` (`fuel` of them) over a band of `n` rows. -/
+def pushSums (s : Array Acc) (gw tw n : Nat) : (fuel ox : Nat) → ByteArray → ByteArray
+  | 0, _, acc => acc
+  | fuel + 1, ox, acc =>
+    let x0 := ox * gw / tw
+    let x1 := (ox + 1) * gw / tw
+    pushSums s gw tw n fuel (ox + 1) (pushAvg acc (s.getD ox ⟨0, 0, 0, 0⟩) ((x1 - x0) * n))
+
+/-- `pushSums` pushes four bytes per output pixel. -/
+theorem pushSums_size (s : Array Acc) (gw tw n : Nat) :
+    ∀ (fuel ox : Nat) (acc : ByteArray), (pushSums s gw tw n fuel ox acc).size = acc.size + 4 * fuel
+  | 0, _, _ => rfl
+  | fuel + 1, ox, acc => by
+    simp only [pushSums]; rw [pushSums_size s gw tw n fuel, pushAvg_size]; omega
+
+/-- Output rows `oy, oy + 1, …` (`fuel` of them) of the grid box-filtered to `tw × th`: row
+`oy` averages the grid rows `[oy · gh / th, (oy + 1) · gh / th)` (`boxRows`' blocks). -/
+def boxGrid (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh tw th : Nat) : (fuel oy : Nat) → ByteArray → ByteArray
+  | 0, _, acc => acc
+  | fuel + 1, oy, acc =>
+    let y0 := oy * gh / th
+    let y1 := (oy + 1) * gh / th
+    let s := bandSums img mk matte gw gh tw (y1 - y0) y0 (Array.replicate tw ⟨0, 0, 0, 0⟩)
+    boxGrid img mk matte gw gh tw th fuel (oy + 1) (pushSums s gw tw (y1 - y0) tw 0 acc)
+
+/-- `boxGrid` pushes `4 · tw` bytes per output row. -/
+theorem boxGrid_size (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh tw th : Nat) : ∀ (fuel oy : Nat) (acc : ByteArray),
+      (boxGrid img mk matte gw gh tw th fuel oy acc).size = acc.size + 4 * tw * fuel
+  | 0, _, _ => rfl
+  | fuel + 1, oy, acc => by
+    simp only [boxGrid]
+    rw [boxGrid_size img mk matte gw gh tw th fuel, pushSums_size, Nat.mul_succ]; omega
+
+/-- **The pixmap of `img`** (masked by `mk`'s channel, un-premultiplied against `matte`) on
+the grid `gw × gh`, box-filtered to `tw × th` when that is smaller (`1 ≤ tw ≤ gw`,
+`1 ≤ th ≤ gh` for a true box filter). Equal to the former pipeline — `toRGBA (samples …)`,
+`applyKey`, `withMask`, `unmatte` on the grid, then `boxDown` — without its buffers. -/
+def fused (img : Src) (mk : Option (Src × Nat)) (matte : Option (Nat × Nat × Nat))
+    (gw gh tw th : Nat) : Pixmap :=
+  let solid := !img.stencil && img.ks.isEmpty && mk.isNone
+  if h : tw = gw ∧ th = gh then
+    { w := tw, h := th,
+      data := gridRows img mk matte gw gh gh 0 (ByteArray.emptyWithCapacity (4 * gw * gh)),
+      size_eq := by rw [gridRows_size, h.1, h.2]; exact Nat.zero_add _,
+      stencil := img.stencil, interpolate := img.interp, solid }
+  else
+    { w := tw, h := th,
+      data := boxGrid img mk matte gw gh tw th th 0 (ByteArray.emptyWithCapacity (4 * tw * th)),
+      size_eq := by rw [boxGrid_size]; exact Nat.zero_add _,
+      stencil := img.stencil, interpolate := img.interp, solid }
+
+/-- The grid an image and its mask are combined on (`withMask`'s rule): the finer of both
+when it has at most `cap` pixels, else the image's. -/
+def gridOf (cap : Nat) (img : Src) (mk : Option (Src × Nat)) : Nat × Nat :=
+  match mk with
+  | none => (img.w, img.h)
+  | some (m, _) =>
+    let tw0 := max img.w m.w
+    let th0 := max img.h m.h
+    if tw0 * th0 ≤ cap then (tw0, th0) else (img.w, img.h)
+
+/-- **The first reduction `k' ≥ k` whose pixmap fits `cap` bytes** (`4 · ⌈w/2^k'⌉ ·
+⌈h/2^k'⌉ ≤ cap`), trying at most `fuel` halvings; `k + fuel` when none does. -/
+def fitScale (cap w h : Nat) : (fuel k : Nat) → Nat
+  | 0, k => k
+  | fuel + 1, k =>
+    let f := 2 ^ k
+    if 4 * ((w + f - 1) / f) * ((h + f - 1) / f) ≤ cap then k else fitScale cap w h fuel (k + 1)
+
+/-- At most this many halvings are tried to fit an image into the pixmap cap (task 8.6;
+`2^32` exceeds any `/Width` or `/Height` within `maxImagePixels`). -/
+def maxHalvings : Nat := 32
+
+/-- **The decoded size** of a `gw × gh` grid: the drawn-size target `t` (`(⌈√…⌉, ⌈√…⌉)` of
+the largest use, `imageExtents`) clamped to `[1, gw] × [1, gh]` (the placement's
+`targetSide`), else the full grid; then, when its RGBA exceeds `cap` bytes, halved
+(`fitScale`, MuPDF-style `⌈n / 2^j⌉`) until it fits — a reduced image instead of a failure. -/
+def fitTarget (cap gw gh : Nat) (t : Option (Nat × Nat)) : Nat × Nat :=
+  let (tw, th) := match t with
+    | some (a, b) => (min gw (max 1 a), min gh (max 1 b))
+    | none => (gw, gh)
+  if 4 * tw * th ≤ cap then (tw, th) else
+  let f := 2 ^ fitScale cap gw gh maxHalvings 0
+  (min tw ((gw + f - 1) / f), min th ((gh + f - 1) / f))
+
+/-- `fitTarget` never exceeds the grid. -/
+theorem fitTarget_le (cap gw gh : Nat) (t : Option (Nat × Nat)) :
+    (fitTarget cap gw gh t).1 ≤ gw ∧ (fitTarget cap gw gh t).2 ≤ gh := by
+  unfold fitTarget
+  cases t with
+  | none => dsimp only; split <;> simp only [] <;> exact ⟨by omega, by omega⟩
+  | some ab => dsimp only; split <;> simp only [] <;> exact ⟨by omega, by omega⟩
+
+/-- Decode with a known plan (`bpc` bits, `nc` components, conversion, normalisation) to
+`tw × th` (task 8.6; clamped to `[1, w] × [1, h]`; `tw = w`, `th = h`: full size): checks
+`/BitsPerComponent` and the pixmap cap (`4 · tw · th ≤ Limits.maxDecodedStreamBytes`), then
+converts row by row (`fused`: colour key, box filter). Too many components yield the
+placeholder. -/
+def finishTo (limits : Limits) (p : ImgDict) (bpc nc : Nat) (cv : Conv) (n : Norm)
+    (data : ByteArray) (tw th : Nat) : Except Error Pixmap :=
+  if !validBpc bpc then .error (.malformed 0 "image: invalid /BitsPerComponent")
+  else if nc = 0 ∨ maxComps < nc then .ok placeholder
+  else
+    let tw := min p.w (max 1 tw)
+    let th := min p.h (max 1 th)
+    if limits.maxDecodedStreamBytes < 4 * tw * th then .error (.limitExceeded .decodedStreamBytes)
+    else .ok (fused (Src.ofPlan p bpc nc cv n data) none none p.w p.h tw th)
+
+/-- Decode with a known plan at full size (`finishTo … w h`). -/
+def finish (limits : Limits) (p : ImgDict) (bpc nc : Nat) (cv : Conv) (n : Norm)
+    (data : ByteArray) : Except Error Pixmap :=
+  finishTo limits p bpc nc cv n data p.w p.h
+
+/-- A pixmap from `finishTo` is the placeholder or has the clamped target dimensions. -/
+theorem finishTo_dims {limits : Limits} {p : ImgDict} {bpc nc : Nat} {cv : Conv} {n : Norm}
+    {data : ByteArray} {tw th : Nat} {pm : Pixmap}
+    (h : finishTo limits p bpc nc cv n data tw th = .ok pm) :
+    pm.w * pm.h = 1 ∨ (pm.w = min p.w (max 1 tw) ∧ pm.h = min p.h (max 1 th)) := by
+  unfold finishTo at h
+  by_cases h1 : (!validBpc bpc) = true
+  · simp [h1] at h
+  · by_cases h2 : nc = 0 ∨ maxComps < nc
+    · simp only [h1, h2, ite_true, ite_false, Bool.false_eq_true] at h
+      cases h; exact .inl rfl
+    · by_cases h3 : limits.maxDecodedStreamBytes < 4 * min p.w (max 1 tw) * min p.h (max 1 th)
+      · simp [h1, h2, h3] at h
+      · simp only [h1, h2, h3, ite_false, Bool.false_eq_true] at h
+        cases h; unfold fused; split <;> exact .inr ⟨rfl, rfl⟩
+
+/-- A pixmap from `finish` is the placeholder or has the image's dimensions. -/
+theorem finish_dims {limits : Limits} {p : ImgDict} {bpc nc : Nat} {cv : Conv} {n : Norm}
+    {data : ByteArray} {pm : Pixmap} (h : finish limits p bpc nc cv n data = .ok pm) :
+    pm.w * pm.h = 1 ∨ (pm.w = p.w ∧ pm.h = p.h) := by
+  rcases finishTo_dims h with e | ⟨e1, e2⟩
+  · exact .inl e
+  · exact .inr ⟨by rw [e1]; omega, by rw [e2]; omega⟩
+
+/-- The `Src` of an image (`decodePixmap`'s checks and plan): errors for empty or oversized
+dimensions and invalid `/BitsPerComponent`; the grey placeholder for an undrawable colour space
+or component count. -/
+def srcOf (limits : Limits) (p : ImgDict) (info : Option CSInfo) (data : ByteArray) :
+    Except Error Src :=
+  if p.w = 0 ∨ p.h = 0 then .error (.malformed 0 "image: empty /Width or /Height")
+  else if limits.maxImagePixels < p.w * p.h then .error (.limitExceeded .imagePixels)
+  else
+    let plan : Option (Nat × Nat × Conv × Norm) :=
+      if p.mask then some (1, 1, .stencil, .unit)
+      else match p.bpc, info.bind planOf with
+        | some b, some (nc, cv, n) => some (b, nc, cv, n)
+        | _, _ => none
+    match plan with
+    | none => .ok Src.grey
+    | some (b, nc, cv, n) =>
+      if !validBpc b then .error (.malformed 0 "image: invalid /BitsPerComponent")
+      else if nc = 0 ∨ maxComps < nc then .ok Src.grey
+      else .ok (Src.ofPlan p b nc cv n data)
+
+/-- **Decode an image** from its parameters, resolved colour space (`none`: missing or not
+understood) and decoded data. `tgt` (task 8.6): the drawn-size target of its largest use
+(`imageExtents`, `inlineExt`): the pixmap is box-filtered to it while decoding (what the
+placement would do after). The RGBA pixmap is capped by `maxDecodedStreamBytes` (4 bytes per
+pixel): over it, a halved size that fits (`fitTarget`) instead of failing. Errors: empty or
+oversized dimensions (`limitExceeded .imagePixels`: the source pixels bound the work), an
+invalid `/BitsPerComponent`. An undrawable colour space yields the placeholder. -/
+def decodePixmap (limits : Limits) (p : ImgDict) (info : Option CSInfo) (data : ByteArray)
+    (tgt : Option (Nat × Nat) := none) : Except Error Pixmap :=
+  if p.w = 0 ∨ p.h = 0 then .error (.malformed 0 "image: empty /Width or /Height")
+  else if limits.maxImagePixels < p.w * p.h then .error (.limitExceeded .imagePixels)
+  else
+    let t := fitTarget limits.maxDecodedStreamBytes p.w p.h tgt
+    if p.mask then finishTo limits p 1 1 .stencil .unit data t.1 t.2
+    else
+      match p.bpc, info.bind planOf with
+      | some b, some (nc, cv, n) => finishTo limits p b nc cv n data t.1 t.2
+      | _, _ => .ok placeholder
+
+/-- A successfully decoded image is within `Limits.maxImagePixels` (or is the 1-pixel
+placeholder). -/
+theorem decodePixmap_pixels {limits : Limits} {p : ImgDict} {info : Option CSInfo}
+    {data : ByteArray} {tgt : Option (Nat × Nat)} {pm : Pixmap}
+    (h : decodePixmap limits p info data tgt = .ok pm) :
+    pm.w * pm.h ≤ limits.maxImagePixels ∨ pm.w * pm.h = 1 := by
+  unfold decodePixmap at h
+  by_cases h1 : p.w = 0 ∨ p.h = 0
+  · simp [h1] at h
+  · by_cases h2 : limits.maxImagePixels < p.w * p.h
+    · simp [h1, h2] at h
+    · have hle : p.w * p.h ≤ limits.maxImagePixels := by omega
+      have fin : ∀ b nc cv n tw th, finishTo limits p b nc cv n data tw th = .ok pm →
+          pm.w * pm.h ≤ limits.maxImagePixels ∨ pm.w * pm.h = 1 := by
+        intro b nc cv n tw th hf
+        rcases finishTo_dims hf with e | ⟨e1, e2⟩
+        · exact .inr e
+        · rw [e1, e2]
+          exact .inl (Nat.le_trans (Nat.mul_le_mul (Nat.min_le_left _ _) (Nat.min_le_left _ _)) hle)
+      simp only [h1, h2, ite_false] at h
+      split at h
+      · exact fin _ _ _ _ _ _ h
+      · split at h
+        · exact fin _ _ _ _ _ _ h
+        · cases h; exact .inr rfl
+
+/-- Does the filter chain of `d` reach an image codec (DCT, JPX, JBIG2, CCITT)? -/
+def hasCodec (limits : Limits) (d : Dict) : Bool :=
+  match Filter.parseChain limits d with
+  | .ok stages => stages.any fun st => match st.kind with
+    | .image _ => true
+    | .byte _ => false
+  | .error _ => false
+
+/-! ### `/DCTDecode` through the quarantine-zone decoder (task 7.6a) -/
+
+/-- A `/Filter` chain ending in the image codec `c` after byte filters only: the stream
+dictionary with that last stage removed from `/Filter` and `/DecodeParms` (a single filter:
+both keys removed), and the codec stage's parameters. `none` for any other chain. -/
+def codecSplit (c : Filter.ImageCodec) (limits : Limits) (d : Dict) : Option (Dict × Dict) :=
+  match Filter.parseChain limits d with
+  | .ok stages =>
+    match stages.reverse with
+    | ⟨.image c', parms⟩ :: pre =>
+      if c' = c ∧ pre.all (fun st => match st.kind with | .byte _ => true | .image _ => false) then
+        some (d.filterMap fun kv =>
+          if kv.1 = Content.Run.nm "Filter" ∨ kv.1 = Content.Run.nm "DecodeParms" then
+            match kv.2 with
+            | .array xs => if xs.length ≤ 1 then none else some (kv.1, .array xs.dropLast)
+            | _ => none
+          else some kv, parms)
+      else none
+    | _ => none
+  | .error _ => none
+
+/-- `codecSplit` for `/DCTDecode`. -/
+def dctSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) := codecSplit .dct limits d
+
+/-- `codecSplit` for `/CCITTFaxDecode`. -/
+def ccittSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) := codecSplit .ccitt limits d
+
+/-- `/ColorTransform` of the DCT parameters (`none` when absent or not an integer). -/
+def colorTransformOf (parms : Dict) : Option Int :=
+  match Dict.get? parms (Content.Run.nm "ColorTransform") with
+  | some (.int i) => some i
+  | _ => none
+
+/-- The device colour space of a JPEG by its component count (for a missing `/ColorSpace`). -/
+def jpegSpace (nc : Nat) : Option CSInfo :=
+  if nc = 1 then some (.dev .gray (.gray Comp.zero))
+  else if nc = 3 then some (.dev .rgb (.gray Comp.zero))
+  else if nc = 4 then some (.dev .cmyk (.gray Comp.zero))
+  else none
+
+/-- **The pixmap of a `Src`** (no mask) at the drawn-size target `tgt` (`fitTarget`: clamped,
+halved to fit `maxDecodedStreamBytes`). -/
+def Src.pixmap (limits : Limits) (s : Src) (tgt : Option (Nat × Nat) := none) :
+    Except Error Pixmap :=
+  let t := fitTarget limits.maxDecodedStreamBytes s.w s.h tgt
+  if limits.maxDecodedStreamBytes < 4 * t.1 * t.2 then .error (.limitExceeded .decodedStreamBytes)
+  else .ok (fused s none none s.w s.h t.1 t.2)
+
+/-- **Decode DCT data and re-validate it against the image dictionary** (as a `Src`): the
+JPEG's components must match the colour space (`info`, else `jpegSpace`); the samples become an
+8-bit raster of the dictionary's dimensions (`srcOf`: `/Decode`, colour-key masking, limits).
+Errors: the decoder's, a component mismatch, a stencil mask. `scale` (0–3, task 7.10) is a
+reduced-size decode by `2^scale` (MuPDF's JPEG `l2factor`): the raster is then the reduced
+dictionary (`ImgDict.reduce`). **Over a limit** (task 8.6: the planes, a progressive frame's
+coefficients or the output above `maxDecodedStreamBytes`, all checked at the frame header) the
+decode is retried at the next reduced scale, up to 1/8 (at most three retries), instead of
+failing. -/
+def dctSrc (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (jpeg : ByteArray) (scale : Nat := 0) : Except Error Src :=
+  if p.mask then .error (.unsupported "DCT-encoded stencil mask") else go 4 scale
+where
+  /-- One attempt at `scale`, then (over a limit) at most `fuel − 1` more at larger scales. -/
+  go : Nat → Nat → Except Error Src
+    | 0, _ => .error (.limitExceeded .decodedStreamBytes)
+    | fuel + 1, scale =>
+      match Quarantine.DCT.decode limits (colorTransformOf parms) jpeg scale with
+      | .error (.limitExceeded .decodedStreamBytes) =>
+        if scale < 3 then go fuel (scale + 1) else .error (.limitExceeded .decodedStreamBytes)
+      | .error e => .error e
+      | .ok img =>
+        let info := match info with
+          | some i => some i
+          | none => jpegSpace img.nc
+        let p := if scale = 0 then p else p.reduce scale
+        match info.bind planOf with
+        | some (nc, _, _) =>
+          if nc = img.nc then srcOf limits { p with bpc := some 8 } info img.data
+          else .error (.malformed 0 s!"DCT: {img.nc} components for a {nc}-component colour space")
+        | none => .error (.unsupported "DCT image without a drawable colour space")
+
+/-- **Decode DCT data** to a pixmap (`dctSrc`, then `Src.pixmap` at the drawn-size target
+`tgt`, task 8.6). -/
+def decodeDCT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (jpeg : ByteArray) (scale : Nat := 0) (tgt : Option (Nat × Nat) := none) :
+    Except Error Pixmap :=
+  (dctSrc limits p info parms jpeg scale).bind (·.pixmap limits tgt)
+
+/-- `decodeDCT`, with every error drawn as the placeholder (S7). -/
+def decodeDCTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (jpeg : ByteArray) (scale : Nat := 0) (tgt : Option (Nat × Nat) := none) : Pixmap :=
+  match decodeDCT limits p info parms jpeg scale tgt with
+  | .ok pm => pm
+  | .error _ => placeholder
+
+/-! ### `/CCITTFaxDecode` through the quarantine-zone decoder (task 7.8) -/
+
+/-- Resolve every value of a dictionary one level through the source. -/
+def resolveDict {σ : Type} (src : Source σ) (s : σ) (d : Dict) : Dict × σ :=
+  let (acc, s) := d.foldl (fun (acc : Dict × σ) kv =>
+    let (o, s) := Content.Run.resolve src acc.2 kv.2
+    ((kv.1, o) :: acc.1, s)) ([], s)
+  (acc.reverse, s)
+
+/-- The `/CCITTFaxDecode` parameters of a `/DecodeParms` dictionary with MuPDF's defaults
+(`pdf_dict_get_int_default`/`_bool_default`: a value of the wrong type is the default; a real
+is truncated toward zero). -/
+def ccittParams (parms : Dict) : Quarantine.CCITT.Params :=
+  let int (k : String) (dflt : Int) : Int :=
+    match Dict.get? parms (Content.Run.nm k) with
+    | some (.int i) => i
+    | some (.real r) => r.mantissa.tdiv (10 ^ r.scale)
+    | _ => dflt
+  let bool (k : String) (dflt : Bool) : Bool :=
+    match Dict.get? parms (Content.Run.nm k) with
+    | some (.bool b) => b
+    | _ => dflt
+  { k := int "K" 0, endOfLine := bool "EndOfLine" false,
+    byteAlign := bool "EncodedByteAlign" false,
+    columns := (int "Columns" 1728).toNat, rows := (int "Rows" 0).toNat,
+    endOfBlock := bool "EndOfBlock" true, blackIs1 := bool "BlackIs1" false }
+
+/-- **Decode CCITT fax data and read it as the image's samples** (as a `Src`): at most
+`/Height` rows (`Quarantine.CCITT.decode`), then `srcOf` (dimensions, `/Decode`, stencil
+masks, limits). A negative `/Columns` (MuPDF: an error) is an error. -/
+def ccittSrc (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (fax : ByteArray) : Except Error Src :=
+  match Dict.get? parms (Content.Run.nm "Columns") with
+  | some (.int i) => if i < 0 then .error (.malformed 0 "CCITTFax: negative /Columns") else go
+  | _ => go
+where
+  /-- The decoding proper. -/
+  go : Except Error Src :=
+    match Quarantine.CCITT.decode limits (ccittParams parms) p.h fax with
+    | .ok rows => srcOf limits p info rows
+    | .error e => .error e
+
+/-- **Decode CCITT fax data** to a pixmap (`ccittSrc`, then `Src.pixmap` at the drawn-size
+target `tgt`, task 8.6). -/
+def decodeCCITT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (fax : ByteArray) (tgt : Option (Nat × Nat) := none) : Except Error Pixmap :=
+  (ccittSrc limits p info parms fax).bind (·.pixmap limits tgt)
+
+/-- `decodeCCITT`, with every error drawn as the placeholder (S7). -/
+def decodeCCITTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (fax : ByteArray) (tgt : Option (Nat × Nat) := none) : Pixmap :=
+  match decodeCCITT limits p info parms fax tgt with
+  | .ok pm => pm
+  | .error _ => placeholder
+
+/-- The colour space of an image: `Run.csInfo` (device names, arrays, references), else a
+resource name looked up in `named`. -/
+def csOf {σ : Type} (src : Source σ) (s : σ) (named : List (Name × CSInfo)) :
+    Option PdfObject → Option CSInfo × σ
+  | none => (none, s)
+  | some o =>
+    match Content.Run.csInfo src s o with
+    | (some i, s) => (some i, s)
+    | (none, s) =>
+      match o with
+      | .name n => ((named.find? (·.1 == n)).map (·.2), s)
+      | _ => (none, s)
+
+/-! ### Device geometry: grid fitting, sizes, fixed point -/
+
+/-- MuPDF's grid-fitting tolerance (`MY_EPSILON`, device pixels). -/
+def gridEps : Rat := 1 / 1000
+
+/-- Snap down to a pixel boundary, unless within `gridEps` below the next one. -/
+def snapLo (x : Rat) : Rat := if (x.ceil : Rat) - x ≤ gridEps then x.ceil else x.floor
+
+/-- Snap up to a pixel boundary, unless within `gridEps` above the previous one. -/
+def snapHi (x : Rat) : Rat := if x - (x.floor : Rat) ≤ gridEps then x.floor else x.ceil
+
+/-- Origin `e` and extent `a` of one axis, expanded outward to whole pixels. -/
+def snapSpan (e a : Rat) : Rat × Rat :=
+  if 0 < a then let l := snapLo e; (l, snapHi (e + a) - l)
+  else if a < 0 then let r := snapHi e; (r, snapLo (e + a) - r)
+  else (e, a)
+
+/-- **Grid fitting** (MuPDF `fz_gridfit_matrix`, non-tiled): an axis-aligned image
+(`b = c = 0`) is expanded to cover every device pixel it touches, edges on pixel boundaries
+(within `gridEps`). Other matrices are unchanged. -/
+def gridfit (m : Aff) : Aff :=
+  if m.b = 0 ∧ m.c = 0 then
+    let x := snapSpan m.e m.a
+    let y := snapSpan m.f m.d
+    { m with a := x.2, e := x.1, d := y.2, f := y.1 }
+  else m
+
+/-- `⌈√q⌉` for `q ≥ 0`. -/
+def ceilSqrt (q : Rat) : Nat :=
+  let n := q.ceil.toNat
+  let s := Nat.sqrt n
+  if s * s < n then s + 1 else s
+
+/-- Number of samples to keep along an axis of `n` samples whose device length is `√len2`:
+`⌈√len2⌉` (at least 1) when that is fewer, else `n`. -/
+def targetSide (len2 : Rat) (n : Nat) : Nat :=
+  if len2 < (n : Rat) * n then max 1 (min n (ceilSqrt len2)) else n
 
 /-! ### Reduced-size decoding of downscaled JPEGs (task 7.10) -/
 
@@ -964,31 +1315,86 @@ two samples per pixel for the box filter while still bounding the decode (an ima
 got slightly worse (`arxiv-1105.2345` p8 0.78% → 1.08%); see `docs/raster.md`. -/
 def dctScale (l : Nat) : Nat := min 3 (l - 1)
 
-/-- The squared device extents `(a² + b², c² + d²)` of an image drawn with `ctm` at `zoom`
-(the view's linear part is `zoom` times a rotation by a multiple of 90° and a flip, which
-preserve these lengths). -/
-def extentOf (zoom : Rat) (ctm : Matrix) : Rat × Rat :=
-  let a := Geom.Fixed.toRat ctm.a
-  let b := Geom.Fixed.toRat ctm.b
-  let c := Geom.Fixed.toRat ctm.c
-  let d := Geom.Fixed.toRat ctm.d
-  (zoom * zoom * (a * a + b * b), zoom * zoom * (c * c + d * d))
+/-- **How an image is drawn on a page** (tasks 7.10, 8.6), over all its uses: the largest
+squared device extents `q = (a² + b², c² + d²)` of its device matrices (MuPDF's `l2factor`, for
+JPEG reduced-size decoding) and the largest placement targets `t = (⌈√…⌉, ⌈√…⌉)` of the
+grid-fitted device matrices (the sizes `place` box-filters the image to, `targetSide`). -/
+structure Extent where
+  /-- Largest squared extents along the image's x and y axes. -/
+  q : Rat × Rat
+  /-- Largest placement targets (device pixels, before clamping to the image size). -/
+  t : Nat × Nat
+  deriving Repr, BEq
 
-/-- **Device extents of the image XObjects of a page** for reduced-size decoding: for each
-`(num, gen)` drawn in `items` (page content and annotations, inside soft masks too, `depth`
-levels) the largest squared extents over its uses (a reduced decode must serve the largest
-use: the factor is monotone in both). Images also drawn in `fixed` (tiling cells, Type 3
-glyphs, whose matrices are not page matrices) are left out, i.e. decoded at full size. -/
-def imageExtents (depth : Nat) (zoom : Rat) (items fixed : DisplayList) :
-    List ((Nat × Nat) × (Rat × Rat)) :=
-  let used := Content.DisplayList.foldDeep (fun (acc : List ((Nat × Nat) × (Rat × Rat))) it =>
+/-- The extent of one use with device matrix `dev` (image space → device). -/
+def Extent.ofDev (dev : Aff) : Extent :=
+  let g := gridfit dev
+  { q := (dev.a * dev.a + dev.b * dev.b, dev.c * dev.c + dev.d * dev.d),
+    t := (ceilSqrt (g.a * g.a + g.b * g.b), ceilSqrt (g.c * g.c + g.d * g.d)) }
+
+/-- The extent serving two uses: componentwise maxima. -/
+def Extent.max (a b : Extent) : Extent :=
+  { q := (Max.max a.q.1 b.q.1, Max.max a.q.2 b.q.2), t := (Max.max a.t.1 b.t.1, Max.max a.t.2 b.t.2) }
+
+/-- **The JPEG reduction** of an `iw × ih` image drawn with extent `e` (`none`: unknown, full
+size): `dctScale (l2Factor …)` (task 7.10). -/
+def scaleFor (iw ih : Nat) : Option Extent → Nat
+  | some e => dctScale (l2Factor iw ih e.q.1 e.q.2)
+  | none => 0
+
+/-- `DeviceGray`, the colour space of soft-mask images. -/
+def grayInfo : CSInfo := .dev .gray (.gray Comp.zero)
+
+/-- **Load a mask image** (`/SMask` when `soft`, else a `/Mask` stream) from its reference, as
+a `Src` (task 8.6: converted row by row with its image) — decoded through the source like an
+image XObject: a soft mask as `DeviceGray` with its own `/Decode` (the mask value is channel 0;
+`/BitsPerComponent` required), an explicit mask as an `/ImageMask` stencil (`/Decode`
+honoured, coverage in channel 3: sample 0 paints) — plus a soft mask's `/Matte` components; a
+`/DCTDecode` mask goes through `dctSrc` (full size, as before). `none` for anything else (not a
+stream, another image codec, a decode error): the image is then drawn unmasked. -/
+def loadMask {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (soft : Bool) :
+    Option PdfObject → Option (Src × Option (List Fixed)) × σ
+  | some (.ref n g) =>
+    match src.fetch s n g with
+    | (.ok (.stream st), s) =>
+      let dct := dctSplit limits st.dict
+      if hasCodec limits st.dict ∧ dct.isNone then (none, s) else
+      let (p, s) := imgDictOf src s st.dict
+      let (mt, s) := entry src s st.dict "Matte"
+      let matte : Option (List Fixed) := match mt with
+        | some (.array xs) => if soft then xs.mapM Content.Interp.num? else none
+        | _ => none
+      if soft ∧ p.bpc.isNone then (none, s) else
+      let p := { p with mask := !soft, key := none }
+      let st' := match dct with
+        | some (d', _) => { st with dict := d' }
+        | none => st
+      match src.decode s n st' with
+      | (.ok bytes, s) =>
+        let r := match dct with
+          | some (_, parms) => dctSrc limits p (some grayInfo) parms bytes
+          | none => srcOf limits p (some grayInfo) bytes
+        match r with
+        | .ok m => (some (m, matte), s)
+        | .error _ => (none, s)
+      | (.error _, s) => (none, s)
+    | (_, s) => (none, s)
+  | _ => (none, s)
+
+/-- **Device extents of the image XObjects of a page**: for each `(num, gen)` drawn in
+`items` (page content and annotations, inside soft masks too, `depth` levels) the `Extent`
+serving all its uses (through `view`, the page → device matrix the items are rendered with;
+the reductions are monotone in it). Images also drawn in `fixed` (tiling cells, Type 3 glyphs,
+whose matrices are not page matrices) are left out, i.e. decoded at full size. -/
+def imageExtents (depth : Nat) (view : Aff) (items fixed : DisplayList) :
+    List ((Nat × Nat) × Extent) :=
+  let used := Content.DisplayList.foldDeep (fun (acc : List ((Nat × Nat) × Extent)) it =>
     match it with
     | .image (.xobject _ n g) ctm _ _ =>
-      let (qw, qh) := extentOf zoom ctm
+      let e := Extent.ofDev (Aff.ofMatrix ctm * view)
       match acc.find? (·.1 == (n, g)) with
-      | some (_, (w0, h0)) =>
-        acc.map fun e => if e.1 == (n, g) then (e.1, (max w0 qw, max h0 qh)) else e
-      | none => ((n, g), (qw, qh)) :: acc
+      | some (_, e0) => acc.map fun x => if x.1 == (n, g) then (x.1, e0.max e) else x
+      | none => ((n, g), e) :: acc
     | _ => acc) depth [] items
   let excl := Content.DisplayList.foldDeep (fun (acc : List (Nat × Nat)) it =>
     match it with
@@ -996,15 +1402,33 @@ def imageExtents (depth : Nat) (zoom : Rat) (items fixed : DisplayList) :
     | _ => acc) depth [] fixed
   used.filter fun e => !excl.contains e.1
 
+/-- **The pixmap of an image `Src` with its mask**: on the grid of both (`gridOf`, at most
+`maxDecodedStreamBytes / 4` pixels), box-filtered to the drawn-size target (`fitTarget`), the
+mask's channel `ch` multiplying the alpha, `/Matte` un-premultiplied (`fused`). A stencil image
+is unmasked. -/
+def maskedPixmap (limits : Limits) (img : Src) (mk : Option (Src × Nat))
+    (matte : Option (Nat × Nat × Nat)) (tgt : Option (Nat × Nat)) : Except Error Pixmap :=
+  let mk := if img.stencil then none else mk
+  let matte := if mk.isSome then matte else none
+  let g := gridOf (limits.maxDecodedStreamBytes / 4) img mk
+  let t := fitTarget limits.maxDecodedStreamBytes g.1 g.2 tgt
+  if limits.maxDecodedStreamBytes < 4 * t.1 * t.2 then .error (.limitExceeded .decodedStreamBytes)
+  else .ok (fused img mk matte g.1 g.2 t.1 t.2)
+
 /-- **Decode an image XObject** `num gen` through the source (its filters, the session
-budget); `/DCTDecode` through `decodeDCTOr`, `/CCITTFaxDecode` through `decodeCCITTOr`, any other image codec yields the placeholder. Its `/SMask` (else its `/Mask` stream) is
-loaded and applied (`applyMasks`); a soft mask disables colour-key masking (§8.9.6.4).
-`ext` (task 7.10): the image's largest squared device extents on the page (`imageExtents`);
-a JPEG is then decoded at `1 / 2^k` of its size, `k = dctScale (l2Factor …)` (libjpeg
-scales by at most 8; the rest of the reduction is left to the placement's area-averaging
-downscale), except when its soft mask has a `/Matte` (MuPDF decodes those at full size). -/
+budget); `/DCTDecode` through `dctSrc`, `/CCITTFaxDecode` through `ccittSrc` (their errors,
+and any other image codec, yield the grey placeholder), other data through `srcOf`. Its
+`/SMask` (else its `/Mask` stream) is loaded (`loadMask`) and applied (`maskedPixmap`); a soft
+mask disables colour-key masking (§8.9.6.4); `/Matte` un-premultiplies the colours (converted
+through the image's colour space).
+`ext` (tasks 7.10, 8.6): how the image is drawn on the page (`imageExtents`). A JPEG is decoded
+at `1 / 2^k` of its size, `k = scaleFor …` (MuPDF's `l2factor`, one step less), except when its
+soft mask has a `/Matte` (MuPDF decodes those at full size); then **every image** is converted
+row by row and box-filtered to its placement target while decoding (`fused`), the pixels the
+placement would have produced from the full pixmap. A decode over `maxDecodedStreamBytes` is
+retried smaller (`dctSrc`, `fitTarget`). -/
 def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named : List (Name × CSInfo))
-    (num gen : Nat) (ext : Option (Rat × Rat) := none) : Except Error Pixmap × σ :=
+    (num gen : Nat) (ext : Option Extent := none) : Except Error Pixmap × σ :=
   match src.fetch s num gen with
   | (.ok (.stream st), s) =>
     let (p, s) := imgDictOf src s st.dict
@@ -1014,29 +1438,38 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
     let (mk, s) := if p.mask ∨ sm.isSome then (none, s)
       else loadMask limits src s false (Dict.get? st.dict (Content.Run.nm "Mask"))
     let p := if sm.isSome then { p with key := none } else p
-    let fin := applyMasks limits.maxImagePixels info sm mk
+    let mask : Option (Src × Nat) := match sm, mk with
+      | some (m, _), _ => some (m, 0)
+      | none, some (m, _) => some (m, 3)
+      | none, none => none
+    let matte : Option (Nat × Nat × Nat) := match sm, info with
+      | some (_, some ms), some i => some (Clip.deviceRGB (i.color ms))
+      | _, _ => none
+    let tgt := ext.map (·.t)
+    let fin := fun (img : Src) => maskedPixmap limits img mask matte tgt
+    let orGrey := fun (r : Except Error Src) => match r with
+      | .ok i => i
+      | .error _ => Src.grey
     match dctSplit limits st.dict with
     | some (d', parms) =>
-      let matte := match sm with
+      let hasMatte := match sm with
         | some (_, some _) => true
         | _ => false
-      let scale := match ext with
-        | some (qw, qh) => if matte then 0 else dctScale (l2Factor p.w p.h qw qh)
-        | none => 0
+      let k := if hasMatte then 0 else scaleFor p.w p.h ext
       match src.decode s num { st with dict := d' } with
-      | (.ok bytes, s) => (.ok (fin (decodeDCTOr limits p info parms bytes scale)), s)
+      | (.ok bytes, s) => (fin (orGrey (dctSrc limits p info parms bytes k)), s)
       | (.error e, s) => (.error e, s)
     | none =>
     match ccittSplit limits st.dict with
     | some (d', parms) =>
       let (parms, s) := resolveDict src s parms
       match src.decode s num { st with dict := d' } with
-      | (.ok bytes, s) => (.ok (fin (decodeCCITTOr limits p info parms bytes)), s)
+      | (.ok bytes, s) => (fin (orGrey (ccittSrc limits p info parms bytes)), s)
       | (.error e, s) => (.error e, s)
     | none =>
-    if hasCodec limits st.dict then (.ok (fin placeholder), s) else
+    if hasCodec limits st.dict then (fin Src.grey, s) else
     match src.decode s num st with
-    | (.ok bytes, s) => ((decodePixmap limits p info bytes).map fin, s)
+    | (.ok bytes, s) => ((srcOf limits p info bytes).bind fin, s)
     | (.error e, s) => (.error e, s)
   | (.ok (.obj _), s) => (.error (.malformed 0 "image XObject is not a stream"), s)
   | (.error e, s) => (.error e, s)
@@ -1044,26 +1477,30 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
 /-- **Decode an inline image** (`BI … ID … EI`): parameters already abbreviation-expanded
 (5.2b), raw data decoded with `Filter.decodeStream` (bounded by
 `Limits.maxDecodedStreamBytes`); named colour spaces from `named`. Pure: inline images hold
-no references. -/
+no references. `ext` (task 8.6): how this use draws it (an inline image is drawn once,
+`inlineExt`): a JPEG at its `scaleFor` reduction, every image box-filtered to its placement
+target while decoding. -/
 def decodeInline (limits : Limits) (named : List (Name × CSInfo)) (params : Dict)
-    (raw : ByteArray) : Except Error Pixmap :=
+    (raw : ByteArray) (ext : Option Extent := none) : Except Error Pixmap :=
   if hasCodec limits params ∧ (dctSplit limits params).isNone ∧ (ccittSplit limits params).isNone
   then .ok placeholder else
   let p := (imgDictOf Source.empty () params).1
   let info := (csOf Source.empty () named p.cs).1
+  let tgt := ext.map (·.t)
   match Filter.decodeStream limits params raw with
-  | .ok (.data b) => decodePixmap limits p info b
-  | .ok (.image .dct parms b) => .ok (decodeDCTOr limits p info parms b)
-  | .ok (.image .ccitt parms b) => .ok (decodeCCITTOr limits p info parms b)
+  | .ok (.data b) => decodePixmap limits p info b tgt
+  | .ok (.image .dct parms b) => .ok (decodeDCTOr limits p info parms b (scaleFor p.w p.h ext) tgt)
+  | .ok (.image .ccitt parms b) => .ok (decodeCCITTOr limits p info parms b tgt)
   | .ok (.image ..) => .ok placeholder
   | .error e => .error e
 
 /-! ## 7. Per-page image table -/
 
 /-- Maximum number of decoded image pixels held for one page (all XObjects together; each
-pixel is 4 bytes, so 1 GiB). Further XObjects are drawn as the placeholder. A local cap
-(no `Limits` field yet). -/
-def maxPageImagePixels : Nat := 1 <<< 28
+pixel is 4 bytes, so 256 MiB; task 8.6, was 1 GiB). An XObject is decoded under what is left
+of it (`ImageTable.add`: reduced to fit when needed); once it is spent, further XObjects are
+drawn as the placeholder. A local cap (no `Limits` field yet). -/
+def maxPageImagePixels : Nat := 1 <<< 26
 
 /-- The images of a page, decoded before rendering. -/
 structure ImageTable where
@@ -1089,12 +1526,19 @@ def namedSpaces {σ : Type} (src : Source σ) (s : σ) (res : Dict) : List (Name
       | (some i, s) => ((kv.1, i) :: acc.1, s)
       | (none, s) => (acc.1, s)) ([], s)
 
-/-- Add image XObject `num gen` to the table (once); `exts` as in `loadImages`. -/
+/-- Add image XObject `num gen` to the table (once); `exts` as in `loadImages`. The image is
+decoded with `maxDecodedStreamBytes` lowered to the RGBA bytes left of the page's
+`maxPageImagePixels` (task 8.6), so it is reduced to fit rather than replaced; with nothing
+left it is the placeholder. -/
 def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num gen : Nat)
-    (exts : List ((Nat × Nat) × (Rat × Rat)) := []) : ImageTable × σ :=
+    (exts : List ((Nat × Nat) × Extent) := []) : ImageTable × σ :=
   let t := acc.1
   if t.xobjs.any (·.1 == (num, gen)) then acc else
-  let (r, s) := loadXObject t.limits src acc.2 t.named num gen
+  if maxPageImagePixels ≤ t.pixels then
+    ({ t with xobjs := ((num, gen), some placeholder) :: t.xobjs }, acc.2) else
+  let lim := { t.limits with
+    maxDecodedStreamBytes := min t.limits.maxDecodedStreamBytes (4 * (maxPageImagePixels - t.pixels)) }
+  let (r, s) := loadXObject lim src acc.2 t.named num gen
     ((exts.find? (·.1 == (num, gen))).map (·.2))
   match r with
   | .ok pm =>
@@ -1110,18 +1554,21 @@ first-use order), including images inside soft-mask groups (`DisplayList.foldDee
 7.10, `imageExtents`): device extents for reduced-size JPEG decoding; images not listed are
 decoded at full size. -/
 def loadImages {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict)
-    (items : DisplayList) (exts : List ((Nat × Nat) × (Rat × Rat)) := []) : ImageTable × σ :=
+    (items : DisplayList) (exts : List ((Nat × Nat) × Extent) := []) : ImageTable × σ :=
   let (named, s) := namedSpaces src s res
   Content.DisplayList.foldDeep (fun acc it =>
     match it with
     | .image (.xobject _ n g) _ _ _ => ImageTable.add src acc n g exts
     | _ => acc) limits.maxXObjectDepth ({ limits, named }, s) items
 
-/-- The pixmap of an image source (`none`: nothing to draw). Inline images are decoded here. -/
-def ImageTable.pixmap (t : ImageTable) : ImageSource → Option Pixmap
+/-- The pixmap of an image source (`none`: nothing to draw). Inline images are decoded here,
+reduced for the squared device extents `ext` of this use (task 8.6). -/
+def ImageTable.pixmap (t : ImageTable) (src : ImageSource) (ext : Option Extent := none) :
+    Option Pixmap :=
+  match src with
   | .xobject _ n g => ((t.xobjs.find? (·.1 == (n, g))).map (·.2)).join
   | .inline params data =>
-    match decodeInline t.limits t.named params data with
+    match decodeInline t.limits t.named params data ext with
     | .ok pm => some pm
     | .error _ => none
 
@@ -1149,45 +1596,6 @@ theorem putPx_size (buf : ByteArray) (j r g b a : Nat) : (putPx buf j r g b a).s
   · split <;> simp only [Clip.setB_size]
 
 /-! ### Area-averaging downscale -/
-
-/-- Running sums over a block of pixels: alpha-weighted colour and alpha. -/
-structure Acc where
-  /-- `Σ r · a`. -/
-  r : Nat
-  /-- `Σ g · a`. -/
-  g : Nat
-  /-- `Σ b · a`. -/
-  b : Nat
-  /-- `Σ a`. -/
-  a : Nat
-
-/-- Add `n` pixels from byte offset `i` to the sums. -/
-def blockRow (d : ByteArray) : (n i r g b a : Nat) → Acc
-  | 0, _, r, g, b, a => ⟨r, g, b, a⟩
-  | n + 1, i, r, g, b, a =>
-    let al := rd d (i + 3)
-    blockRow d n (i + 4) (r + rd d i * al) (g + rd d (i + 1) * al) (b + rd d (i + 2) * al)
-      (a + al)
-
-/-- Add `k` rows of `n` pixels (row stride `rs` bytes) from byte offset `i` to the sums. -/
-def blockSum (d : ByteArray) (n rs : Nat) : (k i : Nat) → Acc → Acc
-  | 0, _, s => s
-  | k + 1, i, s => blockSum d n rs k (i + rs) (blockRow d n i s.r s.g s.b s.a)
-
-/-- Push the average of a block of `cnt` pixels: colour weighted by alpha (straight colour of
-the premultiplied average), alpha averaged. -/
-def pushAvg (acc : ByteArray) (s : Acc) (cnt : Nat) : ByteArray :=
-  if s.a = 0 then (((acc.push 0).push 0).push 0).push 0
-  else
-    (((acc.push (u8 ((s.r + s.a / 2) / s.a))).push
-      (u8 ((s.g + s.a / 2) / s.a))).push
-      (u8 ((s.b + s.a / 2) / s.a))).push
-      (u8 ((s.a + cnt / 2) / max cnt 1))
-
-/-- `pushAvg` pushes four bytes. -/
-theorem pushAvg_size (acc : ByteArray) (s : Acc) (cnt : Nat) :
-    (pushAvg acc s cnt).size = acc.size + 4 := by
-  unfold pushAvg; split <;> simp [ByteArray.size_push]
 
 /-- One output row of the box filter: output columns `ox, ox + 1, …` (`fuel` of them), each
 the average of source columns `[ox · sw / tw, (ox + 1) · sw / tw)` of source rows
@@ -1235,44 +1643,6 @@ def boxDown (pm : Pixmap) (tw th : Nat) : Pixmap :=
     h := th
     data := boxRows pm.data pm.w pm.h tw th th 0 (ByteArray.emptyWithCapacity (4 * tw * th))
     size_eq := by rw [boxRows_size]; exact Nat.zero_add _ }
-
-/-! ### Device geometry: grid fitting, sizes, fixed point -/
-
-/-- MuPDF's grid-fitting tolerance (`MY_EPSILON`, device pixels). -/
-def gridEps : Rat := 1 / 1000
-
-/-- Snap down to a pixel boundary, unless within `gridEps` below the next one. -/
-def snapLo (x : Rat) : Rat := if (x.ceil : Rat) - x ≤ gridEps then x.ceil else x.floor
-
-/-- Snap up to a pixel boundary, unless within `gridEps` above the previous one. -/
-def snapHi (x : Rat) : Rat := if x - (x.floor : Rat) ≤ gridEps then x.floor else x.ceil
-
-/-- Origin `e` and extent `a` of one axis, expanded outward to whole pixels. -/
-def snapSpan (e a : Rat) : Rat × Rat :=
-  if 0 < a then let l := snapLo e; (l, snapHi (e + a) - l)
-  else if a < 0 then let r := snapHi e; (r, snapLo (e + a) - r)
-  else (e, a)
-
-/-- **Grid fitting** (MuPDF `fz_gridfit_matrix`, non-tiled): an axis-aligned image
-(`b = c = 0`) is expanded to cover every device pixel it touches, edges on pixel boundaries
-(within `gridEps`). Other matrices are unchanged. -/
-def gridfit (m : Aff) : Aff :=
-  if m.b = 0 ∧ m.c = 0 then
-    let x := snapSpan m.e m.a
-    let y := snapSpan m.f m.d
-    { m with a := x.2, e := x.1, d := y.2, f := y.1 }
-  else m
-
-/-- `⌈√q⌉` for `q ≥ 0`. -/
-def ceilSqrt (q : Rat) : Nat :=
-  let n := q.ceil.toNat
-  let s := Nat.sqrt n
-  if s * s < n then s + 1 else s
-
-/-- Number of samples to keep along an axis of `n` samples whose device length is `√len2`:
-`⌈√len2⌉` (at least 1) when that is fewer, else `n`. -/
-def targetSide (len2 : Rat) (n : Nat) : Nat :=
-  if len2 < (n : Rat) * n then max 1 (min n (ceilSqrt len2)) else n
 
 /-- `q` in fixed point (32 fractional bits), clamped to `±lim`. -/
 def toFix (q : Rat) (lim : Int) : Int64 :=
@@ -1591,6 +1961,14 @@ theorem place_steps_le (cap W H : Nat) (pm : Pixmap) (dev : Aff) (cm : Option Ma
 
 /-! ## 9. Display items -/
 
+/-- The `Extent` of an inline image drawn with the device matrix `dev` (task 8.6: inline images
+are decoded at their drawn size per use); `none` for XObjects (reduced once per page through
+`imageExtents`). -/
+def inlineExt (src : ImageSource) (dev : Aff) : Option Extent :=
+  match src with
+  | .inline .. => some (Extent.ofDev dev)
+  | .xobject .. => none
+
 /-- **Paint one image item** (`DisplayItem.image src ctm fill clip`) on a `W × H` page through
 the page → device matrix `m`: the clip mask from `Clip.clipMaskC` (cached), the pixmap from
 `tbl` (inline images decoded here), placed with `CTM × m` (`place`, smooth; downscale cap
@@ -1598,7 +1976,7 @@ the page → device matrix `m`: the clip mask from `Clip.clipMaskC` (cached), th
 Nothing is drawn for an image that failed to decode. -/
 def renderImage (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTable) (st : Clip.RState)
     (src : ImageSource) (ctm : Matrix) (fill : FillStyle) (clip : Clip) : Clip.RState :=
-  match tbl.pixmap src with
+  match tbl.pixmap src (inlineExt src (Aff.ofMatrix ctm * m)) with
   | none => st
   | some pm =>
     let c := Clip.clipMaskC cfg m W H st.cache clip
