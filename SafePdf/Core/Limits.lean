@@ -120,6 +120,11 @@ structure Limits where
   uncached), so it never changes the output and no `LimitKind` corresponds to it. Memory:
   at most `clipCacheSize` masks of at most one page each. -/
   clipCacheSize : Nat := 16
+  /-- Maximum marked-content nesting (`BMC`/`BDC` … `EMC`, ISO 32000-2 §14.6) the interpreter
+  tracks per content stream (task 6.8d, `Interp.markOp`). Deeper sequences are only counted
+  (so their `EMC`s still match) and their `/ActualText` is ignored; no `LimitKind`
+  corresponds to it (never an error). -/
+  maxMarkedDepth : Nat := 256
   deriving Repr, Inhabited
 
 namespace Limits

@@ -28,6 +28,14 @@ Stdlib only, deterministic (no compression). The generated PDFs are the test inp
                Page 2: the NTSB cover layout, MediaBox [0 0 792 1224], CropBox
                [0 0 792 612], /Rotate -90, text drawn downwards (Tm 0 -1 1 0) both above
                the CropBox (a mailing panel, dropped) and inside it (the title, kept).
+* actualtext.pdf one page of /ActualText marked content (task 6.8d; MuPDF's structured-text
+               device replaces the glyphs inside a /Span << /ActualText ... >> BDC ... EMC by
+               the ActualText characters at the glyphs' positions): an NTSB dot leader (a
+               space carrying '.', then the dots), ActualText spanning two Tj, fewer and
+               more characters than glyphs (extra glyphs dropped, extra characters at the
+               pen), an empty ActualText (glyphs dropped), nested ActualText, a /Properties
+               resource name, a UTF-16 ligature, ordinary marked content with a stray EMC,
+               and a sequence left open at the end of the page.
 """
 
 import os
@@ -195,6 +203,39 @@ def offpage():
     ])
 
 
+ACTUAL = (
+    b"BT /F1 1 Tf 12 0 0 12 72 700 Tm (Contents) Tj\n"
+    b"/Span<</ActualText<FEFF002E>>> BDC 12 0 0 12 125.36 700 Tm ( )Tj EMC\n"
+    b"0.167 0 Td (..........) Tj ET\n"
+    b"BT /F1 12 Tf 72 686 Td (Two shows: ) Tj\n"
+    b"/Span <</ActualText (ab)>> BDC (x) Tj (y) Tj EMC ( end) Tj ET\n"
+    b"BT /F1 12 Tf 72 672 Td (Fewer: ) Tj /Span <</ActualText (k)>> BDC (xyz) Tj EMC ET\n"
+    b"BT /F1 12 Tf 72 658 Td (More: ) Tj /Span <</ActualText (klm)>> BDC (x) Tj EMC\n"
+    b"( after) Tj ET\n"
+    b"BT /F1 12 Tf 72 644 Td (Empty:) Tj /Span <</ActualText ()>> BDC (!) Tj EMC\n"
+    b"(kept) Tj ET\n"
+    b"BT /F1 12 Tf 72 630 Td (Nested: ) Tj /Span <</ActualText (OUTER)>> BDC\n"
+    b"/Span <</ActualText (in)>> BDC (zz) Tj EMC (w) Tj EMC ET\n"
+    b"BT /F1 12 Tf 72 616 Td (Named: ) Tj /Span /MC0 BDC (q) Tj EMC ET\n"
+    b"BT /F1 12 Tf 72 602 Td (Ligature: ) Tj /Span <</ActualText <FEFFFB01>>> BDC (f) Tj EMC\n"
+    b"(ne) Tj ET\n"
+    b"/P <</MCID 1>> BDC /Artifact BMC BT /F1 12 Tf 72 588 Td (Plain marked) Tj ET EMC EMC EMC\n"
+    b"BT /F1 12 Tf 72 574 Td (Open: ) Tj /Span <</ActualText (xyz)>> BDC (w) Tj ET\n"
+)
+
+
+def actualtext():
+    return pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+        b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << "
+        b"/F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> "
+        b">> /Properties << /MC0 5 0 R >> >> >>",
+        stream(ACTUAL),
+        b"<< /ActualText (Q) >>",
+    ])
+
+
 def main(argv):
     if len(argv) != 2:
         print(__doc__)
@@ -202,7 +243,8 @@ def main(argv):
     out = argv[1]
     os.makedirs(out, exist_ok=True)
     for name, data in (("latin.pdf", latin()), ("unicode.pdf", unicode_()),
-                       ("lineseps.pdf", lineseps()), ("offpage.pdf", offpage())):
+                       ("lineseps.pdf", lineseps()), ("offpage.pdf", offpage()),
+                       ("actualtext.pdf", actualtext())):
         with open(os.path.join(out, name), "wb") as fh:
             fh.write(data)
         print("wrote %s (%d bytes)" % (os.path.join(out, name), len(data)))

@@ -95,6 +95,9 @@ never an error (M5: the interpreter never fails).
   space); `Lab` shows `L*/100` as gray. Initial colours follow §8.6: index 0, tint 1, `L* = 0`;
   an `ICCBased` space with 4 components starts at `(0, 0, 0, 0)`. An unresolvable resource
   name keeps 5.2a's behaviour (`.other name 0 .gray`) and adds a warning.
+* **`BDC` property lists** (task 6.8d, §14.6.2): a `/Properties` resource name is looked up in
+  the current frame and handed to `exec` as an inline dictionary (`bdcStep`, `bdcProps`; an
+  indirect `/ActualText` value is fetched), so `exec`'s `/ActualText` handling sees both forms.
 * **Resource annotation** (task 7.3f): every item a step emits is annotated in the current
   frame (`annotItem`), so consumers resolve resources without the page's resources: an `sh`
   records its `ResRef` (`resRefOf`: the indirect object, or the owner form `num gen` of a
@@ -834,6 +837,37 @@ def scStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (stroke : Bool) (m : Ma
     (op : Op) : Local σ :=
   scStepIn env fr stroke (if stroke then m.core.gs.strokeSpace else m.core.gs.fillSpace) m s op
 
+/-- The property list of `BDC` with its `/ActualText` resolved (task 6.8d): an inline
+dictionary, or a `/Properties` resource name (ISO 32000-2 §14.6.2) looked up in the current
+frame; an indirect `/ActualText` value is fetched. `none` when the operands are not
+`/Tag dict-or-name` or the name is not a dictionary resource. -/
+def bdcProps {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (o : List PdfObject) :
+    Option (Name × Dict) × σ :=
+  let withText (tag : Name) (d : Dict) (s : σ) : Option (Name × Dict) × σ :=
+    match Dict.get? d (nm "ActualText") with
+    | some (.ref n g) =>
+      let (v, s) := resolve src s (.ref n g)
+      (some (tag, (nm "ActualText", v) :: d), s)
+    | _ => (some (tag, d), s)
+  match lastN 2 o with
+  | some [.name tag, .dict d] => withText tag d s
+  | some [.name tag, .name p] =>
+    match resEntry src s fr.res "Properties" p with
+    | (some e, s) =>
+      match resolve src s e with
+      | (.dict d, s) => withText tag d s
+      | (_, s) => (none, s)
+    | (none, s) => (none, s)
+  | _ => (none, s)
+
+/-- `BDC`: `exec` sees the property list as an inline dictionary (`bdcProps`), so a
+`/Properties` resource carries its `/ActualText` like an inline one. -/
+def bdcStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    Local σ :=
+  match bdcProps env.src s fr op.operands with
+  | (some (tag, d), s) => viaExec env.cfg m s { op with operands := [.name tag, .dict d] }
+  | (none, s) => viaExec env.cfg m s op
+
 /-- Every operator but `Do`. -/
 def localStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
     Local σ :=
@@ -846,6 +880,7 @@ def localStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : �
   | [83, 67, 78] => scStep env fr true m s op       -- SCN
   | [115, 99] => scStep env fr false m s op         -- sc
   | [115, 99, 110] => scStep env fr false m s op    -- scn
+  | [66, 68, 67] => bdcStep env fr m s op           -- BDC
   | _ => viaExec env.cfg m s op
 
 /-- A form to expand: object number, operators, tokenizer warnings, resources, the graphics
@@ -1287,6 +1322,10 @@ theorem localStep_bound {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machi
   · exact hsc true s
   · exact hsc false s
   · exact hsc false s
+  · unfold bdcStep
+    split
+    · exact viaExec_bound env.cfg m _ _
+    · exact viaExec_bound env.cfg m _ _
   · exact viaExec_bound env.cfg m s op
 
 /-- The bound invariant with slack `k`: items, plus `1` for a pending clip, plus `k`, are at

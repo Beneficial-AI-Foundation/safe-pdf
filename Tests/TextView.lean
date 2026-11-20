@@ -19,6 +19,12 @@ Phase 6, M6 row of the MVP / visibility track):
 
 `SAFEPDF_GOLDEN_UPDATE=1` regenerates.
 
+Task 6.8d (`/ActualText`): `actualtext.pdf` covers a dot leader whose space carries '.', an
+ActualText spanning two shows, fewer and more characters than glyphs, an empty ActualText,
+nesting, a `/Properties` resource name, a UTF-16 ligature, plain marked content with a stray
+`EMC` and a sequence left open; besides its golden file, its page text must equal MuPDF's
+(`actualTextFailures`).
+
 Task 6.12 (text of encrypted files): `enc-plain.pdf` is one page with a Helvetica font with
 `/Differences`, a Type0 font with a FlateDecode `/ToUnicode` stream, a TrueType font whose
 widths come from its FlateDecode `/FontFile2` (`Tests/fonts/tiny.ttf`), a form XObject with its
@@ -114,6 +120,45 @@ def adversarialFailures : IO Nat := do
     n := n + 1
   return n
 
+/-- Task 6.8d: the page text of `actualtext.pdf` (`/ActualText` marked content) is exactly
+what MuPDF 1.25.1 prints (`mutool draw -F txt`, trailing blank lines removed), and differs from
+the text of the bare glyphs. -/
+def actualTextMuPDF : String :=
+  "Contents ...........\nTwo shows: ab end\nFewer: k\nMore: klm after\nEmpty: kept\n" ++
+  "Nested: inOUTER\nNamed: Q\nLigature: fine\nPlain marked\nOpen: xyz"
+
+/-- Task 6.8d: `actualtext.pdf` against `actualTextMuPDF`; the raw glyphs (`PageText.glyphs`)
+keep the shown code's own text (C3), the shown glyphs carry the ActualText. -/
+def actualTextFailures : IO Nat := do
+  let bytes ← IO.FS.readBinFile (dir / "actualtext.pdf")
+  let l := Limits.default
+  match SafePdf.Shell.Views.Pages.docOf l (SafePdf.parseWith l bytes) with
+  | .error _ =>
+    IO.println "  FAIL text view: actualtext.pdf does not open"
+    return 1
+  | .ok doc =>
+    match doc.pages[0]? with
+    | none =>
+      IO.println "  FAIL text view: actualtext.pdf has no page"
+      return 1
+    | some page =>
+      match (SafePdf.Core.Text.extractDocPage l doc page (SafePdf.Core.Filter.Budget.init l)).1 with
+      | .error _ =>
+        IO.println "  FAIL text view: actualtext.pdf page 1 does not extract"
+        return 1
+      | .ok pt =>
+        let raw := String.join (pt.glyphs.map (·.text))
+        let mut n := 0
+        if pt.text != actualTextMuPDF then
+          IO.println s!"  FAIL text view: actualtext.pdf text {repr pt.text}"
+          n := n + 1
+        -- the bare glyphs still read "( )" for the leader and "(xy)" for the two shows
+        if !((raw.splitOn "Contents ..........").length == 2 &&
+            (raw.splitOn "Two shows: xy end").length == 2) then
+          IO.println s!"  FAIL text view: actualtext.pdf raw glyphs {repr raw}"
+          n := n + 1
+        return n
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let jf := jsonEscapeFailures
@@ -134,6 +179,7 @@ def run : IO Nat := do
   else IO.println s!"  text view: {c.cases} case(s), {c.failures} failure(s)"
   let ef ← encryptedFailures
   let af ← adversarialFailures
-  return c.failures + jf + ef + af
+  let atf ← actualTextFailures
+  return c.failures + jf + ef + af + atf
 
 end SafePdf.Tests.TextView
