@@ -37,6 +37,11 @@ Task 4.6 adds variants (build options, see SETUPS):
                           13 a stream with /Filter [/Crypt /FlateDecode] and the named crypt
                           filter /AltCF (/CFM /V2, RC4), encrypted with RC4 although /StmF is
                           AESV2.
+  direct-rc4-128.pdf, direct-aesv2.pdf, direct-aesv3.pdf (task 9.5e2)
+                          as rc4-128.pdf / aesv2.pdf (/EncryptMetadata false) / aesv3.pdf,
+                          but with a CLASSIC xref table whose trailer holds /Encrypt as a
+                          DIRECT dictionary; no object stream (object 6 is an ordinary
+                          object with an encrypted /Kind), no objects 7, 8, 9.
   sig-aesv2.pdf           as aesv2.pdf (/EncryptMetadata true), but the catalog has a
                           usage-rights signature /Perms << /UR3 << /ByteRange [...]
                           /Contents <...> /M (...) >> >> without /Type, as on USCIS forms:
@@ -286,12 +291,13 @@ class Crypt:
 
     def __init__(self, name, v, r, bits, method, upw=b"", encrypt_metadata=True,
                  direct_encrypt=False, broken_startxref=False, encrypt_ref=9,
-                 length_in_objstm=False, sig_dict=False):
+                 length_in_objstm=False, sig_dict=False, classic=False):
         self.name, self.v, self.r, self.method = name, v, r, method
         self.broken_startxref = broken_startxref
         self.encrypt_ref = encrypt_ref
         self.length_in_objstm = length_in_objstm
         self.sig_dict = sig_dict
+        self.classic = classic
         self.encrypt_metadata = encrypt_metadata
         self.direct_encrypt = direct_encrypt
         self.n = bits // 8
@@ -376,7 +382,10 @@ def build(c):
     obj(5, b"<< /Title %s /Producer %s >>" % (hexs(c.enc(5, 0, TITLE)),
                                                hexs(c.enc(5, 0, b"generate.py"))))
     member = b"<< /Kind %s /N 6 >>" % hexs(KIND)
-    if c.length_in_objstm:
+    if c.classic:
+        # task 9.5e2: no object stream; object 6 is an ordinary (encrypted) object
+        obj(6, b"<< /Kind %s /N 6 >>" % hexs(c.enc(6, 0, KIND)))
+    elif c.length_in_objstm:
         member12 = b"%d" % len(content4)
         header = b"6 0 12 %d " % (len(member) + 1)
         objstm_plain = header + member + b" " + member12
@@ -385,9 +394,10 @@ def build(c):
         header = b"6 0 "
         objstm_plain = header + member
         n_objs = 1
-    stream(7, b"/Type /ObjStm /N %d /First %d /Filter /FlateDecode" % (n_objs, len(header)),
-           c.enc(7, 0, zlib.compress(objstm_plain, 9)))
-    types = {6: (2, 7, 0)}
+    if not c.classic:
+        stream(7, b"/Type /ObjStm /N %d /First %d /Filter /FlateDecode" % (n_objs, len(header)),
+               c.enc(7, 0, zlib.compress(objstm_plain, 9)))
+    types = {} if c.classic else {6: (2, 7, 0)}
     if c.length_in_objstm:
         types[12] = (2, 7, 1)
     if c.v >= 4:
@@ -405,6 +415,19 @@ def build(c):
     else:
         enc_entry = b"/Encrypt " + c.encrypt_dict()
     size = 14 if c.length_in_objstm else 12
+    if c.classic:
+        # task 9.5e2: a classic xref table; /Encrypt (direct here) in the `trailer` dictionary
+        xoff = len(buf)
+        buf.extend(b"xref\n0 %d\n" % size)
+        for i in range(size):
+            if i in offs:
+                buf.extend(b"%010d 00000 n\r\n" % offs[i])
+            else:
+                buf.extend(b"0000000000 %05d f\r\n" % (65535 if i == 0 else 0))
+        buf.extend(b"trailer\n<< /Size %d /Root 1 0 R /Info 5 0 R %s /ID [%s %s] >>\n" % (
+            size, enc_entry, hexs(c.id0), hexs(c.id1)))
+        buf.extend(b"startxref\n%d\n%%%%EOF\n" % xoff)
+        return bytes(buf)
     # xref stream: object 8, W [1 4 2], uncompressed
     off8 = len(buf)
     offs[8] = off8
@@ -443,6 +466,13 @@ SETUPS = [
     ("objstm-length-aesv2.pdf", dict(v=4, r=4, bits=128, method="aesv2",
                                      length_in_objstm=True)),
     ("sig-aesv2.pdf", dict(v=4, r=4, bits=128, method="aesv2", sig_dict=True)),
+    # task 9.5e2: classic xref table with a DIRECT /Encrypt dictionary in the trailer
+    ("direct-rc4-128.pdf", dict(v=2, r=3, bits=128, method="rc4", direct_encrypt=True,
+                                classic=True)),
+    ("direct-aesv2.pdf", dict(v=4, r=4, bits=128, method="aesv2", encrypt_metadata=False,
+                              direct_encrypt=True, classic=True)),
+    ("direct-aesv3.pdf", dict(v=5, r=6, bits=256, method="aesv3", direct_encrypt=True,
+                              classic=True)),
 ]
 
 

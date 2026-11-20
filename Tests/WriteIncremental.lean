@@ -37,7 +37,13 @@ page 1's annotation list is the old one without A (B in place) followed by D, th
 keys unchanged; B and C fetch exactly their new dictionaries; page 2 is not rewritten (C's
 reference is unchanged); `qpdf --check` (skipped without qpdf, probed by `qpdf --version`);
 for encrypted files no plaintext in the update; a third update on top (`writeAnnots`) keeps
-everything. Refusals: removing a reference that is not on the page, superseding a page
+everything.
+
+Direct trailer `/Encrypt` (task 9.5e2, `runDirect`, `Spec.Write.c7Value'`): the classic-xref
+fixtures `direct-rc4-128.pdf`, `direct-aesv2.pdf` (`/EncryptMetadata false`) and
+`direct-aesv3.pdf` go through all encrypted checks above, plus: the update's trailer carries
+`/Encrypt` verbatim, the result's decryption state equals the original's in every field
+(`sameState`), every object of the result fetches as planned or as before, `qpdf --check`. Refusals: removing a reference that is not on the page, superseding a page
 object, an object twice, a free or out-of-range number.
 
 Refusals: a document opened through the repair path (`Error.unsupported`, rule W1; also an
@@ -394,6 +400,80 @@ def runEdit (name : String) (bytes : ByteArray) (enc : Bool) : IO Nat := do
       if f == 0 then IO.println s!"  {ctx}: ok"
       return f
 
+/-- Fixtures with a **direct** `/Encrypt` dictionary in a classic trailer (task 9.5e2). -/
+def directEnc : List String := ["direct-rc4-128.pdf", "direct-aesv2.pdf", "direct-aesv3.pdf"]
+
+/-- Whether the trailer's `/Encrypt` entries of two documents are equal. -/
+def sameEncEntry (a b : Open.OpenDoc) : Bool :=
+  Dict.get? a.trailer.dict Xref.nameEncrypt == Dict.get? b.trailer.dict Xref.nameEncrypt
+
+/-- **Direct trailer `/Encrypt`** (task 9.5e2, `Spec.Write.c7Value'`): the original is
+encrypted with a direct `/Encrypt` (no encryption-dictionary object) and a classic xref table;
+`writeAnnots`, then a strict reopen: the update is a classic section whose trailer carries
+`/Encrypt` verbatim, the result's decryption state equals the original's in every field
+(`sameState`), and **every object** of the result's merged section fetches as planned (written
+objects) or exactly as in the original (all others). Also: `sameState` sees a changed
+`/EncryptMetadata` that `sameCrypt` does not. -/
+def runDirect (name : String) (bytes : ByteArray) : IO Nat := do
+  let lim := Limits.default
+  let ctx := s!"{name} (direct /Encrypt)"
+  let .ok doc := Doc.openDoc lim bytes | check ctx "openDoc" false
+  let d := doc.file
+  let mut f := 0
+  f := f + (← check ctx "original: direct /Encrypt, classic table"
+    ((match Dict.get? d.trailer.dict Xref.nameEncrypt with
+      | some (.dict _) => true
+      | _ => false) &&
+      (match d.crypt with
+        | some st => st.encRef.isNone
+        | none => false) &&
+      (match Xref.findStartxref d.bytes with
+        | .ok s => Xref.matchAt d.bytes s Xref.kwXref
+        | .error _ => false)))
+  match writeAnnots lim doc (marksFor doc.pageCount), plan lim doc (marksFor doc.pageCount) [] with
+  | .error e, _ => return f + (← check ctx "writeAnnots" false (errS e))
+  | _, .error e => return f + (← check ctx "plan" false (errS e))
+  | .ok out, .ok p =>
+    f := f + (← check ctx "prefix" (out.extract 0 bytes.size == bytes))
+    f := f + (← check ctx "classic update section" (!p.stream &&
+      (match Xref.findStartxref out with
+        | .ok s => Xref.matchAt out s Xref.kwXref
+        | .error _ => false)))
+    match Open.openFile lim out with
+    | .error e => return f + (← check ctx "strict reopen" false (errS e))
+    | .ok d' =>
+      f := f + (← check ctx "strict, one more revision"
+        (!d'.repaired && d'.revisions == d.revisions + 1))
+      f := f + (← check ctx "update trailer carries /Encrypt verbatim" (sameEncEntry d' d))
+      f := f + (← check ctx "same decryption state (every field)" (sameState d'.crypt d.crypt))
+      let mut differ := 0
+      let mut compared := 0
+      for (n, e) in d'.xref.entries do
+        let some g := genOf e | continue
+        compared := compared + 1
+        let ok := match p.objects.find? (·.1 == n) with
+          | some o => bodyIs (d'.getObject lim n g) o.2.2
+          | none => sameResult (d'.getObject lim n g) (d.getObject lim n g)
+        if !ok then
+          differ := differ + 1
+          if differ ≤ 3 then IO.println s!"  {ctx}: object {n} {g} differs"
+      f := f + (← check ctx "every object as planned or as before" (differ == 0 && compared > 0)
+        s!"{differ} of {compared} differ")
+      match ← qpdfCheck out with
+      | some code => f := f + (← check ctx "qpdf --check" (code == 0) s!"exit {code}")
+      | none => pure ()
+      -- the strengthened self-check sees what `sameCrypt` does not
+      match d.crypt with
+      | some st =>
+        let h := st.handler
+        let st' := { st with handler := { h with encryptMetadata := !h.encryptMetadata } }
+        f := f + (← check ctx "sameState sees /EncryptMetadata, sameCrypt does not"
+          (sameCrypt (some st') (some st) && !sameState (some st') (some st) &&
+            sameState (some st) (some st)))
+      | none => f := f + (← check ctx "decryption state" false)
+      if f == 0 then IO.println s!"  {ctx}: ok"
+      return f
+
 /-- Refusals on a plain file. -/
 def runRefusals : IO Nat := do
   let lim := Limits.default
@@ -446,7 +526,8 @@ def fixtures : List String :=
 /-- Encrypted fixtures (written, task 9.5f; every handler of `Tests/adversarial/encrypted/` that opens). -/
 def encrypted : List String :=
   ["rc4-40.pdf", "rc4-128.pdf", "rc4-v4.pdf", "aesv2.pdf", "aesv3.pdf", "aesv3-r5.pdf",
-    "objstm-length-aesv2.pdf", "sig-aesv2.pdf"]
+    "objstm-length-aesv2.pdf", "sig-aesv2.pdf", "direct-rc4-128.pdf", "direct-aesv2.pdf",
+    "direct-aesv3.pdf"]
 
 /-- **Suite entry point.** -/
 def run : IO Nat := do
@@ -460,6 +541,8 @@ def run : IO Nat := do
   for name in encrypted do
     f := f + (← runEncrypted name (← IO.FS.readBinFile (encDir / name)))
     f := f + (← runEdit name (← IO.FS.readBinFile (encDir / name)) true)
+  for name in directEnc do
+    f := f + (← runDirect name (← IO.FS.readBinFile (encDir / name)))
   f := f + (← runRefusals)
   f := f + (← runEncryptUnit)
   match ← IO.getEnv "SAFEPDF_WRITE_CORPUS" with
