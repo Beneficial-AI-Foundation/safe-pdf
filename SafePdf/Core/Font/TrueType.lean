@@ -839,6 +839,12 @@ def TTFont.advanceText (f : TTFont) (code : UInt8) (symbolic : Bool)
   let a ← f.advanceOfGlyph g
   some (f.toText a)
 
+/-- The text-space advance of a glyph id (`advanceOfGlyph` scaled by `unitsPerEm`): the width
+fallback of a `/CIDFontType2` font, whose CIDs select glyphs through `/CIDToGIDMap`
+(§9.7.4.2, task 6.7c). -/
+def TTFont.advanceOfGlyphText (f : TTFont) (gid : Nat) : Option Fixed :=
+  (f.advanceOfGlyph gid).map f.toText
+
 /-- The validated glyph `gid`. -/
 def TTFont.glyph? (f : TTFont) (gid : Nat) : Option Glyph := (f.glyphs[gid]?).join
 
@@ -1027,6 +1033,8 @@ private def tiny : Option TTFont := (parse Limits.default tinyTtf).toOption
   some [some 500, some 250, some 600, some 600, some 600, none]
 #guard (tiny.bind fun f => f.advanceText 0x41 false).map (·.raw) == some 600000
 #guard (tiny.bind fun f => f.advanceText 0x20 false).map (·.raw) == some 250000
+#guard (tiny.map fun f => (List.range 6).map fun g => (f.advanceOfGlyphText g).map (·.raw)) ==
+  some [some 500000, some 250000, some 600000, some 600000, some 600000, none]
 -- cmap: format 12 (3,10), format 4 (3,1) incl. the idRangeOffset segment, format 0, format 6
 #guard (tiny.map fun f => [0x20, 0x41, 0xC5, 0x1F600, 0x42].map f.glyphOfUnicode) ==
   some [some 1, some 2, some 3, some 4, none]
