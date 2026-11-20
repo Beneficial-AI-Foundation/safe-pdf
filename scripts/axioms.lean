@@ -1144,3 +1144,21 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Spec.Write.plan_sups
 #print axioms SafePdf.Spec.Write.mem_kept
 #print axioms SafePdf.Spec.Write.newDict_annots_kept
+-- Phase 7, task 7.9c: 64-bit chord geometry
+#print axioms SafePdf.Core.Raster.Stroke.mulW_toNat
+#print axioms SafePdf.Core.Raster.Stroke.mul128_eq
+#print axioms SafePdf.Core.Raster.Stroke.sqInv_step
+#print axioms SafePdf.Core.Raster.Stroke.sqInv_sqrt
+#print axioms SafePdf.Core.Raster.Stroke.sqDigit_toNat
+#print axioms SafePdf.Core.Raster.Stroke.isqLoop_eq
+#print axioms SafePdf.Core.Raster.Stroke.isqrtW_eq
+#print axioms SafePdf.Core.Raster.Stroke.gcd64_eq
+#print axioms SafePdf.Core.Raster.Stroke.roundDivI_qr
+#print axioms SafePdf.Core.Raster.Stroke.rdivFin_eq
+#print axioms SafePdf.Core.Raster.Stroke.shLoop_eq
+#print axioms SafePdf.Core.Raster.Stroke.rdiv36_eq
+#print axioms SafePdf.Core.Raster.Stroke.mul64_toInt
+#print axioms SafePdf.Core.Raster.Stroke.lin64_toInt
+#print axioms SafePdf.Core.Raster.Stroke.abs64_toNat
+#print axioms SafePdf.Core.Raster.Stroke.IMatW.of_ok
+#print axioms SafePdf.Core.Raster.Stroke.ratW_eq
