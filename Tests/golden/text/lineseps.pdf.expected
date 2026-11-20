@@ -6,24 +6,24 @@ pages:      1
 A B C
 --- glyphs page 1 (item seq x y width size text)
 0 0 72 700 8.004 12 "A"
-0 1 80.004 700 0 12 "\u2028"
-0 2 80.004 700 8.004 12 "B"
-0 3 88.008 700 0 12 "\u2029"
-0 4 88.008 700 8.664 12 "C"
+0 1 80.004 700 3.336 12 "\u2028"
+0 2 83.34 700 8.004 12 "B"
+0 3 91.344 700 3.336 12 "\u2029"
+0 4 94.68 700 8.664 12 "C"
 total:      1 page(s), 5 chars, 5 glyphs, 0 U+FFFD, 0 warnings, 0 page error(s)
 --- json
 {"page": 1, "chars": 5, "glyphs": 5, "replacement": 0, "warnings": 0, "error": null, "text": "A\u2028B\u2029C"}
 {"summary": {"path": "input", "open": "strict", "pages": 1, "extracted": 1, "chars": 5, "glyphs": 5, "replacement": 0, "warnings": 0, "errors": 0}}
 --- json page 1 glyphs
-{"page": 1, "chars": 5, "glyphs": 5, "replacement": 0, "warnings": 0, "error": null, "text": "A\u2028B\u2029C", "glyphList": [[0, 0, 72, 700, 8.004, 12, "A"], [0, 1, 80.004, 700, 0, 12, "\u2028"], [0, 2, 80.004, 700, 8.004, 12, "B"], [0, 3, 88.008, 700, 0, 12, "\u2029"], [0, 4, 88.008, 700, 8.664, 12, "C"]]}
+{"page": 1, "chars": 5, "glyphs": 5, "replacement": 0, "warnings": 0, "error": null, "text": "A\u2028B\u2029C", "glyphList": [[0, 0, 72, 700, 8.004, 12, "A"], [0, 1, 80.004, 700, 3.336, 12, "\u2028"], [0, 2, 83.34, 700, 8.004, 12, "B"], [0, 3, 91.344, 700, 3.336, 12, "\u2029"], [0, 4, 94.68, 700, 8.664, 12, "C"]]}
 {"summary": {"path": "input", "open": "strict", "pages": 1, "extracted": 1, "chars": 5, "glyphs": 5, "replacement": 0, "warnings": 0, "errors": 0}}
 --- page out of range
 (none)
 --- svg overlay page 1
 <g data-overlay="text">
 <rect x="72" y="697.6" width="8.004" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="0" data-text="A"/>
-<rect x="80.004" y="697.6" width="0" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="1" data-text=" "/>
-<rect x="80.004" y="697.6" width="8.004" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="2" data-text="B"/>
-<rect x="88.008" y="697.6" width="0" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="3" data-text=" "/>
-<rect x="88.008" y="697.6" width="8.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="4" data-text="C"/>
+<rect x="80.004" y="697.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="1" data-text=" "/>
+<rect x="83.34" y="697.6" width="8.004" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="2" data-text="B"/>
+<rect x="91.344" y="697.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="3" data-text=" "/>
+<rect x="94.68" y="697.6" width="8.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="4" data-text="C"/>
 </g>

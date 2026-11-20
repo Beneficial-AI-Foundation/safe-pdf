@@ -355,6 +355,14 @@ def width? (f : Std14) (g : GlyphName) : Option Nat :=
       | courier | courierBold | courierOblique | courierBoldOblique => some 600
       | symbol | zapfDingbats => none
 
+/-- Advance (1/1000 em) of the substitute font's `.notdef` glyph, used for a code with no glyph
+in a font without `/Widths`. MuPDF 1.25.1 (`pdf_load_simple_font`, `ft_width`) takes the advance
+of glyph 0 of the URW substitute; measured with `mutool draw -F stext` it equals the `space`
+width of each of the 14 fonts (278 Helvetica and ZapfDingbats, 250 Times and Symbol, 600
+Courier). -/
+def notdefWidth (f : Std14) : Nat :=
+  (f.width? "space").getD 600
+
 end Std14
 
 /-! ## Name substitution -/
@@ -486,5 +494,10 @@ def Std14.ofBaseFont (name : String) : Option Std14 :=
 #guard (List.range 256).all fun c =>
   (zapfDingbatsEncoding.glyph c).isSome == (zapfDingbatsWidths.getD c 0 != 0)
 #guard Std14.ofBaseFont "Calibri" == none
+#guard Std14.helveticaBold.notdefWidth == 278
+#guard Std14.timesBoldItalic.notdefWidth == 250
+#guard Std14.courierOblique.notdefWidth == 600
+#guard Std14.symbol.notdefWidth == 250
+#guard Std14.zapfDingbats.notdefWidth == 278
 
 end SafePdf.Core.Font
