@@ -187,6 +187,9 @@ structure Opened where
   bytes : ByteArray
   /-- The opened document. -/
   document : SafePdf.Api.Document
+  /-- The `GET /api/items/{key}` answer (its `children` hold the stored annotations, task
+  10.2), when it arrived. -/
+  detail : Option JVal := none
 
 /-- Why a launch failed, with the contract's exit code (§5). -/
 inductive Failure where
@@ -278,7 +281,7 @@ def openFromBibLean (env : String → IO (Option String) := fun n => IO.getEnv n
   let page := requested.filter (· < document.pageCount)
   return .ok { session := s, title := titleOf key att parent, parent := att.bind parentKey?,
                requested, page,
-               bytes := r.body, document }
+               bytes := r.body, document, detail := att }
 
 /-! ## Full text and detection (task 10.3) -/
 
