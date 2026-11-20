@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.4 highlights and notes, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -70,7 +70,8 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 | mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) |
 | `Shift`+wheel | scroll horizontally (stops at the edge) |
 | `Ctrl`+wheel | zoom in/out about the mouse pointer |
-| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit |
+| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks about unsaved marks) |
+| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into `FILE-annotated.pdf` / into a chosen file (9.5c) |
 
 ## Menubar (9.1)
 
@@ -85,12 +86,12 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 
 | Menu | Entries (accelerator) |
 |---|---|
-| File | Open… (Ctrl+O), Close (Ctrl+W), Quit (Ctrl+Q) |
+| File | Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Close (Ctrl+W), Quit (Ctrl+Q) |
 | Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Highlight tool (check, 9.8), Show all highlights (check, 9.8), Find… (Ctrl+F) |
 | View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`) |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
 
-Disabled: everything but Open… and Quit without a document; Copy and Highlight selection
+Disabled: everything but Open… and Quit without a document; Save without unsaved marks; Copy and Highlight selection
 without a selection; Delete mark without a selected mark;
 Outline when the document has none; Previous/First on the first page, Next/Last on the last;
 Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
@@ -126,8 +127,10 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   * *right*: Highlight (works since 9.4: highlights the selection in the current colour;
     without a selection it turns the Highlight tool on and opens its pop-over, or off (9.8);
     see *Selection bubble and Highlight pop-over*), Comment, Text,
-    Draw, Image, then Print and Save — **disabled placeholders** until their tasks land
-    (Comment, Text, Draw 9.9, Save 9.5c; Print and Image after M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
+    Draw, Image, then Print and Save — Save (PDF.js's download icon) is the command File →
+    Save since 9.5c, enabled while there are unsaved marks; the others are **disabled
+    placeholders** until their tasks land (Comment, Text, Draw 9.9; Print and Image after
+    M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
     buttons). Document properties are not available yet.
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
@@ -224,7 +227,7 @@ back from a file with its own id).
 * Marks are stored in page space, so they follow zoom, rotation and page changes; a page's
   marks are drawn whenever it is shown.
 
-Not done here: free (drawn) highlights, saving (9.5b/9.5c), undo. The selected-mark outline
+Not done here: free (drawn) highlights, undo. Saving: next section (9.5c). The selected-mark outline
 is drawn per quad (PDF.js outlines the union shape).
 
 | Key / mouse | Action |
@@ -233,6 +236,54 @@ is drawn per quad (PDF.js outlines the union shape).
 | click on a mark | select it (a note opens its popup) |
 | `Delete` | delete the selected mark |
 | right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
+
+## Saving marks into the PDF (9.5c)
+
+Tk-free flow in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by `Viewer.save`,
+`saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7: the marks become annotation objects
+appended to the file as an **incremental update**; the original bytes are never modified.
+
+* **Save** (Ctrl+S, File → Save, the toolbar's Save) writes `DIR/STEM-annotated.pdf` next to
+  the opened file (for an opened `…-annotated.pdf`: that file itself, a further revision).
+  It asks first when that means writing into the opened file, or replacing another existing
+  file — unless this session wrote the file (so repeated saves are silent). Save is enabled
+  only while there are unsaved marks; with none, Ctrl+S says "nothing to save".
+* **Save As…** (Ctrl+Shift+S) asks for a file (`tk_getSaveFile`, which confirms replacing an
+  existing file), proposing `STEM-annotated.pdf`; writing over the **opened file** needs an
+  explicit yes (its bytes still stay a prefix of the new file). With no unsaved marks it
+  writes a plain copy.
+* **What is written**: only the marks not yet in the file (`Marks.Store.unsaved`), converted
+  to `Core.Write.Annots.Mark` (`Save.toCore`: quads, a note's icon box as `/Rect`, `/C`,
+  `/Contents`, `/NM safepdf-mark-ID`, `/M` = the current UTC time `D:YYYYMMDDHHmmSSZ`; **no
+  author** `/T`, so the login name never ends up in the file) and passed to
+  `Annots.writeMarks`. A highlight's comment (the note on its quads, 9.8) is written as its
+  own `/Text` annotation with `/QuadPoints`.
+* **Checked before anything is written**: the result must start with the original bytes, must
+  reopen through the **strict** parser (`Api.openBytes`, repair refused), and reading our
+  marks back must give every mark of the store (page, kind, colour, text, geometry within
+  1/500), each new one exactly once. Then the bytes go to a fresh temporary file in the same
+  directory, which is renamed over the target (never truncated in place; on failure the
+  temporary file is removed). The written file is then opened in place of the old one, on the
+  same page (selection, search and history are reset as on any open).
+* **Reopening**: on open, the annotations with `/NM safepdf-mark-ID` are read back
+  (`Save.readMarks`): `/Highlight` → highlight over its `/QuadPoints`, `/Text` → note with
+  `/Contents` anchored to its `/QuadPoints` or its `/Rect`'s upper-left corner, colour =
+  nearest palette colour to `/C`; they are restored with their ids (`Store.load`) and count as
+  saved. Saved marks are **drawn by the renderer** from their appearance streams (so they are
+  not multiplied in again and their note icons are not canvas items); they can be selected and
+  a note's popup shows its text. Other annotations are only rendered.
+* **Saved marks are read-only for now.** The writer only appends (`writeAnnots` rules W3/W4:
+  new objects, `/Annots` extended); it cannot drop an annotation from a page's `/Annots` or
+  supersede an annotation object by writing its number again. Recolouring, deleting or
+  editing the text of a saved mark is refused with a status message ("this mark is saved in
+  the PDF; …"), never silently lost — follow-up task 9.5g. "Show all" off hides only unsaved
+  highlights.
+* **Unsaved marks**: the title starts with `* `; Close (Ctrl+W), Quit (Ctrl+Q, File → Quit,
+  the window's close button: `wm protocol WM_DELETE_WINDOW`) and Open… ask Save / Discard /
+  Cancel (a Tk message box: Yes / No / Cancel).
+* **Errors** (an encrypted document, refused by the writer until 9.5f; a document opened
+  through the repair path; a failed check; a write error) appear in the status line as
+  `cannot save to NAME: …`; nothing is written and the marks stay unsaved.
 
 ## Selection bubble and Highlight pop-over (9.8)
 
@@ -414,6 +465,7 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
 | `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
 | `SafePdf/Shell/App/Marks.lean` | Tk-free model of highlights and notes with `#guard` checks: PDF.js colours, marks with stable ids and `/NM` names, quads and `/QuadPoints`, note icon boxes, the store (add, remove, recolour, edit, restore), hit-testing, the multiply blend into the page image (task 9.4). |
+| `SafePdf/Shell/App/Save.lean` | Tk-free save flow (task 9.5c) with `#guard` checks: marks → `Core.Write.Annots.Mark`, PDF dates, reading our marks back from a document, the read-back check, default target, atomic write. |
 | `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js, placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
 | `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
@@ -545,6 +597,26 @@ note anchored to the highlight's quads, which a second Comment reopens with its 
 closes the pop-over and dismisses the bubble with the tool still on; Edit → Highlight tool
 turns it off; a new selection's bubble goes on Escape and on End (page 2). Generated clicks
 carry `-time` and are spaced past Tk's double-click time where two land close together.
+
+Saving (9.5c) runs in the variants `save`, `reopen` and `encrypted` (`Viewer.smokeSave`,
+`smokeReopen`, `smokeEncrypted`; questions and the Save As dialog are answered through
+`::safepdf::autoAnswer` / `::safepdf::autoPath`, the last question is kept in
+`::safepdf::lastAsk`). On a copy of the text PDF: a highlight on `world` and a note make the
+title start with `* ` and enable Save (menu entry and toolbar button); Quit and Ctrl+W
+answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` without a question and
+opens it (2 saved marks, no `*`, Save disabled; the highlight pixels are yellow from the
+renderer, no canvas note icon, the note text restored); a second Ctrl+S writes nothing; Delete
+and a recolour of the saved highlight are refused; a new highlight on `safe` + Ctrl+S appends
+to the same file (3 marks with distinct ids, read back strictly); Save As writes
+`saveas.pdf`; a new note and Ctrl+W answered No discards it. The `reopen` run on
+`text-annotated.pdf` restores the 3 marks (pixels, a click on the note's place opens its popup
+with the saved text), Save As onto the opened file answered No writes nothing and Yes
+appends, and Quit answered Yes saves one more note before quitting. The script then checks
+`qpdf --check` on the written files, that the original (and each saved revision) is a
+byte-for-byte prefix of the later file (`cmp -n`) and the original unchanged, that the final
+file has 5 revisions and each of its 5 mark annotations once, and that `mutool draw` shows the
+highlight (yellow pixels in the box of `world`). The `encrypted` run (RC4 fixture) saves a
+note: until 9.5f the status line shows the writer's refusal and nothing is written.
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the

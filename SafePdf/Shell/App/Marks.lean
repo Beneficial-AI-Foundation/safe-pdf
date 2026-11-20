@@ -4,9 +4,10 @@ import SafePdf.Core.Raster.Geom
 # User marks: highlights and notes (task 9.4; Plan.md §6 Phase 9 "User highlights in colors", "Notes", "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
 
 The Tk-free model of the marks a reader adds to a document (unverified shell code, total,
-checked by `#guard`s and small theorems). Marks live in memory in this task; task 9.5b turns
-each one into an annotation dictionary (`/Highlight` with `/QuadPoints`, `/Text` with
-`/Contents`) for `Core.Write.Incremental.writeAnnots`, task 9.5c saves and reloads them.
+checked by `#guard`s and small theorems). Task 9.5b turns each mark into an annotation
+dictionary (`/Highlight` with `/QuadPoints`, `/Text` with `/Contents`) for
+`Core.Write.Incremental.writeAnnots`; task 9.5c (`Shell.App.Save`) saves the unsaved ones into
+the PDF and restores them from it.
 
 * **Colours** (`Color`): PDF.js's highlight palette (`web/app_options.js`,
   `highlightEditorColors`): yellow `#FFFF98`, green `#53FFBC`, blue `#80EBFF`, pink
@@ -25,7 +26,9 @@ each one into an annotation dictionary (`/Highlight` with `/QuadPoints`, `/Text`
   moved inside the page box when it would stick out (`Mark.iconBox`).
 * **Store** (`Store`): the marks of a document in creation order (later ones on top) and the
   next id; `Store.noteOn` finds the note anchored to a highlight's quads (its comment, 9.8). Ids are never reused (`Store.add_id`, `Store.add_next`); `Store.restore` keeps
-  the ids of marks read back from a file (9.5c). Operations: add, remove, recolour, edit the
+  the ids of marks read back from a file and `Store.load` builds the store of a file's marks
+  (9.5c); `Store.saved` lists the marks stored in the file, `Store.unsaved` / `Store.dirty`
+  what Save still has to write. Operations: add, remove, recolour, edit the
   text, find, the marks of a page, hit-testing (`Store.hitAt`: the topmost mark whose icon
   or quads contain a page point; icons are above highlights).
 * **Pixels** (`multiplyRect`, `pixelRect`, `composite`): highlights are blended into the
@@ -218,11 +221,16 @@ structure Store where
   marks : Array Mark := #[]
   /-- The id the next mark gets (larger than every id in `marks`). -/
   nextId : Nat := 1
+  /-- Ids of the marks that are stored in the open file (read back on open or written by a
+  save, task 9.5c). They are drawn by the renderer from their appearance streams and cannot
+  be changed until the writer can supersede annotations (task 9.5g). -/
+  saved : List Nat := []
   deriving Inhabited
 
 /-- Adds a mark of `kind` on `page` in `color`; returns the store and the new mark's id. -/
 def Store.add (s : Store) (page : Nat) (color : Color) (kind : Kind) : Store × Nat :=
-  ({ marks := s.marks.push ⟨s.nextId, page, color, kind⟩, nextId := s.nextId + 1 }, s.nextId)
+  ({ s with marks := s.marks.push ⟨s.nextId, page, color, kind⟩, nextId := s.nextId + 1 },
+    s.nextId)
 
 /-- The new mark gets the store's next id. -/
 theorem Store.add_id (s : Store) (p : Nat) (c : Color) (k : Kind) :
@@ -245,7 +253,24 @@ def Store.addNote (s : Store) (page : Nat) (color : Color) (text : String) (anch
 /-- Puts back a mark read from a file with its own id (task 9.5c): replaces a mark with the
 same id, and keeps `nextId` above every id. -/
 def Store.restore (s : Store) (m : Mark) : Store :=
-  { marks := (s.marks.filter (·.id != m.id)).push m, nextId := max s.nextId (m.id + 1) }
+  { s with marks := (s.marks.filter (·.id != m.id)).push m,
+           nextId := max s.nextId (m.id + 1) }
+
+/-- Whether mark `id` is stored in the open file (task 9.5c). -/
+def Store.isSaved (s : Store) (id : Nat) : Bool := s.saved.contains id
+
+/-- The marks not yet stored in the file, oldest first (what Save writes, task 9.5c). -/
+def Store.unsaved (s : Store) : List Mark :=
+  (s.marks.filter (!s.isSaved ·.id)).toList
+
+/-- Whether there are unsaved marks (the title's `*`, the prompt on close/quit/open). -/
+def Store.dirty (s : Store) : Bool := s.marks.any (!s.isSaved ·.id)
+
+/-- The store of the marks read back from a file (task 9.5c): each restored with its own id
+(`restore`, later duplicates of an id replace earlier ones), all of them saved. -/
+def Store.load (ms : List Mark) : Store :=
+  let s := ms.foldl Store.restore {}
+  { s with saved := (s.marks.map (·.id)).toList }
 
 /-- The mark with id `id`. -/
 def Store.find? (s : Store) (id : Nat) : Option Mark :=
@@ -378,6 +403,13 @@ private def sample : Store :=
 #guard let s := sample.restore ⟨40, 0, .red, .highlight [q1]⟩
   s.nextId == 41 && s.marks.size == 5 && (s.add 0 .red (.note "" (.point ⟨0, 0⟩))).2 == 41
 #guard (sample.restore ⟨1, 0, .red, .highlight [q2]⟩).marks.size == 4
+-- Loaded marks are saved; new ones are not; ids continue after the loaded ones.
+#guard let s := Store.load [⟨7, 0, .red, .highlight [q1]⟩, ⟨3, 1, .blue, .highlight [q2]⟩]
+  !s.dirty && s.nextId == 8 && s.isSaved 3 && s.isSaved 7 &&
+  let (s', id) := s.add 0 .yellow (.note "x" (.point ⟨0, 0⟩))
+  id == 8 && s'.dirty && (s'.unsaved.map (·.id)) == [8] && s'.isSaved 7
+#guard (Store.load [⟨2, 0, .red, .highlight [q1]⟩, ⟨2, 0, .green, .highlight [q1]⟩]).marks.size == 1
+#guard sample.dirty && sample.unsaved.length == 4 && !({} : Store).dirty
 -- `/NM` names.
 #guard ((sample.find? 3).map Mark.nm) == some "safepdf-mark-3"
 #guard idOfNm "safepdf-mark-17" == some 17 && idOfNm "other-17" == none &&

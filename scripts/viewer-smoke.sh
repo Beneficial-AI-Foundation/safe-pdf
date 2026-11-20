@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7, 9.8; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.5c, 9.7, 9.8; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -31,6 +31,10 @@
 #      text PDF: bubble highlight, edit bubble recolour via its picker and delete, pop-over
 #      swatch, tool-mode highlight on mouse-up, thickness slider, Show all off/on (pixels),
 #      comment, Escape and page change dismiss (9.8);
+#   1j. saving marks into the PDF (SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen on the saved
+#      file): unsaved indicator, Save / Save As / quit and close prompts, saved marks restored
+#      and read-only, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
+#      shows the highlight (9.5c);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -361,7 +365,7 @@ v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().sp
 want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
-    "entries.menubar.file": "Open...|Close|Quit",
+    "entries.menubar.file": "Open...|Save|Save As...|Close|Quit",
     "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
@@ -454,7 +458,7 @@ common = {
     "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
     "tools": ".bar.highlight=normal," + ",".join(w + "=disabled" for w in [
-        ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),
+        ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),  # Save: no unsaved marks
     "status-unchanged-after-tool": "true",
     "history-after-entry": "2",
 }
@@ -634,6 +638,131 @@ errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.g
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-bubble/bubble.txt" || fail=1
+
+# 1j. Saving marks into the PDF (task 9.5c, SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen) on a
+# copy of the text PDF of 1d: a highlight on "world" and a note make the title start with "* "
+# and enable Save; Quit and Ctrl+W answered Cancel keep them; Ctrl+S writes
+# text-annotated.pdf next to the PDF without a question and opens it (the highlight now drawn
+# by the renderer from its /AP: yellow pixels; the note text restored); a second Ctrl+S has
+# nothing to save; the saved highlight cannot be deleted or recoloured; a new highlight + Ctrl+S
+# appends to the same file (3 marks, distinct ids); Save As writes saveas.pdf; Ctrl+W with an
+# unsaved note answered No discards it. The reopen run restores the 3 marks (pixels, note popup
+# text), refuses then (after Yes) performs Save As onto the opened file, and Quit answered Yes
+# saves a last note before quitting. Externally: `qpdf --check` on the written files, the
+# original bytes (and the first saved revision) are a byte-for-byte prefix of the later files
+# (`cmp -n`), each mark's annotation object is written exactly once, and `mutool draw` shows the
+# highlight.
+mkdir -p "$work/save" "$work/out-save" "$work/out-reopen"
+cp "$work/text.pdf" "$work/save/text.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=save run_viewer "$work/out-save" "$work/save/text.pdf"
+cat "$work/out-save/save.txt"
+cp "$work/save/text-annotated.pdf" "$work/out-save/after-run1.pdf" 2>/dev/null || true
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=reopen run_viewer "$work/out-reopen" "$work/save/text-annotated.pdf"
+cat "$work/out-reopen/reopen.txt"
+python3 -I -c '
+import sys
+def kv(p):
+    return dict(l.split(": ", 1) for l in open(p, encoding="utf-8").read().splitlines() if ": " in l)
+v, r = kv(sys.argv[1]), kv(sys.argv[2])
+yellow = "255 255 152"
+want = {
+    "dirty0": "false false disabled disabled",
+    "dirty1": "true true normal normal 2",
+    "quit-cancel": "1 true true",
+    "close-cancel": "true true",
+    "wm-delete": "::safepdf::emit quit",
+    "saved-path": "true true true",
+    "after-save": "2 2 false false disabled",
+    "world-after-save": yellow,
+    "note-after-save": "true 0",
+    "save-nothing": "true true",
+    "saved-selected": "true",
+    "saved-delete": "2 true",
+    "saved-recolour": "true " + yellow,
+    "dirty2": "true true",
+    "second-save": "true 3 false true",
+    "file-marks": "3 3",
+    "save-as": "true true 3 false",
+    "dirty3": "true true",
+    "close-discard": "true true 3 3",
+}
+want_r = {
+    "restored": "3 3 false false true",
+    "world-px": yellow,
+    "note-text": "true 0",
+    "note-popup": "1 true",
+    "dirty1": "true true",
+    "overwrite-no": "true true true",
+    "overwrite-yes": "true false 4 4 4",
+    "dirty2": "true true",
+}
+errs = ["save %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+errs += ["reopen %s: %r, expected %r" % (k, r.get(k), w) for k, w in want_r.items() if r.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-save/save.txt" "$work/out-reopen/reopen.txt" || fail=1
+# The quit in the reopen run saved the last note: 5 marks, each annotation object written once.
+python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+n = d.count(b"(safepdf-mark-") + d.count(b"<" + b"safepdf-mark-".hex().upper().encode())  # strings are written in hex
+print("annotated file: %d bytes, %d mark annotations, %d revisions" % (len(d), n, d.count(b"startxref")))
+sys.exit(0 if n == 5 and d.count(b"startxref") == 5 else 1)
+' "$work/save/text-annotated.pdf" || { echo "FAIL: quit did not save, or marks were duplicated" >&2; fail=1; }
+for f in "$work/save/text-annotated.pdf" "$work/out-save/saveas.pdf"; do
+  if command -v qpdf >/dev/null 2>&1; then
+    qpdf --check "$f" >/dev/null 2>&1 || { echo "FAIL: qpdf --check $f" >&2; fail=1; }
+  else echo "viewer-smoke: qpdf missing, check skipped"; fi
+done
+# S8: the original bytes are a prefix of every written file, each revision of the next one.
+for pair in "save/text.pdf out-save/first.pdf" "out-save/first.pdf out-save/after-run1.pdf" \
+    "out-save/after-run1.pdf save/text-annotated.pdf" "save/text.pdf out-save/saveas.pdf"; do
+  set -- $pair
+  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+    || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
+done
+cmp -s "$work/text.pdf" "$work/save/text.pdf" || { echo "FAIL: the original was modified" >&2; fail=1; }
+# Another reader draws the highlight: mutool at 72 dpi, inside the box of "world".
+if command -v mutool >/dev/null 2>&1; then
+  mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-save/mutool.ppm" "$work/out-save/saveas.pdf" 1
+  python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+parts, i = [], 0
+while len(parts) < 4:
+    while d[i:i+1].isspace(): i += 1
+    j = i
+    while not d[j:j+1].isspace(): j += 1
+    parts.append(d[i:j]); i = j
+i += 1
+w, h = int(parts[1]), int(parts[2])
+box = [l.split(": ", 1)[1] for l in open(sys.argv[2], encoding="utf-8") if l.startswith("world-box: ")][0]
+x0, y0, x1, y1 = map(float, box.split())
+n = yel = 0
+for y in range(int(792 - y1) + 2, int(792 - y0) - 1):
+    for x in range(int(x0) + 2, int(x1) - 1):
+        o = i + 3 * (y * w + x)
+        r, g, b = d[o], d[o + 1], d[o + 2]
+        n += 1
+        if r > 240 and g > 240 and 135 < b < 170: yel += 1
+print("mutool: %d/%d yellow pixels in the world box" % (yel, n))
+sys.exit(0 if n and yel * 3 >= n else 1)
+' "$work/out-save/mutool.ppm" "$work/out-save/save.txt" || { echo "FAIL: mutool does not show the highlight" >&2; fail=1; }
+else echo "viewer-smoke: mutool missing, check skipped"; fi
+
+# Encrypted input (SAFEPDF_VIEWER_SMOKE_MODE=encrypted): Ctrl+S with a note must not crash; until
+# task 9.5f the writer's refusal shows in the status line and nothing is written ("refused"),
+# afterwards the file is written ("saved").
+mkdir -p "$work/enc" "$work/out-enc"
+cp Tests/adversarial/encrypted/rc4-128.pdf "$work/enc/rc4-128.pdf"
+SAFEPDF_VIEWER_SMOKE_MODE=encrypted run_viewer "$work/out-enc" "$work/enc/rc4-128.pdf"
+cat "$work/out-enc/encrypted.txt"
+grep -qx 'alive: 1' "$work/out-enc/encrypted.txt" && grep -qE '^outcome: (refused|saved)$' "$work/out-enc/encrypted.txt" \
+  || { echo "FAIL: saving an encrypted file" >&2; fail=1; }
+if grep -qx 'outcome: refused' "$work/out-enc/encrypted.txt"; then
+  grep -q '^status: cannot save to rc4-128-annotated.pdf: ' "$work/out-enc/encrypted.txt" \
+    && [ ! -e "$work/enc/rc4-128-annotated.pdf" ] || { echo "FAIL: encrypted refusal not shown, or a file was written" >&2; fail=1; }
+fi
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
