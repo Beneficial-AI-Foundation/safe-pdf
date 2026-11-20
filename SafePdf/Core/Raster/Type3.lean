@@ -69,8 +69,6 @@ Layers larger than `maxGlyphLayerPixels` are not drawn (degradation, never an er
 * The glyph bitmap cache holds image glyphs only (page-wide; tiling cells start their own);
   other glyphs are rendered per instance (two small renders); charproc display lists are
   cached per font.
-* Text extraction (`Text`) keeps the untruncated Type 3 advances (`truncWidth` applies to
-  rendering only).
 * Fonts used by text inside charprocs are not loaded (such text is positioned with the
   runner's environment fonts); tiling patterns used inside charprocs are not loaded.
 -/
@@ -1002,8 +1000,10 @@ private theorem foldl_glyphStep_size (paint : Tiling.CellPainter) (W H : Nat) (w
 
 /-- MuPDF's Type 3 advance: `pdf_load_type3_font` stores `/Widths` × `FontMatrix.a` × 1000 in
 its integer metrics table (`pdf_add_hmtx`), truncating the advance to a multiple of `1/1000`
-of the font size (toward zero). Positions of glyphs drawn here follow it. -/
-def truncWidth (w : Fixed) : Fixed := Fixed.clamp (Int.tdiv w.raw 1000 * 1000)
+of the font size (toward zero). Positions of glyphs drawn here follow it; text extraction
+truncates the same way (`Text.type3TruncWidth`, task 7.3l), so this is idempotent on the
+`FontInfo` of a Type 3 font and kept for fonts built elsewhere. -/
+def truncWidth (w : Fixed) : Fixed := Text.type3TruncWidth w
 
 /-- **Render a glyph run of a Type 3 font** (see the module doc) onto the page state `st`
 (`W × H`, page → device `m`), glyphs drawn by the cell painter `paint`, positions from the
