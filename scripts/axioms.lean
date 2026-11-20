@@ -772,3 +772,44 @@ import SafePdf
 #print axioms SafePdf.Core.Raster.Fill.fillEdgesCounted_steps_le
 #print axioms SafePdf.Core.Raster.Fill.maskRect_le
 #print axioms SafePdf.Core.Raster.Fill.covByte_full
+
+-- Phase 6, task 6.7c: CIDToGIDMap (SafePdf/Core/Text.lean)
+#print axioms SafePdf.Core.Text.CIDToGID.gid_table_lt
+
+-- Phase 7, task 7.2c: clipping and path rendering (SafePdf/Core/Raster/Clip.lean)
+#print axioms SafePdf.Core.Raster.Clip.mul255_le_left
+#print axioms SafePdf.Core.Raster.Clip.mul255_le_right
+#print axioms SafePdf.Core.Raster.Clip.mul255_le_255
+#print axioms SafePdf.Core.Raster.Fill.Mask.tabulate_size
+#print axioms SafePdf.Core.Raster.Fill.Mask.tabulate_get
+#print axioms SafePdf.Core.Raster.Fill.Mask.inter_get_le_left
+#print axioms SafePdf.Core.Raster.Fill.Mask.inter_get_le_right
+#print axioms SafePdf.Core.Raster.Clip.covAt_le_mask
+#print axioms SafePdf.Core.Raster.Clip.covAt_le_clip
+#print axioms SafePdf.Core.Raster.Clip.covAt_le_255
+#print axioms SafePdf.Core.Raster.Clip.ClipCache.insert_length_le
+#print axioms SafePdf.Core.Raster.Clip.clipMaskC_steps_le
+#print axioms SafePdf.Core.Raster.Clip.renderItemsCounted_steps_le
+#print axioms SafePdf.Core.Raster.Clip.renderItems_size
+#print axioms SafePdf.Core.Raster.Clip.renderPaths_size
+#print axioms SafePdf.Core.Raster.Clip.pageSize_le
+
+-- Phase 7, task 7.2b: stroking (SafePdf/Core/Raster/Stroke.lean)
+#print axioms SafePdf.Core.Raster.Stroke.sqrtQ_spec
+#print axioms SafePdf.Core.Raster.Stroke.sqrtQ_rel
+#print axioms SafePdf.Core.Raster.Stroke.pushPoly_size
+#print axioms SafePdf.Core.Raster.Stroke.emit_size
+#print axioms SafePdf.Core.Raster.Stroke.capStart_size
+#print axioms SafePdf.Core.Raster.Stroke.capEnd_size
+#print axioms SafePdf.Core.Raster.Stroke.dot_size
+#print axioms SafePdf.Core.Raster.Stroke.join_size
+#print axioms SafePdf.Core.Raster.Stroke.dashEnd_size
+#print axioms SafePdf.Core.Raster.Stroke.dashThrough_size
+#print axioms SafePdf.Core.Raster.Stroke.dashLoop_size
+#print axioms SafePdf.Core.Raster.Stroke.solidSub_size
+#print axioms SafePdf.Core.Raster.Stroke.strokeSub_size
+#print axioms SafePdf.Core.Raster.Stroke.strokeSubs_size
+#print axioms SafePdf.Core.Raster.Stroke.mkSegs_size
+#print axioms SafePdf.Core.Raster.Stroke.strokeDPath_size_le
+#print axioms SafePdf.Core.Raster.Stroke.subpaths_bound
+#print axioms SafePdf.Core.Raster.Stroke.strokeEdges_size_le
