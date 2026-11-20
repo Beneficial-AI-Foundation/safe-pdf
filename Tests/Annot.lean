@@ -45,6 +45,13 @@ Task 8.3c adds (`run83c`):
   and icons, pixels sampled from `mutool draw -r 72`; the whole page differs from MuPDF in
   0.024% of pixels (22 of 90,000) under `pixels.py` (`SAFEPDF_PPM_DIR` writes `synth2.pdf`).
 
+Task 8.3e adds (`run83e`):
+
+* the catalog's `/AcroForm /DA` as FreeText fallback, and rich text (`/DS`, `/RC`; MuPDF's HTML
+  story) (`richFixture`): CSS colour/style parsing, `/RC` markup to text, fonts, the first glyph
+  of every line against MuPDF's `-F stext` char origins (within 0.002 pt), the lines of
+  `mutool draw -F txt`, border pixels from `mutool draw -r 72`.
+
 Task 8.3d adds (`run83d`):
 
 * NoRotate on pages with `/Rotate` 0, 90, 180, 270 (`noRotFixture`): the flagged annotation stays
@@ -587,6 +594,80 @@ def run83d : IO Nat := do
       | .error _ => failures := failures + (← check "cap text extracts" false)
   return failures
 
+/-- Task 8.3e (1, 2): FreeText default appearance and rich text. The catalog's `/AcroForm /DA`
+is red 14-point Courier. (0) no `/DA`: the `/AcroForm /DA` fallback; (1) `/DS` Times 18 pt
+blue, wrapping, no `/DA` (the border still takes the fallback's red); (2) `/DS` Helvetica 12 pt
+centred over `/DA` Helvetica 10 black; (3) `/RC` markup (two paragraphs, an entity, a bold
+span, a whitespace run) with a blue `/DA` (the text stays black; only the border is blue). -/
+def richFixture : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R /AcroForm << /DA (/Cour 14 Tf 1 0 0 rg) >> >>",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>",
+  strmObj "" "",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 230 280 290] /Contents (Fallback DA text) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 120 120 220] " ++
+    "/DS (font: 18pt Times; color: #0000FF) /Contents (Styled text here and more) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [150 120 280 220] /DA (/Helv 10 Tf 0 g) " ++
+    "/DS (font-size: 12pt; font-family: Helvetica; text-align: center) " ++
+    "/Contents (Sans text that wraps around) >>",
+  "<< /Type /Annot /Subtype /FreeText /Rect [20 20 280 100] /DA (/Helv 10 Tf 0 0 1 rg) " ++
+    "/RC (<?xml version=\"1.0\"?><body><p>Rich &amp; <b>bold</b></p><p>Second   para</p>" ++
+    "</body>) /Contents (Plain contents) >>"]
+
+/-- Task 8.3e checks. -/
+def run83e : IO Nat := do
+  let mut failures := 0
+  -- CSS pieces
+  failures := failures + (← check "css colour" (Annot.cssColor "#00f".toList == some [0, 0, 1] &&
+    Annot.cssColor "rgb(255, 0, 51)".toList == some [1, 0, 1 / 5] &&
+    Annot.cssColor " Teal".toList == some (Annot.rgb255 0 128 128) &&
+    Annot.cssColor "bogus".toList == none))
+  let rs := Annot.richStyle 10 "font: italic 2em Courier New; color: red; text-align: right".toList
+  failures := failures + (← check "css style"
+    (rs.da.font == "Cour" && rs.da.size == 20 && rs.da.color == [1, 0, 0] && rs.align == 2))
+  failures := failures + (← check "rc text"
+    (String.ofList (Annot.richText true "<p>a &lt;b&gt;</p>\n<p> c  <br/>d&#65;</p>".toList) ==
+      "a <b>\nc\ndA"))
+  failures := failures + (← check "ds contents collapse"
+    (String.ofList (Annot.richText false "a\nb   c ".toList) == "a b c"))
+  match process richFixture with
+  | none => failures := failures + (← check "rich fixture processes" false)
+  | some o =>
+    let ds := o.ap.collected.drawn
+    failures := failures + (← check "rich all drawn" (ds.length == 4 && ds.all (·.synth)))
+    -- fonts: the fallback's Courier, the rich Times / Helvetica
+    failures := failures + (← check "rich fonts"
+      ([(0, "Cour"), (1, "TiRo"), (2, "Helv"), (3, "TiRo")].all fun (i, n) =>
+        o.ap.fonts.any fun (k, _) => k == .res (Annot.synthNum i) (Name.ofString n)))
+    -- first glyph of each line: MuPDF 1.25.1 `-F stext` char origins (page y = 300 − y)
+    let gs := Text.extractItems o.ap.fonts o.ap.items.toList
+    let starts := [(22000000, 276800000), (22000000, 201800000), (22000000, 180200000),
+      (22000000, 158600000), (159640000, 207200000), (195322000, 192800000),
+      (22000000, 89000000), (22000000, 77000000)]
+    failures := failures + (← check "rich line origins" (starts.all fun (x, y) =>
+      gs.any fun g => (g.x.raw - x).natAbs ≤ 2000 && g.y.raw == y))
+    -- pixels sampled from `mutool draw -r 72`: borders take the `/DA` (or fallback) colour
+    let samples : List (String × Nat × Nat × (Nat × Nat × Nat)) := [
+      ("fallback border", 150, 10, (255, 0, 0)), ("ds border (fallback)", 70, 80, (255, 0, 0)),
+      ("ds left border", 20, 150, (255, 0, 0)), ("da border", 200, 80, (0, 0, 0)),
+      ("rc da border", 150, 279, (0, 0, 255)), ("white", 150, 220, (255, 255, 255))]
+    for (n, x, y, c) in samples do
+      failures := failures + (← check s!"rich px {n}" (near (pxAt o.img x y) c))
+    if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+      writePpm (System.FilePath.mk dir / "rich.ppm") o.img
+      IO.FS.writeBinFile (System.FilePath.mk dir / "rich.pdf") richFixture
+  -- text: the lines of `mutool draw -F txt` (MuPDF 1.25.1)
+  match firstPage richFixture with
+  | none => failures := failures + 1
+  | some (d, p) =>
+    match (Annot.extractDocPageAnnots {} d p (Filter.Budget.init {})).1 with
+    | .ok t =>
+      failures := failures + (← check "rich text"
+        ((t.text.splitOn "\n").filter (· != "") == ["Fallback DA text", "Styled text",
+          "here and", "more", "Sans text that wraps", "around", "Rich & bold", "Second para"]))
+    | .error _ => failures := failures + (← check "rich text extracts" false)
+  return failures
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -647,6 +728,7 @@ def run : IO Nat := do
   failures := failures + (← run83b pdf)
   failures := failures + (← run83c)
   failures := failures + (← run83d)
+  failures := failures + (← run83e)
   return failures
 
 end SafePdf.Tests.Annot

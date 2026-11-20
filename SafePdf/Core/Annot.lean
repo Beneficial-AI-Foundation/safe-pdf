@@ -362,6 +362,10 @@ structure OCDesc where
   ocgs : List (PdfObject × Bool) := []
   /-- The configuration's `/Intent`, resolved one level (`null` when absent). -/
   intent : PdfObject := .null
+  /-- Not optional content, but document-level data read with it (task 8.3e): the bytes of the
+  catalog's `/AcroForm /DA` (empty when absent or not a string), the default appearance of a
+  FreeText without an inheritable `/DA` (`pdf_annot_default_appearance`). -/
+  acroDA : List UInt8 := []
 
 /-- The object number and generation of a reference. -/
 def refKey : PdfObject → Option (Nat × Nat)
@@ -373,8 +377,8 @@ def resolveOpt {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → Pdf
   | none => (.null, s)
   | some o => Run.resolve src s o
 
-/-- **Read the default configuration** from the catalog `cat` (see the section doc). -/
-def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
+/-- The default configuration from the catalog `cat` (see the section doc), without `acroDA`. -/
+def readOCConfig {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
   match resolveOpt src s (Dict.get? cat (nm "OCProperties")) with
   | (.dict prop, s) =>
     let (groups, s) := match resolveOpt src s (Dict.get? prop (nm "OCGs")) with
@@ -402,6 +406,18 @@ def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
         | none => st0
       ({ ocgs := groups.map fun o => (o, state o), intent }, s)
   | (_, s) => ({}, s)
+
+/-- **Read the document-level data** of the catalog `cat`: the default optional-content
+configuration (`readOCConfig`) and the `/AcroForm /DA` bytes (`pdf_dict_getl(trailer, Root,
+AcroForm, DA)`, `pdf_to_str_buf`: anything but a string is empty). -/
+def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
+  let (oc, s) := readOCConfig src s cat
+  let (da, s) := match resolveOpt src s (Dict.get? cat (nm "AcroForm")) with
+    | (.dict af, s) => match resolveOpt src s (Dict.get? af (nm "DA")) with
+      | (.string b, s) => (b, s)
+      | (_, s) => ([], s)
+    | (_, s) => ([], s)
+  ({ oc with acroDA := da }, s)
 
 /-- `ocg_intents_include`: whether intent `n` is included by the configuration's intent. -/
 def intentIncludes (desc : PdfObject) (n : Name) : Bool :=
@@ -1309,7 +1325,8 @@ PDFDocEncoding; at most `maxSynthText` characters) is laid out like MuPDF's
 `write_variable_text` (multi-line, `break_string`: break at the last space once a line is wider
 than the box, at `\n` and `\r`), aligned by `/Q` (0 left, 1 centre, 2 right; other values 0),
 first baseline `0.8 · size` below the top of the padded box, lines `1.2 · size` apart. `/DA` (on
-the annotation or its `/Parent` chain, `pdf_parse_default_appearance`: the first 99 bytes,
+the annotation or its `/Parent` chain, else the catalog's `/AcroForm /DA` (task 8.3e,
+`pdf_annot_default_appearance`); `pdf_parse_default_appearance`: the first 99 bytes,
 whitespace-separated tokens, `/Name`, `Tf`, `g`, `rg`, `k`, a four-slot operand stack with
 `strtof` prefixes) gives the font (`Helv`, `Cour`, `TiRo`, `Symb`, `ZaDb`; anything else
 `Helv`), the size (0 → 12) and the text and border colour. The box is `/Rect` inset by `/RD`;
@@ -1327,9 +1344,9 @@ IS`, …, two lines for the public-release stamps, the name itself otherwise), T
 in a `[0 0 190 50]` form box with a 2-point frame, all turned by 0.6°; `/C` is the fill and
 stroke colour; the rectangle is shrunk to the box's aspect ratio about its centre.
 
-Recorded gaps: rich text `/RC` and `/DS` (MuPDF's HTML engine), the catalog's `/AcroForm /DA`
-fallback, FreeText `/Rotate` other than multiples of 90 (left unturned). The rasterizer does not
-draw text of non-embedded base-14 fonts yet; text extraction sees it. -/
+Rich text `/RC` and `/DS`: task 8.3e, below (`richStyle`, `richText`). Recorded gaps: FreeText
+`/Rotate` other than multiples of 90 (left unturned). The rasterizer does not draw text of
+non-embedded base-14 fonts yet; text extraction sees it. -/
 
 /-- Most characters of `/Contents` laid out (local cap). -/
 def maxSynthText : Nat := 65536
@@ -1525,11 +1542,14 @@ def layoutLines (wd : Char → Rat) (size maxw : Rat) : Nat → List Char → Li
     (body, w) :: layoutLines wd size maxw f (cs.drop k)
 
 /-- The text lines, aligned by `q` in width `maxw`, each a `Td` down by `lh` then
-`/font size Tf (…) Tj` (an empty line writes no string). -/
-def linesStr (f : Font.Std14) (font : String) (size lh maxw : Rat) (q : Nat) (cs : List Char) :
+`/font size Tf (…) Tj` (an empty line writes no string); `trim`: trailing spaces are not
+written (an HTML story, task 8.3e). -/
+def linesStr (f : Font.Std14) (font : String) (size lh maxw : Rat) (q : Nat) (cs : List Char)
+    (trim : Bool := false) :
     String :=
   let (out, _) := (layoutLines (charWidth f) size maxw cs.length cs).foldl
-    (fun (acc : String × Rat) (line, w) =>
+    (fun (acc : String × Rat) (line0, w) =>
+      let line := if trim then (line0.reverse.dropWhile (· == ' ')).reverse else line0
       let x := if q == 1 then (maxw - w) / 2 else if q == 2 then maxw - w else 0
       (acc.1 ++ pts [x - acc.2, -lh] ++ " Td\n" ++
         (if line.isEmpty then "" else "/" ++ font ++ " " ++ fmt size ++ " Tf\n" ++ litStr line ++
@@ -1542,10 +1562,198 @@ def rotEntries (r : Int) : Rat × Rat × Rat × Rat :=
   if m = 90 then (0, 1, -1, 0) else if m = 180 then (-1, 0, 0, -1)
   else if m = 270 then (0, -1, 1, 0) else (1, 0, 0, 1)
 
-/-- **FreeText** (`pdf_write_free_text_appearance` without rich text; see the section doc):
-content, resources and the rectangle (also the form box). -/
+/-! #### Rich text (task 8.3e)
+
+MuPDF 1.25.1 (built with its HTML engine, as `mutool`) lays out a FreeText with `/RC`, or with
+`/DS` and `/Contents`, as an HTML story (`write_rich_content`): the text is `/RC` (XHTML), else
+`/Contents` escaped; the CSS is `body{margin:0} p{margin:0}` plus `body{<DS>}`; the default
+size is `/DA`'s, the default font the engine's serif font, the default colour black (not `/DA`'s:
+`/DA` still colours the border); the story is placed in the box from `x = 2b` to `x = w − 4b` (`b`
+the border width), the first baseline `0.9 · size` below its top and lines `1.2 · size` apart
+(measured with `mutool draw -F stext`); `/Q` is not used (CSS `text-align` is).
+
+This is a subset of that engine: `/DS` declarations `font-size` (`pt`, `px` = pt, `em`, `%`),
+`font-family` and the `font` shorthand (size and family), `color` (`#rgb`, `#rrggbb`,
+`rgb(r, g, b)`, sixteen names) and `text-align` (`left`, `center`, `right`; `justify` as left);
+families map to base-14 fonts: `courier`/`mono…` → Courier, `helvetica`/`arial`/`sans…` →
+Helvetica, anything else → Times (MuPDF's default serif is Charis SIL: same text, other widths).
+`/RC` markup is reduced to its text: tags dropped, `<br>` and the ends of `p`, `div` and
+`h1`–`h6` break lines, the five XML entities and `&#N;`/`&#xN;` decoded; whitespace collapses
+to one space and empty lines are dropped, as HTML does. Recorded gaps: inline styles of `/RC`
+(`<span style>`, `<b>`, `<i>`: bold and italic faces), CSS `line-height`, margins and
+`vertical-align`. -/
+
+/-- Lower case (ASCII). -/
+def lower (cs : List Char) : List Char := cs.map Char.toLower
+
+/-- Trim ASCII whitespace at both ends. -/
+def trimWs (cs : List Char) : List Char :=
+  ((cs.dropWhile isDAWs).reverse.dropWhile isDAWs).reverse
+
+/-- Whether `pat` occurs in `cs`. -/
+def containsCs (cs pat : List Char) : Bool :=
+  ((String.ofList cs).splitOn (String.ofList pat)).length > 1
+
+/-- Split at a separator character. -/
+def splitOnChar (sep : Char) (cs : List Char) : List (List Char) :=
+  ((String.ofList cs).splitOn (String.ofList [sep])).map String.toList
+
+/-- A CSS length: the number, then `pt`/`px`/nothing (points), `em` (× `base`) or `%`;
+`none` without digits or for another unit. -/
+def cssLen (base : Rat) (cs : List Char) : Option Rat :=
+  let num := cs.takeWhile fun c => c.isDigit || c == '.' || c == '-' || c == '+'
+  let unit := lower (cs.drop num.length)
+  if !num.any Char.isDigit then none else
+  let v := (strtof num).1
+  if unit = [] ∨ unit = "pt".toList ∨ unit = "px".toList then some v
+  else if unit = "em".toList then some (v * base)
+  else if unit = ['%'] then some (v * base / 100)
+  else none
+
+/-- The base-14 resource name of a CSS font family list. -/
+def cssFamily (cs : List Char) : String :=
+  let l := lower cs
+  if containsCs l "courier".toList || containsCs l "mono".toList then "Cour"
+  else if containsCs l "helvetica".toList || containsCs l "arial".toList ||
+    containsCs l "sans".toList then "Helv"
+  else "TiRo"
+
+/-- A hexadecimal digit's value. -/
+def hexVal (c : Char) : Option Nat :=
+  if c.isDigit then some (c.toNat - 48)
+  else if 'a' ≤ c ∧ c ≤ 'f' then some (c.toNat - 87)
+  else if 'A' ≤ c ∧ c ≤ 'F' then some (c.toNat - 55)
+  else none
+
+/-- An RGB colour from bytes. -/
+def rgb255 (r g b : Nat) : List Rat := [(r : Rat) / 255, (g : Rat) / 255, (b : Rat) / 255]
+
+/-- The sixteen basic CSS colour names. -/
+def cssNamed : List (String × Nat × Nat × Nat) :=
+  [("black", 0, 0, 0), ("silver", 192, 192, 192), ("gray", 128, 128, 128),
+   ("grey", 128, 128, 128), ("white", 255, 255, 255), ("maroon", 128, 0, 0),
+   ("red", 255, 0, 0), ("purple", 128, 0, 128), ("fuchsia", 255, 0, 255),
+   ("green", 0, 128, 0), ("lime", 0, 255, 0), ("olive", 128, 128, 0), ("yellow", 255, 255, 0),
+   ("navy", 0, 0, 128), ("blue", 0, 0, 255), ("teal", 0, 128, 128), ("aqua", 0, 255, 255)]
+
+/-- A CSS colour (see the section doc); `none` if not understood. -/
+def cssColor (cs : List Char) : Option (List Rat) :=
+  let l := lower (trimWs cs)
+  match l with
+  | '#' :: hs =>
+    match hs.mapM hexVal with
+    | some [r, g, b] => some (rgb255 (r * 17) (g * 17) (b * 17))
+    | some [r1, r2, g1, g2, b1, b2] => some (rgb255 (r1 * 16 + r2) (g1 * 16 + g2) (b1 * 16 + b2))
+    | _ => none
+  | 'r' :: 'g' :: 'b' :: '(' :: rest =>
+    let inner := rest.takeWhile (· != ')')
+    match (splitOnChar ',' inner).map (fun p => (strtof (trimWs p)).1) with
+    | [r, g, b] =>
+      let cl := fun (x : Rat) => max 0 (min 1 (x / 255))
+      some [cl r, cl g, cl b]
+    | _ => none
+  | _ => (cssNamed.find? (·.1 == String.ofList l)).map fun (_, r, g, b) => rgb255 r g b
+
+/-- The text style of a rich FreeText: font, size and colour (as `DAInfo`), and alignment. -/
+structure RichStyle where
+  /-- Font resource name, size, colour (empty: black). -/
+  da : DAInfo
+  /-- `text-align`: 0 left, 1 centre, 2 right. -/
+  align : Nat := 0
+
+/-- One CSS declaration `prop: value` applied to `st`. -/
+def cssDecl (base : Rat) (st : RichStyle) (decl : List Char) : RichStyle :=
+  let prop := lower (trimWs (decl.takeWhile (· != ':')))
+  let val := trimWs ((decl.dropWhile (· != ':')).drop 1)
+  let p := String.ofList prop
+  if p == "font-size" then
+    match cssLen base val with
+    | some v => { st with da := { st.da with size := v } }
+    | none => st
+  else if p == "font-family" then { st with da := { st.da with font := cssFamily val } }
+  else if p == "font" then
+    let toks := splitWs val []
+    match toks.findIdx? (fun t => (cssLen base t).isSome) with
+    | some i =>
+      let sz := (toks[i]?.bind (cssLen base)).getD st.da.size
+      let fam := toks.drop (i + 1)
+      let fnt := if fam.isEmpty then st.da.font else cssFamily (" ".toList.intercalate fam)
+      let d : DAInfo := { font := fnt, size := sz, color := st.da.color }
+      { st with da := d }
+    | none => st
+  else if p == "color" then
+    match cssColor val with
+    | some c => { st with da := { st.da with color := c } }
+    | none => st
+  else if p == "text-align" then
+    let v := String.ofList (lower val)
+    { st with align := if v == "center" then 1 else if v == "right" then 2 else 0 }
+  else st
+
+/-- **The style of a rich FreeText**: `/DS` over the defaults (serif, `/DA`'s size, black). -/
+def richStyle (daSize : Rat) (ds : List Char) : RichStyle :=
+  let base := if daSize = 0 then 12 else daSize
+  (splitOnChar ';' ds).foldl (cssDecl base) { da := { font := "TiRo", size := base, color := [] } }
+
+/-- An XML entity body (between `&` and `;`). -/
+def entityChar (e : List Char) : Option Char :=
+  let s := String.ofList e
+  if s == "lt" then some '<' else if s == "gt" then some '>' else if s == "amp" then some '&'
+  else if s == "quot" then some '"' else if s == "apos" then some '\''
+  else match e with
+    | '#' :: 'x' :: hs | '#' :: 'X' :: hs =>
+      (hs.mapM hexVal).map fun ds => Char.ofNat (ds.foldl (fun a d => a * 16 + d) 0)
+    | '#' :: ds =>
+      if !ds.isEmpty && ds.all Char.isDigit then
+        some (Char.ofNat (ds.foldl (fun a d => a * 10 + (d.toNat - 48)) 0))
+      else none
+    | _ => none
+
+/-- Whether a tag (its text between `<` and `>`) breaks the line: `br`, or the end of `p`,
+`div`, `h1`–`h6`. -/
+def tagBreaks (t : List Char) : Bool :=
+  let l := lower t
+  let name := (l.takeWhile fun c => !isDAWs c && c != '/' && c != '>')
+  let n := String.ofList name
+  n == "br" ||
+    (l.head? == some '/' &&
+      ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6"].contains (String.ofList
+        ((l.drop 1).takeWhile fun c => !isDAWs c && c != '>')))
+
+/-- The text of XHTML markup, `\n` at line breaks (fuel: the length). -/
+def markupText : Nat → List Char → List Char
+  | 0, _ => []
+  | _, [] => []
+  | f + 1, '<' :: rest =>
+    let tag := rest.takeWhile (· != '>')
+    (if tagBreaks tag then ['\n'] else []) ++ markupText f ((rest.drop tag.length).drop 1)
+  | f + 1, '&' :: rest =>
+    let e := rest.takeWhile (· != ';')
+    match (if e.length ≤ 10 then entityChar e else none) with
+    | some c => c :: markupText f ((rest.drop e.length).drop 1)
+    | none => '&' :: markupText f rest
+  | f + 1, c :: rest => c :: markupText f rest
+
+/-- Collapse each run of whitespace to one space (HTML `white-space: normal`). -/
+def collapseWs : List Char → Bool → List Char
+  | [], _ => []
+  | c :: cs, prevWs =>
+    if isDAWs c then (if prevWs then collapseWs cs true else ' ' :: collapseWs cs true)
+    else c :: collapseWs cs false
+
+/-- **Rich text lines** (`/RC` markup when `markup`, else plain `/Contents`): whitespace
+collapsed per line, trimmed, empty lines dropped, joined by `\n`. -/
+def richText (markup : Bool) (cs : List Char) : List Char :=
+  let raw := if markup then markupText cs.length cs else collapseWs cs false
+  let lines := (splitOnChar '\n' raw).map fun l => trimWs (collapseWs l false)
+  ['\n'].intercalate (lines.filter (!·.isEmpty))
+
+/-- **FreeText** (`pdf_write_free_text_appearance`; see the section doc): content, resources
+and the rectangle (also the form box); `rich`: the style of rich text (task 8.3e), whose
+`text` is already `richText`. -/
 def freeTextAp (st : Style) (orect : RBox) (text : List Char) (q : Nat) (da : DAInfo)
-    (rd : List Rat) (r : Int) (callout : List Rat) (le : PdfObject) : String × Dict × OBox :=
+    (rd : List Rat) (r : Int) (callout : List Rat) (le : PdfObject)
+    (rich : Option RichStyle := none) : String × Dict × OBox :=
   let tb : RBox := ⟨orect.x0 + nth rd 0, orect.y0 + nth rd 1, orect.x1 - nth rd 2,
     orect.y1 - nth rd 3⟩
   let w := tb.x1 - tb.x0
@@ -1577,14 +1785,17 @@ def freeTextAp (st : Style) (orect : RBox) (text : List Char) (q : Nat) (da : DA
     if r = 270 then (0, w) else if r = 90 then (h, 0) else if r = 180 then (w, h) else (0, 0)
   let cm := "q\n" ++ pts [ra, rb, rc, rdd, e + tb.x0, f + tb.y0] ++ " cm\n"
   let pad := b * 2
-  let tw := w - pad * 2
+  -- rich text: the story's box runs from `2b` to `w − 4b`, first baseline `0.9 · size` down
+  let (tda, q, tw, base) := match rich with
+    | some rs => (rs.da, rs.align, w - pad * 3, (9 : Rat) / 10)
+    | none => (da, q, w - pad * 2, (4 : Rat) / 5)
   let th := h - pad * 2
-  let size := if da.size = 0 then 12 else da.size
+  let size := if tda.size = 0 then 12 else tda.size
   let lh := size * 6 / 5
-  let (f14, _) := stdOf da.font
-  let body := "BT\n" ++ color0Str da.color false ++ pts [pad, pad + th - size * 4 / 5 + lh] ++
-    " Td\n" ++ linesStr f14 da.font size lh tw q text ++ "ET\n"
-  let fontRes : Dict := [(nm "Font", .dict [(nm da.font, stdFontDict (stdOf da.font).2)])]
+  let (f14, _) := stdOf tda.font
+  let body := "BT\n" ++ color0Str tda.color false ++ pts [pad, pad + th - size * base + lh] ++
+    " Td\n" ++ linesStr f14 tda.font size lh tw q text rich.isSome ++ "ET\n"
+  let fontRes : Dict := [(nm "Font", .dict [(nm tda.font, stdFontDict (stdOf tda.font).2)])]
   (head ++ call ++ bg ++ border ++ clip ++ cm ++ body ++ "Q\n", res ++ fontRes, rect)
 
 /-- The texts of MuPDF's built-in stamps: `(text, baseline, size)`. -/
@@ -1700,8 +1911,9 @@ def synthDict (r : RBox) (res : Dict) : Dict :=
 /-- **Synthesise a normal appearance** for annotation dictionary `ad` of subtype `sub` with
 `/Rect` `orect` (see the section doc): the new rectangle, the form's `/BBox` (= the rectangle
 except for Caret and icons) and the content stream; `none` for a subtype not synthesised, or an
-empty result rectangle. -/
-def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (orect : RBox) :
+empty result rectangle. `acroDA`: the catalog's `/AcroForm /DA` (`OCDesc.acroDA`). -/
+def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (orect : RBox)
+    (acroDA : List UInt8 := []) :
     Option (RBox × RBox × Stream) × σ :=
   let (st, s) := styleOf src s ad
   let (gs, res) := opacityRes false st.ca
@@ -1786,7 +1998,7 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
       let (contents, s) := strOf src s (Dict.get? ad (nm "Contents"))
       let (q, s) := intOf src s (Dict.get? ad (nm "Q"))
       let (daO, s) := inheritGet src (nm "DA") maxFieldDepth ad s
-      let (daB, s) := strOf src s daO
+      let (daB, s) := if daO.isNone then (acroDA, s) else strOf src s daO
       let (rd, s) := arrOf src s (Dict.get? ad (nm "RD"))
       let (rd, s) := realsOf src s ((rd.getD []).take 4)
       let (rot, s) := intOf src s (Dict.get? ad (nm "Rotate"))
@@ -1798,8 +2010,20 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
         else ([], s)
       let (leO, s) := resolveOpt src s (Dict.get? ad (nm "LE"))
       let qn := if q < 0 ∨ q > 2 then 0 else q.toNat
-      let (c, res, r) := freeTextAp st orect ((textOf contents).take maxSynthText) qn
-        (parseDA daB) rd rot cl leO
+      -- task 8.3e: rich text when `/RC`, or `/DS` with `/Contents` (`pdf_dict_get_text_string_opt`)
+      let (dsO, s) := resolveOpt src s (Dict.get? ad (nm "DS"))
+      let (rcO, s) := resolveOpt src s (Dict.get? ad (nm "RC"))
+      let da := parseDA daB
+      let text := (textOf contents).take maxSynthText
+      let (c, res, r) := match rcO, dsO with
+        | .string rc, ds =>
+          let dsT := match ds with | .string b => textOf b | _ => []
+          freeTextAp st orect (richText true ((textOf rc).take maxSynthText)) qn da rd rot cl leO
+            (some (richStyle da.size dsT))
+        | _, .string ds =>
+          freeTextAp st orect (richText false text) qn da rd rot cl leO
+            (some (richStyle da.size (textOf ds)))
+        | _, _ => freeTextAp st orect text qn da rd rot cl leO
       (some (c, res, r, none), s)
     else if sub = nm "Stamp" then
       let (name, s) := match Dict.get? ad (nm "Name") with
@@ -1863,7 +2087,7 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (rot : Doc.Ro
           match selectAP src s ad state with
           | (none, s) =>
             if widget then (.skip .noAppearance, s) else
-            match synthesize src s ad subtype rect with
+            match synthesize src s ad subtype rect oc.acroDA with
             | (none, s) => (.skip .noAppearance, s)
             | (some (r, bb, st), s) =>
               let m := if r = bb then Matrix.identity else (aOf r bb).matrix
