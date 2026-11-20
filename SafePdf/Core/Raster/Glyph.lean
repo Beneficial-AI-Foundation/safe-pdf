@@ -2,6 +2,8 @@ import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Text
 import SafePdf.Core.Font.Outline
 import SafePdf.Core.Raster.Image
+import SafePdf.Core.Raster.Transparency
+import SafePdf.Core.Raster.Shading
 
 /-!
 # Glyph rendering: outlines through the path rasterizer (task 7.3a)
@@ -402,6 +404,8 @@ structure PageFonts where
   sources : SourceTable
   /-- Decoded image XObjects (task 7.3b). -/
   images : Image.ImageTable := {}
+  /-- Shadings and shading patterns of the page (task 7.3d). -/
+  shadings : Shading.ShadingTable := {}
 
 /-- **Per-run hook**: the coverage masks of a glyph run inside the device window `win`, in
 painting order, each with its colour, alpha and counted work: the fill (modes 0, 2, 4, 6) then
@@ -436,6 +440,8 @@ structure TState where
   rs : Clip.RState
   /-- Outline cache. -/
   cache : Cache := {}
+  /-- Transparency layers and soft masks (task 7.3c). -/
+  tx : Transparency.TxState := {}
 
 /-- Paint a list of masks through one clip (cache and work of `clipMaskC` charged once). -/
 def paintAll (W H : Nat) (cm : Option Mask) (cc : Clip.ClipCache) (s : Nat) (st : Clip.RState) :
@@ -451,8 +457,10 @@ def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeF
     if !r.renderMode.paints then st else
     let c := Clip.clipMaskC cfg m W H st.rs.cache clip
     let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
-    { rs := paintAll W H c.1 c.2.1 c.2.2 st.rs ms, cache }
+    { st with rs := paintAll W H c.1 c.2.1 c.2.2 st.rs ms, cache }
   | .image src ctm fill clip => { st with rs := Image.renderImage cfg m W H pf.images st.rs src ctm fill clip }
+  | .shading name ctm clip => { st with rs := Shading.renderShading cfg m W H pf.shadings st.rs name ctm clip }
+  | .fillPath p rule style clip => { st with rs := Shading.renderFill cfg m W H pf.shadings st.rs p rule style clip }
   | it => { st with rs := Clip.renderItem cfg m W H stroke st.rs it }
 
 /-- `paintAll` preserves the buffer size. -/
@@ -476,7 +484,34 @@ theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Cli
     · rfl
     · exact paintAll_size _ _ _ _ _ _ _
   | image src ctm fill clip => simp only [renderItemG]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
+  | shading name ctm clip => simp only [renderItemG]; exact Shading.renderShading_size _ _ _ _ _ _ _ _ _
+  | fillPath p rule style clip => simp only [renderItemG]; exact Shading.renderFill_size _ _ _ _ _ _ _ _ _ _
   | _ => simp only [renderItemG]; exact Clip.renderItem_size _ _ _ _ _ _ _
+
+/-- `renderItemG` keeps the transparency state. -/
+theorem renderItemG_tx (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) (st : TState) (it : DisplayItem) :
+    (renderItemG cfg m W H stroke pf st it).tx = st.tx := by
+  cases it <;> simp only [renderItemG] <;> (try split) <;> rfl
+
+/-- The transparency driver's view of `TState` (task 7.3c). -/
+def painterG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts) :
+    Transparency.Painter TState where
+  buf := (·.rs.buf)
+  setBuf := fun st b => { st with rs := { st.rs with buf := b } }
+  tx := (·.tx)
+  setTx := fun st t => { st with tx := t }
+  paint := renderItemG cfg m W H stroke pf
+
+/-- `painterG` is lawful. -/
+theorem painterG_lawful (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) : (painterG cfg m W H stroke pf).Lawful where
+  buf_setBuf := fun _ _ => rfl
+  tx_setBuf := fun _ _ => rfl
+  buf_setTx := fun _ _ => rfl
+  tx_setTx := fun _ _ => rfl
+  paint_size := renderItemG_size cfg m W H stroke pf
+  paint_tx := renderItemG_tx cfg m W H stroke pf
 
 private theorem foldl_renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
     (stroke : Clip.StrokeFn) (pf : PageFonts) (l : List DisplayItem) :
@@ -489,7 +524,8 @@ private theorem foldl_renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
 /-- Render a display list (paths and glyph runs) onto a white `W × H` page through `m`. -/
 def renderItems (cfg : Fill.Config) (m : Aff) (W H : Nat) (pf : PageFonts) (items : DisplayList)
     (stroke : Clip.StrokeFn := Clip.defaultStroke) : TState :=
-  items.foldl (renderItemG cfg m W H stroke pf) { rs := { buf := Clip.whiteBuf W H } }
+  items.foldl (Transparency.renderTx (painterG cfg m W H stroke pf) W H Transparency.maxMaskDepth)
+    { rs := { buf := Clip.whiteBuf W H } }
 
 /-- **Render a page** (paths and text) at zoom `zoom` and user rotation `rot`, onto its
 CropBox (as `Clip.renderPaths`, plus glyph runs). -/
@@ -508,8 +544,8 @@ theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf 
       4 * (renderPage page zoom rot pf items cfg stroke).w *
         (renderPage page zoom rot pf items cfg stroke).h := by
   simp only [renderPage, renderItems]
-  rw [← Array.foldl_toList, foldl_renderItemG_size]
-  simp [Clip.whiteBuf, ByteArray.size]
+  exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ items _
+    (by simp [painterG, Clip.whiteBuf, ByteArray.size]) rfl
 
 /-- **Render a page of an opened document**: decode its content, build the display list with
 the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
@@ -522,7 +558,8 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
   | (.ok pt, b) =>
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD [])
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) pt.items
-    (.ok (renderPage page zoom rot ⟨pt.fonts, srcs, imgs⟩ pt.items cfg), b)
+    let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) pt.items
+    (.ok (renderPage page zoom rot ⟨pt.fonts, srcs, imgs, shs⟩ pt.items cfg), b)
 
 /-! ## 6. Checks -/
 

@@ -852,3 +852,66 @@ import SafePdf
 #print axioms SafePdf.Core.Raster.Image.place_steps_le
 #print axioms SafePdf.Core.Raster.Image.renderImage_size
 #print axioms SafePdf.Core.Raster.Image.renderImage_steps_le
+
+-- Phase 7, task 7.2f: fast scanline filler (SafePdf/Core/Raster/Fill.lean)
+#print axioms SafePdf.Core.Raster.Fill.fillEdgesSpec_size
+#print axioms SafePdf.Core.Raster.Fill.fillEdgesCountedSpec_steps_le
+#print axioms SafePdf.Core.Raster.Fill.sortAct_size
+#print axioms SafePdf.Core.Raster.Fill.rowLoopF_inv
+#print axioms SafePdf.Core.Raster.Fill.fillRows_spec
+
+-- Phase 7, task 7.3e: image masks, smooth sampling, fast placement
+#print axioms SafePdf.Core.Raster.Image.u8_eq
+#print axioms SafePdf.Core.Raster.Image.samplesRows_size
+#print axioms SafePdf.Core.Raster.Image.keyLoop_size
+#print axioms SafePdf.Core.Raster.Image.push4_size
+#print axioms SafePdf.Core.Raster.Image.resCols_size
+#print axioms SafePdf.Core.Raster.Image.resRows_size
+#print axioms SafePdf.Core.Raster.Image.alphaLoop_size
+#print axioms SafePdf.Core.Raster.Image.matteLoop_size
+#print axioms SafePdf.Core.Raster.Image.pushAvg_size
+#print axioms SafePdf.Core.Raster.Image.boxCols_size
+#print axioms SafePdf.Core.Raster.Image.boxRows_size
+#print axioms SafePdf.Core.Raster.Image.size_ite
+#print axioms SafePdf.Core.Raster.Image.pixel_size
+#print axioms SafePdf.Core.Raster.Image.downscales_le
+
+-- Phase 7, task 7.3c: transparency (SafePdf/Core/Raster/Transparency.lean, Run, Glyph wiring)
+#print axioms SafePdf.Core.Content.Run.FormJob.pre_post_le
+#print axioms SafePdf.Core.Content.Run.gsStep_pend
+#print axioms SafePdf.Core.Content.Run.gsR_good
+#print axioms SafePdf.Core.Raster.Transparency.blendSep_le
+#print axioms SafePdf.Core.Raster.Transparency.blendSep_normal
+#print axioms SafePdf.Core.Raster.Transparency.blendRGB_le
+#print axioms SafePdf.Core.Raster.Transparency.combinePx_size
+#print axioms SafePdf.Core.Raster.Transparency.span_size
+#print axioms SafePdf.Core.Raster.Transparency.spans_size
+#print axioms SafePdf.Core.Raster.Transparency.combine_size
+#print axioms SafePdf.Core.Raster.Transparency.addMask_length_le
+#print axioms SafePdf.Core.Raster.Transparency.fillBuf_size
+#print axioms SafePdf.Core.Raster.Transparency.beginLayer_open_le
+#print axioms SafePdf.Core.Raster.Transparency.beginLayer_size
+#print axioms SafePdf.Core.Raster.Transparency.endLayer_size
+#print axioms SafePdf.Core.Raster.Transparency.beginGroup_size
+#print axioms SafePdf.Core.Raster.Transparency.tabulate_size
+#print axioms SafePdf.Core.Raster.Transparency.maskFrom_size
+#print axioms SafePdf.Core.Raster.Transparency.addMask_stack
+#print axioms SafePdf.Core.Raster.Transparency.paintFx_inv
+#print axioms SafePdf.Core.Raster.Transparency.renderTx_inv
+#print axioms SafePdf.Core.Raster.Transparency.foldl_renderTx_inv
+#print axioms SafePdf.Core.Raster.Transparency.renderTx_items_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemG_tx
+#print axioms SafePdf.Core.Raster.Glyph.painterG_lawful
+
+-- Phase 7, task 7.3d: shadings (SafePdf/Core/Raster/Shading.lean)
+#print axioms SafePdf.Core.Raster.Shading.Fn.eval_length
+#print axioms SafePdf.Core.Raster.Shading.lutIdx_lt
+#print axioms SafePdf.Core.Raster.Shading.buildLut_size
+#print axioms SafePdf.Core.Raster.Shading.paint_size
+#print axioms SafePdf.Core.Raster.Shading.paint_steps_le
+#print axioms SafePdf.Core.Raster.Shading.paintMesh_inv
+#print axioms SafePdf.Core.Raster.Shading.withBBox_cost
+#print axioms SafePdf.Core.Raster.Shading.renderShading_size
+#print axioms SafePdf.Core.Raster.Shading.renderShading_steps_le
+#print axioms SafePdf.Core.Raster.Shading.renderPatternFill_size
+#print axioms SafePdf.Core.Raster.Shading.renderFill_size
