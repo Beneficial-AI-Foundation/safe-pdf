@@ -6,6 +6,7 @@ corpus (Plan.md section 7, item 1). Stdlib only; run with `python3 -I`.
     python3 -I Tests/differential/run.py [--comparator NAME]... [--corpus DIR]
                                          [--files GLOB] [--limit N] [--json OUT]
                                          [--min-compared N] [--min-similarity X] [--no-fold]
+                                         [--min-within P] [--dpi D] [--exclude GLOB]...
 
 Defaults: all comparators, `corpus/files` (git-ignored; a missing or empty
 directory reports 0 files and exits 0). `--files` overrides `--corpus`.
@@ -24,6 +25,7 @@ our dump (`.lake/build/bin/inspect <file> <view>`) + normalizer + compare.
 | `text`    | `pdftotext` (poppler)    | `text`         | working (needs pdftotext; see below) |
 | `text-mupdf` | `mutool draw -F txt` (MuPDF) | `text`    | working (needs mutool; see below) |
 | `positions` | `mutool draw -F stext` (MuPDF) | `text` (`SAFEPDF_TEXT_GLYPHS=1`) | working (needs mutool; see `positions.py` docstring) |
+| `pixels` | `mutool draw -F pnm` (MuPDF) | `raster` (`SAFEPDF_RASTER_DIR`) | working (needs mutool; metric and numbers in `docs/raster.md`; `pixels.py --selftest`) |
 
 Add one by appending a `Comparator(...)` to `COMPARATORS` in `run.py` (pdf.js
 later).
