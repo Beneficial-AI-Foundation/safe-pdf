@@ -362,6 +362,10 @@ structure OCDesc where
   ocgs : List (PdfObject × Bool) := []
   /-- The configuration's `/Intent`, resolved one level (`null` when absent). -/
   intent : PdfObject := .null
+  /-- Not optional content, but document-level data read with it (task 8.3e): the bytes of the
+  catalog's `/AcroForm /DA` (empty when absent or not a string), the default appearance of a
+  FreeText without an inheritable `/DA` (`pdf_annot_default_appearance`). -/
+  acroDA : List UInt8 := []
 
 /-- The object number and generation of a reference. -/
 def refKey : PdfObject → Option (Nat × Nat)
@@ -373,8 +377,8 @@ def resolveOpt {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → Pdf
   | none => (.null, s)
   | some o => Run.resolve src s o
 
-/-- **Read the default configuration** from the catalog `cat` (see the section doc). -/
-def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
+/-- The default configuration from the catalog `cat` (see the section doc), without `acroDA`. -/
+def readOCConfig {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
   match resolveOpt src s (Dict.get? cat (nm "OCProperties")) with
   | (.dict prop, s) =>
     let (groups, s) := match resolveOpt src s (Dict.get? prop (nm "OCGs")) with
@@ -402,6 +406,18 @@ def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
         | none => st0
       ({ ocgs := groups.map fun o => (o, state o), intent }, s)
   | (_, s) => ({}, s)
+
+/-- **Read the document-level data** of the catalog `cat`: the default optional-content
+configuration (`readOCConfig`) and the `/AcroForm /DA` bytes (`pdf_dict_getl(trailer, Root,
+AcroForm, DA)`, `pdf_to_str_buf`: anything but a string is empty). -/
+def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
+  let (oc, s) := readOCConfig src s cat
+  let (da, s) := match resolveOpt src s (Dict.get? cat (nm "AcroForm")) with
+    | (.dict af, s) => match resolveOpt src s (Dict.get? af (nm "DA")) with
+      | (.string b, s) => (b, s)
+      | (_, s) => ([], s)
+    | (_, s) => ([], s)
+  ({ oc with acroDA := da }, s)
 
 /-- `ocg_intents_include`: whether intent `n` is included by the configuration's intent. -/
 def intentIncludes (desc : PdfObject) (n : Name) : Bool :=
@@ -537,9 +553,9 @@ Sound annotations (`iconAp`, `/Name`, MuPDF's 8 × 8 open-iconic paths). Caret a
 written in a fixed form box (`[0 0 20 14]`, `[0 0 16 16]`) mapped into the recomputed
 rectangle by matrix A; everything else has `/BBox` = rectangle and A = identity. Trigonometry
 is exact: the arrow and slash directions come from the normalised line vector (`dirOf`, MuPDF's
-`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Recorded gaps: cloudy borders (`/BE /S
-/C`: drawn as plain borders), Redact and widgets (`Skip.noAppearance`). FreeText, Stamp and
-Line `/Cap` captions (`captionStr`): task 8.3d, below. -/
+`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Cloudy borders (`/BE /S /C`): task 8.3e,
+below. Recorded gaps: Redact and widgets (`Skip.noAppearance`). FreeText, Stamp and Line `/Cap`
+captions (`captionStr`): task 8.3d, below. -/
 
 /-- Most numbers read from one `/InkList` stroke or `/QuadPoints` array, and most strokes
 (local cap). -/
@@ -698,9 +714,228 @@ def circleStr (rx ry cx cy : Rat) : String :=
   p [cx - mx, cy - ry, cx - rx, cy - my, cx - rx, cy] ++ " c\n" ++
   p [cx - rx, cy + my, cx - mx, cy + ry, cx, cy + ry] ++ " c\n"
 
-/-- Square and Circle (`pdf_write_square_appearance`, `pdf_write_circle_appearance`, without
-clouds): the border centred on `/Rect` inset by `/RD`, at least half the line width. -/
-def boxAp (circle : Bool) (st : Style) (orect : RBox) (rd : List Rat) : String × OBox :=
+/-! ### Cloudy borders (task 8.3e; MuPDF 1.25.1 `start_cloud` … `end_cloud`)
+
+A Square, Circle or Polygon whose `/BE` has `/S /C` and an intensity `/I` > 0
+(`pdf_annot_border_effect`, `pdf_annot_border_effect_intensity`) gets MuPDF's cloudy border
+instead of its plain path: points are placed along the outline every
+`spacing = 6.666667 · I + 0.8333333 · lw` (the square restarts at each corner; the circle is
+32 chords; the polygon continues across vertices), and each point is the centre of an arc of
+radius `radius = 4 · I + 0.5 · lw` from where its circle meets the previous one to where it meets
+the next (`emit_cloud`), split into Bézier segments of at most 45° (`draw_arc`), plus a short
+22.5° tail; with an interior colour the arcs form one filled outline, else each arc starts a
+new subpath. Bevel joins (`2 j`). The border box grows by `radius`. FreeText's `/BE` is not drawn
+by MuPDF 1.25.1 (its writer has no cloud path): plain border, as here.
+
+Trigonometry and square roots are computed over `ℚ` to about 10⁻¹¹ (`sinR`, `atanR`, `atan2R`,
+`sqrtR`; MuPDF: single-precision `cosf`, `atan2`, `sqrtf`): coordinates agree with MuPDF's to
+the written six decimals up to rounding. At most `maxCloudPts` points are placed per border
+(MuPDF: unbounded — a zero spacing loops forever). -/
+
+/-- Most cloud points per border (local cap). -/
+def maxCloudPts : Nat := 4096
+
+/-- Round down to 10⁻¹². -/
+def rnd (q : Rat) : Rat := ((q * 1000000000000).floor : Rat) / 1000000000000
+
+/-- π to 10⁻¹². -/
+def piR : Rat := 3141592653590 / 1000000000000
+
+/-- Square root to 10⁻¹² (0 for a non-positive argument). -/
+def sqrtR (q : Rat) : Rat :=
+  if q ≤ 0 then 0 else
+    ((Nat.sqrt (q * 1000000000000000000000000).floor.toNat : Nat) : Rat) / 1000000000000
+
+/-- The sine series from term `t = y^i / i!` (`x2 = y²`): `n` terms, each rounded. -/
+def taylor (x2 : Rat) : Nat → Nat → Rat → Rat
+  | 0, _, _ => 0
+  | n + 1, i, t => t + taylor x2 n (i + 2) (rnd (-t * x2 / (((i + 1) * (i + 2) : Nat) : Rat)))
+
+/-- Sine to about 10⁻¹¹ (argument reduced to `[−π, π]`). -/
+def sinR (x : Rat) : Rat :=
+  let k := ((x / (2 * piR)) + 1 / 2).floor
+  let y := rnd (x - (k : Rat) * 2 * piR)
+  taylor (rnd (y * y)) 14 1 y
+
+/-- Cosine to about 10⁻¹¹. -/
+def cosR (x : Rat) : Rat := sinR (x + piR / 2)
+
+/-- Arctangent series `Σ (−1)^k y^(2k+1) / (2k+1)` for small `y`. -/
+def atanSeries (y2 : Rat) : Nat → Nat → Rat → Rat
+  | 0, _, _ => 0
+  | n + 1, i, p => rnd (p / ((2 * i + 1 : Nat) : Rat)) + atanSeries y2 n (i + 1) (rnd (-p * y2))
+
+/-- Arctangent of `x` with `|x| ≤ 1`: two half-angle steps, then 16 series terms. -/
+def atanSmall (x : Rat) : Rat :=
+  let h := fun (y : Rat) => rnd (y / (1 + sqrtR (1 + y * y)))
+  let y := h (h x)
+  4 * atanSeries (rnd (y * y)) 16 0 y
+
+/-- Arctangent to about 10⁻¹¹. -/
+def atanR (x : Rat) : Rat :=
+  if x > 1 then piR / 2 - atanSmall (1 / x)
+  else if x < -1 then -piR / 2 - atanSmall (1 / x)
+  else atanSmall x
+
+/-- `atan2(y, x)` (C's: `(−π, π]`, 0 at the origin). -/
+def atan2R (y x : Rat) : Rat :=
+  if x > 0 then atanR (y / x)
+  else if x < 0 then (if y ≥ 0 then atanR (y / x) + piR else atanR (y / x) - piR)
+  else if y > 0 then piR / 2 else if y < 0 then -piR / 2 else 0
+
+/-- `draw_arc_seg`: one cubic Bézier for the arc from `th0` to `th1` (with a `m` if `move`). -/
+def arcSeg (r xc yc th0 th1 : Rat) (move : Bool) : String :=
+  let x1 := xc + r * cosR th0
+  let y1 := yc + r * sinR th0
+  let x4 := xc + r * cosR th1
+  let y4 := yc + r * sinR th1
+  let ax := x1 - xc
+  let ay := y1 - yc
+  let bx := x4 - xc
+  let by_ := y4 - yc
+  let q1 := ax * ax + ay * ay
+  let q2 := q1 + ax * bx + ay * by_
+  let k2 := rnd ((4 / 3) * (sqrtR (2 * q1 * q2) - q2) / (ax * by_ - ay * bx))
+  let p := fun (xs : List Rat) => " ".intercalate (xs.map fmt)
+  (if move then p [x1, y1] ++ " m\n" else "") ++
+    p [xc + ax - k2 * ay, yc + ay + k2 * ax, xc + bx + k2 * by_, yc + by_ - k2 * bx, x4, y4] ++
+    " c\n"
+
+/-- `draw_arc`: the arc from `th0` down to `th1`, halved while longer than 45° (fuel: depth). -/
+def arcStr (r xc yc : Rat) : Nat → Rat → Rat → Bool → String
+  | 0, th0, th1, move => arcSeg r xc yc th0 th1 move
+  | f + 1, th0, th1, move =>
+    let d := th0 - th1
+    if d > piR / 4 then
+      arcStr r xc yc f th0 (rnd (th0 - d / 2)) move ++ arcStr r xc yc f (rnd (th0 - d / 2)) th1 false
+    else arcSeg r xc yc th0 th1 move
+
+/-- The cloud writer's state (`struct cloud_list`) and its output. -/
+structure Cloud where
+  /-- The first two and the latest three points (`data`, at most five). -/
+  data : List (Rat × Rat) := []
+  /-- No arc written yet. -/
+  first : Bool := true
+  /-- Interior colour set (one filled outline). -/
+  fill : Bool
+  /-- Distance between points. -/
+  spacing : Rat
+  /-- Arc radius. -/
+  radius : Rat
+  /-- Distance carried over from the previous line. -/
+  phase : Rat := 0
+  /-- Points placed. -/
+  count : Nat := 0
+  /-- Content written. -/
+  out : String := ""
+
+/-- `start_cloud` (constants measured from Acrobat by MuPDF). -/
+def Cloud.start (lw intensity : Rat) (fill : Bool) : Cloud :=
+  { fill, spacing := intensity * 6666667 / 1000000 + lw * 8333333 / 10000000,
+    radius := intensity * 4 + lw / 2, out := "2 j\n" }
+
+/-- `intersect_cloud`: the angle, seen from `p1` (`sel` = false) or `p0`, of the intersection of
+the circles of radius `r` about `p0` and `p1` (0 when they do not meet or coincide). -/
+def intersectCloud (p0 p1 : Rat × Rat) (r : Rat) (sel : Bool) : Rat :=
+  let dx := p1.1 - p0.1
+  let dy := p1.2 - p0.2
+  let d := sqrtR (dx * dx + dy * dy)
+  if d ≥ r + r ∨ d ≤ 0 then 0 else
+  let a := d / 2
+  let h := sqrtR (r * r - a * a)
+  let x3 := rnd ((p0.1 + p1.1) / 2 - h * dy / d)
+  let y3 := rnd ((p0.2 + p1.2) / 2 + h * dx / d)
+  if sel then atan2R (y3 - p0.2) (x3 - p0.1) else atan2R (y3 - p1.2) (x3 - p1.1)
+
+/-- `emit_cloud`: the arc about `b` between its neighbours `a` and `c`, and its tail. -/
+def Cloud.emit (cl : Cloud) (a b c : Rat × Rat) : Cloud :=
+  let th0 := intersectCloud a b cl.radius false
+  let th1 := intersectCloud b c cl.radius true
+  let th1 := if th1 > th0 then th1 - 2 * piR else th1
+  let th1 := if th1 > th0 then th1 - 2 * piR else th1
+  let r := cl.radius
+  let tail := arcSeg r b.1 b.2 th1 (th1 - piR / 8) false ++
+    (if cl.fill then arcSeg r b.1 b.2 (th1 - piR / 8) th1 false else "")
+  { cl with out := cl.out ++ arcStr r b.1 b.2 4 th0 th1 (cl.first || !cl.fill) ++ tail,
+            first := false }
+
+/-- Point `i` of the window. -/
+def Cloud.pt5 (cl : Cloud) (i : Nat) : Rat × Rat := cl.data[i]?.getD (0, 0)
+
+/-- `add_cloud`: place a point; from the third on, emit the arc about the previous one. -/
+def Cloud.add (cl : Cloud) (p : Rat × Rat) : Cloud :=
+  let p := (rnd p.1, rnd p.2)
+  let data := if cl.data.length < 5 then cl.data ++ [p]
+    else [cl.pt5 0, cl.pt5 1, cl.pt5 3, cl.pt5 4, p]
+  let cl := { cl with data, count := cl.count + 1 }
+  let n := data.length
+  if n ≥ 3 then cl.emit (cl.pt5 (n - 3)) (cl.pt5 (n - 2)) (cl.pt5 (n - 1)) else cl
+
+/-- The placing loop of `add_cloud_line` (fuel: `maxCloudPts`; stops at the cap). -/
+def Cloud.lineLoop (x0 y0 dx dy total : Rat) : Nat → Cloud → Rat → Cloud × Rat
+  | 0, cl, used => (cl, used)
+  | f + 1, cl, used =>
+    if cl.count ≥ maxCloudPts then (cl, used)
+    else if total - used > cl.spacing - cl.phase then
+      let used := rnd (used + cl.spacing - cl.phase)
+      let t := used / total
+      let cl := cl.add (x0 + dx * t, y0 + dy * t)
+      Cloud.lineLoop x0 y0 dx dy total f { cl with phase := 0 } used
+    else (cl, used)
+
+/-- `add_cloud_line`. -/
+def Cloud.line (cl : Cloud) (a b : Rat × Rat) : Cloud :=
+  let dx := b.1 - a.1
+  let dy := b.2 - a.2
+  let total := sqrtR (dx * dx + dy * dy)
+  let cl := if cl.phase = 0 ∧ cl.count < maxCloudPts then cl.add a else cl
+  let (cl, used) := Cloud.lineLoop a.1 a.2 dx dy total maxCloudPts cl 0
+  { cl with phase := rnd (cl.phase + total - used) }
+
+/-- `end_cloud`: join the last points with the first two. -/
+def Cloud.finish (cl : Cloud) : String :=
+  match cl.data with
+  | [] => cl.out
+  | [p] => cl.out ++ circleStr cl.radius cl.radius p.1 p.2
+  | [p, q] => ((cl.emit p q p).emit q p q).out
+  | [p, q, r] => ((cl.emit q r p).emit r p q).out
+  | [p, q, s, r] => ((cl.emit s r p).emit r p q).out
+  | p :: q :: _ :: r :: t :: _ => ((cl.emit r t p).emit t p q).out
+
+/-- The cloudy outline of the rectangle `(x, y, w, h)` (the square: phase restarts at each
+corner). -/
+def cloudRect (cl : Cloud) (x y w h : Rat) : String :=
+  let cl := cl.line (x, y) (x, y + h)
+  let cl := { cl with phase := 0 }.line (x, y + h) (x + w, y + h)
+  let cl := { cl with phase := 0 }.line (x + w, y + h) (x + w, y)
+  let cl := { cl with phase := 0 }.line (x + w, y) (x, y)
+  cl.finish
+
+/-- The cloudy outline of the ellipse in `(x0, y0)–(x1, y1)`: 32 chords, clockwise from the
+right (`add_cloud_circle`). -/
+def cloudEllipse (cl : Cloud) (x0 y0 x1 y1 : Rat) : String :=
+  let cx := (x0 + x1) / 2
+  let cy := (y0 + y1) / 2
+  let rx := (x1 - x0) / 2
+  let ry := (y1 - y0) / 2
+  let da := -2 * piR / 32
+  let p := fun (i : Nat) => (cx + cosR ((i : Rat) * da) * rx, cy + sinR ((i : Rat) * da) * ry)
+  ((List.range 32).foldl (fun (cl : Cloud) i => cl.line (p i) (p (i + 1))) cl).finish
+
+/-- The cloudy outline of a closed polygon (phase carried across vertices). -/
+def cloudPoly (cl : Cloud) (vs : List (Rat × Rat)) : String :=
+  match vs with
+  | [] => cl.out
+  | v0 :: rest =>
+    let (cl, last) := rest.foldl (fun (acc : Cloud × (Rat × Rat)) p => (acc.1.line acc.2 p, p))
+      (cl, v0)
+    (cl.line last v0).finish
+
+/-- Square and Circle (`pdf_write_square_appearance`, `pdf_write_circle_appearance`): the
+border centred on `/Rect` inset by `/RD`, at least half the line width; cloudy when `cloud`
+(the `/BE` intensity) is positive (task 8.3e), the box then grown by the cloud radius. -/
+def boxAp (circle : Bool) (st : Style) (orect : RBox) (rd : List Rat) (cloud : Rat := 0) :
+    String × OBox :=
   let (pre, sc, ic) := prelude st true
   let e := st.lw / 2
   let r0 := max (nth rd 0) e
@@ -711,8 +946,16 @@ def boxAp (circle : Bool) (st : Style) (orect : RBox) (rd : List Rat) : String �
   let y := orect.y0 + r1
   let w := max (orect.x1 - orect.x0 - r0 - r2) 1
   let h := max (orect.y1 - orect.y0 - r1 - r3) 1
-  let path := if circle then circleStr (w / 2) (h / 2) (x + w / 2) (y + h / 2)
+  let cl := Cloud.start st.lw cloud ic
+  let path := if cloud > 0 then
+      (if circle then cloudEllipse cl x y (x + w) (y + h) else cloudRect cl x y w h)
+    else if circle then circleStr (w / 2) (h / 2) (x + w / 2) (y + h / 2)
     else fmt x ++ " " ++ fmt y ++ " " ++ fmt w ++ " " ++ fmt h ++ " re\n"
+  let e := if cloud > 0 then e + cl.radius else e
+  let r0 := max r0 e
+  let r1 := max r1 e
+  let r2 := max r2 e
+  let r3 := max r3 e
   -- MuPDF's circle writer uses `rd.x1` for the bottom (kept for pixel equality)
   let y0 := if circle then y - r2 else y - r1
   (pre ++ path ++ paintStr sc ic, some ⟨x - r0, y0, x + w + r2, y + h + r3⟩)
@@ -933,11 +1176,12 @@ def polyWinding (vs : List (Rat × Rat)) : Bool :=
       else (area, r)) (0, v0)
     area < 0
 
-/-- Polygon (`close`) and PolyLine (`pdf_write_polygon_appearance` without clouds): the
-vertices `/Vertices`, closed and filled with `/IC` for a polygon; PolyLine line endings `/LE`
-at the first and last vertex; the box grown by the border width. -/
-def polyAp (close : Bool) (st : Style) (vs : List (Rat × Rat)) (le : List PdfObject) :
-    String × OBox :=
+/-- Polygon (`close`) and PolyLine (`pdf_write_polygon_appearance`): the vertices
+`/Vertices`, closed and filled with `/IC` for a polygon (cloudy when `cloud` > 0, task 8.3e);
+PolyLine line endings `/LE` at the first and last vertex; the box grown by the border width
+(and the cloud radius). -/
+def polyAp (close : Bool) (st : Style) (vs : List (Rat × Rat)) (le : List PdfObject)
+    (cloud : Rat := 0) : String × OBox :=
   let (pre, sc, ic) := prelude st true
   match vs with
   | [] => (pre, none)
@@ -946,9 +1190,11 @@ def polyAp (close : Bool) (st : Style) (vs : List (Rat × Rat)) (le : List PdfOb
     let (path, r, _) := ord.foldl (fun (acc : String × OBox × Bool) p =>
       (acc.1 ++ pts [p.1, p.2] ++ (if acc.2.2 then " m\n" else " l\n"), acc.2.1.incl p.1 p.2,
         false)) ("", none, true)
-    let path := path ++ (if close then "h\n" else "")
+    let cl := Cloud.start st.lw cloud ic
+    let cloudy := close && decide (cloud > 0)
+    let path := if cloudy then cloudPoly cl ord else path ++ (if close then "h\n" else "")
     let paint := if close then paintStr sc ic else strokeStr sc
-    let r := r.expand st.lw
+    let r := r.expand (if cloudy then st.lw + cl.radius else st.lw)
     let (ends, r) := if close then ("", r) else
       match rest.reverse with
       | last :: prev :: _ => endsStr r le st.lw sc ic v0 ((rest.head?).getD v0) last prev
@@ -1309,7 +1555,8 @@ PDFDocEncoding; at most `maxSynthText` characters) is laid out like MuPDF's
 `write_variable_text` (multi-line, `break_string`: break at the last space once a line is wider
 than the box, at `\n` and `\r`), aligned by `/Q` (0 left, 1 centre, 2 right; other values 0),
 first baseline `0.8 · size` below the top of the padded box, lines `1.2 · size` apart. `/DA` (on
-the annotation or its `/Parent` chain, `pdf_parse_default_appearance`: the first 99 bytes,
+the annotation or its `/Parent` chain, else the catalog's `/AcroForm /DA` (task 8.3e,
+`pdf_annot_default_appearance`); `pdf_parse_default_appearance`: the first 99 bytes,
 whitespace-separated tokens, `/Name`, `Tf`, `g`, `rg`, `k`, a four-slot operand stack with
 `strtof` prefixes) gives the font (`Helv`, `Cour`, `TiRo`, `Symb`, `ZaDb`; anything else
 `Helv`), the size (0 → 12) and the text and border colour. The box is `/Rect` inset by `/RD`;
@@ -1327,9 +1574,9 @@ IS`, …, two lines for the public-release stamps, the name itself otherwise), T
 in a `[0 0 190 50]` form box with a 2-point frame, all turned by 0.6°; `/C` is the fill and
 stroke colour; the rectangle is shrunk to the box's aspect ratio about its centre.
 
-Recorded gaps: rich text `/RC` and `/DS` (MuPDF's HTML engine), the catalog's `/AcroForm /DA`
-fallback, FreeText `/Rotate` other than multiples of 90 (left unturned). The rasterizer does not
-draw text of non-embedded base-14 fonts yet; text extraction sees it. -/
+Rich text `/RC` and `/DS`: task 8.3e, below (`richStyle`, `richText`). Recorded gaps: FreeText
+`/Rotate` other than multiples of 90 (left unturned). The rasterizer does not draw text of
+non-embedded base-14 fonts yet; text extraction sees it. -/
 
 /-- Most characters of `/Contents` laid out (local cap). -/
 def maxSynthText : Nat := 65536
@@ -1525,11 +1772,14 @@ def layoutLines (wd : Char → Rat) (size maxw : Rat) : Nat → List Char → Li
     (body, w) :: layoutLines wd size maxw f (cs.drop k)
 
 /-- The text lines, aligned by `q` in width `maxw`, each a `Td` down by `lh` then
-`/font size Tf (…) Tj` (an empty line writes no string). -/
-def linesStr (f : Font.Std14) (font : String) (size lh maxw : Rat) (q : Nat) (cs : List Char) :
+`/font size Tf (…) Tj` (an empty line writes no string); `trim`: trailing spaces are not
+written (an HTML story, task 8.3e). -/
+def linesStr (f : Font.Std14) (font : String) (size lh maxw : Rat) (q : Nat) (cs : List Char)
+    (trim : Bool := false) :
     String :=
   let (out, _) := (layoutLines (charWidth f) size maxw cs.length cs).foldl
-    (fun (acc : String × Rat) (line, w) =>
+    (fun (acc : String × Rat) (line0, w) =>
+      let line := if trim then (line0.reverse.dropWhile (· == ' ')).reverse else line0
       let x := if q == 1 then (maxw - w) / 2 else if q == 2 then maxw - w else 0
       (acc.1 ++ pts [x - acc.2, -lh] ++ " Td\n" ++
         (if line.isEmpty then "" else "/" ++ font ++ " " ++ fmt size ++ " Tf\n" ++ litStr line ++
@@ -1542,10 +1792,198 @@ def rotEntries (r : Int) : Rat × Rat × Rat × Rat :=
   if m = 90 then (0, 1, -1, 0) else if m = 180 then (-1, 0, 0, -1)
   else if m = 270 then (0, -1, 1, 0) else (1, 0, 0, 1)
 
-/-- **FreeText** (`pdf_write_free_text_appearance` without rich text; see the section doc):
-content, resources and the rectangle (also the form box). -/
+/-! #### Rich text (task 8.3e)
+
+MuPDF 1.25.1 (built with its HTML engine, as `mutool`) lays out a FreeText with `/RC`, or with
+`/DS` and `/Contents`, as an HTML story (`write_rich_content`): the text is `/RC` (XHTML), else
+`/Contents` escaped; the CSS is `body{margin:0} p{margin:0}` plus `body{<DS>}`; the default
+size is `/DA`'s, the default font the engine's serif font, the default colour black (not `/DA`'s:
+`/DA` still colours the border); the story is placed in the box from `x = 2b` to `x = w − 4b` (`b`
+the border width), the first baseline `0.9 · size` below its top and lines `1.2 · size` apart
+(measured with `mutool draw -F stext`); `/Q` is not used (CSS `text-align` is).
+
+This is a subset of that engine: `/DS` declarations `font-size` (`pt`, `px` = pt, `em`, `%`),
+`font-family` and the `font` shorthand (size and family), `color` (`#rgb`, `#rrggbb`,
+`rgb(r, g, b)`, sixteen names) and `text-align` (`left`, `center`, `right`; `justify` as left);
+families map to base-14 fonts: `courier`/`mono…` → Courier, `helvetica`/`arial`/`sans…` →
+Helvetica, anything else → Times (MuPDF's default serif is Charis SIL: same text, other widths).
+`/RC` markup is reduced to its text: tags dropped, `<br>` and the ends of `p`, `div` and
+`h1`–`h6` break lines, the five XML entities and `&#N;`/`&#xN;` decoded; whitespace collapses
+to one space and empty lines are dropped, as HTML does. Recorded gaps: inline styles of `/RC`
+(`<span style>`, `<b>`, `<i>`: bold and italic faces), CSS `line-height`, margins and
+`vertical-align`. -/
+
+/-- Lower case (ASCII). -/
+def lower (cs : List Char) : List Char := cs.map Char.toLower
+
+/-- Trim ASCII whitespace at both ends. -/
+def trimWs (cs : List Char) : List Char :=
+  ((cs.dropWhile isDAWs).reverse.dropWhile isDAWs).reverse
+
+/-- Whether `pat` occurs in `cs`. -/
+def containsCs (cs pat : List Char) : Bool :=
+  ((String.ofList cs).splitOn (String.ofList pat)).length > 1
+
+/-- Split at a separator character. -/
+def splitOnChar (sep : Char) (cs : List Char) : List (List Char) :=
+  ((String.ofList cs).splitOn (String.ofList [sep])).map String.toList
+
+/-- A CSS length: the number, then `pt`/`px`/nothing (points), `em` (× `base`) or `%`;
+`none` without digits or for another unit. -/
+def cssLen (base : Rat) (cs : List Char) : Option Rat :=
+  let num := cs.takeWhile fun c => c.isDigit || c == '.' || c == '-' || c == '+'
+  let unit := lower (cs.drop num.length)
+  if !num.any Char.isDigit then none else
+  let v := (strtof num).1
+  if unit = [] ∨ unit = "pt".toList ∨ unit = "px".toList then some v
+  else if unit = "em".toList then some (v * base)
+  else if unit = ['%'] then some (v * base / 100)
+  else none
+
+/-- The base-14 resource name of a CSS font family list. -/
+def cssFamily (cs : List Char) : String :=
+  let l := lower cs
+  if containsCs l "courier".toList || containsCs l "mono".toList then "Cour"
+  else if containsCs l "helvetica".toList || containsCs l "arial".toList ||
+    containsCs l "sans".toList then "Helv"
+  else "TiRo"
+
+/-- A hexadecimal digit's value. -/
+def hexVal (c : Char) : Option Nat :=
+  if c.isDigit then some (c.toNat - 48)
+  else if 'a' ≤ c ∧ c ≤ 'f' then some (c.toNat - 87)
+  else if 'A' ≤ c ∧ c ≤ 'F' then some (c.toNat - 55)
+  else none
+
+/-- An RGB colour from bytes. -/
+def rgb255 (r g b : Nat) : List Rat := [(r : Rat) / 255, (g : Rat) / 255, (b : Rat) / 255]
+
+/-- The sixteen basic CSS colour names. -/
+def cssNamed : List (String × Nat × Nat × Nat) :=
+  [("black", 0, 0, 0), ("silver", 192, 192, 192), ("gray", 128, 128, 128),
+   ("grey", 128, 128, 128), ("white", 255, 255, 255), ("maroon", 128, 0, 0),
+   ("red", 255, 0, 0), ("purple", 128, 0, 128), ("fuchsia", 255, 0, 255),
+   ("green", 0, 128, 0), ("lime", 0, 255, 0), ("olive", 128, 128, 0), ("yellow", 255, 255, 0),
+   ("navy", 0, 0, 128), ("blue", 0, 0, 255), ("teal", 0, 128, 128), ("aqua", 0, 255, 255)]
+
+/-- A CSS colour (see the section doc); `none` if not understood. -/
+def cssColor (cs : List Char) : Option (List Rat) :=
+  let l := lower (trimWs cs)
+  match l with
+  | '#' :: hs =>
+    match hs.mapM hexVal with
+    | some [r, g, b] => some (rgb255 (r * 17) (g * 17) (b * 17))
+    | some [r1, r2, g1, g2, b1, b2] => some (rgb255 (r1 * 16 + r2) (g1 * 16 + g2) (b1 * 16 + b2))
+    | _ => none
+  | 'r' :: 'g' :: 'b' :: '(' :: rest =>
+    let inner := rest.takeWhile (· != ')')
+    match (splitOnChar ',' inner).map (fun p => (strtof (trimWs p)).1) with
+    | [r, g, b] =>
+      let cl := fun (x : Rat) => max 0 (min 1 (x / 255))
+      some [cl r, cl g, cl b]
+    | _ => none
+  | _ => (cssNamed.find? (·.1 == String.ofList l)).map fun (_, r, g, b) => rgb255 r g b
+
+/-- The text style of a rich FreeText: font, size and colour (as `DAInfo`), and alignment. -/
+structure RichStyle where
+  /-- Font resource name, size, colour (empty: black). -/
+  da : DAInfo
+  /-- `text-align`: 0 left, 1 centre, 2 right. -/
+  align : Nat := 0
+
+/-- One CSS declaration `prop: value` applied to `st`. -/
+def cssDecl (base : Rat) (st : RichStyle) (decl : List Char) : RichStyle :=
+  let prop := lower (trimWs (decl.takeWhile (· != ':')))
+  let val := trimWs ((decl.dropWhile (· != ':')).drop 1)
+  let p := String.ofList prop
+  if p == "font-size" then
+    match cssLen base val with
+    | some v => { st with da := { st.da with size := v } }
+    | none => st
+  else if p == "font-family" then { st with da := { st.da with font := cssFamily val } }
+  else if p == "font" then
+    let toks := splitWs val []
+    match toks.findIdx? (fun t => (cssLen base t).isSome) with
+    | some i =>
+      let sz := (toks[i]?.bind (cssLen base)).getD st.da.size
+      let fam := toks.drop (i + 1)
+      let fnt := if fam.isEmpty then st.da.font else cssFamily (" ".toList.intercalate fam)
+      let d : DAInfo := { font := fnt, size := sz, color := st.da.color }
+      { st with da := d }
+    | none => st
+  else if p == "color" then
+    match cssColor val with
+    | some c => { st with da := { st.da with color := c } }
+    | none => st
+  else if p == "text-align" then
+    let v := String.ofList (lower val)
+    { st with align := if v == "center" then 1 else if v == "right" then 2 else 0 }
+  else st
+
+/-- **The style of a rich FreeText**: `/DS` over the defaults (serif, `/DA`'s size, black). -/
+def richStyle (daSize : Rat) (ds : List Char) : RichStyle :=
+  let base := if daSize = 0 then 12 else daSize
+  (splitOnChar ';' ds).foldl (cssDecl base) { da := { font := "TiRo", size := base, color := [] } }
+
+/-- An XML entity body (between `&` and `;`). -/
+def entityChar (e : List Char) : Option Char :=
+  let s := String.ofList e
+  if s == "lt" then some '<' else if s == "gt" then some '>' else if s == "amp" then some '&'
+  else if s == "quot" then some '"' else if s == "apos" then some '\''
+  else match e with
+    | '#' :: 'x' :: hs | '#' :: 'X' :: hs =>
+      (hs.mapM hexVal).map fun ds => Char.ofNat (ds.foldl (fun a d => a * 16 + d) 0)
+    | '#' :: ds =>
+      if !ds.isEmpty && ds.all Char.isDigit then
+        some (Char.ofNat (ds.foldl (fun a d => a * 10 + (d.toNat - 48)) 0))
+      else none
+    | _ => none
+
+/-- Whether a tag (its text between `<` and `>`) breaks the line: `br`, or the end of `p`,
+`div`, `h1`–`h6`. -/
+def tagBreaks (t : List Char) : Bool :=
+  let l := lower t
+  let name := (l.takeWhile fun c => !isDAWs c && c != '/' && c != '>')
+  let n := String.ofList name
+  n == "br" ||
+    (l.head? == some '/' &&
+      ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6"].contains (String.ofList
+        ((l.drop 1).takeWhile fun c => !isDAWs c && c != '>')))
+
+/-- The text of XHTML markup, `\n` at line breaks (fuel: the length). -/
+def markupText : Nat → List Char → List Char
+  | 0, _ => []
+  | _, [] => []
+  | f + 1, '<' :: rest =>
+    let tag := rest.takeWhile (· != '>')
+    (if tagBreaks tag then ['\n'] else []) ++ markupText f ((rest.drop tag.length).drop 1)
+  | f + 1, '&' :: rest =>
+    let e := rest.takeWhile (· != ';')
+    match (if e.length ≤ 10 then entityChar e else none) with
+    | some c => c :: markupText f ((rest.drop e.length).drop 1)
+    | none => '&' :: markupText f rest
+  | f + 1, c :: rest => c :: markupText f rest
+
+/-- Collapse each run of whitespace to one space (HTML `white-space: normal`). -/
+def collapseWs : List Char → Bool → List Char
+  | [], _ => []
+  | c :: cs, prevWs =>
+    if isDAWs c then (if prevWs then collapseWs cs true else ' ' :: collapseWs cs true)
+    else c :: collapseWs cs false
+
+/-- **Rich text lines** (`/RC` markup when `markup`, else plain `/Contents`): whitespace
+collapsed per line, trimmed, empty lines dropped, joined by `\n`. -/
+def richText (markup : Bool) (cs : List Char) : List Char :=
+  let raw := if markup then markupText cs.length cs else collapseWs cs false
+  let lines := (splitOnChar '\n' raw).map fun l => trimWs (collapseWs l false)
+  ['\n'].intercalate (lines.filter (!·.isEmpty))
+
+/-- **FreeText** (`pdf_write_free_text_appearance`; see the section doc): content, resources
+and the rectangle (also the form box); `rich`: the style of rich text (task 8.3e), whose
+`text` is already `richText`. -/
 def freeTextAp (st : Style) (orect : RBox) (text : List Char) (q : Nat) (da : DAInfo)
-    (rd : List Rat) (r : Int) (callout : List Rat) (le : PdfObject) : String × Dict × OBox :=
+    (rd : List Rat) (r : Int) (callout : List Rat) (le : PdfObject)
+    (rich : Option RichStyle := none) : String × Dict × OBox :=
   let tb : RBox := ⟨orect.x0 + nth rd 0, orect.y0 + nth rd 1, orect.x1 - nth rd 2,
     orect.y1 - nth rd 3⟩
   let w := tb.x1 - tb.x0
@@ -1577,14 +2015,17 @@ def freeTextAp (st : Style) (orect : RBox) (text : List Char) (q : Nat) (da : DA
     if r = 270 then (0, w) else if r = 90 then (h, 0) else if r = 180 then (w, h) else (0, 0)
   let cm := "q\n" ++ pts [ra, rb, rc, rdd, e + tb.x0, f + tb.y0] ++ " cm\n"
   let pad := b * 2
-  let tw := w - pad * 2
+  -- rich text: the story's box runs from `2b` to `w − 4b`, first baseline `0.9 · size` down
+  let (tda, q, tw, base) := match rich with
+    | some rs => (rs.da, rs.align, w - pad * 3, (9 : Rat) / 10)
+    | none => (da, q, w - pad * 2, (4 : Rat) / 5)
   let th := h - pad * 2
-  let size := if da.size = 0 then 12 else da.size
+  let size := if tda.size = 0 then 12 else tda.size
   let lh := size * 6 / 5
-  let (f14, _) := stdOf da.font
-  let body := "BT\n" ++ color0Str da.color false ++ pts [pad, pad + th - size * 4 / 5 + lh] ++
-    " Td\n" ++ linesStr f14 da.font size lh tw q text ++ "ET\n"
-  let fontRes : Dict := [(nm "Font", .dict [(nm da.font, stdFontDict (stdOf da.font).2)])]
+  let (f14, _) := stdOf tda.font
+  let body := "BT\n" ++ color0Str tda.color false ++ pts [pad, pad + th - size * base + lh] ++
+    " Td\n" ++ linesStr f14 tda.font size lh tw q text rich.isSome ++ "ET\n"
+  let fontRes : Dict := [(nm "Font", .dict [(nm tda.font, stdFontDict (stdOf tda.font).2)])]
   (head ++ call ++ bg ++ border ++ clip ++ cm ++ body ++ "Q\n", res ++ fontRes, rect)
 
 /-- The texts of MuPDF's built-in stamps: `(text, baseline, size)`. -/
@@ -1700,8 +2141,9 @@ def synthDict (r : RBox) (res : Dict) : Dict :=
 /-- **Synthesise a normal appearance** for annotation dictionary `ad` of subtype `sub` with
 `/Rect` `orect` (see the section doc): the new rectangle, the form's `/BBox` (= the rectangle
 except for Caret and icons) and the content stream; `none` for a subtype not synthesised, or an
-empty result rectangle. -/
-def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (orect : RBox) :
+empty result rectangle. `acroDA`: the catalog's `/AcroForm /DA` (`OCDesc.acroDA`). -/
+def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (orect : RBox)
+    (acroDA : List UInt8 := []) :
     Option (RBox × RBox × Stream) × σ :=
   let (st, s) := styleOf src s ad
   let (gs, res) := opacityRes false st.ca
@@ -1709,6 +2151,13 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
     let (qp, s) := arrOf src s (Dict.get? ad (nm "QuadPoints"))
     let (qp, s) := realsOf src s (qp.getD [])
     (quadsOf qp, s)
+  -- `/BE /S /C` → the intensity `/I` (task 8.3e), else 0
+  let cloudOf := fun (s : σ) => match resolveOpt src s (Dict.get? ad (nm "BE")) with
+    | (.dict be, s) => match nameOf src s (Dict.get? be (nm "S")) with
+      | (some n, s) => if n = nm "C" then realOf src s ((Dict.get? be (nm "I")).getD .null)
+          else (0, s)
+      | (none, s) => (0, s)
+    | (_, s) => ((0 : Rat), s)
   let le := fun (s : σ) => match arrOf src s (Dict.get? ad (nm "LE")) with
     | (some xs, s) => (xs, s)
     | (none, s) => ([], s)
@@ -1716,7 +2165,8 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
     if sub = nm "Square" ∨ sub = nm "Circle" then
       let (rd, s) := arrOf src s (Dict.get? ad (nm "RD"))
       let (rd, s) := realsOf src s ((rd.getD []).take 4)
-      let (c, r) := boxAp (sub = nm "Circle") st orect rd
+      let (cloud, s) := cloudOf s
+      let (c, r) := boxAp (sub = nm "Circle") st orect rd cloud
       (some (gs ++ c, res, r, none), s)
     else if sub = nm "Line" then
       let (l, s) := arrOf src s (Dict.get? ad (nm "L"))
@@ -1768,7 +2218,8 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
       let (vs, s) := realsOf src s (vs.getD [])
       let pairs := (List.range (vs.length / 2)).map fun k => (nth vs (2 * k), nth vs (2 * k + 1))
       let (e, s) := le s
-      let (c, r) := polyAp (sub = nm "Polygon") st pairs e
+      let (cloud, s) := cloudOf s
+      let (c, r) := polyAp (sub = nm "Polygon") st pairs e cloud
       (some (gs ++ c, res, r, none), s)
     else if sub = nm "Caret" then
       let (c, r, bb) := caretAp st orect
@@ -1786,7 +2237,7 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
       let (contents, s) := strOf src s (Dict.get? ad (nm "Contents"))
       let (q, s) := intOf src s (Dict.get? ad (nm "Q"))
       let (daO, s) := inheritGet src (nm "DA") maxFieldDepth ad s
-      let (daB, s) := strOf src s daO
+      let (daB, s) := if daO.isNone then (acroDA, s) else strOf src s daO
       let (rd, s) := arrOf src s (Dict.get? ad (nm "RD"))
       let (rd, s) := realsOf src s ((rd.getD []).take 4)
       let (rot, s) := intOf src s (Dict.get? ad (nm "Rotate"))
@@ -1798,8 +2249,20 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
         else ([], s)
       let (leO, s) := resolveOpt src s (Dict.get? ad (nm "LE"))
       let qn := if q < 0 ∨ q > 2 then 0 else q.toNat
-      let (c, res, r) := freeTextAp st orect ((textOf contents).take maxSynthText) qn
-        (parseDA daB) rd rot cl leO
+      -- task 8.3e: rich text when `/RC`, or `/DS` with `/Contents` (`pdf_dict_get_text_string_opt`)
+      let (dsO, s) := resolveOpt src s (Dict.get? ad (nm "DS"))
+      let (rcO, s) := resolveOpt src s (Dict.get? ad (nm "RC"))
+      let da := parseDA daB
+      let text := (textOf contents).take maxSynthText
+      let (c, res, r) := match rcO, dsO with
+        | .string rc, ds =>
+          let dsT := match ds with | .string b => textOf b | _ => []
+          freeTextAp st orect (richText true ((textOf rc).take maxSynthText)) qn da rd rot cl leO
+            (some (richStyle da.size dsT))
+        | _, .string ds =>
+          freeTextAp st orect (richText false text) qn da rd rot cl leO
+            (some (richStyle da.size (textOf ds)))
+        | _, _ => freeTextAp st orect text qn da rd rot cl leO
       (some (c, res, r, none), s)
     else if sub = nm "Stamp" then
       let (name, s) := match Dict.get? ad (nm "Name") with
@@ -1863,7 +2326,7 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (rot : Doc.Ro
           match selectAP src s ad state with
           | (none, s) =>
             if widget then (.skip .noAppearance, s) else
-            match synthesize src s ad subtype rect with
+            match synthesize src s ad subtype rect oc.acroDA with
             | (none, s) => (.skip .noAppearance, s)
             | (some (r, bb, st), s) =>
               let m := if r = bb then Matrix.identity else (aOf r bb).matrix
