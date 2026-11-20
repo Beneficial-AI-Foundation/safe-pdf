@@ -125,6 +125,15 @@ structure Limits where
   (so their `EMC`s still match) and their `/ActualText` is ignored; no `LimitKind`
   corresponds to it (never an error). -/
   maxMarkedDepth : Nat := 256
+  /-- Maximum number of form XObjects whose tokenized content the content runner caches per
+  page run (task 7.9b, `Core.Content.Run.FormCache`; a form drawn many times, e.g. a plot
+  marker, is decoded and tokenized once). A pure performance knob: a form that does not fit
+  is decoded again at each `Do`, as without the cache, so no `LimitKind` corresponds to it. -/
+  maxFormCacheEntries : Nat := 256
+  /-- Maximum total decoded size in bytes of the forms in the runner's per-page cache (task
+  7.9b; the cached operators are linear in it). A form that does not fit is not cached (no
+  error, no `LimitKind`). -/
+  maxFormCacheBytes : Nat := 16 <<< 20
   deriving Repr, Inhabited
 
 namespace Limits
