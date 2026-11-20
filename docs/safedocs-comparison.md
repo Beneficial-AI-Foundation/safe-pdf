@@ -10,7 +10,9 @@ among other tools, [DaeDaLus](https://www.galois.com/project/daedalus) (Galois):
 data-description language whose compiler generates memory-safe parsers in conventional
 languages, applied to ~20 formats. With the
 [PDF Association](https://www.pdfa.org/safedocs-darpa-does-pdf) it built a PDF reference
-parser that was the only parser found free of defects in the program's red-team exercise,
+parser that was the only parser found free of defects in the program's red-team exercise
+(zero defects in the generated parser; the five defects found were in the hand-written C++
+wrapper driving it — [PLDI 2024](https://dl.acm.org/doi/10.1145/3656410)),
 and the [Arlington PDF Model](https://pdfa.org/safedocs-latest-research-into-securing-pdf/),
 a machine-readable model of PDF 2.0 objects.
 
@@ -65,6 +67,6 @@ artifact claims.
 
 Sources: [DARPA SafeDocs](https://www.darpa.mil/research/programs/safe-documents) ·
 [Galois DaeDaLus](https://www.galois.com/project/daedalus) ·
-[DaeDaLus: Safer Document Parsing (paper)](https://researchconnect.buffalo.edu/en/publications/daedalus-safer-document-parsing/) ·
+[DaeDaLus: Safer Document Parsing (PLDI 2024)](https://dl.acm.org/doi/10.1145/3656410) ·
 [PDF Association on SafeDocs](https://www.pdfa.org/safedocs-darpa-does-pdf) ·
 [Arlington PDF Model](https://pdfa.org/safedocs-latest-research-into-securing-pdf/)
