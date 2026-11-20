@@ -5,6 +5,7 @@ import SafePdf.Core.Raster.Image
 import SafePdf.Core.Raster.Transparency
 import SafePdf.Core.Raster.Shading
 import SafePdf.Core.Raster.Tiling
+import SafePdf.Core.Raster.Type3
 import SafePdf.Core.Annot
 
 /-!
@@ -34,9 +35,10 @@ bounds"), ISO 32000-2 §9.4.4 (text rendering matrix), §9.3.6 (text rendering m
    Top DICT matrix; only `a` is kept by 6.2, so skewed Font DICT matrices are not rendered
    exactly — recorded as a gap).
    **Not rendered** (draw nothing): fonts without an embedded program (the standard 14 and
-   other non-embedded fonts — MuPDF substitutes URW fonts; we ship none: a gap), Type 3 fonts
-   (running their charprocs through the interpreter is out of scope), OpenType-wrapped CFF,
-   glyphs a font rejects.
+   other non-embedded fonts — MuPDF substitutes URW fonts; we ship none: a gap),
+   OpenType-wrapped CFF, glyphs a font rejects. Type 3 fonts (task 7.3j) have no outlines:
+   their source records the font object (`GlyphSource.t3obj`), `loadType3` runs their
+   charprocs (`Type3.loadFont`) and their runs are drawn by `Type3.renderRun`.
 2. **Positions** come from `Text.layoutParts` with the page's `FontTable` (the same widths,
    `Tc`, `Tw`, `Tz`, `TJ` adjustments the display list was built with), so rendering and
    extraction place every glyph at the same offset `tx` (C6).
@@ -102,6 +104,13 @@ depth `d − 1`, depth 0 by the path-only painter; `renderItemG` uses depth
 adding the fonts and glyph sources of each pattern's resources (owner = pattern object) before
 its cell runs, and loads images and shadings over the page items and every cell's items.
 Buffer sizes: `renderItemWith_size` (any cell painter), `cellPainterD_size`.
+
+Task 7.3j (Type 3 fonts, `Type3`): `renderDocPage` loads the Type 3 fonts of the source table
+(page, annotation and tiling-cell fonts) after the tiling patterns, under the budget the cells
+left (`loadType3`), and loads the images and shadings of their glyphs. `renderItemWith` draws a
+glyph run whose source has a loaded Type 3 font with `Type3.renderRun`, each glyph painted by
+the item's cell painter `paint` (so nested Type 3 glyphs and tiling cells share the depth cap
+`Tiling.maxTileDepth`; depth 0 paints paths only).
 -/
 
 namespace SafePdf.Core.Raster.Glyph
@@ -134,10 +143,14 @@ structure GlyphSource where
   matrix : GKey → Aff
   /-- Short description (program kind), for diagnostics. -/
   desc : String
+  /-- A Type 3 font: its font object (task 7.3j; loaded by `loadType3`). -/
+  t3obj : Option PdfObject := .none
+  /-- A Type 3 font: its charprocs run into glyph space (task 7.3j). -/
+  t3 : Option Type3.T3Font := .none
 
-/-- A font that draws nothing (no embedded program, Type 3, unsupported). -/
+/-- A font without outlines (no embedded program, Type 3 — drawn by `Type3`, unsupported). -/
 def GlyphSource.none (desc : String) : GlyphSource :=
-  ⟨fun _ => .none, fun _ => .none, fun _ => Aff.id, desc⟩
+  { glyphOf := fun _ => .none, outline := fun _ => .none, matrix := fun _ => Aff.id, desc }
 
 /-- A one-byte code. -/
 def oneByte : List UInt8 → Option UInt8
@@ -247,6 +260,7 @@ def buildSource {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontO
     | (some f, s) =>
       (ttSource f (Text.isSymbolic resolve fd) (Font.SimpleMetrics.ofDict resolve fd .none).encoding, s)
     | (.none, s) => (GlyphSource.none "TrueType (not embedded)", s)
+  else if subtype == "Type3" then ({ GlyphSource.none "Type3" with t3obj := some fontObj }, s0)
   else (GlyphSource.none s!"{subtype} (not rendered)", s0)
 
 /-- Glyph sources by font key (the keys of `Text.FontTable`). -/
@@ -277,6 +291,42 @@ def loadSources {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : 
         let (g, s') := buildSource limits src s o
         (add g, k + 1, s')) (([] : SourceTable), 0, s)
   (t, s)
+
+/-- The object key of an indirect font object. -/
+def objKey : PdfObject → Option (Nat × Nat)
+  | .ref n g => some (n, g)
+  | _ => .none
+
+/-- **Load the Type 3 fonts of a source table** (task 7.3j): every source with a Type 3 font
+object not yet loaded gets its charprocs run (`Type3.loadFont`, environment `env`, the shared
+budget `bud`); an indirect font object is loaded once for all its keys; at most
+`Type3.maxType3Fonts` fonts. Returns the table, the states and the budget left. -/
+def loadType3 {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Tiling.Budget)
+    (pageRes : Dict) (t : SourceTable) : SourceTable × σ × ω × Tiling.Budget :=
+  let r := t.foldl (fun (acc : SourceTable × List ((Nat × Nat) × Option Type3.T3Font) × Nat × σ × ω ×
+      Tiling.Budget) e =>
+    let (out, memo, k, s, obs, bud) := acc
+    let (key, g) := e
+    match g.t3obj, g.t3 with
+    | some o, .none =>
+      match (objKey o).bind fun ok => memo.lookup ok with
+      | some f => (out ++ [(key, { g with t3 := f })], memo, k, s, obs, bud)
+      | .none =>
+        if Type3.maxType3Fonts ≤ k then (out ++ [e], memo, k, s, obs, bud) else
+        let (f, s, obs, bud) := Type3.loadFont env s obs bud pageRes o
+        let memo := match objKey o with
+          | some ok => (ok, f) :: memo
+          | .none => memo
+        (out ++ [(key, { g with t3 := f })], memo, k + 1, s, obs, bud)
+    | _, _ => (out ++ [e], memo, k, s, obs, bud)) ([], [], 0, s, obs, bud)
+  (r.1, r.2.2.2.1, r.2.2.2.2.1, r.2.2.2.2.2)
+
+/-- The items of every loaded Type 3 glyph of a source table (for the image and shading
+loaders). -/
+def type3Items (t : SourceTable) : DisplayList :=
+  t.foldl (fun acc e => match e.2.t3 with
+    | some f => acc ++ f.allItems
+    | .none => acc) #[]
 
 /-! ## 2. Outline cache -/
 
@@ -885,6 +935,9 @@ def renderItemWith (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.Stro
     (pf : PageFonts) (paint : Tiling.CellPainter) (st : TState) : DisplayItem → TState
   | .glyphRun r clip =>
     if !r.renderMode.paints then st else
+    match (pf.sources.get r.font).bind (·.t3) with
+    | some f => { st with rs := Type3.renderRun cfg paint m W H (pf.fonts.get r.font) f st.rs r clip }
+    | .none =>
     let c := Clip.clipMaskC cfg m W H st.rs.cache clip
     let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
     let rs := paintAll cfg m W H (runPattern pf.shadings r) (runTiling pf.tilings r) paint
@@ -933,7 +986,9 @@ theorem renderItemWith_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : 
     simp only [renderItemWith]
     split
     · rfl
-    · exact paintAll_size _ _ _ _ _ _ _ _ _ _ _ _
+    · split
+      · exact Type3.renderRun_size _ _ _ _ _ _ _ _ _ _
+      · exact paintAll_size _ _ _ _ _ _ _ _ _ _ _ _
   | image src ctm fill clip =>
     simp only [renderItemWith]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
   | shading name r ctm fill clip =>
@@ -954,7 +1009,7 @@ theorem renderItemWith_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : 
 theorem renderItemWith_tx (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
     (pf : PageFonts) (paint : Tiling.CellPainter) (st : TState) (it : DisplayItem) :
     (renderItemWith cfg m W H stroke pf paint st it).tx = st.tx := by
-  cases it <;> simp only [renderItemWith] <;> (try split) <;> rfl
+  cases it <;> simp only [renderItemWith] <;> (try split) <;> (try split) <;> rfl
 
 /-- The items an `sh` item is painted as (task 7.3f): with `Normal` blending and no soft mask,
 itself; otherwise bracketed by a non-isolated, non-knockout transparency group of alpha 1
@@ -1116,12 +1171,18 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
       (ap.fonts, srcs) b ()
       { ops := limits.maxOpsPerPage - pt.ops - ap.ops, forms := limits.maxFormsPerPage - pt.forms - ap.forms }
       (page.resources.getD []) items
-    -- Images and shadings of the page and of every loaded cell (task 7.3h2).
-    let all := items ++ tls.cellItems
+    -- Type 3 fonts (task 7.3j): the charprocs of every Type 3 font of the page, the
+    -- annotations and the tiling cells run once into glyph space, under what the tiling
+    -- cells left of the shared op/form budget.
+    let (srcs, b, _, _) := loadType3 (Text.textEnv limits (Text.docSource limits doc) ft.1) b ()
+      tls.budget (page.resources.getD []) ft.2
+    -- Images and shadings of the page, of every loaded cell (task 7.3h2) and of every Type 3
+    -- glyph (task 7.3j).
+    let all := items ++ tls.cellItems ++ type3Items srcs
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
     (.ok (renderPage page zoom rot
-      { fonts := ft.1, sources := ft.2, images := imgs, shadings := shs, tilings := tls } items cfg), b)
+      { fonts := ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls } items cfg), b)
 
 /-! ## 6. Checks -/
 
