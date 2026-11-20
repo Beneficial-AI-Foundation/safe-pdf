@@ -13,8 +13,9 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
 
 * **Layout** (`layout`): left — sidebar toggle (shown only when the document has an outline),
   previous / next page arrows, the page-number field and its "of N" label; centre — zoom out,
-  zoom in and the zoom drop-down; right — the annotation tools (Highlight, Comment, Text,
-  Draw, Image; disabled until tasks 9.8/9.9 land), Print (disabled, after M9), Save (disabled
+  zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
+  document since task 9.4: with a selection it highlights it in the current colour, without
+  one it opens the colour choice; Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save (disabled
   until 9.5c) and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
   Open).
 * **Enabled states** (`targets`, `states`): menubar entries (`Menu.entryList`), toolbar
@@ -197,7 +198,7 @@ def pageEntry (labels : Array String) (n cur : Nat) (input : String) : Nat × Bo
 
 /-- Toolbar buttons that are not (yet) viewer commands: the annotation tools, Print, Save. -/
 inductive Tool where
-  /-- Highlight (task 9.8). -/
+  /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8). -/
   | highlight
   /-- Add a comment / note (task 9.9). -/
   | comment
@@ -225,14 +226,16 @@ def Tool.tip : Tool → String
 
 /-- The task that brings the tool (shown when the disabled button is asked for). -/
 def Tool.task : Tool → String
-  | .highlight => "9.8"
+  | .highlight => "9.4"
   | .comment => "9.9"
   | .text | .draw => "a later Phase 9 task"
   | .image | .print => "after M9"
   | .save => "9.5c"
 
-/-- Whether the tool can be used: none can yet (their tasks have not landed). -/
-def Tool.enabled (_ : Ctx) : Tool → Bool
+/-- Whether the tool can be used: Highlight with a document (task 9.4); the others not yet
+(their tasks have not landed). -/
+def Tool.enabled (c : Ctx) : Tool → Bool
+  | .highlight => c.hasDoc
   | _ => false
 
 /-- What a button does. -/
@@ -377,10 +380,11 @@ def states (c : Ctx) : List Bool :=
 -- Without a document only Open, Quit and the overflow button work; the sidebar toggle hides.
 #guard (buttons.filter (·.enabled {})).map (·.path) == [".bar.more"]
 #guard (buttons.filter (·.visible {})).length == buttons.length - 1
--- First page of three with an outline: prev disabled, next enabled, tools disabled.
+-- First page of three with an outline: prev disabled, next enabled, of the tools only
+-- Highlight.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3, hasOutline := true }
   (buttons.filter (·.enabled c)).map (·.path) ==
-    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.more"] &&
+    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.more"] &&
   buttons.all (·.visible c)
 -- No outline: the toggle is hidden.
 #guard let c : Ctx := { hasDoc := true, page := 1, pages := 3 }

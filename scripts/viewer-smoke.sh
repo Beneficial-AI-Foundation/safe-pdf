@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.7; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -22,7 +22,11 @@
 #      boundaries both ways, small deltas, Button-4/5, Shift+wheel (9.2);
 #   1g. the toolbar and sidebar after PDF.js (SAFEPDF_VIEWER_SMOKE_MODE=toolbar) on that PDF and
 #      on the two-page one without an outline: page field, arrows, zoom drop-down, overflow
-#      menu, disabled tools, sidebar shown/hidden with its toggle, disclosure triangles (9.7);
+#      menu, tool states (Highlight enabled since 9.4, the others disabled), sidebar shown/hidden
+#      with its toggle, disclosure triangles (9.7);
+#   1h. highlights and notes on the text PDF (SAFEPDF_VIEWER_SMOKE_MODE=marks): highlight,
+#      recolour, delete (pixel colours), a note at a point with its popup, marks kept across
+#      zoom, rotation and page changes (9.4);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -354,7 +358,7 @@ want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Close|Quit",
-    "entries.menubar.edit": "Copy|Select all|Find...",
+    "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Find...",
     "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
@@ -425,7 +429,8 @@ sys.exit(1 if errs else 0)
 # jumps (number, label), an out-of-range number or text reverts to the current page, leaving
 # the field reverts it; End/Home update the field; the zoom drop-down lists the twelve PDF.js
 # choices, shows the chosen one, and shows custom zooms reached with -/+ as a percentage; the
-# overflow menu pages; the tool buttons are disabled and ignore clicks; a disclosure triangle
+# overflow menu pages; Highlight is enabled (9.4), the other tool buttons are disabled and
+# ignore clicks; a disclosure triangle
 # collapses and expands its subtree; the toggle button hides and shows the sidebar.
 mkdir -p "$work/out-tb-nav" "$work/out-tb-two"
 SAFEPDF_VIEWER_SMOKE_MODE=toolbar run_viewer "$work/out-tb-nav" "$work/nav.pdf"
@@ -444,8 +449,8 @@ common = {
     "zoom-menu": "Automatic Zoom|Actual Size|Page Fit|Page Width|50%|75%|100%|125%|150%|200%|300%|400%",
     "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
-    "tools": ",".join(w + "=disabled" for w in [".bar.highlight", ".bar.comment", ".bar.text",
-                                               ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),
+    "tools": ".bar.highlight=normal," + ",".join(w + "=disabled" for w in [
+        ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),
     "status-unchanged-after-tool": "true",
     "history-after-entry": "2",
 }
@@ -493,6 +498,74 @@ for name, v, want in (("nav", nav, want_nav), ("two", two, want_two)):
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-tb-nav/toolbar.txt" "$work/out-tb-two/toolbar.txt" || fail=1
+
+# 1h. Highlights and notes (task 9.4, SAFEPDF_VIEWER_SMOKE_MODE=marks) on the text PDF of 1d
+# (page 1 white except the black marker under "safe"; substitute fonts off): a double click on
+# "world" + the toolbar's Highlight turns its pixels PDF.js yellow (#FFFF98); Edit > Highlight
+# colour > Green recolours it (#53FFBC); "safe" + Edit > Highlight selection highlights in
+# green with multiply (the black marker stays black, the paper above it turns green); a click
+# selects the "world" highlight and Delete makes it white again; right button at a blank
+# point + Add note... opens the note popup, its text (Tcl metacharacters) is saved verbatim
+# and the icon is drawn where the model puts it; a click on the icon reopens the popup with
+# that text, which is edited; zoom in, rotation, page 2 (no marks) and back keep the marks
+# in place; Edit > Delete mark removes the selected note; ids are never reused.
+mkdir -p "$work/out-marks"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=marks run_viewer "$work/out-marks" "$work/text.pdf"
+cat "$work/out-marks/marks.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines()
+         if ": " in l)
+white, yellow, green, black = "255 255 255", "255 255 152", "83 255 188", "0 0 0"
+want = {
+    "world-before": white,
+    "sel-before-highlight": "true",
+    "marks-after-highlight": "1",
+    "world-yellow": yellow,
+    "sel-after-highlight": "false",
+    "selected-after-highlight": "true",
+    "world-green": green,
+    "color-var": "green",
+    "edit-highlight-state": "normal",
+    "marks-after-edit-highlight": "2",
+    "safe-marker": black,
+    "safe-above-marker": green,
+    "selected-world": "true",
+    "marks-after-delete": "1",
+    "world-after-delete": white,
+    "pop-delete-state": "disabled",
+    "pop-entries": "separator Highlight|Add note...|Delete mark",
+    "note-popup": "1",
+    "marks-after-note": "2",
+    "note-text-ok": "true",
+    "note-popup-after-save": "0",
+    "note-icon": "true true",
+    "note-popup-reopened": "1",
+    "note-popup-text-ok": "true",
+    "note-edited-ok": "true",
+    "zoom-safe": black + "|" + green,
+    "zoom-note-icon": "true true",
+    "rot-deg": "90",
+    "rot-safe": black + "|" + green,
+    "rot-note-icon": "true true",
+    "page2-mark-items": "2 0",
+    "back-safe": "1 " + black + "|" + green,
+    "back-note-icon": "true true",
+    "edit-delete-state0": "disabled",
+    "edit-delete-state1": "normal",
+    "marks-after-note-delete": "1 0",
+    "ids": "[2] next 4",
+}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+try:
+    if not int(v["zoom-pct1"]) > int(v["zoom-pct0"]): errs.append("zoom in did not zoom")
+except (KeyError, ValueError) as e:
+    errs.append("zoom results missing: %r" % e)
+if "choose the highlight colour" not in v.get("status-highlight-nosel", ""):
+    errs.append("Highlight without a selection: %r" % v.get("status-highlight-nosel"))
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-marks/marks.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
