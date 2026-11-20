@@ -355,9 +355,14 @@ established in 8.2). The verified core is untouched.
 ### Phase 10 — bib-lean reader mode
 
 The viewer as the reader of the sibling project bib-lean, through its viewer-neutral reader
-contract (`bib-lean/docs/READER-CONTRACT.md`) and nothing else: bib-lean runs
-`safe-pdf-viewer --biblean {page}` as a child process; the two projects stay independent
-(no Lake dependency either way, each keeps its Tk shim). Shell work; the core gains only
+contract (`bib-lean/docs/READER-CONTRACT.md`): bib-lean runs the viewer as a child
+process (`reader = safepdf`) with `--biblean` and the page argument. bib-lean obtains the
+binary by **requiring this repository as a Lake dependency pinned by commit** and building
+the `viewer` target from source (decided 2026-11-20 on the bib-lean side; option 1 of
+three, over a fetch-and-build script and over release binaries): `viewer` therefore stays
+a **non-default target** here, so bib-lean's plain `lake build` never needs Tk, and both
+projects keep Lean v4.36.0 and the Batteries v4.36.0 tag in step, which Lake requires of
+a dependency. Nothing here depends on bib-lean's code. Shell work; the core gains only
 the annotation writer of Phase 9.
 - **Launch** (`--biblean`): the token read from file descriptor 3 (never argv or the
   environment), `BIBLEAN_SERVER`, `BIBLEAN_ATTACHMENT` and `BIBLEAN_PAGE` from the
@@ -454,9 +459,12 @@ Proofs show we meet *our* spec; testing shows our spec matches the *world*.
   §7.5.6), never in place, with the conservativity theorem C7 and a re-parse by our own
   strict parser before anything is written. Reason: other viewers must find them; a
   sidecar only we read would make the annotations ours alone. XFDF stays as interchange.
-- **bib-lean integration through its reader contract, as an `exec` viewer** (2026-11-20):
-  `viewer --biblean` speaks the contract over loopback HTTP with the token on file
-  descriptor 3; neither project depends on the other's code (Phase 10).
+- **bib-lean integration: this repository is a Lake dependency of bib-lean, pinned by
+  commit and built from source; the viewer is launched through bib-lean's reader
+  contract** (2026-11-20): `viewer --biblean` speaks the contract over loopback HTTP with
+  the token on file descriptor 3; `viewer` stays a non-default target so a dependent's
+  plain `lake build` never needs Tk; the Lean and Batteries pins must stay in step with
+  bib-lean's (Phase 10).
 
 **Open — revisit at the marked milestone:**
 - *Inflate performance in Lean* (M3): if proven-Lean inflate is too slow on big scanned PDFs,
