@@ -15,7 +15,8 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   previous / next page arrows, the page-number field and its "of N" label; centre — zoom out,
   zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
   document since task 9.4: with a selection it highlights it in the current colour, without
-  one it opens the colour choice; Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save (disabled
+  one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
+  Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save (disabled
   until 9.5c) and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
   Open).
 * **Enabled states** (`targets`, `states`): menubar entries (`Menu.entryList`), toolbar
@@ -198,7 +199,7 @@ def pageEntry (labels : Array String) (n cur : Nat) (input : String) : Nat × Bo
 
 /-- Toolbar buttons that are not (yet) viewer commands: the annotation tools, Print, Save. -/
 inductive Tool where
-  /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8). -/
+  /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8, `Bubble`). -/
   | highlight
   /-- Add a comment / note (task 9.9). -/
   | comment
