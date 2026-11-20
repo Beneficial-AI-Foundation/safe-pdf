@@ -67,7 +67,9 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    at the first `⌈n / 2^j⌉` that fits (`fitTarget`, `fitScale`). The page's image budget
    (`maxPageImagePixels`) lowers that cap for each further image (`ImageTable.add`). What
    stays full size: the decoded filter output of an XObject (`Source.decode`, at most
-   `maxDecodedStreamBytes`; the byte filters are not streaming) and of a soft mask.
+   `maxDecodedStreamBytes`; the byte filters are not streaming) and of a soft mask — decoded
+   with `/DL` = `dataSize` (`withDL`, task 8.10), so the Flate output is reserved once
+   rather than grown by doubling.
    **`/CCITTFaxDecode`** (task 7.8) is decoded by `SafePdf.Quarantine.CCITT` (MuPDF's
    `filter-fax.c` ported): a chain `pre ++ [/CCITTFaxDecode]` (`ccittSplit`) is decoded up to
    the codec, then `decodeCCITT` decodes at most `/Height` rows with the parameters of its
@@ -1033,6 +1035,27 @@ def srcOf (limits : Limits) (p : ImgDict) (info : Option CSInfo) (data : ByteArr
       else if nc = 0 ∨ maxComps < nc then .ok Src.grey
       else .ok (Src.ofPlan p b nc cv n data)
 
+/-- The size of an image's decoded data, `h · ⌈w · nc · bpc / 8⌉` bytes (`nc`, `bpc` as
+`srcOf` reads them); `0` when they are unknown. -/
+def dataSize (p : ImgDict) (info : Option CSInfo) : Nat :=
+  let plan : Option (Nat × Nat) :=
+    if p.mask then some (1, 1)
+    else match p.bpc, info.bind planOf with
+      | some b, some (nc, _, _) => some (b, nc)
+      | _, _ => none
+  match plan with
+  | some (b, nc) => p.h * ((p.w * nc * b + 7) / 8)
+  | none => 0
+
+/-- A stream dictionary with `/DL n` (ISO 32000-2 Table 5: the decoded length, a hint) in place
+of any `/DL` it has; unchanged for `n = 0`. Task 8.10: an image's data is decoded with its
+`dataSize` as `/DL`, so `Filter.decodeStream` reserves the filter output once instead of
+growing it by doubling (`Filter.declaredLength`; the decoded bytes do not depend on it,
+`Filter.applyStages_cap`). -/
+def withDL (d : Dict) (n : Nat) : Dict :=
+  if n = 0 then d
+  else (Name.ofString "DL", .int n) :: d.filter (·.1 != Name.ofString "DL")
+
 /-- **Decode an image** from its parameters, resolved colour space (`none`: missing or not
 understood) and decoded data. `tgt` (task 8.6): the drawn-size target of its largest use
 (`imageExtents`, `inlineExt`): the pixmap is box-filtered to it while decoding (what the
@@ -1368,7 +1391,7 @@ def loadMask {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (soft : Bo
       let p := { p with mask := !soft, key := none }
       let st' := match dct with
         | some (d', _) => { st with dict := d' }
-        | none => st
+        | none => { st with dict := withDL st.dict (dataSize p (some grayInfo)) }
       match src.decode s n st' with
       | (.ok bytes, s) =>
         let r := match dct with
@@ -1468,7 +1491,7 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
       | (.error e, s) => (.error e, s)
     | none =>
     if hasCodec limits st.dict then (fin Src.grey, s) else
-    match src.decode s num st with
+    match src.decode s num { st with dict := withDL st.dict (dataSize p info) } with
     | (.ok bytes, s) => ((srcOf limits p info bytes).bind fin, s)
     | (.error e, s) => (.error e, s)
   | (.ok (.obj _), s) => (.error (.malformed 0 "image XObject is not a stream"), s)
@@ -2020,6 +2043,13 @@ private def dev (w h : Nat) : ImgDict :=
 private def grayCS : Option CSInfo := some (.dev .gray (.gray Comp.zero))
 
 #guard rowBytes 3 1 1 == 1 && rowBytes 9 1 1 == 2 && rowBytes 3 3 16 == 18
+-- `/DL` of an image's data (task 8.10): rows of `⌈w · nc · bpc / 8⌉` bytes; `0` when unknown.
+#guard dataSize { dev 3 2 with bpc := some 1 } grayCS == 2 &&
+  dataSize (dev 5 2) (some (.dev .rgb (.gray Comp.zero))) == 30 &&
+  dataSize (dev 5 2) none == 0 && dataSize { dev 9 2 with mask := true } none == 4
+#guard withDL [(Name.ofString "DL", .int 1), (Name.ofString "W", .int 2)] 6 ==
+    [(Name.ofString "DL", .int 6), (Name.ofString "W", .int 2)] &&
+  withDL [(Name.ofString "W", .int 2)] 0 == [(Name.ofString "W", .int 2)]
 #guard sampleAt (bytes [0b10110000]) 0 0 1 == 1 && sampleAt (bytes [0b10110000]) 0 1 1 == 0 &&
   sampleAt (bytes [0b10110000]) 0 2 1 == 1 && sampleAt (bytes [0xA5]) 0 1 4 == 5 &&
   sampleAt (bytes [0x12, 0x34]) 0 0 16 == 0x12

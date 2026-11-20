@@ -606,10 +606,17 @@ termination_by input.size * 8 - pos
 /-! ## Entry points -/
 
 /-- Raw DEFLATE (RFC 1951) from bit position `pos`, output at most `limit` bytes. Returns the
-output and the bit position after the final block. -/
-def inflateAt (limit : Nat) (input : ByteArray) (pos : Nat) :
+output and the bit position after the final block. `cap` (task 8.10) is the capacity reserved
+for the output buffer (`ByteArray.emptyWithCapacity`): with the expected output size the
+buffer never grows by doubling (a reallocation copies it and briefly holds both). It is not
+observable (`inflateAt_cap`). -/
+def inflateAt (limit : Nat) (input : ByteArray) (pos : Nat) (cap : Nat := 0) :
     Except Error (Out limit × Nat) :=
-  blocks input limit ⟨ByteArray.empty, by simp [ByteArray.size_empty]⟩ pos
+  blocks input limit ⟨ByteArray.emptyWithCapacity cap, Nat.zero_le limit⟩ pos
+
+/-- The reserved capacity does not change the result. -/
+theorem inflateAt_cap (limit : Nat) (input : ByteArray) (pos cap : Nat) :
+    inflateAt limit input pos cap = inflateAt limit input pos := rfl
 
 /-- Raw DEFLATE (RFC 1951): decompress `input`, failing with
 `Error.limitExceeded .decodedStreamBytes` as soon as the output would exceed `limit`.
@@ -691,7 +698,7 @@ theorem adler32_eq_foldl (data : ByteArray) :
   rw [adlerGo_eq_foldl]
 
 /-- Zlib stream (RFC 1950), with the output's size bound in its type; see `zlibDecode`. -/
-def zlibDecodeOut (limit : Nat) (input : ByteArray) (checkAdler : Bool) :
+def zlibDecodeOut (limit : Nat) (input : ByteArray) (checkAdler : Bool) (cap : Nat := 0) :
     Except Error (Out limit) :=
   if h : 2 ≤ input.size then
     let cmf := input[0].toNat
@@ -701,7 +708,7 @@ def zlibDecodeOut (limit : Nat) (input : ByteArray) (checkAdler : Bool) :
     else if (cmf * 256 + flg) % 31 != 0 then .error (.malformed 1 "zlib: incorrect header check")
     else if flg &&& 32 != 0 then .error (.unsupported "zlib: preset dictionary (FDICT)")
     else
-      match inflateAt limit input 16 with
+      match inflateAt limit input 16 cap with
       | .error e => .error e
       | .ok (out, p) =>
         if !checkAdler then .ok out
@@ -718,16 +725,30 @@ def zlibDecodeOut (limit : Nat) (input : ByteArray) (checkAdler : Bool) :
 /-- Zlib stream (RFC 1950): 2-byte header (CM = 8, CINFO ≤ 7, FCHECK; FDICT = 1 is
 unsupported), DEFLATE body, then the big-endian Adler-32 of the output, verified when
 `checkAdler` (strict default; the repair path may pass `false` to accept a missing or wrong
-trailer). Trailing bytes after the trailer are ignored. Output at most `limit` bytes. -/
-def zlibDecode (limit : Nat) (input : ByteArray) (checkAdler : Bool := true) :
+trailer). Trailing bytes after the trailer are ignored. Output at most `limit` bytes. `cap`:
+the output buffer's reserved capacity (`inflateAt`; not observable, `zlibDecode_cap`). -/
+def zlibDecode (limit : Nat) (input : ByteArray) (checkAdler : Bool := true) (cap : Nat := 0) :
     Except Error ByteArray :=
-  (zlibDecodeOut limit input checkAdler).map (·.1)
+  (zlibDecodeOut limit input checkAdler cap).map (·.1)
 
 /-- `/FlateDecode` without predictor: a zlib stream, output bounded by
-`limits.maxDecodedStreamBytes`. -/
-def flateDecode (limits : Limits) (input : ByteArray) (checkAdler : Bool := true) :
-    Except Error ByteArray :=
-  zlibDecode limits.maxDecodedStreamBytes input checkAdler
+`limits.maxDecodedStreamBytes`. `cap`: the output buffer's reserved capacity (task 8.10; not
+observable, `flateDecode_cap`). -/
+def flateDecode (limits : Limits) (input : ByteArray) (checkAdler : Bool := true)
+    (cap : Nat := 0) : Except Error ByteArray :=
+  zlibDecode limits.maxDecodedStreamBytes input checkAdler cap
+
+/-- The reserved capacity does not change a zlib decode. -/
+theorem zlibDecodeOut_cap (limit : Nat) (input : ByteArray) (checkAdler : Bool) (cap : Nat) :
+    zlibDecodeOut limit input checkAdler cap = zlibDecodeOut limit input checkAdler := rfl
+
+/-- The reserved capacity does not change a zlib decode. -/
+theorem zlibDecode_cap (limit : Nat) (input : ByteArray) (checkAdler : Bool) (cap : Nat) :
+    zlibDecode limit input checkAdler cap = zlibDecode limit input checkAdler := rfl
+
+/-- The reserved capacity does not change `/FlateDecode`. -/
+theorem flateDecode_cap (limits : Limits) (input : ByteArray) (checkAdler : Bool) (cap : Nat) :
+    flateDecode limits input checkAdler cap = flateDecode limits input checkAdler := rfl
 
 /-! ## Output bound (Plan.md §4 S3) -/
 

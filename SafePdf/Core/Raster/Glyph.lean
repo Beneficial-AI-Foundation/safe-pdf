@@ -1275,7 +1275,7 @@ theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf 
         (renderPage page zoom rot pf items cfg stroke).h := by
   simp only [renderPage, renderItems]
   exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ (liftSh Transparency.maxMaskDepth items) _
-    (by show (Clip.whiteBuf _ _).size = _; simp [Clip.whiteBuf, ByteArray.size]) rfl
+    (Clip.whiteBuf_size _ _) rfl
 
 /-- The 256 one-byte advances of a font, tabulated (`tabulateWidths`). -/
 def widthTable (fi : FontInfo) : Array Fixed :=

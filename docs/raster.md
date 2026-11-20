@@ -327,7 +327,8 @@ images 7.10 did not reduce, and the grey placeholder whenever a full-size decode
   cells or Type 3 glyphs (cell/glyph matrices, not page matrices; Type 3 images go through
   MuPDF's stencil scaler). **Still full size in memory**: the decoded filter output of an
   XObject and of its soft mask (`Source.decode`; the byte filters are not streaming, and
-  Flate's output grows by doubling, so a 144 MB stream peaks near 2×).
+  Flate's output grew by doubling, so a 144 MB stream peaked near 2× — reserved once since
+  task 8.10, below).
 
 Pixels (72 dpi, all 81 corpus files, 2,450 page PPMs hashed before = eb78544 and after):
 **2,445 pages byte-identical**; the 5 others (1810.04805 p3, p15; 2112.10752 p1; 2412.19437
@@ -353,6 +354,46 @@ committed): an 8192 × 6144 4:2:0 progressive JPEG drawn 400 × 300 pt — befor
 placeholder (coefficients over the limit), 26 MiB; after: decoded at 1/8, 65 MiB, 1.3 s; an
 8000 × 6000 RGB Flate image drawn 400 × 300 pt — 515 → 413 MiB (what remains is the 144 MB
 decoded stream and its growth).
+
+## Remaining memory peaks (task 8.10)
+
+* **Filter output reserved once.** `Flate.inflateAt`/`zlibDecode`/`flateDecode` take an
+  optional `cap`, the capacity of the output buffer (`ByteArray.emptyWithCapacity`); before,
+  the output grew by doubling from empty, and each reallocation copied it while the old buffer
+  was still alive (a 144 MB stream peaked near 2×). `Filter.decodeStream`/`decodeStreamB`
+  read the stream's `/DL` (ISO 32000-2 Table 5, the decoded length, a hint;
+  `declaredLength`) and hand it to every stage; a Flate stage reserves `flateCap`: `/DL` plus
+  one tag byte per row when a PNG predictor follows, at most the stage's (budget-capped)
+  limit and `2048 · input + 4096` bytes. `Image.loadXObject`/`loadMask` decode image data
+  with `/DL` set to `dataSize` (`h · ⌈w · nc · bpc / 8⌉`, `withDL`). The reservation is not
+  observable: `inflateAt_cap`, `flateDecode_cap`, `decodeOne_cap`, `applyStages_cap`,
+  `applyStagesB_cap`, `decodeStream_eq` are `rfl`/induction equalities, so every Phase 3
+  bound (`decodeStream_size_le`, `flateDecodeW_steps_le`, `decodeAllB_total`, the bomb
+  suite) holds unchanged — and the reservation never exceeds what B2 already charges a
+  failing stage. Streaming filter output row by row into the image decoder was not needed for
+  the measured peaks (the decoded stream itself, 1× its size, remains).
+* **Filled buffers without the boxed array.** `ByteArray.mk (Array.replicate n v)` first
+  builds an `Array UInt8` (8 bytes per element) — a transient 9× peak. `Clip.filledBuf w h v`
+  pushes one row and appends `h` copies into a buffer reserved at `w · h` bytes
+  (`filledBuf_eq`: same bytes as the replicate form). Used by `Clip.whiteBuf` (every page and
+  tiling cell), `Type3.fullMask`, the `View` cache test helper. `Transparency.fillBufSpec`
+  keeps the replicate form: it is the 7.3c reference that the test drivers compare against
+  (the renderer uses `fillBuf`, row copies since 7.9). LZW output still grows from empty
+  (LZW images are rare in the corpus).
+
+Peak RSS (`python3 -I Tests/differential/peak_rss.py`, 72 dpi, whole file):
+
+| file | before (b631f27) | after |
+|---|---|---|
+| arxiv-2005.14165 | 197 MiB | 142 MiB |
+| arxiv-2307.09288 | 128 MiB | 103 MiB |
+| arxiv-2401.00001 | 117 MiB | 73 MiB |
+| arxiv-2501.12948 | 73 MiB | 56 MiB |
+| ntsb AAR0501 | 99 MiB | 60 MiB |
+| 8000 × 6000 RGB Flate stress file (scratch, drawn 400 × 300 pt) | 285 MiB | 157 MiB |
+
+Pixels: all 375 page PPMs of these six files byte-identical before/after (SHA-256). Times
+unchanged within noise.
 
 ## Issues found (Core; not fixed here — other tasks own the files)
 

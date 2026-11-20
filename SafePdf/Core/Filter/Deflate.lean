@@ -382,6 +382,7 @@ theorem inflate_deflateStored (limit : Nat) (bs : ByteArray) (h : bs.size ≤ li
   simp only [ByteArray.empty_append, ByteArray.append_empty, ByteArray.size_empty,
     Nat.zero_mul, Nat.zero_add, ByteArray.extract_zero_size] at this
   unfold inflate inflateAt deflateStored
+  simp only [ByteArray.emptyWithCapacity_eq_empty]
   rw [this]
   rfl
 
@@ -442,6 +443,7 @@ theorem zlibDecode_zlibStored (limit : Nat) (bs : ByteArray) (h : bs.size ≤ li
     ⟨ByteArray.empty, by simp [ByteArray.size_empty]⟩ (by simp [ByteArray.size_empty]; omega)
   simp only [ByteArray.empty_append, ByteArray.extract_zero_size] at hb
   unfold zlibDecode zlibDecodeOut zlibStored zlibWrap inflateAt deflateStored
+  simp only [ByteArray.emptyWithCapacity_eq_empty]
   generalize deflateStoredFrom bs 0 = D at hb ⊢
   have hHs : zlibHeader.size = 2 := rfl
   have hTs : (adlerTrailer (adler32 bs)).size = 4 := rfl
