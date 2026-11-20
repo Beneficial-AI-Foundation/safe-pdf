@@ -86,6 +86,31 @@ fallback), an RGB colour in `[0, 1]`, an opacity, the comment text, the stable i
   mark with its own id. When `Mark.commentId` is set, the popup's `/NM` is
   `safepdf-mark-ID-popup-CID` (still not a mark name for `Shell.App.Marks.idOfNm`), so the
   comment note gets its id back on reopen; without it, `safepdf-mark-ID-popup` as before.
+* A12. **Free text** (task 9.9, §12.5.6.6, as pdf.js `FreeTextAnnotation.createNewDict`):
+  `/Subtype /FreeText`, `/Rect` = the text box (`freeTextBox`: upper-left corner at
+  `Mark.rect`'s `(x0, y1)`, `ftPad` around the lines, line height `lineFactor` × size — pdf.js
+  `LINE_FACTOR` 1.35 —, width the longest line in Helvetica's AFM widths), then `/Contents`
+  (rule A6: ASCII, else UTF-16BE), `/DA (/Helv SIZE Tf R G B rg)`, `/F 4`, `/Border [0 0 0]`,
+  `/M`, `/CreationDate`, `/T` (author), `/P`, `/AP`. No `/C` (pdf.js writes none; the colour
+  is the text colour in `/DA`).
+* A13. **Free-text appearance**: a form with `/Resources << /Font << /Helv << /Type /Font
+  /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> >> >>` (a standard-14
+  font, nothing embedded), clipped to the box, one `Tj` per line from the first baseline
+  `ftPad + size` below the top. **Characters outside WinAnsi** (Windows-1252,
+  `Core.Annot.win1252`) are drawn as `·` (0xB7, MuPDF's replacement `Annot.code1252`), so the
+  appearance shows a visible gap where Helvetica has no glyph; the exact text is always in
+  `/Contents` (UTF-16BE when needed), which is what readers extract, edit and what we read
+  back. pdf.js in that case writes no appearance at all and relies on the reader's own fonts;
+  we keep an appearance so viewers that do not synthesise FreeText still draw the text.
+* A14. **Ink** (§12.5.6.13, as pdf.js `InkAnnotation.createNewDict`): `/Subtype /Ink`,
+  `/Rect` = the strokes' bounding box grown by the line width (`inkBox`), then `/InkList`
+  (one array `x1 y1 x2 y2 …` per stroke, in stroke order: `inkListObj`, theorems
+  `inkListObj_length`, `strokeNums_length`), `/BS << /W w >>`, `/C`, `/CA` below opacity 1,
+  `/F 4`, `/M`, `/CreationDate`, `/T`, `/P`, `/AP`. A mark has at least one stroke and every
+  stroke at least one point (A9: else `Error.malformed`).
+* A15. **Ink appearance** (as pdf.js `InkAnnotation.createNewAppearanceStream`): `w w 1 J 1 j`
+  (round caps and joins), `r g b RG`, `/R0 gs` with `/CA`/`/ca` below opacity 1, each stroke
+  `m` then `l` per further point (a one-point stroke repeats its point: a round dot), `S`.
 -/
 
 namespace SafePdf.Core.Write.Annots
@@ -112,8 +137,14 @@ def kNM : Name := ⟨[78, 77]⟩
 def kQuadPoints : Name := nm "QuadPoints"
 /-- `/C`. -/
 def kC : Name := nm "C"
-/-- `/Contents`. -/
-def kContents : Name := nm "Contents"
+/-- `/Contents` (as bytes, so key inequalities are decidable). -/
+def kContents : Name := ⟨[67, 111, 110, 116, 101, 110, 116, 115]⟩
+/-- `/InkList` (as bytes). -/
+def kInkList : Name := ⟨[73, 110, 107, 76, 105, 115, 116]⟩
+/-- `/DA` (as bytes). -/
+def kDA : Name := ⟨[68, 65]⟩
+
+#guard kContents == nm "Contents" && kInkList == nm "InkList" && kDA == nm "DA"
 /-- `/AP`. -/
 def kAP : Name := nm "AP"
 /-- `/Annot`. -/
@@ -278,6 +309,11 @@ inductive Kind where
   | highlight
   /-- A note (`/Text` icon at `Mark.rect`), anchored to the quads when there are any. -/
   | note
+  /-- Free text (`/FreeText`, rule A12): `Mark.contents` in Helvetica at `Mark.fontSize`,
+  upper-left corner at `Mark.rect`'s `(x0, y1)`. -/
+  | freeText
+  /-- Ink (`/Ink`, rule A14): the strokes `Mark.strokes`, `Mark.lineWidth` wide. -/
+  | ink
   deriving Repr, Inhabited, DecidableEq
 
 /-- **A user mark** as Core sees it (the shell converts its marks into these, task 9.5c). -/
@@ -306,6 +342,12 @@ structure Mark where
   created : String := ""
   /-- The id of the comment note this highlight's popup stands for (rule A11). -/
   commentId : Option Nat := none
+  /-- Font size of a free-text mark (rule A12). -/
+  fontSize : Rat := 10
+  /-- The strokes of an ink mark (rule A14): points in page space, in drawing order. -/
+  strokes : List (List (Rat × Rat)) := []
+  /-- Line width of an ink mark (`/BS /W`). -/
+  lineWidth : Rat := 1
   deriving Repr, Inhabited
 
 /-- Prefix of our `/NM` names (equal to `Shell.App.Marks.nmPrefix`). -/
@@ -335,11 +377,55 @@ def quadsBox : List Quad → Option Rect
     | none => some ⟨x0, y0, x1, y1⟩
     | some b => some ⟨min x0 b.x0, min y0 b.y0, max x1 b.x1, max y1 b.y1⟩
 
-/-- The annotation rectangle (rule A1: a highlight's quads; else `rect`). -/
+/-! ## Free-text layout and ink boxes (rules A12, A14) -/
+
+/-- Line height per unit of font size (pdf.js `LINE_FACTOR`). -/
+def lineFactor : Rat := 135 / 100
+
+/-- Padding between the free-text box and its text (pdf.js `--freetext-padding`, 2 px at
+100 %). -/
+def ftPad : Rat := 2
+
+/-- The character drawn for `c` (rule A13): itself in Windows-1252, else `·`. -/
+def drawnChar (c : Char) : Char := if (Annot.win1252 c).isSome then c else '·'
+
+/-- Advance of `c` in Helvetica, in em (Adobe AFM widths, `Core.Font.Std14`). -/
+def helvAdvance (c : Char) : Rat := Annot.charWidth .helvetica (drawnChar c)
+
+/-- The lines of a free text (line feeds; carriage returns dropped). -/
+def textLines (s : String) : List (List Char) :=
+  (s.toList.filter (· != '\r')).splitOn '\n'
+
+/-- Width of a line in em. -/
+def lineEm (l : List Char) : Rat := (l.map helvAdvance).sum
+
+/-- **The free-text box** (rule A12) with upper-left corner `(x, yTop)` for `text` at font
+size `size`: the longest line (at least one em) and the lines' height, `ftPad` around. -/
+def freeTextBox (x yTop size : Rat) (text : String) : Rect :=
+  let ls := textLines text
+  let w := max size (((ls.map lineEm).foldl max 0) * size)
+  let h := (ls.length : Rat) * lineFactor * size
+  ⟨x, yTop - h - 2 * ftPad, x + w + 2 * ftPad, yTop⟩
+
+/-- The bounding box of the points of some strokes (`none` without points). -/
+def pointsBox (ps : List (Rat × Rat)) : Option Rect :=
+  ps.foldl (fun acc p => match acc with
+    | none => some ⟨p.1, p.2, p.1, p.2⟩
+    | some b => some ⟨min b.x0 p.1, min b.y0 p.2, max b.x1 p.1, max b.y1 p.2⟩) none
+
+/-- **The ink box** (rule A14): the strokes' bounding box grown by the line width on every
+side (round caps reach half of it). -/
+def inkBox (strokes : List (List (Rat × Rat))) (w : Rat) : Option Rect :=
+  (pointsBox strokes.flatten).map fun b => ⟨b.x0 - w, b.y0 - w, b.x1 + w, b.y1 + w⟩
+
+/-- The annotation rectangle (rule A1: a highlight's quads; a note's `rect`; free text: its
+box at `rect`'s upper-left corner, A12; ink: its strokes' box, A14). -/
 def Mark.annotRect (m : Mark) : Rect :=
   match m.kind with
   | .highlight => (quadsBox m.quads).getD m.rect
   | .note => m.rect
+  | .freeText => freeTextBox m.rect.x0 m.rect.y1 m.fontSize m.contents
+  | .ink => (inkBox m.strokes m.lineWidth).getD m.rect
 
 /-- `/Rect`, rounded outwards (rule A7). -/
 def rectObj (r : Rect) : PdfObject :=
@@ -358,6 +444,9 @@ def colorObj (c : Rat × Rat × Rat) : PdfObject :=
 
 /-- A string object of ASCII text. -/
 def asciiStr (s : String) : PdfObject := .string s.toUTF8.toList
+
+/-- The bytes of a string (UTF-8; ASCII for the constants used here). -/
+def ascii' (s : String) : List UInt8 := s.toUTF8.toList
 
 /-! ## Annotation dictionaries (rules A1–A3) -/
 
@@ -425,6 +514,40 @@ def noteDict (m : Mark) (ap : Nat) (page : PdfObject) : Dict :=
     opt (!m.quads.isEmpty) "QuadPoints" (quadPointsObj m.quads) ++
     [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])]
 
+/-- The bytes of a colour's three components, separated by spaces. -/
+def compBytes (c : Rat × Rat × Rat) : List UInt8 :=
+  Print.printObj (unitNum c.1) ++ [32] ++ Print.printObj (unitNum c.2.1) ++ [32] ++
+    Print.printObj (unitNum c.2.2)
+
+/-- `/DA` of a free text (rule A12): `/Helv SIZE Tf R G B rg`. -/
+def daBytes (m : Mark) : List UInt8 :=
+  ascii' "/Helv " ++ Print.printObj (coord m.fontSize) ++ ascii' " Tf " ++ compBytes m.color ++
+    ascii' " rg"
+
+/-- The free-text dictionary (rule A12); `/Contents` comes first after the head. -/
+def freeTextDict (m : Mark) (ap : Nat) (page : PdfObject) : Dict :=
+  mkAnnot "FreeText" (rectObj m.annotRect) (nmOf m.id) <|
+    [(kContents, .string (textBytes m.contents)), (kDA, .string (daBytes m)),
+      (nm "F", .int 4), (nm "Border", .array [.int 0, .int 0, .int 0]),
+      (nm "M", asciiStr m.date),
+      (nm "CreationDate", asciiStr (if m.created.isEmpty then m.date else m.created))] ++
+    opt (!m.author.isEmpty) "T" (.string (textBytes m.author)) ++
+    [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])]
+
+/-- The numbers of one stroke: `x1 y1 x2 y2 …` (rule A14). -/
+def strokeNums (s : List (Rat × Rat)) : List PdfObject := s.flatMap fun p => [coord p.1, coord p.2]
+
+/-- `/InkList`: one array per stroke, in order (rule A14). -/
+def inkListObj (strokes : List (List (Rat × Rat))) : List PdfObject :=
+  strokes.map fun s => .array (strokeNums s)
+
+/-- The ink dictionary (rule A14); `/InkList` comes first after the head. -/
+def inkDict (m : Mark) (ap : Nat) (page : PdfObject) : Dict :=
+  mkAnnot "Ink" (rectObj m.annotRect) (nmOf m.id) <|
+    [(kInkList, .array (inkListObj m.strokes)),
+      (nm "BS", .dict [(nm "W", coord m.lineWidth)])] ++ common m ++
+    [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])]
+
 /-- The annotation dictionaries of one mark (`num` its first number). -/
 def annotDicts (m : Mark) (num ap : Nat) (page : PdfObject) : List Dict :=
   match m.kind with
@@ -432,6 +555,8 @@ def annotDicts (m : Mark) (num ap : Nat) (page : PdfObject) : List Dict :=
     if m.hasPopup then [highlightDict m num ap page, popupDict m num page]
     else [highlightDict m num ap page]
   | .note => [noteDict m ap page]
+  | .freeText => [freeTextDict m ap page]
+  | .ink => [inkDict m ap page]
 
 /-- A mark yields `slots` dictionaries (the numbering of rule A8 relies on it). -/
 theorem annotDicts_length (m : Mark) (num ap : Nat) (page : PdfObject) :
@@ -454,7 +579,8 @@ theorem annotDicts_isAnnot (m : Mark) (num ap : Nat) (page : PdfObject) :
     · simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
       subst hd
       exact mkAnnot_isAnnot _ _ _ _
-  · simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
+  all_goals
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
     subst hd
     exact mkAnnot_isAnnot _ _ _ _
 
@@ -527,11 +653,68 @@ def noteIcon (c : Rat × Rat × Rat) : List UInt8 :=
 def noteAp (m : Mark) : AuxStream :=
   ⟨formDict (.array [.int 0, .int 0, .int 20, .int 20]) [], noteIcon m.color⟩
 
+/-- The free-text content stream (rule A13): clip to the box, then one `Tj` per line. -/
+def freeTextContent (m : Mark) : List UInt8 :=
+  let r := m.annotRect
+  let lh := lineFactor * m.fontSize
+  let lines := textLines m.contents
+  let first := op [coord (r.x0 + ftPad), coord (r.y1 - ftPad - m.fontSize)] "Td"
+  let lineOps := (lines.zip (List.range lines.length)).flatMap fun (l, i) =>
+    (if i == 0 then first else op [coord 0, coord (-lh)] "Td") ++
+      ascii (Annot.litStr (l.map drawnChar)) ++ ascii " Tj\n"
+  op [] "q" ++ op [coord r.x0, coord r.y0, coord (r.x1 - r.x0), coord (r.y1 - r.y0)] "re" ++
+    op [] "W" ++ op [] "n" ++ op [] "BT" ++ fillColor m.color ++
+    op [.name (nm "Helv"), coord m.fontSize] "Tf" ++ lineOps ++ op [] "ET" ++ op [] "Q"
+
+/-- The Helvetica font resource of a free-text appearance (rule A13). -/
+def helvFont : PdfObject :=
+  .dict [(kType, .name (nm "Font")), (kSubtype, .name (nm "Type1")),
+    (nm "BaseFont", .name (nm "Helvetica")), (nm "Encoding", .name (nm "WinAnsiEncoding"))]
+
+/-- The free-text appearance stream (rule A13). -/
+def freeTextAp (m : Mark) : AuxStream :=
+  ⟨formDict (rectObj m.annotRect) [(nm "Font", .dict [(nm "Helv", helvFont)])],
+    freeTextContent m⟩
+
+/-- One stroke as a path: `m`, then `l` to every further point (a one-point stroke repeats
+its point, which round caps draw as a dot). -/
+def strokePath : List (Rat × Rat) → List UInt8
+  | [] => []
+  | [p] => op (pt p) "m" ++ op (pt p) "l"
+  | p :: ps => op (pt p) "m" ++ ps.flatMap fun q => op (pt q) "l"
+
+/-- The ink content stream (rule A15). -/
+def inkContent (m : Mark) : List UInt8 :=
+  op [coord m.lineWidth] "w" ++ op [.int 1] "J" ++ op [.int 1] "j" ++
+    op [unitNum m.color.1, unitNum m.color.2.1, unitNum m.color.2.2] "RG" ++
+    (if m.opacity < 1 then op [.name (nm "R0")] "gs" else []) ++
+    m.strokes.flatMap fun st => strokePath st ++ op [] "S"
+
+/-- The ink appearance stream (rule A15). -/
+def inkAp (m : Mark) : AuxStream :=
+  let res : Dict := if m.opacity < 1 then
+      [(nm "ExtGState", .dict [(nm "R0", .dict [(kType, .name (nm "ExtGState")),
+        (nm "CA", unitNum m.opacity), (nm "ca", unitNum m.opacity)])])]
+    else []
+  ⟨formDict (rectObj m.annotRect) res, inkContent m⟩
+
 /-- The appearance stream of a mark. -/
 def apOf (m : Mark) : AuxStream :=
   match m.kind with
   | .highlight => highlightAp m
   | .note => noteAp m
+  | .freeText => freeTextAp m
+  | .ink => inkAp m
+
+/-- Why a mark cannot be written (rule A9), if it cannot: a highlight without quads, an ink
+mark without strokes or with an empty stroke. -/
+def Mark.invalid (m : Mark) : Option String :=
+  match m.kind with
+  | .highlight => if m.quads.isEmpty then some "highlight without quads" else none
+  | .ink =>
+    if m.strokes.isEmpty then some "ink without strokes"
+    else if m.strokes.any List.isEmpty then some "ink stroke without points" else none
+  | _ => none
 
 /-! ## Building the writer's input (rules A8, A9) -/
 
@@ -573,9 +756,9 @@ def buildPages (doc : Doc.Doc) : Nat → Nat → List (Nat × List Mark) →
 /-- **The writer's input for `marks`** (rules A1–A9): per page the annotation dictionaries,
 and the appearance streams, numbered as `writeAnnots` will number them for `doc`. -/
 def build (doc : Doc.Doc) (marks : List Mark) : Except Error (Marks × List AuxStream) :=
-  if marks.any (fun m => m.kind == .highlight && m.quads.isEmpty) then
-    .error (.malformed 0 "highlight without quads")
-  else
+  match marks.findSome? Mark.invalid with
+  | some why => .error (.malformed 0 why)
+  | none =>
     let gs := grouped marks
     let base := doc.file.trailer.size
     let flat := gs.flatMap Prod.snd
@@ -674,6 +857,8 @@ def supDicts (doc : Doc.Doc) (fresh : List ((Nat × Nat) × Nat)) (s : SupMark) 
     let self : PdfObject := .ref s.ref.1 s.ref.2
     match s.mark.kind with
     | .note => .ok [(s.ref.1, s.ref.2, noteDict s.mark ap r)]
+    | .freeText => .ok [(s.ref.1, s.ref.2, freeTextDict s.mark ap r)]
+    | .ink => .ok [(s.ref.1, s.ref.2, inkDict s.mark ap r)]
     | .highlight =>
       let popRef : PdfObject := match s.popup with
         | some pr => .ref pr.1 pr.2
@@ -700,9 +885,9 @@ appearance streams, numbered as `Incremental.writeUpdate` will number them for `
 def buildEdits (doc : Doc.Doc) (e : EditSet) :
     Except Error (Incremental.Edits × List Incremental.Supersede × List AuxStream) :=
   let all := e.adds ++ e.sups.map (·.mark)
-  if all.any (fun m => m.kind == .highlight && m.quads.isEmpty) then
-    .error (.malformed 0 "highlight without quads")
-  else
+  match all.findSome? Mark.invalid with
+  | some why => .error (.malformed 0 why)
+  | none =>
     let pages := e.pages
     let base := doc.file.trailer.size
     let nAnn := (pages.map fun p =>
@@ -819,6 +1004,83 @@ theorem quadsOf_quadPoints (qs : List Quad) :
     simp only [quadPoints, List.flatMap_cons] at ih ⊢
     rw [quadsOf_cons, ih, List.map_cons]
 
+/-! ### Free text and ink (rules A12–A15) -/
+
+/-- The head of `mkAnnot`: `/Subtype`, `/Rect` and `/NM` are the given ones. -/
+theorem mkAnnot_lookup (sub : String) (rect : PdfObject) (n : String) (rest : Dict) :
+    Dict.lookup (mkAnnot sub rect n rest) kSubtype = some (.name (nm sub)) ∧
+    Dict.lookup (mkAnnot sub rect n rest) kRect = some rect ∧
+    Dict.lookup (mkAnnot sub rect n rest) kNM = some (.string (textBytes n)) := by
+  have h1 : kType ≠ kSubtype := by decide
+  have h2 : kType ≠ kRect := by decide
+  have h3 : kSubtype ≠ kRect := by decide
+  have h4 : kType ≠ kNM := by decide
+  have h5 : kSubtype ≠ kNM := by decide
+  have h6 : kRect ≠ kNM := by decide
+  refine ⟨?_, ?_, ?_⟩ <;> simp [mkAnnot, Dict.lookup, h1, h2, h3, h4, h5, h6]
+
+/-- The first entry after the head of `mkAnnot` is found by its key (when that key is none of
+`/Type`, `/Subtype`, `/Rect`, `/NM`). -/
+theorem mkAnnot_lookup_first (sub : String) (rect : PdfObject) (n : String) (k : Name)
+    (v : PdfObject) (rest : Dict) (h1 : kType ≠ k) (h2 : kSubtype ≠ k) (h3 : kRect ≠ k)
+    (h4 : kNM ≠ k) : Dict.lookup (mkAnnot sub rect n ((k, v) :: rest)) k = some v := by
+  simp [mkAnnot, Dict.lookup, h1, h2, h3, h4]
+
+/-- **Free-text dictionary shape** (rule A12): `/Subtype /FreeText`, `/Rect` the text box,
+`/NM` the mark's name, `/Contents` its text (rule A6). -/
+theorem freeTextDict_shape (m : Mark) (ap : Nat) (page : PdfObject) :
+    Dict.lookup (freeTextDict m ap page) kSubtype = some (.name (nm "FreeText")) ∧
+    Dict.lookup (freeTextDict m ap page) kRect = some (rectObj m.annotRect) ∧
+    Dict.lookup (freeTextDict m ap page) kNM = some (.string (textBytes (nmOf m.id))) ∧
+    Dict.lookup (freeTextDict m ap page) kContents = some (.string (textBytes m.contents)) := by
+  obtain ⟨a, b, c⟩ := mkAnnot_lookup "FreeText" (rectObj m.annotRect) (nmOf m.id)
+    ([(kContents, .string (textBytes m.contents)), (kDA, .string (daBytes m)),
+      (nm "F", .int 4), (nm "Border", .array [.int 0, .int 0, .int 0]),
+      (nm "M", asciiStr m.date),
+      (nm "CreationDate", asciiStr (if m.created.isEmpty then m.date else m.created))] ++
+    opt (!m.author.isEmpty) "T" (.string (textBytes m.author)) ++
+    [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])])
+  refine ⟨a, b, c, ?_⟩
+  exact mkAnnot_lookup_first _ _ _ _ _ _ (by decide) (by decide) (by decide) (by decide)
+
+/-- **Ink dictionary shape** (rule A14): `/Subtype /Ink`, `/Rect` the ink box, `/NM` the
+mark's name, `/InkList` one array per stroke (`inkListObj`). -/
+theorem inkDict_shape (m : Mark) (ap : Nat) (page : PdfObject) :
+    Dict.lookup (inkDict m ap page) kSubtype = some (.name (nm "Ink")) ∧
+    Dict.lookup (inkDict m ap page) kRect = some (rectObj m.annotRect) ∧
+    Dict.lookup (inkDict m ap page) kNM = some (.string (textBytes (nmOf m.id))) ∧
+    Dict.lookup (inkDict m ap page) kInkList = some (.array (inkListObj m.strokes)) := by
+  obtain ⟨a, b, c⟩ := mkAnnot_lookup "Ink" (rectObj m.annotRect) (nmOf m.id)
+    ([(kInkList, .array (inkListObj m.strokes)),
+      (nm "BS", .dict [(nm "W", coord m.lineWidth)])] ++ common m ++
+    [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])])
+  refine ⟨a, b, c, ?_⟩
+  exact mkAnnot_lookup_first _ _ _ _ _ _ (by decide) (by decide) (by decide) (by decide)
+
+/-- **InkList ↔ strokes 1:1 (count)**: one `/InkList` array per stroke. -/
+theorem inkListObj_length (ss : List (List (Rat × Rat))) : (inkListObj ss).length = ss.length :=
+  List.length_map ..
+
+/-- **InkList ↔ strokes 1:1 (position)**: the `i`-th `/InkList` array is the `i`-th stroke's
+numbers. -/
+theorem inkListObj_getElem? (ss : List (List (Rat × Rat))) (i : Nat) :
+    (inkListObj ss)[i]? = ss[i]?.map fun s => .array (strokeNums s) :=
+  List.getElem?_map ..
+
+/-- **Points ↔ numbers**: two numbers per point of a stroke. -/
+theorem strokeNums_length (s : List (Rat × Rat)) : (strokeNums s).length = 2 * s.length := by
+  induction s with
+  | nil => rfl
+  | cons p ps ih =>
+    simp only [strokeNums, List.flatMap_cons, List.length_append, List.length_cons,
+      List.length_nil] at ih ⊢
+    omega
+
+/-- Free text and ink yield one dictionary each (no popup). -/
+theorem slots_freeText_ink (m : Mark) (h : m.kind = .freeText ∨ m.kind = .ink) :
+    m.slots = 1 := by
+  rcases h with h | h <;> simp [Mark.slots, Mark.hasPopup, h]
+
 /-- Printing a string object round-trips through the strict parser (M1's
 `Spec.RoundTripCore.parseObject_print`, via `Spec.Write.serialize_roundtrip`'s hypotheses):
 strings are always canonical, so every text string we write is read back exactly. -/
@@ -857,6 +1119,26 @@ private def tnote (p i : Nat) : Mark :=
 #guard popupNm { tnote 0 4 with commentId := some 9 } == "safepdf-mark-4-popup-9"
 #guard popupNm (tnote 0 4) == "safepdf-mark-4-popup"
 #guard removeMark 1 (5, 0) (some (6, 0)) == [(1, 5, 0), (1, 6, 0)]
+-- Free text: Helvetica widths (H 722, i 222, space 278, `·` 278 for ✓), 2 lines of 1.35 × 12.
+#guard freeTextBox 100 700 12 "Hi ✓\nAB" == ⟨100, 3318 / 5, 122, 700⟩
+#guard drawnChar '✓' == '·' && drawnChar 'é' == 'é' && drawnChar '€' == '€'
+#guard textLines "a\r\nb" == [['a'], ['b']]
+#guard daBytes { tnote 0 1 with kind := .freeText, color := (1, 0, 0), fontSize := 12 } ==
+  ascii "/Helv 12. Tf 1. 0. 0. rg"
+-- Ink: the box grows by the line width; a one-point stroke is a dot; `/R0 gs` below opacity 1.
+#guard inkBox [[(10, 10), (20, 30)], [(5, 5)]] 3 == some ⟨2, 2, 23, 33⟩
+#guard inkBox [] 3 == none
+#guard strokePath [(5, 5)] == ascii "5. 5. m\n5. 5. l\n"
+/-- A test ink mark. -/
+private def tink : Mark :=
+  { tnote 0 1 with kind := .ink, color := (0, 0, 1), opacity := 1 / 2,
+                   strokes := [[(10, 10), (20, 30)]], lineWidth := 3 }
+
+#guard inkContent tink ==
+  ascii "3. w\n1 J\n1 j\n0. 0. 1. RG\n/R0 gs\n10. 10. m\n20. 30. l\nS\n"
+#guard (Mark.invalid { tnote 0 1 with kind := .ink }).isSome &&
+  (Mark.invalid { tnote 0 1 with kind := .ink, strokes := [[]] }).isSome &&
+  (Mark.invalid { tnote 0 1 with kind := .ink, strokes := [[(1, 1)]] }).isNone
 
 end Tests
 

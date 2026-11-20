@@ -122,6 +122,20 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   Highlight tool and its pop-over `.hlbar` (swatches, thickness slider, "Show all"; `syncTool`,
   `drawPopover`); with the tool on a mouse-up that selects text highlights it at once; Escape
   closes the pop-over and dismisses the bubble.
+* **Add text and Draw** (task 9.9, PDF.js's FreeText and Ink editors; pure state in
+  `Bubble.Ui`/`Bubble.EdPop`, marks in `Marks`): the toolbar's Add text and Draw buttons turn
+  their mode on with a parameter pop-over `.edbar` (`drawEdPop`: colour swatches, Font size /
+  Thickness / Opacity sliders), exclusive with the Highlight tool. Add text: a click on the
+  page opens a text box (a Tk text widget in a canvas window, tag `ftedit`, Helvetica at the
+  font size × zoom in the chosen colour); a click elsewhere or Escape commits it as a free-text
+  mark (an empty box is dropped); a double click on a text box edits it again. Draw: each
+  press–drag–release draws a stroke (canvas line `inkcur`); the strokes of one session (until
+  the mode is left, Escape, or the drawing is on another page) form one ink mark. Free text
+  and drawings are selected by a click, moved by dragging them (`Marks.Store.translate`),
+  deleted with Delete or their bubble's Delete; the pop-over's colour and sliders apply to the
+  selected one of the mode's kind. Unsaved ones are canvas items (`drawMarks`), saved ones are
+  drawn by the renderer from their appearance streams (edits through the preview). Add
+  comment adds a note (`addNote`).
 * **Saving** (task 9.5c, Tk-free flow in `Save`): Ctrl+S / File → Save / the toolbar's Save
   writes the unsaved marks into `FILE-annotated.pdf` as an incremental update (Plan S8/C7),
   checked by a strict reopen and read-back before an atomic write, then opens that file; Save
@@ -265,6 +279,19 @@ structure Job where
   start : Nat
   /-- The render (`IO.asTask` on a dedicated thread). -/
   task : Task (Except IO.Error (Except Error Clip.Image × Nat))
+
+/-- The free-text editor open on the canvas (task 9.9). -/
+structure FtEdit where
+  /-- The mark it edits (`none`: a new one). -/
+  id : Option Nat
+  /-- Page index. -/
+  page : Nat
+  /-- Upper-left corner of the box (page space). -/
+  pos : Pt
+  /-- Font size. -/
+  size : Nat
+  /-- Text colour. -/
+  rgb : Marks.Rgb
 
 /-- The viewer's state, kept in one `IO.Ref`. -/
 structure State where
@@ -421,6 +448,16 @@ structure State where
   ownFiles : List String := []
   /-- The window title last applied (`syncMenus` keeps it in step with `State.title`). -/
   titleShown : String := ""
+  /-- The free-text editor on the canvas (task 9.9). -/
+  ftEdit : Option FtEdit := none
+  /-- The ink mark of the current drawing session (task 9.9): further strokes join it. -/
+  inkSession : Option Nat := none
+  /-- The stroke being drawn: its page and points (page space). -/
+  inkStroke : Option (Nat × Array Pt) := none
+  /-- A free text or drawing being dragged: its id, the press point and the last point. -/
+  moveFrom : Option (Nat × Pt × Pt) := none
+  /-- The pop-over slider row being dragged (task 9.9). -/
+  edSlide : Option Nat := none
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -1305,6 +1342,56 @@ proc ::safepdf::popShow {x} {
   raise .hlbar
 }
 proc ::safepdf::popHide {} { place forget .hlbar }
+# Add text and Draw (9.9): the parameter pop-over .edbar (drawn by Lean, drawEdPop), the
+# free-text editor (a text widget in a canvas window, tag ftedit; typed keys stay in it) and
+# the stroke being drawn (canvas line, tag inkcur).
+canvas .edbar -width 220 -height 196 -background $::safepdf::col(body) -highlightthickness 0 -borderwidth 0 -takefocus 0 -cursor arrow
+bind .edbar <ButtonPress-1> {::safepdf::emit edClick %x %y}
+bind .edbar <B1-Motion> {::safepdf::emit edDrag %x %y}
+proc ::safepdf::edShow {x h} {
+  .edbar configure -height $h
+  set y [expr {[winfo rooty .barline] - [winfo rooty .] + 5}]
+  place .edbar -in . -x $x -y $y
+  raise .edbar
+}
+proc ::safepdf::edHide {} { place forget .edbar }
+proc ::safepdf::ftOpen {x y text px fg} {
+  destroy .c.ft
+  .c delete ftedit
+  text .c.ft -wrap none -borderwidth 0 -highlightthickness 1 -highlightcolor #0060df \
+    -highlightbackground #0060df -relief flat -font [list Helvetica -$px] -foreground $fg \
+    -background white -insertbackground $fg -undo 1 -padx 1 -pady 0 -width 4 -height 1
+  .c.ft insert end $text
+  bindtags .c.ft [list .c.ft Text all]
+  bind .c.ft <Escape> {::safepdf::emit ftCommit; break}
+  bind .c.ft <KeyRelease> ::safepdf::ftFit
+  bind .c.ft <Control-q> {::safepdf::emit quit}
+  .c create window $x $y -anchor nw -window .c.ft -tags ftedit
+  ::safepdf::ftFit
+  focus .c.ft
+}
+proc ::safepdf::ftFit {} {
+  if {![winfo exists .c.ft]} return
+  set ls [split [.c.ft get 1.0 {end - 1 chars}] \n]
+  set w 4
+  foreach l $ls { if {[string length $l] + 2 > $w} { set w [expr {[string length $l] + 2}] } }
+  .c.ft configure -width $w -height [expr {max(1, [llength $ls])}]
+}
+proc ::safepdf::ftConf {px fg} {
+  if {[winfo exists .c.ft]} {
+    .c.ft configure -font [list Helvetica -$px] -foreground $fg -insertbackground $fg
+    ::safepdf::ftFit
+  }
+}
+proc ::safepdf::inkStart {x y w fg} {
+  .c delete inkcur
+  set ::safepdf::inkPts [list $x $y $x $y]
+  .c create line {*}$::safepdf::inkPts -width $w -fill $fg -capstyle round -joinstyle round -tags inkcur
+}
+proc ::safepdf::inkAdd {x y} {
+  lappend ::safepdf::inkPts $x $y
+  .c coords inkcur {*}$::safepdf::inkPts
+}
 bind . <Key-Escape> {::safepdf::emit escape}
 focus .c
 "
@@ -1386,7 +1473,7 @@ def pagePointOn (st : IO.Ref State) (p : Nat) (wx wy : Int) : IO (Option Pt) := 
 off (task 9.8). -/
 def visibleMarks (s : State) (p : Nat) : List Marks.Mark :=
   let ms := s.marks.onPage p
-  if s.ui.showAll then ms else ms.filter (·.isNote)
+  if s.ui.showAll then ms else ms.filter (!·.isHighlight)
 
 /-- The visible marks of page `p` the viewer draws itself: not the saved ones, which are in the
 file and drawn by the renderer from their appearance streams (task 9.5c; after an edit, from
@@ -1399,6 +1486,49 @@ def drawnMarks (s : State) (p : Nat) : List Marks.Mark :=
 def Slot.rectR (sl : Slot) (b : Box) : Bubble.Rect :=
   let (x0, y0, x1, y1) := sl.rect b
   ⟨x0, y0, x1, y1⟩
+
+/-- The Tk font of free text at font size `size` on a page drawn at `zoom` (Helvetica, the size
+in pixels). -/
+def ftFont (size : Nat) (zoom : Rat) : String :=
+  s!"Helvetica -{max 1 (((size : Rat) * zoom + 1 / 2).floor.toNat)}"
+
+/-- The stipple that approximates an opacity in percent on the canvas (Tk has no alpha). -/
+def stippleOf (o : Nat) : List String :=
+  if o ≥ 88 then [] else if o ≥ 63 then ["-stipple", "gray75"]
+  else if o ≥ 38 then ["-stipple", "gray50"] else ["-stipple", "gray25"]
+
+/-- Draws an unsaved free text (one canvas text item per line, first baseline `ftPad` + size
+below the top as the appearance stream Save writes) or drawing (a line per stroke, a dot for a
+one-point stroke) on the page of slot `sl` (task 9.9). -/
+def drawEditorMark (s : State) (sl : Slot) (m : Marks.Mark) (tags : String) : IO Unit := do
+  let at' (q : Pt) : Rat × Rat := let (x, y, _, _) := sl.rect ⟨q.x, q.y, q.x, q.y⟩; (x, y)
+  match m.kind with
+  | .freeText t p sz c =>
+    let font := ftFont sz sl.vp.zoom
+    let asc : Nat := ((← run ["font", "metrics", font, "-ascent"]).toNat?).getD 0
+    let lines := t.splitOn "\n"
+    let lf := SafePdf.Core.Write.Annots.lineFactor
+    let pad := SafePdf.Core.Write.Annots.ftPad
+    for (l, i) in lines.zip (List.range lines.length) do
+      let (x, y) := at' ⟨p.x + pad, p.y - pad - (sz : Rat) - (i : Rat) * lf * (sz : Rat)⟩
+      discard <| run [".c", "create", "text", num x, num (y - asc), "-anchor", "nw", "-text", l,
+        "-font", font, "-fill", Marks.rgbHex c, "-tags", s!"{tags} ft"]
+  | .ink ss w o c =>
+    let wpx := max 1 ((w : Rat) * sl.vp.zoom)
+    let stip := if s.stipple then stippleOf o else []
+    for st in ss do
+      match st with
+      | [q] =>
+        let (x, y) := at' q
+        discard <| run ([".c", "create", "oval", num (x - wpx / 2), num (y - wpx / 2),
+          num (x + wpx / 2), num (y + wpx / 2), "-fill", Marks.rgbHex c, "-outline", ""] ++ stip ++
+          ["-tags", s!"{tags} ink"])
+      | _ =>
+        let coords := st.flatMap fun q => let (x, y) := at' q; [num x, num y]
+        discard <| run ([".c", "create", "line"] ++ coords ++ ["-width", num wpx, "-fill",
+          Marks.rgbHex c, "-capstyle", "round", "-joinstyle", "round"] ++ stip ++
+          ["-tags", s!"{tags} ink"])
+  | _ => pure ()
 
 /-- Draws the canvas items of the marks of the page of slot `sl` (tag `mark`, task 9.4): note
 icons (`::safepdf::noteIcon`, tag `note` and `mID`), the dashed quads a note is anchored to,
@@ -1419,8 +1549,11 @@ def drawMarks (s : State) (sl : Slot) : IO Unit := do
         let (x0, y0, x1, y1) := sl.rect ib
         discard <| run ["::safepdf::noteIcon", ".c", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, m.color.hex, s!"{tags} note"]
+    if !s.marks.isSaved m.id && (s.ftEdit.bind (·.id)) != some m.id then
+      drawEditorMark s sl m tags
     if s.markSel == some m.id then
-      let boxes := if m.isNote then (m.iconBox bx).toList else m.quads
+      let boxes := if m.isNote then (m.iconBox bx).toList
+        else if m.isEditor then m.box.toList else m.quads
       for q in boxes do
         let (x0, y0, x1, y1) := sl.rect q
         discard <| run [".c", "create", "rectangle", toString (x0.floor - 2),
@@ -1447,12 +1580,18 @@ def drawBubble (st : IO.Ref State) : IO Unit := do
         else pure []
       | none => pure []
     | none => pure []
-  let mark := (s.markSel.bind s.marks.find?).filter fun m => !m.isNote
+  let mark := (s.markSel.bind s.marks.find?).filter (·.isHighlight)
   let markRects := (mark.bind fun m => (slotOf s m.page).map fun sl => m.quads.map sl.rectR).getD []
   let area : Bubble.Rect := ⟨0, 0, (s.regionW : Rat), (s.regionH : Rat)⟩
-  let placed := (Bubble.kindFor (!selRects.isEmpty) (!markRects.isEmpty) s.ui).bind fun k =>
-    (Bubble.place (if k == .float then selRects else markRects) k.width Bubble.height area).map
-      (k, ·)
+  -- A selected free text or drawing gets the editor bubble with Delete (task 9.9).
+  let edRects := ((s.markSel.bind s.marks.find?).filter (·.isEditor)).bind (fun m =>
+    (slotOf s m.page).bind fun sl => m.box.map fun b => [sl.rectR b]) |>.getD []
+  let placed := if selRects.isEmpty && !edRects.isEmpty && s.ftEdit.isNone &&
+      s.inkStroke.isNone then
+      (Bubble.place edRects Bubble.Kind.editor.width Bubble.height area).map (.editor, ·)
+    else (Bubble.kindFor (!selRects.isEmpty) (!markRects.isEmpty) s.ui).bind fun k =>
+      (Bubble.place (if k == .float then selRects else markRects) k.width Bubble.height area).map
+        (k, ·)
   let picker := match placed with
     | some (.edit, r) => if s.ui.picker then some (Bubble.pickerRect r area) else none
     | _ => none
@@ -1516,6 +1655,15 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
     if let some sl := slotOf s p then
       if let .ok ix ← pageIndex st p then
         for b in Select.rangeBoxes ix.cells a b do rect sl b "#3874f2" "sel"
+  -- The free-text editor follows zoom, rotation and scrolling (task 9.9).
+  if let some fe := s.ftEdit then
+    if let some sl := slotOf s fe.page then
+      let pad := SafePdf.Core.Write.Annots.ftPad
+      let (x, y, _, _) := sl.rect ⟨fe.pos.x + pad, fe.pos.y - pad, fe.pos.x + pad, fe.pos.y - pad⟩
+      discard <| run [".c", "coords", "ftedit", num x, num y]
+      discard <| run ["::safepdf::ftConf",
+        toString ((max 1 (((fe.size : Rat) * sl.vp.zoom + 1 / 2).floor.toNat))),
+        Marks.rgbHex fe.rgb]
   drawBubble st
 
 /-! ## Rendering -/
@@ -2079,9 +2227,12 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
                               history := {}, marks := {}, markSel := none, slots := #[],
-                              layoutKey := none, ownTop := none }
+                              layoutKey := none, ownTop := none, ftEdit := none,
+                              inkSession := none, inkStroke := none, moveFrom := none }
   clearPages st
   discard <| run ["destroy", ".note"]
+  discard <| run ["destroy", ".c.ft"]
+  discard <| run [".c", "delete", "ftedit", "inkcur"]
   fillOutline st
   showOutline st false
   st.modify ({ · with toggleShown := none })
@@ -2832,7 +2983,11 @@ def pageEntry (st : IO.Ref State) (txt : String) : IO Unit := do
 
 /-- What the status line calls a mark. -/
 def markName (m : Marks.Mark) : String :=
-  if m.isNote then "note" else s!"{m.color.name} highlight"
+  match m.kind with
+  | .note .. => "note"
+  | .highlight _ => s!"{m.color.name} highlight"
+  | .freeText .. => "text box"
+  | .ink .. => "drawing"
 
 /-- Draws the Highlight pop-over `.hlbar` (task 9.8, layout `Bubble.Popover`, after PDF.js's
 `#editorHighlightParamsToolbar`): "Highlight color" with the five swatches (the current colour
@@ -2880,6 +3035,69 @@ def drawPopover (s : State) : IO Unit := do
   discard <| run [c, "create", "oval", num k0, num (t.y0 + 5 / 2), num k1, num (t.y1 - 5 / 2),
     "-fill", if on then "white" else "#8f8f9d", "-outline", "", "-tags", "knob"]
 
+/-- The slider of row `row` of the Add text / Draw pop-over and its current value. -/
+def edSlider (u : Bubble.Ui) (row : Nat) : Bubble.Slider × Nat :=
+  match u.editor, row with
+  | .draw, 2 => (Bubble.EdPop.opacity, u.inkOpacity)
+  | .draw, _ => (Bubble.EdPop.thickness, u.inkThick)
+  | _, _ => (Bubble.EdPop.fontSize, u.ftSize)
+
+/-- Draws the Add text / Draw pop-over `.edbar` (task 9.9, after PDF.js's
+`.editorParamsToolbar`: 220 px, 10 px padding, a label per row with its control): the colour
+swatches (`Bubble.EdPop.palette`, the current one ringed), then Font size, or Thickness and
+Opacity, as sliders with their value at the right. -/
+def drawEdPop (s : State) : IO Unit := do
+  let c := ".edbar"
+  let e := s.ui.editor
+  let W := Bubble.EdPop.width
+  let H := Bubble.EdPop.height e
+  let px := Bubble.EdPop.padX
+  let text (x y : Rat) (anchor t : String) : IO Unit := do
+    discard <| run [c, "create", "text", num x, num y, "-anchor", anchor, "-text", t, "-font",
+      "::safepdf::fBar", "-fill", "#15141a"]
+  discard <| run [c, "delete", "all"]
+  discard <| run ["::safepdf::rrect", c, "0.5", "0.5", num (W - 1 / 2), num (H - 1 / 2), "8",
+    "-fill", "white", "-outline", "#d7d7db"]
+  let labels := Bubble.EdPop.labels e
+  let cur := if e == .draw then s.ui.inkColor else s.ui.ftColor
+  text px (Bubble.EdPop.labelY 0) "w" (labels.headD "")
+  let pal := Bubble.EdPop.palette
+  for (i, col) in (List.range pal.length).zip pal do
+    discard <| run ["::safepdf::swatch", c, num (Bubble.EdPop.swatchX i),
+      num (Bubble.EdPop.ctrlY 0), num Bubble.EdPop.swatchD, Marks.rgbHex col,
+      if col == cur then "1" else "0", s!"c:{i}"]
+  for row in [1:labels.length] do
+    let (sl, v) := edSlider s.ui row
+    text px (Bubble.EdPop.labelY row) "w" (labels.getD row "")
+    text (W - px) (Bubble.EdPop.labelY row) "e" (if e == .draw && row == 2 then s!"{v}%" else toString v)
+    let y := Bubble.EdPop.ctrlY row
+    let tx := sl.thumbX v
+    discard <| run [c, "create", "line", num Bubble.EdPop.sliderX0, num y,
+      num Bubble.EdPop.sliderX1, num y, "-fill", "#c6c5c7", "-width", "2", "-capstyle", "round"]
+    discard <| run [c, "create", "line", num Bubble.EdPop.sliderX0, num y, num tx, num y,
+      "-fill", "#c1b0ec", "-width", "2", "-capstyle", "round"]
+    discard <| run ["::safepdf::rrect", c, num (tx - 7), num (y - 7), num (tx + 7), num (y + 7),
+      "3", "-fill", "#c3b5ee", "-outline", "#b3a3e6", "-tags", s!"thumb{row}"]
+
+/-- Brings the Tk side in step with the Add text / Draw mode (task 9.9): the toggled look of
+their buttons and the pop-over `.edbar`, placed under the active button (right-aligned, as the
+Highlight pop-over). -/
+def syncEditor (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let b (v : Bool) : String := if v then "1" else "0"
+  discard <| run ["::safepdf::btnToggled", ".bar.text", b (s.ui.editor == .text)]
+  discard <| run ["::safepdf::btnToggled", ".bar.draw", b (s.ui.editor == .draw)]
+  if s.ui.edPop && s.ui.editor != .none && s.doc.isSome then
+    drawEdPop s
+    let w := if s.ui.editor == .draw then ".bar.draw" else ".bar.text"
+    let num? (ws : List String) : IO Rat := return (View.parseDecimal (← run ws)).getD 0
+    let bx := (← num? ["winfo", "rootx", w]) - (← num? ["winfo", "rootx", "."])
+    let bw ← num? ["winfo", "width", w]
+    let ww ← num? ["winfo", "width", "."]
+    discard <| run ["::safepdf::edShow", toString (Bubble.Popover.left bx bw ww).floor,
+      toString (Bubble.EdPop.height s.ui.editor).floor]
+  else discard <| run ["::safepdf::edHide"]
+
 /-- Brings the Tk side in step with the Highlight tool state (task 9.8): the Edit menu's check
 variables, the toolbar button's toggled look, and the pop-over (drawn and placed under the
 Highlight button, right-aligned with it, `Bubble.Popover.left`; hidden when closed). -/
@@ -2897,6 +3115,7 @@ def syncTool (st : IO.Ref State) : IO Unit := do
     let ww ← num? ["winfo", "width", "."]
     discard <| run ["::safepdf::popShow", toString (Bubble.Popover.left bx bw ww).floor]
   else discard <| run ["::safepdf::popHide"]
+  syncEditor st
 
 /-- Sets the current highlight colour (and the colour menus' radio variable; the pop-over's
 ring follows). -/
@@ -2930,6 +3149,10 @@ def highlight (st : IO.Ref State) (color : Option String) : IO Unit := do
   | none =>
     match s.markSel, chosen with
     | some id, some c =>
+      if ((s.marks.find? id).map (·.isEditor)).getD false then
+        setStatus s!"highlight colour: {c.name} (a text box or drawing takes its colour from \
+          its own pop-over)"
+      else
       st.modify ({ · with marks := s.marks.recolor id c })
       marksChanged st
       if !(← updatePreview st) then repaint st
@@ -3032,7 +3255,7 @@ def selectMarkAt (st : IO.Ref State) (pg : Nat) (p : Pt) (openIt : Bool) : IO Bo
   let s ← st.get
   let some sl := slotOf s pg | return false
   let store := if s.ui.showAll then s.marks
-    else { s.marks with marks := s.marks.marks.filter (·.isNote) }
+    else { s.marks with marks := s.marks.marks.filter (!·.isHighlight) }
   match store.hitAt sl.vp.box pg p with
   | some id =>
     st.modify ({ · with markSel := some id })
@@ -3096,7 +3319,7 @@ highlights of the page view (notes stay); a hidden highlight cannot stay selecte
 def toggleShowAll (st : IO.Ref State) : IO Unit := do
   st.modify fun s =>
     let on := !s.ui.showAll
-    let keep := on || ((s.markSel.bind s.marks.find?).map (·.isNote)).getD true
+    let keep := on || ((s.markSel.bind s.marks.find?).map (!·.isHighlight)).getD true
     { s with ui := { s.ui with showAll := on }, markSel := if keep then s.markSel else none }
   repaint st
   syncTool st
@@ -3115,7 +3338,7 @@ def popClick (st : IO.Ref State) (xs ys : String) : IO Unit := do
     let s ← st.get
     match s.markSel.bind s.marks.find? with
     | some m =>
-      if !m.isNote then
+      if m.isHighlight then
         st.modify ({ · with marks := s.marks.recolor m.id c })
         marksChanged st
         if !(← updatePreview st) then repaint st
@@ -3144,7 +3367,8 @@ def popDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
 /-- Escape (task 9.8): closes the colour picker and the pop-over and dismisses the bubble (the
 text selection and the selected mark are cleared; the tool stays on). -/
 def escape (st : IO.Ref State) : IO Unit := do
-  st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none }
+  st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none,
+                              inkSession := none }
   drawOverlay st
   syncTool st
 
@@ -3176,11 +3400,239 @@ def bubbleClick (st : IO.Ref State) (wx wy : Int) : IO Bool := do
       return true
   return false
 
-/-- Handles `tool NAME` (an annotation tool, Print or Save): Highlight works (task 9.4); the
-others are not available yet. -/
+/-! ## Add text and Draw (task 9.9) -/
+
+/-- Opens the free-text editor on page `pg` with its box's upper-left corner at `pos` (page
+space), holding `text`, at font size `size` in colour `rgb`; `id` is the mark it edits
+(`none`: a new one). -/
+def ftOpenAt (st : IO.Ref State) (id : Option Nat) (pg : Nat) (pos : Pt) (text : String)
+    (size : Nat) (rgb : Marks.Rgb) : IO Unit := do
+  let s ← st.get
+  let some sl := slotOf s pg | return
+  let pad := SafePdf.Core.Write.Annots.ftPad
+  let (x, y, _, _) := sl.rect ⟨pos.x + pad, pos.y - pad, pos.x + pad, pos.y - pad⟩
+  discard <| run ["::safepdf::ftOpen", num x, num y, text,
+    toString (max 1 (((size : Rat) * sl.vp.zoom + 1 / 2).floor.toNat)), Marks.rgbHex rgb]
+  st.modify ({ · with ftEdit := some ⟨id, pg, pos, size, rgb⟩, sel := none, pressPt := none })
+  drawOverlay st
+  setStatus s!"page {pg + 1}: type the text (a click elsewhere or Escape finishes it)"
+
+/-- Commits the open free-text editor (a click elsewhere, Escape, a tool change, Save): a new
+box becomes a free-text mark (dropped when empty); an edited one gets the new text (deleted
+when emptied). Returns whether an editor was open. -/
+def commitFt (st : IO.Ref State) : IO Bool := do
+  let s ← st.get
+  let some fe := s.ftEdit | return false
+  let raw ← try run [".c.ft", "get", "1.0", "end - 1 chars"] catch _ => pure ""
+  discard <| run ["destroy", ".c.ft"]
+  discard <| run [".c", "delete", "ftedit"]
+  discard <| run ["focus", ".c"]
+  st.modify ({ · with ftEdit := none })
+  let t := String.ofList ((raw.toList.reverse.dropWhile (· == '\n')).reverse)
+  let blank := t.all Char.isWhitespace
+  match fe.id with
+  | none =>
+    if blank then
+      drawOverlay st
+      setStatus "empty text box discarded"
+    else
+      let (marks, id) := s.marks.add fe.page .yellow (.freeText t fe.pos fe.size fe.rgb)
+      st.modify ({ · with marks, markSel := some id })
+      marksChanged st
+      drawOverlay st
+      setStatus s!"page {fe.page + 1}: text added ({t.length} characters; drag it to move it, \
+        double-click to edit, Delete removes it)"
+  | some id =>
+    if blank then
+      st.modify fun s => { s with marks := s.marks.remove id,
+                                  markSel := if s.markSel == some id then none else s.markSel }
+      marksChanged st
+      if !(← updatePreview st) then drawOverlay st
+      setStatus "text box deleted (emptied)"
+    else if ((s.marks.find? id).map (·.text)) == some t then
+      drawOverlay st
+      setStatus "text unchanged"
+    else
+      st.modify ({ · with marks := s.marks.setText id t, markSel := some id })
+      marksChanged st
+      if !(← updatePreview st) then drawOverlay st
+      setStatus s!"text edited ({t.length} characters)"
+  return true
+
+/-- Status line after the Add text / Draw mode changed. -/
+def editorStatus (st : IO.Ref State) : IO Unit := do
+  match (← st.get).ui.editor with
+  | .text => setStatus "Add text: click on the page to place a text box (font colour and size in \
+      the pop-over; Escape closes it, the button ends the mode)"
+  | .draw => setStatus "Draw: drag on the page to draw (colour, thickness and opacity in the \
+      pop-over; the strokes until Escape or the end of the mode form one drawing)"
+  | .none => setStatus "Add text / Draw off"
+
+/-- The toolbar's Add text or Draw button: turns that mode on (with its pop-over; the Highlight
+tool off) or off (`Bubble.Ui.selectEditor`); an open text box is committed and a drawing
+session ends. -/
+def toggleEditor (st : IO.Ref State) (e : Bubble.Editor) : IO Unit := do
+  if (← st.get).doc.isNone then return
+  discard <| commitFt st
+  st.modify fun s => { s with ui := s.ui.selectEditor e, inkSession := none }
+  syncTool st
+  editorStatus st
+
+/-- Applies a pop-over change to the selected mark when it is of the mode's kind (`pred`),
+as PDF.js applies the parameters to the selected editor. -/
+def edApply (st : IO.Ref State) (pred : Marks.Mark → Bool)
+    (f : Marks.Store → Nat → Marks.Store) : IO Unit := do
+  let s ← st.get
+  let some m := s.markSel.bind s.marks.find? | return
+  if !pred m then return
+  st.modify ({ · with marks := f s.marks m.id })
+  marksChanged st
+  if !(← updatePreview st) then drawOverlay st
+
+/-- Whether a mark is free text / ink. -/
+def isFt (m : Marks.Mark) : Bool := match m.kind with | .freeText .. => true | _ => false
+/-- See `isFt`. -/
+def isInk (m : Marks.Mark) : Bool := match m.kind with | .ink .. => true | _ => false
+
+/-- Sets slider `row` of the pop-over to the value at x position `x`. -/
+def edSlideTo (st : IO.Ref State) (row : Nat) (x : Rat) : IO Unit := do
+  let s ← st.get
+  let (sl, old) := edSlider s.ui row
+  let v := sl.valueAt x
+  if v == old then return
+  match s.ui.editor, row with
+  | .draw, 2 =>
+    st.modify fun s => { s with ui := { s.ui with inkOpacity := v } }
+    edApply st isInk fun ms id => ms.setOpacity id v
+    setStatus s!"opacity {v}%"
+  | .draw, _ =>
+    st.modify fun s => { s with ui := { s.ui with inkThick := v } }
+    edApply st isInk fun ms id => ms.setSize id v
+    setStatus s!"thickness {v}"
+  | _, _ =>
+    st.modify fun s => { s with ui := { s.ui with ftSize := v },
+                                ftEdit := s.ftEdit.map ({ · with size := v }) }
+    edApply st isFt fun ms id => ms.setSize id v
+    setStatus s!"font size {v}"
+  syncTool st
+  drawOverlay st
+
+/-- A press in the Add text / Draw pop-over at `(x, y)` (`Bubble.EdPop.hit`): a swatch sets
+the colour, a slider row its value (drags follow, `edDrag`); both apply to the selected mark
+of the mode's kind and to an open text box. -/
+def edClick (st : IO.Ref State) (xs ys : String) : IO Unit := do
+  let (some x, some y) := (xs.toInt?, ys.toInt?) | return
+  st.modify ({ · with edSlide := none })
+  let s ← st.get
+  match Bubble.EdPop.hit s.ui.editor x y with
+  | some (.color i) =>
+    let some c := Bubble.EdPop.palette[i]? | return
+    if s.ui.editor == .draw then
+      st.modify fun s => { s with ui := { s.ui with inkColor := c } }
+      edApply st isInk fun ms id => ms.setRgb id c
+    else
+      st.modify fun s => { s with ui := { s.ui with ftColor := c },
+                                  ftEdit := s.ftEdit.map ({ · with rgb := c }) }
+      edApply st isFt fun ms id => ms.setRgb id c
+    syncTool st
+    drawOverlay st
+    setStatus s!"colour {Marks.rgbHex c}"
+  | some (.slider row) =>
+    st.modify ({ · with edSlide := some row })
+    edSlideTo st row x
+  | none => pure ()
+
+/-- A drag in the pop-over after a press on a slider moves it. -/
+def edDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
+  let some x := xs.toInt? | return
+  let some row := (← st.get).edSlide | return
+  edSlideTo st row x
+
+/-- Starts a stroke at point `p` of page `pg` (Draw mode, task 9.9): canvas line `inkcur` in
+the drawing's colour and thickness. -/
+def inkBegin (st : IO.Ref State) (pg : Nat) (p : Pt) : IO Unit := do
+  let s ← st.get
+  let some sl := slotOf s pg | return
+  let (x, y, _, _) := sl.rect ⟨p.x, p.y, p.x, p.y⟩
+  st.modify ({ · with inkStroke := some (pg, #[p]), sel := none, pressPt := none,
+                      bubble := none })
+  discard <| run [".c", "delete", "bub"]
+  discard <| run ["::safepdf::inkStart", num x, num y,
+    num (max 1 ((s.ui.inkThick : Rat) * sl.vp.zoom)), Marks.rgbHex s.ui.inkColor]
+
+/-- Ends the stroke being drawn: it joins the session's drawing when that is still unsaved and
+on the same page, else it starts a new drawing (one ink mark per session, as PDF.js). -/
+def inkEnd (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let some (pg, pts) := s.inkStroke | return
+  st.modify ({ · with inkStroke := none })
+  discard <| run [".c", "delete", "inkcur"]
+  let stroke := pts.toList
+  let joins := s.inkSession.bind fun id => (s.marks.find? id).filter fun m =>
+    m.page == pg && !s.marks.isSaved id && isInk m
+  let (marks, id, n) := match joins with
+    | some m => (s.marks.addStroke m.id stroke, m.id, match m.kind with
+        | .ink ss .. => ss.length + 1
+        | _ => 1)
+    | none =>
+      let (ms, id) := s.marks.add pg .yellow
+        (.ink [stroke] s.ui.inkThick s.ui.inkOpacity s.ui.inkColor)
+      (ms, id, 1)
+  st.modify ({ · with marks, inkSession := some id, markSel := some id })
+  marksChanged st
+  drawOverlay st
+  setStatus s!"page {pg + 1}: drawing with {n} stroke(s) (Escape ends it; Delete removes it)"
+
+/-- A drag to window `(wx, wy)` while a stroke is drawn: adds the point when it is at least a
+pixel away from the last one; on release the stroke ends (`inkEnd`). -/
+def inkMove (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
+  let s ← st.get
+  let some (pg, pts) := s.inkStroke | return
+  if let some p ← pagePointOn st pg wx wy then
+    if let (some sl, some last) := (slotOf s pg, pts.back?) then
+      let d := sl.vp.zoom * (max (p.x - last.x) (last.x - p.x) + max (p.y - last.y) (last.y - p.y))
+      if d ≥ 1 then
+        st.modify ({ · with inkStroke := some (pg, pts.push p) })
+        let (x, y, _, _) := sl.rect ⟨p.x, p.y, p.x, p.y⟩
+        discard <| run ["::safepdf::inkAdd", num x, num y]
+  if final then inkEnd st
+
+/-- A drag of a free text or drawing (task 9.9): its canvas items follow the pointer; on
+release the mark is moved by the distance dragged (`Marks.Store.translate`). -/
+def moveDrag (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
+  let s ← st.get
+  let some (id, p0, last) := s.moveFrom | return
+  let some m := s.marks.find? id | return
+  let some sl := slotOf s m.page | return
+  let some p ← pagePointOn st m.page wx wy | return
+  let (ax, ay, _, _) := sl.rect ⟨last.x, last.y, last.x, last.y⟩
+  let (bx, by', _, _) := sl.rect ⟨p.x, p.y, p.x, p.y⟩
+  discard <| run [".c", "move", s!"m{id}", num (bx - ax), num (by' - ay)]
+  st.modify ({ · with moveFrom := if final then none else some (id, p0, p) })
+  if final then
+    let dx := p.x - p0.x
+    let dy := p.y - p0.y
+    if sl.vp.zoom * (max dx (-dx) + max dy (-dy)) ≥ 2 then
+      st.modify fun s => { s with marks := s.marks.translate id dx dy }
+      marksChanged st
+      if !(← updatePreview st) then drawOverlay st
+      setStatus s!"{markName m} moved"
+    else drawOverlay st
+
+/-- The free text or drawing under page point `p` of page `pg` (`Marks.Store.hitAt`). -/
+def editorAt (s : State) (pg : Nat) (p : Pt) : Option Marks.Mark := do
+  let sl ← slotOf s pg
+  let id ← s.marks.hitAt sl.vp.box pg p
+  (s.marks.find? id).filter (·.isEditor)
+
+/-- Handles `tool NAME` (an annotation tool, Print or Save): Highlight (task 9.4), Add comment
+(a note, `addNote`), Add text and Draw (task 9.9); Add image and Print are not available yet. -/
 def tool (st : IO.Ref State) (name : String) : IO Unit := do
   match Toolbar.toolOf name with
   | some .highlight => toolHighlight st
+  | some .comment => addNote st none
+  | some .text => toggleEditor st .text
+  | some .draw => toggleEditor st .draw
   | some t => setStatus s!"{t.tip}: not available yet ({t.task})"
   | none => setStatus s!"internal: unknown tool {name}"
 
@@ -3197,8 +3649,25 @@ def selStatus (st : IO.Ref State) : IO Unit := do
 /-- Mouse press at window position `(wx, wy)`: clears the selection and remembers the page
 point where a drag starts. -/
 def press (st : IO.Ref State) (wx wy : Int) : IO Unit := do
-  st.modify ({ · with bubblePress := false })
+  st.modify ({ · with bubblePress := false, moveFrom := none })
   if ← bubbleClick st wx wy then return
+  -- Task 9.9: a click elsewhere commits an open text box (and does nothing else, as PDF.js);
+  -- in Draw mode a press starts a stroke; a press on a free text or drawing selects it and
+  -- starts moving it.
+  if ← commitFt st then
+    st.modify ({ · with bubblePress := true })
+    return
+  if (← st.get).ui.editor == .draw then
+    if let some (pg, p) ← pagePointAt st wx wy then inkBegin st pg p
+    return
+  if let some (pg, p) ← pagePointAt st wx wy then
+    if let some m := editorAt (← st.get) pg p then
+      st.modify fun s => { s with sel := none, pressPt := none, markSel := some m.id,
+                                  moveFrom := some (m.id, p, p), ui := { s.ui with picker := false } }
+      drawOverlay st
+      let dbl := if isFt m then "; double-click edits it" else ""
+      setStatus s!"{markName m} selected (drag to move it; Delete removes it{dbl})"
+      return
   st.modify fun s => { s with sel := none, pressPt := none, markSel := none,
                               ui := { s.ui with picker := false } }
   if let some (pg, p) ← pagePointAt st wx wy then
@@ -3213,6 +3682,8 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
   if s.bubblePress then
     if final then st.modify ({ · with bubblePress := false })
     return
+  if s.inkStroke.isSome then inkMove st wx wy final; return
+  if s.moveFrom.isSome then moveDrag st wx wy final; return
   let some p0 := s.pressPt | return
   if final then st.modify ({ · with pressPt := none })
   -- The drag selects on the page it started on (task 9.3).
@@ -3222,8 +3693,14 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
     -- A click in place: select the mark under it (task 9.4; marks lie above links), else
     -- activate the link under it (task 8.2d).
     if ← selectMarkAt st pg p1 true then return
+    -- Add text mode: a click places a text box (task 9.9).
+    if s.ui.editor == .text then
+      ftOpenAt st none pg p1 "" s.ui.ftSize s.ui.ftColor
+      return
     if let some (_, l) := Links.linkAt (← linksOf st pg) p1 then activate st l.action
     return
+  -- Add text mode: dragging selects nothing.
+  if s.ui.editor == .text then return
   match ← pageIndex st pg with
   | .ok ix =>
     if let some (a, b) := Select.dragRange ix.cells p0 p1 then
@@ -3237,11 +3714,23 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
 
 /-- Double click at `(wx, wy)`: selects the word of the nearest glyph (`Select.wordAt`). -/
 def selectWord (st : IO.Ref State) (wx wy : Int) : IO Unit := do
-  st.modify ({ · with pressPt := none })
+  st.modify ({ · with pressPt := none, moveFrom := none })
   let s ← st.get
   -- The second click of a double click on the bubble is not a word selection (task 9.8).
   if let some (cx, cy) ← canvasPos wx wy then
     if (s.bubble.any fun (_, r) => r.contains cx cy) || (s.pickerAt.any (·.contains cx cy)) then
+      return
+  -- Task 9.9: in Draw mode the second press draws; an open text box keeps the double click;
+  -- a double click on a text box edits it.
+  if s.ui.editor == .draw then
+    if let some (pg, p) ← pagePointAt st wx wy then inkBegin st pg p
+    return
+  if s.ftEdit.isSome then return
+  if let some (pg, p) ← pagePointAt st wx wy then
+    if let some m := editorAt s pg p then
+      if let .freeText t pos sz c := m.kind then
+        st.modify ({ · with markSel := some m.id })
+        ftOpenAt st (some m.id) pg pos t sz c
       return
   let some (pg, p) ← pagePointAt st wx wy | return
   match ← pageIndex st pg with
@@ -3536,7 +4025,7 @@ def smokeToolbar (st : IO.Ref State) (dir : String) : IO Unit := do
     sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]
     sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
   let st0 ← run [".status", "cget", "-text"]
-  click ".bar.comment"
+  click ".bar.image"
   out := out.push s!"status-unchanged-after-tool: {st0 == (← run [".status", "cget", "-text"])}"
   -- Arrows (generated clicks on the canvas buttons).
   click ".bar.next"
@@ -4061,6 +4550,7 @@ def smokeBubble (st : IO.Ref State) (dir : String) : IO Unit := do
   let kindName : IO String := return match (← st.get).bubble with
     | some (.float, _) => "float"
     | some (.edit, _) => "edit"
+    | some (.editor, _) => "editor"
     | none => "none"
   let count : IO Nat := return (← st.get).marks.marks.size
   let popClickAt (x y : Rat) : IO Unit := do
@@ -4958,6 +5448,204 @@ def smokeBiblean (st : IO.Ref State) (dir : String) : IO Unit := do
     append "done"
     discard <| run ["destroy", "."]
 
+/-- Free text or ink of a mark as `key: value` text for the smoke files (task 9.9). -/
+def editorDesc (m : Option Marks.Mark) : String :=
+  match (m.map (·.kind) : Option Marks.Kind) with
+  | some (.freeText t p z c) => s!"text {t} {num p.x} {num p.y} {z} {Marks.rgbHex c}"
+  | some (.ink ss w o c) => s!"ink {ss.length} {ss.map List.length} {w} {o} {Marks.rgbHex c}"
+  | _ => "none"
+
+/-- Smoke steps of Add text and Draw (`SAFEPDF_VIEWER_SMOKE_MODE=editors`, task 9.9) on a copy
+of the text PDF (substitute fonts on, so the saved free text is painted): the toolbar's Add
+text turns the mode on with its pop-over; a click at (100, 400) opens a text box, typed text
+and Escape make a free-text mark (canvas text items); a double click edits it (a click
+elsewhere commits); the pop-over's red swatch and size slider (20) change it; Draw: blue,
+thickness 4, two strokes form one drawing (two canvas lines); Ctrl+S writes and reopens
+`text-annotated.pdf` (both read back, the text box's pixels dark, the stroke blue, drawn by the
+renderer); dragging the text box moves it by 50 units (saved, read back moved); Delete removes
+the text box and the drawing's bubble Delete the drawing; Ctrl+S leaves none in the file and
+white paper. Results in `editors.txt` (boxes for the external `mutool` check of
+`editors1.pdf`, the file with both). -/
+def smokeEditors (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let winAt (x y : Rat) : IO (String × String) := do
+    let some pos ← boxWindowPos st ⟨x, y, x, y⟩ | throw (IO.userError "page not shown")
+    return pos
+  let press (w : String × String) : IO Unit :=
+    sendEvent ".c" "<ButtonPress-1>" ["-x", w.1, "-y", w.2]
+  let release (w : String × String) : IO Unit :=
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", w.1, "-y", w.2]
+  let motion (w : String × String) : IO Unit :=
+    sendEvent ".c" "<Motion>" ["-x", w.1, "-y", w.2, "-state", "256"]
+  let btn (w : String) : IO Unit := do
+    sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+    sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  let edAt (x y : Rat) : IO Unit := do
+    sendEvent ".edbar" "<ButtonPress-1>" ["-x", toString x.floor, "-y", toString y.floor]
+    sendEvent ".edbar" "<ButtonRelease-1>" ["-x", toString x.floor, "-y", toString y.floor]
+  let firstOf (pred : Marks.Mark → Bool) : IO (Option Marks.Mark) := do
+    return (← st.get).marks.marks.toList.find? pred
+  -- Non-white pixels among 9 × 3 points inside a box (page space).
+  let inked (b : Box) : IO Nat := do
+    let mut n := 0
+    for i in [1:10] do
+      for j in [1:4] do
+        let q : Pt := ⟨b.llx + (b.urx - b.llx) * i / 10, b.lly + (b.ury - b.lly) * j / 4⟩
+        let cs := ((← k.px q).splitOn " ").filterMap String.toNat?
+        if cs.length == 3 && cs.any (· < 200) then n := n + 1
+    return n
+  -- 1. Add text: mode, pop-over, a text box.
+  btn ".bar.text"
+  discard <| run ["update"]
+  out := out.push s!"text-mode: {(← st.get).ui.editor == .text} {← run ["winfo", "ismapped", ".edbar"]} {← run ["::safepdf::btnState", ".bar.text"]}"
+  let p1 ← winAt 100 400
+  press p1; release p1
+  out := out.push s!"editor-open: {← run ["winfo", "exists", ".c.ft"]} {(← st.get).ftEdit.isSome}"
+  discard <| run [".c.ft", "insert", "end", "Hello text"]
+  discard <| run ["update"]
+  sendEvent ".c.ft" "<Key-Escape>"
+  let ft ← firstOf isFt
+  out := out.push s!"text-added: {(← st.get).marks.marks.size} {editorDesc ft} {← tagCount "ft"} {← run ["winfo", "exists", ".c.ft"]}"
+  let some ftm := ft | throw (IO.userError s!"no text box; {out}; status: {← k.status}")
+  let some fbox := ftm.box | throw (IO.userError "no text box box")
+  -- 2. A double click edits it; a click elsewhere commits.
+  discard <| run ["after", "600"]
+  let inside ← winAt (fbox.llx + 6) ((fbox.lly + fbox.ury) / 2)
+  press inside; release inside; press inside; release inside
+  discard <| run ["update"]
+  let shown ← try run [".c.ft", "get", "1.0", "end - 1 chars"] catch _ => pure "<none>"
+  out := out.push s!"edit-open: {shown == "Hello text"}"
+  if shown != "Hello text" then
+    throw (IO.userError s!"no editor; {out}; status: {← k.status}")
+  discard <| run [".c.ft", "delete", "1.0", "end"]
+  discard <| run [".c.ft", "insert", "end", "Edited text ✓"]
+  let away ← winAt 400 150
+  press away; release away
+  out := out.push s!"text-edited: {editorDesc (← firstOf isFt)} {(← st.get).markSel == some ftm.id}"
+  -- 3. Colour and size from the pop-over (applied to the selected text box).
+  edAt (Bubble.EdPop.swatchX 1) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.fontSize.thumbX 20) (Bubble.EdPop.ctrlY 1)
+  out := out.push s!"text-styled: {editorDesc (← firstOf isFt)} {(← st.get).ui.ftSize}"
+  -- 4. Draw: blue, thickness 4, two strokes = one drawing.
+  btn ".bar.draw"
+  out := out.push s!"draw-mode: {(← st.get).ui.editor == .draw} {← run ["winfo", "ismapped", ".edbar"]} {← run ["::safepdf::btnState", ".bar.text"]}"
+  edAt (Bubble.EdPop.swatchX 2) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.thickness.thumbX 4) (Bubble.EdPop.ctrlY 1)
+  for (y, xs) in [((300 : Rat), [(300 : Rat), 330, 360, 390, 420]), (250, [300, 340, 380, 420])] do
+    let ws ← xs.mapM fun x => winAt x (y + (x - 300) / 4)
+    if let some w0 := ws.head? then press w0
+    for w in ws.drop 1 do motion w
+    if let some wl := ws.getLast? then release wl
+  let ink ← firstOf isInk
+  out := out.push s!"drawn: {(← st.get).marks.marks.size} {editorDesc ink} {← tagCount "ink"}"
+  sendKey "Escape"
+  btn ".bar.draw"
+  out := out.push s!"modes-off: {(← st.get).ui.editor == .none} {← run ["winfo", "ismapped", ".edbar"]}"
+  -- 5. Save (FILE-annotated.pdf, reopened): both read back, painted by the renderer.
+  sendEvent ".c" "<Control-Key-s>"
+  let s1 ← st.get
+  let path := s1.path.getD ""
+  out := out.push s!"saved: {s1.marks.marks.size} {s1.marks.saved.length} {s1.marks.dirty} {← fileMarks path}"
+  let ft1 ← firstOf isFt
+  let ink1 ← firstOf isInk
+  out := out.push s!"after-save-text: {editorDesc ft1}"
+  out := out.push s!"after-save-ink: {editorDesc ink1}"
+  out := out.push s!"canvas-after-save: {← tagCount "ft"} {← tagCount "ink"}"
+  let some tb := ft1.bind (·.box) | throw (IO.userError "text box lost")
+  out := out.push s!"text-box: {num tb.llx} {num tb.lly} {num tb.urx} {num tb.ury}"
+  out := out.push s!"text-pixels: {decide ((← inked tb) > 3)}"
+  let mid : Pt := ⟨345, 300 + 45 / 4⟩
+  out := out.push s!"ink-mid: {num mid.x} {num mid.y}"
+  out := out.push s!"ink-px: {← k.px mid}"
+  out := out.push s!"subst: {(← SafePdf.Shell.Fonts.findFiles).any (·.1 == .helvetica)}"
+  IO.FS.writeBinFile (file "editors1.pdf") (← IO.FS.readBinFile path)
+  -- 6. Move the text box 50 units right by dragging it; save; read back moved.
+  discard <| run ["after", "600"]
+  let a ← winAt (tb.llx + 6) ((tb.lly + tb.ury) / 2)
+  let b ← winAt (tb.llx + 31) ((tb.lly + tb.ury) / 2)
+  let c ← winAt (tb.llx + 56) ((tb.lly + tb.ury) / 2)
+  press a; motion b; motion c; release c
+  let ftMoved ← firstOf isFt
+  let dx := match ft1.map (·.kind), ftMoved.map (·.kind) with
+    | some (.freeText _ p _ _), some (.freeText _ q _ _) => q.x - p.x
+    | _, _ => 0
+  out := out.push s!"moved: {decide (dx > 48 && dx < 52)} {(← st.get).marks.dirty}"
+  sendEvent ".c" "<Control-Key-s>"
+  let ftSaved ← firstOf isFt
+  let dx2 := match ft1.map (·.kind), ftSaved.map (·.kind) with
+    | some (.freeText _ p _ _), some (.freeText _ q _ _) => q.x - p.x
+    | _, _ => 0
+  out := out.push s!"moved-saved: {decide (dx2 > 48 && dx2 < 52)} {(← st.get).marks.dirty} {← fileMarks path}"
+  -- 7. Delete each: the text box with Delete, the drawing with its bubble's Delete.
+  discard <| run ["after", "600"]
+  let some tb2 := ftSaved.bind (·.box) | throw (IO.userError "moved text box lost")
+  let t2 ← winAt (tb2.llx + 6) ((tb2.lly + tb2.ury) / 2)
+  press t2; release t2
+  out := out.push s!"text-selected: {(← st.get).markSel == ftSaved.map (·.id)} {(← st.get).bubble.map (·.1 == .editor)}"
+  sendKey "Delete"
+  discard <| run ["after", "600"]
+  let m2 ← winAt mid.x mid.y
+  press m2; release m2
+  let bub := (← st.get).bubble
+  out := out.push s!"ink-selected: {(← st.get).markSel == ink1.map (·.id)} {bub.map (·.1 == .editor)}"
+  if let some (kd, r) := bub then
+    if let some (_, x0, x1) := kd.layout.find? (·.1 == .delete) then
+      let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+      let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+      let w := (toString (r.x0 + (x0 + x1) / 2 - vx).floor, toString ((r.y0 + r.y1) / 2 - vy).floor)
+      press w; release w
+      discard <| run ["update"]
+  out := out.push s!"deleted: {(← st.get).marks.marks.size} {(← st.get).marks.dirty} {(← st.get).view.isSome}"
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"deleted-saved: {(← st.get).marks.marks.size} {(← st.get).marks.dirty} {← fileMarks path}"
+  out := out.push s!"after-delete-pixels: {← inked tb2} {← k.px mid}"
+  IO.FS.writeFile (file "editors.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The screenshot set-up of task 9.9 (`SAFEPDF_VIEWER_SMOKE_MODE=editors-shot`): a red text
+box and a blue drawing on the page, the Draw mode on with its pop-over open; writes
+`ready.txt` and stays up for 20 s (the caller takes the screenshot), then closes. -/
+def smokeEditorsShot (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  let winAt (x y : Rat) : IO (String × String) := do
+    let some pos ← boxWindowPos st ⟨x, y, x, y⟩ | throw (IO.userError "page not shown")
+    return pos
+  let ev (w : String) (pat : String) (p : String × String) (more : List String := []) : IO Unit :=
+    sendEvent w pat (["-x", p.1, "-y", p.2] ++ more)
+  let btn (w : String) : IO Unit := do
+    ev w "<ButtonPress-1>" ("16", "16"); ev w "<ButtonRelease-1>" ("16", "16")
+  let edAt (x y : Rat) : IO Unit := do
+    let p := (toString x.floor, toString y.floor)
+    ev ".edbar" "<ButtonPress-1>" p; ev ".edbar" "<ButtonRelease-1>" p
+  btn ".bar.text"
+  discard <| run ["update"]
+  edAt (Bubble.EdPop.swatchX 1) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.fontSize.thumbX 16) (Bubble.EdPop.ctrlY 1)
+  let p ← winAt 150 786
+  ev ".c" "<ButtonPress-1>" p; ev ".c" "<ButtonRelease-1>" p
+  discard <| run [".c.ft", "insert", "end", "Add text: a FreeText box"]
+  discard <| run ["update"]
+  sendEvent ".c.ft" "<Key-Escape>"
+  btn ".bar.draw"
+  discard <| run ["update"]
+  edAt (Bubble.EdPop.swatchX 2) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.thickness.thumbX 3) (Bubble.EdPop.ctrlY 1)
+  let curve (cx cy : Rat) : List (Rat × Rat) :=
+    (List.range 25).map fun (i : Nat) =>
+      let t : Rat := (i : Rat) / 24
+      (cx + 70 * t, cy + 40 * (4 * t * (1 - t)) - 20 * t)
+  for (cx, cy) in [((515 : Rat), (520 : Rat)), (515, 495)] do
+    let ws ← (curve cx cy).mapM fun (x, y) => winAt x y
+    if let some w0 := ws.head? then ev ".c" "<ButtonPress-1>" w0
+    for w in ws.drop 1 do ev ".c" "<Motion>" w ["-state", "256"]
+    if let some wl := ws.getLast? then ev ".c" "<ButtonRelease-1>" wl
+  discard <| run ["update"]
+  IO.FS.writeFile ((dir : System.FilePath) / "ready.txt") "ready\n"
+  discard <| run ["after", "20000", "destroy ."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -5025,6 +5713,13 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeBiblean st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "biblean.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "editors" || s.smokeMode == "editors-shot" then
+    try
+      if s.smokeMode == "editors" then smokeEditors st dir else smokeEditorsShot st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "editors.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "marks" then
@@ -5153,15 +5848,21 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["showAll"] => toggleShowAll st
   | ["escape"] => escape st
   | ["popClick", x, y] => popClick st x y
+  | ["edClick", x, y] => edClick st x y
+  | ["edDrag", x, y] => edDrag st x y
+  | ["ftCommit"] => discard <| commitFt st
   | ["popDrag", x, y] => popDrag st x y
   | ["popup", x, y, rx, ry] => popup st x y rx ry
   | ["wheel", axis, kind, d] => wheel st axis kind d
-  | ["close"] => if ← confirmDiscard st "closing" then closeFile st
-  | ["save"] => discard <| save st
-  | ["saveAs"] => discard <| saveAs st
+  | ["close"] =>
+    discard <| commitFt st
+    if ← confirmDiscard st "closing" then closeFile st
+  | ["save"] => discard <| commitFt st; discard <| save st
+  | ["saveAs"] => discard <| commitFt st; discard <| saveAs st
   | ["importXfdf"] => importXfdf st
   | ["exportXfdf"] => exportXfdf st
   | ["quit"] =>
+    discard <| commitFt st
     if ← confirmDiscard st "quitting" then discard <| run ["after", "0", "destroy ."]
   | ["outline", id] => outlineClick st id
   | ["goto", txt] => gotoText st txt
@@ -5212,6 +5913,8 @@ View menu: Page/Vertical Scrolling, No/Odd/Even Spreads (continuous and facing p
 Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
+Add text: click to place a text box (Escape or a click elsewhere ends it, double-click
+edits); Draw: drag to draw strokes; drag a text box or drawing to move it.
 h or the Highlight button highlights the selection (the button without one: Highlight
 tool and its pop-over); a selection shows a Highlight bubble, a selected highlight its
 colour/comment/delete bubble; Escape dismisses them; right button: Highlight colours,
@@ -5232,6 +5935,8 @@ SAFEPDF_VIEWER_SMOKE_MODE=bubble: the selection bubble and Highlight pop-over st
 SAFEPDF_VIEWER_SMOKE_MODE=save / reopen / encrypted: the save flow, reopening the saved file,
 saving an encrypted file).
 SAFEPDF_VIEWER_SMOKE_MODE=xfdf: XFDF export and import (task 9.11);
+SAFEPDF_VIEWER_SMOKE_MODE=editors: Add text and Draw, save, move, delete (task 9.9);
+=editors-shot: a text box, a drawing and the Draw pop-over, kept up 20 s for a screenshot;
 SAFEPDF_VIEWER_SMOKE_MODE=biblean: under viewer --biblean, a highlight, a note and Save to
 library (task 10.1b);
 SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in

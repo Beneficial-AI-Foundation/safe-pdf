@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.11 XFDF import/export)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -132,11 +132,11 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     with no entry checked (PDF.js's custom option).
   * *right*: Highlight (works since 9.4: highlights the selection in the current colour;
     without a selection it turns the Highlight tool on and opens its pop-over, or off (9.8);
-    see *Selection bubble and Highlight pop-over*), Comment, Text,
-    Draw, Image, then Print and Save — Save (PDF.js's download icon) is the command File →
-    Save since 9.5c, enabled while there are unsaved marks; the others are **disabled
-    placeholders** until their tasks land (Comment, Text, Draw 9.9; Print and Image after
-    M9) — and the `»` overflow menu: Open…, Import annotations…, Export annotations… (9.11), Find…, Go to page…, First page, Last
+    see *Selection bubble and Highlight pop-over*), Add comment (9.9: Add note… on the
+    selection, else at the window centre), Add text and Draw (9.9, see *Add text and Draw*),
+    Add image, then Print and Save — Save (PDF.js's download icon) is the command File →
+    Save since 9.5c, enabled while there are unsaved marks; Add image and Print are
+    **disabled placeholders** (after M9) — and the `»` overflow menu: Open…, Import annotations…, Export annotations… (9.11), Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
     buttons), then, as in PDF.js's secondary toolbar, the scroll modes (Page Scrolling, Vertical
     Scrolling) and the spread modes (No Spreads, Odd Spreads, Even Spreads) as radio entries on
@@ -160,7 +160,7 @@ attachment views, "find current outline item"), no thumbnails; the menubar stays
 toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
-the other annotation tools are later tasks (9.9).
+Add image (stamp) and Print come after M9.
 
 ## Wheel scrolling across pages (9.2)
 
@@ -413,6 +413,66 @@ appended to the file as an **incremental update**; the original bytes are never 
 * **Errors** (an encrypted document, refused by the writer until 9.5f; a document opened
   through the repair path; a failed check; a write error) appear in the status line as
   `cannot save to NAME: …`; nothing is written and the marks stay unsaved.
+
+## Add text and Draw (9.9)
+
+PDF.js's FreeText and Ink editors (`src/display/editor/freetext.js`, `ink.js`, the parameter
+toolbar of `web/viewer.css` `.editorParamsToolbar`; nothing copied). Pure state in
+`Bubble.lean` (`Ui.editor`, `Ui.selectEditor`, `EdPop` layout and `Slider`s; theorem
+`Ui.selectEditor_exclusive`: one tool at a time), marks in `Marks.lean` (`Kind.freeText`,
+`Kind.ink`, `Store.translate`, `setRgb`, `setSize`, `setOpacity`, `addStroke`), writing in
+`Core/Write/Annots.lean` (rules A12–A15).
+
+* **Modes.** The toolbar's Add text and Draw buttons turn their mode on (button toggled, the
+  Highlight tool off) with a parameter pop-over `.edbar` under the button: *Font color* +
+  *Font size* (5–100, default 10) for text; *Color*, *Thickness* (1–20, default 1) and
+  *Opacity* (5–100 %, step 5, default 100 %) for drawing. PDF.js shows a native colour input;
+  here the colour is a row of six swatches (black — PDF.js's default —, red, blue, green,
+  orange, purple), so it can be driven and tested deterministically. A second click on the
+  button ends the mode; Escape closes the pop-over and ends a drawing session.
+* **Add text.** A click on the page opens a text box: a Tk text widget in a canvas window
+  (tag `ftedit`) with its upper-left corner at the click, Helvetica at font size × zoom in
+  the chosen colour; typed keys stay in it (own bind tags). A click elsewhere, Escape, a tool
+  change, Save, Close or Quit commit it: a free-text mark (an empty box is dropped). A double
+  click on a text box opens it again with its text (emptying it deletes it). Unsaved text is
+  drawn as canvas text items with the first baseline where the appearance stream puts it.
+* **Draw.** Each press–drag–release draws a stroke (canvas line `inkcur`, points at least one
+  pixel apart, in page space). The strokes of one session — until Escape, the end of the
+  mode, or a stroke on another page — form one ink mark (PDF.js groups them in one editor).
+  Unsaved drawings are canvas lines with round caps (opacity shown with a stipple).
+* **Select, move, edit, delete.** A press on a text box or drawing selects it (blue outline,
+  the editor bubble with Delete) and dragging moves it (canvas items follow; on release
+  `Store.translate`); the pop-over's colour and sliders apply to the selected mark of the
+  mode's kind (as PDF.js applies parameters to the selected editor); Delete or the bubble's
+  Delete removes it. Saved ones are drawn by the renderer from their appearance streams, so
+  an edit of a saved one goes through the preview (9.5g) and Save supersedes its annotation
+  (W11).
+* **In the PDF** (rules A12–A15 of `Core/Write/Annots.lean`, as pdf.js
+  `FreeTextAnnotation`/`InkAnnotation.createNewDict`): `/FreeText` with `/Contents`, `/DA
+  (/Helv SIZE Tf R G B rg)`, `/Rect` = the text box (`freeTextBox`: Helvetica AFM widths,
+  line height 1.35 × size, 2 pt padding), `/F 4`, `/Border [0 0 0]`, an appearance stream
+  with a `/Helv` standard-14 resource (Helvetica, WinAnsiEncoding, nothing embedded);
+  `/Ink` with `/InkList` (one array per stroke), `/BS /W`, `/C`, `/CA` below 1, an appearance
+  stream with round caps and joins. **Characters outside WinAnsi** (e.g. ✓, CJK) are kept
+  exactly in `/Contents` (UTF-16BE) — what readers extract and what we read back and edit —
+  while the appearance stream draws `·` in their place (the gap is visible; MuPDF's
+  replacement character). pdf.js writes no appearance at all in that case and relies on the
+  reader's fonts; we keep one so viewers that do not synthesise FreeText still show the text.
+  Our renderer paints the non-embedded Helvetica with the substitute fonts (7.7).
+* **Reopen**: our `/FreeText` and `/Ink` annotations (`/NM safepdf-mark-ID`) come back as
+  marks (`Save.markOf`: text from `/Contents`, size and colour from `/DA`, position from
+  `/Rect`'s upper-left corner; strokes from `/InkList`, width `/BS /W`, colour `/C`, opacity
+  `/CA`).
+* **XFDF**: `<freetext>` with `<contents>` and `<defaultappearance>`, `<ink>` with
+  `<inklist><gesture>x,y;x,y;…</gesture></inklist>` and `width`/`opacity` (export and import;
+  the samples' pdf.js- and Okular-style elements now import).
+* **bib-lean**: the reader contract has the kinds `text` and `ink` (§4.1), so they are posted
+  (`text`: the box, the text, `extra {"fontSize"}`; `ink`: the box, `extra {"inkList",
+  "width", "opacity"}`) and restored.
+
+Not done: the text box is upright in page space (no `/Rotate` for rotated views, which PDF.js
+writes); no rich text; strokes are straight segments (PDF.js smooths them into Béziers); no
+resize handles; the colour is a fixed palette.
 
 ## XFDF import and export (9.11)
 
@@ -823,6 +883,17 @@ drawn), then a third revision on top (blue, comment deleted: 3 marks); the scrip
 `qpdf --check`, the byte prefixes, no duplicate ids, and that `mutool draw` shows `world`
 green (then blue) and no tint in the box of `safe`. The `encrypted` run (RC4 fixture) saves a
 note: until 9.5f the status line shows the writer's refusal and nothing is written.
+
+Add text and Draw (9.9) run in the variant `editors` (`Viewer.smokeEditors`) on a copy of the
+text PDF with substitute fonts on: the Add text mode and pop-over; a click places a text box,
+typed text + Escape make a free-text mark; a double click edits it and a click elsewhere
+commits; the pop-over's red swatch and size slider (20) restyle it; Draw in blue at thickness
+4: two strokes form one drawing; Ctrl+S writes and reopens `text-annotated.pdf` (both read
+back exactly; text pixels and a blue stroke pixel from the renderer); the text box dragged 50
+units right and saved; Delete and the drawing's bubble Delete remove both, saved (none left,
+white paper). The script checks `qpdf --check`, the byte prefixes, and that `mutool draw`
+shows the red text and the blue strokes. The variant `editors-shot` sets up a text box, a
+drawing and the open Draw pop-over and stays up 20 s for a screenshot.
 
 XFDF (9.11) runs in the variant `xfdf` (`Viewer.smokeXfdf`) on a copy of the text PDF: a
 highlight on `world` with a comment and a note at (300, 400); File → Export annotations…

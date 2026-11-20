@@ -35,6 +35,18 @@ with Tk canvas items, nothing of PDF.js is copied.
   pop-over and the colour picker are open, the thickness and "Show all". The toolbar button
   highlights a selection when there is one (as since 9.4), else toggles the tool and its
   pop-over (`Ui.toolClick`); Escape closes the picker and the pop-over (`Ui.escape`).
+* **Add text and Draw** (task 9.9, PDF.js's FreeText and Ink editors, `src/display/editor/
+  freetext.js`, `ink.js`, `web/viewer.css` `.editorParamsToolbar`): the editor mode
+  (`Editor`: none, text, draw) is exclusive with the Highlight tool (`Ui.selectEditor`,
+  `Ui.toolClick`; `selectEditor_exclusive`). Their parameter pop-over (`EdPop`, 220 px wide as
+  PDF.js's, label rows then controls): "Font color" and "Font size" (5–100, default 10) for
+  text; "Color", "Thickness" (1–20, default 1) and "Opacity" (5–100 %, step 5, default 100)
+  for drawing. PDF.js shows a native colour well; Tk has none that can be driven
+  deterministically, so the colour is a row of six swatches (`EdPop.palette`: black — PDF.js's
+  default —, red, blue, green, orange, purple). Sliders are `Slider`s (`Slider.valueAt`
+  clamps and snaps to the step, `Slider.thumbX` back; `valueAt_thumbX` checked over each
+  range). A selected free text or drawing gets the *editor* bubble with Delete
+  (`Kind.editor`).
 * **Commands**: the bubble buttons run `Menu.Cmd` scripts (`Btn.cmd?`: Highlight
   selection, Add note…, Delete mark), so menubar, keys and bubbles share one vocabulary.
 -/
@@ -135,6 +147,8 @@ inductive Kind where
   | float
   /-- On a selected highlight: colour, Comment, Delete. -/
   | edit
+  /-- On a selected free text or drawing (task 9.9): Delete. -/
+  | editor
   deriving DecidableEq, Repr, Inhabited
 
 /-- A bubble button. -/
@@ -184,6 +198,7 @@ def Btn.width : Btn → Rat
 def Kind.btns : Kind → List Btn
   | .float => [.highlight]
   | .edit => [.color, .comment, .delete]
+  | .editor => [.delete]
 
 /-- The buttons with their horizontal ranges `(x0, x1)` relative to the bubble's left edge;
 dividers between them. -/
@@ -345,6 +360,117 @@ def left (bx bw ww : Rat) : Rat :=
 
 end Popover
 
+/-! ## Add text and Draw pop-over (task 9.9) -/
+
+/-- The editor mode of the annotation tools Add text and Draw. -/
+inductive Editor where
+  /-- Neither. -/
+  | none
+  /-- Add text (FreeText): a click on the page places a text box. -/
+  | text
+  /-- Draw (Ink): dragging on the page draws strokes. -/
+  | draw
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A slider of the pop-over: its range and step. -/
+structure Slider where
+  /-- Smallest value. -/
+  lo : Nat
+  /-- Largest value. -/
+  hi : Nat
+  /-- Step. -/
+  step : Nat := 1
+  deriving DecidableEq, Repr, Inhabited
+
+namespace EdPop
+
+/-- Width of the pop-over (PDF.js `--editor-toolbar-min-width`). -/
+def width : Rat := 220
+
+/-- Horizontal padding (PDF.js `padding-inline: 10px`). -/
+def padX : Rat := 10
+
+/-- Height: two rows for Add text, three for Draw. -/
+def height : Editor → Rat
+  | .draw => 196
+  | _ => 136
+
+/-- Centre of the label of row `i` (0: colour, 1: size or thickness, 2: opacity). -/
+def labelY (i : Nat) : Rat := 20 + 60 * (i : Rat)
+
+/-- Centre of the control of row `i` (swatches, slider). -/
+def ctrlY (i : Nat) : Rat := labelY i + 28
+
+/-- Swatch diameter. -/
+def swatchD : Rat := 22
+
+/-- The colours offered (PDF.js's default text and line colour is black). -/
+def palette : List Marks.Rgb :=
+  [(0, 0, 0), (0xD7, 0x00, 0x22), (0x00, 0x60, 0xDF), (0x05, 0x8B, 0x00), (0xD7, 0x6E, 0x00),
+   (0x80, 0x00, 0xD7)]
+
+/-- Centre x of swatch `i` (spread over the width). -/
+def swatchX (i : Nat) : Rat :=
+  padX + swatchD / 2 + (i : Rat) * ((width - 2 * padX - swatchD) / ((palette.length - 1 : Nat) : Rat))
+
+/-- Left end of a slider track. -/
+def sliderX0 : Rat := padX + 6
+
+/-- Right end of a slider track. -/
+def sliderX1 : Rat := width - padX - 6
+
+/-- Font size (PDF.js `editorFreeTextFontSize`: 5–100). -/
+def fontSize : Slider := ⟨5, 100, 1⟩
+
+/-- Thickness (PDF.js `editorInkThickness`: 1–20). -/
+def thickness : Slider := ⟨1, 20, 1⟩
+
+/-- Opacity in percent (PDF.js `editorInkOpacity`: 0.05–1, step 0.05). -/
+def opacity : Slider := ⟨5, 100, 5⟩
+
+/-- The labels of the rows. -/
+def labels : Editor → List String
+  | .draw => ["Color", "Thickness", "Opacity"]
+  | _ => ["Font color", "Font size"]
+
+/-- What a press in the pop-over hits. -/
+inductive Hit where
+  /-- A colour swatch (index into `palette`). -/
+  | color (i : Nat)
+  /-- The slider of row `row` (1 or 2). -/
+  | slider (row : Nat)
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The part of the pop-over of `e` under `(x, y)`. -/
+def hit (e : Editor) (x y : Rat) : Option Hit :=
+  let near (cy : Rat) (r : Rat) : Bool := decide (cy - r ≤ y) && decide (y ≤ cy + r)
+  if near (ctrlY 0) (swatchD / 2 + 4) then
+    ((List.range palette.length).find? fun i =>
+      decide (swatchX i - swatchD / 2 - 4 ≤ x) && decide (x ≤ swatchX i + swatchD / 2 + 4)).map
+      .color
+  else if decide (sliderX0 - 8 ≤ x) && decide (x ≤ sliderX1 + 8) then
+    if near (ctrlY 1) 12 then some (.slider 1)
+    else if e == .draw && near (ctrlY 2) 12 then some (.slider 2)
+    else none
+  else none
+
+end EdPop
+
+/-- `v` clamped into the slider's range. -/
+def Slider.clamp (sl : Slider) (v : Nat) : Nat := max sl.lo (min sl.hi v)
+
+/-- x of the thumb for value `v`. -/
+def Slider.thumbX (sl : Slider) (v : Nat) : Rat :=
+  EdPop.sliderX0 + ((sl.clamp v - sl.lo : Nat) : Rat) * (EdPop.sliderX1 - EdPop.sliderX0) /
+    ((sl.hi - sl.lo : Nat) : Rat)
+
+/-- The value at slider position `x`: nearest step, clamped. -/
+def Slider.valueAt (sl : Slider) (x : Rat) : Nat :=
+  let t := (x - EdPop.sliderX0) * ((sl.hi - sl.lo : Nat) : Rat) / (EdPop.sliderX1 - EdPop.sliderX0)
+  let st := max 1 sl.step
+  let steps := ((t / (st : Rat)) + 1 / 2).floor.toNat
+  sl.clamp (sl.lo + steps * st)
+
 /-! ## Tool state -/
 
 /-- The Highlight tool and the floating toolbars' state. -/
@@ -359,6 +485,20 @@ structure Ui where
   showAll : Bool := true
   /-- The edit bubble's colour picker is open. -/
   picker : Bool := false
+  /-- The Add text / Draw mode (task 9.9). -/
+  editor : Editor := .none
+  /-- Its parameter pop-over is open. -/
+  edPop : Bool := false
+  /-- Font size of new free text. -/
+  ftSize : Nat := 10
+  /-- Text colour of new free text. -/
+  ftColor : Marks.Rgb := (0, 0, 0)
+  /-- Line colour of new drawings. -/
+  inkColor : Marks.Rgb := (0, 0, 0)
+  /-- Thickness of new drawings. -/
+  inkThick : Nat := 1
+  /-- Opacity (percent) of new drawings. -/
+  inkOpacity : Nat := 100
   deriving DecidableEq, Repr, Inhabited
 
 /-- The toolbar's Highlight button: with a selection, highlight it (`true`; the state stays);
@@ -366,14 +506,21 @@ else toggle the tool, the pop-over with it. -/
 def Ui.toolClick (u : Ui) (hasSel : Bool) : Ui × Bool :=
   if hasSel then (u, true)
   else if u.tool then ({ u with tool := false, popover := false }, false)
-  else ({ u with tool := true, popover := true }, false)
+  else ({ u with tool := true, popover := true, editor := .none, edPop := false }, false)
 
 /-- Edit → Highlight tool: toggles the tool (and its pop-over) whatever is selected. -/
 def Ui.toggleTool (u : Ui) : Ui :=
-  if u.tool then { u with tool := false, popover := false } else { u with tool := true, popover := true }
+  if u.tool then { u with tool := false, popover := false }
+  else { u with tool := true, popover := true, editor := .none, edPop := false }
 
-/-- Escape: closes the colour picker and the pop-over (the tool stays active). -/
-def Ui.escape (u : Ui) : Ui := { u with picker := false, popover := false }
+/-- The Add text or Draw button (task 9.9): turns that mode on with its pop-over (the
+Highlight tool off), or off when it is on. -/
+def Ui.selectEditor (u : Ui) (e : Editor) : Ui :=
+  if u.editor == e || e == .none then { u with editor := .none, edPop := false }
+  else { u with editor := e, edPop := true, tool := false, popover := false }
+
+/-- Escape: closes the colour picker and the pop-overs (the tool stays active). -/
+def Ui.escape (u : Ui) : Ui := { u with picker := false, popover := false, edPop := false }
 
 /-- Sets the thickness (clamped). -/
 def Ui.setThickness (u : Ui) (v : Nat) : Ui := { u with thickness := Popover.clampThick v }
@@ -386,9 +533,26 @@ edit bubble for a selected highlight on the shown page while highlights are show
 def kindFor (selHere markHere : Bool) (u : Ui) : Option Kind :=
   if selHere then some .float else if markHere && u.showAll then some .edit else none
 
-/-- Escape closes the pop-over and the picker. -/
-theorem Ui.escape_closes (u : Ui) : u.escape.popover = false ∧ u.escape.picker = false :=
-  ⟨rfl, rfl⟩
+/-- Escape closes the pop-overs and the picker. -/
+theorem Ui.escape_closes (u : Ui) :
+    u.escape.popover = false ∧ u.escape.picker = false ∧ u.escape.edPop = false :=
+  ⟨rfl, rfl, rfl⟩
+
+/-- **One tool at a time** (task 9.9): with Add text or Draw on, the Highlight tool is off. -/
+theorem Ui.selectEditor_exclusive (u : Ui) (e : Editor) :
+    (u.selectEditor e).editor = .none ∨ (u.selectEditor e).tool = false := by
+  unfold Ui.selectEditor; split
+  · exact Or.inl rfl
+  · exact Or.inr rfl
+
+/-- Turning the Highlight tool on turns Add text and Draw off. -/
+theorem Ui.toolClick_exclusive (u : Ui) (b : Bool) :
+    (u.toolClick b).1.tool = false ∨ (u.toolClick b).1.editor = .none ∨ (u.toolClick b).1 = u := by
+  unfold Ui.toolClick; split
+  · exact Or.inr (Or.inr rfl)
+  · split
+    · exact Or.inl rfl
+    · exact Or.inr (Or.inl rfl)
 
 /-- After Edit → Highlight tool the pop-over is open exactly when the tool is active. -/
 theorem Ui.toggleTool_popover (u : Ui) : u.toggleTool.popover = u.toggleTool.tool := by
@@ -433,6 +597,22 @@ private def eb : Rect := ⟨188, 148, 300, 182⟩
 #guard Popover.thicknessAt 0 == 8 && Popover.thicknessAt 500 == 24 &&
   (List.range 30).all fun v => Popover.thicknessAt (Popover.thumbX v) == Popover.clampThick v
 #guard Popover.left 1660 32 1900 == 1472 && Popover.left 100 32 1900 == 4
+-- Add text / Draw (task 9.9): the editor bubble, the pop-over, sliders, exclusive modes.
+#guard Kind.editor.layout == [(.delete, 3, 31)] && Kind.editor.width == 34
+#guard (List.range 6).map EdPop.swatchX == [21, 283 / 5, 461 / 5, 639 / 5, 817 / 5, 199]
+#guard EdPop.hit .text 21 48 == some (.color 0) && EdPop.hit .text 199 48 == some (.color 5) &&
+  EdPop.hit .text 100 108 == some (.slider 1) && EdPop.hit .text 100 168 == none &&
+  EdPop.hit .draw 100 168 == some (.slider 2) && EdPop.hit .draw 41 48 == none
+#guard [EdPop.fontSize, EdPop.thickness].all fun sl =>
+  (List.range 120).all fun v => sl.valueAt (sl.thumbX v) == sl.clamp v
+#guard (List.range 21).all fun k => EdPop.opacity.valueAt (EdPop.opacity.thumbX (5 * k)) == EdPop.opacity.clamp (5 * k)
+#guard EdPop.opacity.valueAt 0 == 5 && EdPop.opacity.valueAt 500 == 100 &&
+  EdPop.fontSize.valueAt (EdPop.fontSize.thumbX 10) == 10
+#guard (({} : Ui).selectEditor .draw).editor == .draw && (({} : Ui).selectEditor .draw).edPop &&
+  ((({} : Ui).selectEditor .draw).selectEditor .draw).editor == .none &&
+  ((({} : Ui).selectEditor .text).selectEditor .draw).editor == .draw &&
+  ((({ tool := true, popover := true } : Ui).selectEditor .text)).tool == false &&
+  ((({} : Ui).selectEditor .text).toolClick false).1.editor == .none
 -- Tool state.
 #guard ({} : Ui).toolClick true == ({}, true)
 #guard (({} : Ui).toolClick false).1.tool && (({} : Ui).toolClick false).1.popover

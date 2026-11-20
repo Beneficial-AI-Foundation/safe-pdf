@@ -49,6 +49,15 @@ newest note anchored to exactly its quads, `Store.noteOn`, which is then not sen
 notes) and `top − max y` of the rectangles with `top` the CropBox's upper edge, each floored
 at 0 and zero-padded; elements are sorted by it (stably), the pass-through ones follow.
 
+**Free text and ink** (task 9.9): the contract has the kinds `text` and `ink` (§4.1, the
+stock viewer maps pdf.js's `FreeText` and `Ink` onto them), so they are sent too: free text as
+`kind` `text` with `rects` its box (`Mark.box`), `text` the typed text, `comment` `null`,
+`color` its own colour and `extra` `{"fontSize": N}`; ink as `kind` `ink` with `rects` its
+box, `text`/`comment` `null`, its colour and `extra` `{"inkList": [[x1, y1, x2, y2, …], …],
+"width": W, "opacity": O}` (one array per stroke; opacity in percent). Loading reads them back
+(`ownMark?`): the box's upper-left corner is the free text's position; without a usable
+`extra` the size is 10 and an ink element is passed through.
+
 **Coordinates.** The contract's rectangles are in PDF user space (points, origin bottom-left,
 before `/Rotate`), the space `Marks` quads live in (`Geom.toScreen` applies the CropBox
 origin and the rotation only on the way to the screen), so rectangles and quads are the same
@@ -220,6 +229,21 @@ def colorOfHex (s : String) : Color :=
   colorOfHex "red" == .yellow
 #guard hexOf .green == "#53ffbc"
 
+/-- The RGB bytes of `#rrggbb` (black when malformed). -/
+def rgbOfHex (s : String) : Marks.Rgb :=
+  match s.toList with
+  | ['#', r1, r2, g1, g2, b1, b2] =>
+    let byte (h l : Char) : Option Nat := return (← hexDigit? h) * 16 + (← hexDigit? l)
+    match byte r1 r2, byte g1 g2, byte b1 b2 with
+    | some r, some g, some b => (r, g, b)
+    | _, _, _ => (0, 0, 0)
+  | _ => (0, 0, 0)
+
+#guard rgbOfHex "#0060df" == (0, 96, 223) && rgbOfHex "red" == (0, 0, 0)
+
+/-- The colour of a mark as the contract writes it (`#rrggbb`, lower case). -/
+def markHex (m : Mark) : String := (m.hex.toList.map Char.toLower) |> String.ofList
+
 /-! ## Page text under quads and the sort key -/
 
 /-- What the conversion needs of a page: its CropBox (note icons, `top`) and its glyph cells
@@ -321,6 +345,22 @@ def neutralOfMark (info : Nat → PageInfo) (s : Store) (m : Mark) : Option (Str
           | .point _ => "null"
         let key := sortIndex m.page 0 top ib.ury
         some (key, element m.nm "note" m.page [ib] none (some t) (hexOf m.color) key extra)
+  | .freeText t _ sz _ =>
+    match m.box with
+    | none => none
+    | some b =>
+      let key := sortIndex m.page 0 top b.ury
+      some (key, element m.nm "text" m.page [b] (some t) none (markHex m) key
+        s!"\{\"fontSize\":{sz}}")
+  | .ink ss w o _ =>
+    match m.box with
+    | none => none
+    | some b =>
+      let key := sortIndex m.page 0 top b.ury
+      let strokes := ss.map fun st =>
+        "[" ++ ",".intercalate (st.flatMap fun p => [fmtNum p.x, fmtNum p.y]) ++ "]"
+      some (key, element m.nm "ink" m.page [b] none none (markHex m) key
+        s!"\{\"inkList\":[{",".intercalate strokes}],\"width\":{w},\"opacity\":{o}}")
 
 /-- The elements of all marks, sorted by sort key (stable: creation order on ties). -/
 def neutralsOf (info : Nat → PageInfo) (s : Store) : List String :=
@@ -386,6 +426,29 @@ def ownMark? (v : JVal) : Option (Mark × Option String) := do
   | some "highlight" =>
     if rects.isEmpty then none
     else some (⟨id, page, color, .highlight rects⟩, comment.filter (!·.isEmpty))
+  | some "text" =>
+    let r ← rects.head?
+    let text := ((v.get? "text" >>= JVal.str?) <|> comment).getD ""
+    let size := match (getD v "extra").get? "fontSize" with
+      | some (.num n) => ((parseNum? n).map fun q => max 1 (min 1000 ((q + 1 / 2).floor.toNat))).getD 10
+      | _ => 10
+    some (⟨id, page, .yellow, .freeText text ⟨r.llx, r.ury⟩ size
+      (rgbOfHex ((v.get? "color" >>= JVal.str?).getD "#000000"))⟩, none)
+  | some "ink" =>
+    let ex := getD v "extra"
+    let numN (k : String) (d : Nat) : Nat := match ex.get? k with
+      | some (.num n) => ((parseNum? n).map fun q => (q + 1 / 2).floor.toNat).getD d
+      | _ => d
+    let strokes ← match ex.get? "inkList" with
+      | some (.arr xs) => xs.toList.mapM fun
+          | .arr ns => do
+            let qs ← ns.toList.mapM fun | .num t => parseNum? t | _ => none
+            some (Save.pointsOf qs)
+          | _ => none
+      | _ => none
+    if strokes.isEmpty || strokes.any List.isEmpty then none
+    some (⟨id, page, .yellow, .ink strokes (max 1 (numN "width" 1)) (min 100 (numN "opacity" 100))
+      (rgbOfHex ((v.get? "color" >>= JVal.str?).getD "#000000"))⟩, none)
   | some "note" =>
     let text := comment.getD ((v.get? "text" >>= JVal.str?).getD "")
     let quads := (getD v "extra").get? "quads" |>.bind boxesOf |>.getD []
@@ -465,6 +528,18 @@ private def sig (s : Store) : List (Nat × Nat × String × List Rat × String �
   other.isEmpty && (sig s).map (·.1) == [1, 2, 4, 5] &&
   ((sig s).map (·.2)).all (((sig store0).map (·.2)).contains ·) &&
   bodyOf info s #[] == bodyOf info store0 #[]
+-- Free text and ink (task 9.9): kinds `text` and `ink`, read back into the same marks.
+private def storeEd : Store :=
+  let (s, _) := ({} : Store).add 0 .yellow (.freeText "Typed ✓" ⟨72.5, 700⟩ 14 (255, 0, 0))
+  let (s, _) := s.add 1 .yellow (.ink [[⟨10, 10⟩, ⟨20.25, 30⟩], [⟨5, 5⟩]] 3 40 (0, 96, 223))
+  s
+#guard neutralsOf info storeEd ==
+  ["{\"id\":\"safepdf-mark-1\",\"kind\":\"text\",\"pageIndex\":0,\"rects\":[[72.5,677.1,123.19,700]],\"text\":\"Typed ✓\",\"comment\":null,\"color\":\"#ff0000\",\"sortIndex\":\"00000|000000|00092\",\"extra\":{\"fontSize\":14}}",
+   "{\"id\":\"safepdf-mark-2\",\"kind\":\"ink\",\"pageIndex\":1,\"rects\":[[2,2,23.25,33]],\"text\":null,\"comment\":null,\"color\":\"#0060df\",\"sortIndex\":\"00001|000000|00759\",\"extra\":{\"inkList\":[[10,10,20.25,30],[5,5]],\"width\":3,\"opacity\":40}}"]
+#guard let (s, other) := mergeStored (parsedBody storeEd) {}
+  other.isEmpty && s.marks.size == 2 &&
+  (s.marks.toList.zip storeEd.marks.toList).all (fun (a, b) => a.id == b.id && a.kind.same b.kind) &&
+  bodyOf info s #[] == bodyOf info storeEd #[]
 -- Our own marks read back from the PDF win over the stored elements; the stored-only ones are
 -- restored unsaved.
 #guard let fileStore := Store.load [⟨1, 0, .red, .highlight [q1]⟩]

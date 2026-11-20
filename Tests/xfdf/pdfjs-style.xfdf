@@ -4,8 +4,8 @@
      /C from the palette of web/app_options.js highlightEditorColors, /QuadPoints UL, UR, LL,
      LR, /Contents for a comment; FreeText and Ink for its other editors) into ISO 19444-1
      XFDF. Text with numeric character references, a non-BMP character, a tab and a CR.
-     Expected (Tests/Xfdf.lean): 4 marks (red highlight + comment, pink highlight, blue note),
-     skipped 2 (freetext, ink), ignored 0. -->
+     Expected (Tests/Xfdf.lean): 6 marks (red highlight + comment, pink highlight, blue note,
+     and since task 9.9 the free text and the ink drawing), skipped 0, ignored 0. -->
 <xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
 <annots>
 <highlight page="0" color="#FF4F5F" name="pdfjs_internal_editor_0" rect="72,600,300,628" coords="72,628,300,628,72,616,300,616,72,612,180,612,72,600,180,600" opacity="1"><contents>&#x1F4CC; pinned&#9;tab&#13;and CR — “quotes”</contents></highlight>

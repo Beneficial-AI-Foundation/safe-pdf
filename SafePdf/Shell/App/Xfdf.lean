@@ -1,4 +1,5 @@
 import SafePdf.Shell.App.Marks
+import SafePdf.Core.Annot
 
 /-!
 # XFDF import and export of user marks (tasks 9.5d, 9.11; Plan.md §6 Phase 9 "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
@@ -51,6 +52,13 @@ shrinking index), checked by `#guard`s and the suite `Tests/Xfdf.lean`.
   `<text>` with `coords`; such files are still imported, below.) Export → import is the
   identity on the marks as Save stores them (`Save.normalize`: a comment in its highlight's
   colour), ids included.
+* **Free text and ink** (task 9.9), in the elements ISO 19444-1 defines for them:
+  `<freetext page rect name flags date><contents>TEXT</contents><defaultappearance>/Helv 12 Tf
+  1 0 0 rg</defaultappearance></freetext>` (`rect` the box, `defaultappearance` the `/DA` the
+  PDF gets: font size and text colour; no `color`, as pdf.js writes no `/C` for free text) and
+  `<ink page rect color name flags date width opacity><inklist><gesture>x1,y1;x2,y2;…</gesture>
+  …</inklist></ink>` (one `<gesture>` per stroke, in order; `width` the thickness, `opacity`
+  in `[0, 1]`).
 * Escaping (`escape`): `& < > "` as `&amp; &lt; &gt; &quot;`; in attribute values tab, line
   feed and carriage return as character references (so attribute-value normalisation keeps
   them); in content a carriage return as `&#13;` (end-of-line normalisation would turn it
@@ -85,9 +93,15 @@ with the character position. Over the tree, `<xfdf>` (any namespace prefix) →
   is skipped.
 * `color` maps to the nearest PDF.js palette colour (`nearest`; the same squared distance and
   tie-break as `Save.nearestColor`, in bytes instead of units); missing or malformed: yellow.
+* `<freetext page rect>` (task 9.9) → free text with the text of `<contents>` (or the plain
+  text of `<contents-richtext>`), its box's upper-left corner at `rect`'s, the font size and
+  colour of `<defaultappearance>` (`Core.Annot.parseDA`; else size 10 and `color`, else black).
+* `<ink page>` with `<inklist>` → ink with one stroke per `<gesture>` (`x,y;x,y;…`), thickness
+  `width` (default 1), opacity `opacity` (default 1), colour `color` (default black).
 * Everything else is skipped and reported (`Report.skipped`: element and reason, the first
-  `maxReport`; `Report.skippedCount`): other annotation types (`underline`, `ink`,
-  `freetext`, …), a missing or bad `page`/`coords`/`rect`, a page beyond the document.
+  `maxReport`; `Report.skippedCount`): other annotation types (`underline`, `squiggly`,
+  `strikeout`, …), a missing or bad `page`/`coords`/`rect`/`inklist`, a page beyond the
+  document.
   Elements outside `<annots>` other than `<f>` and `<ids>` (e.g. `<fields>`) are counted in
   `Report.ignored`.
 
@@ -687,6 +701,17 @@ def commentIdOf (hl popup : String) : Option Nat :=
   commentIdOf "safepdf-mark-4" "safepdf-mark-5-popup-9" == none &&
   commentIdOf "" "-popup-9" == none
 
+/-- A free text's `/DA` as text: `/Helv SIZE Tf R G B rg` (the PDF's, rule A12). -/
+def daText (size : Nat) (c : Marks.Rgb) : String :=
+  let u (n : Nat) : String := fmtRat (Core.Raster.Geom.decimalToRat
+    (Core.Write.Annots.decRound 4 ((n : Rat) / 255)))
+  s!"/Helv {size} Tf {u c.1} {u c.2.1} {u c.2.2} rg"
+
+#guard daText 12 (255, 0, 152) == "/Helv 12 Tf 1 0 0.5961 rg"
+
+/-- One stroke as a `<gesture>` text: `x,y;x,y;…`. -/
+def gestureXml (st : List Pt) : String := ";".intercalate (st.map fun p => numsXml [p.x, p.y])
+
 /-- The XFDF element of mark `m` on a page with page box `pb`, dated `date`; `none` for a
 highlight without quads. A highlight's `comment` (`Store.commentOf`) goes into its element as
 `<contents>` and a `<popup>` named `popupName` (task 9.11). -/
@@ -708,6 +733,16 @@ def markXml (pb : Box) (date : String) (m : Mark) (comment : Option Mark := none
     | .note t _ =>
       "<text" ++ attrsXml (common ++ [("icon", "Comment")] ++ coords) ++ "><contents>" ++
         escape false t ++ "</contents></text>"
+    | .freeText t _ sz c =>
+      let attrs := common.filter (·.1 != "color")
+      "<freetext" ++ attrsXml attrs ++ "><contents>" ++ escape false t ++
+        "</contents><defaultappearance>" ++ escape false (daText sz c) ++
+        "</defaultappearance></freetext>"
+    | .ink ss w o _ =>
+      let attrs := common.map fun (k, v) => if k == "color" then (k, m.hex) else (k, v)
+      "<ink" ++ attrsXml (attrs ++ [("width", toString w), ("opacity", fmtRat ((o : Rat) / 100))]) ++
+        "><inklist>" ++ String.join (ss.map fun st => "<gesture>" ++ gestureXml st ++ "</gesture>") ++
+        "</inklist></ink>"
 
 /-- **Export**: the XFDF document of every mark of `s` (creation order; a highlight's comment
 inside the highlight's element, not on its own); `box` gives page boxes for note icons (US
@@ -789,6 +824,35 @@ def coordsOf (as : List (String × String)) : Except String (Option (List Box)) 
                  else .ok (some (boxesOf xs))
     | none => .error "coords is not a list of numbers"
 
+/-- The children named `k` (local name) of a node list. -/
+def childrenNamed (cs : List Node) (k : String) : List (List Node) :=
+  cs.filterMap fun
+    | .elem n _ kids => if localName n == k then some kids else none
+    | .text _ => none
+
+/-- The concatenated text nodes of a node list. -/
+def textOfNodes (cs : List Node) : String :=
+  cs.foldl (fun acc c => match c with
+    | .text s => acc ++ s
+    | .elem .. => acc) ""
+
+/-- The points of a `<gesture>`: `x,y` pairs separated by `;`. -/
+def gesturePts (s : String) : Option (List Pt) :=
+  (s.splitOn ";").foldr (fun part acc => acc.bind fun ps =>
+    if (part.toList.all isWs) then some ps
+    else match nums part with
+      | some [x, y] => some (⟨x, y⟩ :: ps)
+      | _ => none) (some [])
+
+#guard gesturePts "1,2;3.5,4" == some [⟨1, 2⟩, ⟨7 / 2, 4⟩] && gesturePts "1,2;3" == none &&
+  gesturePts "1,2; " == some [⟨1, 2⟩]
+
+/-- A number attribute rounded to a natural number in `[lo, hi]` (`d` when absent or bad). -/
+def natAttr (as : List (String × String)) (k : String) (scale : Rat) (lo hi d : Nat) : Nat :=
+  match (attr as k).bind parseNum with
+  | some q => max lo (min hi ((q * scale + 1 / 2).floor.toNat))
+  | none => d
+
 /-- The marks of one annotation element (`ln` its local name), or why it is skipped. -/
 def itemsOf (lim : Limits) (pages : Option Nat) (ln : String) (as : List (String × String))
     (cs : List Node) : Except String (List Item) := do
@@ -818,6 +882,35 @@ def itemsOf (lim : Limits) (pages : Option Nat) (ln : String) (as : List (String
       | some qs => .quads qs
       | none => .point ⟨min x1 x2, max y1 y2⟩
     pure [{ name, page, color, kind := .note ((contentsOf lim cs).getD "") anchor }]
+  else if ln == "freetext" then
+    let page ← pageOf as pages
+    let some r := attr as "rect" | throw "no rect"
+    let some [x1, y1, x2, y2] := nums r | throw "rect is not 4 numbers"
+    let rgb := ((attr as "color").bind parseColor).getD (0, 0, 0)
+    let (size, rgb) := match childrenNamed cs "defaultappearance" with
+      | kids :: _ =>
+        let da := Core.Annot.parseDA (textOfNodes kids).toUTF8.toList
+        let b (q : Rat) : Nat := max 0 (min 255 ((q * 255 + 1 / 2).floor.toNat))
+        let c := match da.color with
+          | [g] => (b g, b g, b g)
+          | [r, g, bl] => (b r, b g, b bl)
+          | _ => rgb
+        (max 1 (min 1000 ((da.size + 1 / 2).floor.toNat)), c)
+      | [] => (10, rgb)
+    pure [{ name, page, color := .yellow,
+            kind := .freeText ((contentsOf lim cs).getD "") ⟨min x1 x2, max y1 y2⟩ size rgb }]
+  else if ln == "ink" then
+    let page ← pageOf as pages
+    let some lists := (childrenNamed cs "inklist").head? | throw "no inklist"
+    let gs := childrenNamed lists "gesture"
+    let some strokes := gs.foldr (fun g acc => acc.bind fun ss =>
+        (gesturePts (textOfNodes g)).map (· :: ss)) (some []) | throw "bad gesture"
+    let strokes := strokes.filter (!·.isEmpty)
+    if strokes.isEmpty then throw "no strokes"
+    let rgb := ((attr as "color").bind parseColor).getD (0, 0, 0)
+    pure [{ name, page, color := .yellow,
+            kind := .ink strokes (natAttr as "width" 1 1 100 1)
+              (natAttr as "opacity" 100 0 100 100) rgb }]
   else throw "unsupported annotation type"
 
 /-- Adds the annotation element `n` of `<annots>` to the report. -/
@@ -862,11 +955,11 @@ def anchorEq : Anchor → Anchor → Bool
   | .point p, .point q => p == q
   | _, _ => false
 
-/-- Whether two kinds are equal (text, quads, anchor). -/
+/-- Whether two kinds are equal (text, quads, anchor; free text and ink: `Kind.same`). -/
 def kindEq : Kind → Kind → Bool
   | .highlight a, .highlight b => a == b
   | .note t a, .note u b => t == u && anchorEq a b
-  | _, _ => false
+  | a, b => a.same b
 
 /-- Whether two marks have the same content (page, colour, kind; ids not compared). -/
 def sameContent (a b : Mark) : Bool :=
@@ -991,6 +1084,12 @@ private def sample : Store :=
   let (s, _) := s.addNote 1 .pink "" (.point ⟨10, 700⟩)
   s
 
+/-- Free text and ink (task 9.9). -/
+private def sampleEd : Store :=
+  let (s, _) := sample.add 0 .yellow (.freeText "Typed <text> & ✓\nline 2" ⟨72.5, 700⟩ 14 (255, 0, 0))
+  let (s, _) := s.add 1 .yellow (.ink [[⟨10, 10⟩, ⟨20.25, 30⟩], [⟨5, 5⟩]] 3 40 (0, 96, 223))
+  s
+
 /-- Whether two stores hold the same marks (ids included), in order. -/
 private def sameMarks (a b : Store) : Bool :=
   a.marks.size == b.marks.size &&
@@ -1006,6 +1105,13 @@ private def roundTrip (s : Store) : Option Store :=
 #guard match roundTrip (sample.remove 5) with
   | some s => sameMarks s (sample.remove 5) && s.nextId == 7
   | none => false
+-- Free text and ink (task 9.9) round-trip too, ids, strokes, sizes and colours included.
+#guard match roundTrip (sampleEd.remove 5) with
+  | some s => sameMarks s (sampleEd.remove 5) && s.nextId == 9
+  | none => false
+#guard ((toXfdf sampleEd (fun _ => some pb) "" none).splitOn "\n").any (· ==
+  "<ink page=\"1\" rect=\"2,2,23.25,33\" color=\"#0060DF\" name=\"safepdf-mark-8\" flags=\"print\" " ++
+  "width=\"3\" opacity=\"0.4\"><inklist><gesture>10,10;20.25,30</gesture><gesture>5,5</gesture></inklist></ink>")
 #guard match roundTrip sample with
   | some s => s.marks.size == 6 && (s.find? 5).any (fun m => m.quads == [⟨333333 / 1000000, 2, 3, 4⟩])
   | none => false
