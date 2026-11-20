@@ -22,17 +22,19 @@ The rules follow MuPDF 1.25.1 (`pdf_sync_annots`, `pdf_process_annot`, `pdf_anno
 * `/F` (§12.5.3): Invisible (bit 1) or Hidden (bit 2) → skipped; NoView (bit 6) → skipped
   (usage "View"). Print, NoZoom, NoRotate, ReadOnly, Locked … are ignored for display
   (MuPDF: "TODO: NoZoom and NoRotate"; NoRotate is handled by `pdf_run_annot_with_usage` but
-  not here — a recorded gap). `/OC` (optional content) is ignored (Tier 2).
+  not here — a recorded gap). `/OC` (optional content): hidden in the default configuration →
+  `Skip.ocHidden` (task 8.3c, `ocHidden`).
 * `/Subtype /Widget` is drawn only if both `/FT` and `/T` are found on it or on its `/Parent`
   chain (at most `maxFieldDepth` levels), as MuPDF does.
 * `/Rect` must be an array of four numbers (normalised); otherwise `Skip.badRect`.
 * **Appearance** (`selectAP`, = `pdf_annot_ap` without interaction state): `/AP /N`; if it is a
   reference to a stream that stream is used, else it is resolved to a dictionary of
   appearance states and the entry named by `/AS` (which must be a reference to a stream) is
-  used. No `/AS`, or no stream: a non-widget Square, Circle, Line, Ink, Highlight, Underline
-  or StrikeOut gets a **synthesised** appearance (task 8.3b, `synthesize`, as MuPDF's
+  used. No `/AS`, or no stream: a non-widget Square, Circle, Line, Ink, Highlight, Underline,
+  StrikeOut (task 8.3b), Polygon, PolyLine, Squiggly, Caret, Text, FileAttachment or Sound
+  (task 8.3c) gets a **synthesised** appearance (`synthesize`, as MuPDF's
   `pdf_update_appearance`); anything else is `Skip.noAppearance` (MuPDF also synthesises
-  FreeText, Text icons, Polygon, Caret, Stamp, Squiggly, Redact and widgets: not done here).
+  FreeText, Stamp, Redact and widgets: not done here).
 * **Order**: MuPDF runs the page's non-widget annotations, then its widgets, each in `/Annots`
   order; `collect` returns them in that order (`Collected.drawn`).
 
@@ -64,7 +66,7 @@ share one `Limits.maxOpsPerPage` (`docAnnots_shared_ops`).
 MuPDF's `-F txt` includes annotation text), item indices continuing after the page's items.
 
 Not done (recorded): `/F` NoZoom and NoRotate (MuPDF: NoRotate in `pdf_run_annot_with_usage`
-only), `/OC` optional content of annotations.
+only).
 
 ## Fonts
 
@@ -219,12 +221,14 @@ inductive Skip where
   | hidden
   /-- `/F` NoView. -/
   | noView
+  /-- `/OC` hidden in the default optional-content configuration (task 8.3c). -/
+  | ocHidden
   /-- A widget without inheritable `/FT` and `/T`. -/
   | noField
   /-- `/Rect` missing or malformed. -/
   | badRect
-  /-- No usable normal appearance (`/AP /N` stream, or state entry chosen by `/AS`); MuPDF
-  synthesises some of these (not done here). -/
+  /-- No usable normal appearance (`/AP /N` stream, or state entry chosen by `/AS`) and no
+  synthesised one; MuPDF synthesises FreeText, Stamp, Redact and widgets (not done here). -/
   | noAppearance
   deriving DecidableEq, Repr, Inhabited
 
@@ -296,6 +300,154 @@ def inheritable {σ : Type} (src : Source σ) (k : Name) : Nat → Dict → σ �
         | (.dict pd, s) => inheritable src k f pd s
         | (_, s) => (false, s)
 
+/-! ### Optional content of annotations (task 8.3c; §8.11, MuPDF `pdf_is_ocg_hidden`)
+
+An annotation whose `/OC` names an optional content group (or membership dictionary) that is
+hidden in the default configuration is not drawn (MuPDF `pdf_process_annot`, usage "View").
+The configuration is read like `pdf_read_ocg` + `pdf_select_layer_config(doc, 0)`: the catalog's
+`/OCProperties`, its `/OCGs` (each initially ON), the configuration `/Configs [0]` if present,
+else `/D` (neither: no optional content at all, as MuPDF's "broken configuration" path);
+`/BaseState /OFF` turns every group off (anything else: on), then `/ON` and `/OFF` (later wins);
+the configuration's `/Intent` is kept.
+
+`ocHidden` follows `pdf_is_ocg_hidden_imp`: no groups described → visible; a name (the
+annotation has no resource dictionary) or nothing → visible; an `/OCG` is hidden when its
+`/Intent` (name, array, or absent = `View`) is not included by the configuration's intent, else
+by `/Usage /View /ViewState` (`/OFF` hidden, `/ON` visible), else by its default state (groups
+are matched by reference, not resolved, as MuPDF); an `/OCMD` with an array `/VE` is visible
+(MuPDF's FIXME), else `/P` (`AllOn`, `AnyOff`, `AllOff`, default `AnyOn`) over `/OCGs` (an array,
+or a single group) with MuPDF's literal `combine` arithmetic, which differs from §8.11.2.2 for
+arrays: `AllOn` is visible when any group is on, `AnyOff` hidden when any group is on
+(pixel-checked against `mutool draw`). Recursion depth is bounded by `maxOCDepth` (MuPDF: a cycle check; a cycle
+or exhausted depth is visible). At most `maxOCGs` groups are read. -/
+
+/-- Most `/OCGs` entries read (local cap). -/
+def maxOCGs : Nat := 4096
+
+/-- Most nesting levels of membership dictionaries followed (local cap). -/
+def maxOCDepth : Nat := 32
+
+/-- The default optional-content configuration (`pdf_ocg_descriptor`). -/
+structure OCDesc where
+  /-- The `/OCGs` entries (as written: references) with their state (`true` = ON). -/
+  ocgs : List (PdfObject × Bool) := []
+  /-- The configuration's `/Intent`, resolved one level (`null` when absent). -/
+  intent : PdfObject := .null
+
+/-- The object number and generation of a reference. -/
+def refKey : PdfObject → Option (Nat × Nat)
+  | .ref n g => some (n, g)
+  | _ => none
+
+/-- An object resolved one level, `null` when absent. -/
+def resolveOpt {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → PdfObject × σ
+  | none => (.null, s)
+  | some o => Run.resolve src s o
+
+/-- **Read the default configuration** from the catalog `cat` (see the section doc). -/
+def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
+  match resolveOpt src s (Dict.get? cat (nm "OCProperties")) with
+  | (.dict prop, s) =>
+    let (groups, s) := match resolveOpt src s (Dict.get? prop (nm "OCGs")) with
+      | (.array xs, s) => (xs.take maxOCGs, s)
+      | (_, s) => ([], s)
+    let (cfg0, s) := match resolveOpt src s (Dict.get? prop (nm "Configs")) with
+      | (.array xs, s) => (xs[0]?, s)
+      | (_, s) => (none, s)
+    match cfg0.or (Dict.get? prop (nm "D")) with
+    | none => ({}, s)
+    | some c =>
+      let (cd, s) := Run.dictOf src s c
+      let (intent, s) := resolveOpt src s (Dict.get? cd (nm "Intent"))
+      let (base, s) := nameOf src s (Dict.get? cd (nm "BaseState"))
+      let keys := fun (s : σ) (k : String) =>
+        match resolveOpt src s (Dict.get? cd (nm k)) with
+        | (.array xs, s) => (xs.filterMap refKey, s)
+        | (_, s) => ([], s)
+      let (onK, s) := keys s "ON"
+      let (offK, s) := keys s "OFF"
+      let st0 := base != some (nm "OFF")
+      let state := fun (o : PdfObject) =>
+        match refKey o with
+        | some k => if offK.contains k then false else if onK.contains k then true else st0
+        | none => st0
+      ({ ocgs := groups.map fun o => (o, state o), intent }, s)
+  | (_, s) => ({}, s)
+
+/-- `ocg_intents_include`: whether intent `n` is included by the configuration's intent. -/
+def intentIncludes (desc : PdfObject) (n : Name) : Bool :=
+  if n = nm "All" then true else
+  match desc with
+  | .null => n = nm "View"
+  | .name i => i = nm "All" || i = n
+  | .array xs => xs.any fun x => match x with
+    | .name i => i = nm "All" || i = n
+    | _ => n = nm ""
+  | _ => false
+
+/-- The `/P` policy of a membership dictionary as MuPDF's `combine` bits (bit 0: AND, bit 1:
+true means off). -/
+def combineOf (p : Option Name) : Nat :=
+  if p = some (nm "AllOn") then 1 else if p = some (nm "AnyOff") then 2
+  else if p = some (nm "AllOff") then 3 else 0
+
+/-- **Whether optional content `o` is hidden** (usage "View"; see the section doc), following
+membership dictionaries at most `fuel` levels deep. -/
+def ocHidden {σ : Type} (src : Source σ) (desc : OCDesc) : Nat → PdfObject → σ → Bool × σ
+  | 0, _, s => (false, s)
+  | f + 1, o, s =>
+    if desc.ocgs.isEmpty then (false, s) else
+    match o with
+    | .null => (false, s)
+    | .name _ => (false, s)
+    | _ =>
+      match Run.resolve src s o with
+      | (.dict d, s) =>
+        let (ty, s) := nameOf src s (Dict.get? d (nm "Type"))
+        if ty = some (nm "OCG") then
+          let dflt := match refKey o with
+            | some k => match desc.ocgs.find? (fun e => refKey e.1 == some k) with
+              | some e => !e.2
+              | none => false
+            | none => false
+          let (it, s) := resolveOpt src s (Dict.get? d (nm "Intent"))
+          let ok := match it with
+            | .name n => intentIncludes desc.intent n
+            | .array xs => xs.any fun x => match x with
+              | .name n => intentIncludes desc.intent n
+              | _ => intentIncludes desc.intent (nm "")
+            | _ => intentIncludes desc.intent (nm "View")
+          if !ok then (true, s) else
+          match resolveOpt src s (Dict.get? d (nm "Usage")) with
+          | (.dict ud, s) =>
+            let (vd, s) := match Dict.get? ud (nm "View") with
+              | some x => Run.dictOf src s x
+              | none => ([], s)
+            let (es, s) := nameOf src s (Dict.get? vd (nm "ViewState"))
+            if es = some (nm "OFF") then (true, s) else if es = some (nm "ON") then (false, s)
+            else (dflt, s)
+          | (_, s) => (dflt, s)
+        else if ty = some (nm "OCMD") then
+          match resolveOpt src s (Dict.get? d (nm "VE")) with
+          | (.array _, s) => (false, s)
+          | (_, s) =>
+            let (p, s) := nameOf src s (Dict.get? d (nm "P"))
+            let cb := combineOf p
+            let flip := fun (h : Bool) => if cb % 2 == 0 then !h else h
+            let raw := (Dict.get? d (nm "OCGs")).getD .null
+            match Run.resolve src s raw with
+            | (.array xs, s) =>
+              let (on, s) := xs.foldl (fun (acc : Bool × σ) x =>
+                let (h, s) := ocHidden src desc f x acc.2
+                let h := flip h
+                (if cb / 2 % 2 == 1 then acc.1 && h else acc.1 || h, s)) (cb % 2 == 1, s)
+              (!on, s)
+            | (_, s) =>
+              let (h, s) := ocHidden src desc f raw s
+              (!(flip h), s)
+        else (false, s)
+      | (_, s) => (false, s)
+
 /-- A normalised rectangle from four numbers. -/
 def rectOf (o : PdfObject) : Option RBox :=
   match Run.numsOf o with
@@ -348,9 +500,17 @@ Read like MuPDF: `/C` and `/IC` (`pdf_annot_color_imp`: 0 → none, 1–2 → gr
 ≥ 4 → CMYK), `/CA` (default 1), border width `/BS /W`, else `/Border [h v w]`, else 1; dash
 `/BS /D`, else `/Border`'s fourth element; `/RD`; `/L`, `/LL`, `/LLE`, `/LLO`; `/InkList`;
 `/QuadPoints` (ul, ur, ll, lr). Numbers are written with six decimals (MuPDF's `%g`: six
-significant digits). Recorded gaps: Line `/LE` endings and `/Cap` captions, cloudy borders
-(`/BE`), FreeText, Text icons, Squiggly, Polygon/PolyLine, Caret, Stamp, Redact and widgets are
-not synthesised (`Skip.noAppearance`). At most `maxSynthNums` numbers are read per array. -/
+significant digits). At most `maxSynthNums` numbers are read per array.
+
+Task 8.3c adds line endings `/LE` (Line, PolyLine; `capStr`), Polygon/PolyLine (`/Vertices`,
+`polyAp`), Squiggly (`squigglyAp`), Caret (`caretAp`) and the icons of Text, FileAttachment and
+Sound annotations (`iconAp`, `/Name`, MuPDF's 8 × 8 open-iconic paths). Caret and icons are
+written in a fixed form box (`[0 0 20 14]`, `[0 0 16 16]`) mapped into the recomputed
+rectangle by matrix A; everything else has `/BBox` = rectangle and A = identity. Trigonometry
+is exact: the arrow and slash directions come from the normalised line vector (`dirOf`, MuPDF's
+`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Recorded gaps: Line `/Cap` captions and
+FreeText/Stamp (need text layout with a synthesised standard-14 font), cloudy borders (`/BE /S
+/C`: drawn as plain borders), Redact and widgets (`Skip.noAppearance`). -/
 
 /-- Most numbers read from one `/InkList` stroke or `/QuadPoints` array, and most strokes
 (local cap). -/
@@ -532,10 +692,92 @@ def boxAp (circle : Bool) (st : Style) (orect : RBox) (rd : List Rat) : String �
 def segStr (ax ay bx by_ : Rat) : String :=
   fmt ax ++ " " ++ fmt ay ++ " m\n" ++ fmt bx ++ " " ++ fmt by_ ++ " l\n"
 
-/-- Line (`pdf_write_line_appearance` without `/LE` endings and `/Cap` captions): leader lines
-`/LL`, `/LLE`, `/LLO`; the box grown by `max 1 w`. -/
-def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) : String × OBox :=
-  let (pre, sc, _) := prelude st true
+/-- Numbers separated by spaces (six decimals each). -/
+def pts (xs : List Rat) : String := " ".intercalate (xs.map fmt)
+
+/-- `maybe_stroke`. -/
+def strokeStr (sc : Bool) : String := if sc then "S\n" else "n\n"
+
+/-- `include_cap`: grow `r` to contain the square of half-side `d` about `(x, y)`. -/
+def OBox.cap (r : OBox) (x y d : Rat) : OBox := OBox.union r (some ⟨x - d, y - d, x + d, y + d⟩)
+
+/-- `cos 30°` to six decimals. -/
+def cos30 : Rat := 866025 / 1000000
+
+/-- `rotate_vector` for the angle with cosine `c` and sine `s`. -/
+def rotV (c s x y : Rat) : Rat × Rat := (x * c - y * s, x * s + y * c)
+
+/-- The unit direction of `(dx, dy)` (`(1, 0)` for the zero vector, as `atan2f(0, 0)`). -/
+def dirOf (dx dy : Rat) : Rat × Rat :=
+  let l := rsqrt (dx * dx + dy * dy)
+  if l = 0 then (1, 0) else (dx / l, dy / l)
+
+/-- `pdf_write_arrow_appearance`: an arrow head at `(x, y)` opening along `(dx, dy)`. -/
+def arrowStr (r : OBox) (x y dx dy w : Rat) (close : Bool) : String × OBox :=
+  let rr := max 1 w
+  let (c, sn) := dirOf dx dy
+  let v := rotV c sn (88 / 10 * rr) (45 / 10 * rr)
+  let a := (x + v.1, y + v.2)
+  let v := rotV c sn (88 / 10 * rr) (-(45 / 10) * rr)
+  let b := (x + v.1, y + v.2)
+  (pts [a.1, a.2] ++ " m\n" ++ pts [x, y] ++ " l\n" ++ pts [b.1, b.2] ++ " l\n" ++
+    (if close then "h\n" else ""), ((r.incl a.1 a.2).incl b.1 b.2).expand w)
+
+/-- **A line ending** (`pdf_write_line_cap_appearance`, §12.5.6.7 Table 179) at `(x, y)`, the
+line running along `(dx, dy)` away from it: Square, Circle, Diamond, OpenArrow, ClosedArrow,
+Butt, ROpenArrow, RClosedArrow, Slash; anything else draws nothing. MuPDF's Butt includes its
+first point twice (kept). -/
+def capStr (r : OBox) (x y dx dy w : Rat) (sc ic : Bool) (cap : PdfObject) : String × OBox :=
+  let (dx, dy) := dirOf dx dy
+  let r3 := max 3 (w * 3)
+  match cap with
+  | .name n =>
+    if n = nm "Square" then
+      (pts [x - r3, y - r3, r3 * 2, r3 * 2] ++ " re\n" ++ paintStr sc ic, r.cap x y (r3 + w / 2))
+    else if n = nm "Circle" then
+      (circleStr r3 r3 x y ++ paintStr sc ic, r.cap x y (r3 + w / 2))
+    else if n = nm "Diamond" then
+      (pts [x, y + r3] ++ " m\n" ++ pts [x + r3, y] ++ " l\n" ++ pts [x, y - r3] ++ " l\n" ++
+        pts [x - r3, y] ++ " l\nh\n" ++ paintStr sc ic, r.cap x y (r3 + w / rsqrt 2))
+    else if n = nm "OpenArrow" then
+      let (t, r) := arrowStr r x y dx dy w false; (t ++ strokeStr sc, r)
+    else if n = nm "ClosedArrow" then
+      let (t, r) := arrowStr r x y dx dy w true; (t ++ paintStr sc ic, r)
+    else if n = nm "Butt" then
+      let a := (x - dy * r3, y + dx * r3)
+      let b := (x + dy * r3, y - dx * r3)
+      (segStr a.1 a.2 b.1 b.2 ++ strokeStr sc, (r.incl a.1 a.2).expand w)
+    else if n = nm "ROpenArrow" then
+      let (t, r) := arrowStr r x y (-dx) (-dy) w false; (t ++ strokeStr sc, r)
+    else if n = nm "RClosedArrow" then
+      let (t, r) := arrowStr r x y (-dx) (-dy) w true; (t ++ paintStr sc ic, r)
+    else if n = nm "Slash" then
+      let r5 := max 5 (w * 5)
+      -- the direction turned by −30°
+      let c := dx * cos30 + dy / 2
+      let sn := dy * cos30 - dx / 2
+      let a := (x - r5 * sn, y + r5 * c)
+      let b := (x + r5 * sn, y - r5 * c)
+      (segStr a.1 a.2 b.1 b.2 ++ strokeStr sc, ((r.incl a.1 a.2).incl b.1 b.2).expand w)
+    else ("", r)
+  | _ => ("", r)
+
+/-- Both line endings `le` (exactly two entries, else none), at `a` (line towards `b`) and at
+`b` (towards `a`'s side point `b'`). -/
+def endsStr (r : OBox) (le : List PdfObject) (w : Rat) (sc ic : Bool)
+    (a a' b b' : Rat × Rat) : String × OBox :=
+  match le with
+  | [e0, e1] =>
+    let (t0, r) := capStr r a.1 a.2 (a'.1 - a.1) (a'.2 - a.2) w sc ic e0
+    let (t1, r) := capStr r b.1 b.2 (b'.1 - b.1) (b'.2 - b.2) w sc ic e1
+    (t0 ++ t1, r)
+  | _ => ("", r)
+
+/-- Line (`pdf_write_line_appearance` without `/Cap` captions): leader lines `/LL`, `/LLE`,
+`/LLO`, line endings `/LE`; the box grown by `max 1 w`. -/
+def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject := []) :
+    String × OBox :=
+  let (pre, sc, ic) := prelude st true
   let (ax, ay, bx, by_) := (nth l 0, nth l 1, nth l 2, nth l 3)
   let len := rsqrt ((bx - ax) * (bx - ax) + (by_ - ay) * (by_ - ay))
   let dx := (bx - ax) / len
@@ -552,7 +794,8 @@ def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) : String × OBox :=
     let b := (bx - dy * (llo + ll), by_ + dx * (llo + ll))
     (segStr aa.1 aa.2 ab.1 ab.2 ++ segStr ba.1 ba.2 bb.1 bb.2, a, b,
       ((((r0.incl a.1 a.2).incl b.1 b.2).incl ab.1 ab.2).incl bb.1 bb.2))
-  (pre ++ lead ++ segStr a.1 a.2 b.1 b.2 ++ (if sc then "S\n" else "n\n"), r.expand (max 1 st.lw))
+  let (ends, r) := endsStr r le st.lw sc ic a b b a
+  (pre ++ lead ++ segStr a.1 a.2 b.1 b.2 ++ strokeStr sc ++ ends, r.expand (max 1 st.lw))
 
 /-- One ink stroke: its path and the box. -/
 def inkStroke (r : OBox) (pts : List Rat) : String × OBox :=
@@ -633,6 +876,391 @@ def barAp (t : Rat) (st : Style) (qs : List Quad) : String × OBox :=
       unionQuad acc.2 q (h / 16))) ("", none)
   ((colorStr st.c true).getD "" ++ body, r)
 
+/-- `polygon_winding`: whether the vertices run so that MuPDF writes them in order (the
+signed crossing area across the middle line is negative). -/
+def polyWinding (vs : List (Rat × Rat)) : Bool :=
+  match vs with
+  | [] => false
+  | v0 :: rest =>
+    let minX := rest.foldl (fun m v => min m v.1) v0.1
+    let midY := vs.foldl (fun (t : Rat) v => t + v.2) 0 / (vs.length : Rat)
+    let (area, _) := rest.foldl (fun (acc : Rat × (Rat × Rat)) r =>
+      let (area, q) := acc
+      if (r.2 > midY ∧ midY > q.2) ∨ (r.2 < midY ∧ midY < q.2) then
+        let w : Rat := if r.2 > midY then 1 else -1
+        let x := r.1 + (q.1 - r.1) * (r.2 - midY) / (r.2 - q.2)
+        (area + (x - minX) * w, r)
+      else (area, r)) (0, v0)
+    area < 0
+
+/-- Polygon (`close`) and PolyLine (`pdf_write_polygon_appearance` without clouds): the
+vertices `/Vertices`, closed and filled with `/IC` for a polygon; PolyLine line endings `/LE`
+at the first and last vertex; the box grown by the border width. -/
+def polyAp (close : Bool) (st : Style) (vs : List (Rat × Rat)) (le : List PdfObject) :
+    String × OBox :=
+  let (pre, sc, ic) := prelude st true
+  match vs with
+  | [] => (pre, none)
+  | v0 :: rest =>
+    let ord := if polyWinding vs then vs else vs.reverse
+    let (path, r, _) := ord.foldl (fun (acc : String × OBox × Bool) p =>
+      (acc.1 ++ pts [p.1, p.2] ++ (if acc.2.2 then " m\n" else " l\n"), acc.2.1.incl p.1 p.2,
+        false)) ("", none, true)
+    let path := path ++ (if close then "h\n" else "")
+    let paint := if close then paintStr sc ic else strokeStr sc
+    let r := r.expand st.lw
+    let (ends, r) := if close then ("", r) else
+      match rest.reverse with
+      | last :: prev :: _ => endsStr r le st.lw sc ic v0 ((rest.head?).getD v0) last prev
+      | [last] => endsStr r le st.lw sc ic v0 last last v0
+      | [] => ("", r)
+    (pre ++ path ++ paint ++ ends, r)
+
+/-- Most zig-zag points written per Squiggly quad (local cap; MuPDF loops while `x < w`). -/
+def maxSquiggle : Nat := 10000
+
+/-- Linear interpolation of points. -/
+def lerp (a b : Rat × Rat) (t : Rat) : Rat × Rat := (a.1 + t * (b.1 - a.1), a.2 + t * (b.2 - a.2))
+
+/-- Squiggly (`pdf_write_squiggly_appearance`): per quad a zig-zag along the bottom edge with
+steps of `h / 7`, peaks at `1/7` of the height, width `h / 16`, stroke colour `/C`. -/
+def squigglyAp (st : Style) (qs : List Quad) : String × OBox :=
+  let (body, r) := qs.foldl (fun (acc : String × OBox) q =>
+    let (ul, ur, ll, lr) := q
+    let h := quadH q
+    let w := rsqrt ((lr.1 - ll.1) * (lr.1 - ll.1) + (lr.2 - ll.2) * (lr.2 - ll.2))
+    -- the loop runs `k` times: the least `k` with `k · h / 7 ≥ w`
+    let k := if h ≤ 0 ∨ w ≤ 0 then 0 else min maxSquiggle (7 * w / h).ceil.toNat
+    let zig := (List.range k).foldl (fun (t : String) i =>
+      let x := ((i + 1 : Nat) : Rat) * h / 7
+      let a := lerp ll lr (x / w)
+      let c := if i % 2 == 0 then lerp a (lerp ul ur (x / w)) (1 / 7) else a
+      t ++ pts [c.1, c.2] ++ " l\n") ""
+    (acc.1 ++ fmt (h / 16) ++ " w\n" ++ pts [ll.1, ll.2] ++ " m\n" ++ zig ++ "S\n",
+      unionQuad acc.2 q (h / 16))) ("", none)
+  ((colorStr st.c true).getD "" ++ body, r)
+
+/-- Caret (`pdf_write_caret_appearance`): a fixed 20 × 14 shape filled with `/C`, centred on
+`/Rect`; the rectangle and the box `[0 0 20 14]`. -/
+def caretAp (st : Style) (orect : RBox) : String × RBox × RBox :=
+  let xc := (orect.x0 + orect.x1) / 2
+  let yc := (orect.y0 + orect.y1) / 2
+  ((colorStr st.c false).getD "" ++ "0 0 m\n10 0 10 7 10 14 c\n10 7 10 0 20 0 c\nf\n",
+    ⟨xc - 10, yc - 7, xc + 10, yc + 7⟩, ⟨0, 0, 20, 14⟩)
+
+/-- MuPDF icon `comment` (open-iconic, MIT). -/
+def iconComment : String :=
+  ".09 0 m\n" ++
+  ".03 0 0 .04 0 .09 c\n" ++
+  "0 5.9 l\n" ++
+  "0 5.95 .04 6 .09 6 c\n" ++
+  "6 6 l\n" ++
+  "8 8 l\n" ++
+  "8 .08 l\n" ++
+  "8 .02 7.96 -.01 7.91 -.01 c\n" ++
+  ".1 -.01 l\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `key` (open-iconic, MIT). -/
+def iconKey : String :=
+  "5.5 0 m\n" ++
+  "4.12 0 3 1.12 3 2.5 c\n" ++
+  "3 2.66 3 2.82 3.03 2.97 c\n" ++
+  "0 6 l\n" ++
+  "0 8 l\n" ++
+  "3 8 l\n" ++
+  "3 6 l\n" ++
+  "5 6 l\n" ++
+  "5 5 l\n" ++
+  "5.03 4.97 l\n" ++
+  "5.18 5 5.34 5 5.5 5 c\n" ++
+  "6.88 5 8 3.88 8 2.5 c\n" ++
+  "8 1.12 6.88 0 5.5 0 c\n" ++
+  "h\n" ++
+  "6 1 m\n" ++
+  "6.55 1 7 1.45 7 2 c\n" ++
+  "7 2.55 6.55 3 6 3 c\n" ++
+  "5.45 3 5 2.55 5 2 c\n" ++
+  "5 1.45 5.45 1 6 1 c\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `note` (open-iconic, MIT). -/
+def iconNote : String :=
+  "0 0 8 1 re\n" ++
+  "0 2 8 1 re\n" ++
+  "0 4 8 1 re\n" ++
+  "0 6 8 1 re\n" ++
+  "f\n"
+
+/-- MuPDF icon `help` (open-iconic, MIT). -/
+def iconHelp : String :=
+  "1 0 0 1 1 0 cm\n" ++
+  "2.47 0 m\n" ++
+  "1.62 0 .99 .26 .59 .66 c\n" ++
+  ".19 1.06 .05 1.56 0 1.94 c\n" ++
+  "1 2.07 l\n" ++
+  "1.04 1.82 1.12 1.57 1.31 1.38 c\n" ++
+  "1.50 1.19 1.80 1 2.47 1.00 c\n" ++
+  "3.13 1 3.49 1.16 3.69 1.34 c\n" ++
+  "3.89 1.52 3.97 1.74 3.97 2 c\n" ++
+  "3.97 2.83 3.63 3.06 3.13 3.50 c\n" ++
+  "2.63 3.94 1.97 4.58 1.97 5.75 c\n" ++
+  "1.97 6 l\n" ++
+  "2.97 6 l\n" ++
+  "2.97 5.75 l\n" ++
+  "2.97 4.92 3.28 4.69 3.78 4.25 c\n" ++
+  "4.28 3.81 4.97 3.17 4.97 2 c\n" ++
+  "4.97 1.52 4.80 .98 4.38 .59 c\n" ++
+  "3.95 .20 3.31 0 2.47 .00 c\n" ++
+  "h\n" ++
+  "1.97 7 m\n" ++
+  "1.97 8 l\n" ++
+  "2.97 8 l\n" ++
+  "2.97 7 l\n" ++
+  "1.97 7 l\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `graph` (open-iconic, MIT). -/
+def iconGraph : String :=
+  "7.03 0 m\n" ++
+  "4 3 l\n" ++
+  "3 2 l\n" ++
+  "0 5.03 l\n" ++
+  "1 6.03 l\n" ++
+  "3 4 l\n" ++
+  "4 5 l\n" ++
+  "8 1 l\n" ++
+  "7.03 0 l\n" ++
+  "h\n" ++
+  "0 7 m\n" ++
+  "0 8 l\n" ++
+  "8 8 l\n" ++
+  "8 7 l\n" ++
+  "0 7 l\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `push_pin` (open-iconic, MIT). -/
+def iconPushPin : String :=
+  "1.34 0 m\n" ++
+  ".92 .04 .76 .64 1.1 .89 c\n" ++
+  "1.34 1.08 1.65 .97 1.93 1 c\n" ++
+  "2.08 .98 1.96 1.22 2 1.32 c\n" ++
+  "2 1.88 2 2.44 2 3 c\n" ++
+  "1.6 3.01 1.2 2.98 .8 3.02 c\n" ++
+  ".35 3.11 -.01 3.54 0 4 c\n" ++
+  "1 4 2 4 3 4 c\n" ++
+  "3 5 3 6 3 7 c\n" ++
+  "3.146 7.33 3.29 7.67 3.44 8 c\n" ++
+  "3.62 7.66 3.83 7.32 4 6.98 c\n" ++
+  "4 5.99 4 4.99 4 4 c\n" ++
+  "5 4 6 4 7 4 c\n" ++
+  "7.02 3.42 6.46 2.94 5.89 3 c\n" ++
+  "5.6 3 5.3 3 5 3 c\n" ++
+  "5 2.33 5 1.67 5 1 c\n" ++
+  "5.30 .98 5.67 1.09 5.89 .81 c\n" ++
+  "6.16 .5 5.89 -.038 5.48 0 c\n" ++
+  "4.15 0 2.83 0 1.5 0 c\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `paperclip` (open-iconic, MIT). -/
+def iconPaperclip : String :=
+  "5 0 m\n" ++
+  "4.49 0 3.98 .21 3.59 .59 c\n" ++
+  ".81 3.31 l\n" ++
+  "-.26 4.38 -.26 6.11 .81 7.19 c\n" ++
+  "1.88 8.26 3.61 8.26 4.69 7.19 c\n" ++
+  "5.94 5.94 l\n" ++
+  "5.25 5.25 l\n" ++
+  "4.09 6.38 l\n" ++
+  "4 6.51 l\n" ++
+  "3.31 7.2 2.19 7.2 1.5 6.51 c\n" ++
+  ".82 5.83 .84 4.73 1.5 4.04 c\n" ++
+  "4.28 1.29 l\n" ++
+  "4.67 .9 5.32 .9 5.72 1.29 c\n" ++
+  "6.11 1.68 6.09 2.3 5.72 2.7 c\n" ++
+  "3.22 5.17 l\n" ++
+  "3.12 5.27 2.95 5.27 2.84 5.17 c\n" ++
+  "2.74 5.07 2.74 4.9 2.84 4.79 c\n" ++
+  "2.9 4.76 l\n" ++
+  "3.81 3.82 l\n" ++
+  "3.12 3.13 l\n" ++
+  "2.15 4.1 l\n" ++
+  "1.67 4.58 1.67 5.37 2.15 5.85 c\n" ++
+  "2.63 6.33 3.42 6.34 3.9 5.85 c\n" ++
+  "6.4 3.41 l\n" ++
+  "7.18 2.63 7.18 1.37 6.4 .6 c\n" ++
+  "6.01 .21 5.51 .01 4.99 .01 c\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `tag` (open-iconic, MIT). -/
+def iconTag : String :=
+  "0 0 m\n" ++
+  "0 3 l\n" ++
+  "5 8 l\n" ++
+  "8 5 l\n" ++
+  "3 0 l\n" ++
+  "0 0 l\n" ++
+  "h\n" ++
+  "2 1 m\n" ++
+  "2.55 1 3 1.45 3 2 c\n" ++
+  "3 2.55 2.55 3 2 3 c\n" ++
+  "1.45 3 1 2.55 1 2 c\n" ++
+  "1 1.45 1.45 1 2 1 c\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `speaker` (open-iconic, MIT). -/
+def iconSpeaker : String :=
+  "3.34 0 m\n" ++
+  "2 2 l\n" ++
+  "0 2 l\n" ++
+  "0 6 l\n" ++
+  "2 6 l\n" ++
+  "3.34 8 l\n" ++
+  "4 8 l\n" ++
+  "4 0 l\n" ++
+  "3.34 0 l\n" ++
+  "h\n" ++
+  "5 1 m\n" ++
+  "5 2 l\n" ++
+  "5.17 2 5.34 2.02 5.5 2.06 c\n" ++
+  "6.36 2.28 7 3.06 7 4 c\n" ++
+  "7 4.94 6.37 5.72 5.5 5.94 c\n" ++
+  "5.34 5.98 5.17 6 5 6 c\n" ++
+  "5 7 l\n" ++
+  "5.25 7 5.48 6.96 5.72 6.91 c\n" ++
+  "5.75 6.91 l\n" ++
+  "7.05 6.58 8 5.4 8 4 c\n" ++
+  "8 2.6 7.05 1.42 5.75 1.09 c\n" ++
+  "5.52 1.03 5.26 1 5 1 c\n" ++
+  "h\n" ++
+  "5 3 m\n" ++
+  "5 5 l\n" ++
+  "5.09 5 5.18 4.99 5.25 4.97 c\n" ++
+  "5.68 4.86 6 4.46 6 4 c\n" ++
+  "6 3.54 5.69 3.14 5.25 3.03 c\n" ++
+  "5.17 3.01 5.08 3 5 3 c\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `mic` (open-iconic, MIT). -/
+def iconMic : String :=
+  "1 0 0 1 1 0 cm\n" ++
+  "2.91 -.03 m\n" ++
+  "2.49 .03 2.11 .34 2.02 .76 c\n" ++
+  "1.97 1.12 2.01 1.48 2 1.84 c\n" ++
+  "2.01 2.29 1.98 2.73 2.02 3.17 c\n" ++
+  "2.1 3.72 2.68 4.11 3.21 3.98 c\n" ++
+  "3.7 3.89 4.05 3.39 4 2.9 c\n" ++
+  "4 2.21 4.01 1.53 3.99 .84 c\n" ++
+  "3.94 .32 3.43 -.09 2.91 -.03 c\n" ++
+  "h\n" ++
+  ".34 2 m\n" ++
+  ".1 2.07 -.04 2.34 - 2.58 c\n" ++
+  "-.02 3.18 .03 3.81 .32 4.34 c\n" ++
+  ".75 5.18 1.58 5.78 2.5 5.94 c\n" ++
+  "2.5 6.29 2.5 6.65 2.5 7 c\n" ++
+  "2.11 7.01 1.68 6.94 1.36 7.23 c\n" ++
+  "1.14 7.41 .96 7.75 1.02 8 c\n" ++
+  "2.35 8 3.67 8 5 8 c\n" ++
+  "5.02 7.43 4.47 6.94 3.9 7 c\n" ++
+  "3.77 7 3.63 7 3.5 7 c\n" ++
+  "3.5 6.65 3.5 6.29 3.5 5.94 c\n" ++
+  "4.82 5.73 5.92 4.55 5.99 3.21 c\n" ++
+  "5.99 2.93 6.02 2.65 5.98 2.37 c\n" ++
+  "5.91 2.05 5.49 1.89 5.23 2.08 c\n" ++
+  "5.03 2.2 4.97 2.45 5 2.66 c\n" ++
+  "5.02 3.15 4.97 3.66 4.69 4.08 c\n" ++
+  "4.18 4.9 3.05 5.24 2.17 4.82 c\n" ++
+  "1.42 4.5 .94 3.67 1 2.86 c\n" ++
+  ".99 2.61 1.05 2.32 .85 2.13 c\n" ++
+  ".71 1.99 .52 1.98 .34 2 c\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `star` (open-iconic, MIT). -/
+def iconStar : String :=
+  "4 0 m\n" ++
+  "3 3 l\n" ++
+  "0 3 l\n" ++
+  "2.5 5 l\n" ++
+  "1.5 8 l\n" ++
+  "4 6 l\n" ++
+  "6.5 8 l\n" ++
+  "5.5 5 l\n" ++
+  "8 3 l\n" ++
+  "5 3 l\n" ++
+  "4 0 l\n" ++
+  "h\n" ++
+  "f\n"
+
+/-- MuPDF icon `insert` (open-iconic, MIT). -/
+def iconInsert : String :=
+  "8 5 m\n" ++
+  "4 0 l\n" ++
+  "0 5 l\n" ++
+  "f\n"
+
+/-- MuPDF icon `new_paragraph` (open-iconic, MIT). -/
+def iconNewParagraph : String :=
+  "8 8 m\n" ++
+  "4 0 l\n" ++
+  "0 8 l\n" ++
+  "f\n"
+
+/-- MuPDF icon `paragraph` (open-iconic, MIT). -/
+def iconParagraph : String :=
+  "7 0 m\n" ++
+  "2 0 l\n" ++
+  "1 0 0 1 0 2 c\n" ++
+  "0 3 1 4 2 4 c\n" ++
+  "3 4 l\n" ++
+  "3 8 l\n" ++
+  "4 8 l\n" ++
+  "4 1 l\n" ++
+  "5 1 l\n" ++
+  "5 8 l\n" ++
+  "6 8 l\n" ++
+  "6 1 l\n" ++
+  "7 1 l\n" ++
+  "f\n"
+
+/-- The icon path for icon name `n` (`pdf_write_icon_appearance`; unknown: the star). -/
+def iconPath (n : Name) : String :=
+  let tbl : List (String × String) := [("Comment", iconComment), ("Key", iconKey),
+    ("Note", iconNote), ("Help", iconHelp), ("NewParagraph", iconNewParagraph),
+    ("Paragraph", iconParagraph), ("Insert", iconInsert), ("Graph", iconGraph),
+    ("PushPin", iconPushPin), ("Paperclip", iconPaperclip), ("Tag", iconTag),
+    ("Speaker", iconSpeaker), ("Mic", iconMic)]
+  match tbl.find? (fun e => nm e.1 = n) with
+  | some e => e.2
+  | none => iconStar
+
+/-- `pdf_is_dark_fill_color` of colour `c` (`/C`). -/
+def darkFill (c : List Rat) : Bool :=
+  let g : Rat := match c with
+    | [k] => k
+    | [r, g, b] => r * 3 / 10 + g * 59 / 100 + b * 11 / 100
+    | [cy, m, y, k] => 1 - min (cy * 3 / 10 + m * 59 / 100 + y * 11 / 100 + k) 1
+    | _ => 1
+  g < 1 / 4
+
+/-- Text, FileAttachment and Sound icons (`pdf_write_icon_appearance`): a 15 × 15 square filled
+with `/C` (else white) and stroked black, the 8 × 8 icon flipped into it in white on a dark fill
+(else black); an 18 × 18 rectangle centred on `/Rect` and the box `[0 0 16 16]`. -/
+def iconAp (st : Style) (name : Name) (orect : RBox) : String × RBox × RBox :=
+  let xc := (orect.x0 + orect.x1) / 2
+  let yc := (orect.y0 + orect.y1) / 2
+  ((colorStr st.c false).getD "1 g\n" ++ "1 w\n0.5 0.5 15 15 re\nb\n" ++ "1 0 0 -1 4 12 cm\n" ++
+    (if darkFill st.c then "1 g\n" else "0 g\n") ++ iconPath name,
+    ⟨xc - 9, yc - 9, xc + 9, yc + 9⟩, ⟨0, 0, 16, 16⟩)
+
 /-- A stream dictionary for a synthesised appearance with `/BBox` `r` and resources `res`. -/
 def synthDict (r : RBox) (res : Dict) : Dict :=
   [(nm "Type", .name (nm "XObject")), (nm "Subtype", .name (nm "Form")),
@@ -640,30 +1268,35 @@ def synthDict (r : RBox) (res : Dict) : Dict :=
   (if res.isEmpty then [] else [(nm "Resources", .dict res)])
 
 /-- **Synthesise a normal appearance** for annotation dictionary `ad` of subtype `sub` with
-`/Rect` `orect` (see the section doc): the new rectangle (= `/BBox`) and the content stream;
-`none` for a subtype not synthesised, or an empty result rectangle. -/
+`/Rect` `orect` (see the section doc): the new rectangle, the form's `/BBox` (= the rectangle
+except for Caret and icons) and the content stream; `none` for a subtype not synthesised, or an
+empty result rectangle. -/
 def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (orect : RBox) :
-    Option (RBox × Stream) × σ :=
+    Option (RBox × RBox × Stream) × σ :=
   let (st, s) := styleOf src s ad
   let (gs, res) := opacityRes false st.ca
   let quads := fun (s : σ) =>
     let (qp, s) := arrOf src s (Dict.get? ad (nm "QuadPoints"))
     let (qp, s) := realsOf src s (qp.getD [])
     (quadsOf qp, s)
-  let out : Option (String × Dict × OBox) × σ :=
+  let le := fun (s : σ) => match arrOf src s (Dict.get? ad (nm "LE")) with
+    | (some xs, s) => (xs, s)
+    | (none, s) => ([], s)
+  let out : Option (String × Dict × OBox × Option RBox) × σ :=
     if sub = nm "Square" ∨ sub = nm "Circle" then
       let (rd, s) := arrOf src s (Dict.get? ad (nm "RD"))
       let (rd, s) := realsOf src s ((rd.getD []).take 4)
       let (c, r) := boxAp (sub = nm "Circle") st orect rd
-      (some (gs ++ c, res, r), s)
+      (some (gs ++ c, res, r, none), s)
     else if sub = nm "Line" then
       let (l, s) := arrOf src s (Dict.get? ad (nm "L"))
       let (l, s) := realsOf src s ((l.getD []).take 4)
       let (ll, s) := realOpt src s (Dict.get? ad (nm "LL"))
       let (lle, s) := realOpt src s (Dict.get? ad (nm "LLE"))
       let (llo, s) := realOpt src s (Dict.get? ad (nm "LLO"))
-      let (c, r) := lineAp st l (ll.getD 0) (lle.getD 0) (llo.getD 0)
-      (some (gs ++ c, res, r), s)
+      let (e, s) := le s
+      let (c, r) := lineAp st l (ll.getD 0) (lle.getD 0) (llo.getD 0) e
+      (some (gs ++ c, res, r, none), s)
     else if sub = nm "Ink" then
       let (il, s) := arrOf src s (Dict.get? ad (nm "InkList"))
       let (strokes, s) := (il.getD []).foldl (fun (acc : List (List Rat) × σ) o =>
@@ -671,25 +1304,52 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
         let (xs, s) := realsOf src s (xs.getD [])
         (xs :: acc.1, s)) ([], s)
       let (c, r) := inkAp st strokes.reverse
-      (some (gs ++ c, res, r), s)
+      (some (gs ++ c, res, r, none), s)
     else if sub = nm "Highlight" then
       let (qs, s) := quads s
-      (some (highlightAp st qs), s)
+      let (c, res, r) := highlightAp st qs
+      (some (c, res, r, none), s)
     else if sub = nm "Underline" then
       let (qs, s) := quads s
       let (c, r) := barAp (1 / 7) st qs
-      (some (gs ++ c, res, r), s)
+      (some (gs ++ c, res, r, none), s)
     else if sub = nm "StrikeOut" then
       let (qs, s) := quads s
       let (c, r) := barAp (3 / 7) st qs
-      (some (gs ++ c, res, if qs.isEmpty then some orect else r), s)
+      (some (gs ++ c, res, if qs.isEmpty then some orect else r, none), s)
+    else if sub = nm "Squiggly" then
+      let (qs, s) := quads s
+      let (c, r) := squigglyAp st qs
+      (some (gs ++ c, res, r, none), s)
+    else if sub = nm "Polygon" ∨ sub = nm "PolyLine" then
+      let (vs, s) := arrOf src s (Dict.get? ad (nm "Vertices"))
+      let (vs, s) := realsOf src s (vs.getD [])
+      let pairs := (List.range (vs.length / 2)).map fun k => (nth vs (2 * k), nth vs (2 * k + 1))
+      let (e, s) := le s
+      let (c, r) := polyAp (sub = nm "Polygon") st pairs e
+      (some (gs ++ c, res, r, none), s)
+    else if sub = nm "Caret" then
+      let (c, r, bb) := caretAp st orect
+      (some (gs ++ c, res, some r, some bb), s)
+    else if sub = nm "Text" ∨ sub = nm "FileAttachment" ∨ sub = nm "Sound" then
+      let (n, s) := match Dict.get? ad (nm "Name") with
+        | none => (nm (if sub = nm "Text" then "Note" else if sub = nm "Sound" then "Speaker"
+            else "PushPin"), s)
+        | some o => match nameOf src s (some o) with
+          | (some n, s) => (n, s)
+          | (none, s) => (nm "", s)
+      let (c, r, bb) := iconAp st n orect
+      (some (gs ++ c, res, some r, some bb), s)
     else (none, s)
   match out with
-  | (some (c, res, some r), s) => (some (r, ⟨synthDict r res, c.toUTF8⟩), s)
+  | (some (c, res, some r, bb), s) =>
+    let bb := bb.getD r
+    (some (r, bb, ⟨synthDict bb res, c.toUTF8⟩), s)
   | (_, s) => (none, s)
 
 /-- Parse one annotation dictionary `ad` (object `num`, position `idx`). -/
-def parseDict {σ : Type} (src : Source σ) (s : σ) (idx num : Nat) (ad : Dict) : Outcome × σ :=
+def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx num : Nat) (ad : Dict) :
+    Outcome × σ :=
   let (sub, s) := nameOf src s (Dict.get? ad (nm "Subtype"))
   let subtype := sub.getD (nm "")
   if subtype = nm "Link" then (.skip .link, s)
@@ -701,6 +1361,9 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (idx num : Nat) (ad : Dict)
     let flags := flagsOf fo
     if hasFlag flags flagInvisible || hasFlag flags flagHidden then (.skip .hidden, s)
     else if hasFlag flags flagNoView then (.skip .noView, s)
+    else
+    let (och, s) := ocHidden src oc maxOCDepth ((Dict.get? ad (nm "OC")).getD .null) s
+    if och then (.skip .ocHidden, s)
     else
       let widget := subtype = nm "Widget"
       let (hasFT, s) := inheritable src (nm "FT") maxFieldDepth ad s
@@ -719,24 +1382,24 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (idx num : Nat) (ad : Dict)
             if widget then (.skip .noAppearance, s) else
             match synthesize src s ad subtype rect with
             | (none, s) => (.skip .noAppearance, s)
-            | (some (r, st), s) =>
-              (.draw ⟨idx, num, subtype, r, flags, state, 0, 0, st, Matrix.identity, widget,
-                true⟩, s)
+            | (some (r, bb, st), s) =>
+              let m := if r = bb then Matrix.identity else (aOf r bb).matrix
+              (.draw ⟨idx, num, subtype, r, flags, state, 0, 0, st, m, widget, true⟩, s)
           | (some (n, g, st), s) =>
             let m := annotMatrix rect (Run.bboxOf st.dict) (Run.formMatrix st.dict)
             (.draw ⟨idx, num, subtype, rect, flags, state, n, g, st, m, widget, false⟩, s)
 
 /-- Parse one `/Annots` element (`seen`: annotation object numbers already listed). -/
-def parseOne {σ : Type} (src : Source σ) (s : σ) (idx : Nat) (seen : List Nat) (o : PdfObject) :
-    Outcome × σ :=
+def parseOne {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx : Nat) (seen : List Nat)
+    (o : PdfObject) : Outcome × σ :=
   match o with
   | .ref n g =>
     if seen.contains n then (.skip .duplicate, s)
     else
       match src.fetch s n g with
-      | (.ok (.obj (.dict ad)), s) => parseDict src s idx n ad
+      | (.ok (.obj (.dict ad)), s) => parseDict src s oc idx n ad
       | (_, s) => (.skip .notDict, s)
-  | .dict ad => parseDict src s idx 0 ad
+  | .dict ad => parseDict src s oc idx 0 ad
   | _ => (.skip .notDict, s)
 
 /-- Object number of a reference (0 otherwise). -/
@@ -745,22 +1408,22 @@ def refNum : PdfObject → Nat
   | _ => 0
 
 /-- Parse the elements in order: one outcome per element. -/
-def parseAll {σ : Type} (src : Source σ) :
+def parseAll {σ : Type} (src : Source σ) (oc : OCDesc) :
     Nat → List Nat → List PdfObject → σ → List (Nat × Outcome) × σ
   | _, _, [], s => ([], s)
   | idx, seen, o :: os, s =>
-    let (r, s) := parseOne src s idx seen o
-    let (rs, s) := parseAll src (idx + 1) (refNum o :: seen) os s
+    let (r, s) := parseOne src s oc idx seen o
+    let (rs, s) := parseAll src oc (idx + 1) (refNum o :: seen) os s
     ((idx, r) :: rs, s)
 
 /-- `parseAll` gives exactly one outcome per element. -/
-theorem parseAll_length {σ : Type} (src : Source σ) :
+theorem parseAll_length {σ : Type} (src : Source σ) (oc : OCDesc) :
     ∀ (idx : Nat) (seen : List Nat) (os : List PdfObject) (s : σ),
-      (parseAll src idx seen os s).1.length = os.length
+      (parseAll src oc idx seen os s).1.length = os.length
   | _, _, [], _ => rfl
   | idx, seen, o :: os, s => by
     simp only [parseAll, List.length_cons]
-    rw [parseAll_length src (idx + 1) (refNum o :: seen) os]
+    rw [parseAll_length src oc (idx + 1) (refNum o :: seen) os]
 
 /-- The annotations of a page. -/
 structure Collected where
@@ -782,21 +1445,22 @@ theorem widgetsLast_length (ds : List Drawable) : (widgetsLast ds).length = ds.l
   | cons x xs ih => cases h : x.widget <;> simp [h] <;> omega
 
 /-- **Collect the annotations** of a page dictionary `pd` (§12.5; see the module doc). -/
-def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) : Collected × σ :=
+def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {}) :
+    Collected × σ :=
   let (arr, s) := match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
     | none => (.null, s)
   let xs := match arr with
     | .array xs => xs
     | _ => []
-  let (rs, s) := parseAll src 0 [] (xs.take maxAnnots) s
+  let (rs, s) := parseAll src oc 0 [] (xs.take maxAnnots) s
   let over := (List.range (xs.length - maxAnnots)).map fun i => (maxAnnots + i, Skip.overCap)
   ({ drawn := widgetsLast (rs.filterMap (·.2.drawable?)),
      skipped := rs.filterMap (fun (i, r) => r.skip?.map (i, ·)) ++ over }, s)
 
 /-- **Annotation count bound**: at most `maxAnnots` annotations are drawn per page. -/
-theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) :
-    (collect src s pd).1.drawn.length ≤ maxAnnots := by
+theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc) :
+    (collect src s pd oc).1.drawn.length ≤ maxAnnots := by
   simp only [collect]
   generalize (match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
@@ -805,8 +1469,8 @@ theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) :
   generalize (match arr with
     | .array xs => xs
     | _ => []) = xs
-  have hl := parseAll_length src 0 [] (xs.take maxAnnots) s1
-  generalize parseAll src 0 [] (xs.take maxAnnots) s1 = p at hl
+  have hl := parseAll_length src oc 0 [] (xs.take maxAnnots) s1
+  generalize parseAll src oc 0 [] (xs.take maxAnnots) s1 = p at hl
   obtain ⟨rs, s2⟩ := p
   simp only at hl ⊢
   rw [widgetsLast_length]
@@ -997,8 +1661,8 @@ structure AnnotPage where
 /-- **Annotations of a page** (page dictionary `pd`, resources `pageRes`, the page's font
 table `pageFonts`), run under the budget `bud`. Total. -/
 def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) : AnnotPage × σ :=
-  let (c, s) := collect src s pd
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc := {}) : AnnotPage × σ :=
+  let (c, s) := collect src s pd oc
   let (roots, s) := apRoots src s c.drawn
   let (fonts, s) := loadAnnotFonts limits src s pageFonts roots
   let st := runAppearances (Text.textEnv limits src fonts) bud pageRes c.drawn s ()
@@ -1007,11 +1671,12 @@ def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd page
 /-- **Bounds of `pageAnnots`**: at most `maxAnnots` annotations drawn, at most `bud.ops`
 operators and `Paint.maxItems · bud.ops` items. -/
 theorem pageAnnots_bounds {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) :
-    (pageAnnots limits src s pd pageRes pageFonts bud).1.collected.drawn.length ≤ maxAnnots ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud).1.ops ≤ bud.ops ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud).1.items.size ≤ Paint.maxItems * bud.ops :=
-  ⟨collect_drawn_le src s pd, runAppearances_ops_le _ _ _ _ _ _,
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc) :
+    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.collected.drawn.length ≤ maxAnnots ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.ops ≤ bud.ops ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.items.size ≤
+      Paint.maxItems * bud.ops :=
+  ⟨collect_drawn_le src s pd oc, runAppearances_ops_le _ _ _ _ _ _,
    runAppearances_items_le _ _ _ _ _ _⟩
 
 /-- **Annotations of a page of an opened document**, charging the decode `budget`; `pageFonts`
@@ -1021,7 +1686,8 @@ def docAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (pageFonts : T
     (bud : Budget) (budget : Filter.Budget) : AnnotPage × Filter.Budget :=
   let src := Text.docSource limits doc
   let (pd, b) := Run.dictOf src budget (.ref page.num page.gen)
-  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud
+  let (oc, b) := readOC src b doc.catalog
+  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc
 
 /-- **The shared budget** (task 8.3b): what the page run `pt` left of `Limits.maxOpsPerPage`
 and `Limits.maxFormsPerPage`. -/
@@ -1037,8 +1703,10 @@ theorem docAnnots_shared_ops (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
   dsimp only [docAnnots]
   generalize Run.dictOf (Text.docSource limits doc) b (.ref page.num page.gen) = r
   obtain ⟨pd, b'⟩ := r
-  have := (pageAnnots_bounds limits (Text.docSource limits doc) b' pd
-    (page.resources.getD []) pt.fonts (Budget.after limits pt)).2.1
+  generalize readOC (Text.docSource limits doc) b' doc.catalog = q
+  obtain ⟨oc, b''⟩ := q
+  have := (pageAnnots_bounds limits (Text.docSource limits doc) b'' pd
+    (page.resources.getD []) pt.fonts (Budget.after limits pt) oc).2.1
   simp only [Budget.after] at this ⊢
   omega
 
