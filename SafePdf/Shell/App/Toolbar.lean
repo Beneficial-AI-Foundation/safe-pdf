@@ -16,8 +16,9 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
   document since task 9.4: with a selection it highlights it in the current colour, without
   one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
-  Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save (disabled
-  until 9.5c) and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
+  Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save
+  (task 9.5c: the command `Menu.Cmd.save`, PDF.js's download icon, enabled with unsaved marks)
+  and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
   Open).
 * **Enabled states** (`targets`, `states`): menubar entries (`Menu.entryList`), toolbar
   buttons and overflow-menu entries all follow `Menu.Cmd.enabled`; the tool buttons follow
@@ -197,7 +198,8 @@ def pageEntry (labels : Array String) (n cur : Nat) (input : String) : Nat × Bo
 
 /-! ## Buttons and layout -/
 
-/-- Toolbar buttons that are not (yet) viewer commands: the annotation tools, Print, Save. -/
+/-- Toolbar buttons that are not (yet) viewer commands: the annotation tools and Print (Save is
+the command `Menu.Cmd.save` since task 9.5c). -/
 inductive Tool where
   /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8, `Bubble`). -/
   | highlight
@@ -211,8 +213,6 @@ inductive Tool where
   | image
   /-- Print (after M9). -/
   | print
-  /-- Save the annotations into the PDF (task 9.5c). -/
-  | save
   deriving DecidableEq, Repr, Inhabited
 
 /-- Tooltip of a tool button. -/
@@ -223,7 +223,6 @@ def Tool.tip : Tool → String
   | .draw => "Draw"
   | .image => "Add image"
   | .print => "Print"
-  | .save => "Save"
 
 /-- The task that brings the tool (shown when the disabled button is asked for). -/
 def Tool.task : Tool → String
@@ -231,7 +230,6 @@ def Tool.task : Tool → String
   | .comment => "9.9"
   | .text | .draw => "a later Phase 9 task"
   | .image | .print => "after M9"
-  | .save => "9.5c"
 
 /-- Whether the tool can be used: Highlight with a document (task 9.4); the others not yet
 (their tasks have not landed). -/
@@ -318,7 +316,7 @@ def layout : List (String × List Item) :=
        .button ⟨".bar.image", "image", Tool.tip .image, .tool .image⟩,
        .sep ".bar.s3",
        .button ⟨".bar.print", "print", Tool.tip .print, .tool .print⟩,
-       .button ⟨".bar.save", "save", Tool.tip .save, .tool .save⟩,
+       .button ⟨".bar.save", "save", "Save (Ctrl+S)", .cmd .save⟩,
        .sep ".bar.s4",
        .button ⟨".bar.more", "more", "Tools", .more⟩]) ]
 
@@ -374,7 +372,7 @@ def states (c : Ctx) : List Bool :=
 -- Paths are unique; the tool names map back to their tools.
 #guard (buttons.map (·.path)).eraseDups.length == buttons.length
 #guard buttons.length == 13
-#guard [Tool.highlight, .comment, .text, .draw, .image, .print, .save].all fun t =>
+#guard [Tool.highlight, .comment, .text, .draw, .image, .print].all fun t =>
   buttons.any fun b => b.act == .tool t && toolOf b.icon == some t
 #guard targets.length == (states {}).length
 #guard targets.eraseDups.length == targets.length
@@ -390,6 +388,10 @@ def states (c : Ctx) : List Bool :=
 -- No outline: the toggle is hidden.
 #guard let c : Ctx := { hasDoc := true, page := 1, pages := 3 }
   (buttons.filter (!·.visible c)).map (·.path) == [".bar.sidebar"]
+-- Save follows the unsaved marks.
+#guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
+  !(buttons.filter (·.enabled c)).any (·.path == ".bar.save") &&
+  (buttons.filter (·.enabled { c with dirty := true })).any (·.path == ".bar.save")
 #guard (overflowEntries.map (·.2.label)) ==
   ["Open...", "Find...", "Go to page...", "First page", "Last page", "Rotate right",
    "Rotate left"]
