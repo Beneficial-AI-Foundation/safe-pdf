@@ -1,6 +1,7 @@
 import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Text
 import SafePdf.Core.Font.Outline
+import SafePdf.Core.Raster.Image
 
 /-!
 # Glyph rendering: outlines through the path rasterizer (task 7.3a)
@@ -399,6 +400,8 @@ structure PageFonts where
   fonts : FontTable
   /-- Glyph programs. -/
   sources : SourceTable
+  /-- Decoded image XObjects (task 7.3b). -/
+  images : Image.ImageTable := {}
 
 /-- **Per-run hook**: the coverage masks of a glyph run inside the device window `win`, in
 painting order, each with its colour, alpha and counted work: the fill (modes 0, 2, 4, 6) then
@@ -449,6 +452,7 @@ def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeF
     let c := Clip.clipMaskC cfg m W H st.rs.cache clip
     let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
     { rs := paintAll W H c.1 c.2.1 c.2.2 st.rs ms, cache }
+  | .image src ctm fill clip => { st with rs := Image.renderImage cfg m W H pf.images st.rs src ctm fill clip }
   | it => { st with rs := Clip.renderItem cfg m W H stroke st.rs it }
 
 /-- `paintAll` preserves the buffer size. -/
@@ -471,6 +475,7 @@ theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Cli
     split
     · rfl
     · exact paintAll_size _ _ _ _ _ _ _
+  | image src ctm fill clip => simp only [renderItemG]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
   | _ => simp only [renderItemG]; exact Clip.renderItem_size _ _ _ _ _ _ _
 
 private theorem foldl_renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
@@ -516,7 +521,8 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD [])
-    (.ok (renderPage page zoom rot ⟨pt.fonts, srcs⟩ pt.items cfg), b)
+    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) pt.items
+    (.ok (renderPage page zoom rot ⟨pt.fonts, srcs, imgs⟩ pt.items cfg), b)
 
 /-! ## 6. Checks -/
 

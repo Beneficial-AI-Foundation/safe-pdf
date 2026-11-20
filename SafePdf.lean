@@ -63,5 +63,6 @@ import SafePdf.Core.Raster.Geom
 import SafePdf.Core.Raster.Fill
 import SafePdf.Core.Raster.Stroke
 import SafePdf.Core.Raster.Clip
+import SafePdf.Core.Raster.Image
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text
