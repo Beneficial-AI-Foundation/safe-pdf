@@ -28,7 +28,8 @@ object shared under several names or by several forms is parsed once, and an Ext
 every form with its own `/Resources` (at most `maxFormFonts` resource dictionaries, each form
 once, at most `maxFormFonts` XObjects inspected per dictionary). A name a form's own resources
 do not define falls back to the page's font of that name (`FontTable.get`; sloppy producers
-rely on it). Every collected font object becomes a `FontInfo`:
+rely on it); a name no resources define, or a font object that is not a dictionary, gets
+MuPDF's substitute Times-Roman (`FontInfo.unknown`, task 6.12). Every collected font object becomes a `FontInfo`:
 
 * **Code splitting** (`SplitKind`): one byte for simple fonts; two bytes for Type0 with
   `Identity-H`/`-V`; for other Type0 fonts the `codespacerange` of an embedded `/Encoding` CMap,
@@ -226,10 +227,29 @@ structure FontInfo where
   page-space font size is `|Tfs| · sizeScale · scale`. -/
   sizeScale : Fixed := Fixed.one
 
-/-- The font used when `Tf` names no known font resource: one-byte codes, zero widths, no
-Unicode. -/
+/-- The font dictionary of the substitute for a missing font: a non-embedded Times-Roman
+(what MuPDF's `pdf_load_hail_mary_font` loads: `pdf_load_simple_font` of no dictionary, whose
+empty `/BaseFont` becomes Times-Roman with `StandardEncoding`). -/
+def hailMaryDict : Dict :=
+  [(nm "Type", .name (nm "Font")), (nm "Subtype", .name (nm "Type1")),
+    (nm "BaseFont", .name (nm "Times-Roman"))]
+
+/-- The metrics of `hailMaryDict` (standard 14 Times-Roman widths, `StandardEncoding`). -/
+def hailMaryMetrics : SimpleMetrics := SimpleMetrics.ofDict id hailMaryDict none
+
+/-- The font used when `Tf` names no font resource, or one that is not a dictionary (task
+6.12): as MuPDF, the "hail mary" font — one-byte codes, Times-Roman widths, Unicode through
+`StandardEncoding` and the glyph list. A page without `/Resources` (as the encrypted fixtures
+of `Tests/adversarial/encrypted/`) thus keeps its text and its glyph positions. -/
 def FontInfo.unknown : FontInfo :=
-  { split := .one, width := fun _ => Fixed.zero, unicode := fun _ => none, desc := "missing" }
+  { split := .one
+    width := fun c => match c with
+      | [b] => (hailMaryMetrics.width b.toNat).1
+      | _ => Fixed.zero
+    unicode := fun c => match c with
+      | [b] => (hailMaryMetrics.encoding.glyph b.toNat).bind (Font.glyphToUnicodeIn false)
+      | _ => none
+    desc := "missing (Times-Roman substitute)" }
 
 instance : Inhabited FontInfo := ⟨FontInfo.unknown⟩
 
@@ -534,13 +554,9 @@ def type3SizeScale (sm : SimpleMetrics) (scale : Fixed) : Fixed :=
 /-- Whether a string contains `pat`. -/
 def hasInfix (s pat : String) : Bool := (s.splitOn pat).length > 1
 
-/-- Build the `FontInfo` of a font object. -/
-def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj : PdfObject) :
-    FontInfo × σ :=
-  let resolve := fun o => (Run.resolve src s0 o).1
-  let fd : Dict := match resolve fontObj with
-    | .dict d => d
-    | _ => []
+/-- Build the `FontInfo` of a font dictionary (`resolve` reads objects in state `s0`). -/
+def buildFontDict {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ)
+    (resolve : PdfObject → PdfObject) (fd : Dict) : FontInfo × σ :=
   let subtype := (nameStr? (getR resolve fd "Subtype")).getD ""
   let base := (nameStr? (getR resolve fd "BaseFont")).getD "?"
   let (tu, s1) := cmapOf src s0 fd "ToUnicode"
@@ -642,6 +658,15 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
         | _ => Fixed.zero),
       simpleUnicode (sm.std14 == some .zapfDingbats) false tu sm.encoding,
       s!"{subtype} {base}{tuDesc}{progDesc}", Fixed.one⟩, s4)
+
+/-- Build the `FontInfo` of a font object; an object that is not a dictionary gets the
+substitute `FontInfo.unknown` (as MuPDF's `pdf_load_hail_mary_font`). -/
+def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj : PdfObject) :
+    FontInfo × σ :=
+  let resolve := fun o => (Run.resolve src s0 o).1
+  match resolve fontObj with
+  | .dict fd => buildFontDict limits src s0 resolve fd
+  | _ => (FontInfo.unknown, s0)
 
 /-- Maximum number of font objects loaded per page. -/
 def maxFonts : Nat := 1024
@@ -1266,9 +1291,11 @@ private def ligPdf : ByteArray := page "/F3 5 0 R" "BT /F3 10 Tf 72 700 Td (\\00
 #guard spaceMayFollow "a" && spaceMayFollow "×" && spaceMayFollow "†" && spaceMayFollow ""
 #guard !spaceMayFollow "−" && !spaceMayFollow "≤" && !spaceMayFollow "中" && !spaceMayFollow "a "
 
--- a font that is not a resource: U+FFFD, zero advance, still extracted
-#guard txt (page helv "BT /F9 10 Tf 72 700 Td (a) Tj ET" [helvObj]) == replacementStr
-#guard (pos (page helv "BT /F9 10 Tf 72 700 Td (ab) Tj ET" [helvObj])).map (·.2.1) == [72000, 72000]
+-- 6.12: a font that is not a resource (or not a dictionary) gets MuPDF's substitute
+-- Times-Roman: StandardEncoding text (0x27 is quoteright), Times widths (a = 444)
+#guard txt (page helv "BT /F9 10 Tf 72 700 Td (a') Tj ET" [helvObj]) == "a’"
+#guard (pos (page helv "BT /F9 10 Tf 72 700 Td (ab) Tj ET" [helvObj])).map (·.2.1) == [72000, 76440]
+#guard txt (page "/F1 42" "BT /F1 10 Tf 72 700 Td (Hi) Tj ET" []) == "Hi"
 
 -- C3 bytes, on a run: glyph codes concatenate to the shown bytes
 #guard ((ext hello).map fun t => (t.glyphs.map Glyph.code).flatten) == some "Hello World".toUTF8.toList

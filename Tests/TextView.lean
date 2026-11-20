@@ -18,6 +18,19 @@ Phase 6, M6 row of the MVP / visibility track):
 * `svg overlay page N`: the `SAFEPDF_SVG_TEXT=1` glyph boxes of every page.
 
 `SAFEPDF_GOLDEN_UPDATE=1` regenerates.
+
+Task 6.12 (text of encrypted files): `enc-plain.pdf` is one page with a Helvetica font with
+`/Differences`, a Type0 font with a FlateDecode `/ToUnicode` stream, a TrueType font whose
+widths come from its FlateDecode `/FontFile2` (`Tests/fonts/tiny.ttf`), a form XObject with its
+own font resources, and a `Tf` naming no resource (MuPDF's substitute Times-Roman);
+`enc-rc4-40.pdf`, `enc-rc4-128.pdf`, `enc-aes-128.pdf` and `enc-aes-256.pdf` are the same file
+encrypted by qpdf 12.2 with an empty user password (`qpdf --static-id --static-aes-iv
+--allow-weak-crypto --object-streams=disable --stream-data=preserve --encrypt "" owner
+40|128 [--use-aes=n|y]|256 -- enc-plain.pdf OUT`). Besides their golden files, each must render
+exactly as `enc-plain.pdf` (`encryptedFailures`), and every fixture of
+`Tests/adversarial/encrypted/` must show `Hello, encrypted world` without U+FFFD, or fail to
+open when it is meant to (`adversarialFailures`; those pages have no `/Resources`, so their
+`/F1` is the substitute font).
 -/
 
 namespace SafePdf.Tests.TextView
@@ -58,6 +71,49 @@ def jsonEscapeFailures : Nat :=
     String.ofList [Char.ofNat 0x20ac] ++ "\""
   if SafePdf.Shell.jsonString s == want then 0 else 1
 
+/-- Task 6.12: every encrypted variant `enc-*.pdf` renders exactly as `enc-plain.pdf`. -/
+def encryptedFailures : IO Nat := do
+  let plain ← IO.FS.readBinFile (dir / "enc-plain.pdf")
+  let want := render plain
+  let mut n := 0
+  for v in ["enc-rc4-40.pdf", "enc-rc4-128.pdf", "enc-aes-128.pdf", "enc-aes-256.pdf"] do
+    let got := render (← IO.FS.readBinFile (dir / v))
+    if got != want then
+      IO.println s!"  FAIL text view: {v} does not render as enc-plain.pdf"
+      n := n + 1
+  return n
+
+/-- Directory of the encryption fixtures (`Tests/adversarial/encrypted/generate.py`). -/
+def encDir : System.FilePath := "Tests" / "adversarial" / "encrypted"
+
+/-- Fixtures of `encDir` that must not open (a non-empty user password; `/Encrypt` names a
+missing object). -/
+def encMustFail : List String :=
+  ["userpw-aesv3.pdf", "userpw-rc4-128.pdf", "repair-lost-encrypt.pdf"]
+
+/-- Task 6.12: the text of each fixture of `encDir` (MuPDF: `Hello, encrypted world`). -/
+def adversarialFailures : IO Nat := do
+  if !(← encDir.isDir) then
+    IO.println s!"  FAIL text view: directory {encDir} not found"
+    return 1
+  let files := ((← encDir.readDir).map (·.path)).toList.filter (·.extension == some "pdf")
+  let files := files.toArray.qsort (fun a b => a.toString < b.toString)
+  let mut n := 0
+  for f in files do
+    let name := f.fileName.getD ""
+    let out := render (← IO.FS.readBinFile f)
+    let ok := if encMustFail.contains name then out.startsWith "error: "
+      else (out.splitOn "
+").contains "Hello, encrypted world" &&
+        (out.splitOn "--- page 1: 22 chars, 22 glyphs, 0 U+FFFD").length == 2
+    if !ok then
+      IO.println s!"  FAIL text view: {encDir / name}: unexpected text"
+      n := n + 1
+  if files.size != 12 then
+    IO.println s!"  FAIL text view: {files.size} encryption fixtures, expected 12"
+    n := n + 1
+  return n
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let jf := jsonEscapeFailures
@@ -76,6 +132,8 @@ def run : IO Nat := do
     c ← Tests.Golden.runCase update render input c
   if update then IO.println s!"  text view: wrote {c.written} .expected file(s)"
   else IO.println s!"  text view: {c.cases} case(s), {c.failures} failure(s)"
-  return c.failures + jf
+  let ef ← encryptedFailures
+  let af ← adversarialFailures
+  return c.failures + jf + ef + af
 
 end SafePdf.Tests.TextView
