@@ -66,14 +66,12 @@ dropped connection, time limit) goes to stderr as `viewer --biblean: METHOD PATH
 method, the path (the key only) and the status, never the token or a body — and is otherwise
 ignored: viewing never depends on the server.
 
-**Viewer hooks** (task 10.1b wires them into `Viewer.lean`): `Sync.create` + `Sync.load`
-(`loadInitial`: the store to show at open, from the marks read back from the PDF), then
-`Sync.onMarksChanged` after every change of the viewer's store, `Sync.onSaved` with
-`Save.build`'s bytes instead of writing a file, and `Sync.flush` on close. Until then
-`afterWindow` is the window's only path (a Save in the window → `PUT` + post on exit); the
-window does not see the stored set there, so its fresh mark ids start after the file's
-marks only — a stored mark of ours that never reached the file could share an id with a new
-one (the file's mark wins). With `loadInitial` the store's `nextId` is above every stored id.
+**Viewer hooks** (wired into the window by task 10.1b, `Main.lean` `windowInit`, as
+`Viewer.Library`): `Sync.create` + `Sync.load` (`loadInitial`: the store to show at open,
+from the marks read back from the PDF; its `nextId` is above every stored id, so a new mark
+never takes the id of a stored one), then `Sync.onMarksChanged` after every change of the
+viewer's store, `Sync.onSaved` with `Save.build`'s bytes instead of writing a file (Save to
+library), and `Sync.flush` on Close and after the window closed.
 -/
 
 namespace SafePdf.Shell.App.BibLean.Annots
@@ -682,21 +680,5 @@ def Sync.flush (y : Sync) (graceMs : Nat := 3000) : IO Bool := do
 
 /-- The outcomes so far. -/
 def Sync.outcomes (y : Sync) : IO (Array String) := return (← y.state.get).log
-
-/-- **`viewer --biblean`, after the window closed (interim until the viewer calls the hooks,
-task 10.1b)**: when the window saved its marks into `target` (`Save.defaultTarget` of the
-private copy), the file is sent with `PUT` and its marks, merged with the stored set, are
-posted; then at most `graceMs` is spent on it. Returns a one-line summary. -/
-def afterWindow (y : Sync) (target : System.FilePath) (graceMs : Nat := 3000) : IO String := do
-  unless ← target.pathExists do return "nothing saved"
-  let bytes ← IO.FS.readBinFile target
-  let d ← match SafePdf.Api.openBytes bytes { limits := y.document.limits, allowRepair := false } with
-    | .ok d => pure d
-    | .error _ => return "the saved file does not reopen; not sent"
-  let s ← y.load (Store.load (Save.readMarks d.doc d.limits))
-  y.onSaved bytes
-  y.onMarksChanged s
-  let done ← y.flush graceMs
-  return if done then "sent" else s!"still pending after {graceMs} ms"
 
 end SafePdf.Shell.App.BibLean.Annots
