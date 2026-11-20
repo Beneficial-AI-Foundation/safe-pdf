@@ -287,6 +287,34 @@ The biggest engineering item.
   (annotation anchoring, text indexing: exactly C2/C3/C6).
 - **M8**: daily-drivable viewer on the corpus.
 
+### Phase 9 — GUI enhancements (viewer UX + user annotations)
+Shell work (`Shell/App/`, unverified; Tk-free logic modules with `#guard`s and theorems, as
+established in 8.2). The verified core is untouched.
+- **Menu bar** (File / Edit / View / Go): a native Tk menubar; the *Outline*, *Back* and
+  *Forward* toolbar buttons move into it (View → Outline, Go → Back / Forward; the keys F9
+  and Alt+Left/Right stay), decluttering the toolbar.
+- **Wheel scrolling across pages**: the mouse wheel (macOS trackpad deltas included)
+  continues into the next / previous page as the keys already do, instead of stopping at
+  the page edge.
+- **View modes** (View menu): single page (today's mode), continuous vertical scroll, two
+  pages side by side, and continuous facing pages; paging in the facing modes moves two by
+  two. Page cache and prefetch extend to the visible neighbours.
+- **User highlights in colors**: select text, then highlight it in a chosen color (Edit
+  menu or right click); the highlight quads come from the C3 glyph boxes of the selection.
+- **Notes**: a text note anchored to a selection or a page point, shown as a marker on the
+  page, edited in a small popup.
+- **Right-click menu** grows *Highlight* (color submenu) and *Add note…* next to
+  Copy / Select all / Find.
+- **Persistence — XFDF sidecar**: user highlights and notes are saved in a sidecar `.xfdf`
+  file next to the PDF, in XFDF (ISO 19444-1), the standard XML interchange format for PDF
+  annotations (Acrobat and others import/export it; highlights as `QuadPoints`, notes as
+  text annotations, both in page space). The PDF itself is **never written** — S8
+  (read-only by construction) stands; the other usual format, annotation objects written
+  into the PDF by incremental update (ISO 32000 §12.5), needs a file writer and is at most
+  a later "export annotated copy" feature, never an in-place change.
+- **M9**: a paper reads end-to-end with the wheel in every view mode; a highlight and a
+  note survive close/reopen through the sidecar; the sidecar imports into Acrobat/Okular.
+
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
 optional content groups, tagged-PDF reading order, accessibility export.
