@@ -300,7 +300,7 @@ def objKey : PdfObject → Option (Nat × Nat)
 /-- **Load the Type 3 fonts of a source table** (task 7.3j): every source with a Type 3 font
 object not yet loaded gets its charprocs run (`Type3.loadFont`, environment `env`, the shared
 budget `bud`); an indirect font object is loaded once for all its keys; at most
-`Type3.maxType3Fonts` fonts. Returns the table, the states and the budget left. -/
+`Type3.maxType3Fonts` fonts, numbered `0, 1, …` (`T3Font.uid`, the glyph cache's font key). Returns the table, the states and the budget left. -/
 def loadType3 {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Tiling.Budget)
     (pageRes : Dict) (t : SourceTable) : SourceTable × σ × ω × Tiling.Budget :=
   let r := t.foldl (fun (acc : SourceTable × List ((Nat × Nat) × Option Type3.T3Font) × Nat × σ × ω ×
@@ -314,6 +314,7 @@ def loadType3 {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Tiling
       | .none =>
         if Type3.maxType3Fonts ≤ k then (out ++ [e], memo, k, s, obs, bud) else
         let (f, s, obs, bud) := Type3.loadFont env s obs bud pageRes o
+        let f := f.map fun f => { f with uid := k }
         let memo := match objKey o with
           | some ok => (ok, f) :: memo
           | .none => memo
@@ -887,7 +888,8 @@ def runMasks (cfg : Fill.Config) (view : Aff) (win : IRect) (pf : PageFonts) (ca
 
 /-! ## 5. Pages -/
 
-/-- Rendering state: the path renderer's state and the outline cache. -/
+/-- Rendering state: the path renderer's state, the outline cache, the transparency state and
+the Type 3 glyph cache. -/
 structure TState where
   /-- Page buffer, clip cache, counted work. -/
   rs : Clip.RState
@@ -895,6 +897,9 @@ structure TState where
   cache : Cache := {}
   /-- Transparency layers and soft masks (task 7.3c). -/
   tx : Transparency.TxState := {}
+  /-- Page-wide Type 3 glyph bitmap cache (task 7.3l, bounded: `Type3.maxGlyphCache` entries,
+  `Type3.maxGlyphCacheBytes` bytes). -/
+  t3 : Type3.GlyphCache := Type3.GlyphCache.empty
 
 /-- Paint a list of masks through one clip (cache and work of `clipMaskC` charged once). A
 mask whose colour is a pattern colour that `look` resolves to a loaded shading pattern (task
@@ -936,7 +941,9 @@ def renderItemWith (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.Stro
   | .glyphRun r clip =>
     if !r.renderMode.paints then st else
     match (pf.sources.get r.font).bind (·.t3) with
-    | some f => { st with rs := Type3.renderRun cfg paint m W H (pf.fonts.get r.font) f st.rs r clip }
+    | some f =>
+      let q := Type3.renderRun cfg paint m W H (pf.fonts.get r.font) f st.rs st.t3 r clip
+      { st with rs := q.1, t3 := q.2 }
     | .none =>
     let c := Clip.clipMaskC cfg m W H st.rs.cache clip
     let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
@@ -987,7 +994,7 @@ theorem renderItemWith_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : 
     split
     · rfl
     · split
-      · exact Type3.renderRun_size _ _ _ _ _ _ _ _ _ _
+      · exact Type3.renderRun_size _ _ _ _ _ _ _ _ _ _ _
       · exact paintAll_size _ _ _ _ _ _ _ _ _ _ _ _
   | image src ctm fill clip =>
     simp only [renderItemWith]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
