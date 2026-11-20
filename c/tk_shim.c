@@ -14,6 +14,8 @@
  * photo image, and runs the event loop. No data is spliced into script text here: the
  * photo's pixels go through `Tk_PhotoPutBlock`, its name is looked up with
  * `Tk_FindPhoto`, and `emit` hands its argument words to Lean as separate strings.
+ * `safepdf_close_fd3` (task 10.1b) is not Tk: it closes bib-lean's token pipe on file
+ * descriptor 3; it lives here because this is the `viewer` executable's only C object.
  *
  * Lean calling conventions used here (Lean 4.36):
  *   - the IO world token is erased from compiled signatures: an `IO α` extern takes only
@@ -29,6 +31,7 @@
 #include <tk.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef TCL_SIZE_MAX /* Tcl 8.6 has no Tcl_Size; lengths are int there */
 typedef int Tcl_Size;
@@ -202,5 +205,16 @@ LEAN_EXPORT lean_obj_res safepdf_tk_mainloop(void) {
 /* safepdf_tk_quit : IO Unit — makes safepdf_tk_mainloop return after the current event. */
 LEAN_EXPORT lean_obj_res safepdf_tk_quit(void) {
   quit_requested = 1;
+  return io_ok_unit();
+}
+
+/* safepdf_close_fd3 : IO Unit — closes file descriptor 3 (task 10.1b; bib-lean's reader
+ * contract §2: the viewer "SHOULD close fd 3 after" reading the token from it). Lean can only
+ * open `/dev/fd/3` as a new descriptor, so the inherited one needs this call. Called by
+ * `BibLean.Launch.openFromBibLean` only after a valid token was read from fd 3, i.e. while
+ * fd 3 is known to be the inherited pipe and not a descriptor of the runtime. A failure
+ * (fd 3 already closed) is not an error. */
+LEAN_EXPORT lean_obj_res safepdf_close_fd3(void) {
+  (void)close(3);
   return io_ok_unit();
 }

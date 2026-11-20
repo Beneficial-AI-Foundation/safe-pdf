@@ -21,10 +21,13 @@
 #   A6–A8 failures (HTTP 500, dropped connection, a server that never answers) never fail the
 #       probe, are reported on stderr without the token, and a hang costs at most the grace;
 #   A9  token never printed, every request authenticated, no Origin, right content types.
-# In a window (Xvfb; smoke mode `save` of scripts/viewer-smoke.sh):
-#   A10 the marks saved in the window reach bib-lean on exit: the PUT holds the original as a
-#       prefix and three marks, the POST lists them with the stored elements;
+# In a window (Xvfb; smoke mode `biblean`, `Viewer.smokeBiblean`, task 10.1b):
+#   A10 the window loads the stored set and syncs live: a highlight is posted (no save), Save
+#       sends the PUT (the original a prefix, the stored mark and the window's two marks) then
+#       the set (the stored mark with its comment, the window's highlight and note, the
+#       stored elements of other viewers), item keys of stored ids kept;
 #   A11 a server that never answers does not hold the window's exit.
+# (Window title, page, fd 3, no temporary file: Tests/biblean/window-test.sh.)
 # Exit 0 on success.
 set -euo pipefail
 
@@ -276,7 +279,7 @@ window() {
   rm -rf "$work/smoke" "$work/tmp"; mkdir -p "$work/smoke" "$work/tmp"
   local start; start=$(date +%s)
   env -u BIBLEAN_PAGE TMPDIR="$work/tmp" SAFEPDF_VIEWER_SMOKE="$work/smoke" \
-    SAFEPDF_VIEWER_SMOKE_MODE=save SAFEPDF_SUBST_FONTS=0 \
+    SAFEPDF_VIEWER_SMOKE_MODE=biblean SAFEPDF_SUBST_FONTS=0 \
     BIBLEAN_SERVER="$server" BIBLEAN_ATTACHMENT="$att" \
     timeout 120 "$viewer" --biblean >"$work/$name.out" 2>"$work/$name.err" \
     3< <(printf '%s\n' "$token")
@@ -284,18 +287,13 @@ window() {
   elapsed=$(( $(date +%s) - start ))
 }
 if [ "$display" = 1 ]; then
-  # Only other viewers' elements are stored: in the window (until task 10.1b) the viewer does
-  # not see the stored set, so the library's own marks must be the file's (see Annots.lean).
-  python3 -I -c 'import json, sys; s = json.load(open(sys.argv[1])); json.dump(s[1:], open(sys.argv[2], "w"))' \
-    "$work/stored.json" "$work/stored-other.json"
-  stored="$work/stored-other.json"
+  stored="$work/stored.json"
   start_stub "$work/a.pdf"
   window w1
   base=$elapsed
   [ "$rc" = 0 ] &&
   python3 -I - "$work/log" "$work/annots" "$work/put" "$work/a.pdf" <<'EOF'
 import json, re, sys
-import re
 def nm_names(b):
     """The /NM strings of `b` that name our marks (literal or hex strings)."""
     out = {m.decode() for m in re.findall(rb"/NM\s*\((safepdf-mark-\d+)\)", b)}
@@ -309,21 +307,27 @@ def nm_names(b):
 log = [json.loads(l) for l in open(sys.argv[1])]
 writes = [(r["method"], r["path"].rsplit("/", 1)[1], r["status"]) for r in log
           if r["method"] == "PUT" or r["path"].endswith("/annotations")]
-assert writes == [("PUT", "file", 200), ("POST", "annotations", 200)], writes
+assert writes == [("POST", "annotations", 200), ("PUT", "file", 200),
+                  ("POST", "annotations", 200)], writes
 put, orig = open(sys.argv[3], "rb").read(), open(sys.argv[4], "rb").read()
 assert put.startswith(orig) and len(put) > len(orig), "prefix"
-nms = nm_names(put)
-assert len(nms) == 3, nms
-body = json.loads(open(sys.argv[2]).readline())["body"]
+# The stored highlight (its comment is its /Contents + popup) and the window's two marks.
+assert nm_names(put) == {"safepdf-mark-1", "safepdf-mark-3", "safepdf-mark-4"}, nm_names(put)
+posts = [json.loads(l) for l in open(sys.argv[2])]
+body, keys, before = posts[-1]["body"], posts[-1]["keys"], posts[-1]["before"]
+mine = {e["id"]: e for e in body if (e.get("id") or "").startswith("safepdf-mark-")}
+assert set(mine) == {"safepdf-mark-1", "safepdf-mark-3", "safepdf-mark-4"}, sorted(mine)
+assert mine["safepdf-mark-1"]["comment"] == "a comment", mine["safepdf-mark-1"]
+hl = mine["safepdf-mark-3"]
+assert hl["kind"] == "highlight" and hl["text"] == "Hello" and hl["pageIndex"] == 0, hl
+assert mine["safepdf-mark-4"]["comment"] == "library note", mine["safepdf-mark-4"]
 ids = [e.get("id") for e in body]
-mine = {i for i in ids if (i or "").startswith("safepdf-mark-")}
-# The window's highlight with its comment note travels as one element; every posted mark is in
-# the file, and the stored elements of other viewers are kept.
-assert mine and mine <= nms, (mine, nms)
 assert "12R" in ids and None in ids, ids
-assert any(e.get("kind") == "highlight" and e.get("text") == "world" for e in body), body
+for e, k in zip(body, keys):
+    if e.get("id") in before:
+        assert before[e["id"]] == k, (e["id"], k, before)
 EOF
-  check $? "A10 marks saved in the window reach bib-lean on exit (PUT with 3 marks, then the set)" \
+  check $? "A10 the window loads the stored set, posts a highlight live, Save sends PUT then the set" \
     "exit $rc: $(cat "$work/w1.err" "$work/log" "$work/smoke/save.txt" 2>/dev/null | tail -40)"
   start_stub "$work/a.pdf" --fail-annots hang
   window w2
