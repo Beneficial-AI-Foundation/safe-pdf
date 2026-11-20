@@ -80,8 +80,21 @@ spec. This file proves, for every successful `Core.Write.Incremental.writeAnnots
    be a `/Length` value or an object-stream container (`keys_cases`, `keys_notLen`).
    `c7Value` (general writer), `c7Value_plain` (unencrypted, no side condition) and
    `c7ValueAnnots` (`writeAnnots`) bundle it next to the unchanged `c7` / `c7Update`.
+8a. **No side condition** (task 9.5e2; `writeUpdate_value'`, `writeAnnots_value'`,
+   `c7Value'`, `c7ValueAnnots'`): fact 8 for *every* successful write — also a direct
+   trailer `/Encrypt` dictionary, and an indirect one that the update supersedes (rule W11
+   allows superseding any non-page dictionary). The decryption-state equality now comes from
+   the writer's self-check: `checkObjects` also requires `sameState` (every field of
+   `Crypt.State`: the whole handler incl. `/EncryptMetadata` and the named crypt filters, the
+   file key, the `/Encrypt` object, the `/Perms` result), so `checkObjects_crypt` /
+   `writeUpdate_crypt_eq` give `d'.crypt = doc.file.crypt` outright; the rest of the proof
+   (prefix stability, `keys_notLen`) is unchanged. The old statements (`writeUpdate_value`,
+   `writeAnnots_value`, `c7Value`, `c7ValueAnnots`, with `EncKept`) are unchanged and are now
+   corollaries; `WritePrefix.crypt_eq_of_ref` (the 9.5e route for an indirect `/Encrypt`) is
+   kept, no longer needed.
 
-`c7` bundles 1–5; `c7Update` bundles 1–5 and 7 for the general writer; `c7Value` adds 8.
+`c7` bundles 1–5; `c7Update` bundles 1–5 and 7 for the general writer; `c7Value` adds 8,
+`c7Value'` adds 8a.
 
 ## What is proved by construction, what by the writer's self-check
 
@@ -95,14 +108,15 @@ theorems turn those Boolean checks into statements about the parser — via
 
 **Not proved (recorded obstacles):**
 
-* Fact 8 for an encrypted document whose `/Encrypt` is a *direct* dictionary in the trailer.
-  The result's decryption state is built from the *update's* trailer, and nothing proved
-  says that this trailer carries the original `/Encrypt` dictionary (rule W6 copies it, but
-  the self-check only checks `/Prev` and the section's numbers, and `sameCrypt` compares
-  the key, `/StrF`, `/StmF` and the reference, not `/EncryptMetadata` or the crypt filters
-  a stream's own `/Crypt` filter selects). Closing it needs either a parse-back theorem for
-  the written trailer (serializer completeness for the section, which is tested, not
-  proved) or a stronger `sameCrypt` (comparing the whole handler) in the writer.
+* That the update's trailer carries the original `/Encrypt` *by construction* (rule W6).
+  Task 9.5e2 closed fact 8 for a direct `/Encrypt` through the self-check (`sameState`,
+  option (b) of the task) rather than by a parse-back theorem (option (a)): that would need
+  serializer completeness for the cross-reference section — `Xref.Chain.parseSection` on
+  `xrefTable` (classic subsections, `trailer` keyword, dictionary) and on the uncompressed
+  xref stream (`streamRows`, `/Index`, `/W`, the stream parser with its `/Length`) — which is
+  tested, never proved, and would still leave the case of a superseded indirect `/Encrypt`
+  object open. The check is exactly as strong as needed: the result's state *is* the
+  original's, whatever the trailer says.
 * Only successful fetches are claimed stable: an original object whose fetch *fails* may
   fail differently (or succeed) on the result, as in `Spec.PrefixStable`.
 The object-level property stays checked by the test suite on every original object of
@@ -321,8 +335,50 @@ theorem checkObjects_ok {limits : Limits} {out : ByteArray}
   split at h
   · rename_i d' hd
     simp only [Bool.and_eq_true, Bool.not_eq_true', List.all_eq_true] at h
-    exact ⟨d', hd, h.1.1.1, fun o ho => bodyIs_eq (h.1.1.2 o ho),
-      fun a ha => auxIs_eq (h.1.2 a ha), sameCrypt_ok h.2⟩
+    exact ⟨d', hd, h.1.1.1.1, fun o ho => bodyIs_eq (h.1.1.1.2 o ho),
+      fun a ha => auxIs_eq (h.1.1.2 a ha), sameCrypt_ok h.1.2⟩
+  · cases h
+
+/-- `sameHandler` decides equality of security handlers (task 9.5e2). -/
+theorem sameHandler_ok {a b : Crypt.Handler} (h : sameHandler a b = true) : a = b := by
+  obtain ⟨v, r, kl, p, ⟨o⟩, ⟨u⟩, ⟨oe⟩, ⟨ue⟩, ⟨pm⟩, em, sm, sf, fl⟩ := a
+  obtain ⟨v', r', kl', p', ⟨o'⟩, ⟨u'⟩, ⟨oe'⟩, ⟨ue'⟩, ⟨pm'⟩, em', sm', sf', fl'⟩ := b
+  simp only [sameHandler, Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩ := h
+  subst h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11 h12 h13
+  rfl
+
+/-- `sameState` decides equality of decryption states (task 9.5e2). -/
+theorem sameState_ok {a b : Option Crypt.State} (h : sameState a b = true) : a = b := by
+  cases a with
+  | none =>
+    cases b with
+    | none => rfl
+    | some _ => simp [sameState] at h
+  | some x =>
+    cases b with
+    | none => simp [sameState] at h
+    | some y =>
+      obtain ⟨hx, ⟨fk⟩, er, po⟩ := x
+      obtain ⟨hy, ⟨fk'⟩, er', po'⟩ := y
+      simp only [sameState, Bool.and_eq_true, decide_eq_true_eq] at h
+      obtain ⟨⟨⟨hh, hk⟩, he⟩, hp⟩ := h
+      have := sameHandler_ok hh
+      subst this hk he hp
+      rfl
+
+/-- **The object check fixes the decryption state** (task 9.5e2): a passing `checkObjects`
+re-opens the result with exactly the state `crypt` (`sameState`). -/
+theorem checkObjects_crypt {limits : Limits} {out : ByteArray}
+    {objs : List (Nat × Nat × PdfObject)} {aux : List (Nat × IndirectBody)}
+    {crypt : Option Crypt.State}
+    (h : checkObjects limits out objs aux crypt = true) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = crypt := by
+  unfold checkObjects at h
+  split at h
+  · rename_i d' hd
+    simp only [Bool.and_eq_true] at h
+    exact ⟨d', hd, sameState_ok h.2⟩
   · cases h
 
 /-- **C7 (4), strict re-open, general writer** (rule W11): every written object — the
@@ -797,6 +853,26 @@ theorem writeUpdate_crypt {limits : Limits} {doc : Doc.Doc} {edits : Edits}
   obtain ⟨p, d', hp, hd, _, _, _, hcr⟩ := writeUpdate_open h
   exact ⟨d', hd, (planUpdate_ok hp).2.1 ▸ hcr⟩
 
+/-- **The result has exactly the original's decryption state, general writer** (rules W10,
+W11, task 9.5e2): the strict re-open of every successful `writeUpdate` has a decryption state
+equal (every field: handler incl. `/EncryptMetadata` and crypt filters, file key,
+`/Encrypt` object, `/Perms` result) to the original's — whether `/Encrypt` is direct in the
+trailer or indirect, superseded or not. -/
+theorem writeUpdate_crypt_eq {limits : Limits} {doc : Doc.Doc} {edits : Edits}
+    {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
+    (h : writeUpdate limits doc edits sups aux = .ok out) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt := by
+  obtain ⟨p, hp, _, _, hc⟩ := writeUpdate_ok h
+  obtain ⟨d', hd, hcr⟩ := checkObjects_crypt hc
+  exact ⟨d', hd, hcr.trans (planUpdate_ok hp).2.1⟩
+
+/-- **The result has exactly the original's decryption state** (task 9.5e2) for
+`writeAnnots`: see `writeUpdate_crypt_eq`. -/
+theorem writeAnnots_crypt_eq {limits : Limits} {doc : Doc.Doc} {marks : Marks}
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt :=
+  writeUpdate_crypt_eq h
+
 /-- **The result keeps the original's encryption** (rule W10, task 9.5f): it re-opens with a
 decryption state exactly when the original has one, with the same file key, string and
 stream methods and encryption-dictionary object — the new objects are encrypted for the
@@ -881,11 +957,10 @@ theorem keys_notLen {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : Li
       omega
   · exact WritePrefix.notLen_of_dict hg
 
-/-- The original's decryption state is kept by the update in the provable case (rule W10):
-the document is unencrypted, or its encryption dictionary is an indirect object that the
-update does not write. (A direct `/Encrypt` dictionary in the trailer is the case left open:
-it would need the update's trailer to parse back to the carried dictionary, rule W6, which
-the writer's self-check does not establish.) -/
+/-- The original's decryption state is kept by the update in the case task 9.5e proved
+(rule W10): the document is unencrypted, or its encryption dictionary is an indirect object
+that the update does not write. Task 9.5e2 made it unnecessary (`c7Value'`: the writer's
+self-check compares the whole state, `sameState`); kept for the 9.5e statements. -/
 def EncKept (doc : Doc.Doc) (p : Plan) : Prop :=
   ∀ st, doc.file.crypt = some st → ∃ r, st.encRef = some r ∧ r.1 ∉ p.keys
 
@@ -895,29 +970,31 @@ theorem encKept_plain {doc : Doc.Doc} (p : Plan) (h : doc.file.crypt = none) : E
   rw [h] at hst
   cases hst
 
-/-- **C7 (3), value level, general writer** (task 9.5e; rules G1–G5, W10, W11). For a
-successful `writeUpdate` of a document opened from its bytes, if the encryption dictionary
-(if any) is indirect and not written over (`EncKept`; always true for unencrypted
-documents): the result opens with exactly the original's decryption state, and every object
-number the update does not write **fetches the same value** — every successful
+/-- **C7 (3), value level, general writer, no side condition** (tasks 9.5e, 9.5e2; rules
+G1–G5, W10, W11). For a successful `writeUpdate` of a document opened from its bytes — plain,
+or encrypted with a direct or an indirect `/Encrypt` — the result opens with exactly the
+original's decryption state (`writeUpdate_crypt_eq`, from the self-check's `sameState`), and
+every object number the update does not write **fetches the same value**: every successful
 `getObject` of the original (any generation; `null` for undefined objects included) gives the
 same body on the result, `/Length` resolution, object streams and decryption included. -/
-theorem writeUpdate_value {limits : Limits} {doc : Doc.Doc} {edits : Edits}
+theorem writeUpdate_value' {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
     (h : writeUpdate limits doc edits sups aux = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
-    (hp : planUpdate limits doc edits sups aux = .ok p) (henc : EncKept doc p) :
+    (hp : planUpdate limits doc edits sups aux = .ok p) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v := by
   obtain ⟨p1, revs, sec', tr', off', hp1, hold, hnew, _, _, hstart, hkeys⟩ := writeUpdate_chain h
   rw [hp] at hp1
   cases hp1
-  obtain ⟨p2, d', hp2, hd', hr', _, _, hcr⟩ := writeUpdate_open h
+  obtain ⟨p2, d', hp2, hd', hr', _, _, _⟩ := writeUpdate_open h
   rw [hp] at hp2
   cases hp2
-  obtain ⟨hrep, hpc, -⟩ := planUpdate_ok hp
-  rw [hpc] at hcr
+  obtain ⟨d'', hd'', hc⟩ := writeUpdate_crypt_eq h
+  rw [hd'] at hd''
+  cases hd''
+  obtain ⟨hrep, -, -⟩ := planUpdate_ok hp
   have hE := writeUpdate_extends h
   have hs : WritePrefix.HasEnd doc.file.bytes := ⟨_, hstart⟩
   -- the two documents
@@ -930,41 +1007,37 @@ theorem writeUpdate_value {limits : Limits} {doc : Doc.Doc} {edits : Edits}
   obtain ⟨hb0, hx0, -⟩ := WritePrefix.withCrypt_mk' hw0
   obtain ⟨hb1, hx1, -⟩ := WritePrefix.withCrypt_mk' hw1
   -- lookups agree outside the keys
-  have hlk : ∀ m, m ∉ p.keys →
-      lookupEntry m (Xref.Chain.mergeChain ((sec', tr', off') :: revs)).entries =
-        lookupEntry m (Xref.Chain.mergeChain revs).entries := by
+  have hL : ∀ m, m ∉ p.keys → d'.lookup m = doc.file.lookup m := by
     intro m hm
+    rw [WritePrefix.lookup_eq, WritePrefix.lookup_eq, hx0, hx1]
     apply WritePrefix.mergeChain_cons_lookup_none
     simp only
     rw [hkeys]
     exact hm
-  have hL : ∀ m, m ∉ p.keys → d'.lookup m = doc.file.lookup m := by
-    intro m hm
-    rw [WritePrefix.lookup_eq, WritePrefix.lookup_eq, hx0, hx1]
-    exact hlk m hm
   have hfuel : doc.file.objectCount ≤ d'.objectCount := by
     rw [WritePrefix.objectCount_eq, WritePrefix.objectCount_eq, hx0, hx1]
     exact WritePrefix.mergeChain_cons_length _ _
-  -- the decryption state
-  have hc : d'.crypt = doc.file.crypt := by
-    rcases hcd : doc.file.crypt with _ | st
-    · rw [hcd] at hcr
-      rcases hcr with ⟨h1, -⟩ | ⟨x, y, -, hy, -⟩
-      · exact h1
-      · cases hy
-    · rw [hcd] at hcr
-      rcases hcr with ⟨-, h2⟩ | ⟨x, y, hx, hy, hkey, -, -, hre⟩
-      · cases h2
-      · cases hy
-        obtain ⟨r, hr, hrk⟩ := henc st hcd
-        rw [hx]
-        congr 1
-        rw [hb0] at hE
-        exact WritePrefix.crypt_eq_of_ref hw0 hw1 hE (hb0 ▸ hs) hcd hx hr (hre ▸ hr) hkey.symm
-          (hlk r.1 hrk)
   refine ⟨d', hd', hc, fun n hn g v hv => ?_⟩
   have hE' : PrefixStable.Extends doc.file.bytes d'.bytes := by rw [hb1]; exact hE
   exact WritePrefix.getObject_transfer hE' hs hL (fun m hm => keys_notLen hp hd0 hm) hfuel hc hn hv
+
+/-- **C7 (3), value level, general writer** (task 9.5e; rules G1–G5, W10, W11). For a
+successful `writeUpdate` of a document opened from its bytes, if the encryption dictionary
+(if any) is indirect and not written over (`EncKept`; always true for unencrypted
+documents): the result opens with exactly the original's decryption state, and every object
+number the update does not write **fetches the same value** — every successful
+`getObject` of the original (any generation; `null` for undefined objects included) gives the
+same body on the result, `/Length` resolution, object streams and decryption included.
+Since task 9.5e2 a corollary of `writeUpdate_value'`, which needs no `EncKept`. -/
+theorem writeUpdate_value {limits : Limits} {doc : Doc.Doc} {edits : Edits}
+    {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
+    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
+    (hp : planUpdate limits doc edits sups aux = .ok p) (_henc : EncKept doc p) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v :=
+  writeUpdate_value' h hd0 hp
 
 /-- **C7 (3), value level** (task 9.5e) for `writeAnnots`: see `writeUpdate_value`. -/
 theorem writeAnnots_value {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
@@ -975,6 +1048,17 @@ theorem writeAnnots_value {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v :=
   writeUpdate_value h hd0 hp henc
+
+/-- **C7 (3), value level, no side condition** (tasks 9.5e, 9.5e2) for `writeAnnots`: see
+`writeUpdate_value'`. -/
+theorem writeAnnots_value' {limits : Limits} {doc : Doc.Doc} {marks : Marks}
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
+    (hp : plan limits doc marks aux = .ok p) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v :=
+  writeUpdate_value' h hd0 hp
 
 /-! ## C7 -/
 
@@ -1082,14 +1166,34 @@ theorem openFile_self {limits : Limits} {bytes : ByteArray} {doc : Doc.Doc}
   rw [(WritePrefix.withCrypt_mk' hw).1]
   exact h1
 
+/-- **C7 at the value level, general writer, no side condition** (tasks 9.5e, 9.5e2;
+alongside `c7Update`, whose statement is unchanged). For every successful
+`writeUpdate limits doc edits sups aux = .ok out` of a document opened from its bytes
+(`openFile_self` for `Doc.openDoc`) — unencrypted, or encrypted with a direct trailer
+`/Encrypt` dictionary or an indirect one (superseded or not) — the plan `p` and the strictly
+opened result `d'` are those of `c7Update`, the result has exactly the original's decryption
+state, and every object number not in `p.keys` fetches exactly as in the original (every
+successful `getObject`, any generation). -/
+theorem c7Value' {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
+    {aux : List AuxStream} {out : ByteArray}
+    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
+    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      d'.crypt = doc.file.crypt ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v := by
+  obtain ⟨p, hp, -⟩ := writeUpdate_ok h
+  obtain ⟨d', hd, hc, hv⟩ := writeUpdate_value' h hd0 hp
+  exact ⟨p, d', hp, hd, hc, hv⟩
+
 /-- **C7 at the value level, general writer** (task 9.5e; alongside `c7Update`, whose
 statement is unchanged). For every successful `writeUpdate limits doc edits sups aux = .ok out`
 of a document opened from its bytes (`openFile_self` for `Doc.openDoc`): the plan `p` and the
 strictly opened result `d'` are those of `c7Update`, and if the encryption dictionary is kept
 (`EncKept`: unencrypted, or `/Encrypt` an indirect object not in `p.keys`) the result has the
 original's decryption state and every object number not in `p.keys` fetches exactly as in
-the original (every successful `getObject`, any generation). The direct-`/Encrypt` case is
-the one part not proved (see the module doc). -/
+the original (every successful `getObject`, any generation). Since task 9.5e2 a corollary
+of `c7Value'`, which drops the `EncKept` condition. -/
 theorem c7Value {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
     {aux : List AuxStream} {out : ByteArray}
     (h : writeUpdate limits doc edits sups aux = .ok out)
@@ -1098,12 +1202,8 @@ theorem c7Value {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List S
       (EncKept doc p → d'.crypt = doc.file.crypt ∧
         ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
           d'.getObject limits n g = .ok v) := by
-  obtain ⟨p, d', hp, hd, _⟩ := writeUpdate_open h
-  refine ⟨p, d', hp, hd, fun henc => ?_⟩
-  obtain ⟨d'', hd', hc, hv⟩ := writeUpdate_value h hd0 hp henc
-  rw [hd] at hd'
-  cases hd'
-  exact ⟨hc, hv⟩
+  obtain ⟨p, d', hp, hd, hc, hv⟩ := c7Value' h hd0
+  exact ⟨p, d', hp, hd, fun _ => ⟨hc, hv⟩⟩
 
 /-- **C7 at the value level for unencrypted documents** (task 9.5e): no side condition. -/
 theorem c7Value_plain {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
@@ -1125,5 +1225,16 @@ theorem c7ValueAnnots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : L
         ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
           d'.getObject limits n g = .ok v) :=
   c7Value h hd0
+
+/-- **C7 at the value level for `writeAnnots`, no side condition** (tasks 9.5e, 9.5e2;
+alongside `c7`): see `c7Value'`. -/
+theorem c7ValueAnnots' {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
+    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      d'.crypt = doc.file.crypt ∧
+      ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
+        d'.getObject limits n g = .ok v :=
+  c7Value' h hd0
 
 end SafePdf.Spec.Write

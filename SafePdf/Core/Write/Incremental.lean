@@ -39,7 +39,12 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
   update's xref stream is never encrypted. The self-check (W8) re-opens the result, which
   decrypts every written object, and compares with the plaintext — so the C7 theorems hold
   for encrypted documents as stated — and checks that the result's decryption state has the
-  original's file key and methods (`sameCrypt`).
+  original's file key and methods (`sameCrypt`) and, since task 9.5e2, that it is the
+  original's state in every field (`sameState`: the whole handler incl. `/EncryptMetadata`
+  and the crypt filters, the key, the `/Encrypt` object, the `/Perms` result). The writer
+  copies `/Encrypt` into the update's trailer verbatim (W6), so the check holds for every
+  correct write; it is what lets `Spec.Write.c7Value'` cover a direct trailer `/Encrypt`
+  and a superseded (W11) indirect one without a side condition.
 * W2. The page indices of `marks` are distinct and in range; each annotation dictionary is
   canonical with in-range references (the printer's round-trip hypotheses,
   `Spec.RoundTripCore.parseObject_print`) and nests within `limits.maxObjectDepth`.
@@ -549,14 +554,37 @@ def sameCrypt : Option Crypt.State → Option Crypt.State → Bool
       decide (a.handler.stmF = b.handler.stmF) && decide (a.encRef = b.encRef)
   | _, _ => false
 
-/-- The object check: the result opens strictly with the decryption state `crypt` of the
-original (`sameCrypt`) and returns every written object and every auxiliary stream (as
-decrypted bodies, rule W10). -/
+/-- Whether two security handlers agree in every field (rule W10, task 9.5e2): algorithm,
+revision, key length, permissions, the `/O` `/U` `/OE` `/UE` `/Perms` strings,
+`/EncryptMetadata`, the stream and string methods and the named crypt filters. -/
+def sameHandler (a b : Crypt.Handler) : Bool :=
+  decide (a.v = b.v) && decide (a.r = b.r) && decide (a.keyLen = b.keyLen) &&
+    decide (a.p = b.p) && decide (a.o.data = b.o.data) && decide (a.u.data = b.u.data) &&
+    decide (a.oe.data = b.oe.data) && decide (a.ue.data = b.ue.data) &&
+    decide (a.perms.data = b.perms.data) && decide (a.encryptMetadata = b.encryptMetadata) &&
+    decide (a.stmF = b.stmF) && decide (a.strF = b.strF) && decide (a.filters = b.filters)
+
+/-- Whether two decryption states are equal in every field (rule W10, task 9.5e2): both
+absent, or the same handler (`sameHandler`), file key, encryption-dictionary object and
+`/Perms` result. Stronger than `sameCrypt`; the self-check uses both. -/
+def sameState : Option Crypt.State → Option Crypt.State → Bool
+  | none, none => true
+  | some a, some b =>
+    sameHandler a.handler b.handler && decide (a.fileKey.data = b.fileKey.data) &&
+      decide (a.encRef = b.encRef) && decide (a.permsOk = b.permsOk)
+  | _, _ => false
+
+/-- The object check: the result opens strictly with exactly the decryption state `crypt`
+of the original (`sameCrypt`, and since task 9.5e2 `sameState`: every field, so the
+`/Encrypt` dictionary the result is read with — direct in the update's trailer or an
+indirect object — defines the same handler) and returns every written object and every
+auxiliary stream (as decrypted bodies, rule W10). -/
 def checkObjects (limits : Limits) (out : ByteArray) (objs : List (Nat × Nat × PdfObject))
     (aux : List (Nat × IndirectBody) := []) (crypt : Option Crypt.State := none) : Bool :=
   match Open.openFile limits out with
   | .ok d' => !d'.repaired && objs.all (fun o => bodyIs (d'.getObject limits o.1 o.2.1) o.2.2) &&
-      aux.all (fun a => auxIs (d'.getObject limits a.1 0) a.2) && sameCrypt d'.crypt crypt
+      aux.all (fun a => auxIs (d'.getObject limits a.1 0) a.2) && sameCrypt d'.crypt crypt &&
+      sameState d'.crypt crypt
   | .error _ => false
 
 /-! ## Entry point -/
