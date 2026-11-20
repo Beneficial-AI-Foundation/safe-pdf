@@ -1188,3 +1188,12 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Spec.Write.writeAnnots_value'
 #print axioms SafePdf.Spec.Write.c7Value'
 #print axioms SafePdf.Spec.Write.c7ValueAnnots'
+-- Phase 8, task 8.6: image memory bounds
+#print axioms SafePdf.Core.Raster.Image.rowRGBA_size
+#print axioms SafePdf.Core.Raster.Image.Src.row_size
+#print axioms SafePdf.Core.Raster.Image.gridRow_size
+#print axioms SafePdf.Core.Raster.Image.gridRows_size
+#print axioms SafePdf.Core.Raster.Image.pushSums_size
+#print axioms SafePdf.Core.Raster.Image.boxGrid_size
+#print axioms SafePdf.Core.Raster.Image.fitTarget_le
+#print axioms SafePdf.Core.Raster.Image.finishTo_dims
