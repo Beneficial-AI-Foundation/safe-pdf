@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a, 8.2b; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -13,6 +13,9 @@
 #      page 2 and Prior at its top the bottom of page 1;
 #   1d. a generated two-page text PDF (SAFEPDF_VIEWER_SMOKE_MODE=text): select all + copy
 #      gives the page text, double click a word, drag a range, search across pages (8.2c);
+#   1e. a generated three-page PDF with page labels, an outline, an internal and a URI link
+#      (SAFEPDF_VIEWER_SMOKE_MODE=nav): outline clicks, link hover/click, back/forward, the
+#      URI confirmation dialog and clipboard, Ctrl+G with labels, F9 (8.2d);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -225,6 +228,101 @@ print("word highlight %s: %d/%d dark pixels (%d on the page)" % (r[0], dark, tot
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-text" "$work/text.json" || fail=1
+
+# 1e. Outline, links, history, page labels (task 8.2d) on a generated three-page PDF labelled
+# i, ii, 1 (SAFEPDF_VIEWER_SMOKE_MODE=nav): the outline panel opens with Intro, Chapter (a
+# UTF-16 title) > Section; hovering the internal link shows a hand cursor and its target, a
+# click jumps to page 3, Alt+Left/Alt+Right walk the history; the URI link (an address full
+# of Tcl metacharacters) shows the confirmation dialog with the exact address, which (auto-
+# confirmed) lands on the clipboard; clicking Section goes to page 2 (named destination),
+# Chapter at 200 % to page 3 scrolled to its /XYZ top 400; Ctrl+G accepts labels ("ii" ->
+# page 2, the label "1" -> page 3) and rejects unknown ones; F9 hides the outline.
+python3 -I -c '
+import sys
+uri = b"https://example.org/p?q=[exit_7]&v=$HOME{x}\\"
+pages = [b"0.8 g 72 600 228 40 re f 0.6 g 72 500 228 40 re f\n",
+         b"0.5 g 100 100 200 200 re f\n",
+         b"0 g 72 380 400 20 re f\n"]
+objs = {
+    1: b"<< /Type /Catalog /Pages 2 0 R /Outlines 9 0 R /Names << /Dests 13 0 R >> "
+       b"/PageLabels << /Nums [0 << /S /r >> 2 << /S /D >>] >> >>",
+    2: b"<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>",
+    9: b"<< /Type /Outlines /First 10 0 R /Last 11 0 R /Count 3 >>",
+    10: b"<< /Title (Intro) /Parent 9 0 R /Next 11 0 R /Dest [3 0 R /Fit] >>",
+    11: b"<< /Title <FEFF0043006800610070007400650072> /Parent 9 0 R /Prev 10 0 R "
+        b"/First 12 0 R /Last 12 0 R /Count 1 /Dest [7 0 R /XYZ 0 400 0] >>",
+    12: b"<< /Title (Section) /Parent 11 0 R /Dest (sec) >>",
+    13: b"<< /Names [(sec) [5 0 R /XYZ null null null]] >>",
+    14: b"<< /Type /Annot /Subtype /Link /Rect [72 600 300 640] /Border [0 0 0] "
+        b"/Dest [7 0 R /Fit] >>",
+    15: b"<< /Type /Annot /Subtype /Link /Rect [72 500 300 540] /Border [0 0 0] "
+        b"/A << /S /URI /URI (" + uri.replace(b"\\", b"\\\\") + b") >> >>",
+}
+for i, c in enumerate(pages):
+    annots = b" /Annots [14 0 R 15 0 R]" if i == 0 else b""
+    objs[3 + 2 * i] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R"
+                       % (4 + 2 * i) + annots + b" >>")
+    objs[4 + 2 * i] = b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream"
+n = max(objs) + 1
+out = bytearray(b"%PDF-1.4\n")
+offs = {}
+for k in sorted(objs):
+    offs[k] = len(out)
+    out += b"%d 0 obj\n" % k + objs[k] + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % n
+out += b"".join(b"%010d 00000 n \n" % offs[k] for k in range(1, n))
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n, x)
+open(sys.argv[1], "wb").write(out)
+open(sys.argv[2], "wb").write(uri)
+' "$work/nav.pdf" "$work/nav-uri.txt"
+mkdir -p "$work/out-nav"
+SAFEPDF_VIEWER_SMOKE_MODE=nav run_viewer "$work/out-nav" "$work/nav.pdf"
+cat "$work/out-nav/nav.txt"
+echo "uri shown: $(cat "$work/out-nav/uri-shown.txt"); clipboard: $(cat "$work/out-nav/uri-clip.txt")"
+python3 -I -c '
+import sys
+d = sys.argv[1]
+uri = open(sys.argv[2], encoding="ascii").read()
+v = dict(l.split(": ", 1) for l in open(d + "/nav.txt", encoding="utf-8").read().splitlines()
+         if ": " in l)
+rd = lambda n: open(d + "/" + n, encoding="utf-8").read()
+want = {
+    "title0": "nav.pdf - page i (1/3) - safe-pdf",
+    "outline-shown": "true",
+    "outline-titles": "Intro|Chapter|Section",
+    "outline-depths": "[0, 0, 1]",
+    "links-page1": "2",
+    "cursor-internal": "hand2",
+    "status-hover-internal": "go to page 1 (3/3)",
+    "page-after-link": "3",
+    "title-after-link": "nav.pdf - page 1 (3/3) - safe-pdf",
+    "page-after-back": "1",
+    "page-after-forward": "3",
+    "page-after-back2": "1",
+    "cursor-uri": "hand2",
+    "status-hover-uri": "external link (click to copy the address): " + uri,
+    "page-after-uri": "1",
+    "page-after-outline-section": "2",
+    "title-after-outline-section": "nav.pdf - page ii (2/3) - safe-pdf",
+    "page-after-outline-chapter": "3",
+    "page-after-goto-ii": "2",
+    "page-after-goto-1": "3",
+    "page-after-goto-nope": "3",
+    "outline-shown-after-f9": "false",
+    "panes-after-f9": ".v",
+}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if rd("uri-shown.txt") != uri: errs.append("dialog showed %r, not %r" % (rd("uri-shown.txt"), uri))
+if rd("uri-clip.txt") != uri: errs.append("clipboard holds %r, not %r" % (rd("uri-clip.txt"), uri))
+if "not opened" not in v.get("status-after-uri", ""): errs.append("URI status: %r" % v.get("status-after-uri"))
+if "no page with label" not in v.get("status-goto-nope", ""): errs.append("Ctrl+G nope: %r" % v.get("status-goto-nope"))
+# Chapter: /XYZ top 400 on a 792 pt page puts the window top at (792 - 400) / 792 of the page.
+y = float(v.get("yview-after-outline-chapter", "0 0").split()[0])
+if not 0.45 <= y <= 0.53: errs.append("outline /XYZ position not applied: yview %r" % y)
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-nav" "$work/nav-uri.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"

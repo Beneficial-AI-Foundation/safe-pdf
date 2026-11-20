@@ -19,13 +19,13 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation)
 
-* Window: toolbar (Open…, `< Prev`, `Next >`, `-`, `+`, `100%`, `Fit page`, `Fit width`,
+* Window: toolbar (Open…, Outline, Back, Forward, `< Prev`, `Next >`, Go to…, `-`, `+`, `100%`, `Fit page`, `Fit width`,
   `Rotate left`, `Rotate right`, "page k of n", zoom %), a scrollable canvas (scroll bars)
   with the current page, a status line (file, page, zoom, rotation, pixel size, render time
   or "from cache", notes, or the error).
-* Title: `NAME - page k/n - safe-pdf`.
+* Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
 * **Zoom** (`View.Mode`): fit page (default), fit width, or a fixed percentage of actual size,
@@ -114,8 +114,67 @@ page copies exactly the page text of the text view.
 | `Enter`, `F3` / `Shift+Enter`, `Shift+F3` | next / previous hit |
 | `Escape` (in the find bar) | close the find bar |
 
-Later tasks: 8.2d outline/links/page labels; continuous scrolling (several pages on one
-canvas) is optional and not done.
+## Outline, links, history, page labels (8.2d)
+
+Pure logic in `SafePdf/Shell/App/Links.lean` (Tk-free, `#guard` checks and theorems); all
+data comes from the verified navigation layer `Core.Doc.Nav` (task 4.2: visited sets cut
+outline and name-tree cycles, every walk is bounded by the object count).
+
+* **Outline panel**: a `ttk::treeview` in the left pane of a paned window (drag the sash to
+  resize). It opens automatically when the document has an outline; **F9**, the *Outline*
+  button or the right-button menu toggle it. Items come from `Nav.outline` (flat preorder list
+  with depths; a depth more than one below the previous item is clamped so that every item has
+  a parent), titles decoded as PDF text strings (`Links.textString`: UTF-16BE, UTF-8 or
+  PDFDocEncoding; control and bidi-override characters become spaces; at most 500
+  characters), items with a positive `/Count` start open. Clicking an item (not its
+  expand arrow) or Enter on it activates its destination.
+* **Destinations**: the page of an explicit destination (also reached through a named
+  destination: catalog `/Dests` or the `/Names /Dests` tree, `Nav.resolveDest`) and, when
+  the fit spec gives them, the left/top coordinates (`/XYZ`, `/FitH`, `/FitV`, `/FitR`,
+  `/FitBH`, `/FitBV`): that page point is mapped with `Geom.toScreen` (C2) and scrolled to
+  the window's top-left corner (a missing coordinate is the page's left or top edge). The
+  viewer keeps its own zoom: the `/XYZ` zoom and the `/Fit*` zoom modes are not applied.
+* **Links** (`Links.pageLinks`: the page's `/Annots` `/Link` annotations as `Nav.pageLinks`
+  reads them, plus the `/URI` string of a URI action, which `Nav` does not keep). Moving the
+  pointer over a link turns the cursor into a hand and shows the target in the status line:
+  `go to page N` (with the label: `go to page iii (3/120)`), the full address of a URI, an
+  unknown named destination, or another action type (`/Launch`, `/GoToR`, `/JavaScript`, …:
+  `not followed`); leaving the link restores the status line. Overlapping links: the last
+  one in `/Annots` order wins (it is painted on top). A **click** (press and release at the
+  same point; a drag still selects text) on an internal link jumps.
+* **URI links are never opened.** A click opens a modal *External link* dialog that shows the
+  exact address in a read-only text widget (the address enters Tk as one `Tcl.quote`d word
+  and is inserted by variable substitution, never evaluated) with *Copy address* and *Cancel*
+  (default; Escape and closing the window cancel). Only *Copy address* puts it on the
+  clipboard. No browser is launched in this task. The address is shown as `Links.uriText`:
+  printable ASCII as written, every other byte (space, control characters, non-ASCII)
+  percent-encoded (`%20`, `%E2%80%AE`), so nothing in it can be invisible or reorder the
+  text (`Links.uriText_ascii` proves the result is printable ASCII; a URI is 7-bit ASCII by
+  §12.6.4.8, so a conforming address is shown unchanged).
+* **History**: every jump (link, outline item, Ctrl+G) records where the view was (page and
+  scroll fractions) on a back stack and clears the forward stack, browser-style; **Alt+Left**
+  / **Alt+Right** (and the *Back* / *Forward* buttons) move through it (at most 100 entries
+  each way; `Links.History.back_push`: Back right after a jump returns to where it started,
+  Forward then returns). Ordinary paging and scrolling are not recorded.
+* **Page labels** (`Nav.labelTable`, one number-tree walk at open): the title, the toolbar
+  and the status line say `page iii (3/120)`, or `page 3/120` when the label is the page
+  number. **Ctrl+G** (or *Go to…*) opens a go-to bar: an exact label first, then a page
+  number `1..n`, then a label ignoring ASCII case (`Links.gotoPage`); so with labels
+  `i, ii, 1, 2` the input `1` goes to the third page. Unknown input leaves the bar open
+  with an error in the status line; Escape closes it.
+
+| Key / mouse | Action |
+|---|---|
+| `F9` | show / hide the outline panel |
+| click on an outline item | go to its destination |
+| pointer over a link | hand cursor, target in the status line |
+| click on a link | internal: jump; URI: confirmation dialog (copy the address) |
+| `Alt+Left` / `Alt+Right` | back / forward |
+| `Ctrl+G` | go to a page label or number |
+
+Not done: launching a browser (the address can only be copied), remote destinations
+(`/GoToR`), the `/XYZ` zoom, link borders/highlighting (`/H`), keyboard focus traversal of
+links. Continuous scrolling (several pages on one canvas) is optional and not done.
 
 ## Structure
 
@@ -126,7 +185,8 @@ canvas) is optional and not done.
 | `SafePdf/Shell/App/Tcl.lean`, `TclLemmas.lean` | Tcl scripts as data and the proof that `Tcl.quote` is injection-free (`parseWordStr_quote`, `parseScript_render`, …). Copied from bib-lean `BibLean/Gui/Tcl.lean` + `Tcl/Lemmas.lean`. Built by default (lib `SafePdfApp`). |
 | `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
-| `SafePdf/Shell/App/Viewer.lean` | State, rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, smoke mode. |
+| `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
+| `SafePdf/Shell/App/Viewer.lean` | State, rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
 **No data in script text.** Every Tcl command that carries data (file names, error text,
@@ -173,6 +233,21 @@ the page ↔ device mapping, since standard fonts without an embedded program ar
 Ctrl+F with `ZEBRA  crossing` + Enter must move to page 2 and report `hit 1/1 on page 2` with
 a highlight; F3 and Shift+F3 wrap to the same hit; an absent phrase reports `not found`;
 Escape removes the highlights.
+
+Navigation (8.2d) runs in a third variant (`SAFEPDF_VIEWER_SMOKE_MODE=nav`,
+`Viewer.smokeNav`) on a generated three-page PDF labelled `i`, `ii`, `1` with an outline
+(`Intro`; `Chapter`, a UTF-16 title, `/XYZ 0 400` on page 3; its child `Section`, page 2
+through a named destination in the `/Names` tree), an internal link (to page 3) and a URI
+link on page 1 whose address is full of Tcl metacharacters
+(`https://example.org/p?q=[exit_7]&v=$HOME{x}\`). Driven by generated pointer and key events,
+it checks: the outline panel opens with the three titles and depths; the title says
+`page i (1/3)`; hovering the internal link gives the hand cursor and `go to page 1 (3/3)`; a
+click jumps to page 3; Alt+Left, Alt+Right, Alt+Left go to pages 1, 3, 1; hovering the URI
+link shows the exact address; a click opens the dialog, whose text widget holds exactly the
+address (read just before the dialog confirms itself), and the clipboard then holds exactly
+the address; clicking `Section` goes to page 2; at 200 % clicking `Chapter` goes to page 3
+with the window top at y = 400 (yview within 0.45–0.53); Ctrl+G `ii` → page 2, `1` → page 3
+(label before number), `nope` → error; F9 hides the panel.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
