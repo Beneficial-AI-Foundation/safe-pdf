@@ -302,8 +302,10 @@ def simpleWidth (sm : SimpleMetrics) (t1 : Option Font.Type1.Font1) (code : Nat)
 only, e.g. `<63> <000d>`, is a producer error and falls through). -/
 def printable (s : String) : Bool := s.toList.any fun (c : Char) => 32 ≤ c.toNat
 
-/-- The Unicode of a one-byte code of a simple font (§9.10.2 fallback chain). -/
-def simpleUnicode (tu : Option Font.CMap.CMap) (enc : Encoding) (c : List UInt8) : Option String :=
+/-- The Unicode of a one-byte code of a simple font (§9.10.2 fallback chain). `dingbats`
+enables the ZapfDingbats `aNN` glyph names (task 6.4b), which other fonts reuse for unrelated
+glyphs. -/
+def simpleUnicode (dingbats : Bool) (tu : Option Font.CMap.CMap) (enc : Encoding) (c : List UInt8) : Option String :=
   match c with
   | [b] =>
     match (tu.bind (·.lookup c)).filter printable with
@@ -313,7 +315,7 @@ def simpleUnicode (tu : Option Font.CMap.CMap) (enc : Encoding) (c : List UInt8)
         else none
       match enc.glyph b.toNat with
       | some g =>
-        match glyphToUnicode g with
+        match Font.glyphToUnicodeIn dingbats g with
         | some u => some u
         | none => ascii
       | none => ascii
@@ -384,7 +386,7 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     (⟨.one, (fun c => match c with
         | [b] => Fixed.mul (sm.width b.toNat).1 scale
         | _ => Fixed.zero),
-      simpleUnicode tu sm.encoding, s!"Type3{tuDesc}", type3SizeScale sm scale⟩, s1)
+      simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding, s!"Type3{tuDesc}", type3SizeScale sm scale⟩, s1)
   else
     let hasWidths := match getR resolve fd "Widths" with
       | some (.array _) => true
@@ -400,7 +402,7 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     (⟨.one, (fun c => match c with
         | [b] => simpleWidth sm t1 b.toNat
         | _ => Fixed.zero),
-      simpleUnicode tu sm.encoding, s!"{subtype} {base}{tuDesc}{t1Desc}", Fixed.one⟩, s2)
+      simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding, s!"{subtype} {base}{tuDesc}{t1Desc}", Fixed.one⟩, s2)
 
 /-- Maximum number of font objects loaded per page. -/
 def maxFonts : Nat := 1024
