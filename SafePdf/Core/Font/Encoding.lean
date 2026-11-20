@@ -1,4 +1,5 @@
 import SafePdf.Core.Object
+import SafePdf.Core.Font.GlyphList
 
 /-!
 # Simple-font encodings and glyph names (Plan.md §6 Phase 6, task 6.4)
@@ -60,7 +61,14 @@ Unicode fallback used by text extraction when a font has no `/ToUnicode` CMap (t
   `uXXXX`–`uXXXXXX`, else nothing. For a ZapfDingbats font (`glyphToUnicodeIn true`) the
   ITC Zapf Dingbats Glyph List (`dingbatNames`, `a1`…`a206`) is tried first; `glyphToUnicode`
   is the variant for any other font. Hex digits are accepted in either case (AGL requires upper case; pdf.js accepts
-  both) and surrogates / values above `0x10FFFF` are rejected. `afii*` names are not covered.
+  both) and surrogates / values above `0x10FFFF` are rejected.
+* **Full glyph list (task 6.7b).** A component that the subset does not know is looked up in
+  `aglTable`, the whole AGL 2.0 (4281 names: `afii*`, `dotlessj`, small caps, …) plus the 271
+  TeX font names of lcdf-typetools' `texglyphlist.txt` (CMSY `negationslash`, `angbracketleft`,
+  CMTT `visiblespace`, AMS relations, …), data in `GlyphList.lean`, parsed once and searched by
+  bisection (`bsearch`). After `uni`/`u` names, a non-ZapfDingbats component `aNN` (two to five
+  decimal digits, `32..0xFFFF`) maps to `U+NN` as in MuPDF (`aDecimal`: Ghostscript's names for
+  dvips bitmap glyphs). `gNN`, `cidNN`, `index…` and other generated names map to nothing.
 
 Everything is pure and total.
 -/
@@ -744,22 +752,78 @@ def uniGroups : List Char → Option (List Char)
     | none => none
   | _ => none
 
+/-! ### The full glyph list (`GlyphList.lean`, task 6.7b) -/
+
+/-- One line `name;HEX[ HEX…]` of `aglData`: the name and its Unicode sequence (every group
+exactly four to six hex digits and a scalar value), else `none`. -/
+def parseAglLine (l : String) : Option (String × List Char) :=
+  match l.splitOn ";" with
+  | [n, v] =>
+    let groups := v.splitOn " "
+    let cps := groups.filterMap fun g =>
+      if 4 ≤ g.length ∧ g.length ≤ 6 then
+        (parseHexAux 0 g.toList).bind fun x => if isScalar x then some (Char.ofNat x) else none
+      else none
+    if cps.length == groups.length && !n.isEmpty then some (n, cps) else none
+  | _ => none
+
+/-- The full glyph list, parsed once (a closed constant): the AGL 2.0 plus the TeX names of
+`texglyphlist.txt`, sorted by name (`aglTable_sorted`). -/
+def aglTable : Array (String × List Char) :=
+  ((aglData.splitOn "\n").filterMap parseAglLine).toArray
+
+/-- Binary search for `k` in the name-sorted table `t` between `lo` (inclusive) and `hi`
+(exclusive); terminates on `hi - lo`. -/
+def bsearch (t : Array (String × List Char)) (k : String) (lo hi : Nat) : Option (List Char) :=
+  if _h : lo < hi then
+    let mid := (lo + hi) / 2
+    match t[mid]? with
+    | some (n, v) =>
+      if k < n then bsearch t k lo mid
+      else if n < k then bsearch t k (mid + 1) hi
+      else some v
+    | none => none
+  else none
+termination_by hi - lo
+
+/-- The Unicode sequence of a glyph name in the full glyph list (`aglTable`). -/
+def aglFullLookup (g : GlyphName) : Option (List Char) := bsearch aglTable g 0 aglTable.size
+
+/-- MuPDF's `aNN` names (decimal, as `fz_unicode_from_glyph_name`): `a` followed by two to five
+decimal digits whose value `v` is in `32..0xFFFF` and a scalar value maps to `U+v` (Type 3 fonts
+of dvips through Ghostscript name glyphs by their code; MuPDF also maps `1..31`, to control
+characters, which extraction would turn into spaces). Not used for ZapfDingbats fonts, whose
+`a1`…`a206` are their own glyph names. -/
+def aDecimal : List Char → Option Char
+  | 'a' :: ds@(_ :: _ :: _) =>
+    if ds.length ≤ 5 ∧ ds.all Char.isDigit then
+      let v := ds.foldl (fun a c => a * 10 + (c.toNat - '0'.toNat)) 0
+      if 32 ≤ v ∧ v ≤ 0xFFFF ∧ isScalar v then some (Char.ofNat v) else none
+    else none
+  | _ => none
+
 /-- Map one `_`-separated component of a glyph name (AGL specification, step 3); with
-`dingbats` (the font is ZapfDingbats) the ITC Zapf Dingbats Glyph List is tried first. -/
+`dingbats` (the font is ZapfDingbats) the ITC Zapf Dingbats Glyph List is tried first. Then the
+hand-checked AGL subset (`aglLookup`), the full glyph list with the TeX names
+(`aglFullLookup`), `uniXXXX…`, `uXXXX`–`uXXXXXX`, and (not for ZapfDingbats) MuPDF's decimal
+`aNN` (`aDecimal`). -/
 def componentToUnicode (dingbats : Bool) (comp : List Char) : List Char :=
   let name := String.ofList comp
   match (if dingbats then dingbatLookup name else none).or (aglLookup name) with
   | some u => [Char.ofNat u]
   | none =>
-    match comp with
-    | 'u' :: 'n' :: 'i' :: rest@(_ :: _) => (uniGroups rest).getD []
-    | 'u' :: rest =>
-      if 4 ≤ rest.length ∧ rest.length ≤ 6 then
-        match parseHexAux 0 rest with
-        | some v => if isScalar v then [Char.ofNat v] else []
-        | none => []
-      else []
-    | _ => []
+    match aglFullLookup name with
+    | some cs => cs
+    | none =>
+      match comp with
+      | 'u' :: 'n' :: 'i' :: rest@(_ :: _) => (uniGroups rest).getD []
+      | 'u' :: rest =>
+        if 4 ≤ rest.length ∧ rest.length ≤ 6 then
+          match parseHexAux 0 rest with
+          | some v => if isScalar v then [Char.ofNat v] else []
+          | none => []
+        else []
+      | _ => if dingbats then [] else (aDecimal comp).toList
 
 /-- The Unicode text of a glyph name per the Adobe Glyph List specification, for a font that
 is ZapfDingbats (`dingbats = true`: `a1`…`a206` map through the ITC Zapf Dingbats Glyph
@@ -896,6 +960,40 @@ def glyphToUnicode (g : GlyphName) : Option String :=
 #guard glyphToUnicodeIn true "a163" == some "↔"
 #guard glyphToUnicode "apple" == some (String.ofList [Char.ofNat 0xF8FF])
 #guard glyphToUnicodeIn true "space" == some " "
+-- The full glyph list (task 6.7b): parsed completely, sorted, and consistent with the subset.
+#guard aglTable.size == 4552 && (aglData.splitOn "\n").length == 4552
+#guard (List.range (aglTable.size - 1)).all fun i =>
+  match aglTable[i]?, aglTable[i + 1]? with
+  | some a, some b => decide (a.1 < b.1)
+  | _, _ => false
+#guard (aglNames.zip aglCodes).all fun (n, c) => aglFullLookup n == some [Char.ofNat c]
+#guard (aglSymbolNames.zip aglSymbolCodes).all fun (n, c) => aglFullLookup n == some [Char.ofNat c]
+#guard glyphToUnicode "dotlessj" == some (String.ofList [Char.ofNat 0xF6BE])
+#guard glyphToUnicode "afii10017" == some "А"
+#guard glyphToUnicode "Ng" == some "Ŋ"
+#guard glyphToUnicode "zukatakana" == some "ズ"
+-- TeX names (texglyphlist): CMSY, CMEX, CMTT, AMS.
+#guard glyphToUnicode "negationslash" == some (String.ofList [Char.ofNat 0x0338])
+#guard glyphToUnicode "angbracketleft" == some "⟨"
+#guard glyphToUnicode "visiblespace" == some "␣"
+#guard glyphToUnicode "turnstileleft" == some "⊢"
+#guard glyphToUnicode "minusplus" == some "∓"
+#guard glyphToUnicode "circledot" == some "⊙"
+#guard glyphToUnicode "owner" == some "∋"
+#guard glyphToUnicode "SS" == some "SS"
+#guard glyphToUnicode "Digamma" == some (String.ofList [Char.ofNat 0x1D7CB])
+#guard glyphToUnicode "altselector" == none
+#guard glyphToUnicode "negationslash.alt" == some (String.ofList [Char.ofNat 0x0338])
+-- MuPDF's decimal `aNN` names, not for ZapfDingbats.
+#guard glyphToUnicode "a66" == some "B"
+#guard glyphToUnicode "a8364" == some "€"
+#guard glyphToUnicode "a1" == none
+#guard glyphToUnicode "a65536" == none
+#guard glyphToUnicode "a66x" == none
+#guard glyphToUnicode "a0" == none
+#guard glyphToUnicode "a12" == none
+#guard glyphToUnicodeIn true "a250" == none
+#guard glyphToUnicode "g66" == none
 -- A non-embedded Symbol / ZapfDingbats font without `/Encoding` uses its built-in encoding.
 #guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "Symbol"))]
     none).glyph 0x61 == some "alpha"

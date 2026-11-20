@@ -14,6 +14,7 @@ import Tests.RasterGeom
 import Tests.CFFText
 import Tests.RasterFill
 import Tests.TextLayout
+import Tests.TextUnicode
 
 /-!
 # Test runner
@@ -47,7 +48,8 @@ def suites : List Suite :=
     { name := "raster-geom", run := SafePdf.Tests.RasterGeom.run },
     { name := "cff-text", run := SafePdf.Tests.CFFText.run },
     { name := "raster-fill", run := SafePdf.Tests.RasterFill.run },
-    { name := "text-layout", run := SafePdf.Tests.TextLayout.run } ]
+    { name := "text-layout", run := SafePdf.Tests.TextLayout.run },
+    { name := "text-unicode", run := SafePdf.Tests.TextUnicode.run } ]
 
 end SafePdf.Tests
 
