@@ -29,11 +29,15 @@ Unicode fallback used by text extraction when a font has no `/ToUnicode` CMap (t
     greaterequal partialdiff summation product pi integral Omega radical approxequal Delta
     lozenge apple`) are **not** in PDF's MacRomanEncoding and stay unassigned.
   - PDFDoc: `0x18`–`0x1F` are the spacing accents, `0x7F`, `0x9F`, `0xAD` are undefined.
-* **Symbol and ZapfDingbats (Annex D.5, D.6).** `symbolEncoding` (190 codes) and
+* **Symbol and ZapfDingbats (Annex D.5, D.6).** `symbolEncoding` (189 codes) and
   `zapfDingbatsEncoding` (202 codes) are the built-in encodings of the two standard symbolic
-  fonts, transcribed from memory of Adobe's `Symbol.afm` (001.008, which encodes `Euro` at
-  `0xA0`) and `ZapfDingbats.afm` (002.000) `C` entries, which Annex D reproduces (no file was
-  downloaded); counts and spot checks are `#guard`s below. They are the implicit base of a font
+  fonts: the `C` entries of Adobe's `Symbol.afm` (001.008, which encodes `Euro` at `0xA0`) and
+  `ZapfDingbats.afm` (002.000), which Annex D reproduces. Written from memory in 6.4b and
+  verified in 6.4c, code by code, against the Adobe Core14 AFMs as redistributed by Apache PDFBox 3.0.3 (`pdfbox/src/main/resources/org/apache/pdfbox/resources/afm/`); the one mismatch (`apple` at `0xF0`: the
+  AFM lists `apple` unencoded, `C -1`, as do pdf.js and PDFBox) was fixed. The glyph-name →
+  Unicode tables below were verified against Adobe's `glyphlist.txt` and `zapfdingbats.txt`
+  (github.com/adobe-type-tools/agl-aglfn @ 4036a9c) with no mismatch. Counts and spot checks
+  are `#guard`s below. They are the implicit base of a font
   whose `/BaseFont` names one of them (`symbolicBuiltin?`, same prefixes as
   `Std14.ofBaseFont`, subset tag stripped) when the caller has no program encoding.
 * **`/Differences`** (§9.6.5.1, Table 112): an integer sets the current code, each following
@@ -226,7 +230,8 @@ def pdfDocNames : Array String := #[
   ]
 
 /-- Built-in encoding of the standard **Symbol** font by code (ISO 32000-2 Annex D.5, Adobe
-`Symbol.afm` 001.008); `""` = unassigned. 190 codes: `0x20`–`0x7E` and `0xA0`–`0xFE`. -/
+`Symbol.afm` 001.008); `""` = unassigned. 189 codes: `0x20`–`0x7E` and `0xA0`–`0xFE` except
+`0xF0` (the AFM's unencoded `apple` glyph has no code). -/
 def symbolNames : Array String := #[
   "", "", "", "", "", "", "", "",
   "", "", "", "", "", "", "", "",
@@ -258,7 +263,7 @@ def symbolNames : Array String := #[
   "logicalnot", "logicaland", "logicalor", "arrowdblboth", "arrowdblleft", "arrowdblup", "arrowdblright", "arrowdbldown",
   "lozenge", "angleleft", "registersans", "copyrightsans", "trademarksans", "summation", "parenlefttp", "parenleftex",
   "parenleftbt", "bracketlefttp", "bracketleftex", "bracketleftbt", "bracelefttp", "braceleftmid", "braceleftbt", "braceex",
-  "apple", "angleright", "integral", "integraltp", "integralex", "integralbt", "parenrighttp", "parenrightex",
+  "", "angleright", "integral", "integraltp", "integralex", "integralbt", "parenrighttp", "parenrightex",
   "parenrightbt", "bracketrighttp", "bracketrightex", "bracketrightbt", "bracerighttp", "bracerightmid", "bracerightbt", ""
   ]
 
@@ -833,8 +838,8 @@ def glyphToUnicode (g : GlyphName) : Option String :=
 -- Every ZapfDingbats glyph has a code point through the dingbats list.
 #guard zapfDingbatsEncoding.all fun g => match g with
   | some n => (glyphToUnicodeIn true n).isSome | none => true
--- Symbol (Annex D.5): 190 encoded glyphs; ZapfDingbats (Annex D.6): 202.
-#guard (symbolEncoding.filterMap id).size == 190
+-- Symbol (Annex D.5): 189 encoded glyphs; ZapfDingbats (Annex D.6): 202.
+#guard (symbolEncoding.filterMap id).size == 189
 #guard (zapfDingbatsEncoding.filterMap id).size == 202
 #guard aglSymbolNames.size == aglSymbolCodes.size && dingbatNames.size == dingbatCodes.size
 #guard dingbatNames.size == 201
@@ -844,11 +849,27 @@ def glyphToUnicode (g : GlyphName) : Option String :=
 #guard symbolEncoding.glyph 0x6D == some "mu"
 #guard symbolEncoding.glyph 0xA0 == some "Euro"
 #guard symbolEncoding.glyph 0xD5 == some "product"
-#guard symbolEncoding.glyph 0xF0 == some "apple"
+#guard symbolEncoding.glyph 0xF0 == none
+#guard symbolEncoding.glyph 0xEF == some "braceex"
+#guard symbolEncoding.glyph 0xF1 == some "angleright"
+#guard symbolEncoding.glyph 0x7E == some "similar"
+#guard symbolEncoding.glyph 0xA1 == some "Upsilon1"
+#guard symbolEncoding.glyph 0xFE == some "bracerightbt"
+#guard symbolEncoding.glyph 0xFF == none
+#guard symbolEncoding.glyph 0x9F == none
 #guard symbolEncoding.glyph 0x7F == none
 #guard zapfDingbatsEncoding.glyph 0x34 == some "a20"
 #guard zapfDingbatsEncoding.glyph 0x6C == some "a71"
 #guard zapfDingbatsEncoding.glyph 0x80 == some "a89"
+#guard zapfDingbatsEncoding.glyph 0x81 == some "a90"
+#guard zapfDingbatsEncoding.glyph 0x84 == some "a91"
+#guard zapfDingbatsEncoding.glyph 0x86 == some "a205"
+#guard zapfDingbatsEncoding.glyph 0x88 == some "a206"
+#guard zapfDingbatsEncoding.glyph 0x8D == some "a96"
+#guard zapfDingbatsEncoding.glyph 0x8E == none
+#guard zapfDingbatsEncoding.glyph 0x7F == none
+#guard zapfDingbatsEncoding.glyph 0xA0 == none
+#guard zapfDingbatsEncoding.glyph 0xA1 == some "a101"
 #guard zapfDingbatsEncoding.glyph 0xFE == some "a191"
 #guard zapfDingbatsEncoding.glyph 0xF0 == none
 #guard glyphToUnicode "minus" == some "−"
@@ -863,6 +884,17 @@ def glyphToUnicode (g : GlyphName) : Option String :=
 #guard glyphToUnicodeIn true "a35" == some "★"
 #guard glyphToUnicodeIn true "a120" == some "①"
 #guard glyphToUnicodeIn true "a1" == some "✁"
+-- The ornamental brackets 0x80–0x8D map to U+2768–U+2775 (Adobe `zapfdingbats.txt`).
+#guard (List.range 14).all fun i =>
+  ((zapfDingbatsEncoding.glyph (0x80 + i)).bind (glyphToUnicodeIn true)) ==
+    some (String.ofList [Char.ofNat (0x2768 + i)])
+#guard glyphToUnicodeIn true "a89" == some "❨"
+#guard glyphToUnicodeIn true "a96" == some "❵"
+#guard glyphToUnicodeIn true "a191" == some "➾"
+#guard glyphToUnicodeIn true "a160" == some "➔"
+#guard glyphToUnicodeIn true "a161" == some "→"
+#guard glyphToUnicodeIn true "a163" == some "↔"
+#guard glyphToUnicode "apple" == some (String.ofList [Char.ofNat 0xF8FF])
 #guard glyphToUnicodeIn true "space" == some " "
 -- A non-embedded Symbol / ZapfDingbats font without `/Encoding` uses its built-in encoding.
 #guard (simpleEncoding id [(Name.ofString "BaseFont", .name (Name.ofString "Symbol"))]
