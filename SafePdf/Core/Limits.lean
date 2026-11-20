@@ -80,6 +80,46 @@ structure Limits where
   stores one byte per entry, so real fonts have at most 256). Excess yields
   `Error.limitExceeded .fontDicts`. -/
   maxFontDicts : Nat := 256
+  /-- Maximum number of chords one cubic Bézier segment is flattened into (task 7.2a,
+  `Core.Raster.Fill.segCount`; values below 1 act as 1). Makes the edge count of a flattened
+  path data-independent: at most `curveSegCap · #segments + 1` edges
+  (`Fill.flatten_size_le`). A curve that would need more chords for the flattening tolerance
+  is flattened **coarser** (a documented degradation: the error bound `Fill.flatten_err_tol`
+  then holds only under the cap condition of `Fill.segCount_tol_of_cap`), so no `LimitKind`
+  corresponds to it. At the default tolerance (0.1 px) 512 chords suffice for curves whose
+  control polygon spans up to roughly 10⁵ pixels. -/
+  curveSegCap : Nat := 512
+  /-- Device coordinates are clamped to `±coordLimit` subpixel units (`1/256` px; default
+  `2³⁰`, about 4.2 million pixels) when a page-space path is mapped to the device
+  (`Core.Raster.Fill.ofContentPath`, the stroker's offsets). Far beyond any window, it keeps
+  the integers of the crossing computation moderate. Clamping only moves points that are
+  millions of pixels off-screen (a documented degradation), so no `LimitKind` corresponds to
+  it. -/
+  coordLimit : Nat := 1 <<< 30
+  /-- Maximum number of dash steps (element changes along the path) per stroked path (task
+  7.2b, `Core.Raster.Stroke.strokeDPath`). The steps are estimated exactly before walking;
+  a path whose estimate exceeds the cap is stroked **solid** instead (a documented
+  degradation, as MuPDF ignores dash patterns that are too fine), so no `LimitKind`
+  corresponds to it. Bounds the stroke edges (`Stroke.strokeEdges_size_le`). -/
+  maxDashSteps : Nat := 100000
+  /-- Maximum number of chords per quarter of the pen ellipse (task 7.2b,
+  `Core.Raster.Stroke.arcCount`; values below 1 act as 1). Every emitted stroke polygon has
+  at most `4 · arcSegCap` vertices. A wider pen than the cap resolves is drawn as a
+  **coarser** polygon (documented degradation), so no `LimitKind` corresponds to it. -/
+  arcSegCap : Nat := 64
+  /-- Maximum page width and height in pixels of a rendered page (task 7.2c,
+  `Core.Raster.Clip.pageSize`). The default `16384` keeps the pixel count at
+  `16384² = 2²⁸ = maxImagePixels`. A page that would be larger at the requested zoom is
+  **cropped** to its top-left `maxPageSide × maxPageSide` pixels (documented degradation: the
+  viewer can still show the page at that zoom, scrolled), so no `LimitKind` corresponds to
+  it. -/
+  maxPageSide : Nat := 16384
+  /-- Maximum number of cached clip masks per rendered page (task 7.2c,
+  `Core.Raster.Clip.ClipCache`). A pure performance knob: an evicted mask is recomputed when
+  needed (the work bound `Clip.renderItemsCounted_steps_le` charges every clip as if
+  uncached), so it never changes the output and no `LimitKind` corresponds to it. Memory:
+  at most `clipCacheSize` masks of at most one page each. -/
+  clipCacheSize : Nat := 16
   deriving Repr, Inhabited
 
 namespace Limits

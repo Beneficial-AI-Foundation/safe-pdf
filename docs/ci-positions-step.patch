@@ -1,0 +1,32 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index da8ac13..87b0abf 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -202,6 +202,19 @@ jobs:
+             --json differential-text.json \
+             2>&1 | tee differential-text.log
+ 
++      # Task 6.10 / M6 "all glyph positions within tolerance": per-glyph origins
++      # (SAFEPDF_TEXT_GLYPHS=1) vs MuPDF `mutool draw -F stext` char origins
++      # (Tests/differential/positions.py). Offline self-test on the fixtures, then
++      # the corpus. Report only: no --min-within threshold yet.
++      - name: Glyph-position comparison on the corpus
++        if: always()
++        run: |
++          set -o pipefail
++          python3 -I Tests/differential/positions.py --selftest
++          python3 -I Tests/differential/run.py --comparator positions \
++            --json differential-positions.json \
++            2>&1 | tee differential-positions.log
++
+       # actions/upload-artifact v4.6.2
+       - name: Upload comparison results
+         if: always()
+@@ -217,5 +230,7 @@ jobs:
+             differential-pages.log
+             differential-text.json
+             differential-text.log
++            differential-positions.json
++            differential-positions.log
+           if-no-files-found: warn
+           retention-days: 30

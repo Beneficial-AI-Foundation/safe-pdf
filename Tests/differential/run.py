@@ -12,7 +12,9 @@ a failure.  Exit status 1 only if a comparator that actually ran produced a
 disagreement or an error, or if --min-compared N is given and, for each of the
 selected `objects` / `pages` comparators, fewer than N files had at least one
 object (page) compared, or if --min-similarity X is given and the `text`
-comparator's corpus-wide similarity is below X.
+comparator's corpus-wide similarity is below X, or if --min-within P is given
+and fewer than P percent of the `positions` comparator's measured glyph pairs
+are within tolerance.
 """
 import argparse
 import fnmatch
@@ -202,6 +204,29 @@ def text_summary(stats: dict, min_similarity: Optional[float], name: str = "text
     return lines, sim, fail
 
 
+_POSITIONS = []
+
+
+def _load_positions_module():
+    if not _POSITIONS:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "positions_cmp", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "positions.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _POSITIONS.append(mod)
+    return _POSITIONS[0]
+
+
+def _positions_check(path: str):
+    mod = _load_positions_module()
+    try:
+        return mod.check_file(INSPECT, path)
+    except mod.Skip as e:
+        raise Skip(str(e))
+
+
 # Comparators whose stats carry a "compared" count checked by --min-compared.
 MIN_COMPARED = ("objects", "pages")
 
@@ -220,6 +245,8 @@ COMPARATORS = {
         # Page text vs MuPDF's `mutool draw -F txt`, same metric (text.py, ref "mupdf").
         Comparator("text-mupdf", ["mutool"], "text", lambda p: "",
                    custom=_text_checker("mupdf")),
+        # Per-glyph origins vs MuPDF's `mutool draw -F stext` char origins (positions.py).
+        Comparator("positions", ["mutool"], "text", lambda p: "", custom=_positions_check),
     ]
 }
 # Comparator-specific normalization of OUR dump (applied before compare).
@@ -274,6 +301,9 @@ def main(argv=None) -> int:
     ap.add_argument("--min-similarity", type=float, default=None, metavar="X",
                     help="text comparator: fail when the corpus-wide character-weighted "
                          "similarity is below X (default: report only)")
+    ap.add_argument("--min-within", type=float, default=None, metavar="P",
+                    help="positions comparator: fail when fewer than P percent of the "
+                         "measured glyph pairs are within tolerance (default: report only)")
     ap.add_argument("--no-fold", action="store_true",
                     help="text comparator: do not fold dashes and quotes")
     args = ap.parse_args(argv)
@@ -357,6 +387,14 @@ def main(argv=None) -> int:
                  "excerpt": t[5]}
                 for t in sorted(mod.PAGES, key=lambda t: (t[0], -t[4]))[:50] if t[3] > 0]}
 
+    positions_report = {}
+    if "positions" in names:
+        mod = _load_positions_module()
+        lines, positions_report, fail = mod.summary_lines(stats["positions"], args.min_within)
+        for ln in lines:
+            print(ln)
+        bad = bad or fail
+
     if args.min_compared > 0:
         checked = [n for n in names if n in MIN_COMPARED]
         if not checked:
@@ -375,6 +413,8 @@ def main(argv=None) -> int:
             out = {"counts": counts, "stats": stats, "files_compared": files_compared,
                    "min_compared": args.min_compared, "results": results}
             out.update(text_reports)
+            if "positions" in names:
+                out["positions"] = positions_report
             json.dump(out, fh, indent=1)
     return 1 if bad else 0
 

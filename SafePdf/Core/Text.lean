@@ -101,9 +101,16 @@ end); otherwise it starts a new line. A line's baseline is that of its largest g
 expected results follow MuPDF (`mutool draw -F txt`), except that stacked scripts stay on the
 line (`Tests/TextLayout.lean`). Lines keep content-stream order (which follows columns
 in TeX and word-processor output; a global top-to-bottom sort would interleave columns), glyphs
-inside a line are sorted left to right (stable). A space is inserted where the gap between a
+inside a line are sorted left to right (stable), except that a glyph **attached** to the glyph
+shown before it — moved back behind that glyph's origin, but by less than `attachBack` ‰ of the
+size past its advance end, i.e. overlapping it — keeps content order (`lineOrder`, task 6.7d):
+an accent built as a separate glyph and drawn before its base letter (TeX's `\c{c}`, `\.z`)
+stays before it, as in MuPDF (`¸ca`, `˙z`). A space is inserted where the gap between a
 glyph's advance end and the next origin exceeds `wordGap` ‰ of the font size (gaps from `TJ`
-numbers and `Td` moves alike), unless either side already is a space; an overprinted duplicate
+numbers and `Td` moves alike; 0.15 em, MuPDF's `SPACE_DIST`), unless either side already is a
+space or the text before the gap ends in a character after which MuPDF never inserts one
+(`spaceMayFollow`: U+0700 and above outside U+2000–U+20CF, e.g. the math operators of `a −b`,
+`c ≤d`, and CJK); an overprinted duplicate
 (same text, origin within 10 % of the size: fake bold) is dropped. Lines are separated by a
 newline, with a blank line when the baselines are more than `paraGap` ‰ of the font size apart.
 Coordinates are taken in the frame of each glyph's baseline direction (`dirOf`: the quarter
@@ -909,8 +916,8 @@ structure Options where
   includeInvisible : Bool := true
   /-- Baseline tolerance for one line. -/
   lineTol : Nat := 500
-  /-- Minimum gap that becomes a space. -/
-  wordGap : Nat := 120
+  /-- Minimum gap that becomes a space (MuPDF's `SPACE_DIST`, 0.15 em). -/
+  wordGap : Nat := 150
   /-- Baseline distance above which a blank line separates lines. -/
   paraGap : Nat := 2000
   /-- Largest raise of a smaller-font run (superscript) above the line's baseline, ‰ of the
@@ -921,6 +928,9 @@ structure Options where
   scriptBack : Nat := 500
   /-- How far after the end of the line a script run may start (‰ of the larger size). -/
   scriptAhead : Nat := 1000
+  /-- How far past the previous glyph's advance end a backward-moving glyph may start and still
+  keep content order (`attached`); MuPDF's `SPACE_MAX_DIST` (0.8 em). -/
+  attachBack : Nat := 800
 
 /-- Position along the baseline direction. -/
 def Glyph.u (g : Glyph) : Fixed := (rotFrame g.dir g.x g.y).1
@@ -1004,9 +1014,42 @@ def groupLines (o : Options) (gs : List Glyph) : Array Line :=
   | some l => done.push l
   | none => done
 
-/-- The text of a line: glyphs left to right, spaces at word gaps, overprints dropped. -/
+/-- Whether a space may follow text ending in `s` (MuPDF's `may_add_space`): its last
+character is not a space and lies below U+0700 (Latin, Greek, Cyrillic, Hebrew, Arabic, …) or in
+U+2000–U+20CF (general punctuation, super/subscripts, currency). After mathematical operators,
+arrows or CJK no space is inserted (`a −b`, `≤d`, `∞∈`, as MuPDF). Empty text allows one. -/
+def spaceMayFollow (s : String) : Bool :=
+  match s.toList.getLast? with
+  | none => true
+  | some c => c != ' ' && (c.toNat < 0x700 || (0x2000 ≤ c.toNat && c.toNat ≤ 0x20CF))
+
+/-- Whether `g`, shown right after `p`, is **attached** to it: it starts before `p`'s origin
+(a backward move) but by less than `attachBack` ‰ of the size past `p`'s advance end —
+overlapping glyph boxes, such as a base letter drawn after its accent (TeX's `\c{c}`, `\.z`).
+Attached glyphs keep content order (as MuPDF, which keeps such glyphs on the line in content
+order). -/
+def attached (o : Options) (p g : Glyph) : Bool :=
+  g.dir == p.dir && g.u.raw < p.u.raw &&
+    withinPermille (Fixed.sub g.u p.uEnd) (fmax p.fontSize g.fontSize) o.attachBack
+
+/-- Sort keys of a line's glyphs (content order): a glyph's own position along the baseline,
+or the key of the glyph before it when it is `attached` to it. -/
+def sortKeys (o : Options) (gs : List Glyph) : List (Glyph × Int) :=
+  let (out, _) := gs.foldl (fun (acc : Array (Glyph × Int) × Option (Glyph × Int)) g =>
+    let k := match acc.2 with
+      | some (p, kp) => if attached o p g then kp else g.u.raw
+      | none => g.u.raw
+    (acc.1.push (g, k), some (g, k))) (#[], none)
+  out.toList
+
+/-- The glyphs of a line in reading order: left to right by `sortKeys` (stable), so glyphs
+attached to their predecessor (accents before their base letter) keep content order. -/
+def lineOrder (o : Options) (l : Line) : List Glyph :=
+  ((sortKeys o l.glyphs.toList).mergeSort fun a b => a.2 ≤ b.2).map (·.1)
+
+/-- The text of a line: glyphs in `lineOrder`, spaces at word gaps, overprints dropped. -/
 def lineText (o : Options) (l : Line) : String :=
-  let sorted := l.glyphs.toList.mergeSort fun a b => a.u.raw ≤ b.u.raw
+  let sorted := lineOrder o l
   let (out, _) := sorted.foldl (fun (acc : String × Option Glyph) g =>
     match acc.2 with
     | none => (acc.1 ++ g.text, some g)
@@ -1018,7 +1061,7 @@ def lineText (o : Options) (l : Line) : String :=
       else
         let gap := Fixed.sub g.u (Fixed.add p.u p.width)
         let space := gap.raw > 0 && !withinPermille gap sz o.wordGap &&
-          !p.text.endsWith " " && !g.text.startsWith " "
+          spaceMayFollow p.text && !g.text.startsWith " "
         (acc.1 ++ (if space then " " else "") ++ g.text, some g)) ("", none)
   out
 
@@ -1216,6 +1259,12 @@ private def ligPdf : ByteArray := page "/F3 5 0 R" "BT /F3 10 Tf 72 700 Td (\\00
 
 #guard txt ligPdf == "file"
 #guard ((ext ligPdf).map fun t => t.glyphs.map (·.text)).getD [] == ["fi", "l", "e"]
+
+-- 6.7d: an accent drawn before its (overlapping) base letter keeps content order; no space
+-- after a math operator (U+2212), but after a Latin letter and after × (U+00D7)
+#guard txt (page helv "BT /F1 10 Tf 72 700 Td [(\\270) 416 (ca)] TJ ET" [helvObj]) == "¸ca"
+#guard spaceMayFollow "a" && spaceMayFollow "×" && spaceMayFollow "†" && spaceMayFollow ""
+#guard !spaceMayFollow "−" && !spaceMayFollow "≤" && !spaceMayFollow "中" && !spaceMayFollow "a "
 
 -- a font that is not a resource: U+FFFD, zero advance, still extracted
 #guard txt (page helv "BT /F9 10 Tf 72 700 Td (a) Tj ET" [helvObj]) == replacementStr

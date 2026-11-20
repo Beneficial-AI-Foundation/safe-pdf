@@ -43,8 +43,8 @@ that are handed, all together, to 7.2a's scanline filler with the **nonzero** ru
    (round cap → pen disc, square cap → square oriented along the path, butt → nothing). Each
    dash gets caps at both ends and joins at the vertices it passes.
    **Bound**: the number of dash steps of a path is estimated before walking
-   (`dashEstimate`, exact over ℚ); a path whose estimate exceeds `maxDashSteps`
-   (100 000) is stroked **solid** instead (MuPDF also ignores dash patterns that are too
+   (`dashEstimate`, exact over ℚ); a path whose estimate exceeds `Config.maxDashSteps`
+   (`Limits.maxDashSteps`, 100 000) is stroked **solid** instead (MuPDF also ignores dash patterns that are too
    fine). The walk itself runs on fuel `#segments + estimate + 2`.
 4. **Pieces.** Each (piece of a) segment is the parallelogram `p ± B … q ± B`; a square cap
    adds `[c − A ± B]`; a round cap and a round join add the full pen polygon at the point (the
@@ -58,7 +58,7 @@ that are handed, all together, to 7.2a's scanline filler with the **nonzero** ru
    a disc (§8.5.3.2).
 5. **Fill.** The pen polygon is the ellipse sampled at the exactly-on-circle rational points
    `((m² − j²)/(m² + j²), 2jm/(m² + j²))`, `j < m`, of each quarter (`circleTable`), with `m`
-   the least value in `[1, arcSegCap]` such that the chord sagitta bound
+   the least value in `[1, Config.arcCap]` (`Limits.arcSegCap`) such that the chord sagitta bound
    `r·‖L‖_F / (2m²)` is at most `tol`. All pieces are **convex** and every polygon is emitted
    with the **same orientation** (`emit` reverses polygons of negative shoelace area). With
    one orientation, each piece has winding number `+1` (or each `−1`) inside and `0` outside,
@@ -76,11 +76,12 @@ that are handed, all together, to 7.2a's scanline filler with the **nonzero** ru
   `2⁻²⁰ ≈ 10⁻⁶`, i.e. offsets are within `w/2 · 10⁻⁶` (pen units) of exact before the final
   rounding to `1/256` px (± ½ unit per coordinate).
 * **S3 work bound** (`strokeDPath_size_le`): the stroke of a device path has at most
-  `polyCap · (3·(P + maxDashSteps) + 9·S)` edges, where `P` is the number of flattened points
-  and `S` the number of subpaths; `subpaths_bound` gives `P ≤ curveSegCap·n` and
-  `S ≤ n + 1` for a path of `n` segments (`strokeEdges_size_le` combines them). Every emitted
-  polygon has at most `polyCap = 4·arcSegCap` vertices (a runtime guard in `emit`, never hit
-  by construction: the largest polygon is the pen with `4·m ≤ 4·arcSegCap` points). Combined
+  `3·pen.polyCap·(P + cfg.maxDashSteps + S)` edges, where `P` is the number of flattened
+  points and `S` the number of subpaths; `subpaths_bound` gives `P ≤ max 2 cfg.segCap · n`
+  and `S ≤ n + 1` for a path of `n` segments (`strokeEdges_size_le` combines them, with
+  `pen.polyCap = cfg.polyCap`, `Geo.make_polyCap`). Every emitted polygon has at most
+  `polyCap = 4·arcCap` vertices (a runtime guard in `emit`, never hit by construction: the
+  largest polygon is the pen with `4·m ≤ 4·arcCap` points). Combined
   with `Fill.fillEdgesCounted_steps_le` this bounds the whole stroke rasterization.
 * **Totality** by construction (folds, structural recursion, fuel with proven bounds).
 
@@ -90,11 +91,13 @@ Width-2 butt line = exact rectangle; square − butt cap area = `w²`; miter vs 
 angle (exact areas); miter-limit fallback at a sharp angle; round join/cap areas; dash
 coverage ratio; non-uniform CTM; zero-width line visible; dots for zero-length dashes.
 
-## Local constants (not in `SafePdf.Limits`, which this task does not own)
+## Caps
 
-`maxDashSteps` (100 000 dash steps per path; above it the path is stroked solid),
-`arcSegCap` (64 chords per quarter of the pen ellipse), `smoothMiterLimit` (4), `sqrtBits`
-(20). None raises an error: they only coarsen absurd inputs.
+From `SafePdf.Limits` through `Fill.Config` (task 7.2d): `maxDashSteps` (100 000 dash steps
+per path; above it the path is stroked solid), `arcSegCap` (64 chords per quarter of the pen
+ellipse), `curveSegCap` and `coordLimit` (as for filling). Local constants:
+`smoothMiterLimit` (4), `sqrtBits` (20). None raises an error: they only coarsen absurd
+inputs (see the `Limits` docstrings).
 -/
 
 namespace SafePdf.Core.Raster.Stroke
@@ -246,27 +249,17 @@ def perp (v : Pt) : Pt := ⟨-v.y, v.x⟩
 /-- A device point as an exact point (subpixel units). -/
 def toPt (p : FPt) : Pt := ⟨p.x, p.y⟩
 
-/-- Round to the nearest subpixel unit (halves up), clamped like 7.2a's points. -/
-def rnd (q : Rat) : Int := clampCoord (roundDivI q.num (q.den : Int))
+/-- Round to the nearest subpixel unit (halves up), clamped to `±lim` like 7.2a's points. -/
+def rnd (lim : Int) (q : Rat) : Int := clampCoord (roundDivI q.num (q.den : Int)) lim
 
-/-- An exact point rounded to a device point. -/
-def fpt (v : Pt) : FPt := ⟨rnd v.x, rnd v.y⟩
+/-- An exact point rounded to a device point, clamped to `±lim`. -/
+def fpt (lim : Int) (v : Pt) : FPt := ⟨rnd lim v.x, rnd lim v.y⟩
 
 /-! ## 3. The pen -/
-
-/-- Upper bound on the chords per quarter of the pen ellipse (local constant). -/
-def arcSegCap : Nat := 64
-
-/-- Upper bound on the vertices of one emitted polygon. -/
-def polyCap : Nat := 4 * arcSegCap
 
 /-- Miter limit used at the interior vertices of a flattened curve (where the true outline
 is smooth); larger turns there (cusps) get a bevel. -/
 def smoothMiterLimit : Rat := 4
-
-/-- Upper bound on the dash steps of one path (local constant; above it the path is
-stroked solid). -/
-def maxDashSteps : Nat := 100000
 
 /-- Search the least `m ∈ [m₀, m₀ + fuel]` with `r2 ≤ 4·tol²·m⁴`. -/
 def arcCountGo (r2 : Rat) (tol : Nat) : Nat → Nat → Nat
@@ -276,8 +269,9 @@ def arcCountGo (r2 : Rat) (tol : Nat) : Nat → Nat → Nat
     else arcCountGo r2 tol (m + 1) fuel
 
 /-- Chords per quarter for a pen whose device radius squared is at most `r2` (subpixel
-units²): the least `m ≥ 1` with sagitta bound `√r2 / (2m²) ≤ tol`, capped at `arcSegCap`. -/
-def arcCount (r2 : Rat) (tol : Nat) : Nat := min arcSegCap (arcCountGo r2 tol 1 (arcSegCap - 1))
+units²): the least `m ≥ 1` with sagitta bound `√r2 / (2m²) ≤ tol`, capped at `cap`
+(`Config.arcCap`). -/
+def arcCount (cap : Nat) (r2 : Rat) (tol : Nat) : Nat := min cap (arcCountGo r2 tol 1 (cap - 1))
 
 /-- The `4·m` rational points on the unit circle used for the pen polygon, counter-clockwise
 from `(1, 0)`: in each quarter, `((m² − j²)/(m² + j²), 2jm/(m² + j²))` for `j < m`
@@ -297,7 +291,7 @@ def circleTable (m : Nat) : Array Pt :=
     | _ => ⟨s, -c⟩
 
 /-- The pen: a linear map from pen space to device subpixel units with its inverse, the pen
-radius in pen units, and the sampled unit circle. -/
+radius in pen units, the sampled unit circle, and the caps it was made with. -/
 structure Pen where
   /-- Pen space → device subpixel units (linear part only). -/
   map : Aff
@@ -307,6 +301,10 @@ structure Pen where
   r : Rat
   /-- Unit-circle sample points (`circleTable`). -/
   circle : Array Pt
+  /-- Upper bound on the vertices of an emitted polygon (`Config.polyCap`). -/
+  polyCap : Nat := 4 * Limits.default.arcSegCap
+  /-- Device points are clamped to `±lim` subpixel units (`Config.coordLimit`). -/
+  lim : Int := (Limits.default.coordLimit : Int)
   deriving Inhabited
 
 /-- How dash lengths are measured: in pen space (the usual case, pen = user space), through a
@@ -321,13 +319,14 @@ inductive Metric where
   | none
   deriving Inhabited
 
-/-- Make a pen from its map, radius and flattening tolerance. -/
-def Pen.make (map : Aff) (r : Rat) (tol : Nat) : Pen :=
+/-- Make a pen from its map and radius (tolerance and caps from `cfg`). -/
+def Pen.make (map : Aff) (r : Rat) (cfg : Config) : Pen :=
   let fro := map.a * map.a + map.b * map.b + map.c * map.c + map.d * map.d
-  { map, inv := map.inv, r, circle := circleTable (arcCount (r * r * fro) tol) }
+  { map, inv := map.inv, r, circle := circleTable (arcCount cfg.arcCap (r * r * fro) cfg.tol),
+    polyCap := cfg.polyCap, lim := cfg.coordLimit }
 
 /-- The hairline pen: a device circle of diameter one pixel. -/
-def hairPen (tol : Nat) : Pen := Pen.make Aff.id (subUnit / 2 : Int) tol
+def hairPen (cfg : Config) : Pen := Pen.make Aff.id (subUnit / 2 : Int) cfg
 
 /-! ## 4. Segments -/
 
@@ -351,6 +350,8 @@ structure SegG where
   b : Pt
   /-- `p` is an interior vertex of a flattened curve. -/
   smooth : Bool
+  /-- Clamp for device points (the pen's `lim`). -/
+  lim : Int
   deriving Inhabited
 
 /-- The geometry of the chord `p → q`. -/
@@ -363,13 +364,14 @@ def mkSeg (pen : Pen) (metric : Metric) (p q : FPt) (smooth : Bool) : SegG :=
     | .pen => pl
     | .user inv => sqrtQ (norm2 (lin inv d))
     | .none => pl
-  { p, q, d, u, pl, len, a := psc h d, b := psc h (lin pen.map (perp u)), smooth }
+  { p, q, d, u, pl, len, a := psc h d, b := psc h (lin pen.map (perp u)), smooth, lim := pen.lim }
 
 /-- The point at user length `s` along the segment. -/
 def along (g : SegG) (s : Rat) : Pt := padd (toPt g.p) (psc (s / g.len) g.d)
 
 /-- `c + α·A + β·B`, rounded. -/
-def off (g : SegG) (c : Pt) (α β : Rat) : FPt := fpt (padd c (padd (psc α g.a) (psc β g.b)))
+def off (g : SegG) (c : Pt) (α β : Rat) : FPt :=
+  fpt g.lim (padd c (padd (psc α g.a) (psc β g.b)))
 
 /-! ## 5. Emitting polygons -/
 
@@ -388,9 +390,9 @@ def pushPoly (es : Array Edge) (pts : Array FPt) : Array Edge :=
   | some l => (pts.foldl (fun (acc : Array Edge × FPt) q => (pushLine acc.1 acc.2 q, q)) (es, l)).1
 
 /-- Emit a polygon with the common orientation (non-negative shoelace area); polygons with
-more than `polyCap` vertices are dropped (never produced by this module). -/
-def emit (es : Array Edge) (pts : Array FPt) : Array Edge :=
-  if pts.size ≤ polyCap then pushPoly es (if area2 pts < 0 then pts.reverse else pts) else es
+more than `pen.polyCap` vertices are dropped (never produced by this module). -/
+def emit (pen : Pen) (es : Array Edge) (pts : Array FPt) : Array Edge :=
+  if pts.size ≤ pen.polyCap then pushPoly es (if area2 pts < 0 then pts.reverse else pts) else es
 
 /-- The parallelogram of the segment `g` between the centre points `c0` and `c1`. -/
 def quadPts (g : SegG) (c0 c1 : Pt) : Array FPt :=
@@ -404,22 +406,22 @@ def penPts (pen : Pen) (g : SegG) (c : Pt) : Array FPt :=
 def capStart (cap : LineCap) (pen : Pen) (es : Array Edge) (g : SegG) (c : Pt) : Array Edge :=
   match cap with
   | .butt => es
-  | .round => emit es (penPts pen g c)
-  | .square => emit es #[off g c (-1) (-1), off g c (-1) 1, off g c 0 1, off g c 0 (-1)]
+  | .round => emit pen es (penPts pen g c)
+  | .square => emit pen es #[off g c (-1) (-1), off g c (-1) 1, off g c 0 1, off g c 0 (-1)]
 
 /-- Cap at the end of a dash or open subpath. -/
 def capEnd (cap : LineCap) (pen : Pen) (es : Array Edge) (g : SegG) (c : Pt) : Array Edge :=
   match cap with
   | .butt => es
-  | .round => emit es (penPts pen g c)
-  | .square => emit es #[off g c 0 (-1), off g c 0 1, off g c 1 1, off g c 1 (-1)]
+  | .round => emit pen es (penPts pen g c)
+  | .square => emit pen es #[off g c 0 (-1), off g c 0 1, off g c 1 1, off g c 1 (-1)]
 
 /-- A zero-length dash (or degenerate subpath) at `c`, oriented along `g`. -/
 def dot (cap : LineCap) (pen : Pen) (es : Array Edge) (g : SegG) (c : Pt) : Array Edge :=
   match cap with
   | .butt => es
-  | .round => emit es (penPts pen g c)
-  | .square => emit es #[off g c (-1) (-1), off g c (-1) 1, off g c 1 1, off g c 1 (-1)]
+  | .round => emit pen es (penPts pen g c)
+  | .square => emit pen es #[off g c (-1) (-1), off g c (-1) 1, off g c 1 1, off g c 1 (-1)]
 
 /-- The join at the vertex `g2.p` between `g1` and `g2`. -/
 def join (jn : LineJoin) (ml : Rat) (pen : Pen) (es : Array Edge) (g1 g2 : SegG) : Array Edge :=
@@ -427,7 +429,7 @@ def join (jn : LineJoin) (ml : Rat) (pen : Pen) (es : Array Edge) (g1 g2 : SegG)
   let jn := if g2.smooth then LineJoin.miter else jn
   let ml := if g2.smooth then smoothMiterLimit else ml
   match jn with
-  | .round => emit es (penPts pen g1 v)
+  | .round => emit pen es (penPts pen g1 v)
   | _ =>
     let cr := g1.d.x * g2.d.y - g1.d.y * g2.d.x
     if cr = 0 then es
@@ -437,9 +439,9 @@ def join (jn : LineJoin) (ml : Rat) (pen : Pen) (es : Array Edge) (g1 g2 : SegG)
       let p2 := off g2 v 0 σ
       let c := (g1.u.x * g2.u.x + g1.u.y * g2.u.y) / (g1.pl * g2.pl)
       if jn = .miter ∧ 2 ≤ (1 + c) * (ml * ml) then
-        let tip := fpt (padd v (psc (σ / (1 + c)) (padd g1.b g2.b)))
-        emit es #[fpt v, p1, tip, p2]
-      else emit es #[fpt v, p1, p2]
+        let tip := fpt g2.lim (padd v (psc (σ / (1 + c)) (padd g1.b g2.b)))
+        emit pen es #[fpt g2.lim v, p1, tip, p2]
+      else emit pen es #[fpt g2.lim v, p1, p2]
 
 /-! ## 6. Centre line: subpaths of points -/
 
@@ -480,7 +482,7 @@ def pSeg (cfg : Config) (st : PState) : DSeg → PState
   | .moveTo p => ⟨st.done.push st.cur, ⟨#[(p, false)], false, false⟩, p, p⟩
   | .lineTo p => ⟨st.done, ⟨st.cur.pts.push (p, false), st.cur.closed, true⟩, st.start, p⟩
   | .curveTo c1 c2 p =>
-    let n := segCount (flatness st.last c1 c2 p) cfg.tol
+    let n := segCount cfg.segCap (flatness st.last c1 c2 p) cfg.tol
     ⟨st.done, ⟨cubicPts n st.last c1 c2 p n 1 st.cur.pts, st.cur.closed, true⟩, st.start, p⟩
   | .closePath =>
     ⟨st.done.push ⟨st.cur.pts.push (st.start, false), true, true⟩,
@@ -507,7 +509,7 @@ or the closing join (closed). -/
 def solidSub (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array SegG) (closed : Bool)
     (es : Array Edge) : Array Edge :=
   let r := segs.foldl (fun (acc : Array Edge × Option SegG) g =>
-    (emit (match acc.2 with
+    (emit pen (match acc.2 with
       | none => acc.1
       | some g0 => join line.join ml pen acc.1 g0 g) (quadPts g (toPt g.p) (toPt g.q)), some g))
     (es, none)
@@ -540,7 +542,7 @@ def dashEnd (line : LineStyle) (pen : Pen) (es : Array Edge) (g : SegG) (d : Das
     let c0 := along g d.s
     let c1 := along g (d.s + d.rem)
     let es1 := if d.fresh then capStart line.cap pen es g c0 else es
-    capEnd line.cap pen (emit es1 (quadPts g c0 c1)) g c1
+    capEnd line.cap pen (emit pen es1 (quadPts g c0 c1)) g c1
 
 /-- The current "on" element runs past the end of `g`: the rest of `g`, then the join to the
 next segment or the end cap. -/
@@ -548,7 +550,7 @@ def dashThrough (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array SegG) (e
     (g : SegG) (d : DashSt) : Array Edge :=
   let c0 := along g d.s
   let es1 := if d.fresh then capStart line.cap pen es g c0 else es
-  let es2 := emit es1 (quadPts g c0 (toPt g.q))
+  let es2 := emit pen es1 (quadPts g c0 (toPt g.q))
   match segs[d.i + 1]? with
   | some g2 => join line.join ml pen es2 g g2
   | none => capEnd line.cap pen es2 g (toPt g.q)
@@ -643,11 +645,18 @@ structure Geo where
 /-- The stroke geometry for line width `w` (user units) and the user → device-subpixel map
 `L` (only its linear part matters): the elliptic pen `L(disc of radius w/2)`, or the hairline
 pen for `w = 0` or a degenerate `L` (see the module doc). -/
-def Geo.make (L : Aff) (w : Rat) (tol : Nat) : Geo :=
+def Geo.make (L : Aff) (w : Rat) (cfg : Config := {}) : Geo :=
   let w := if w < 0 then -w else w
-  if L.det = 0 then { pen := hairPen tol, metric := .none }
-  else if w = 0 then { pen := hairPen tol, metric := .user L.inv }
-  else { pen := Pen.make L (w / 2) tol, metric := .pen }
+  if L.det = 0 then { pen := hairPen cfg, metric := .none }
+  else if w = 0 then { pen := hairPen cfg, metric := .user L.inv }
+  else { pen := Pen.make L (w / 2) cfg, metric := .pen }
+
+/-- The pen of `Geo.make` has the configuration's polygon cap. -/
+theorem Geo.make_polyCap (L : Aff) (w : Rat) (cfg : Config) :
+    (Geo.make L w cfg).pen.polyCap = cfg.polyCap := by
+  unfold Geo.make; dsimp only
+  repeat' split
+  all_goals rfl
 
 /-- **Stroke a device path** into polygon edges (for the nonzero rule). -/
 def strokeDPath (cfg : Config) (geo : Geo) (line : LineStyle) (p : DPath) : Array Edge :=
@@ -661,7 +670,7 @@ def strokeDPath (cfg : Config) (geo : Geo) (line : LineStyle) (p : DPath) : Arra
   | none => strokeSubs line ml geo.pen none (sg.map fun x => (x.1, x.2, 0)) #[]
   | some dp =>
     let ests := sg.map fun x => (x.1, x.2, dashEstimate dp.1 dp.2.1 x.1)
-    if (ests.map (·.2.2)).sum ≤ maxDashSteps then
+    if (ests.map (·.2.2)).sum ≤ cfg.maxDashSteps then
       strokeSubs line ml geo.pen (some dp) ests #[]
     else strokeSubs line ml geo.pen none (sg.map fun x => (x.1, x.2, 0)) #[]
 
@@ -673,8 +682,8 @@ def userToSub (view : Aff) (ctm : Content.Matrix) : Aff :=
 device matrix `view`: polygon edges for the nonzero rule. -/
 def strokeEdges (view : Aff) (path : Content.Path) (style : Content.StrokeStyle)
     (cfg : Config := {}) : Array Edge :=
-  let geo := Geo.make (userToSub view style.ctm) (Fixed.toRat style.line.width) cfg.tol
-  strokeDPath cfg geo style.line (ofContentPath view path)
+  let geo := Geo.make (userToSub view style.ctm) (Fixed.toRat style.line.width) cfg
+  strokeDPath cfg geo style.line (ofContentPath view path cfg)
 
 /-- **Stroke coverage**: the stroke of a page-space path as a coverage mask over
 (bounding box ∩ `clip`). -/
@@ -708,8 +717,9 @@ theorem pushPoly_size (es : Array Edge) (pts : Array FPt) :
     simp only [Array.length_toList] at this
     exact this
 
-/-- Every emitted polygon adds at most `polyCap` edges. -/
-theorem emit_size (es : Array Edge) (pts : Array FPt) : (emit es pts).size ≤ es.size + polyCap := by
+/-- Every emitted polygon adds at most `pen.polyCap` edges. -/
+theorem emit_size (pen : Pen) (es : Array Edge) (pts : Array FPt) :
+    (emit pen es pts).size ≤ es.size + pen.polyCap := by
   unfold emit
   split
   · rename_i h
@@ -719,78 +729,78 @@ theorem emit_size (es : Array Edge) (pts : Array FPt) : (emit es pts).size ≤ e
     omega
   · omega
 
-/-- A start cap adds at most `polyCap` edges. -/
+/-- A start cap adds at most `pen.polyCap` edges. -/
 theorem capStart_size (cap : LineCap) (pen : Pen) (es : Array Edge) (g : SegG) (c : Pt) :
-    (capStart cap pen es g c).size ≤ es.size + polyCap := by
+    (capStart cap pen es g c).size ≤ es.size + pen.polyCap := by
   unfold capStart; split
   · omega
-  · exact emit_size _ _
-  · exact emit_size _ _
+  · exact emit_size _ _ _
+  · exact emit_size _ _ _
 
-/-- An end cap adds at most `polyCap` edges. -/
+/-- An end cap adds at most `pen.polyCap` edges. -/
 theorem capEnd_size (cap : LineCap) (pen : Pen) (es : Array Edge) (g : SegG) (c : Pt) :
-    (capEnd cap pen es g c).size ≤ es.size + polyCap := by
+    (capEnd cap pen es g c).size ≤ es.size + pen.polyCap := by
   unfold capEnd; split
   · omega
-  · exact emit_size _ _
-  · exact emit_size _ _
+  · exact emit_size _ _ _
+  · exact emit_size _ _ _
 
-/-- A dot adds at most `polyCap` edges. -/
+/-- A dot adds at most `pen.polyCap` edges. -/
 theorem dot_size (cap : LineCap) (pen : Pen) (es : Array Edge) (g : SegG) (c : Pt) :
-    (dot cap pen es g c).size ≤ es.size + polyCap := by
+    (dot cap pen es g c).size ≤ es.size + pen.polyCap := by
   unfold dot; split
   · omega
-  · exact emit_size _ _
-  · exact emit_size _ _
+  · exact emit_size _ _ _
+  · exact emit_size _ _ _
 
-/-- A join adds at most `polyCap` edges. -/
+/-- A join adds at most `pen.polyCap` edges. -/
 theorem join_size (jn : LineJoin) (ml : Rat) (pen : Pen) (es : Array Edge) (g1 g2 : SegG) :
-    (join jn ml pen es g1 g2).size ≤ es.size + polyCap := by
+    (join jn ml pen es g1 g2).size ≤ es.size + pen.polyCap := by
   unfold join
   dsimp only
   repeat' split
-  all_goals first | exact emit_size _ _ | omega
+  all_goals first | exact emit_size _ _ _ | omega
 
-/-- The end of a dash adds at most `3·polyCap` edges. -/
+/-- The end of a dash adds at most `3·pen.polyCap` edges. -/
 theorem dashEnd_size (line : LineStyle) (pen : Pen) (es : Array Edge) (g : SegG) (d : DashSt) :
-    (dashEnd line pen es g d).size ≤ es.size + 3 * polyCap := by
+    (dashEnd line pen es g d).size ≤ es.size + 3 * pen.polyCap := by
   unfold dashEnd
   split
   · have := dot_size line.cap pen es g (along g d.s); omega
   · dsimp only
     have h1 : (if d.fresh = true then capStart line.cap pen es g (along g d.s) else es).size ≤
-        es.size + polyCap := by
+        es.size + pen.polyCap := by
       split
       · exact capStart_size _ _ _ _ _
       · omega
-    have h2 := emit_size (if d.fresh = true then capStart line.cap pen es g (along g d.s) else es)
+    have h2 := emit_size pen (if d.fresh = true then capStart line.cap pen es g (along g d.s) else es)
       (quadPts g (along g d.s) (along g (d.s + d.rem)))
     have h3 := capEnd_size line.cap pen
-      (emit (if d.fresh = true then capStart line.cap pen es g (along g d.s) else es)
+      (emit pen (if d.fresh = true then capStart line.cap pen es g (along g d.s) else es)
         (quadPts g (along g d.s) (along g (d.s + d.rem)))) g (along g (d.s + d.rem))
     omega
 
-/-- A dash running through a vertex adds at most `3·polyCap` edges. -/
+/-- A dash running through a vertex adds at most `3·pen.polyCap` edges. -/
 theorem dashThrough_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array SegG)
     (es : Array Edge) (g : SegG) (d : DashSt) :
-    (dashThrough line ml pen segs es g d).size ≤ es.size + 3 * polyCap := by
+    (dashThrough line ml pen segs es g d).size ≤ es.size + 3 * pen.polyCap := by
   unfold dashThrough
   dsimp only
   generalize hE1 : (if d.fresh = true then capStart line.cap pen es g (along g d.s) else es) = e1
-  have h1 : e1.size ≤ es.size + polyCap := by
+  have h1 : e1.size ≤ es.size + pen.polyCap := by
     rw [← hE1]; split
     · exact capStart_size _ _ _ _ _
     · omega
-  generalize hE2 : emit e1 (quadPts g (along g d.s) (toPt g.q)) = e2
-  have h2 : e2.size ≤ e1.size + polyCap := by rw [← hE2]; exact emit_size _ _
+  generalize hE2 : emit pen e1 (quadPts g (along g d.s) (toPt g.q)) = e2
+  have h2 : e2.size ≤ e1.size + pen.polyCap := by rw [← hE2]; exact emit_size _ _ _
   split
   · have := join_size line.join ml pen e2 g (by assumption); omega
   · have := capEnd_size line.cap pen e2 g (toPt g.q); omega
 
-/-- **Dash walk bound.** Each fuel step adds at most `3·polyCap` edges. -/
+/-- **Dash walk bound.** Each fuel step adds at most `3·pen.polyCap` edges. -/
 theorem dashLoop_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array SegG)
     (arr : Array Rat) : ∀ (fuel : Nat) (d : DashSt) (es : Array Edge),
-    (dashLoop line ml pen segs arr fuel d es).size ≤ es.size + 3 * polyCap * fuel
+    (dashLoop line ml pen segs arr fuel d es).size ≤ es.size + 3 * pen.polyCap * fuel
   | 0, _, es => by simp [dashLoop]
   | fuel + 1, d, es => by
     simp only [dashLoop]
@@ -799,7 +809,7 @@ theorem dashLoop_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array Se
     · rename_i g _
       split
       · generalize hE : (if d.idx % 2 = 0 then dashEnd line pen es g d else es) = e1
-        have h1 : e1.size ≤ es.size + 3 * polyCap := by
+        have h1 : e1.size ≤ es.size + 3 * pen.polyCap := by
           rw [← hE]; split
           · exact dashEnd_size _ _ _ _ _
           · omega
@@ -809,7 +819,7 @@ theorem dashLoop_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array Se
         · refine Nat.le_trans (dashLoop_size line ml pen segs arr fuel _ es) ?_
           rw [Nat.mul_succ]; omega
         · generalize hE : (if d.idx % 2 = 0 then dashThrough line ml pen segs es g d else es) = e1
-          have h1 : e1.size ≤ es.size + 3 * polyCap := by
+          have h1 : e1.size ≤ es.size + 3 * pen.polyCap := by
             rw [← hE]; split
             · exact dashThrough_size _ _ _ _ _ _ _
             · omega
@@ -819,36 +829,36 @@ theorem dashLoop_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array Se
 private theorem solid_fold (jn : LineJoin) (ml : Rat) (pen : Pen) : ∀ (l : List SegG)
     (es : Array Edge) (o : Option SegG),
     (l.foldl (fun (acc : Array Edge × Option SegG) g =>
-      (emit (match acc.2 with
+      (emit pen (match acc.2 with
         | none => acc.1
         | some g0 => join jn ml pen acc.1 g0 g) (quadPts g (toPt g.p) (toPt g.q)), some g))
       (es, o)).1.size ≤
-      es.size + 2 * polyCap * l.length
+      es.size + 2 * pen.polyCap * l.length
   | [], es, o => by simp
   | g :: rest, es, o => by
     simp only [List.foldl_cons, List.length_cons]
     generalize hE : (match o with
       | none => es
       | some g0 => join jn ml pen es g0 g) = e1
-    have h1 : e1.size ≤ es.size + polyCap := by
+    have h1 : e1.size ≤ es.size + pen.polyCap := by
       rw [← hE]; split
       · omega
       · exact join_size _ _ _ _ _ _
-    have h2 := emit_size e1 (quadPts g (toPt g.p) (toPt g.q))
-    have h3 := solid_fold jn ml pen rest (emit e1 (quadPts g (toPt g.p) (toPt g.q))) (some g)
+    have h2 := emit_size pen e1 (quadPts g (toPt g.p) (toPt g.q))
+    have h3 := solid_fold jn ml pen rest (emit pen e1 (quadPts g (toPt g.p) (toPt g.q))) (some g)
     rw [Nat.mul_succ]; omega
 
-/-- A solid subpath of `k` chords adds at most `polyCap·(2k + 2)` edges. -/
+/-- A solid subpath of `k` chords adds at most `pen.polyCap·(2k + 2)` edges. -/
 theorem solidSub_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array SegG)
     (closed : Bool) (es : Array Edge) :
-    (solidSub line ml pen segs closed es).size ≤ es.size + polyCap * (2 * segs.size + 2) := by
+    (solidSub line ml pen segs closed es).size ≤ es.size + pen.polyCap * (2 * segs.size + 2) := by
   unfold solidSub
   dsimp only
   have h0 := solid_fold line.join ml pen segs.toList es none
   rw [Array.foldl_toList, Array.length_toList] at h0
   generalize segs.foldl _ (es, none) = r at h0
-  have e : polyCap * (2 * segs.size + 2) = 2 * polyCap * segs.size + 2 * polyCap := by
-    rw [Nat.mul_add, ← Nat.mul_assoc, Nat.mul_comm polyCap 2]
+  have e : pen.polyCap * (2 * segs.size + 2) = 2 * pen.polyCap * segs.size + 2 * pen.polyCap := by
+    rw [Nat.mul_add, ← Nat.mul_assoc, Nat.mul_comm pen.polyCap 2]
   split
   · next g0 gl _ _ =>
     split
@@ -858,16 +868,16 @@ theorem solidSub_size (line : LineStyle) (ml : Rat) (pen : Pen) (segs : Array Se
       omega
   · omega
 
-/-- One subpath adds at most `3·polyCap·(k + est + 1)` edges (`k` chords, dash budget
+/-- One subpath adds at most `3·pen.polyCap·(k + est + 1)` edges (`k` chords, dash budget
 `est`). -/
 theorem strokeSub_size (line : LineStyle) (ml : Rat) (pen : Pen)
     (dash : Option (Array Rat × Rat × Rat)) (segs : Array SegG) (sub : Sub) (est : Nat)
     (es : Array Edge) :
     (strokeSub line ml pen dash segs sub est es).size ≤
-      es.size + 3 * polyCap * (segs.size + est + 1) := by
+      es.size + 3 * pen.polyCap * (segs.size + est + 1) := by
   unfold strokeSub
-  have hp : polyCap ≤ 3 * polyCap * (segs.size + est + 1) := by
-    have : 3 * polyCap * 1 ≤ 3 * polyCap * (segs.size + est + 1) :=
+  have hp : pen.polyCap ≤ 3 * pen.polyCap * (segs.size + est + 1) := by
+    have : 3 * pen.polyCap * 1 ≤ 3 * pen.polyCap * (segs.size + est + 1) :=
       Nat.mul_le_mul_left _ (by omega)
     omega
   split
@@ -878,8 +888,8 @@ theorem strokeSub_size (line : LineStyle) (ml : Rat) (pen : Pen)
     · omega
   · split
     · have := solidSub_size line ml pen segs sub.closed es
-      have : polyCap * (2 * segs.size + 2) ≤ 3 * polyCap * (segs.size + est + 1) := by
-        rw [Nat.mul_comm 3 polyCap, Nat.mul_assoc]
+      have : pen.polyCap * (2 * segs.size + 2) ≤ 3 * pen.polyCap * (segs.size + est + 1) := by
+        rw [Nat.mul_comm 3 pen.polyCap, Nat.mul_assoc]
         exact Nat.mul_le_mul_left _ (by omega)
       omega
     · exact dashLoop_size line ml pen segs _ _ _ _
@@ -888,11 +898,11 @@ theorem strokeSub_size (line : LineStyle) (ml : Rat) (pen : Pen)
 def planCost (l : List (Array SegG × Sub × Nat)) : Nat :=
   (l.map fun x => x.1.size + x.2.2 + 1).sum
 
-/-- All subpaths: at most `3·polyCap·planCost` edges. -/
+/-- All subpaths: at most `3·pen.polyCap·planCost` edges. -/
 theorem strokeSubs_size (line : LineStyle) (ml : Rat) (pen : Pen)
     (dash : Option (Array Rat × Rat × Rat)) :
     ∀ (l : List (Array SegG × Sub × Nat)) (es : Array Edge),
-    (strokeSubs line ml pen dash l es).size ≤ es.size + 3 * polyCap * planCost l
+    (strokeSubs line ml pen dash l es).size ≤ es.size + 3 * pen.polyCap * planCost l
   | [], es => by simp [strokeSubs, planCost]
   | (segs, sub, est) :: rest, es => by
     simp only [strokeSubs, planCost, List.map_cons, List.sum_cons]
@@ -950,11 +960,11 @@ private theorem sum_ests (pen : Pen) (metric : Metric) (f : Array SegG × Sub �
   | cons s rest ih => simp only [List.map_cons, List.sum_cons]; rw [ih]
 
 /-- **S3 work bound for stroking (flattened form).** For the subpaths `subs` of a device
-path, the stroke has at most `3·polyCap·(P + maxDashSteps + S)` edges, with `P` the number of
-flattened points and `S` the number of subpaths. -/
+path, the stroke has at most `3·pen.polyCap·(P + cfg.maxDashSteps + S)` edges, with `P` the
+number of flattened points and `S` the number of subpaths. -/
 theorem strokeDPath_size_le (cfg : Config) (geo : Geo) (line : LineStyle) (p : DPath) :
     (strokeDPath cfg geo line p).size ≤
-      3 * polyCap * (ptCount (subpaths cfg p).toList + maxDashSteps +
+      3 * geo.pen.polyCap * (ptCount (subpaths cfg p).toList + cfg.maxDashSteps +
         (subpaths cfg p).toList.length) := by
   unfold strokeDPath
   dsimp only
@@ -966,7 +976,8 @@ theorem strokeDPath_size_le (cfg : Config) (geo : Geo) (line : LineStyle) (p : D
   have hsolid := planCost_le geo.pen geo.metric (fun _ => 0) subs
   rw [hz] at hsolid
   have hmono : ∀ c, c ≤ ptCount subs + subs.length →
-      3 * polyCap * c ≤ 3 * polyCap * (ptCount subs + maxDashSteps + subs.length) :=
+      3 * geo.pen.polyCap * c ≤
+        3 * geo.pen.polyCap * (ptCount subs + cfg.maxDashSteps + subs.length) :=
     fun c hc => Nat.mul_le_mul_left _ (by omega)
   split
   · have := strokeSubs_size line (max 1 (Fixed.toRat line.miterLimit)) geo.pen none
@@ -983,10 +994,10 @@ theorem strokeDPath_size_le (cfg : Config) (geo : Geo) (line : LineStyle) (p : D
       have := strokeSubs_size line (max 1 (Fixed.toRat line.miterLimit)) geo.pen (some dp)
         ((subs.map fun s => (mkSegs geo.pen geo.metric s.pts, s)).map
           fun x => (x.1, x.2, dashEstimate dp.1 dp.2.1 x.1)) #[]
-      have := Nat.mul_le_mul_left (3 * polyCap)
+      have := Nat.mul_le_mul_left (3 * geo.pen.polyCap)
         (show planCost ((subs.map fun s => (mkSegs geo.pen geo.metric s.pts, s)).map
           fun x => (x.1, x.2, dashEstimate dp.1 dp.2.1 x.1)) ≤
-            ptCount subs + maxDashSteps + subs.length by omega)
+            ptCount subs + cfg.maxDashSteps + subs.length by omega)
       simp only [List.size_toArray, List.length_nil] at *
       omega
     · have := strokeSubs_size line (max 1 (Fixed.toRat line.miterLimit)) geo.pen none
@@ -1013,9 +1024,10 @@ private theorem ptCount_push (a : Array Sub) (x : Sub) :
 private def pMeasure (st : PState) : Nat := ptCount st.done.toList + st.cur.pts.size
 
 private theorem pSeg_measure (cfg : Config) (st : PState) (sg : DSeg) :
-    pMeasure (pSeg cfg st sg) ≤ pMeasure st + curveSegCap ∧
+    pMeasure (pSeg cfg st sg) ≤ pMeasure st + max 2 cfg.segCap ∧
       (pSeg cfg st sg).done.size ≤ st.done.size + 1 := by
-  have hc : 2 ≤ curveSegCap := by decide
+  have hc : 2 ≤ max 2 cfg.segCap := Nat.le_max_left _ _
+  have hc' : cfg.segCap ≤ max 2 cfg.segCap := Nat.le_max_right _ _
   cases sg with
   | moveTo p =>
     simp only [pSeg, pMeasure, ptCount_push, Array.size_push]
@@ -1023,16 +1035,17 @@ private theorem pSeg_measure (cfg : Config) (st : PState) (sg : DSeg) :
   | lineTo p => simp only [pSeg, pMeasure, Array.size_push]; omega
   | curveTo c1 c2 q =>
     simp only [pSeg, pMeasure]
-    have h1 := cubicPts_size (segCount (flatness st.last c1 c2 q) cfg.tol) st.last c1 c2 q
-      (segCount (flatness st.last c1 c2 q) cfg.tol) 1 st.cur.pts
-    have h2 := (segCount_spec (flatness st.last c1 c2 q) cfg.tol).2.1
+    have h1 := cubicPts_size (segCount cfg.segCap (flatness st.last c1 c2 q) cfg.tol) st.last
+      c1 c2 q (segCount cfg.segCap (flatness st.last c1 c2 q) cfg.tol) 1 st.cur.pts
+    have h2 := (segCount_spec cfg.segCap (flatness st.last c1 c2 q) cfg.tol
+      cfg.one_le_segCap).2.1
     omega
   | closePath =>
     simp only [pSeg, pMeasure, ptCount_push, Array.size_push]
     simp; omega
 
 private theorem pFold_measure (cfg : Config) : ∀ (l : List DSeg) (st : PState),
-    pMeasure (l.foldl (pSeg cfg) st) ≤ pMeasure st + curveSegCap * l.length ∧
+    pMeasure (l.foldl (pSeg cfg) st) ≤ pMeasure st + max 2 cfg.segCap * l.length ∧
       (l.foldl (pSeg cfg) st).done.size ≤ st.done.size + l.length
   | [], st => by simp
   | sg :: rest, st => by
@@ -1041,10 +1054,11 @@ private theorem pFold_measure (cfg : Config) : ∀ (l : List DSeg) (st : PState)
     have h2 := pSeg_measure cfg st sg
     rw [Nat.mul_succ]; omega
 
-/-- **Flattened size.** A device path of `n` segments flattens to at most `curveSegCap · n`
-points in at most `n + 1` subpaths. -/
+/-- **Flattened size.** A device path of `n` segments flattens to at most
+`max 2 cfg.segCap · n` points in at most `n + 1` subpaths (`cfg.segCap` chords per curve; a
+`closePath` adds 2 points). -/
 theorem subpaths_bound (cfg : Config) (p : DPath) :
-    ptCount (subpaths cfg p).toList ≤ curveSegCap * p.size ∧
+    ptCount (subpaths cfg p).toList ≤ max 2 cfg.segCap * p.size ∧
       (subpaths cfg p).toList.length ≤ p.size + 1 := by
   simp only [subpaths]
   rw [← Array.foldl_toList]
@@ -1061,19 +1075,22 @@ theorem subpaths_bound (cfg : Config) (p : DPath) :
     omega
 
 /-- **S3 work bound for stroking.** The stroke of a page-space path of `n` segments has at
-most `3·polyCap·(curveSegCap·n + maxDashSteps + n + 1)` edges, whatever the style, CTM, view
-or dash pattern. (The fill of these edges is then bounded by
+most `3·polyCap·(max 2 segCap·n + maxDashSteps + n + 1)` edges (all caps from `cfg`, i.e.
+`Limits.arcSegCap`, `Limits.curveSegCap`, `Limits.maxDashSteps`), whatever the style, CTM,
+view or dash pattern. (The fill of these edges is then bounded by
 `Fill.fillEdgesCounted_steps_le`.) -/
 theorem strokeEdges_size_le (view : Aff) (path : Content.Path) (style : Content.StrokeStyle)
     (cfg : Config) :
     (strokeEdges view path style cfg).size ≤
-      3 * polyCap * (curveSegCap * path.segs.size + maxDashSteps + path.segs.size + 1) := by
+      3 * cfg.polyCap * (max 2 cfg.segCap * path.segs.size + cfg.maxDashSteps +
+        path.segs.size + 1) := by
   unfold strokeEdges
   have h1 := strokeDPath_size_le cfg
-    (Geo.make (userToSub view style.ctm) (Fixed.toRat style.line.width) cfg.tol) style.line
-    (ofContentPath view path)
-  have h2 := subpaths_bound cfg (ofContentPath view path)
-  have hs : (ofContentPath view path).size = path.segs.size := by simp [ofContentPath]
+    (Geo.make (userToSub view style.ctm) (Fixed.toRat style.line.width) cfg) style.line
+    (ofContentPath view path cfg)
+  rw [Geo.make_polyCap] at h1
+  have h2 := subpaths_bound cfg (ofContentPath view path cfg)
+  have hs : (ofContentPath view path cfg).size = path.segs.size := by simp [ofContentPath]
   rw [hs] at h2
   refine Nat.le_trans h1 (Nat.mul_le_mul_left _ ?_)
   omega
@@ -1098,7 +1115,7 @@ private def tstyle (cap : LineCap := .butt) (jn : LineJoin := .miter) (ml : Int 
 
 /-- Coverage total of a stroke (255 per covered pixel). -/
 private def tcov (w sx : Rat) (l : LineStyle) (p : DPath) : Nat :=
-  (fillEdges (strokeDPath {} (Geo.make (Aff.scale (256 * sx) 256) w 26) l p) .nonzero
+  (fillEdges (strokeDPath {} (Geo.make (Aff.scale (256 * sx) 256) w) l p) .nonzero
     ⟨0, 0, 100, 100⟩).total
 
 -- Horizontal line, width 2, butt caps: the exact 20 × 2 rectangle.

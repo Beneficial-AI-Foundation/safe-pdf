@@ -15,7 +15,7 @@ curves).
 1. **Device path** (`DPath = Array DSeg`). `ofContentPath m p` maps a `Content.Path` (page
    space, `Fixed`) through an exact `Geom.Aff` `m` (page → device pixels, e.g. a
    `Geom.viewMatrix`) and rounds each point to **subpixel fixed point**: `Int` in units of
-   `1/256` px (`subUnit`), clamped to `±coordLimit` (≈ 4.2 million px). Rational arithmetic
+   `1/256` px (`subUnit`), clamped to `±Config.coordLimit` (≈ 4.2 million px). Rational arithmetic
    happens once per path point, never per pixel. Glyph outlines (7.3) build a `DPath`
    directly (a quadratic segment is the cubic with controls `p0 + 2/3(q − p0)`,
    `p2 + 2/3(q − p2)`: degree elevation is exact).
@@ -25,7 +25,7 @@ curves).
    exactly in `Int` (`bezNum`, `bezNum_eq`) and rounded once (`roundDivI_err`). `n` is the
    least `n ≥ 1` with `3·M ≤ 4·tol·n²` (`segCount`, `segCount_spec`), where `M` is the
    largest absolute second difference of the control polygon (both coordinates), capped at
-   `curveSegCap`. Curves whose control hull lies entirely on one side of the clip window
+   `Config.segCap` (`Limits.curveSegCap`). Curves whose control hull lies entirely on one side of the clip window
    become their chord (exact for the coverage inside the window: the window is outside the
    region between curve and chord).
 3. **Coverage** (`fillEdges`): a scanline rasterizer over the mask rectangle
@@ -47,11 +47,12 @@ curves).
   `x` and `y` this bounds the parametric (hence Hausdorff) distance between the curve and the
   exact polyline per coordinate (L∞; the Euclidean distance is at most `√2` times it).
   `segCount_spec` + `flatten_err_tol`: with the chosen `n` (unless capped), the bound is
-  `≤ tol`. The implementation's vertices are the exact `B(k/n)` (`bezNum_eq`) rounded to the
+  `≤ tol`; `segCount_tol_of_cap` states the cap condition explicitly: whenever
+  `3·M ≤ 4·tol·cap²` the chosen `n` satisfies the bound. The implementation's vertices are the exact `B(k/n)` (`bezNum_eq`) rounded to the
   nearest subpixel unit (`roundDivI_err`: error ≤ 1/2 unit per coordinate), so the
   implemented polyline is within `tol + 1/2` subpixel units of the curve per coordinate.
 * **Totality** by construction (structural recursion and `Array` folds; no `partial`).
-* **S3 work bound**: `flatten_size_le` — at most `curveSegCap · #segments + 1` edges;
+* **S3 work bound**: `flatten_size_le` — at most `cfg.segCap · #segments + 1` edges;
   `fillEdgesCounted_steps_le` — the counted row work (`S` × active edges + mask width + 1
   per row; every active-edge list has at most `E` edges, `rowLoop_inv`) is
   `≤ h · (S · E + w + 1)`, with `h`, `w` the mask height and width (at most the clip window's).
@@ -66,11 +67,14 @@ Rectangle exactness, triangle and circle (4 cubics) areas within tolerance, nonz
 even-odd on a self-overlapping star (and agreement on a simple polygon), empty path, path
 outside the window, huge clamped coordinates, coverage of every byte in `[0, 255]`.
 
-## Local constants (not in `SafePdf.Limits`, which this task does not own)
+## Caps (`SafePdf.Limits`, task 7.2d)
 
-`curveSegCap` (512 chords per cubic) and `coordLimit` (`2³⁰` subpixel units). Both make the
-work bound data-independent; neither raises an error: the cap only coarsens absurdly large
-curves, the clamp only moves points beyond ±4 million pixels.
+`Config` carries the raster caps, each defaulting from `Limits.default` (`Config.ofLimits`
+builds one from any `Limits`): `curveSegCap` (512 chords per cubic) and `coordLimit` (`2³⁰`
+subpixel units) here, `arcSegCap` and `maxDashSteps` for the stroker (7.2b), `maxPageSide`
+and `clipCacheSize` for page rendering (7.2c). The work-bound theorems are stated over these
+fields. None raises an error (see the `Limits` docstrings): the curve cap only coarsens
+absurdly large curves, the clamp only moves points beyond ±4 million pixels.
 -/
 
 namespace SafePdf.Core.Raster.Fill
@@ -250,11 +254,6 @@ theorem roundDivI_err (a d : Int) (hd : 0 < d) :
 /-- Subpixel units per pixel (8 fractional bits). -/
 def subUnit : Int := 256
 
-/-- Device coordinates are clamped to `±coordLimit` subpixel units (`2³⁰`, about
-4.2 million pixels): far beyond any window, small enough to keep the products in the
-crossing computation moderate. -/
-def coordLimit : Int := 1073741824
-
 /-- A device point, in `1/256` pixel units (y downward, as `Geom.toScreen`). -/
 structure FPt where
   /-- Horizontal coordinate, subpixel units. -/
@@ -278,27 +277,26 @@ inductive DSeg where
 /-- A device path. -/
 abbrev DPath := Array DSeg
 
-/-- Clamp to `[−coordLimit, coordLimit]`. -/
-def clampCoord (v : Int) : Int := max (-coordLimit) (min coordLimit v)
+/-- Clamp to `[−lim, lim]` (`lim` = `Limits.coordLimit`, default `2³⁰` subpixel units). -/
+def clampCoord (v : Int) (lim : Int := (Limits.default.coordLimit : Int)) : Int :=
+  max (-lim) (min lim v)
 
 /-- A rational pixel coordinate in subpixel units, rounded to nearest (halves up). -/
 def toSub (q : Rat) : Int := roundDivI (q.num * subUnit) (q.den : Int)
 
-/-- A device point (pixels, exact) in clamped subpixel units. -/
-def FPt.ofPt (p : Pt) : FPt := ⟨clampCoord (toSub p.x), clampCoord (toSub p.y)⟩
+/-- A device point (pixels, exact) in subpixel units clamped to `±lim`. -/
+def FPt.ofPt (p : Pt) (lim : Int := (Limits.default.coordLimit : Int)) : FPt :=
+  ⟨clampCoord (toSub p.x) lim, clampCoord (toSub p.y) lim⟩
 
-/-- Map one content-stream segment (page space) through `m` (page → device pixels). -/
-def DSeg.ofSegment (m : Aff) : Content.Segment → DSeg
-  | .moveTo p => .moveTo (FPt.ofPt (m.apply (ptOfPoint p)))
-  | .lineTo p => .lineTo (FPt.ofPt (m.apply (ptOfPoint p)))
+/-- Map one content-stream segment (page space) through `m` (page → device pixels),
+clamping to `±lim` subpixel units. -/
+def DSeg.ofSegment (lim : Int) (m : Aff) : Content.Segment → DSeg
+  | .moveTo p => .moveTo (FPt.ofPt (m.apply (ptOfPoint p)) lim)
+  | .lineTo p => .lineTo (FPt.ofPt (m.apply (ptOfPoint p)) lim)
   | .curveTo c1 c2 p =>
-    .curveTo (FPt.ofPt (m.apply (ptOfPoint c1))) (FPt.ofPt (m.apply (ptOfPoint c2)))
-      (FPt.ofPt (m.apply (ptOfPoint p)))
+    .curveTo (FPt.ofPt (m.apply (ptOfPoint c1)) lim) (FPt.ofPt (m.apply (ptOfPoint c2)) lim)
+      (FPt.ofPt (m.apply (ptOfPoint p)) lim)
   | .closePath => .closePath
-
-/-- A page-space path as a device path (affine maps commute with Bézier curves, so mapping
-the control points is exact before rounding). -/
-def ofContentPath (m : Aff) (p : Content.Path) : DPath := p.segs.map (DSeg.ofSegment m)
 
 /-- Device pixel rectangle `[x0, x1) × [y0, y1)` (the clip window / target area). -/
 structure IRect where
@@ -349,10 +347,10 @@ def polygonEdges (pts : Array FPt) : Array Edge :=
     let r := pts.foldl (fun (acc : Array Edge × FPt) q => (pushLine acc.1 acc.2 q, q)) (#[], p0)
     pushLine r.1 r.2 p0
 
-/-- Upper bound on the chords per cubic (local constant; see the module doc). -/
-def curveSegCap : Nat := 512
-
-/-- Flattening configuration and anti-aliasing quality. -/
+/-- Raster configuration: flattening tolerance, anti-aliasing quality, and the raster caps
+of `SafePdf.Limits` (task 7.2d; each defaults from `Limits.default`, `Config.ofLimits` copies
+them from any `Limits`). Shared by the filler, the stroker (7.2b) and page rendering
+(7.2c). -/
 structure Config where
   /-- Flattening tolerance per coordinate, in subpixel units (default 26 ≈ 0.1 px: chords lie
   inside convex arcs, so a coarser tolerance visibly thins small glyphs — 0.2 px loses 4.5% of
@@ -360,7 +358,42 @@ structure Config where
   tol : Nat := 26
   /-- Sample rows per pixel row (vertical anti-aliasing levels), clamped to `1 … 16`. -/
   vSamples : Nat := 4
+  /-- `Limits.curveSegCap`: chords per cubic (values below 1 act as 1, `segCap`). -/
+  curveSegCap : Nat := Limits.default.curveSegCap
+  /-- `Limits.coordLimit`: device coordinates are clamped to `±coordLimit` subpixel units. -/
+  coordLimit : Nat := Limits.default.coordLimit
+  /-- `Limits.arcSegCap`: chords per quarter of the pen ellipse (stroker; below 1 acts as 1). -/
+  arcSegCap : Nat := Limits.default.arcSegCap
+  /-- `Limits.maxDashSteps`: dash steps per stroked path (above it: solid). -/
+  maxDashSteps : Nat := Limits.default.maxDashSteps
+  /-- `Limits.maxPageSide`: page width and height in pixels (larger pages are cropped). -/
+  maxPageSide : Nat := Limits.default.maxPageSide
+  /-- `Limits.clipCacheSize`: cached clip masks per page. -/
+  clipCacheSize : Nat := Limits.default.clipCacheSize
   deriving Repr, Inhabited
+
+/-- The raster configuration with the caps of `l` (tolerance and sampling from `base`). -/
+def Config.ofLimits (l : Limits) (base : Config := {}) : Config :=
+  { base with curveSegCap := l.curveSegCap, coordLimit := l.coordLimit,
+              arcSegCap := l.arcSegCap, maxDashSteps := l.maxDashSteps,
+              maxPageSide := l.maxPageSide, clipCacheSize := l.clipCacheSize }
+
+/-- The effective chord cap per cubic: `max 1 curveSegCap`. -/
+def Config.segCap (cfg : Config) : Nat := max 1 cfg.curveSegCap
+
+/-- The effective chord cap is positive. -/
+theorem Config.one_le_segCap (cfg : Config) : 1 ≤ cfg.segCap := Nat.le_max_left _ _
+
+/-- The effective chord cap per quarter of the pen ellipse (stroker): `max 1 arcSegCap`. -/
+def Config.arcCap (cfg : Config) : Nat := max 1 cfg.arcSegCap
+
+/-- Upper bound on the vertices of one emitted stroke polygon: `4 · arcCap` (the pen). -/
+def Config.polyCap (cfg : Config) : Nat := 4 * cfg.arcCap
+
+/-- A page-space path as a device path (affine maps commute with Bézier curves, so mapping
+the control points is exact before rounding), clamped to `±cfg.coordLimit`. -/
+def ofContentPath (m : Aff) (p : Content.Path) (cfg : Config := {}) : DPath :=
+  p.segs.map (DSeg.ofSegment (cfg.coordLimit : Int) m)
 
 /-- Search for the least `n ∈ [n₀, n₀ + fuel]` with `3·m ≤ 4·tol·n²` (else `n₀ + fuel`). -/
 def segCountGo (m tol : Nat) : Nat → Nat → Nat
@@ -368,8 +401,8 @@ def segCountGo (m tol : Nat) : Nat → Nat → Nat
   | n, fuel + 1 => if 3 * m ≤ 4 * tol * (n * n) then n else segCountGo m tol (n + 1) fuel
 
 /-- Number of chords for a cubic whose second differences are bounded by `m`: the least
-`n ≥ 1` with `3·m ≤ 4·tol·n²`, capped at `curveSegCap`. -/
-def segCount (m tol : Nat) : Nat := segCountGo m tol 1 (curveSegCap - 1)
+`n ≥ 1` with `3·m ≤ 4·tol·n²`, capped at `cap` (callers pass `Config.segCap ≥ 1`). -/
+def segCount (cap m tol : Nat) : Nat := segCountGo m tol 1 (cap - 1)
 
 private theorem segCountGo_spec (m tol : Nat) : ∀ fuel n,
     n ≤ segCountGo m tol n fuel ∧ segCountGo m tol n fuel ≤ n + fuel ∧
@@ -386,16 +419,29 @@ private theorem segCountGo_spec (m tol : Nat) : ∀ fuel n,
       · exact Or.inl h
       · exact Or.inr (by omega)
 
-/-- **Chord count.** `1 ≤ n ≤ curveSegCap`, and either the flattening bound
+/-- **Chord count.** For a cap `≥ 1`: `1 ≤ n ≤ cap`, and either the flattening bound
 `3·m ≤ 4·tol·n²` holds (so the error is `≤ tol`, `flatten_err_tol`) or the cap was hit. -/
-theorem segCount_spec (m tol : Nat) :
-    1 ≤ segCount m tol ∧ segCount m tol ≤ curveSegCap ∧
-      (3 * m ≤ 4 * tol * (segCount m tol * segCount m tol) ∨ segCount m tol = curveSegCap) := by
-  have h := segCountGo_spec m tol (curveSegCap - 1) 1
+theorem segCount_spec (cap m tol : Nat) (hcap : 1 ≤ cap) :
+    1 ≤ segCount cap m tol ∧ segCount cap m tol ≤ cap ∧
+      (3 * m ≤ 4 * tol * (segCount cap m tol * segCount cap m tol) ∨
+        segCount cap m tol = cap) := by
+  have h := segCountGo_spec m tol (cap - 1) 1
   simp only [segCount]
-  have hc : 1 + (curveSegCap - 1) = curveSegCap := by decide
+  have hc : 1 + (cap - 1) = cap := by omega
   rw [hc] at h
   exact ⟨h.1, h.2.1, h.2.2⟩
+
+/-- **The cap condition.** If the cap itself is fine enough for the curve
+(`3·m ≤ 4·tol·cap²`), the chosen chord count meets the flattening bound `3·m ≤ 4·tol·n²`, so
+the per-coordinate error is `≤ tol` (`flatten_err_tol`). Without that condition the curve is
+flattened with `cap` chords and the error is only `≤ 3·m / (4·cap²)` (`flatten_err`): the
+documented degradation of `Limits.curveSegCap`. -/
+theorem segCount_tol_of_cap (cap m tol : Nat) (hcap : 1 ≤ cap)
+    (h : 3 * m ≤ 4 * tol * (cap * cap)) :
+    3 * m ≤ 4 * tol * (segCount cap m tol * segCount cap m tol) := by
+  rcases (segCount_spec cap m tol hcap).2.2 with h' | h'
+  · exact h'
+  · rw [h']; exact h
 
 /-- Absolute second difference `|a − 2b + c|`. -/
 def dd2 (a b c : Int) : Nat := (a - 2 * b + c).natAbs
@@ -439,27 +485,27 @@ def hullOutside (cx0 cy0 cx1 cy1 : Int) (p0 p1 p2 p3 : FPt) : Bool :=
   (p0.y ≤ cy0 && p1.y ≤ cy0 && p2.y ≤ cy0 && p3.y ≤ cy0) ||
   (cy1 ≤ p0.y && cy1 ≤ p1.y && cy1 ≤ p2.y && cy1 ≤ p3.y)
 
-/-- Flatten one cubic into at most `curveSegCap` edges. -/
+/-- Flatten one cubic into at most `cfg.segCap` edges. -/
 def flattenCubic (cfg : Config) (clip : IRect) (es : Array Edge) (p0 p1 p2 p3 : FPt) :
     Array Edge :=
   if hullOutside (clip.x0 * subUnit) (clip.y0 * subUnit) (clip.x1 * subUnit)
       (clip.y1 * subUnit) p0 p1 p2 p3 then
     pushLine es p0 p3
   else
-    let n := segCount (flatness p0 p1 p2 p3) cfg.tol
+    let n := segCount cfg.segCap (flatness p0 p1 p2 p3) cfg.tol
     cubicLoop n p0 p1 p2 p3 n 1 p0 es
 
-/-- A cubic adds at most `curveSegCap` edges. -/
+/-- A cubic adds at most `cfg.segCap` edges. -/
 theorem flattenCubic_size (cfg : Config) (clip : IRect) (es : Array Edge) (p0 p1 p2 p3 : FPt) :
-    (flattenCubic cfg clip es p0 p1 p2 p3).size ≤ es.size + curveSegCap := by
+    (flattenCubic cfg clip es p0 p1 p2 p3).size ≤ es.size + cfg.segCap := by
   unfold flattenCubic; split
   · have := pushLine_size es p0 p3
-    have : 1 ≤ curveSegCap := by decide
+    have := cfg.one_le_segCap
     omega
   · dsimp only
-    have h1 := cubicLoop_size (segCount (flatness p0 p1 p2 p3) cfg.tol) p0 p1 p2 p3
-      (segCount (flatness p0 p1 p2 p3) cfg.tol) 1 p0 es
-    have h2 := (segCount_spec (flatness p0 p1 p2 p3) cfg.tol).2.1
+    have h1 := cubicLoop_size (segCount cfg.segCap (flatness p0 p1 p2 p3) cfg.tol) p0 p1 p2 p3
+      (segCount cfg.segCap (flatness p0 p1 p2 p3) cfg.tol) 1 p0 es
+    have h2 := (segCount_spec cfg.segCap (flatness p0 p1 p2 p3) cfg.tol cfg.one_le_segCap).2.1
     omega
 
 /-- Flattening state: edges so far, subpath start, current point. -/
@@ -480,8 +526,8 @@ def flattenSeg (cfg : Config) (clip : IRect) (st : FState) : DSeg → FState
   | .closePath => { st with edges := pushLine st.edges st.cur st.start, cur := st.start }
 
 private theorem flattenSeg_size (cfg : Config) (clip : IRect) (st : FState) (s : DSeg) :
-    (flattenSeg cfg clip st s).edges.size ≤ st.edges.size + curveSegCap := by
-  have : 1 ≤ curveSegCap := by decide
+    (flattenSeg cfg clip st s).edges.size ≤ st.edges.size + cfg.segCap := by
+  have := cfg.one_le_segCap
   cases s with
   | moveTo p => have := pushLine_size st.edges st.cur st.start; simp only [flattenSeg]; omega
   | lineTo p => have := pushLine_size st.edges st.cur p; simp only [flattenSeg]; omega
@@ -496,7 +542,7 @@ def flatten (cfg : Config) (clip : IRect) (p : DPath) : Array Edge :=
 
 private theorem foldl_flattenSeg_size (cfg : Config) (clip : IRect) :
     ∀ (l : List DSeg) (st : FState),
-      (l.foldl (flattenSeg cfg clip) st).edges.size ≤ st.edges.size + curveSegCap * l.length
+      (l.foldl (flattenSeg cfg clip) st).edges.size ≤ st.edges.size + cfg.segCap * l.length
   | [], st => by simp
   | s :: l, st => by
     simp only [List.foldl_cons, List.length_cons]
@@ -504,10 +550,10 @@ private theorem foldl_flattenSeg_size (cfg : Config) (clip : IRect) :
     have h2 := flattenSeg_size cfg clip st s
     rw [Nat.mul_succ]; omega
 
-/-- **S3, edge count.** A path of `s` segments flattens to at most `curveSegCap · s + 1`
-edges. -/
+/-- **S3, edge count.** A path of `s` segments flattens to at most `cfg.segCap · s + 1`
+edges (`cfg.segCap = max 1 cfg.curveSegCap`, `Limits.curveSegCap`). -/
 theorem flatten_size_le (cfg : Config) (clip : IRect) (p : DPath) :
-    (flatten cfg clip p).size ≤ curveSegCap * p.size + 1 := by
+    (flatten cfg clip p).size ≤ cfg.segCap * p.size + 1 := by
   simp only [flatten]
   rw [← Array.foldl_toList]
   have h1 := foldl_flattenSeg_size cfg clip p.toList {}
@@ -724,11 +770,14 @@ def floorSub (a : Int) : Int := a / subUnit
 /-- `⌈a / 256⌉`. -/
 def ceilSub (a : Int) : Int := (a + subUnit - 1) / subUnit
 
-/-- Bounding box of the edges in subpixel units `(minx, miny, maxx, maxy)`. -/
+/-- Bounding box of the edges in subpixel units `(minx, miny, maxx, maxy)`. The start value
+uses the default `Limits.coordLimit` only as a sentinel: for edges beyond it the box is a
+superset, which `maskRect` then cuts to the window. -/
 def edgeBBox (es : Array Edge) : Int × Int × Int × Int :=
   es.foldl (fun (b : Int × Int × Int × Int) e =>
     (min b.1 (min e.x0 e.x1), min b.2.1 e.y0, max b.2.2.1 (max e.x0 e.x1), max b.2.2.2 e.y1))
-    (coordLimit, coordLimit, -coordLimit, -coordLimit)
+    ((Limits.default.coordLimit : Int), (Limits.default.coordLimit : Int),
+      -(Limits.default.coordLimit : Int), -(Limits.default.coordLimit : Int))
 
 /-- The mask rectangle: bounding box of the edges (in whole pixels) ∩ `clip`, as
 `(x0, y0, w, h)`. -/
@@ -801,7 +850,7 @@ def fillDPath (p : DPath) (rule : FillRule) (clip : IRect) (cfg : Config := {}) 
 (e.g. `Geom.viewMatrix zoom rot box`). -/
 def fillPath (m : Aff) (p : Content.Path) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
     Mask :=
-  fillDPath (ofContentPath m p) rule clip cfg
+  fillDPath (ofContentPath m p cfg) rule clip cfg
 
 /-! ## 6. Checks -/
 
@@ -836,11 +885,16 @@ private def win : IRect := ⟨0, 0, 20, 20⟩
 #guard (fillDPath (poly [(30, 30), (40, 30), (40, 40)]) .nonzero win).total == 0
 -- Huge (clamped) coordinates: the whole 20×20 window is covered.
 #guard
-  let big := coordLimit / 256 + 1000000
+  let big := (Limits.default.coordLimit : Int) / 256 + 1000000
   let m := fillDPath (poly [(-big, -big), (big, -big), (big, big), (-big, big)]) .nonzero win
   m.w == 20 && m.h == 20 && m.total == 400 * 255
 -- Exact subdivision points: B(1/2) of (0, 0, 256, 256) is (0 + 0 + 768 + 256)/8 = 128.
 #guard bezNum 2 1 0 0 256 256 == 1024 && (bezAt 2 1 ⟨0, 0⟩ ⟨0, 0⟩ ⟨256, 256⟩ ⟨256, 256⟩).x == 128
-#guard segCount 0 51 == 1 && segCount 1000000 51 ≤ curveSegCap
+#guard segCount 512 0 51 == 1 && segCount 512 1000000 51 ≤ 512 && segCount 0 5 1 == 1
+-- A smaller cap from `Limits` coarsens: a 16-chord cap gives at most 16 + 1 edges per cubic.
+#guard
+  let cfg := Config.ofLimits { curveSegCap := 16 }
+  let p : DPath := #[.moveTo ⟨0, 0⟩, .curveTo ⟨0, 100000⟩ ⟨100000, 100000⟩ ⟨100000, 0⟩]
+  (flatten cfg win p).size ≤ 17 && (flatten {} win p).size > 17
 
 end SafePdf.Core.Raster.Fill
