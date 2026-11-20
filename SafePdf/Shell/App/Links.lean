@@ -21,8 +21,7 @@ cycle cuts), link annotations (`Nav.targetOf` on each `/Link`), named destinatio
   `/FitBH`, `/FitBV`); the zoom of `/XYZ` and the fit modes are not applied (the viewer keeps
   its zoom).
 * **Links** (`Link`, `pageLinks`): the page's `/Annots` walked as `Nav.pageLinks` does (rule
-  N7), plus the `/URI` string of a `/URI` action, which `Nav.Target.action` does not keep (it
-  keeps only the action type). `Action`: internal jump, URI, unresolved name, other action
+  N7), whose `Nav.Target.uri` carries the `/URI` string of a `/URI` action. `Action`: internal jump, URI, unresolved name, other action
   type (not followed), nothing. `linkAt` is the topmost (last in `/Annots` order) link whose
   rectangle contains a page point.
 * **URIs** are shown and copied as `uriText`: printable ASCII as is, every other byte
@@ -178,33 +177,17 @@ inductive Action where
   | none
   deriving DecidableEq, Repr
 
-/-- The action of a `Nav` target; `uri` is the `/URI` string of the dictionary, if any. -/
-def actionOf {n : Nat} (t : Doc.Nav.Target n) (uri : Option (List UInt8)) : Action :=
+/-- The action of a `Nav` target (a `/URI` action carries its address, shown as `uriText`). -/
+def actionOf {n : Nat} (t : Doc.Nav.Target n) : Action :=
   match t with
   | .dest d => match jumpOf d with
     | some j => .goto j
     | Option.none => .badPage
   | .unresolved nm => .unresolved (textString nm)
+  | .uri u => .uri (uriText u)
   | .action k =>
-    if k == bytes "URI" then
-      match uri with
-      | some u => .uri (uriText u)
-      | Option.none => .other "URI (no address)"
-    else .other (uriText k)
+    if k == bytes "URI" then .other "URI (no address)" else .other (uriText k)
   | .none => .none
-
-/-- The `/URI` string of a link dictionary's `/A` action when its type is `/URI`
-(§12.6.4.8). Not followed further (`/Next` actions are ignored). -/
-def uriOf (doc : Doc) (limits : Limits) (ad : Dict) : Option (List UInt8) :=
-  match Doc.Nav.raw ad "A" with
-  | some a =>
-    match Doc.Nav.res doc limits a with
-    | .dict d =>
-      match Doc.Nav.getL doc limits d "S", Doc.Nav.getL doc limits d "URI" with
-      | .name s, .string u => if s = Name.ofString "URI" then some u else Option.none
-      | _, _ => Option.none
-    | _ => Option.none
-  | Option.none => Option.none
 
 /-- A link of a page: its page-space rectangle and action. -/
 structure Link where
@@ -219,7 +202,7 @@ def linkOf (doc : Doc) (limits : Limits) (a : PdfObject) : Option Link :=
   | .dict ad =>
     if Doc.Nav.isLink doc limits ad then
       (Doc.rectOf (Doc.Nav.getL doc limits ad "Rect")).map fun r =>
-        ⟨Box.ofRect r, actionOf (Doc.Nav.targetOf doc limits ad) (uriOf doc limits ad)⟩
+        ⟨Box.ofRect r, actionOf (Doc.Nav.targetOf doc limits ad)⟩
     else Option.none
   | _ => Option.none
 
@@ -292,12 +275,9 @@ def clampDepths : Nat → List Entry → List Entry
 items whose action is a URI. -/
 def outlineEntries (doc : Doc) (limits : Limits) : List Entry :=
   clampDepths 0 <| (Doc.Nav.outline doc limits).items.map fun it =>
-    let uri := match Doc.Nav.fetchDict doc limits it.num it.gen with
-      | some nd => uriOf doc limits nd
-      | Option.none => Option.none
     { title := textString it.title, depth := it.depth,
       isOpen := match it.count with | some c => decide (0 < c) | Option.none => false,
-      action := actionOf it.target uri }
+      action := actionOf it.target }
 
 /-- Treeview parents: for each entry, the index of its parent (`none`: top level). -/
 def parents (es : List Entry) : List (Option Nat) :=

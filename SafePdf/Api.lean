@@ -490,21 +490,13 @@ def Target.ofCore {n : Nat} : Doc.Nav.Target n → Target
     | some i => .page i.val dst.fit
     | Option.none => .danglingDest dst.fit
   | .unresolved nm => .unresolved (textString nm)
+  | .uri u => .uri (textString u)
   | .action k => .action (String.fromUTF8? ⟨k.toArray⟩ |>.getD "?")
 
 /-- The target of an outline item or annotation dictionary: `Core.Doc.Nav.targetOf` (`/Dest`,
-else `/A`, rule N5), except that a `/URI` action carries its URI. -/
+else `/A`, rule N5); a `/URI` action carries its URI. -/
 def targetOfDict (d : Document) (nd : SafePdf.Dict) : Target :=
-  let core := Target.ofCore (Doc.Nav.targetOf d.doc d.limits nd)
-  match core with
-  | .action "URI" =>
-    match Doc.Nav.getL d.doc d.limits nd "A" with
-    | .dict a =>
-      match Doc.Nav.getL d.doc d.limits a "URI" with
-      | .string u => .uri (textString u)
-      | _ => core
-    | _ => core
-  | _ => core
+  Target.ofCore (Doc.Nav.targetOf d.doc d.limits nd)
 
 /-- One outline (bookmark) item. -/
 structure OutlineItem where
