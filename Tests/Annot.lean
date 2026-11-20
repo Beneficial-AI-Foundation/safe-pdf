@@ -44,6 +44,12 @@ Task 8.3c adds (`run83c`):
   Sound icons (`synth2Fixture`, 17 annotations): recomputed rectangles, the form box of Caret
   and icons, pixels sampled from `mutool draw -r 72`; the whole page differs from MuPDF in
   0.024% of pixels (22 of 90,000) under `pixels.py` (`SAFEPDF_PPM_DIR` writes `synth2.pdf`).
+
+Task 8.3d adds (`run83d`):
+
+* NoRotate on pages with `/Rotate` 0, 90, 180, 270 (`noRotFixture`): the flagged annotation stays
+  upright, hanging from its rectangle's upper-left corner; sampled pixels identical to
+  `mutool draw -r 72`, and the whole renders identical (0 of 40,000 pixels differ, each rotation).
 -/
 
 namespace SafePdf.Tests.Annot
@@ -410,6 +416,39 @@ def run83c : IO Nat := do
       IO.FS.writeBinFile (System.FilePath.mk dir / "synth2.pdf") synth2Fixture
   return failures
 
+/-- Task 8.3d (1): NoRotate on a page with `/Rotate rot`. Two 40 × 20 annotations whose
+appearance fills the left half red (`/BBox [0 0 40 20]`): (0) with `/F 16` (NoRotate),
+(1) without. -/
+def noRotFixture (rot : Nat) : ByteArray := mkPdf [
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  s!"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] /Rotate {rot} >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots [6 0 R 7 0 R] >>",
+  strmObj "" "",
+  strmObj "/Type /XObject /Subtype /Form /BBox [0 0 40 20]" "1 0 0 rg 0 0 20 20 re f",
+  "<< /Type /Annot /Subtype /Square /F 16 /Rect [40 100 80 120] /AP << /N 5 0 R >> >>",
+  "<< /Type /Annot /Subtype /Square /Rect [120 100 160 120] /AP << /N 5 0 R >> >>"]
+
+/-- Task 8.3d checks. -/
+def run83d : IO Nat := do
+  let mut failures := 0
+  -- (1) NoRotate: pixels sampled from `mutool draw -r 72` (device space of the rotated page)
+  let cases : List (Nat × List (Nat × Nat × (Nat × Nat × Nat))) := [
+    (0, [(50, 90, (255, 0, 0)), (70, 90, (255, 255, 255))]),
+    (90, [(130, 50, (255, 0, 0)), (150, 50, (255, 255, 255)), (110, 130, (255, 0, 0))]),
+    (180, [(170, 130, (255, 0, 0)), (190, 130, (255, 255, 255)), (70, 110, (255, 0, 0))]),
+    (270, [(90, 170, (255, 0, 0)), (110, 170, (255, 255, 255)), (90, 70, (255, 0, 0))])]
+  for (rot, samples) in cases do
+    let pdf := noRotFixture rot
+    match process pdf with
+    | none => failures := failures + (← check s!"norot {rot} processes" false)
+    | some o =>
+      for (x, y, c) in samples do
+        failures := failures + (← check s!"norot {rot} px ({x}, {y})" (pxAt o.img x y == c))
+      if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
+        writePpm (System.FilePath.mk dir / s!"norot{rot}.ppm") o.img
+        IO.FS.writeBinFile (System.FilePath.mk dir / s!"norot{rot}.pdf") pdf
+  return failures
+
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
   let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
@@ -469,6 +508,7 @@ def run : IO Nat := do
     failures := failures + (← check "tiny budget" (o.ap.truncated && o.ap.ops ≤ 2))
   failures := failures + (← run83b pdf)
   failures := failures + (← run83c)
+  failures := failures + (← run83d)
   return failures
 
 end SafePdf.Tests.Annot

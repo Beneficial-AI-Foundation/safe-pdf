@@ -20,10 +20,11 @@ The rules follow MuPDF 1.25.1 (`pdf_sync_annots`, `pdf_process_annot`, `pdf_anno
 * `/Subtype /Link` and `/Subtype /Popup` are never drawn (`pdf_sync_annots` does not even load
   them).
 * `/F` (§12.5.3): Invisible (bit 1) or Hidden (bit 2) → skipped; NoView (bit 6) → skipped
-  (usage "View"). Print, NoZoom, NoRotate, ReadOnly, Locked … are ignored for display
-  (MuPDF: "TODO: NoZoom and NoRotate"; NoRotate is handled by `pdf_run_annot_with_usage` but
-  not here — a recorded gap). `/OC` (optional content): hidden in the default configuration →
-  `Skip.ocHidden` (task 8.3c, `ocHidden`).
+  (usage "View"). NoRotate (bit 5, task 8.3d): on a page with `/Rotate`, A is followed by
+  `noRotateMatrix` (as `pdf_run_annot_with_usage`; we use the page's effective rotation, MuPDF
+  the raw `/Rotate`: they differ only for a value that is not a multiple of 90). NoZoom, Print,
+  ReadOnly, Locked … are ignored for display (MuPDF: "TODO: NoZoom"). `/OC` (optional
+  content): hidden in the default configuration → `Skip.ocHidden` (task 8.3c, `ocHidden`).
 * `/Subtype /Widget` is drawn only if both `/FT` and `/T` are found on it or on its `/Parent`
   chain (at most `maxFieldDepth` levels), as MuPDF does.
 * `/Rect` must be an array of four numbers (normalised); otherwise `Skip.badRect`.
@@ -65,8 +66,7 @@ share one `Limits.maxOpsPerPage` (`docAnnots_shared_ops`).
 `extractDocPageAnnots` appends the glyphs of the annotation items to the page's (`withAnnots`;
 MuPDF's `-F txt` includes annotation text), item indices continuing after the page's items.
 
-Not done (recorded): `/F` NoZoom and NoRotate (MuPDF: NoRotate in `pdf_run_annot_with_usage`
-only).
+Not done (recorded): `/F` NoZoom (MuPDF ignores it too).
 
 ## Fonts
 
@@ -109,6 +109,8 @@ def flagInvisible : Nat := 1
 def flagHidden : Nat := 2
 /-- Print. -/
 def flagPrint : Nat := 4
+/-- NoRotate (task 8.3d). -/
+def flagNoRotate : Nat := 16
 /-- NoView. -/
 def flagNoView : Nat := 32
 
@@ -202,6 +204,33 @@ def annotMatrix (rect : RBox) (bbox : Option (Fixed × Fixed × Fixed × Fixed))
     | some bb => RBox.ofFixed bb
     | none => ⟨0, 0, 0, 0⟩
   (aOf rect (tBox fm b)).matrix
+
+/-- `(cos θ, sin θ)` of the page rotation `θ` (exact). -/
+def rotCS : Doc.Rotation → Rat × Rat
+  | .r0 => (1, 0)
+  | .r90 => (0, 1)
+  | .r180 => (-1, 0)
+  | .r270 => (0, -1)
+
+/-- **NoRotate** (task 8.3d; MuPDF 1.25.1 `pdf_run_annot_with_usage`): in device space MuPDF
+turns the annotation by `−/Rotate` about the device image of the rectangle's upper-left corner
+`(x0, y1)`. As the page-to-device map is a rotation by `−/Rotate` after a y-flip, the same map in
+page space is `fz_rotate(/Rotate)` about `(x0, y1)`: `T(−p) · R · T(p)` (row vectors), to be
+applied after A. Exact (integer rotation entries). -/
+def noRotateMatrix (rot : Doc.Rotation) (r : RBox) : Matrix :=
+  let (c, s) := rotCS rot
+  let px := r.x0
+  let py := r.y1
+  ⟨fixOfRat c, fixOfRat s, fixOfRat (-s), fixOfRat c,
+   fixOfRat (px - px * c + py * s), fixOfRat (py - px * s - py * c)⟩
+
+/-- `noRotateMatrix` fixes the corner `(x0, y1)` it turns about (exactly, over `ℚ`). -/
+theorem noRotate_fixes_corner (rot : Doc.Rotation) (r : RBox) :
+    r.x0 * (rotCS rot).1 + r.y1 * (-(rotCS rot).2) +
+        (r.x0 - r.x0 * (rotCS rot).1 + r.y1 * (rotCS rot).2) = r.x0 ∧
+      r.x0 * (rotCS rot).2 + r.y1 * (rotCS rot).1 +
+        (r.y1 - r.x0 * (rotCS rot).2 - r.y1 * (rotCS rot).1) = r.y1 :=
+  ⟨by grind, by grind⟩
 
 /-! ## 3. Collecting a page's annotations -/
 
@@ -1347,8 +1376,22 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
     (some (r, bb, ⟨synthDict bb res, c.toUTF8⟩), s)
   | (_, s) => (none, s)
 
-/-- Parse one annotation dictionary `ad` (object `num`, position `idx`). -/
-def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx num : Nat) (ad : Dict) :
+/-- First pseudo object number of synthesised appearances: above every object number a document
+can have (`Limits.maxObjects` < 2²³), so the owner of a synthesised appearance's direct font
+resources (`FontId.res`) never clashes with the page's (0) or a form's. -/
+def synthBase : Nat := 1099511627776
+
+/-- The pseudo object number of the synthesised appearance of `/Annots` element `idx`. -/
+def synthNum (idx : Nat) : Nat := synthBase + idx
+
+/-- Matrix A followed by the NoRotate turn when flag NoRotate is set and the page is rotated
+(`noRotateMatrix` about the rectangle `r`'s upper-left corner); else A. -/
+def noRotate (flags : Nat) (rot : Doc.Rotation) (r : RBox) (a : Matrix) : Matrix :=
+  if hasFlag flags flagNoRotate && rot != .r0 then Matrix.mul a (noRotateMatrix rot r) else a
+
+/-- Parse one annotation dictionary `ad` (object `num`, position `idx`) on a page with rotation
+`rot`. -/
+def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (rot : Doc.Rotation) (idx num : Nat) (ad : Dict) :
     Outcome × σ :=
   let (sub, s) := nameOf src s (Dict.get? ad (nm "Subtype"))
   let subtype := sub.getD (nm "")
@@ -1384,22 +1427,24 @@ def parseDict {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx num : Na
             | (none, s) => (.skip .noAppearance, s)
             | (some (r, bb, st), s) =>
               let m := if r = bb then Matrix.identity else (aOf r bb).matrix
-              (.draw ⟨idx, num, subtype, r, flags, state, 0, 0, st, m, widget, true⟩, s)
+              (.draw ⟨idx, num, subtype, r, flags, state, synthNum idx, 0, st,
+                noRotate flags rot r m, widget, true⟩, s)
           | (some (n, g, st), s) =>
             let m := annotMatrix rect (Run.bboxOf st.dict) (Run.formMatrix st.dict)
-            (.draw ⟨idx, num, subtype, rect, flags, state, n, g, st, m, widget, false⟩, s)
+            (.draw ⟨idx, num, subtype, rect, flags, state, n, g, st, noRotate flags rot rect m,
+              widget, false⟩, s)
 
 /-- Parse one `/Annots` element (`seen`: annotation object numbers already listed). -/
-def parseOne {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (idx : Nat) (seen : List Nat)
+def parseOne {σ : Type} (src : Source σ) (s : σ) (oc : OCDesc) (rot : Doc.Rotation) (idx : Nat) (seen : List Nat)
     (o : PdfObject) : Outcome × σ :=
   match o with
   | .ref n g =>
     if seen.contains n then (.skip .duplicate, s)
     else
       match src.fetch s n g with
-      | (.ok (.obj (.dict ad)), s) => parseDict src s oc idx n ad
+      | (.ok (.obj (.dict ad)), s) => parseDict src s oc rot idx n ad
       | (_, s) => (.skip .notDict, s)
-  | .dict ad => parseDict src s oc idx 0 ad
+  | .dict ad => parseDict src s oc rot idx 0 ad
   | _ => (.skip .notDict, s)
 
 /-- Object number of a reference (0 otherwise). -/
@@ -1408,22 +1453,22 @@ def refNum : PdfObject → Nat
   | _ => 0
 
 /-- Parse the elements in order: one outcome per element. -/
-def parseAll {σ : Type} (src : Source σ) (oc : OCDesc) :
+def parseAll {σ : Type} (src : Source σ) (oc : OCDesc) (rot : Doc.Rotation) :
     Nat → List Nat → List PdfObject → σ → List (Nat × Outcome) × σ
   | _, _, [], s => ([], s)
   | idx, seen, o :: os, s =>
-    let (r, s) := parseOne src s oc idx seen o
-    let (rs, s) := parseAll src oc (idx + 1) (refNum o :: seen) os s
+    let (r, s) := parseOne src s oc rot idx seen o
+    let (rs, s) := parseAll src oc rot (idx + 1) (refNum o :: seen) os s
     ((idx, r) :: rs, s)
 
 /-- `parseAll` gives exactly one outcome per element. -/
-theorem parseAll_length {σ : Type} (src : Source σ) (oc : OCDesc) :
+theorem parseAll_length {σ : Type} (src : Source σ) (oc : OCDesc) (rot : Doc.Rotation) :
     ∀ (idx : Nat) (seen : List Nat) (os : List PdfObject) (s : σ),
-      (parseAll src oc idx seen os s).1.length = os.length
+      (parseAll src oc rot idx seen os s).1.length = os.length
   | _, _, [], _ => rfl
   | idx, seen, o :: os, s => by
     simp only [parseAll, List.length_cons]
-    rw [parseAll_length src oc (idx + 1) (refNum o :: seen) os]
+    rw [parseAll_length src oc rot (idx + 1) (refNum o :: seen) os]
 
 /-- The annotations of a page. -/
 structure Collected where
@@ -1445,7 +1490,8 @@ theorem widgetsLast_length (ds : List Drawable) : (widgetsLast ds).length = ds.l
   | cons x xs ih => cases h : x.widget <;> simp [h] <;> omega
 
 /-- **Collect the annotations** of a page dictionary `pd` (§12.5; see the module doc). -/
-def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {}) :
+def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {})
+    (rot : Doc.Rotation := .r0) :
     Collected × σ :=
   let (arr, s) := match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
@@ -1453,14 +1499,15 @@ def collect {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc := {
   let xs := match arr with
     | .array xs => xs
     | _ => []
-  let (rs, s) := parseAll src oc 0 [] (xs.take maxAnnots) s
+  let (rs, s) := parseAll src oc rot 0 [] (xs.take maxAnnots) s
   let over := (List.range (xs.length - maxAnnots)).map fun i => (maxAnnots + i, Skip.overCap)
   ({ drawn := widgetsLast (rs.filterMap (·.2.drawable?)),
      skipped := rs.filterMap (fun (i, r) => r.skip?.map (i, ·)) ++ over }, s)
 
 /-- **Annotation count bound**: at most `maxAnnots` annotations are drawn per page. -/
-theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc) :
-    (collect src s pd oc).1.drawn.length ≤ maxAnnots := by
+theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc : OCDesc)
+    (rot : Doc.Rotation) :
+    (collect src s pd oc rot).1.drawn.length ≤ maxAnnots := by
   simp only [collect]
   generalize (match Dict.get? pd (nm "Annots") with
     | some o => Run.resolve src s o
@@ -1469,8 +1516,8 @@ theorem collect_drawn_le {σ : Type} (src : Source σ) (s : σ) (pd : Dict) (oc 
   generalize (match arr with
     | .array xs => xs
     | _ => []) = xs
-  have hl := parseAll_length src oc 0 [] (xs.take maxAnnots) s1
-  generalize parseAll src oc 0 [] (xs.take maxAnnots) s1 = p at hl
+  have hl := parseAll_length src oc rot 0 [] (xs.take maxAnnots) s1
+  generalize parseAll src oc rot 0 [] (xs.take maxAnnots) s1 = p at hl
   obtain ⟨rs, s2⟩ := p
   simp only at hl ⊢
   rw [widgetsLast_length]
@@ -1661,8 +1708,9 @@ structure AnnotPage where
 /-- **Annotations of a page** (page dictionary `pd`, resources `pageRes`, the page's font
 table `pageFonts`), run under the budget `bud`. Total. -/
 def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc := {}) : AnnotPage × σ :=
-  let (c, s) := collect src s pd oc
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc := {}) (rot : Doc.Rotation := .r0) :
+    AnnotPage × σ :=
+  let (c, s) := collect src s pd oc rot
   let (roots, s) := apRoots src s c.drawn
   let (fonts, s) := loadAnnotFonts limits src s pageFonts roots
   let st := runAppearances (Text.textEnv limits src fonts) bud pageRes c.drawn s ()
@@ -1671,12 +1719,12 @@ def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd page
 /-- **Bounds of `pageAnnots`**: at most `maxAnnots` annotations drawn, at most `bud.ops`
 operators and `Paint.maxItems · bud.ops` items. -/
 theorem pageAnnots_bounds {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd pageRes : Dict)
-    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc) :
-    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.collected.drawn.length ≤ maxAnnots ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.ops ≤ bud.ops ∧
-    (pageAnnots limits src s pd pageRes pageFonts bud oc).1.items.size ≤
+    (pageFonts : Text.FontTable) (bud : Budget) (oc : OCDesc) (rot : Doc.Rotation) :
+    (pageAnnots limits src s pd pageRes pageFonts bud oc rot).1.collected.drawn.length ≤ maxAnnots ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc rot).1.ops ≤ bud.ops ∧
+    (pageAnnots limits src s pd pageRes pageFonts bud oc rot).1.items.size ≤
       Paint.maxItems * bud.ops :=
-  ⟨collect_drawn_le src s pd oc, runAppearances_ops_le _ _ _ _ _ _,
+  ⟨collect_drawn_le src s pd oc rot, runAppearances_ops_le _ _ _ _ _ _,
    runAppearances_items_le _ _ _ _ _ _⟩
 
 /-- **Annotations of a page of an opened document**, charging the decode `budget`; `pageFonts`
@@ -1687,7 +1735,7 @@ def docAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (pageFonts : T
   let src := Text.docSource limits doc
   let (pd, b) := Run.dictOf src budget (.ref page.num page.gen)
   let (oc, b) := readOC src b doc.catalog
-  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc
+  pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc page.rotate
 
 /-- **The shared budget** (task 8.3b): what the page run `pt` left of `Limits.maxOpsPerPage`
 and `Limits.maxFormsPerPage`. -/
@@ -1706,7 +1754,7 @@ theorem docAnnots_shared_ops (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
   generalize readOC (Text.docSource limits doc) b' doc.catalog = q
   obtain ⟨oc, b''⟩ := q
   have := (pageAnnots_bounds limits (Text.docSource limits doc) b'' pd
-    (page.resources.getD []) pt.fonts (Budget.after limits pt) oc).2.1
+    (page.resources.getD []) pt.fonts (Budget.after limits pt) oc page.rotate).2.1
   simp only [Budget.after] at this ⊢
   omega
 
