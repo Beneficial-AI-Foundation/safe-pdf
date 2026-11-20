@@ -14,6 +14,7 @@ import SafePdf
 import SafePdf.Shell.App.TclLemmas
 import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Select
+import SafePdf.Shell.App.Links
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -1007,3 +1008,25 @@ import SafePdf.Shell.App.Select
 
 -- Phase 8, task 8.2c: viewer search soundness
 #print axioms SafePdf.Shell.App.Select.findAll_sound
+
+-- Phase 8, task 8.2d: viewer links and history
+#print axioms SafePdf.Shell.App.Links.toNat_ofNat_small
+#print axioms SafePdf.Shell.App.Links.hexDigit_ascii
+#print axioms SafePdf.Shell.App.Links.uriByte_ascii
+#print axioms SafePdf.Shell.App.Links.uriText_ascii
+#print axioms SafePdf.Shell.App.Links.History.back_push
+
+-- Phase 8, task 8.4: library API (SafePdf/Api.lean)
+#print axioms SafePdf.Api.openBytes_strict
+#print axioms SafePdf.Api.toPage_toScreen
+#print axioms SafePdf.Api.toScreen_toPage
+#print axioms SafePdf.Api.toScreen_eq
+#print axioms SafePdf.Api.pageText_glyphs_ofCore
+#print axioms SafePdf.Api.pageText_glyphs
+#print axioms SafePdf.Api.glyph_provenance
+#print axioms SafePdf.Api.glyph_codes
+#print axioms SafePdf.Api.renderPage_size
+#print axioms SafePdf.Api.outline_bounded
+
+-- Phase 8, task 8.3d: NoRotate
+#print axioms SafePdf.Core.Annot.noRotate_fixes_corner

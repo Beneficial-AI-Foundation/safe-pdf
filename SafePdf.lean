@@ -70,3 +70,4 @@ import SafePdf.Core.Raster.Tiling
 import SafePdf.Core.Annot
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text
+import SafePdf.Api
