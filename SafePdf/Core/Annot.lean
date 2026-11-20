@@ -537,9 +537,9 @@ Sound annotations (`iconAp`, `/Name`, MuPDF's 8 × 8 open-iconic paths). Caret a
 written in a fixed form box (`[0 0 20 14]`, `[0 0 16 16]`) mapped into the recomputed
 rectangle by matrix A; everything else has `/BBox` = rectangle and A = identity. Trigonometry
 is exact: the arrow and slash directions come from the normalised line vector (`dirOf`, MuPDF's
-`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Recorded gaps: Line `/Cap` captions,
-cloudy borders (`/BE /S /C`: drawn as plain borders), Redact and widgets
-(`Skip.noAppearance`); FreeText and Stamp: task 8.3d, below. -/
+`atan2f`/`cosf`/`sinf`), `cos 30°` to six decimals. Recorded gaps: cloudy borders (`/BE /S
+/C`: drawn as plain borders), Redact and widgets (`Skip.noAppearance`). FreeText, Stamp and
+Line `/Cap` captions (`captionStr`): task 8.3d, below. -/
 
 /-- Most numbers read from one `/InkList` stroke or `/QuadPoints` array, and most strokes
 (local cap). -/
@@ -804,7 +804,8 @@ def endsStr (r : OBox) (le : List PdfObject) (w : Rat) (sc ic : Bool)
 
 /-- Line (`pdf_write_line_appearance` without `/Cap` captions): leader lines `/LL`, `/LLE`,
 `/LLO`, line endings `/LE`; the box grown by `max 1 w`. -/
-def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject := []) :
+def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject := [])
+    (caption : Option ((Rat × Rat) → (Rat × Rat) → OBox → String × OBox × Rat) := none) :
     String × OBox :=
   let (pre, sc, ic) := prelude st true
   let (ax, ay, bx, by_) := (nth l 0, nth l 1, nth l 2, nth l 3)
@@ -823,8 +824,18 @@ def lineAp (st : Style) (l : List Rat) (ll lle llo : Rat) (le : List PdfObject :
     let b := (bx - dy * (llo + ll), by_ + dx * (llo + ll))
     (segStr aa.1 aa.2 ab.1 ab.2 ++ segStr ba.1 ba.2 bb.1 bb.2, a, b,
       ((((r0.incl a.1 a.2).incl b.1 b.2).incl ab.1 ab.2).incl bb.1 bb.2))
+  -- `/Cap` (task 8.3d): the caption, and the line broken by its gap when it is inline
+  let (capS, segs, r) := match caption with
+    | none => ("", segStr a.1 a.2 b.1 b.2, r)
+    | some f =>
+      let (t, r, gap) := f a b r
+      if gap > 0 then
+        let m := ((a.1 + b.1) / 2, (a.2 + b.2) / 2)
+        (t, segStr a.1 a.2 (m.1 - dx * gap) (m.2 - dy * gap) ++
+          segStr (m.1 + dx * gap) (m.2 + dy * gap) b.1 b.2, r)
+      else (t, segStr a.1 a.2 b.1 b.2, r)
   let (ends, r) := endsStr r le st.lw sc ic a b b a
-  (pre ++ lead ++ segStr a.1 a.2 b.1 b.2 ++ strokeStr sc ++ ends, r.expand (max 1 st.lw))
+  (pre ++ lead ++ capS ++ segs ++ strokeStr sc ++ ends, r.expand (max 1 st.lw))
 
 /-- One ink stroke: its path and the box. -/
 def inkStroke (r : OBox) (pts : List Rat) : String × OBox :=
@@ -1619,6 +1630,34 @@ def stampAp (st : Style) (orect : RBox) (name : String) : String × Dict × RBox
       { orect with y0 := yc - 25 * xs, y1 := yc + 25 * xs }
   (c, res ++ [(nm "Font", .dict [(nm "Times", stdFontDict "Times-Bold")])], r, ⟨0, 0, 190, 50⟩)
 
+/-- **Line caption** (`pdf_write_line_caption`, task 8.3d): `/Contents` in Helvetica 12, black,
+along the line from `a` to `b` (turned to its direction), centred on its middle; inline (0.3 ·
+size below the line's axis, the line broken by the returned gap) unless `/CP /Top`, an offset
+`/CO`, or the text does not fit (`top`: 0.2 · size above, no gap). The rectangle grows to the
+text's ends, expanded by the size. -/
+def captionStr (text : List Char) (cpTop : Bool) (cox coy : Rat) (a b : Rat × Rat) (r : OBox) :
+    String × OBox × Rat :=
+  let len := rsqrt ((b.1 - a.1) * (b.1 - a.1) + (b.2 - a.2) * (b.2 - a.2))
+  let dx := (b.1 - a.1) / len
+  let dy := (b.2 - a.2) / len
+  let size : Rat := 12
+  let tw := (text.map (charWidth .helvetica)).foldl (· + ·) 0 * size
+  let top := cpTop || tw + size > len
+  let e := (a.1 + b.1) / 2 - dx * (tw / 2)
+  let f := (a.2 + b.2) / 2 - dy * (tw / 2)
+  let (top, e, f) :=
+    if cox ≠ 0 ∨ coy ≠ 0 then
+      let coy := if coy < 0 then coy - size else coy
+      (true, e + cox * dx - coy * dy, f + cox * dy + coy * dx)
+    else if top then (top, e - dy * size / 5, f + dx * size / 5)
+    else (top, e + dy * size * 3 / 10, f - dx * size * 3 / 10)
+  let t := "q\n" ++ pts [dx, dy, -dy, dx, e, f] ++ " cm\n0 g\nBT\n" ++
+    (if text.isEmpty then "" else "/Helv " ++ fmt size ++ " Tf\n" ++ litStr text ++ " Tj\n") ++
+    "ET\nQ\n"
+  let r := ((r.incl (e - dx * tw / 2) (f - dy * tw / 2)).incl (e + dx * tw / 2)
+    (f + dy * tw / 2)).expand size
+  (t, r, if top then 0 else (tw + size / 2) / 2)
+
 /-- The value of key `k` on `d` or its `/Parent` chain (`pdf_dict_get_inheritable`), resolved
 one level; at most `fuel` levels up. -/
 def inheritGet {σ : Type} (src : Source σ) (k : Name) : Nat → Dict → σ → Option PdfObject × σ
@@ -1686,6 +1725,18 @@ def synthesize {σ : Type} (src : Source σ) (s : σ) (ad : Dict) (sub : Name) (
       let (lle, s) := realOpt src s (Dict.get? ad (nm "LLE"))
       let (llo, s) := realOpt src s (Dict.get? ad (nm "LLO"))
       let (e, s) := le s
+      let (cap, s) := resolveOpt src s (Dict.get? ad (nm "Cap"))
+      if cap == .bool true then
+        let (contents, s) := strOf src s (Dict.get? ad (nm "Contents"))
+        let (cp, s) := nameOf src s (Dict.get? ad (nm "CP"))
+        let (co, s) := arrOf src s (Dict.get? ad (nm "CO"))
+        let (co, s) := realsOf src s ((co.getD []).take 2)
+        let f := captionStr ((textOf contents).take maxSynthText) (cp = some (nm "Top"))
+          (nth co 0) (nth co 1)
+        let (c, r) := lineAp st l (ll.getD 0) (lle.getD 0) (llo.getD 0) e (some f)
+        (some (gs ++ c, res ++ [(nm "Font", .dict [(nm "Helv", stdFontDict "Helvetica")])], r,
+          none), s)
+      else
       let (c, r) := lineAp st l (ll.getD 0) (lle.getD 0) (llo.getD 0) e
       (some (gs ++ c, res, r, none), s)
     else if sub = nm "Ink" then
