@@ -25,6 +25,54 @@ compositing), evaluated in `IO.lazyPure` and matched in `IO` before the clock is
 File writing is excluded. The inspector is compiled (`leanc -O3`), so these are compiled
 times. Process start-up is not included (see "Issues" below: it is ~1 s today).
 
+## Substitute fonts for non-embedded fonts (task 7.7)
+
+A font without an embedded program (the standard 14, `/Arial`, `/TimesNewRoman`, any other
+non-embedded simple font, the "hail mary" font of a `Tf` naming no font) is painted with the
+substitute MuPDF 1.25.1 would use, **when a substitute program is found on the system**.
+Nothing is committed: the repository is MIT, the fonts are not (URW base-35: AGPL-3.0 with a
+font exception; TeX Gyre: GUST font licence). Ledger Decisions 2026-11-20 (7.7).
+
+**Where they come from** (`SafePdf/Shell/Fonts.lean`, first file per face wins):
+
+1. `SAFEPDF_FONT_DIR` (a directory, or several separated by `:`), with the URW file names
+   (`NimbusSans-Regular`, `NimbusSans-Bold`, `NimbusSans-Italic`, `NimbusSans-BoldItalic`,
+   `NimbusRoman-*`, `NimbusMonoPS-*`, `StandardSymbolsPS`, `D050000L`) or the TeX Gyre names
+   (`texgyreheros-regular`, …, `texgyretermes-*`, `texgyrecursor-*`), extension `.t1`,
+   `.pfb`, `.pfa`, `.otf` or none;
+2. URW base-35 — Debian/Ubuntu package **`fonts-urw-base35`**:
+   `/usr/share/fonts/type1/urw-base35/*.t1`, `/usr/share/fonts/X11/Type1/*.pfb`,
+   `/usr/share/fonts/opentype/urw-base35/*.otf`; Ghostscript's `Resource/Font` (Homebrew
+   `/opt/homebrew/share/ghostscript/Resource/Font`, `/usr/local/…`, `/usr/…`);
+3. TeX Gyre — package **`fonts-texgyre`**: `/usr/share/texmf/fonts/opentype/public/tex-gyre`,
+   `/usr/share/fonts/opentype/texgyre` (Heros, Termes, Cursor; no Symbol or Dingbats).
+
+`SAFEPDF_SUBST_FONTS=0` disables substitutes (the behaviour before 7.7; used for before/after
+comparisons). A face that is missing, unreadable or does not parse is absent: its text stays
+unpainted, nothing fails. The inspector's `raster` view and the viewer both load the table once
+per process; each face is parsed (Type 1 parser, or the CFF parser on an OpenType file's
+`CFF ` table) the first time a page needs it — inside that page's timed render (≈ 10 ms per
+face). CI needs `apt-get install fonts-urw-base35` for the painting checks of suite
+`raster-subst` (without it they skip).
+
+**Which substitute** (`SafePdf/Core/Raster/Subst.lean`, MuPDF `pdf-font.c`):
+`pdf_clean_font_name`'s exact table (standard names; `Arial`, `ArialMT`, `Arial,Bold`,
+`TimesNewRoman…`, `CourierNew…`, `SymbolMT…`; spaces ignored, no subset-tag stripping) gives
+a built-in face; a font without `/FontDescriptor` and an unknown name gets Times-Roman; a
+descriptor without an embedded program and an unknown name gets `pdf_load_substitute_font`'s
+face from `/Flags` (FixedPitch → Courier, Serif → Times, else Helvetica; Italic flag or
+`Italic`/`Oblique` in the name; ForceBold flag or `Bold` in the name — MuPDF 1.25.1 ignores
+`/FontWeight` and `/StemV`). Glyphs by name through the font's encoding (implicit base: the
+substitute's built-in encoding), else the code's glyph in the built-in encoding. Advances stay
+the PDF's (`/Widths` or the standard-14 AFM widths, as before); only for the last case
+(MuPDF's `ft_stretch`) each glyph is scaled horizontally to its PDF width
+(`fz_adjust_ft_glyph_width`). Not substituted: non-embedded CIDFonts (`/Type0`: MuPDF uses CJK
+fonts or a Unicode-mapped substitute), embedded programs our parsers reject.
+
+Measured (72 dpi, `pixels.py`): the human's receipts page (non-embedded Helvetica,
+Helvetica-Bold, WinAnsi) 4.70% → 0.0002% differing pixels; the 7-font fixture
+`Tests/fixtures-subst/subst.pdf` 0.0000% with URW (`.t1` and `.otf`), 0.08% with TeX Gyre.
+
 ## Comparator `pixels`
 
     python3 -I Tests/differential/run.py --comparator pixels [--files GLOB] [--dpi D]
@@ -121,6 +169,7 @@ refusals. The timing half (**median < 100 ms**) is **not met on text-heavy pages
    no cm-super produces bitmap Type 3 fonts: 8–9% of the page differs.
 4. Stroking dominates the vector page (`Stroke.strokeSubs`/`solidSub`/`quadPts`), 128 ms for
    400 paths — in budget, but the next hot spot after 1.
-5. Known, by design: non-embedded fonts draw nothing (MuPDF substitutes base-14 fonts), DCT
+5. Known, by design: non-embedded fonts draw nothing without substitute fonts on the system
+   (task 7.7; non-embedded CIDFonts always), DCT
    images are placeholders, shared `/Kids` are a cycle, page numbering differs from MuPDF
    after a dangling kid.

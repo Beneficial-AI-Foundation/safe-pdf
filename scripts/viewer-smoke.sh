@@ -176,7 +176,9 @@ out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(o
 open(sys.argv[1], "wb").write(out)
 ' "$work/text.pdf"
 mkdir -p "$work/out-text"
-SAFEPDF_VIEWER_SMOKE_MODE=text run_viewer "$work/out-text" "$work/text.pdf"
+# The marker check below needs the non-embedded Helvetica text to stay unpainted (only the
+# marker is dark), so substitute fonts (task 7.7) are switched off for this run.
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=text run_viewer "$work/out-text" "$work/text.pdf"
 SAFEPDF_PAGE=1 "$repo/.lake/build/bin/inspect" --json --view text "$work/text.pdf" > "$work/text.json" || true
 for f in clip-all word drag; do echo "$f: $(cat "$work/out-text/$f.txt" | tr '\n' '|')"; done
 cat "$work/out-text/sel.txt" "$work/out-text/find.txt"

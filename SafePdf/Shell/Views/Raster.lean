@@ -1,6 +1,7 @@
 import SafePdf.Shell.Views.Common
 import SafePdf.Shell.Views.Summary
 import SafePdf.Shell.Views.Pages
+import SafePdf.Shell.Fonts
 
 /-!
 # `raster` view: full-page rasterisation, image files and per-page timing (task 7.4)
@@ -21,6 +22,10 @@ renders them on demand, so a large early page cannot starve a later one and the 
 does not depend on the pages before it.
 
 Environment:
+* substitute fonts for non-embedded fonts (task 7.7) are found by `Shell.Fonts`
+  (`SAFEPDF_FONT_DIR`, the URW base-35 and TeX Gyre system directories;
+  `SAFEPDF_SUBST_FONTS=0` disables them); a face is parsed the first time a page needs it,
+  inside that page's timed render;
 * `SAFEPDF_PAGE=N` (1-based) renders only page `N` (default: every page, document order);
 * `SAFEPDF_DPI=D` resolution in dots per inch, a positive integer (default 72; MuPDF's
   `mutool draw` default is also 72);
@@ -146,13 +151,15 @@ structure PageOut where
 
 /-- Render page `k` (0-based) with a fresh budget, timing the pure call. Returns the record and
 the image (on success). -/
-def renderTimed (limits : Limits) (doc : Doc) (k : Nat) (zoom : Rat) :
+def renderTimed (limits : Limits) (doc : Doc) (k : Nat) (zoom : Rat)
+    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {}) :
     IO (PageOut × Option Clip.Image) := do
   if h : k < doc.pages.size then
     let page := doc.pages[k]
     let t0 ← IO.monoNanosNow
     let r ← IO.lazyPure fun _ =>
-      (SafePdf.Core.Raster.Glyph.renderDocPage limits doc page zoom .r0 (Budget.init limits)).1
+      (SafePdf.Core.Raster.Glyph.renderDocPage limits doc page zoom .r0 (Budget.init limits)
+        (subst := subst)).1
     -- `lazyPure` runs the render when this action runs (as `Inspect.load` times the parse);
     -- matching on the result in `IO` before reading the clock again keeps the evaluation of
     -- the image between the two clock reads.
@@ -247,9 +254,10 @@ def view : View where
             pure (List.range doc.pages.size)
       if !cfg.json then
         IO.println s!"file:       {i.path}\nopen:       {Summary.openMode i.result}\npages:      {doc.pages.size}\ndpi:        {dpi}"
+      let subst ← Fonts.loadSubstFonts cfg.limits
       let mut outs : Array PageOut := #[]
       for k in indices do
-        let (p, img?) ← renderTimed cfg.limits doc k zoom
+        let (p, img?) ← renderTimed cfg.limits doc k zoom subst
         let mut p := p
         if let (some d, some img) := (dir, img?) then
           let path := (d : System.FilePath) / s!"page-{k + 1}.{fmt.ext}"

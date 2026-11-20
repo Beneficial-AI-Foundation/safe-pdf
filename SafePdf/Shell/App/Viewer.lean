@@ -6,6 +6,7 @@ import SafePdf.Shell.App.Links
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
+import SafePdf.Shell.Fonts
 
 /-!
 # Native viewer (tasks 8.2a–8.2d; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
@@ -25,6 +26,8 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   `tk scaling`) and the user rotation (added to the page's `/Rotate` by the renderer through
   `rotAdd`). Zoom is capped at `View.maxViewPixels` pixels per page image (status line says
   so); a side above `Limits.maxPageSide` is cropped by the renderer (status line says so).
+  Non-embedded fonts are painted with the substitute programs `Shell.Fonts.loadSubstFonts`
+  finds at start-up (task 7.7, `docs/raster.md`; `State.subst`).
 * **Page cache** (`View.Cache`): render results keyed by (document generation, page, zoom,
   rotation), LRU, at most `View.cacheBytes` (256 MiB) of images. After a page is shown the
   next page is prefetched 100 ms later (same event loop, no threads) when it is at most
@@ -124,6 +127,9 @@ structure State where
   scaling : Rat := 4 / 3
   /-- Rendered pages. -/
   cache : View.Cache := {}
+  /-- Substitute programs for non-embedded fonts (task 7.7, `Shell.Fonts`), found at start-up
+  and parsed on first use. -/
+  subst : SafePdf.Core.Raster.Subst.SubstFonts := {}
   /-- Key of what is on screen (successful or failed render). -/
   shown : Option View.Key := none
   /-- Canvas position and size of the shown image, zoom and total rotation it was drawn
@@ -563,13 +569,14 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
 
 /-- Renders page `p` of `doc` at `zoom` and user rotation `rot` with a fresh budget (the
 inspector's `raster` view does the same). -/
-def renderPage (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotation) :
+def renderPage (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotation)
+    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {}) :
     IO (Except Error Clip.Image) := do
   match doc.pages[p]? with
   | some page =>
     IO.lazyPure fun _ =>
       (SafePdf.Core.Raster.Glyph.renderDocPage limits doc page zoom rot
-        (SafePdf.Core.Filter.Budget.init limits)).1
+        (SafePdf.Core.Filter.Budget.init limits) (subst := subst)).1
   | none => return .error (.malformed 0 "page index out of range")
 
 /-- The render result for `key` from the cache, or rendered now and cached. Returns the
@@ -582,7 +589,7 @@ def fetch (st : IO.Ref State) (doc : Doc) (key : View.Key) :
   | some r => return (r, none)
   | none =>
     let t0 ← IO.monoNanosNow
-    let r ← renderPage doc key.page key.zoom key.rot
+    let r ← renderPage doc key.page key.zoom key.rot (← st.get).subst
     let t1 ← IO.monoNanosNow
     st.modify fun s => { s with cache := s.cache.insert key r }
     return (r, some (t1 - t0))
@@ -1452,7 +1459,8 @@ def main (args : List String) : IO UInt32 := do
     return 3
   let smokeDir ← IO.getEnv "SAFEPDF_VIEWER_SMOKE"
   let smokeMode := (← IO.getEnv "SAFEPDF_VIEWER_SMOKE_MODE").getD ""
-  let st ← IO.mkRef ({ smokeDir, smokeMode } : State)
+  let subst ← Fonts.loadSubstFonts limits
+  let st ← IO.mkRef ({ smokeDir, smokeMode, subst } : State)
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
