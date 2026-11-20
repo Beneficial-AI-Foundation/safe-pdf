@@ -127,8 +127,14 @@ def read_pnm(b):
     return w, h, nc, b[i:i + w * h * nc]
 
 
+# libjpeg-turbo's C code paths (JSIMD_FORCENONE): its SIMD islow IDCT works in 16-bit lanes
+# and differs from the C one only on blocks whose coefficients overflow (garbage from
+# truncated progressive data, 7.6c); the decoder follows the C code.
+ENV = dict(os.environ, JSIMD_FORCENONE="1")
+
+
 def run(args, data):
-    return subprocess.run(args, input=data, stdout=subprocess.PIPE, check=True).stdout
+    return subprocess.run(args, input=data, stdout=subprocess.PIPE, check=True, env=ENV).stdout
 
 
 def cjpeg(w, h, nc, data, opts):
@@ -140,7 +146,7 @@ def djpeg(jpg, strict=True):
     if strict:
         return read_pnm(run(["djpeg", "-dct", "int", "-pnm"], jpg))
     r = subprocess.run(["djpeg", "-dct", "int", "-pnm"], input=jpg, stdout=subprocess.PIPE,
-                       stderr=subprocess.DEVNULL)
+                       stderr=subprocess.DEVNULL, env=ENV)
     return read_pnm(r.stdout)
 
 
@@ -306,7 +312,9 @@ def main():
             ("tp420", "p420", 0.3), ("tp420b", "p420", 0.5), ("tp444", "p444", 0.7),
             ("tpgray", "pgray", 0.5), ("tprst", "prst", 0.3), ("tpscans", "pscans", 0.5),
             ("tpscanrst", "pscanrst", 0.7), ("tpscangray", "pscangray", 0.3),
-            ("tpsmooth", "psmooth", 0.7), ("tpnarrow", "pnarrow", 0.5)):
+            ("tpsmooth", "psmooth", 0.7), ("tpnarrow", "pnarrow", 0.5),
+            # cut inside a DHT segment between scans (libjpeg reads fake EOIs, ends there)
+            ("tdhtp", "pscans", 0.3), ("tdhts", "scans", 0.75)):
         jpg = byname[src]
         jpg = jpg[:int(len(jpg) * frac)]
         fixtures.append((name, jpg, djpeg(jpg, strict=False)))

@@ -30,16 +30,25 @@ ITU-T T.81 (ISO/IEC 10918-1), sequential and progressive DCT with Huffman coding
   approximation `Ah`/`Al`. Scan parameters are checked like `start_pass_phuff_decoder`
   (else malformed); inconsistent scan *sequences* (libjpeg warnings) decode as they come.
   After a read past the end of a segment, the remaining MCUs of the restart interval are
-  left unchanged (libjpeg `insufficient_data`). **Deviation**: libjpeg's interblock
-  smoothing (`do_block_smoothing`, applied at output when the scans leave the DC or the
-  first AC coefficients short of full precision — truncated files, unusual scripts) is not
-  reproduced: such images differ slightly from MuPDF (complete files are bit-exact).
+  left unchanged (libjpeg `insufficient_data`). **Block smoothing** (7.6c, libjpeg-turbo 2.1
+  `decompress_smooth_data`): when the scans leave some of the first nine AC coefficients
+  short of full precision (truncated files, DC-only files), they are estimated from the
+  5 × 5 neighbourhood of DC values (and the DC too when no AC is known), with libjpeg's
+  progression bookkeeping (`coef_bits`, the previous-scan latch for iMCU rows after
+  `last_good_iMCU_row`) and edge rules.
 * **Entropy decoding** (F.2.2): canonical Huffman tables validated as libjpeg does
   (`jpeg_make_d_derived_tbl`: at most 256 symbols, no code overflow — the all-ones code is
   rejected — DC symbols ≤ 15), decoded through a 16-bit lookup table; byte stuffing
-  `FF 00`, fill bytes `FF FF`; DC prediction reset at each restart. A marker or the end of
-  the data inside a scan reads as zero bits (libjpeg: "premature end of data segment"), so a
-  truncated image decodes to its end like MuPDF's.
+  `FF 00`, fill bytes `FF FF`; DC prediction reset at each restart. Sequential frames
+  without a `DHT` for slots 0/1 get the standard tables of Annex K.3 (libjpeg-turbo's
+  motion-JPEG rule; progressive frames do not). A marker or the end of the data inside a
+  scan reads as zero bits (libjpeg: "premature end of data segment"); once such padding
+  bits were consumed, the rest of the restart interval is not decoded — in a sequential
+  scan those MCUs stay grey (128, libjpeg leaves their coefficients zero), and without
+  restart intervals the scan ends at once, so a truncated file claiming huge dimensions
+  costs no per-block work. A table segment (`DHT`, `DQT`, `DRI`, `APPn`, `COM`) cut by the
+  end of the data is read as libjpeg reads it (fake `EOI` bytes `FF D9 …`): if libjpeg
+  accepts it, decoding ends there with what was decoded.
 * **Dequantisation, zig-zag, IDCT**: libjpeg's exact integer "islow" IDCT (`jidctint.c`,
   13-bit constants, 2 extra bits in pass 1, the 1024-entry range-limit table semantics).
 * **Upsampling**: libjpeg-turbo 2.1's default ("fancy", `jdsample.c`): `h2v1` and `h2v2`
@@ -56,7 +65,9 @@ ITU-T T.81 (ISO/IEC 10918-1), sequential and progressive DCT with Huffman coding
   `/Decode [1 0 1 0 1 0 1 0]`).
 
 The reference is MuPDF 1.25.1 as installed (Debian's build links libjpeg-turbo 2.1.5:
-`JDCT_ISLOW`, fancy upsampling, no merged upsampler). MuPDF's reduced-size decoding
+`JDCT_ISLOW`, fancy upsampling, no merged upsampler), its C code paths: libjpeg-turbo's SIMD
+islow IDCT (16-bit lanes) differs from its C IDCT, which this decoder follows, only on
+blocks whose coefficients overflow (garbage from truncated progressive data). MuPDF's reduced-size decoding
 (`scale_num = 8 / 2^l2factor` when an image is drawn much smaller than its size) is not
 reproduced: this decoder always decodes at full size.
 
@@ -186,6 +197,16 @@ structure St where
   /-- Progressive frames: each component's quantisation table, latched at its first scan
   (libjpeg `latch_quant_tables`; `#[]`: not yet scanned). -/
   qlat : Array (Array Int) := #[]
+  /-- Progressive frames: libjpeg's `coef_bits` for the first ten zig-zag coefficients of each
+  component (`10 · c + k`): the `Al` of the last scan that covered the coefficient, `-1` if
+  none. -/
+  cbits : Array Int := #[]
+  /-- Progressive frames: the same state before the last scan of each component that covered
+  it (libjpeg's second half of `coef_bits`; `0` before any scan). -/
+  pbits : Array Int := #[]
+  /-- Progressive frames: the last iMCU row the most recent scan started with data
+  (`last_good_iMCU_row`). -/
+  lastGood : Nat := 0
 
 /-- Malformed-JPEG error. -/
 def bad (off : Nat) (msg : String) : Error := .malformed off s!"DCT: {msg}"
@@ -721,14 +742,16 @@ of the segment, the following MCUs of the restart interval are left unchanged. A
 leaving the 32-bit range is an error (`JERR_BAD_DCT_COEF`). Returns the coefficients and the
 position where the reader stopped. -/
 def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX mcusY ri pos : Nat)
-    (coef : Array Int) : Except Error (Array Int × Nat) := do
+    (coef : Array Int) (rowDiv : Nat := 1) : Except Error (Array Int × Nat × Nat) := do
   let mut br : BR := { pos }
   let mut preds : Array Int := Array.replicate cs.size 0
   let mut eob := 0
   let mut coef := coef
   let mut m := 0
+  let mut lastGood := 0
   for my in [0:mcusY] do
     for mx in [0:mcusX] do
+      if !br.short then lastGood := my / rowDiv
       if 0 < ri ∧ 0 < m ∧ m % ri = 0 then
         let ins := br.short
         br := restart d br
@@ -766,7 +789,7 @@ def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX m
                 br := r.1
                 eob := r.2.1
                 coef := r.2.2
-  return (coef, br.pos)
+  return (coef, br.pos, lastGood)
 
 /-- Dequantise and inverse-transform every block of a progressive frame into the planes. -/
 def idctAll (f : Frame) (coef : Array Int) (qlat : Array (Array Int)) (buf : ByteArray) :
@@ -783,6 +806,128 @@ def idctAll (f : Frame) (coef : Array Int) (qlat : Array (Array Int)) (buf : Byt
         let blk := (Array.range 64).map fun i => g coef (base + i) * g q i
         buf := idctStore blk buf (off + by_ * 8 * st + bx * 8) st
   return buf
+
+/-! ## 5c. Block smoothing (libjpeg-turbo 2.1 `jdcoefct.c`, `decompress_smooth_data`)
+
+When a progressive image ends with low-frequency coefficients short of full precision
+(truncated files; DC-only previews), libjpeg estimates the first nine AC coefficients of each
+block — and, when no AC data is known at all, re-estimates the DC — from the DC values of the
+5 × 5 neighbourhood of blocks. The estimate replaces a coefficient only if it is still zero
+and not known to full precision. -/
+
+/-- Number of coefficients whose progression state is tracked for smoothing (`SAVED_COEFS`:
+the DC and the first nine AC coefficients in zig-zag order). -/
+def savedCoefs : Nat := 10
+
+/-- One smoothing estimate: `num = Q00 · e` divided by `Qk · 256` rounding to nearest,
+magnitude clamped to `2^al − 1` when `al > 0` (the coefficient's known bits), as a 16-bit
+coefficient. -/
+def smoothPred (q0 qk al e : Int) : Int :=
+  let num := q0 * e
+  let den := qk * 256
+  let clampP := fun (p : Int) => if 0 < al ∧ (2 : Int) ^ al.toNat ≤ p then (2 : Int) ^ al.toNat - 1 else p
+  if 0 ≤ num then wrap16 (clampP ((qk * 128 + num) / den))
+  else wrap16 (-(clampP ((qk * 128 - num) / den)))
+
+/-- The smoothed coefficients of one block: `ws` its coefficients (natural order), `dc i` the
+DC value `DCi` of libjpeg's 5 × 5 window (`i = 1 … 25`, row-major, the block itself is
+`DC13`), `q` the quantisation table, `bits` the latched progression state of the ten tracked
+coefficients (`-1`: never scanned), `chg` whether the DC is re-estimated (no AC known). -/
+def smoothBlock (ws : Array Int) (dc : Nat → Int) (q : Array Int) (bits : Array Int) (chg : Bool) :
+    Array Int := Id.run do
+  let D := dc
+  let q0 := g q 0
+  let mut ws := ws
+  -- (zig-zag index, natural position, estimate with DC change, estimate without)
+  let est : Array (Nat × Nat × Int × Int) :=
+    #[(1, 1, -D 1 - D 2 + D 4 + D 5 - 3 * D 6 + 13 * D 7 - 13 * D 9 + 3 * D 10 - 3 * D 11 +
+          38 * D 12 - 38 * D 14 + 3 * D 15 - 3 * D 16 + 13 * D 17 - 13 * D 19 + 3 * D 20 -
+          D 21 - D 22 + D 24 + D 25,
+          -7 * D 11 + 50 * D 12 - 50 * D 14 + 7 * D 15),
+      (2, 8, -D 1 - 3 * D 2 - 3 * D 3 - 3 * D 4 - D 5 - D 6 + 13 * D 7 + 38 * D 8 + 13 * D 9 -
+          D 10 + D 16 - 13 * D 17 - 38 * D 18 - 13 * D 19 + D 20 + D 21 + 3 * D 22 + 3 * D 23 +
+          3 * D 24 + D 25,
+          -7 * D 3 + 50 * D 8 - 50 * D 18 + 7 * D 23),
+      (3, 16, D 3 + 2 * D 7 + 7 * D 8 + 2 * D 9 - 5 * D 12 - 14 * D 13 - 5 * D 14 + 2 * D 17 +
+          7 * D 18 + 2 * D 19 + D 23,
+          -D 3 + 13 * D 8 - 24 * D 13 + 13 * D 18 - D 23),
+      (4, 9, -D 1 + D 5 + 9 * D 7 - 9 * D 9 - 9 * D 17 + 9 * D 19 + D 21 - D 25,
+          D 10 + D 16 - 10 * D 17 + 10 * D 19 - D 2 - D 20 + D 22 - D 24 + D 4 - D 6 +
+          10 * D 7 - 10 * D 9),
+      (5, 2, 2 * D 7 - 5 * D 8 + 2 * D 9 + D 11 + 7 * D 12 - 14 * D 13 + 7 * D 14 + D 15 +
+          2 * D 17 - 5 * D 18 + 2 * D 19,
+          -D 11 + 13 * D 12 - 24 * D 13 + 13 * D 14 - D 15),
+      (6, 3, D 7 - D 9 + 2 * D 12 - 2 * D 14 + D 17 - D 19, 0),
+      (7, 10, D 7 - 3 * D 8 + D 9 - D 17 + 3 * D 18 - D 19, 0),
+      (8, 17, D 7 - D 9 - 3 * D 12 + 3 * D 14 + D 17 - D 19, 0),
+      (9, 24, D 7 + 2 * D 8 + D 9 - D 17 - 2 * D 18 - D 19, 0)]
+  for (k, pos, eChg, eNo) in est do
+    if 5 < k ∧ !chg then continue
+    let al := bits.getD k 0
+    if al ≠ 0 ∧ g ws pos == 0 then
+      ws := ws.setIfInBounds pos (smoothPred q0 (g q pos) al (if chg then eChg else eNo))
+  if chg then
+    let e := -2 * D 1 - 6 * D 2 - 8 * D 3 - 6 * D 4 - 2 * D 5 - 6 * D 6 + 6 * D 7 + 42 * D 8 +
+      6 * D 9 - 6 * D 10 - 8 * D 11 + 42 * D 12 + 152 * D 13 + 42 * D 14 - 8 * D 15 -
+      6 * D 16 + 6 * D 17 + 42 * D 18 + 6 * D 19 - 6 * D 20 - 2 * D 21 - 6 * D 22 -
+      8 * D 23 - 6 * D 24 - 2 * D 25
+    ws := ws.setIfInBounds 0 (smoothPred q0 q0 0 e)
+  return ws
+
+/-- Smooth and inverse-transform the visible blocks of component `ci` into the planes
+(`decompress_smooth_data` for one component): `cb` / `pb` its latched progression state
+after the last scan / before it, used for the iMCU rows up to / after `lastGood` (the last
+iMCU row the final scan reached with data). Neighbour rows and the sliding window of DC
+columns follow libjpeg's edge rules exactly (including its quirks at iMCU-row borders). -/
+def smoothComp (f : Frame) (coef : Array Int) (q : Array Int) (cb pb : Array Int)
+    (lastGood ci : Nat) (buf : ByteArray) : ByteArray := Id.run do
+  let c := f.comps.getD ci default
+  let off := f.offs.getD ci 0
+  let st := f.stride c
+  let hb := (f.dh c + 7) / 8
+  let wb := (f.dw c + 7) / 8
+  let lastI := f.mcusY - 1
+  let lastCol := wb - 1
+  let mut buf := buf
+  for iy in [0:f.mcusY] do
+    let blockRows := if iy < lastI then c.v else (if hb % c.v = 0 then c.v else hb % c.v)
+    let bits := if lastGood < iy then pb else cb
+    let chg := (List.range 9).all fun k => bits.getD (k + 1) 0 == -1
+    for br in [0:blockRows] do
+      let r := iy * c.v + br
+      let rp := if 0 < br ∨ 0 < iy then r - 1 else r
+      let rpp := if 1 < br ∨ 1 < iy then r - 2 else rp
+      let rn := if br + 1 < blockRows ∨ iy < lastI then r + 1 else r
+      let rnn := if br + 2 < blockRows ∨ iy + 1 < lastI then r + 2 else rn
+      let rows := #[rpp, rp, r, rn, rnn]
+      let mut cols : Array Nat := #[0, 0, 0, 0, 0]
+      for b in [0:wb] do
+        if b = 0 ∧ 0 < lastCol then cols := cols.setIfInBounds 3 1
+        if b + 1 < lastCol then cols := cols.setIfInBounds 4 (b + 2)
+        let cs := cols
+        let dc := fun (i : Nat) =>
+          let i := i - 1
+          g coef (off + rows.getD (i / 5) 0 * 8 * st + cs.getD (i % 5) 0 * 64)
+        let base := off + r * 8 * st + b * 64
+        let ws := (Array.range 64).map fun i => g coef (base + i)
+        let ws := smoothBlock ws dc q bits chg
+        let blk := (Array.range 64).map fun i => g ws i * g q i
+        buf := idctStore blk buf (off + r * 8 * st + b * 8) st
+        cols := #[cs.getD 1 0, cs.getD 2 0, cs.getD 3 0, cs.getD 4 0, cs.getD 4 0]
+  return buf
+
+/-- `smoothing_ok`: every component has a latched quantisation table with nonzero DC and first
+nine AC entries and a scanned DC, and some tracked AC coefficient is not at full precision. -/
+def smoothingOk (f : Frame) (qlat : Array (Array Int)) (cbits : Array Int) : Bool := Id.run do
+  let mut useful := false
+  for ci in [0:f.comps.size] do
+    let q := qlat.getD ci #[]
+    if q.size ≠ 64 then return false
+    if [0, 1, 8, 16, 9, 2, 3, 10, 17, 24].any (fun p => g q p == 0) then return false
+    if cbits.getD (ci * savedCoefs) (-1) < 0 then return false
+    for k in [1:savedCoefs] do
+      if cbits.getD (ci * savedCoefs + k) 0 ≠ 0 then useful := true
+  return useful
 
 /-! ## 6. Segments -/
 
@@ -882,7 +1027,9 @@ def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) (prog : B
     buf := ByteArray.mk (Array.replicate total 128)
     done := Array.replicate nf false
     coef := if prog then Array.replicate total 0 else #[]
-    qlat := Array.replicate nf #[] }
+    qlat := Array.replicate nf #[]
+    cbits := Array.replicate (nf * savedCoefs) (-1)
+    pbits := Array.replicate (nf * savedCoefs) (-1) }
 
 /-- Parse a progressive scan header body at `a` (length `len`, at most 4 components, then
 `Ss`, `Se`, `Ah`/`Al`), validate it like libjpeg (`start_pass_phuff_decoder`: a DC scan has
@@ -929,11 +1076,21 @@ def parseSOSProg (d : ByteArray) (f : Frame) (a len e : Nat) (st : St) : Except 
     else (f.mcusX, f.mcusY)
   if 1 < ns ∧ 10 < cs.foldl (fun n c => n + c.h * c.v) 0 then
     throw (bad a "too many blocks in an MCU")
+  -- Progression state (`start_pass_phuff_decoder`), first ten coefficients only.
+  let mut cbits := st.cbits
+  let mut pbits := st.pbits
+  for c in cs do
+    let b := c.idx * savedCoefs
+    for k in [min ss 1:savedCoefs] do
+      pbits := pbits.setIfInBounds (b + k) (if 0 < st.scans then cbits.getD (b + k) (-1) else 0)
+    for k in [ss:min (se + 1) savedCoefs] do
+      cbits := cbits.setIfInBounds (b + k) (al : Int)
+  let rowDiv := if ns = 1 then (f.comps.getD ((cs.getD 0 default).idx) default).v else 1
   let coef := st.coef
   let st := { st with coef := #[] }
-  let (coef, pos) ← progScan d cs mode ss se al mx my st.ri e coef
+  let (coef, pos, lastGood) ← progScan d cs mode ss se al mx my st.ri e coef rowDiv
   let done := cs.foldl (fun dn c => dn.setIfInBounds c.idx true) st.done
-  return ({ st with coef, qlat, done, scans := st.scans + 1 }, pos)
+  return ({ st with coef, qlat, done, cbits, pbits, lastGood, scans := st.scans + 1 }, pos)
 
 /-- Parse a scan header body at `a` (length `len`) and decode the scan that follows the
 segment (at `e`); returns the new state and the position where decoding stopped. -/
@@ -986,6 +1143,46 @@ def parseScan (d : ByteArray) (a len e : Nat) (st : St) : Except Error (St × Na
     else parseSOS d a len e st
   | none => .error (bad a "SOS before SOF")
 
+/-- Byte `i` of the data as libjpeg's source managers supply it: past the end, fake `EOI`
+markers `FF D9 FF D9 …` (`fill_input_buffer` at end of file). -/
+def padByte (d : ByteArray) (i : Nat) : Nat :=
+  if i < d.size then rd d i else if (i - d.size) % 2 = 0 then 0xFF else 0xD9
+
+/-- A marker segment `m` at `p` (its length field) that runs past the end of the data, read
+as libjpeg reads it (`get_dht`, `get_dqt`, `get_dri` checks on the fake-`EOI`-padded bytes;
+`APPn`/`COM` skipped): `none` when libjpeg accepts it — then the next marker is the fake `EOI`
+and decoding ends with what was decoded so far — else the error. Frame and scan headers cut
+by the end of the data stay errors. -/
+def truncatedSeg (d : ByteArray) (m p : Nat) : Option Error := Id.run do
+  let len := padByte d p * 256 + padByte d (p + 1)
+  if (0xC0 ≤ m ∧ m ≤ 0xCF ∧ m ≠ 0xC4 ∧ m ≠ 0xC8 ∧ m ≠ 0xCC) ∨ m = 0xDA then
+    return some (bad p "truncated segment")
+  let mut q := p + 2
+  let mut length : Int := (len : Int) - 2
+  if m = 0xC4 then
+    for _ in [0:len] do
+      if length ≤ 16 then break
+      let index := padByte d q
+      let count := (List.range 16).foldl (fun s i => s + padByte d (q + 1 + i)) 0
+      length := length - 17
+      if 256 < count ∨ length < count then return some (bad q "bad Huffman table")
+      length := length - count
+      q := q + 17 + count
+      if 4 ≤ (if index &&& 0x10 ≠ 0 then index - 16 else index) then
+        return some (bad q "bad DHT table index")
+    if length ≠ 0 then return some (bad p "bad DHT length")
+  else if m = 0xDB then
+    for _ in [0:len] do
+      if length ≤ 0 then break
+      let n := padByte d q
+      if 4 ≤ n % 16 then return some (bad q "bad DQT table index")
+      let sz := if n / 16 = 0 then 64 else 128
+      q := q + 1 + sz
+      length := length - 1 - sz
+    if length ≠ 0 then return some (bad p "bad DQT length")
+  else if m = 0xDD ∧ len ≠ 4 then return some (bad p "bad DRI length")
+  return none
+
 /-- **The marker loop** from byte `pos` (at most `fuel` segments): reads markers and
 segments until `EOI`, the end of the data, or every component has been decoded. -/
 def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Except Error St
@@ -1000,7 +1197,11 @@ def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Exce
       else
         let len := rd16 d p
         let e := p + len
-        if len < 2 ∨ d.size < e then .error (bad p "truncated segment")
+        if p + 2 ≤ d.size ∧ len < 2 then .error (bad p "truncated segment")
+        else if d.size < p + 2 ∨ d.size < e then
+          match truncatedSeg d m p with
+          | some err => .error err
+          | none => .ok st
         else
           let a := p + 2
           let body := len - 2
@@ -1206,7 +1407,23 @@ inverse-transformed into the planes (libjpeg's output pass after the whole input
 absorbed). -/
 def St.flush (st : St) : St :=
   match st.frame with
-  | some f => if f.prog then { st with buf := idctAll f st.coef st.qlat st.buf, coef := #[] } else st
+  | some f =>
+    if f.prog then
+      let buf := idctAll f st.coef st.qlat st.buf
+      let buf := if smoothingOk f st.qlat st.cbits then Id.run do
+          let mut buf := buf
+          for ci in [0:f.comps.size] do
+            let b := ci * savedCoefs
+            let cb := st.cbits.extract b (b + savedCoefs)
+            let pb := if 1 < st.scans then st.pbits.extract b (b + savedCoefs)
+              else Array.replicate savedCoefs (-1)
+            -- `coef_bits_latch[0]` of the previous-state latch is never written by libjpeg;
+            -- only entries 1–9 are read.
+            buf := smoothComp f st.coef (st.qlat.getD ci #[]) cb pb st.lastGood ci buf
+          return buf
+        else buf
+      { st with buf, coef := #[] }
+    else st
   | none => st
 
 /-- Decode the planes of a JPEG stream: `SOI`, then the marker loop. -/
