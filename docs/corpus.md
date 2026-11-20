@@ -100,6 +100,96 @@ undecrypted" case (task 4.6), plus an unexplained rejection of the strict open.
 qpdf pages comparator (`Tests/differential/pages.py`) was not run locally (qpdf not
 installed); CI's qpdf decrypts these with the empty user password.
 
+## Known reference defects (task 6.8c)
+
+Sometimes the *reference* tool is the one that is wrong. Such pages would otherwise drag
+the corpus-wide M6 numbers (text similarity vs MuPDF, glyph positions within tolerance)
+with errors that are not ours. They are recorded, with evidence, in
+`Tests/differential/known-reference-defects.json` and handled by
+`Tests/differential/run.py`:
+
+* Each entry names a corpus file (basename **and** SHA-256), the pages, the comparators
+  it applies to (`text-mupdf`, `positions`), the reference version, a `signature`, the
+  `reason` and the `evidence` (how it was decided: rendering, fonts, a second reference).
+* An entry applies only when the file's SHA-256 matches, and only to listed pages whose
+  reference output (`mutool draw -q -F txt`, that page) still matches `signature` (a
+  regular expression). A page that no longer shows it -- e.g. after a MuPDF upgrade
+  fixed the bug -- is printed as `STALE known-defect entry ...` and compared normally;
+  a hash mismatch ignores the entry the same way. So an entry can never hide a page whose
+  reference output is healthy.
+* Matching pages are removed from the corpus-wide similarity, the worst-pages list, the
+  positions totals (`compared`, `within`, distances, worst glyphs) and the `--min-similarity`
+  / `--min-within` gates. They are **printed separately** ("known reference defects
+  (EXCLUDED ...)" with per-page similarity / measured pairs and outliers) and counted in
+  the stats `known_pages`, `known_dist`, `known_maxlen` (text) and `known_pages`,
+  `known_compared`, `known_within` (positions). The file's status becomes `known` with the
+  reason (`KNOWN ...` line) unless it disagrees on its other pages. Tolerances and
+  thresholds are never changed; `--no-known` reproduces the raw numbers.
+* Self-tests: `python3 -I Tests/differential/run.py --selftest` (data file, hash and
+  signature gates, text split) and `python3 -I Tests/differential/positions.py
+  --selftest` (known-page split, anchoring).
+
+Adding an entry needs the same standard of evidence as the first one: look at the
+rendered page, inspect the font / content, and compare with a second reference.
+
+### arxiv-astro-ph_9805201 p51, p60-p72 (MuPDF drops digits)
+
+The tables at the end of this 1998 Ghostscript conversion use Type 3 fonts whose
+`/Encoding /Differences` name the digit glyphs `/0` ... `/9` and whose ToUnicode CMap maps
+only the letters. MuPDF 1.25.1 turns the glyph names `/1` ... `/9` into the code points
+U+0001 ... U+0009 (`mutool draw -F stext` prints `c="&#x2;"` for a '2'; `/0` stays '0'),
+so its text loses the digits: `{ { T able . SN Ia Imaging JD a UT Date B V B V` where the
+page shows "- 2 -  Table 2.  SN Ia Imaging  JD^a UT Date B45 V45 B35 V35". The rendering
+(`mutool draw -o p61.png FILE 61`) and `pdftotext -f 61 -l 61` both have the digits, as
+we do. (MuPDF also splits words in these fonts -- "T able", "Con tin ued" -- which neither
+pdftotext nor we do.) Exactly pages 51 and 60-72 contain U+0001-U+0008 in MuPDF's text,
+which is the entry's signature.
+
+The 844 glyph pairs outside tolerance on this file (e.g. '.' size 0.24 ours (520.564,
+405.360) vs MuPDF (90.961, 436.560) on p64) were all on these pages: with the digits gone,
+a table row like `22.30(0.09)` is `..(0.)` on MuPDF's side, and the order-preserving
+alignment paired leftover '.', '0', '(' and ')' of different table cells. Numbers
+(a0f4718, one file):
+
+| comparator | before | after |
+|---|---|---|
+| `text-mupdf` | 0.9466 over 72 pages; p61-p72 0.47-0.67 | 0.9984 over 58 pages; 14 known pages 0.5786 (printed separately) |
+| `positions` | 99.2287% of 109,420 pairs within (844 out) | 100.0000% of 103,100 pairs; 14 known pages 6,067 pairs, 760 out (printed separately) |
+
+Whole corpus (81 files, 2,450 pages, a0f4718 inspector; `run.py --comparator text-mupdf
+--comparator positions`), before -> after this mechanism and the matcher fixes below:
+text vs MuPDF 0.9926 over 2,450 pages -> 0.9936 over 2,436 pages (+ 14 known pages at
+0.5786, printed separately); positions 99.9471% of 5,724,449 pairs within (3,030 out, 76/81
+files at 100%) -> 5,718,110 of 5,718,112 within (2 out: arxiv-2010.11929 p18 and
+arxiv-1706.00001 p4, 79/81 files at 100%; + 6,067 known-page pairs, 760 out, printed
+separately). `--no-known` gives the numbers with the known pages included.
+
+## Positions matcher: anchoring and runs (task 6.8c)
+
+Two matcher flaws paired characters that do not correspond, so they showed up as large
+"position errors"; both fixes only change *which* characters are paired, never the
+tolerance:
+
+* **Anchoring.** A matching block shorter than 3 characters counts only when it lies on
+  the alignment diagonal of the nearest long block before or after it (or of the page
+  start / end), or between those two diagonals within 4 characters of one of them (a
+  piece between two one-sided deletions, "c[al]c" vs "[al]"); otherwise its characters
+  are unmatched (stat `unanchored`). This removed the 17 outliers of arxiv-2501.12948 p52
+  (our Caesar-shifted text matched stray 'R', 'K', '9' of MuPDF's) and drops no pair that
+  was within tolerance on the healthy files checked (0704.0001, 0905.0002, 2006.11239,
+  2303.08774).
+* **Runs of identical characters.** difflib pairs a run of equal characters leftmost. On
+  www.ntsb.gov-RAR0801 p5 the TOC leaders are `/Span<</ActualText<feff002e>>> BDC ( )Tj
+  EMC` + 104 dots: MuPDF honours the ActualText ('.' at the space) and has 105 dots, we
+  have a space + 104 dots at exactly MuPDF's other 104 positions, so every dot was paired
+  one advance (3 pt) off. A run whose pairs are out of tolerance is now re-paired by
+  shifting it up to 2 slots onto identical reference characters that are unmatched (or
+  its own), when that puts more of its pairs within tolerance (stat `slid`; one-to-one
+  and order kept). RAR0801: 2,167 -> 0 pairs out of tolerance. (ActualText support in our
+  extraction is a separate Core task.)
+
+Details in the `positions.py` docstring (`anchored_blocks`, `slide_runs`).
+
 ## Licensing
 
 arXiv PDFs are copyrighted by their authors under varying licenses. They are fetched by URL
