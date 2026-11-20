@@ -2,12 +2,13 @@ import SafePdf.Shell.App.Shim
 import SafePdf.Shell.App.Tcl
 import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Select
+import SafePdf.Shell.App.Links
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 
 /-!
-# Native viewer (tasks 8.2a, 8.2b, 8.2c; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a–8.2d; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
 
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a toolbar
 (Open…, Prev, Next, zoom out/in, 100 %, fit page, fit width, rotate left/right, page k/n,
@@ -53,6 +54,19 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   current page are highlighted (tag `hit`, the current one in orange) and the current hit is
   scrolled into view; the status line says `"q": hit k/n on page p` (k of the n hits of that
   page) or `"q": not found`.
+* **Navigation** (task 8.2d, pure logic in `Links`). The outline (`Nav.outline`) fills a
+  `ttk::treeview` in the left pane of a paned window (shown when the document has an outline;
+  F9, the Outline button or the context menu toggle it); clicking an item jumps to its
+  destination page, scrolled to the destination's position (`/XYZ`, `/FitH`, `/FitR`, … left/top
+  mapped with `Geom.toScreen`, C2). Links (`Links.pageLinks`, read per page on first use):
+  over a link the cursor is a hand and the status line shows the target (`go to page …`, or
+  the full address of a URI as `Links.uriText`); a click in place on an internal link (also
+  through a named destination) jumps; a click on a URI link opens the `::safepdf::askUri`
+  dialog showing the exact address and, only when confirmed, copies it to the clipboard —
+  nothing is ever opened or launched. Jumps (links, outline, Ctrl+G) record the previous place
+  (page and scroll fractions) in a back/forward history (Alt+Left/Alt+Right, toolbar). Page
+  labels (`Nav.labelTable`) appear in the title, toolbar and status line (`page iii (3/120)`);
+  Ctrl+G opens a go-to bar accepting a label or a page number (`Links.gotoPage`).
 * **Errors** (unreadable file, parse error, render error, Tcl error) are shown in the status
   line; the window stays usable. Every event handler catches its own exceptions.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
@@ -82,6 +96,11 @@ inductive ScrollTo where
   | bottom
   /-- Keep the page point `p` under the window position `(wx, wy)` (C2 anchoring). -/
   | anchor (wx wy : Nat) (p : Pt)
+  /-- Show the page point (`left`, `top`) at the window's top-left corner (a destination's
+  position; a missing coordinate is the page's left or top edge). -/
+  | dest (left top : Option Rat)
+  /-- Restore the scroll fractions `(x, y)` (history). -/
+  | frac (x y : Rat)
 
 /-- The viewer's state, kept in one `IO.Ref`. -/
 structure State where
@@ -141,6 +160,20 @@ structure State where
   smokeMode : String := ""
   /-- Smoke-test step counter. -/
   smokeStep : Nat := 0
+  /-- Page labels of the open document as text (task 8.2d). -/
+  labels : Array String := #[]
+  /-- Outline entries of the open document (treeview item `oK` is entry `K`). -/
+  outline : Array Links.Entry := #[]
+  /-- Whether the outline panel is shown. -/
+  outlineShown : Bool := false
+  /-- Links per page (`none`: not read yet). -/
+  links : Array (Option (Array Links.Link)) := #[]
+  /-- Index of the link under the mouse pointer on the shown page. -/
+  hover : Option Nat := none
+  /-- The status line text from before the pointer entered a link (restored on leaving). -/
+  savedStatus : String := ""
+  /-- Back/forward history of jumps. -/
+  history : Links.History := {}
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -190,7 +223,7 @@ def baseName (path : String) : String :=
 /-- Window title: `safe-pdf`, or `NAME - page k/n - safe-pdf`. -/
 def State.title (s : State) : String :=
   match s.path, s.doc with
-  | some p, some _ => s!"{baseName p} - page {s.page + 1}/{s.pageCount} - safe-pdf"
+  | some p, some _ => s!"{baseName p} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
   | some p, none => s!"{baseName p} - safe-pdf"
   | none, _ => "safe-pdf"
 
@@ -241,11 +274,37 @@ ttk::button .bar.fitp -text {Fit page} -command {::safepdf::emit zoom fitpage}
 ttk::button .bar.fitw -text {Fit width} -command {::safepdf::emit zoom fitwidth}
 ttk::button .bar.rccw -text {Rotate left} -command {::safepdf::emit rotate ccw}
 ttk::button .bar.rcw -text {Rotate right} -command {::safepdf::emit rotate cw}
+ttk::button .bar.outline -text {Outline} -command {::safepdf::emit outlineToggle}
+ttk::button .bar.back -text {Back} -command {::safepdf::emit back}
+ttk::button .bar.fwd -text {Forward} -command {::safepdf::emit forward}
+ttk::button .bar.goto -text {Go to...} -command ::safepdf::showGoto
 ttk::label .bar.page -text {} -anchor w
 ttk::label .bar.zoom -text {} -anchor w
-pack .bar.open .bar.prev .bar.next .bar.zout .bar.zin .bar.actual .bar.fitp .bar.fitw \\
-  .bar.rccw .bar.rcw -side left -padx 2 -pady 2
+pack .bar.open .bar.outline .bar.back .bar.fwd .bar.prev .bar.next .bar.goto .bar.zout \\
+  .bar.zin .bar.actual .bar.fitp .bar.fitw .bar.rccw .bar.rcw -side left -padx 2 -pady 2
 pack .bar.page .bar.zoom -side left -padx 8
+# Outline panel (8.2d): a treeview in the left pane of .pw (shown/hidden by F9).
+ttk::panedwindow .pw -orient horizontal
+ttk::frame .ol
+ttk::treeview .ol.t -show tree -selectmode browse -yscrollcommand {.ol.s set}
+.ol.t column #0 -width 240
+ttk::scrollbar .ol.s -orient vertical -command {.ol.t yview}
+grid .ol.t -row 0 -column 0 -sticky nsew
+grid .ol.s -row 0 -column 1 -sticky ns
+grid rowconfigure .ol 0 -weight 1
+grid columnconfigure .ol 0 -weight 1
+bindtags .ol.t [list .ol.t Treeview all]
+proc ::safepdf::olClick {x y} {
+  if {[string match *indicator* [.ol.t identify element $x $y]]} return
+  set id [.ol.t identify item $x $y]
+  if {$id ne {}} { ::safepdf::emit outline $id }
+}
+bind .ol.t <ButtonRelease-1> {::safepdf::olClick %x %y}
+bind .ol.t <Key-Return> {::safepdf::emit outline [.ol.t focus]}
+bind .ol.t <F9> {::safepdf::emit outlineToggle}
+bind .ol.t <Alt-Key-Left> {::safepdf::emit back}
+bind .ol.t <Alt-Key-Right> {::safepdf::emit forward}
+bind .ol.t <Control-q> {destroy .}
 ttk::frame .v
 canvas .c -background gray60 -highlightthickness 0 -takefocus 1 -confine 1 \\
   -xscrollcommand {.xs set} -yscrollcommand {.ys set}
@@ -261,7 +320,8 @@ image create photo ::safepdf::page
 ttk::label .status -text {} -anchor w -relief sunken -padding {4 2}
 pack .bar -side top -fill x
 pack .status -side bottom -fill x
-pack .v -side top -fill both -expand 1
+.pw add .v -weight 1
+pack .pw -side top -fill both -expand 1
 # Scroll along axis (x or y) by dir (1 or -1) units or pages; past the end of the page,
 # move to the next/previous page.
 proc ::safepdf::step {axis dir what} {
@@ -358,6 +418,76 @@ bind .find.e <Control-q> {destroy .}
 bind . <Control-f> ::safepdf::showFind
 bind . <F3> {::safepdf::emit find next $::safepdf::query}
 bind . <Shift-F3> {::safepdf::emit find prev $::safepdf::query}
+# Links (8.2d): hover shows the target, a click (press and release in place) activates it.
+bind .c <Motion> {::safepdf::emit hover %x %y}
+bind .c <Leave> {::safepdf::emit hover {} {}}
+bind . <Alt-Key-Left> {::safepdf::emit back}
+bind . <Alt-Key-Right> {::safepdf::emit forward}
+bind . <F9> {::safepdf::emit outlineToggle}
+.pop add separator
+.pop add command -label {Outline} -accelerator F9 -command {::safepdf::emit outlineToggle}
+.pop add command -label {Back} -accelerator Alt+Left -command {::safepdf::emit back}
+.pop add command -label {Forward} -accelerator Alt+Right -command {::safepdf::emit forward}
+.pop add command -label {Go to page...} -accelerator Ctrl+G -command ::safepdf::showGoto
+# Go-to-page bar (Ctrl+G): a page number or a page label.
+ttk::frame .goto
+ttk::label .goto.l -text {Go to page (number or label):}
+ttk::entry .goto.e -textvariable ::safepdf::gotoText -width 16
+ttk::button .goto.go -text {Go} -command {::safepdf::emit goto $::safepdf::gotoText}
+ttk::button .goto.close -text {Close} -command ::safepdf::hideGoto
+pack .goto.l .goto.e .goto.go .goto.close -side left -padx 2 -pady 2
+bindtags .goto.e [list .goto.e TEntry all]
+proc ::safepdf::showGoto {} {
+  if {![winfo ismapped .goto]} { pack .goto -side top -fill x -after .bar }
+  focus .goto.e
+  .goto.e selection range 0 end
+  .goto.e icursor end
+}
+proc ::safepdf::hideGoto {} { pack forget .goto; focus .c }
+bind .goto.e <Return> {::safepdf::emit goto $::safepdf::gotoText; break}
+bind .goto.e <KP_Enter> {::safepdf::emit goto $::safepdf::gotoText; break}
+bind .goto.e <Escape> {::safepdf::hideGoto; break}
+bind .goto.e <Control-q> {destroy .}
+bind . <Control-g> ::safepdf::showGoto
+# External-link confirmation: shows the exact address (a read-only text widget filled by
+# variable substitution, never parsed as script) and returns 1 only when the user chooses
+# to copy it. Nothing is opened. In smoke mode (autoConfirm) the dialog confirms itself.
+proc ::safepdf::askUri {uri} {
+  set w .uri
+  destroy $w
+  toplevel $w
+  wm title $w {External link}
+  wm transient $w .
+  ttk::label $w.msg -justify left -wraplength 460 -text {This link points outside the \\
+document, to the address below. safe-pdf never opens it; it can copy the address to the \\
+clipboard.}
+  text $w.t -wrap char -width 60 -height 4 -relief sunken -borderwidth 1
+  $w.t insert end $uri
+  $w.t configure -state disabled
+  ttk::frame $w.b
+  ttk::button $w.b.copy -text {Copy address} -command {set ::safepdf::uriAnswer 1}
+  ttk::button $w.b.cancel -text {Cancel} -command {set ::safepdf::uriAnswer 0}
+  pack $w.b.cancel $w.b.copy -side right -padx 4 -pady 4
+  pack $w.msg -side top -fill x -padx 8 -pady 6
+  pack $w.t -side top -fill both -expand 1 -padx 8
+  pack $w.b -side bottom -fill x
+  wm protocol $w WM_DELETE_WINDOW {set ::safepdf::uriAnswer 0}
+  bind $w <Escape> {set ::safepdf::uriAnswer 0}
+  set ::safepdf::uriAnswer {}
+  if {$::safepdf::autoConfirm} {
+    after 300 {
+      set ::safepdf::shownUri [.uri.t get 1.0 {end - 1 chars}]
+      .uri.b.copy invoke
+    }
+  }
+  catch {grab $w}
+  focus $w.b.cancel
+  vwait ::safepdf::uriAnswer
+  catch {grab release $w}
+  destroy $w
+  return $::safepdf::uriAnswer
+}
+set ::safepdf::autoConfirm 0
 focus .c
 "
 
@@ -470,6 +600,14 @@ def applyScroll (s : State) (vp : ViewParams) (ix iy rw rh : Nat) : IO Unit := d
       let top : Rat := q.y + (iy : Rat) - (wy : Rat)
       discard <| run [".c", "xview", "moveto", fmtFrac (left / (max rw 1 : Nat))]
       discard <| run [".c", "yview", "moveto", fmtFrac (top / (max rh 1 : Nat))]
+  | some (.dest left top) =>
+    if 0 < vp.zoom then
+      let q := toScreen vp.zoom vp.rot vp.box ⟨left.getD vp.box.llx, top.getD vp.box.ury⟩
+      discard <| run [".c", "xview", "moveto", fmtFrac ((q.x + (ix : Rat)) / (max rw 1 : Nat))]
+      discard <| run [".c", "yview", "moveto", fmtFrac ((q.y + (iy : Rat)) / (max rh 1 : Nat))]
+  | some (.frac x y) =>
+    discard <| run [".c", "xview", "moveto", fmtFrac x]
+    discard <| run [".c", "yview", "moveto", fmtFrac y]
   | none => pure ()
 
 /-- Updates title, labels and (when the page, document, zoom or rotation changed, or a scroll
@@ -479,7 +617,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
   discard <| run ["wm", "title", ".", s.title]
   match s.path, s.doc with
   | some path, some doc =>
-    discard <| run [".bar.page", "configure", "-text", s!"page {s.page + 1} of {s.pageCount}"]
+    discard <| run [".bar.page", "configure", "-text", Links.pageText s.labels s.page s.pageCount]
     let some vp := viewParams s doc s.page | return
     let pct := match s.mode with
       | .scale p => if vp.capped then View.zoomPct vp.zoom s.scaling else p
@@ -512,7 +650,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
       let notes := (if vp.capped then
           s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
         (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
-      setStatus s!"{path}: page {s.page + 1}/{s.pageCount}, {pct}% ({modeName s.mode}), \
+      setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}, {pct}% ({modeName s.mode}), \
         rotation {View.rotDeg s.rot}, {img.w}x{img.h} px, {how}{notes}"
       if s.page + 1 < s.pageCount then
         discard <| run ["after", "100", "::safepdf::emit prefetch"]
@@ -520,7 +658,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
       st.modify ({ · with pending := none })
       discard <| run [".c", "delete", "sel", "hit"]
       discard <| run [photoName, "blank"]
-      setStatus s!"{path}: page {s.page + 1}: cannot render: {renderError e}"
+      setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}: cannot render: {renderError e}"
   | _, _ =>
     discard <| run [".bar.page", "configure", "-text", ""]
     discard <| run [".bar.zoom", "configure", "-text", ""]
@@ -540,12 +678,38 @@ def prefetch (st : IO.Ref State) : IO Unit := do
   if w * h > prefetchPixels then return
   discard <| fetch st doc key
 
+/-! ## Outline panel (task 8.2d) -/
+
+/-- Shows or hides the outline panel (the left pane of `.pw`). -/
+def showOutline (st : IO.Ref State) (on : Bool) : IO Unit := do
+  let s ← st.get
+  if on == s.outlineShown then return
+  if on then discard <| run [".pw", "insert", "0", ".ol", "-weight", "0"]
+  else discard <| run [".pw", "forget", ".ol"]
+  st.modify ({ · with outlineShown := on })
+
+/-- Fills the outline treeview from `State.outline` (item `oK` for entry `K`, under its
+parent `Links.parents`); every title is one quoted word. -/
+def fillOutline (st : IO.Ref State) : IO Unit := do
+  let kids ← run [".ol.t", "children", ""]
+  discard <| run [".ol.t", "delete", kids]
+  let es := (← st.get).outline.toList
+  let ps := Links.parents es
+  for (i, e, p) in (List.range es.length).zip (es.zip ps) do
+    let parent := match p with | some k => s!"o{k}" | none => ""
+    discard <| run [".ol.t", "insert", parent, "end", "-id", s!"o{i}", "-text", e.title,
+      "-open", if e.isOpen then "1" else "0"]
+
 /-- Opens `path`: reads and parses it, builds the page tree, shows page 1. Every failure
 ends up in the status line with an empty page. -/
 def openFile (st : IO.Ref State) (path : String) : IO Unit := do
   st.modify fun s => { s with path := some path, doc := none, page := 0, shown := none }
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
-                              texts := #[], sel := none, pressPt := none, hit := none }
+                              texts := #[], sel := none, pressPt := none, hit := none,
+                              labels := #[], outline := #[], links := #[], hover := none,
+                              history := {} }
+  fillOutline st
+  showOutline st false
   match ← Inspect.load {} path with
   | .error msg =>
     discard <| run [photoName, "blank"]
@@ -559,6 +723,17 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
       setStatus s!"{path}: cannot open: {renderError e}"
     | .ok doc =>
       st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none })
+      let (labels, outline) ← IO.lazyPure fun _ =>
+        (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
+      st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
+      fillOutline st
+      showOutline st (!outline.isEmpty)
+      -- Lay the window out again so that the first render uses the canvas size beside the
+      -- outline panel.
+      discard <| run ["update", "idletasks"]
+      if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
+          (← run ["winfo", "height", ".c"]).toNat?) then
+        if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
       if doc.pages.size == 0 then
         refresh st
         setStatus s!"{path}: the document has no pages"
@@ -570,7 +745,9 @@ def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit :=
   if s.pageCount == 0 then return
   let p := min p (s.pageCount - 1)
   if p != s.page then
-    st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none })
+    st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none,
+                        hover := none })
+    discard <| run [".c", "configure", "-cursor", ""]
     refresh st
 
 /-- Remembers the page point at window position `(wx, wy)` of the canvas, so that the next
@@ -632,6 +809,126 @@ def openDialog (st : IO.Ref State) : IO Unit := do
     "{{PDF files} {.pdf .PDF}} {{All files} *}"]
   if !path.isEmpty then openFile st path
 
+/-! ## Links, jumps, history, go to page (task 8.2d) -/
+
+/-- The links of page `p`, read on first use (`Links.pageLinks`) and cached. -/
+def linksOf (st : IO.Ref State) (p : Nat) : IO (Array Links.Link) := do
+  let s ← st.get
+  let some doc := s.doc | return #[]
+  match s.links[p]? with
+  | some (some ls) => return ls
+  | _ =>
+    let ls ← IO.lazyPure fun _ => Links.pageLinks doc limits p
+    let gen := s.gen
+    st.modify fun s =>
+      if s.gen == gen then { s with links := s.links.modify p (fun _ => some ls) } else s
+    return ls
+
+/-- The first number of an `xview`/`yview` result. -/
+def firstFrac (s : String) : Rat :=
+  ((s.splitOn " ").head?.bind View.parseDecimal).getD 0
+
+/-- Where the view is now (page and scroll fractions), for the history. -/
+def curLoc (st : IO.Ref State) : IO Links.Loc := do
+  let s ← st.get
+  return ⟨s.page, firstFrac (← run [".c", "xview"]), firstFrac (← run [".c", "yview"])⟩
+
+/-- Shows page `p` (clamped) scrolled as `whereTo`, also when it is the current page. -/
+def showAt (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo) : IO Unit := do
+  let s ← st.get
+  if s.pageCount == 0 then return
+  let p := min p (s.pageCount - 1)
+  st.modify fun s => { s with page := p, pending := some whereTo, pressPt := none, hover := none,
+                              sel := if p == s.page then s.sel else none }
+  discard <| run [".c", "configure", "-cursor", ""]
+  refresh st
+
+/-- Jumps to `j` (a link, an outline item, Ctrl+G), recording the current place in the
+history. -/
+def jumpTo (st : IO.Ref State) (j : Links.Jump) : IO Unit := do
+  let s ← st.get
+  if j.page ≥ s.pageCount then
+    setStatus s!"destination page {j.page + 1} is not in the document"
+    return
+  let here ← curLoc st
+  st.modify fun s => { s with history := s.history.push here }
+  showAt st j.page (.dest j.left j.top)
+
+/-- Back (`back = true`, Alt+Left) or Forward (Alt+Right) in the history. -/
+def histMove (st : IO.Ref State) (back : Bool) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone then return
+  let here ← curLoc st
+  match (if back then s.history.goBack here else s.history.goForward here) with
+  | some (l, h) =>
+    st.modify ({ · with history := h })
+    showAt st l.page (.frac l.x l.y)
+  | none => setStatus (if back then "nothing to go back to" else "nothing to go forward to")
+
+/-- Asks whether to copy an external link's address (dialog `::safepdf::askUri`, which shows
+the exact address); copies it to the clipboard only when confirmed. Nothing is opened. -/
+def confirmUri (u : String) : IO Unit := do
+  let ans ← run ["::safepdf::askUri", u]
+  if ans == "1" then
+    discard <| run ["clipboard", "clear"]
+    discard <| run ["clipboard", "append", "--", u]
+    setStatus s!"copied the link address to the clipboard (not opened): {u}"
+  else setStatus s!"external link not followed: {u}"
+
+/-- Activates a link or outline action. -/
+def activate (st : IO.Ref State) (a : Links.Action) : IO Unit := do
+  match a with
+  | .goto j => jumpTo st j
+  | .uri u => confirmUri u
+  | a =>
+    let s ← st.get
+    setStatus (Links.describe s.labels s.pageCount a)
+
+/-- The link of the shown page under window position `(wx, wy)`, if any. -/
+def linkUnder (st : IO.Ref State) (wx wy : Int) : IO (Option (Nat × Links.Link)) := do
+  let some p ← pagePoint st wx wy | return none
+  return Links.linkAt (← linksOf st (← st.get).page) p
+
+/-- Pointer motion: over a link the cursor becomes a hand and the status line shows the
+target (the full address of a URI); leaving it restores the status line. -/
+def hover (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
+  let s ← st.get
+  if s.pressPt.isSome then return
+  let l ← match pos with
+    | some (x, y) => linkUnder st x y
+    | none => pure none
+  let idx := l.map (·.1)
+  if idx == s.hover then return
+  if s.hover.isNone then
+    let cur ← run [".status", "cget", "-text"]
+    st.modify ({ · with savedStatus := cur })
+  st.modify ({ · with hover := idx })
+  match l with
+  | some (_, k) =>
+    discard <| run [".c", "configure", "-cursor", "hand2"]
+    setStatus (Links.describe s.labels s.pageCount k.action)
+  | none =>
+    discard <| run [".c", "configure", "-cursor", ""]
+    setStatus (← st.get).savedStatus
+
+/-- Handles `outline ID`: activates the outline entry of treeview item `oK`. -/
+def outlineClick (st : IO.Ref State) (id : String) : IO Unit := do
+  let s ← st.get
+  let some k := (id.drop 1).toString.toNat? | return
+  if !id.startsWith "o" then return
+  let some e := s.outline[k]? | return
+  activate st e.action
+
+/-- Handles `goto TEXT` (Ctrl+G): a page label or number (`Links.gotoPage`). -/
+def gotoText (st : IO.Ref State) (txt : String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone then return
+  match Links.gotoPage s.labels txt with
+  | some p =>
+    discard <| run ["::safepdf::hideGoto"]
+    jumpTo st ⟨p, none, none⟩
+  | none => setStatus s!"no page with label or number \"{txt}\""
+
 /-! ## Selection, copy and search (task 8.2c) -/
 
 /-- Status line after a selection change. -/
@@ -657,7 +954,10 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
   let some p0 := s.pressPt | return
   if final then st.modify ({ · with pressPt := none })
   let some p1 ← pagePoint st wx wy | return
-  if final && p0 == p1 then return
+  if final && p0 == p1 then
+    -- A click in place: activate the link under it (task 8.2d).
+    if let some (_, l) := Links.linkAt (← linksOf st s.page) p1 then activate st l.action
+    return
   match ← pageIndex st s.page with
   | .ok ix =>
     if let some (a, b) := Select.dragRange ix.cells p0 p1 then
@@ -890,6 +1190,106 @@ def smokeText (st : IO.Ref State) (dir : String) : IO Unit := do
     discard <| run ["destroy", "."]
   | _ => discard <| run ["destroy", "."]
 
+/-- Window position of the centre of a page-space box on the shown page. -/
+def boxWindowPos (st : IO.Ref State) (b : Box) : IO (Option (String × String)) := do
+  let s ← st.get
+  let some bx := shownBox s | return none
+  let (x0, y0, x1, y1) := canvasRect s bx b
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return none
+  return some (toString ((x0 + x1) / 2 - vx).floor, toString ((y0 + y1) / 2 - vy).floor)
+
+/-- Smoke steps of the navigation test (`SAFEPDF_VIEWER_SMOKE_MODE=nav`, task 8.2d), on a
+three-page document labelled `i`, `ii`, `1` whose page 1 has an internal link (to page 3) and
+a URI link, and whose outline is `Intro` (page 1), `Chapter` (page 3, `/XYZ 0 400`) with child
+`Section` (page 2, through a named destination). Everything is driven by Tk events (pointer
+motion and clicks on the links and outline items, Alt+Left/Right, Ctrl+G, F9) and the results
+go into `nav.txt` as `key: value` lines; the URI dialog confirms itself in smoke mode after
+recording the address it shows (`::safepdf::shownUri`). -/
+def smokeNav (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let status : IO String := run [".status", "cget", "-text"]
+  let page : IO Nat := return (← st.get).page + 1
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let s ← st.get
+  out := out.push s!"title0: {← run ["wm", "title", "."]}"
+  out := out.push s!"outline-shown: {s.outlineShown}"
+  out := out.push s!"outline-titles: {"|".intercalate (s.outline.toList.map (·.title))}"
+  out := out.push s!"outline-depths: {s.outline.toList.map (·.depth)}"
+  let at' (pos : String × String) (w pat : String) (opts : List String := []) : IO Unit :=
+    sendEvent w pat (["-x", pos.1, "-y", pos.2] ++ opts)
+  let clickAt (pos : String × String) : IO Unit := do
+    at' pos ".c" "<ButtonPress-1>"
+    at' pos ".c" "<ButtonRelease-1>"
+  let ls ← linksOf st 0
+  out := out.push s!"links-page1: {ls.size}"
+  -- Internal link: hover, click, history.
+  if let some l := ls[0]? then
+    if let some pos ← boxWindowPos st l.box then
+      at' pos ".c" "<Motion>"
+      out := out.push s!"cursor-internal: {← run [".c", "cget", "-cursor"]}"
+      out := out.push s!"status-hover-internal: {← status}"
+      clickAt pos
+      out := out.push s!"page-after-link: {← page}"
+      out := out.push s!"title-after-link: {← run ["wm", "title", "."]}"
+  sendEvent ".c" "<Alt-Key-Left>"
+  out := out.push s!"page-after-back: {← page}"
+  sendEvent ".c" "<Alt-Key-Right>"
+  out := out.push s!"page-after-forward: {← page}"
+  sendEvent ".c" "<Alt-Key-Left>"
+  out := out.push s!"page-after-back2: {← page}"
+  -- URI link: hover shows the address; a click shows the dialog (auto-confirmed).
+  if let some l := ls[1]? then
+    if let some pos ← boxWindowPos st l.box then
+      at' pos ".c" "<Motion>"
+      out := out.push s!"cursor-uri: {← run [".c", "cget", "-cursor"]}"
+      out := out.push s!"status-hover-uri: {← status}"
+      discard <| run ["set", "::safepdf::shownUri", "<no dialog>"]
+      clickAt pos
+      out := out.push s!"page-after-uri: {← page}"
+      out := out.push s!"status-after-uri: {← status}"
+      IO.FS.writeFile (file "uri-shown.txt") (← run ["set", "::safepdf::shownUri"])
+      IO.FS.writeFile (file "uri-clip.txt") (← clipGet)
+  -- Outline: click `Section` (o2), then `Chapter` (o1) at 200 %.
+  discard <| run ["update"]
+  let itemPos (id : String) : IO (Option (String × String)) := do
+    match ((← run [".ol.t", "bbox", id]).splitOn " ").filterMap String.toNat? with
+    | [x, y, w, h] => return some (toString (x + w / 2), toString (y + h / 2))
+    | _ => return none
+  if let some pos ← itemPos "o2" then
+    at' pos ".ol.t" "<ButtonRelease-1>"
+  out := out.push s!"page-after-outline-section: {← page}"
+  out := out.push s!"title-after-outline-section: {← run ["wm", "title", "."]}"
+  sendKey "0"
+  for _ in [0:3] do sendKey "plus"
+  out := out.push s!"zoom: {View.zoomPct (← st.get).shownZoom (← st.get).scaling}"
+  if let some pos ← itemPos "o1" then
+    at' pos ".ol.t" "<ButtonRelease-1>"
+  out := out.push s!"page-after-outline-chapter: {← page}"
+  out := out.push s!"yview-after-outline-chapter: {← run [".c", "yview"]}"
+  sendKey "f"
+  -- Ctrl+G: "ii" is page 2; the label "1" is page 3 (labels win over page numbers).
+  let gotoWith (txt : String) : IO Unit := do
+    sendEvent ".c" "<Control-Key-g>"
+    discard <| run ["update", "idletasks"]
+    discard <| run ["set", "::safepdf::gotoText", txt]
+    sendEvent ".goto.e" "<Key-Return>"
+  gotoWith "ii"
+  out := out.push s!"page-after-goto-ii: {← page}"
+  gotoWith "1"
+  out := out.push s!"page-after-goto-1: {← page}"
+  out := out.push s!"title-after-goto-1: {← run ["wm", "title", "."]}"
+  gotoWith "nope"
+  out := out.push s!"page-after-goto-nope: {← page}"
+  out := out.push s!"status-goto-nope: {← status}"
+  discard <| run ["::safepdf::hideGoto"]
+  sendEvent ".c" "<Key-F9>"
+  out := out.push s!"outline-shown-after-f9: {(← st.get).outlineShown}"
+  out := out.push s!"panes-after-f9: {← run [".pw", "panes"]}"
+  IO.FS.writeFile (file "nav.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `page-1.ppm` (fit page), then `Next`;
@@ -905,6 +1305,7 @@ def smoke (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some dir := s.smokeDir | return
   if s.smokeMode == "text" then smokeText st dir; return
+  if s.smokeMode == "nav" then smokeNav st dir; return
   st.modify ({ · with smokeStep := s.smokeStep + 1 })
   -- Writing an empty photo fails in Tk; that only means there is nothing to write.
   let write (name : String) : IO Unit :=
@@ -996,6 +1397,12 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["selectall"] => selectAll st
   | ["copy"] => copySel st
   | "find" :: rest => find st rest
+  | ["hover", x, y] => hover st (intPos x y)
+  | ["back"] => histMove st true
+  | ["forward"] => histMove st false
+  | ["outlineToggle"] => showOutline st (!s.outlineShown)
+  | ["outline", id] => outlineClick st id
+  | ["goto", txt] => gotoText st txt
   | ["resize", w, h] =>
     match w.toNat?, h.toNat? with
     | some w, some h =>
@@ -1025,8 +1432,11 @@ Down/Up/Right/Left scroll; Home/End first/last page; + - zoom in/out; 0 actual s
 f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+Q quit.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
+F9 outline panel; click a link to follow it (external addresses are only shown and, if
+confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
-(SAFEPDF_VIEWER_SMOKE_MODE=text: the selection/copy/search steps instead)."
+(SAFEPDF_VIEWER_SMOKE_MODE=text: the selection/copy/search steps instead;
+SAFEPDF_VIEWER_SMOKE_MODE=nav: the outline/link/history/go-to steps)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
 start (no display, missing Tk). -/
@@ -1046,6 +1456,7 @@ def main (args : List String) : IO UInt32 := do
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
+    if smokeDir.isSome then discard <| run ["set", "::safepdf::autoConfirm", "1"]
     if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
     if let some sc := View.parseDecimal (← Shim.eval "tk scaling") then
