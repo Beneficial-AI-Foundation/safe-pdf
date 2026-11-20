@@ -80,7 +80,9 @@ else `--page`). Annotations sync live (task 10.2's `Annots.Sync`, attached to th
   are already in its annotation list);
 * **on Close** (Ctrl+W) and **after the window closed** pending requests are flushed for at
   most 3 s; when something is still pending (a server that never answers) the process exits
-  at once. Opening another file (Ctrl+O) lets the library go: the new file is a local one.
+  at once. After the flush the window run always ends through `IO.Process.exit` (task 8.9), so
+  a page still rendering on a worker thread never holds the process open (Lean would
+  otherwise join it when `main` returns). Opening another file (Ctrl+O) lets the library go: the new file is a local one.
 
 ### `--self-test`
 
