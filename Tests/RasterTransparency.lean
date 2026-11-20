@@ -19,6 +19,9 @@ buffer sizes are theorems in `SafePdf.Core.Raster.Transparency`; this suite chec
   black fill stripe by stripe; outside the mask's `/BBox` the backdrop `/BC` (black) masks
   everything out; an alpha soft mask from a half-transparent square;
 * item blend modes (`Multiply`, `Screen`) and a `Multiply` group;
+* knockout groups (task 7.3i): in a `/K true` group the second of two overlapping translucent
+  squares replaces the first in the overlap (blue at 50 % over white, not over black), also
+  after an opaque square, and with the group at alpha 0.5; without `/K` the overlap darkens;
 * layer nesting beyond `maxLayerDepth` keeps the buffer size;
 * end to end: a content stream with an ExtGState soft mask and a transparency-group form
   through `Content.runBytes` and the driver;
@@ -327,7 +330,31 @@ def run : IO Nat := do
   if pxAt i8b 10 10 != (127, 127, 127) || pxAt i8b 4 4 != (127, 127, 127) then
     failures := failures + 1
     report s!"runner group: {pxAt i8b 10 10} (items {items8b.toList.map DisplayItem.kind})"
-  -- 9. Timing: a group of 100 squares at alpha 0.5 on 612 × 792; a soft-masked full fill.
+  -- 9. Knockout groups (task 7.3i): the second of two overlapping translucent squares in a
+  -- `/K true` group composites over the group's backdrop, not over the first square.
+  let k9 := render 20 20 #[.groupBegin { knockout := true }, fillI (rectP 2 2 12 12) black half,
+    fillI (rectP 8 8 18 18) (rgbC 0 0 100) half, .groupEnd]
+  let v9 := (pxAt k9 10 10, pxAt k9 4 4, pxAt k9 15 15, pxAt k9 0 0)
+  if v9 != ((127, 127, 255), (127, 127, 127), (127, 127, 255), (255, 255, 255)) then
+    failures := failures + 1; report s!"knockout group: {v9}"
+  -- an opaque item inside a knockout group paints normally; a later translucent one knocks it out
+  let k9b := render 20 20 #[.groupBegin { knockout := true }, fillI (rectP 2 2 12 12) (rgbC 100 0 0),
+    fillI (rectP 8 8 18 18) (rgbC 0 0 100) half, .groupEnd, fillI (rectP 0 0 1 1) black half]
+  let v9b := (pxAt k9b 10 10, pxAt k9b 4 4, pxAt k9b 15 15, pxAt k9b 0 0)
+  if v9b != ((127, 127, 255), (255, 0, 0), (127, 127, 255), (127, 127, 127)) then
+    failures := failures + 1; report s!"knockout over opaque: {v9b}"
+  -- a knockout group at alpha 0.5 over a red backdrop
+  let k9c := render 20 20 #[fillI (rectP 0 0 20 20) (rgbC 100 0 0),
+    .groupBegin { knockout := true, alpha := half }, fillI (rectP 2 2 12 12) black half,
+    fillI (rectP 8 8 18 18) black half, .groupEnd]
+  if pxAt k9c 10 10 != pxAt k9c 4 4 || pxAt k9c 0 0 != (255, 0, 0) then
+    failures := failures + 1; report s!"knockout group alpha: {pxAt k9c 10 10} {pxAt k9c 4 4}"
+  -- without /K the overlap darkens
+  let k9d := render 20 20 #[.groupBegin {}, fillI (rectP 2 2 12 12) black half,
+    fillI (rectP 8 8 18 18) (rgbC 0 0 100) half, .groupEnd]
+  if pxAt k9d 10 10 != (63, 63, 191) then
+    failures := failures + 1; report s!"non-knockout group: {pxAt k9d 10 10}"
+  -- 10. Timing: a group of 100 squares at alpha 0.5 on 612 × 792; a soft-masked full fill.
   let sq : Array DisplayItem := (Array.range 100).map fun k =>
     let x : Int := (k % 10 : Nat) * 60
     let y : Int := (k / 10 : Nat) * 78
