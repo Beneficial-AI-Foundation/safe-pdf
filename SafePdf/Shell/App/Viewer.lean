@@ -3,15 +3,18 @@ import SafePdf.Shell.App.Tcl
 import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
+import SafePdf.Shell.App.Menu
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
 
 /-!
-# Native viewer (tasks 8.2a–8.2d; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
-The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a toolbar
+The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
+(File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
+`Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar
 (Open…, Prev, Next, zoom out/in, 100 %, fit page, fit width, rotate left/right, page k/n,
 zoom %), a scrollable canvas showing the current page as a Tk photo image, and a status line.
 Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
@@ -36,8 +39,10 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   Keys (Tcl proc `::safepdf::step`): `Down`/`Up` and `Right`/`Left` scroll by a tenth of the window,
   `Next`/`space` and `Prior`/`BackSpace`/`Shift+space` by a window. Past the bottom (right) edge
   they move to the top of the next page; past the top they move to the bottom of the previous
-  page (page-at-a-time). The mouse wheel scrolls (Shift: horizontally), Ctrl+wheel zooms
-  about the mouse pointer.
+  page (page-at-a-time). The mouse wheel does the same (task 9.2, `wheel`, logic in
+  `View.wheelStep`: small deltas accumulate, the page turns only after the view reached the
+  edge and the wheel pushes on past it); Shift+wheel scrolls horizontally without turning
+  pages; Ctrl+wheel zooms about the mouse pointer.
 * **Anchoring (C2).** Before a zoom or rotation change the viewer reads the canvas point under
   the mouse (Ctrl+wheel) or at the window centre, maps it to page space with `Geom.toPage`;
   after the new image is shown it maps that page point back with `Geom.toScreen`
@@ -180,6 +185,11 @@ structure State where
   savedStatus : String := ""
   /-- Back/forward history of jumps. -/
   history : Links.History := {}
+  /-- Enabled states last applied to the menubar entries and toolbar buttons
+  (`Menu.entryStates` order; empty: not applied yet). -/
+  menuStates : List Bool := []
+  /-- Wheel state: sub-pixel remainder and push past the page edge (task 9.2). -/
+  wheel : View.Wheel := {}
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -265,7 +275,7 @@ in frame `.v`, the photo image `::safepdf::page` on canvas item tag `page`, stat
 `.status`. Key bindings on the toplevel's bind tag `.`; canvas resizes are debounced and
 reported as `emit resize W H`. -/
 def setupScript : String := "
-namespace eval ::safepdf { variable resizeId {}; variable query {} }
+namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0 }
 wm title . safe-pdf
 wm geometry . 860x1040
 wm minsize . 320 200
@@ -339,8 +349,16 @@ proc ::safepdf::step {axis dir what} {
   }
   .c ${axis}view scroll $dir $what
 }
-proc ::safepdf::wheel {axis d} {
-  if {$d > 0} { .c ${axis}view scroll -1 units } elseif {$d < 0} { .c ${axis}view scroll 1 units }
+# Wheel (9.2): the delta goes to Lean (`View.wheelStep`), which scrolls, accumulates small
+# deltas and turns the page after a push past the edge. Kinds: notch (%D in 1/120 notches,
+# Tk >= 8.7 everywhere and Windows), line (Tk 8.6 on macOS: %D in lines), pixel (Tk 9
+# <TouchpadScroll>, macOS trackpads).
+set ::safepdf::wheelKind notch
+if {[tk windowingsystem] eq {aqua} && [package vcompare [package provide Tk] 8.7] < 0} {
+  set ::safepdf::wheelKind line
+}
+proc ::safepdf::wheel {axis kind d} {
+  if {$d != 0} { ::safepdf::emit wheel $axis $kind $d }
 }
 proc ::safepdf::wheelZoom {d x y} {
   if {$d > 0} { ::safepdf::emit zoom in $x $y } elseif {$d < 0} { ::safepdf::emit zoom out $x $y }
@@ -370,16 +388,26 @@ bind . <Key-f> {::safepdf::emit zoom fitpage}
 bind . <Key-w> {::safepdf::emit zoom fitwidth}
 bind . <Key-r> {::safepdf::emit rotate cw}
 bind . <Key-R> {::safepdf::emit rotate ccw}
-bind .c <MouseWheel> {::safepdf::wheel y %D; break}
-bind .c <Shift-MouseWheel> {::safepdf::wheel x %D; break}
+bind .c <MouseWheel> {::safepdf::wheel y $::safepdf::wheelKind %D; break}
+bind .c <Shift-MouseWheel> {::safepdf::wheel x $::safepdf::wheelKind %D; break}
 bind .c <Control-MouseWheel> {::safepdf::wheelZoom %D %x %y; break}
-bind .c <Button-4> {::safepdf::wheel y 1; break}
-bind .c <Button-5> {::safepdf::wheel y -1; break}
-bind .c <Shift-Button-4> {::safepdf::wheel x 1; break}
-bind .c <Shift-Button-5> {::safepdf::wheel x -1; break}
+bind .c <Button-4> {::safepdf::wheel y notch 120; break}
+bind .c <Button-5> {::safepdf::wheel y notch -120; break}
+bind .c <Shift-Button-4> {::safepdf::wheel x notch 120; break}
+bind .c <Shift-Button-5> {::safepdf::wheel x notch -120; break}
+# Tk 9 trackpads (macOS): pixel deltas; Shift is not needed, the gesture has both axes.
+catch {
+  bind .c <TouchpadScroll> {
+    lassign [tk::PreciseScrollDeltas %D] ::safepdf::tdx ::safepdf::tdy
+    ::safepdf::wheel x pixel $::safepdf::tdx
+    ::safepdf::wheel y pixel $::safepdf::tdy
+    break
+  }
+}
 bind .c <Control-Button-4> {::safepdf::wheelZoom 1 %x %y; break}
 bind .c <Control-Button-5> {::safepdf::wheelZoom -1 %x %y; break}
 bind . <Control-o> {::safepdf::emit open}
+bind . <Control-w> {::safepdf::emit close}
 bind . <Control-q> {destroy .}
 bind .c <Configure> {
   after cancel $::safepdf::resizeId
@@ -690,9 +718,13 @@ def prefetch (st : IO.Ref State) : IO Unit := do
 /-- Shows or hides the outline panel (the left pane of `.pw`). -/
 def showOutline (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
+  -- The View → Outline check entry toggles its variable before it runs the command; set it
+  -- back to the panel's real state whatever happens below.
+  discard <| run ["set", Menu.outlineVar, if s.outlineShown then "1" else "0"]
   if on == s.outlineShown then return
   if on then discard <| run [".pw", "insert", "0", ".ol", "-weight", "0"]
   else discard <| run [".pw", "forget", ".ol"]
+  discard <| run ["set", Menu.outlineVar, if on then "1" else "0"]
   st.modify ({ · with outlineShown := on })
 
 /-- Fills the outline treeview from `State.outline` (item `oK` for entry `K`, under its
@@ -753,7 +785,7 @@ def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit :=
   let p := min p (s.pageCount - 1)
   if p != s.page then
     st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none,
-                        hover := none })
+                        hover := none, wheel := {} })
     discard <| run [".c", "configure", "-cursor", ""]
     refresh st
 
@@ -800,6 +832,49 @@ def zoom (st : IO.Ref State) (what : String) (pos : Option (Nat × Nat)) : IO Un
   | "fitwidth" => setMode st .fitWidth pos
   | _ => setStatus s!"internal: unknown zoom {what}"
 
+/-- The two numbers of an `xview`/`yview` result. -/
+def viewFracs (s : String) : Option (Rat × Rat) :=
+  match (s.splitOn " ").filter (!·.isEmpty) with
+  | [a, b] => do return (← View.parseDecimal a, ← View.parseDecimal b)
+  | _ => none
+
+/-- Handles `wheel AXIS KIND D` (task 9.2): a wheel or trackpad delta `D` of kind `KIND`
+(`notch`, `line`, `pixel`; `View.WheelKind`) on axis `x` or `y`. `View.wheelStep` decides:
+scroll within the page (small deltas accumulate), or, on the vertical axis after reaching the
+edge and pushing on past it by `View.wheelThreshold`, turn to the top of the next page or the
+bottom of the previous one, as the keys do. -/
+def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || s.shown.isNone then return
+  let some d := dS.toInt? | return
+  let kind : View.WheelKind ← match kindS with
+    | "notch" => pure .notch
+    | "line" => pure .line
+    | "pixel" => pure .pixel
+    | _ => return
+  let isY := axis == "y"
+  let some (a, b) := viewFracs (← run [".c", if isY then "yview" else "xview"]) | return
+  let region := if isY then s.regionH else s.regionW
+  let r : Rat := region
+  let top := (a * r + 1 / 2).floor.toNat
+  let view := ((b - a) * r + 1 / 2).floor.toNat
+  let now ← IO.monoMsNow
+  let (w, act) := View.wheelStep s.wheel now (View.wheelPixels kind d view) (kind == .pixel) isY
+    top view region (View.wheelThreshold kind view)
+  match act with
+  | .none => st.modify ({ · with wheel := w })
+  | .scrollTo p =>
+    st.modify ({ · with wheel := w })
+    -- Tk rounds `moveto` to the nearest pixel, so the fraction p / region lands on p.
+    discard <| run [".c", if isY then "yview" else "xview", "moveto",
+      fmtFrac ((p : Rat) / (max region 1 : Nat))]
+  | .next =>
+    if s.page + 1 < s.pageCount then goTo st (s.page + 1) .top
+    st.modify ({ · with wheel := w })
+  | .prev =>
+    if s.page > 0 then goTo st (s.page - 1) .bottom
+    st.modify ({ · with wheel := w })
+
 /-- Rotates the view by a quarter turn (`cw` or `ccw`), keeping the window centre's page
 point at the centre. -/
 def rotate (st : IO.Ref State) (cw : Bool) : IO Unit := do
@@ -815,6 +890,66 @@ def openDialog (st : IO.Ref State) : IO Unit := do
   let path ← run ["tk_getOpenFile", "-parent", ".", "-title", "Open PDF", "-filetypes",
     "{{PDF files} {.pdf .PDF}} {{All files} *}"]
   if !path.isEmpty then openFile st path
+
+/-! ## Menubar (task 9.1) -/
+
+/-- Closes the document (File → Close, Ctrl+W): the window stays, empty, as after starting
+without a file. -/
+def closeFile (st : IO.Ref State) : IO Unit := do
+  st.modify fun s => { s with path := none, doc := none, page := 0, shown := none,
+                              gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
+                              texts := #[], sel := none, pressPt := none, query := #[],
+                              hit := none, labels := #[], outline := #[], links := #[],
+                              hover := none, history := {} }
+  discard <| run ["pack", "forget", ".find", ".goto"]
+  fillOutline st
+  showOutline st false
+  discard <| run [".c", "configure", "-cursor", ""]
+  refresh st
+  setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
+
+/-- Builds the menubar `.menubar` from `Menu.menubar` (every word a literal through
+`Tcl.quote`; the `-command` scripts are the model's constants) and attaches it to the main
+window. -/
+def buildMenus : IO Unit := do
+  discard <| run ["menu", Menu.barPath, "-tearoff", "0"]
+  for m in Menu.menubar do
+    discard <| run ["menu", m.path, "-tearoff", "0"]
+    discard <| run [Menu.barPath, "add", "cascade", "-label", m.label, "-underline",
+      toString m.underline, "-menu", m.path]
+    for e in m.entries do
+      match e with
+      | .sep => discard <| run [m.path, "add", "separator"]
+      | .cmd c =>
+        discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accel,
+          "-underline", toString c.underline, "-command", c.script]
+      | .check c var =>
+        discard <| run [m.path, "add", "checkbutton", "-label", c.label, "-accelerator", c.accel,
+          "-underline", toString c.underline, "-variable", var, "-onvalue", "1",
+          "-offvalue", "0", "-command", c.script]
+  discard <| run [".", "configure", "-menu", Menu.barPath]
+
+/-- The part of the state the enabled rules look at. -/
+def menuCtx (s : State) : Menu.Ctx :=
+  { hasDoc := s.doc.isSome && s.pageCount > 0, page := s.page, pages := s.pageCount,
+    hasSel := s.sel.isSome, hasOutline := !s.outline.isEmpty,
+    canBack := !s.history.back.isEmpty, canForward := !s.history.fwd.isEmpty }
+
+/-- Sets the `-state` of every menubar entry and toolbar button whose enabled state
+(`Menu.entryStates`) changed since the last call. Runs after every event. -/
+def syncMenus (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let now := Menu.entryStates (menuCtx s)
+  let old := if s.menuStates.length == now.length then s.menuStates else now.map (!·)
+  let targets : List (Sum (String × Nat) String) :=
+    Menu.entryList.map (fun (p, i, _) => .inl (p, i)) ++ Menu.toolbarCmds.map (fun (w, _) => .inr w)
+  for ((t, on), was) in (targets.zip now).zip old do
+    if on != was then
+      match t with
+      | .inl (p, i) =>
+        discard <| run [p, "entryconfigure", toString i, "-state", if on then "normal" else "disabled"]
+      | .inr w => discard <| run [w, "state", if on then "!disabled" else "disabled"]
+  st.modify ({ · with menuStates := now })
 
 /-! ## Links, jumps, history, go to page (task 8.2d) -/
 
@@ -846,7 +981,7 @@ def showAt (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo) : IO Unit := do
   if s.pageCount == 0 then return
   let p := min p (s.pageCount - 1)
   st.modify fun s => { s with page := p, pending := some whereTo, pressPt := none, hover := none,
-                              sel := if p == s.page then s.sel else none }
+                              sel := if p == s.page then s.sel else none, wheel := {} }
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
 
@@ -1297,6 +1432,164 @@ def smokeNav (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "nav.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the menubar test (`SAFEPDF_VIEWER_SMOKE_MODE=menu`, task 9.1), on the
+three-page navigation document of `smokeNav`. Every action goes through the menubar: entries
+are invoked by their `.menubar` path and label (`.menubar.go invoke {Next page}`), as a click
+would; enabled states are read with `entrycget -state`. Results go into `menu.txt` as
+`key: value` lines; the run ends with File → Quit. -/
+def smokeMenu (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let status : IO String := run [".status", "cget", "-text"]
+  let page : IO Nat := return (← st.get).page + 1
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let menuOf (c : Menu.Cmd) : String := ((Menu.locate c).map (·.1)).getD ".menubar"
+  let invoke (c : Menu.Cmd) : IO Unit := do
+    discard <| run [menuOf c, "invoke", c.label]
+    discard <| run ["update", "idletasks"]
+  let state (c : Menu.Cmd) : IO String := run [menuOf c, "entrycget", c.label, "-state"]
+  out := out.push s!"menubar: {← run [".", "cget", "-menu"]}"
+  let mut cascades : Array String := #[]
+  for i in [0:Menu.menubar.length] do
+    cascades := cascades.push (← run [Menu.barPath, "entrycget", toString i, "-label"])
+  out := out.push s!"cascades: {"|".intercalate cascades.toList}"
+  for m in Menu.menubar do
+    let mut labels : Array String := #[]
+    let n := (← run [m.path, "index", "end"]).toNat?.getD 0
+    for i in [0:n + 1] do
+      if (← run [m.path, "type", toString i]) != "separator" then
+        labels := labels.push (← run [m.path, "entrycget", toString i, "-label"])
+    out := out.push s!"entries{m.path}: {"|".intercalate labels.toList}"
+  let statesOf (cs : List Menu.Cmd) : IO String := do
+    let mut v : Array String := #[]
+    for c in cs do v := v.push s!"{c.label}={← state c}"
+    return ",".intercalate v.toList
+  let goCmds : List Menu.Cmd := [.prevPage, .nextPage, .firstPage, .lastPage, .back, .forward]
+  out := out.push s!"states-page1: {← statesOf (goCmds ++ [.copy, .outline])}"
+  out := out.push s!"toolbar-prev-page1: {← run [".bar.prev", "state"]}"
+  invoke .nextPage
+  out := out.push s!"page-after-next: {← page}"
+  invoke .lastPage
+  out := out.push s!"page-after-last: {← page}"
+  out := out.push s!"states-page3: {← statesOf goCmds}"
+  invoke .nextPage
+  out := out.push s!"page-after-next-at-end: {← page}"
+  invoke .firstPage
+  out := out.push s!"page-after-first: {← page}"
+  invoke .prevPage
+  out := out.push s!"page-after-prev-at-start: {← page}"
+  -- Go → Go to page… opens the go-to bar; a jump records history for Go → Back / Forward.
+  invoke .gotoPage
+  out := out.push s!"goto-bar-mapped: {← run ["winfo", "ismapped", ".goto"]}"
+  discard <| run ["set", "::safepdf::gotoText", "ii"]
+  sendEvent ".goto.e" "<Key-Return>"
+  out := out.push s!"page-after-goto: {← page}"
+  out := out.push s!"states-after-goto: {← statesOf [.back, .forward]}"
+  invoke .back
+  out := out.push s!"page-after-back: {← page}"
+  invoke .forward
+  out := out.push s!"page-after-forward: {← page}"
+  -- View → Outline (a check entry) hides and shows the panel; the check follows.
+  invoke .outline
+  out := out.push s!"outline-after-view-outline: {(← st.get).outlineShown} {← run ["set", Menu.outlineVar]}"
+  invoke .outline
+  out := out.push s!"outline-after-view-outline2: {(← st.get).outlineShown} {← run ["set", Menu.outlineVar]}"
+  -- View → zoom and rotation.
+  invoke .actualSize
+  -- The mode's percentage (the shown zoom is quantised to 1/64 and may print as 99 %).
+  let pct : IO String := do
+    match (← st.get).mode with
+    | .scale p => return toString p
+    | m => return modeName m
+  out := out.push s!"zoom-actual: {← pct}"
+  invoke .zoomIn
+  out := out.push s!"zoom-in: {← pct}"
+  invoke .zoomOut
+  out := out.push s!"zoom-out: {← pct}"
+  invoke .fitWidth
+  out := out.push s!"mode-fit-width: {modeName (← st.get).mode}"
+  invoke .fitPage
+  out := out.push s!"mode-fit-page: {modeName (← st.get).mode}"
+  invoke .rotateCw
+  out := out.push s!"rot-after-right: {View.rotDeg (← st.get).rot}"
+  invoke .rotateCcw
+  out := out.push s!"rot-after-left: {View.rotDeg (← st.get).rot}"
+  -- Edit → Find… opens the find bar; Edit → Select all on a page without text says so.
+  invoke .find
+  out := out.push s!"find-bar-mapped: {← run ["winfo", "ismapped", ".find"]}"
+  discard <| run ["::safepdf::hideFind"]
+  invoke .selectAll
+  out := out.push s!"status-select-all: {← status}"
+  -- Wheel across pages (task 9.2), with generated Tk 9 `<MouseWheel>` events (%D in 1/120
+  -- notches), X11 Button-4/5 and Shift+wheel.
+  let wheelEv (pat : String) (d : Int) : IO Unit :=
+    sendEvent ".c" pat ["-delta", toString d, "-x", "200", "-y", "200"]
+  let yv : IO String := run [".c", "yview"]
+  let xv : IO String := run [".c", "xview"]
+  let first (v : String) : String := ((viewFracs v).map (fun (a, _) => fmtFrac a)).getD "?"
+  invoke .firstPage
+  invoke .fitPage
+  wheelEv "<MouseWheel>" (-120)
+  out := out.push s!"page-after-wheel-fit-down: {← page}"
+  wheelEv "<MouseWheel>" 120
+  out := out.push s!"page-after-wheel-fit-up: {← page}"
+  invoke .actualSize
+  for _ in [0:3] do invoke .zoomIn
+  out := out.push s!"wheel-zoom: {← pct}"
+  discard <| run [".c", "yview", "moveto", "0"]
+  out := out.push s!"y-start: {← yv}"
+  -- Notches down until the page turns: the view must reach the bottom first, and only the
+  -- one notch after that turns the page.
+  let mut n := 0
+  let mut atEnd := 0
+  let mut yLast := ""
+  while (← st.get).page == 0 && n < 200 do
+    yLast ← yv
+    if let some (_, b) := viewFracs yLast then
+      if b ≥ 1 then atEnd := atEnd + 1
+    wheelEv "<MouseWheel>" (-120)
+    n := n + 1
+  out := out.push s!"wheel-down-events: {n}"
+  out := out.push s!"wheel-down-events-at-end: {atEnd}"
+  out := out.push s!"y-before-turn: {yLast}"
+  out := out.push s!"page-after-wheel-down: {← page}"
+  out := out.push s!"y-after-wheel-down: {← yv}"
+  -- Tiny deltas (1/12 notch) upwards at the top of page 2: eleven are not enough to turn
+  -- back, the twelfth (one notch in all) is.
+  for _ in [0:11] do wheelEv "<MouseWheel>" 10
+  out := out.push s!"page-after-11-tiny-up: {← page}"
+  wheelEv "<MouseWheel>" 10
+  out := out.push s!"page-after-12-tiny-up: {← page}"
+  out := out.push s!"y-after-tiny-up: {← yv}"
+  -- Small deltas accumulate: twelve 1/12 notches scroll as far as one notch.
+  let y0 ← yv
+  for _ in [0:12] do wheelEv "<MouseWheel>" 10
+  let y1 ← yv
+  wheelEv "<MouseWheel>" 120
+  let y2 ← yv
+  out := out.push s!"y-frac: {first y0} {first y1} {first y2}"
+  out := out.push s!"region-h: {(← st.get).regionH}"
+  -- X11 legacy wheel buttons (Tk 8.6; Tk 9 turns real wheel buttons into <MouseWheel>).
+  let b0 ← yv
+  sendEvent ".c" "<Button-5>" ["-x", "200", "-y", "200"]
+  let b1 ← yv
+  sendEvent ".c" "<Button-4>" ["-x", "200", "-y", "200"]
+  out := out.push s!"button-5-4: {first b0} {first b1} {first (← yv)}"
+  -- Shift+wheel scrolls horizontally and never turns the page.
+  let x0 ← xv
+  wheelEv "<Shift-MouseWheel>" (-120)
+  let x1 ← xv
+  for _ in [0:60] do wheelEv "<Shift-MouseWheel>" (-120)
+  out := out.push s!"shift-wheel: {first x0} {first x1} {← xv}"
+  out := out.push s!"page-after-shift-wheel: {← page}"
+  -- File → Close empties the window and disables the document commands.
+  invoke .close
+  out := out.push s!"title-after-close: {← run ["wm", "title", "."]}"
+  out := out.push s!"states-after-close: {← statesOf [.close, .nextPage, .zoomIn, .openFile, .quit]}"
+  IO.FS.writeFile (file "menu.txt") ("\n".intercalate out.toList ++ "\n")
+  -- File → Quit ends the run.
+  invoke .quit
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `page-1.ppm` (fit page), then `Next`;
@@ -1313,6 +1606,7 @@ def smoke (st : IO.Ref State) : IO Unit := do
   let some dir := s.smokeDir | return
   if s.smokeMode == "text" then smokeText st dir; return
   if s.smokeMode == "nav" then smokeNav st dir; return
+  if s.smokeMode == "menu" then smokeMenu st dir; return
   st.modify ({ · with smokeStep := s.smokeStep + 1 })
   -- Writing an empty photo fails in Tk; that only means there is nothing to write.
   let write (name : String) : IO Unit :=
@@ -1408,6 +1702,8 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["back"] => histMove st true
   | ["forward"] => histMove st false
   | ["outlineToggle"] => showOutline st (!s.outlineShown)
+  | ["wheel", axis, kind, d] => wheel st axis kind d
+  | ["close"] => closeFile st
   | ["outline", id] => outlineClick st id
   | ["goto", txt] => gotoText st txt
   | ["resize", w, h] =>
@@ -1426,9 +1722,11 @@ def guarded (act : IO Unit) : IO Unit := do
   catch e =>
     try setStatus s!"error: {e}" catch _ => IO.eprintln s!"viewer: {e}"
 
-/-- `handle`, with every exception shown in the status line instead of escaping into Tk. -/
-def safeHandle (st : IO.Ref State) (args : Array String) : IO Unit :=
+/-- `handle`, with every exception shown in the status line instead of escaping into Tk;
+then the menubar and toolbar enabled states are brought up to date (`syncMenus`). -/
+def safeHandle (st : IO.Ref State) (args : Array String) : IO Unit := do
   guarded (handle st args)
+  guarded (syncMenus st)
 
 /-- Usage text. -/
 def usage : String :=
@@ -1436,14 +1734,16 @@ def usage : String :=
 Opens FILE (or asks for one) in a window.
 Keys: Next/space, Prior/BackSpace scroll by a window (then next/previous page);
 Down/Up/Right/Left scroll; Home/End first/last page; + - zoom in/out; 0 actual size;
-f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+Q quit.
+f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+W close;
+Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
 (SAFEPDF_VIEWER_SMOKE_MODE=text: the selection/copy/search steps instead;
-SAFEPDF_VIEWER_SMOKE_MODE=nav: the outline/link/history/go-to steps)."
+SAFEPDF_VIEWER_SMOKE_MODE=nav: the outline/link/history/go-to steps;
+SAFEPDF_VIEWER_SMOKE_MODE=menu: the menubar steps)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
 start (no display, missing Tk). -/
@@ -1464,6 +1764,7 @@ def main (args : List String) : IO UInt32 := do
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
+    buildMenus
     if smokeDir.isSome then discard <| run ["set", "::safepdf::autoConfirm", "1"]
     if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
@@ -1483,6 +1784,7 @@ def main (args : List String) : IO UInt32 := do
   | none =>
     setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
     if smokeDir.isNone then discard <| run ["after", "idle", "::safepdf::emit open"]
+  guarded (syncMenus st)
   if smokeDir.isSome then discard <| run ["after", "300", "::safepdf::emit smoke"]
   Shim.mainLoop
   return 0

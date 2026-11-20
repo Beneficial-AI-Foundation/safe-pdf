@@ -19,9 +19,9 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel)
 
-* Window: toolbar (Open…, Outline, Back, Forward, `< Prev`, `Next >`, Go to…, `-`, `+`, `100%`, `Fit page`, `Fit width`,
+* Window: menubar (File, Edit, View, Go; see *Menubar* below), toolbar (Open…, Outline, Back, Forward, `< Prev`, `Next >`, Go to…, `-`, `+`, `100%`, `Fit page`, `Fit width`,
   `Rotate left`, `Rotate right`, "page k of n", zoom %), a scrollable canvas (scroll bars)
   with the current page, a status line (file, page, zoom, rotation, pixel size, render time
   or "from cache", notes, or the error).
@@ -42,7 +42,7 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   centre's page point stays at the centre.
 * **Scrolling** is page-at-a-time: the canvas holds one page image. Scrolling past the bottom
   (or right) edge with the keys moves to the top of the next page; past the top, to the bottom
-  of the previous page. The mouse wheel only scrolls within the page.
+  of the previous page. The mouse wheel does the same (9.2, below).
 * **Page cache** (`View.Cache`): render results keyed by (document, page, zoom, rotation), LRU,
   at most `View.cacheBytes` = 256 MiB of images and `View.cacheEntries` = 64 entries; results
   above half the budget are not cached. 100 ms after a page is shown, the next page is
@@ -64,9 +64,59 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 | `0`, `Ctrl+0` | actual size (100 %) |
 | `f` / `w` | fit page / fit width |
 | `r` / `R` | rotate the view 90° clockwise / counter-clockwise |
-| mouse wheel, `Shift`+wheel | scroll vertically / horizontally |
+| mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) |
+| `Shift`+wheel | scroll horizontally (stops at the edge) |
 | `Ctrl`+wheel | zoom in/out about the mouse pointer |
-| `Ctrl+O` / `Ctrl+Q` | open / quit |
+| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit |
+
+## Menubar (9.1)
+
+A native Tk menubar (`.menubar`, attached with `. configure -menu`; on X11 Tk draws it at the
+top of the window, on macOS it is the system menu bar) duplicates the toolbar and the keys.
+The model is Tk-free: `SafePdf/Shell/App/Menu.lean` lists the commands (`Menu.Cmd`: label,
+accelerator text, the constant Tcl script that runs it, an enabled rule) and the menus; the
+viewer builds the Tk menus from it (`Viewer.buildMenus`) and after every event sets the
+`-state` of each entry and of the toolbar buttons Prev/Next/Back/Forward/Outline whose rule
+changed (`Viewer.syncMenus`). Task 9.7 rebuilds the toolbar after PDF.js on the same commands.
+
+| Menu | Entries (accelerator) |
+|---|---|
+| File | Open… (Ctrl+O), Close (Ctrl+W), Quit (Ctrl+Q) |
+| Edit | Copy (Ctrl+C), Select all (Ctrl+A), Find… (Ctrl+F) |
+| View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`) |
+| Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
+
+Disabled: everything but Open… and Quit without a document; Copy without a selection;
+Outline when the document has none; Previous/First on the first page, Next/Last on the last;
+Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
+Outline button stays on the toolbar (it becomes the PDF.js sidebar button in 9.7). *Close*
+empties the window (as when started without a file).
+
+## Wheel scrolling across pages (9.2)
+
+The wheel continues into the next / previous page as the keys do. Pure logic in
+`View.wheelStep` (`#guard` checks), driven by `::safepdf::emit wheel AXIS KIND D`:
+
+* **Deltas.** `<MouseWheel>` `%D` is in 1/120 notches on Tk ≥ 8.7 (Tk 9 turns X11 wheel
+  buttons into `<MouseWheel>`) and on Windows; `<Button-4>`/`<Button-5>` (Tk 8.6 on X11) are
+  sent as ±120; Tk 8.6 on macOS gives lines (`KIND line`); Tk 9 trackpads (`<TouchpadScroll>`,
+  unpacked with `tk::PreciseScrollDeltas`) give pixels. One notch scrolls a tenth of the view
+  (as Tk's `scroll 1 units`); smaller deltas (high-resolution wheels, trackpads) accumulate
+  their fractions (`View.Wheel.acc`) instead of being rounded to a notch or lost.
+* **Edges.** Within the page the view scrolls and stops exactly at the edge (the rest of that
+  event is dropped). Only further events at the edge push past it; when the push reaches one
+  notch (a quarter of the view for trackpads) the page turns: down → top of the next page,
+  up → bottom of the previous page. A tiny overscroll never turns a page; a pause of 400 ms or
+  a change of direction forgets the push. A page that fits the window (fit page) turns with
+  every notch.
+* **Momentum.** After a trackpad turns the page, trackpad events are ignored until a 400 ms
+  pause, so inertial scrolling does not run through several pages. Wheel notches are not
+  latched.
+* **Horizontal** (`Shift`+wheel, trackpad sideways): scrolls and stops at the edge; it never
+  turns pages (the `Left`/`Right` keys still do).
+* Not tested here: real macOS trackpad deltas (the smoke test generates Tk 9 `<MouseWheel>`
+  and `<Button-4/5>` events on X11; the `line` and `pixel` kinds are covered by the `#guard`s
+  only).
 
 ## Selection, copy and search (8.2c)
 
@@ -183,10 +233,11 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `c/tk_shim.c` | Tcl interpreter, Tk init, `::safepdf::emit` → Lean callback, `Tk_PhotoPutBlock` from an RGBA `ByteArray`, event loop. Adapted from bib-lean's `c/tk_shim.c`. |
 | `SafePdf/Shell/App/Shim.lean` | `@[extern]` bindings and the exported dispatcher `safepdf_gui_dispatch`. Only the `viewer` executable may import it. |
 | `SafePdf/Shell/App/Tcl.lean`, `TclLemmas.lean` | Tcl scripts as data and the proof that `Tcl.quote` is injection-free (`parseWordStr_quote`, `parseScript_render`, …). Copied from bib-lean `BibLean/Gui/Tcl.lean` + `Tcl/Lemmas.lean`. Built by default (lib `SafePdfApp`). |
-| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, the LRU page cache. |
+| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
-| `SafePdf/Shell/App/Viewer.lean` | State, rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
+| `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, toolbar buttons that follow the rules, entry indices (task 9.1). |
+| `SafePdf/Shell/App/Viewer.lean` | State, menubar, rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
 **No data in script text.** Every Tcl command that carries data (file names, error text,
@@ -248,6 +299,22 @@ address (read just before the dialog confirms itself), and the clipboard then ho
 the address; clicking `Section` goes to page 2; at 200 % clicking `Chapter` goes to page 3
 with the window top at y = 400 (yview within 0.45–0.53); Ctrl+G `ii` → page 2, `1` → page 3
 (label before number), `nope` → error; F9 hides the panel.
+
+The menubar (9.1) runs in a fourth variant (`SAFEPDF_VIEWER_SMOKE_MODE=menu`,
+`Viewer.smokeMenu`) on the same three-page PDF: the window's `-menu` is `.menubar` with
+File / Edit / View / Go and the expected entries; each action is invoked as
+`.menubar.go invoke {Next page}` and so on: Go → Next, Last, Next at the end (disabled: stays),
+First, Previous at the start (stays), Go to page… (`ii` → page 2), Back, Forward (with the
+entry states checked on pages 1 and 3 and after the jump); View → Outline twice (panel and
+check variable follow), Actual size, Zoom in (125 %), Zoom out, Fit width, Fit page, Rotate
+right/left; Edit → Find… (bar mapped), Select all (no text on that page); File → Close (title
+`safe-pdf`, document entries disabled) and File → Quit, which ends the run. Before closing, the
+same run checks the wheel (9.2) with generated Tk 9 `<MouseWheel>` events: in fit page one
+notch down turns to page 2 and one up back to page 1; at 200 % notches scroll page 1 down,
+the view reaches the bottom and exactly one notch more turns to the top of page 2; eleven
+1/12-notch deltas up leave page 2, the twelfth turns to the bottom of page 1; twelve 1/12
+notches scroll as far as one notch (within 1.5 px); `<Button-5>`/`<Button-4>` scroll down and
+back; Shift+wheel scrolls horizontally to the right edge and the page stays.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
