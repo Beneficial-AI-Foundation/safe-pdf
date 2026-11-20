@@ -58,7 +58,8 @@ Unicode fallback used by text extraction when a font has no `/ToUnicode` CMap (t
   glyph of the four encodings plus `minus`, `ff`, `ffi`, `ffl`, `nbspace`, `sfthyphen` and the
   15 Mac symbols) and `aglSymbolNames` (the other Symbol glyphs: Greek, math, arrows, the
   Corporate Use extension pieces), else `uniXXXX…` (groups of four hex digits) or
-  `uXXXX`–`uXXXXXX`, else nothing. For a ZapfDingbats font (`glyphToUnicodeIn true`) the
+  `uXXXX`–`uXXXXXX`, else nothing. A `uni` name of several groups with a control character
+  (`uni00000044`, a glyph index) maps to nothing, as in MuPDF (`uniName`, task 6.8a). For a ZapfDingbats font (`glyphToUnicodeIn true`) the
   ITC Zapf Dingbats Glyph List (`dingbatNames`, `a1`…`a206`) is tried first; `glyphToUnicode`
   is the variant for any other font. Hex digits are accepted in either case (AGL requires upper case; pdf.js accepts
   both) and surrogates / values above `0x10FFFF` are rejected.
@@ -752,6 +753,18 @@ def uniGroups : List Char → Option (List Char)
     | none => none
   | _ => none
 
+/-- A `uni` name's suffix as text (task 6.8a): its four-digit groups (`uniGroups`), except that
+a name of two or more groups with a control character (below `U+0020`) maps to nothing. Such
+names are not ligatures but glyph indices written as eight hex digits (`uni00000044` is glyph
+`0x44` of a Type 3 font converted from a TrueType subset, whose codes are ASCII):
+`fz_unicode_from_glyph_name` reads `uni` only in seven-character names, so MuPDF finds no
+Unicode here and its Type 3 loader then reads codes `32..126` as ASCII, which `Core.Text`
+does likewise for a name that maps to nothing. -/
+def uniName (rest : List Char) : List Char :=
+  match uniGroups rest with
+  | some cs => if 4 < rest.length ∧ cs.any (·.toNat < 0x20) then [] else cs
+  | none => []
+
 /-! ### The full glyph list (`GlyphList.lean`, task 6.7b) -/
 
 /-- One line `name;HEX[ HEX…]` of `aglData`: the name and its Unicode sequence (every group
@@ -816,7 +829,7 @@ def componentToUnicode (dingbats : Bool) (comp : List Char) : List Char :=
     | some cs => cs
     | none =>
       match comp with
-      | 'u' :: 'n' :: 'i' :: rest@(_ :: _) => (uniGroups rest).getD []
+      | 'u' :: 'n' :: 'i' :: rest@(_ :: _) => uniName rest
       | 'u' :: rest =>
         if 4 ≤ rest.length ∧ rest.length ≤ 6 then
           match parseHexAux 0 rest with
@@ -893,6 +906,11 @@ def glyphToUnicode (g : GlyphName) : Option String :=
 #guard glyphToUnicode ".notdef" == none
 #guard glyphToUnicode "g123" == none
 #guard glyphToUnicode "uni" == none
+-- Eight-digit glyph-index names (Type 3 fonts converted from TrueType subsets, task 6.8a).
+#guard glyphToUnicode "uni00000044" == none
+#guard glyphToUnicode "uni00000003" == none
+#guard glyphToUnicode "uni0003" == some (String.ofList [Char.ofNat 3])
+#guard glyphToUnicode "uni00200041" == some " A"
 #guard isSymbolic id [(Name.ofString "FontDescriptor", .dict [(Name.ofString "Flags", .int 4)])]
 #guard !isSymbolic id [(Name.ofString "FontDescriptor", .dict [(Name.ofString "Flags", .int 32)])]
 -- Every glyph of the four encodings has an AGL code point.

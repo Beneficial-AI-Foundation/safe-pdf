@@ -15,7 +15,8 @@ PDFs, each checked against the page text and per-glyph texts that MuPDF 1.25
 * TeX, Symbol and AGL glyph names through `/Differences` on a non-embedded font;
 * **Type 3** glyphs: AGL names, MuPDF's decimal `aNN`, `uniXXXX`, unknown names at ASCII codes
   (that ASCII character) and above 126 (U+FFFD); the same unknown names in a Type 1 font give
-  U+FFFD (no ASCII guess outside Type 3).
+  U+FFFD (no ASCII guess outside Type 3); eight-digit `uni000000XX` glyph-index names (a Type 3
+  font converted from a TrueType subset, task 6.8a) map to nothing, so codes read as ASCII.
 -/
 
 namespace SafePdf.Tests.TextUnicode
@@ -183,7 +184,15 @@ def cases : List (String × ByteArray × List String × Bool) :=
     ("Type3 names above 126", type3Doc 200
         ["eacute", "a201", "g202", "Cdd", "index204", "a66", "f_i", "uni00E9"]
         (lines ["c8", "c9", "ca", "cb", "cc", "cd", "ce", "cf"]),
-      ["é", "É", r, r, r, "B", "fi", "é"], false) ]
+      ["é", "É", r, r, r, "B", "fi", "é"], false),
+    -- Type 3 converted from a TrueType subset (arxiv-2501.12948 p52, task 6.8a): names are
+    -- glyph indices `uni000000XX` (index = code − 29), not Unicode; MuPDF reads the codes as
+    -- ASCII (32..126) and U+FFFD above
+    ("Type3 eight-digit glyph-index names", type3Doc 115
+        ["uni00000056", "uni00000057"] (lines ["73", "74", "63"]),
+      ["s", "t", "c"], false),
+    ("Type3 eight-digit glyph-index name above 126", type3Doc 200 ["uni00000044"]
+        (lines ["c8"]), [r], false) ]
 
 /-- Run the cases; the number of failures. -/
 def run : IO Nat := do
