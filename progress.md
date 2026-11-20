@@ -30,6 +30,7 @@ Design document: Plan.md
 | 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | draft |
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | — | none |
 | 8 | `phase-8-shell` | `phase-7-raster` | — | none |
+| 9 | `phase-9-gui` | `phase-8-shell` | — | none |
 States: none · draft · awaiting-ci · ready (<date>) · changes-requested · merged · closed.
 
 ## Phase 0 — Infrastructure
@@ -226,6 +227,18 @@ Plan.md §6 Phase 8, §8. Exit: **M8**: daily-drivable viewer on the corpus.
 | 8.3d | Annotation gaps left by 8.3c: synthesized FreeText (`/DA` font + size, `/Q` alignment, standard-14 font dict), Stamp (MuPDF's built-in stamp texts), Line `/Cap` captions, cloudy borders `/BE`; NoRotate: per MuPDF 1.25.1 `pdf_run_annot_with_usage`, rotate by the page's `/Rotate` back about the rect's upper-left corner (x0, y1) — pass the page rotation into `parseDict` and post-multiply A (NoZoom: MuPDF ignores it; follow); Redact/widget synthesis stays out | 8.3c | `SafePdf/Core/Annot.lean`, `Tests/Annot.lean` | wt | done (2026-11-20) |
 | 8.3e | Cloudy borders `/BE` (MuPDF 1.25.1 `pdf-appearance.c`) for Square/Circle/Polygon/FreeText; rich text `/RC`/`/DS` and `/AcroForm /DA` fallback for FreeText (8.3d gaps) | 8.3d | `SafePdf/Core/Annot.lean`, `Tests/Annot.lean` | wt | done (2026-11-20) |
 | 8.2e | `Nav.Target` keeps the `/URI` string of URI actions (today only the action kind; the viewer reads `/A /URI` itself — 8.2d); `Api.pageLinks` and `Shell/App/Links.lean`/`Viewer.lean` use it; keep every Nav theorem; tests | 8.2d, 8.4 | `SafePdf/Core/Doc/Nav.lean`, `SafePdf/Api.lean`, `SafePdf/Shell/App/Links.lean`, `SafePdf/Shell/App/Viewer.lean` | wt | done (2026-11-20) |
+Exit criterion checked: [ ]
+
+## Phase 9 — GUI enhancements (viewer UX + user annotations)
+Plan.md §6 Phase 9 (added 2026-11-20 at the human's request). Exit: **M9**: a paper reads end-to-end with the wheel in every view mode; a highlight and a note survive close/reopen through the XFDF sidecar; the sidecar imports into Acrobat/Okular.
+| ID | Task | Needs | Owns | Par | Status |
+|---|---|---|---|---|---|
+| 9.1 | Native menubar File / Edit / View / Go; the Outline, Back and Forward toolbar buttons move into View / Go (keys F9, Alt+Left/Right stay) | 8.2d | `SafePdf/Shell/App/Viewer.lean` | wt | todo |
+| 9.2 | Mouse-wheel scrolling continues across page boundaries as the keys do (macOS trackpad deltas included) | 8.2b | `SafePdf/Shell/App/Viewer.lean`, `SafePdf/Shell/App/View.lean` | wt | todo |
+| 9.3 | View modes (View menu): single page, continuous vertical scroll, facing pages, continuous facing; two-by-two paging in the facing modes; page cache/prefetch over the visible neighbours | 9.1, 9.2 | `SafePdf/Shell/App/View.lean`, `SafePdf/Shell/App/Viewer.lean` | wt | todo |
+| 9.4 | User highlights (color choice) and notes: Tk-free model `Shell/App/Marks.lean` (anchors = C3 glyph quads of a selection, or a page point), drawn over the page, note popup, right-click entries Highlight (color submenu) / Add note…, Edit menu | 8.2c, 9.1 | `SafePdf/Shell/App/Marks.lean`, `SafePdf/Shell/App/Viewer.lean` | wt | todo |
+| 9.5 | XFDF sidecar (ISO 19444-1): save/load user highlights + notes in `FILE.xfdf` next to the PDF (QuadPoints / text annotations in page space; the PDF itself is never written, S8); tolerate the subset other tools emit | 9.4 | `SafePdf/Shell/App/Xfdf.lean` | wt | todo |
+| 9.6 | Smoke-test variant: menubar entries, wheel across pages, each view mode, highlight + note + sidecar round-trip | 9.3, 9.5 | `scripts/viewer-smoke.sh`, `SafePdf/Shell/App/Viewer.lean` | wt | todo |
 Exit criterion checked: [ ]
 
 ## Gotchas (append-only; read before every wave, pasted into every brief)
@@ -503,6 +516,8 @@ Exit criterion checked: [ ]
 * 2026-11-20 (8.1) — **GUI toolkit (Plan §8 open question, M8): Tcl/Tk 9 through a small C shim** (default chosen by the loop; the human may override). Rationale: the sibling project bib-lean already has a working Lean ↔ Tk shell (`c/tk_shim.c`, proved Tcl quoting so no data is ever spliced into script text); Tk 9.0 + Xvfb are installed in this sandbox (lean-tools kit) and Homebrew `tcl-tk` on macOS; a photo image in a canvas is enough to show the core's RGBA pages; widgets for menus, scrollbars, outline tree, search entry exist; the shell stays unverified and replaceable (Plan §8). Alternatives: GTK 4 (heavier C API, more FFI surface), Qt (C++), SDL2 (no widgets), Tauri/webview (rejected by the threat model: no browser engine near document data). Consequence: `lakefile.toml` becomes `lakefile.lean` (`extern_lib` exists only in the Lean DSL) — task 8.2a.
 
 * 2026-11-20 (7.6a) — JPEG decoding is a pure-Lean decoder in `SafePdf/Quarantine/` (Plan §8 decided "FFI only in the quarantine zone for DCT/JPX"; a Lean decoder needs no FFI and no new dependency, and it is held to the Core hygiene rules). Reference behaviour is libjpeg-turbo 2.1 as linked by the installed MuPDF (bit-exact on fixtures). JPX/JBIG2/CCITT remain placeholders.
+
+* 2026-11-20 (Phase 9) — **User annotations persist in an XFDF sidecar** (ISO 19444-1), never in the PDF. The usual in-file format — annotation objects appended by incremental update (ISO 32000 §12.5) — needs a PDF writer and would end "read-only by construction" (S8); XFDF is the standard interchange XML that Acrobat and others import/export, so the notes stay portable. An "export annotated copy" writer may be a later, separate decision; in-place writes never.
 
 ## Blocked / questions for the human
 * 2026-11-20 (8.1) — The loop chose **Tcl/Tk 9** for the viewer shell (Decisions entry). Please confirm or name another toolkit before the shell grows (8.2b–8.2d); 8.2a builds the skeleton meanwhile.
