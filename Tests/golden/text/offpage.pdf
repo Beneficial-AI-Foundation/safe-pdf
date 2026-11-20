@@ -1,0 +1,52 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [0 0 300 300] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 241 >>
+stream
+BT /F1 12 Tf 72 200 Td (Inside the box) Tj ET
+BT /F1 12 Tf 72 500 Td (Above the CropBox) Tj ET
+BT /F1 12 Tf -200 100 Td (Left of the MediaBox) Tj ET
+BT /F1 12 Tf 280 150 Td (Edge) Tj ET
+BT /F1 12 Tf 0 1 -1 0 150 400 Tm (Rotated above) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 1224] /CropBox [0 0 792 612] /Rotate -90 /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+6 0 obj
+<< /Length 217 >>
+stream
+BT /F1 1 Tf 0 -8 8 0 733.56 1187.04 Tm (National Transportation) Tj
+0 -1.02 TD (Safety Board) Tj ET
+BT /F1 1 Tf 0 -20 20 0 654.6 495.24 Tm (Hard Landing, Gear Collapse) Tj
+0 -1.2 TD (Federal Express Flight 647) Tj ET
+
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000270 00000 n 
+0000000562 00000 n 
+0000000724 00000 n 
+0000000992 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1089
+%%EOF

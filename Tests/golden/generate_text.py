@@ -20,6 +20,14 @@ Stdlib only, deterministic (no compression). The generated PDFs are the test inp
 * lineseps.pdf one page, a simple Helvetica font whose /ToUnicode maps code 1 to U+2028 and
                code 2 to U+2029 (task 6.9: the JSON output must escape them so every JSON
                object stays on one physical line for any line splitter).
+* offpage.pdf  two pages whose CropBox is smaller than the MediaBox (task 6.8b: glyphs
+               entirely outside the CropBox are left out of the text, as MuPDF's
+               FZ_STEXT_CLIP). Page 1: CropBox [0 0 300 300]; text inside, above the
+               box, left of the MediaBox, straddling the right edge (the glyphs past it
+               dropped one by one: "Edg"), and rotated text above the box.
+               Page 2: the NTSB cover layout, MediaBox [0 0 792 1224], CropBox
+               [0 0 792 612], /Rotate -90, text drawn downwards (Tm 0 -1 1 0) both above
+               the CropBox (a mailing panel, dropped) and inside it (the title, kept).
 """
 
 import os
@@ -157,6 +165,36 @@ def lineseps():
     ])
 
 
+OFFPAGE_1 = (
+    b"BT /F1 12 Tf 72 200 Td (Inside the box) Tj ET\n"
+    b"BT /F1 12 Tf 72 500 Td (Above the CropBox) Tj ET\n"
+    b"BT /F1 12 Tf -200 100 Td (Left of the MediaBox) Tj ET\n"
+    b"BT /F1 12 Tf 280 150 Td (Edge) Tj ET\n"
+    b"BT /F1 12 Tf 0 1 -1 0 150 400 Tm (Rotated above) Tj ET\n"
+)
+
+OFFPAGE_2 = (
+    b"BT /F1 1 Tf 0 -8 8 0 733.56 1187.04 Tm (National Transportation) Tj\n"
+    b"0 -1.02 TD (Safety Board) Tj ET\n"
+    b"BT /F1 1 Tf 0 -20 20 0 654.6 495.24 Tm (Hard Landing, Gear Collapse) Tj\n"
+    b"0 -1.2 TD (Federal Express Flight 647) Tj ET\n"
+)
+
+
+def offpage():
+    return pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [0 0 300 300] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+        stream(OFFPAGE_1),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 1224] /CropBox [0 0 792 612] "
+        b"/Rotate -90 /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+        stream(OFFPAGE_2),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ])
+
+
 def main(argv):
     if len(argv) != 2:
         print(__doc__)
@@ -164,7 +202,7 @@ def main(argv):
     out = argv[1]
     os.makedirs(out, exist_ok=True)
     for name, data in (("latin.pdf", latin()), ("unicode.pdf", unicode_()),
-                       ("lineseps.pdf", lineseps())):
+                       ("lineseps.pdf", lineseps()), ("offpage.pdf", offpage())):
         with open(os.path.join(out, name), "wb") as fh:
             fh.write(data)
         print("wrote %s (%d bytes)" % (os.path.join(out, name), len(data)))
