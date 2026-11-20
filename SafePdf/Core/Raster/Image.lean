@@ -806,8 +806,9 @@ abbrev MaskImg := Pixmap × Option (List Fixed)
 decoded through the source like an image XObject — a soft mask as `DeviceGray` with its own
 `/Decode` (the mask value is channel 0; `/BitsPerComponent` required), an explicit mask as an
 `/ImageMask` stencil (`/Decode` honoured, coverage in channel 3: sample 0 paints) — plus a soft
-mask's `/Matte` components (a `/DCTDecode` mask through `decodeDCT`). `none` for anything else (not a stream, another image codec, a decode
-error): the image is then drawn unmasked. -/
+mask's `/Matte` components; a `/DCTDecode` mask goes through `decodeDCT`. `none` for anything
+else (not a stream, another image codec, a decode error): the image is then drawn
+unmasked. -/
 def loadMask {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (soft : Bool) :
     Option PdfObject → Option MaskImg × σ
   | some (.ref n g) =>
