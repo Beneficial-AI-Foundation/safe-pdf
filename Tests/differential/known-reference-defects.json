@@ -1,0 +1,15 @@
+{
+ "about": "Pages where a REFERENCE tool's output is demonstrably wrong (their bug, not ours). Read by Tests/differential/run.py; mechanism and rules in docs/corpus.md ('Known reference defects'). An entry applies only to the file with this SHA-256, and only to the listed pages whose reference output still shows `signature` (a regular expression searched in that page of `mutool draw -q -F txt -o - FILE`); pages that no longer show it are reported as STALE and compared normally. Excluded pages are left out of the corpus-wide similarity / within-tolerance numbers and printed separately; thresholds are never changed.",
+ "defects": [
+  {
+   "file": "arxiv-astro-ph_9805201.pdf",
+   "sha256": "5edf2da6f5ff6438649e818e82ea86c7a168fbe1294fa165a252f9640b24e039",
+   "pages": [51, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72],
+   "comparators": ["text-mupdf", "positions"],
+   "reference": "MuPDF (mutool 1.25.1)",
+   "signature": "[\\u0001-\\u0008]",
+   "reason": "MuPDF maps the Type 3 glyph names /1../9 (no ToUnicode entry for the digit codes) to the control characters U+0001..U+0009 instead of the digits ('/0' survives as '0'), so the digits 1-9 vanish (controls are dropped by the normalizer; U+0009 is a tab); its text and its char stream lose these digits and the positions matcher pairs leftover punctuation ('.', '(', '0') across far-apart table cells",
+   "evidence": "Fonts are Ghostscript Type 3 (e.g. obj 463 on p61) with /Encoding Differences [48 /0 /1 /2 /3 /4 /5 /6 /7 /8 /9 ...] and a ToUnicode CMap (obj 648) that maps only letters. The rendered page (mutool draw -o p61.png FILE 61) shows '- 2 -', 'Table 2.', '127.6 1996 Feb 14 22.30(0.09)'; pdftotext -f 61 -l 61 prints the digits like we do ('Table 2. SN Ia Imaging', 'JDa UT Date B 45'); mutool draw -F txt prints 0x02 for '2' ('{ \\u0002 {', 'T able \\u0002.'), mutool draw -F stext has c=\"&#x2;\". Pages 51 and 60-72 use such fonts and are the only pages whose MuPDF text holds U+0001..U+0008 (51: 294, 60: 157, 61: 410, ... 72: 597 such characters). MuPDF also splits words in these fonts ('T able', 'Con tin ued') (its stext reports font size 0.24 for them, FontMatrix [1 0 0 -1 0 0] with glyphs drawn at 0.01 scale); pdftotext and we do not. Before exclusion (a0f4718): text-mupdf p61 0.4661 ... p72 0.6067; positions 844 pairs out of tolerance on p51 (6) and p64-p72 (838), all far-apart mispairings of '.', '0', '(', ')', '-'."
+  }
+ ]
+}
