@@ -20,7 +20,12 @@
 #   W8  Save in the window: a PUT (the original bytes a prefix, the marks' /NM inside) then a
 #       POST with the new note and the stored elements of other viewers; after it the marks
 #       are saved, the title has no `*`, the window stays on the library's document;
-#   W9  the token appears nowhere in the output.
+#   W9  the token appears nowhere in the output;
+#   W10 (task 8.9) closing the window while a slow page still renders (page 2 of a generated
+#       PDF strokes `scripts/viewer-smoke-pdf.py --slow`'s curves, many seconds of rendering,
+#       prefetched on a worker thread while page 1 is shown): the process exits 0 within 1 s
+#       of the window closing (after `Sync.flush`), not when the render ends, and the stub
+#       got the final POST (the note) after the PUT.
 # Exit 0 on success; the window checks are skipped (exit 0) without Xvfb.
 set -euo pipefail
 
@@ -51,7 +56,7 @@ bad() { echo "FAIL - $1${2:+: $2}"; fail=$((fail + 1)); }
 check() { if [ "$1" = 0 ]; then ok "$2"; else bad "$2" "${3:-}"; fi; }
 
 if ! command -v Xvfb >/dev/null 2>&1; then
-  echo "skip - W1-W9 (no Xvfb)"
+  echo "skip - W1-W10 (no Xvfb)"
   exit 0
 fi
 xvfb_dpy=""
@@ -64,7 +69,7 @@ for n in $(seq 201 240); do
   kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; xvfb_pid=""
 done
 if [ -z "$xvfb_dpy" ]; then
-  echo "skip - W1-W9 (Xvfb did not start)"
+  echo "skip - W1-W10 (Xvfb did not start)"
   exit 0
 fi
 export DISPLAY="$xvfb_dpy"
@@ -170,6 +175,75 @@ check $((r + $?)) "W8 Save: PUT (original a prefix, the marks inside) then POST 
   "$(cat "$out" "$work/log" 2>/dev/null | tail -20)"
 ! grep -rqF "$token" "$work/win.out" "$work/win.err" "$work/smoke"
 check $? "W9 the token is not in the viewer's output"
+
+# W10 (task 8.9): page 1 text (the smoke steps highlight and note there), page 2 slow.
+kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null; stub_pid=""
+mkdir -p "$work/s" "$work/s/smoke" "$work/s/tmp"
+python3 -I - "$repo/scripts/viewer-smoke-pdf.py" "$work/s/slow.pdf" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("smokepdf", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+page1 = b"BT /F1 12 Tf 100 700 Td (Hello safe world) Tj ET\n"
+page2 = m.slow_page(40000)
+res = b"/Resources << /Font << /F1 3 0 R >> >>"
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+for i, c in enumerate([page1, page2]):
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R %s >>"
+                % (5 + 2 * i, res))
+    objs.append(b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream")
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+xref = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+open(sys.argv[2], "wb").write(out)
+EOF
+python3 -I "$here/stub_server.py" --token-file "$work/token" --pdf "$work/s/slow.pdf" \
+  --att "$att" --parent PAR23456 --title "$title" --port-file "$work/s/port" \
+  --log "$work/s/log" --annots-out "$work/s/annots" --put-out "$work/s/put" &
+stub_pid=$!
+for _ in $(seq 100); do [ -s "$work/s/port" ] && break; sleep 0.05; done
+[ -s "$work/s/port" ] || { echo "window-test: stub server did not start" >&2; exit 1; }
+(cd "$work/cwd" && exec env TMPDIR="$work/s/tmp" SAFEPDF_VIEWER_SMOKE="$work/s/smoke" \
+  SAFEPDF_VIEWER_SMOKE_MODE=biblean SAFEPDF_SUBST_FONTS=0 \
+  BIBLEAN_SERVER="http://127.0.0.1:$(cat "$work/s/port")" BIBLEAN_ATTACHMENT="$att" \
+  "$viewer" --biblean >"$work/s/win.out" 2>"$work/s/win.err" 3< <(printf '%s\n' "$token")) &
+vpid=$!
+out="$work/s/smoke/biblean.txt"
+# The smoke steps write `done` just before they close the window (about 3 s after it is up).
+t_done=""
+for _ in $(seq 3000); do
+  if [ -z "$t_done" ] && grep -qx done "$out" 2>/dev/null; then t_done="$(date +%s%N)"; fi
+  kill -0 "$vpid" 2>/dev/null || break
+  sleep 0.02
+done
+t_exit="$(date +%s%N)"
+if kill -0 "$vpid" 2>/dev/null; then kill "$vpid"; fi
+wait "$vpid"
+rc=$?
+vpid=""
+ms=$(( (t_exit - ${t_done:-$t_exit}) / 1000000 ))
+python3 -I - "$work/s/log" "$work/s/annots" <<'EOF'
+import json, sys
+log = [json.loads(l) for l in open(sys.argv[1])]
+writes = [(r["method"], r["path"].rsplit("/", 1)[1], r["status"]) for r in log
+          if r["method"] == "PUT" or r["path"].endswith("/annotations")]
+assert writes[-2:] == [("PUT", "file", 200), ("POST", "annotations", 200)], writes
+body = [json.loads(l) for l in open(sys.argv[2])][-1]["body"]
+assert any(e.get("kind") == "note" and e.get("comment") == "library note" for e in body), body
+EOF
+r=$?
+[ "$rc" = 0 ] && [ -n "$t_done" ] && [ "$ms" -le 1000 ] && [ "$r" = 0 ] &&
+  grep -qx 'page: 1/2' "$out"
+check $? "W10 closing the window while page 2 still renders: exit 0 within 1 s (${ms} ms), the final POST reached the stub" \
+  "exit $rc, done seen: ${t_done:+yes}, posts $r: $(cat "$work/s/win.err" "$out" "$work/s/log" 2>/dev/null | tail -20)"
 
 echo "window-test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
