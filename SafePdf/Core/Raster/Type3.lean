@@ -38,8 +38,9 @@ shadings, soft masks) the `d1` box, else the `/FontBBox`, else the whole window.
 
 ## Rendering (`renderRun`)
 
-Each laid-out code of a glyph run (`Text.layoutParts` with the font's `FontInfo`: the same
-positions as extraction, C6) is drawn with the matrix
+Each laid-out code of a glyph run (`Text.layoutParts` with the font's `FontInfo`, the
+advances truncated to multiples of `1/1000` em as MuPDF's integer metrics table, `truncWidth`)
+is drawn with the matrix
 `T = FontMatrix × [Tfs·Th 0 0 Tfs tx Trise] × Tm × CTM × view` (exact over `ℚ`). The glyph
 is rendered with the caller's **cell painter** (the full item painter at one depth less,
 `Glyph.cellPainterD`; nested Type 3 glyphs and tiling cells share the depth cap, depth 0 =
@@ -54,13 +55,22 @@ renders Type 3 glyphs as filled; stroke and clip effects of modes 1, 2, 4–6 ar
 applied — a documented gap, as are pattern fill colours on masked glyphs, which paint with
 the pattern's device placeholder colour).
 
+**Image glyphs** (bitmap fonts: every item an inline image, `T3Glyph.images`) skip the layer:
+a stencil is scaled as MuPDF does (task 7.3k, `mupdfStencil`: power-of-two subsampling, then
+`fz_scale_pixmap`'s smoothstep weights) and composited directly; the masks are cached per run
+by (code, sub-pixel phase) (`GlyphCache`), the subsampled bitmaps per loaded font
+(`StencilSrc`, lazily).
+
 Layers larger than `maxGlyphLayerPixels` are not drawn (degradation, never an error).
 `renderRun_size`: the page buffer keeps its size.
 
 ## Gaps
 
-* No bitmap cache of rendered glyphs (MuPDF caches per subpixel position): every instance is
-  rendered (two small renders); charproc display lists are cached.
+* The glyph bitmap cache holds image glyphs only and lives for one glyph run (a page-wide
+  cache needs a field in `Glyph`'s render state); other glyphs are rendered per instance (two
+  small renders); charproc display lists are cached per font.
+* Text extraction (`Text`) keeps the untruncated Type 3 advances (`truncWidth` applies to
+  rendering only).
 * Fonts used by text inside charprocs are not loaded (such text is positioned with the
   runner's environment fonts); tiling patterns used inside charprocs are not loaded.
 -/
@@ -513,10 +523,12 @@ flag `FZ_DRAWDEV_FLAGS_TYPE3`: no grid fitting) as follows, for the image → de
    `check_weights`; rows are filtered first into bytes `(128 + Σ w·s) >> 8`, then columns the
    same way. The scaled pixmap lands on whole pixels and is painted 1 : 1.
 
-The weights are computed exactly over `ℚ` with MuPDF's formulas; MuPDF evaluates them in
-`float`, so a weight whose `256 · f + 0.5` falls within float rounding of an integer can differ
-by one (a documented deviation, as is the single-column case, where MuPDF reads its re-ordered
-vertical weights sequentially). Other cases (rotated or skewed images, upscaling, unusual
+`weightsAt` is the exact reference over `ℚ` (MuPDF's formulas); the renderer uses
+`weightsAtI` (positions on a `2⁻²⁰` grid, filter in `2⁻²⁴` fixed point, natural numbers only).
+MuPDF evaluates them in `float`, so a weight whose `256 · f + 0.5` falls within rounding of an
+integer can differ by one (a documented deviation, as is the single-column case, where MuPDF
+reads its re-ordered vertical weights sequentially). On the pdfTeX bitmap-font page of
+`gen_tex_pages.py` the coverage of every glyph equals `mutool draw`'s (task 7.3k). Other cases (rotated or skewed images, upscaling, unusual
 `/Decode` arrays) keep the exact area filter (`stencilMask`) or `placeNoFit`. -/
 
 /-- MuPDF's smoothstep scale filter `fz_scale_filter_simple`: `1 + (2x − 3)x²` below 1, else 0
@@ -563,40 +575,50 @@ def weightsAt (srcW : Nat) (x dstW : Rat) (dstWInt j : Nat) : List (Nat × Int) 
       [((max 0 (min (centre.floor) ((srcW : Int) - 1))).toNat, 1)] else ws
   checkWeights ws j dstWInt x dstW
 
-/-- Bits of the dyadic grid of `weightsAtI` (`2⁻²⁰` px, finer than MuPDF's `float` positions
-on a page). -/
+/-- Bits of the dyadic grid of `weightsAtI` (`2⁻²⁰` px, finer than MuPDF's `float` positions:
+`float` page coordinates between 128 and 256 px have a resolution of `2⁻¹⁶`). -/
 def wBits : Nat := 20
 
 /-- `q` on the grid `2⁻ʷᴮⁱᵗˢ`, rounded. -/
 def toDy (q : Rat) : Int := (q * ((1 <<< wBits : Nat) : Rat) + 1 / 2).floor
 
-/-- **`weightsAt` in integer arithmetic** for dyadic inputs `x = X / 2^wBits`,
-`dstW = N / 2^wBits` (`N > 0`): the same weights (`Tests/RasterGlyph.lean` checks equality),
-without rational normalisation in the per-tap loop. With `P = |((2j+1)·2ᵏ − 2X)·srcW −
-(2i+1)·N|` the filter distance is `P / Q` (`Q = 2·srcW·2ᵏ` when scaling down, `2N` up) and
-`simple(P/Q) · Q³ = Q³ + (2P − 3Q)·P²`. -/
-def weightsAtI (srcW : Nat) (X N : Int) (dstWInt j : Nat) : List (Nat × Int) :=
-  let K : Int := ((1 <<< wBits : Nat) : Int)
-  let sw : Int := srcW
+/-- **`weightsAt` in fixed point** (the hot path): inputs on the grid `2⁻ʷᴮⁱᵗˢ`
+(`x = X / 2ᵏ ∈ [0, 1)`, `dstW = N / 2ᵏ > 0`), the filter evaluated in `2⁻²⁴` fixed point with
+natural numbers (below `2⁶³`, i.e. machine words in compiled code, for device extents up to
+`2¹¹` px) — about the precision of MuPDF's own `float` evaluation. With `P = |((2j+1)·2ᵏ − 2X)·srcW − (2i+1)·N|` the filter distance is `P / Q`
+(`Q = 2·srcW·2ᵏ` scaling down, `2N` up). A weight can differ from the exact `weightsAt` by one
+only when `256·f·F + ½` lies within about `2⁻¹⁴` of an integer (`Tests/RasterGlyph.lean`
+measures the agreement). Callers keep `srcW, dstWInt ≤ maxStencilSide`. -/
+def weightsAtI (srcW : Nat) (X N : Nat) (dstWInt j : Nat) : List (Nat × Int) :=
+  let K : Nat := 1 <<< wBits
+  let sw : Nat := srcW
   let down := N < sw * K
-  let A := ((2 * (j : Int) + 1) * K - 2 * X) * sw
+  -- `A = ((2j+1)·2ᵏ − 2X)·srcW` can be negative (`x > ½` at `j = 0`): kept shifted by
+  -- `c = 2·2ᵏ·srcW` as a natural number (`Ac = A + c`, compared with `(2i+1)·N + c`)
+  let c : Nat := 2 * K * sw
+  let Ac : Nat := ((2 * j + 3) * K - 2 * X) * sw
+  let A : Int := (Ac : Int) - c
   -- centre = (A − N) / 2N; window = sw·K / N (down) or 1
-  let win2 : Int := if down then 2 * sw * K else 2 * N
-  let l := -Int.fdiv (-(A - N - win2)) (2 * N)
-  let r := Int.fdiv (A - N + win2) (2 * N)
-  let Q : Int := if down then 2 * sw * K else 2 * N
-  let Q3 := Q * Q * Q
-  let D : Int := if down then K * sw * Q3 else Q3
+  let win2 : Int := if down then 2 * (sw : Int) * K else 2 * (N : Int)
+  let l : Int := -Int.fdiv (-(A - N - win2)) (2 * (N : Int))
+  let r : Int := Int.fdiv (A - N + win2) (2 * (N : Int))
+  let Q : Nat := if down then 2 * sw * K else 2 * N
+  let one : Nat := 1 <<< 24
+  let den : Nat := if down then K * sw * one else one
+  let mulN : Nat := if down then 256 * N else 256
   let ws := (List.range (r - l + 1).toNat).filterMap fun (k : Nat) =>
     let i : Int := l + (k : Int)
-    if i < 0 ∨ sw ≤ i then none else
-    let P := (A - (2 * i + 1) * N).natAbs
-    if Q ≤ (P : Int) then none else
-    let S : Int := Q3 + (2 * (P : Int) - 3 * Q) * (P : Int) * (P : Int)
-    let wt := Int.fdiv ((if down then 512 * N else 512) * S + D) (2 * D)
-    if wt = 0 then none else some (i.toNat, wt)
+    if i < 0 ∨ (sw : Int) ≤ i then none else
+    let B := (2 * i.toNat + 1) * N + c
+    let P := if B ≤ Ac then Ac - B else B - Ac
+    if Q ≤ P then none else
+    let d := (P <<< 24) / Q
+    let s := one - (((((3 * one - 2 * d) * d) >>> 24) * d) >>> 24)
+    let wt := (mulN * s + den / 2) / den
+    if wt = 0 then none else some (i.toNat, (wt : Int))
   let ws := if ws.isEmpty then
-      [((max 0 (min (Int.fdiv (A - N) (2 * N)) (sw - 1))).toNat, 1)] else ws
+      [((max 0 (min (Int.fdiv (A - N) (2 * (N : Int))) ((sw : Int) - 1))).toNat, 1)]
+    else ws
   checkWeightsB ws j dstWInt (X * 10000 < K) (((dstWInt : Int) * K - N) * 10000 < K)
 
 /-- `(v >> 8)` stored as an `unsigned char` (wraps modulo 256, as MuPDF's cast). -/
@@ -644,11 +666,12 @@ def mupdfStencil (pm : Image.Pixmap) (src0 : StencilSrc) (dev : Aff) : Option Ma
   let ay := axisSetup mf md
   let dwi := ax.2.2.1
   let dhi := ay.2.2.1
-  if maxStencilSide < dwi ∨ maxStencilSide < dhi then none else
-  let xX := toDy ax.2.2.2.1
-  let xN := max 1 (toDy ax.2.2.2.2)
-  let yX := toDy ay.2.2.2.1
-  let yN := max 1 (toDy ay.2.2.2.2)
+  if maxStencilSide < dwi ∨ maxStencilSide < dhi ∨ maxStencilSide < sw ∨ maxStencilSide < sh then
+    none else
+  let xX := (min (toDy ax.2.2.2.1) ((1 <<< wBits : Nat) - 1)).toNat
+  let xN := (max 1 (toDy ax.2.2.2.2)).toNat
+  let yX := (min (toDy ay.2.2.2.1) ((1 <<< wBits : Nat) - 1)).toNat
+  let yN := (max 1 (toDy ay.2.2.2.2)).toNat
   let cols : Array (List (Nat × Int)) :=
     (Array.range dwi).map fun j => weightsAtI sw xX xN dwi j
   let rows : Array (List (Nat × Int)) :=
