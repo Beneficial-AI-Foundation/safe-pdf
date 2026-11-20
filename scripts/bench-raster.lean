@@ -15,7 +15,9 @@ i.e. allocating the white RGBA buffer and summing it):
 
 Then hotspot splits (no compositing): the full-page fill's coverage mask, the grid's stroke
 edges and stroke mask (`Stroke.strokeEdges` / `Stroke.strokePath`), and the 1000 circle fill
-masks (task 7.2e: after the compositor rewrite, these dominate the scene times).
+masks (task 7.2e: after the compositor rewrite, these dominate the scene times). Task 7.2f
+adds the same two mask splits through the reference filler (`Fill.fillEdgesCountedSpec`,
+`Fill.ofContentPathSpec`) with their checksums, which must equal the fast ones.
 
 Run it compiled, not interpreted (the interpreter is far slower):
 
@@ -140,6 +142,34 @@ no compositing; returns the summed coverage). -/
   let t1 ← IO.monoNanosNow
   pure (n, t1 - t0)
 
+/-- `timeCircleMasks` through the reference filler and reference point mapping (7.2a). -/
+@[noinline] def timeCircleMasksSpec (items : DisplayList) : IO (Nat × Nat) := do
+  let t0 ← IO.monoNanosNow
+  let win : IRect := ⟨0, 0, 612, 792⟩
+  let n := items.foldl (fun acc it => match it with
+    | .fillPath p rule _ _ =>
+      acc + (fillEdgesCountedSpec (flatten {} win (ofContentPathSpec view p {})) rule win {}).1.total
+    | _ => acc) 0
+  let t1 ← IO.monoNanosNow
+  pure (n, t1 - t0)
+
+/-- `timeStrokeMask` with the reference filler: stroke edges + `fillEdgesSpec`. -/
+@[noinline] def timeStrokeMaskSpec (u : Unit) : IO (Nat × Nat) := do
+  let t0 ← IO.monoNanosNow
+  let es := Raster.Stroke.strokeEdges view gridStroke.1 gridStroke.2 {}
+  let m := fillEdgesSpec es .nonzero ⟨0, 0, 612, 792⟩ {}
+  let n := m.total + (if u == () then 0 else 1)
+  let t1 ← IO.monoNanosNow
+  pure (n, t1 - t0)
+
+/-- Best run (time and checksum) of `reps` runs of `act`. -/
+def bestOfSum (reps : Nat) (act : Unit → IO (Nat × Nat)) : IO (Nat × Nat) := do
+  let mut best : Nat × Nat := (0, 0)
+  for i in [0:reps] do
+    let r ← act ()
+    if i == 0 || r.2 < best.2 then best := r
+  pure best
+
 /-- Best time of `reps` runs of `act`. -/
 def bestOf (reps : Nat) (act : Unit → IO (Nat × Nat)) : IO Nat := do
   let mut best := 0
@@ -175,8 +205,15 @@ def main (args : List String) : IO UInt32 := do
   IO.println s!"full-fill, coverage mask only: {best.toFloat / 1.0e6} ms (best of {reps})"
   let e ← bestOf reps timeStrokeEdges
   IO.println s!"grid-119, stroke edges only: {e.toFloat / 1.0e6} ms (best of {reps})"
-  let sm ← bestOf reps timeStrokeMask
-  IO.println s!"grid-119, stroke mask only (edges + scanline): {sm.toFloat / 1.0e6} ms (best of {reps})"
-  let cm ← bestOf reps (fun _ => timeCircleMasks circles)
-  IO.println s!"circles-1000, fill masks only: {cm.toFloat / 1.0e6} ms (best of {reps})"
+  let sm ← bestOfSum reps timeStrokeMask
+  IO.println s!"grid-119, stroke mask only (edges + scanline): {sm.2.toFloat / 1.0e6} ms (best of {reps}; checksum {sm.1})"
+  let smr ← bestOfSum reps timeStrokeMaskSpec
+  IO.println s!"grid-119, stroke mask, reference filler: {smr.2.toFloat / 1.0e6} ms (best of {reps}; checksum {smr.1})"
+  let cm ← bestOfSum reps (fun _ => timeCircleMasks circles)
+  IO.println s!"circles-1000, fill masks only: {cm.2.toFloat / 1.0e6} ms (best of {reps}; checksum {cm.1})"
+  let cmr ← bestOfSum reps (fun _ => timeCircleMasksSpec circles)
+  IO.println s!"circles-1000, fill masks, reference filler: {cmr.2.toFloat / 1.0e6} ms (best of {reps}; checksum {cmr.1})"
+  if sm.1 != smr.1 || cm.1 != cmr.1 then
+    IO.println "MISMATCH: fast and reference masks differ"
+    return 1
   pure 0

@@ -13,6 +13,7 @@ import Tests.FontIdentity
 import Tests.RasterGeom
 import Tests.CFFText
 import Tests.RasterFill
+import Tests.RasterFillSpec
 import Tests.RasterClip
 import Tests.RasterStroke
 import Tests.TextLayout
@@ -53,6 +54,7 @@ def suites : List Suite :=
     { name := "raster-geom", run := SafePdf.Tests.RasterGeom.run },
     { name := "cff-text", run := SafePdf.Tests.CFFText.run },
     { name := "raster-fill", run := SafePdf.Tests.RasterFill.run },
+    { name := "raster-fill-spec", run := SafePdf.Tests.RasterFillSpec.run },
     { name := "raster-clip", run := SafePdf.Tests.RasterClip.run },
     { name := "raster-stroke", run := SafePdf.Tests.RasterStroke.run },
     { name := "text-layout", run := SafePdf.Tests.TextLayout.run },

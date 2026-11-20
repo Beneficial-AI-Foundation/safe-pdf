@@ -36,7 +36,13 @@ curves).
    accumulator, which a prefix sum turns into the pixel coverage of the row, written as a byte
    `0 … 255` (`covByte`). So anti-aliasing is exact-area horizontally and `S`-level
    supersampled vertically. An axis-aligned rectangle with integer corners gets exactly 255
-   inside and 0 outside (tested).
+   inside and 0 outside (tested). That description is the **reference** filler
+   (`fillEdgesCountedSpec`, section 5); the filler in use (`fillEdgesCounted`, section 6, task
+   7.2f) computes the same bytes with 64-bit active edges whose crossing order is carried
+   across sample rows (insertion sort, `mergeSort` fallback) and one reused `UInt32`
+   accumulator, and `ofContentPath` maps points with 64-bit integers when the matrix allows
+   (`IAff`); both are tested byte-for-byte against their references (suite
+   `raster-fill-spec`).
 
 ## What is proven
 
@@ -56,8 +62,10 @@ curves).
   `fillEdgesCounted_steps_le` — the counted row work (`S` × active edges + mask width + 1
   per row; every active-edge list has at most `E` edges, `rowLoop_inv`) is
   `≤ h · (S · E + w + 1)`, with `h`, `w` the mask height and width (at most the clip window's).
-  The per-sample-row `mergeSort` of the crossings (≤ `E` elements) is `O(E log E)` by its
-  algorithm; that factor is not part of the counted steps.
+  The per-sample-row ordering of the crossings (≤ `E` elements; reference: `mergeSort`; fast
+  filler: insertion sort with a swap budget `8·E + 64`, then `mergeSort`) is `O(E log E)` by
+  its algorithm; that factor is not part of the counted steps. The fast filler proves the
+  same bound (`rowLoopF_inv`, `fillRows_spec`).
 * **Buffer shape**: `fillEdges_size` — the coverage buffer has exactly `w · h` bytes; every
   write is a `ByteArray.push` or a bounds-checked `Array.modify` (no `!` indexing).
 
@@ -390,9 +398,92 @@ def Config.arcCap (cfg : Config) : Nat := max 1 cfg.arcSegCap
 /-- Upper bound on the vertices of one emitted stroke polygon: `4 · arcCap` (the pen). -/
 def Config.polyCap (cfg : Config) : Nat := 4 * cfg.arcCap
 
+/-- `⌊n / d⌋` for `d > 0` (`Int64` division truncates). -/
+@[inline] def fdiv64 (n d : Int64) : Int64 :=
+  let q := n / d
+  if n % d < 0 then q - 1 else q
+
+/-- An affine map over a common denominator, for exact 64-bit point mapping (task 7.2f):
+`x' = (a·X + c·Y + e·10⁶) / (dm·10⁶)`, `y' = (b·X + d·Y + f·10⁶) / (dm·10⁶)` for a
+`Content.Point` with raw `Fixed` values `X`, `Y` (units of `10⁻⁶`). -/
+structure IAff where
+  /-- `Aff.a · dm`. -/
+  a : Int64
+  /-- `Aff.b · dm`. -/
+  b : Int64
+  /-- `Aff.c · dm`. -/
+  c : Int64
+  /-- `Aff.d · dm`. -/
+  d : Int64
+  /-- `Aff.e · dm · 10⁶`. -/
+  e : Int64
+  /-- `Aff.f · dm · 10⁶`. -/
+  f : Int64
+  /-- The denominator `dm · 10⁶`. -/
+  den : Int64
+
+/-- `|v| ≤ b` (on `natAbs`: no big-integer arithmetic for small `v`). -/
+@[inline] def absLe (v : Int) (b : Nat) : Bool := v.natAbs ≤ b
+
+/-- `m` over its common denominator `dm` (lcm of the six denominators), when every scaled
+entry is small enough for `IAff.sub` to be exact in 64 bits: `dm ≤ 2²⁰`, the linear entries
+`≤ 2²⁰` and the translations `≤ 2³⁰` in absolute value (after scaling by `dm`). -/
+def IAff.ofAff? (m : Aff) : Option IAff :=
+  let dm : Nat := Nat.lcm m.a.den (Nat.lcm m.b.den (Nat.lcm m.c.den (Nat.lcm m.d.den
+    (Nat.lcm m.e.den m.f.den))))
+  let sc := fun (q : Rat) => q.num * ((dm / q.den : Nat) : Int)
+  let a := sc m.a
+  let b := sc m.b
+  let c := sc m.c
+  let d := sc m.d
+  let e := sc m.e
+  let f := sc m.f
+  if 0 < dm && dm ≤ 1048576 && absLe a 1048576 && absLe b 1048576 && absLe c 1048576 &&
+      absLe d 1048576 && absLe e 1073741824 && absLe f 1073741824 then
+    some ⟨a.toInt64, b.toInt64, c.toInt64, d.toInt64, (e * 1000000).toInt64,
+      (f * 1000000).toInt64, ((dm : Int) * 1000000).toInt64⟩
+  else none
+
+/-- `toSub (N / D)` for `D > 0`: `round(256·N / D)`, halves up, computed as
+`256·⌊N/D⌋ + ⌊(512·r + D) / (2·D)⌋` with `r = N mod D` (no overflow for `|N| < 2⁶²`,
+`D ≤ 2⁴⁰`). -/
+@[inline] def IAff.sub (n den : Int64) : Int64 :=
+  let q := fdiv64 n den
+  let r := n - q * den
+  256 * q + (512 * r + den) / (2 * den)
+
+/-- A page point through `m` in subpixel units clamped to `±lim`: the 64-bit path when `im`
+is available and `|X|, |Y| ≤ 2³⁶` (then `|N| ≤ 2⁵⁸`), else the exact `Rat` path
+(`FPt.ofPt`). Both compute `toSub` of the same rational, so they agree (tested,
+suite `raster-fill-spec`). -/
+def FPt.ofPoint (lim : Int) (m : Aff) (im : Option IAff) (p : Content.Point) : FPt :=
+  match im with
+  | some i =>
+    if absLe p.x.raw 68719476736 && absLe p.y.raw 68719476736 then
+      let X := p.x.raw.toInt64
+      let Y := p.y.raw.toInt64
+      ⟨clampCoord (IAff.sub (i.a * X + i.c * Y + i.e) i.den).toInt lim,
+        clampCoord (IAff.sub (i.b * X + i.d * Y + i.f) i.den).toInt lim⟩
+    else FPt.ofPt (m.apply (ptOfPoint p)) lim
+  | none => FPt.ofPt (m.apply (ptOfPoint p)) lim
+
+/-- `DSeg.ofSegment` through `FPt.ofPoint` (64-bit fast path). -/
+def DSeg.ofSegmentF (lim : Int) (m : Aff) (im : Option IAff) : Content.Segment → DSeg
+  | .moveTo p => .moveTo (FPt.ofPoint lim m im p)
+  | .lineTo p => .lineTo (FPt.ofPoint lim m im p)
+  | .curveTo c1 c2 p =>
+    .curveTo (FPt.ofPoint lim m im c1) (FPt.ofPoint lim m im c2) (FPt.ofPoint lim m im p)
+  | .closePath => .closePath
+
 /-- A page-space path as a device path (affine maps commute with Bézier curves, so mapping
-the control points is exact before rounding), clamped to `±cfg.coordLimit`. -/
+the control points is exact before rounding), clamped to `±cfg.coordLimit`. Points go
+through 64-bit integer arithmetic when the matrix allows it (`IAff.ofAff?`), else through
+`Rat`; the results are the same (`ofContentPathSpec`, tested). -/
 def ofContentPath (m : Aff) (p : Content.Path) (cfg : Config := {}) : DPath :=
+  p.segs.map (DSeg.ofSegmentF (cfg.coordLimit : Int) m (IAff.ofAff? m))
+
+/-- Reference for `ofContentPath`: every point through `Rat` (`DSeg.ofSegment`). -/
+def ofContentPathSpec (m : Aff) (p : Content.Path) (cfg : Config := {}) : DPath :=
   p.segs.map (DSeg.ofSegment (cfg.coordLimit : Int) m)
 
 /-- Search for the least `n ∈ [n₀, n₀ + fuel]` with `3·m ≤ 4·tol·n²` (else `n₀ + fuel`). -/
@@ -789,21 +880,23 @@ def maskRect (es : Array Edge) (clip : IRect) : Int × Int × Nat × Nat :=
   let py1 := min clip.y1 (ceilSub maxy)
   (px0, py0, (px1 - px0).toNat, (py1 - py0).toNat)
 
-/-- **Coverage rasterizer** with its counted work: fill the polygon `edges` with `rule` into a
-coverage mask over (bounding box ∩ `clip`). -/
-def fillEdgesCounted (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
-    Mask × Nat :=
+/-- **Reference rasterizer** (the 7.2a scanline filler, kept as the specification of the fast
+one, task 7.2f) with its counted work: fill the polygon `edges` with `rule` into a coverage
+mask over (bounding box ∩ `clip`). `fillEdgesCounted` produces byte-identical masks (suite
+`raster-fill-spec`). -/
+def fillEdgesCountedSpec (edges : Array Edge) (rule : FillRule) (clip : IRect)
+    (cfg : Config := {}) : Mask × Nat :=
   let es := edges.mergeSort (fun a b => a.y0 ≤ b.y0)
   let S := cfg.samples
   let rc := maskRect es clip
   let st := rowLoop rule es S rc.2.2.1 (rc.1 * subUnit) rc.2.2.2 rc.2.1 {}
   ({ x0 := rc.1, y0 := rc.2.1, w := rc.2.2.1, h := rc.2.2.2, data := st.out }, st.steps)
 
-/-- **Coverage rasterizer**: fill the polygon `edges` with `rule` into a coverage mask over
-(bounding box of the edges ∩ `clip`). -/
-def fillEdges (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
+/-- **Reference rasterizer** (specification of `fillEdges`): the mask of
+`fillEdgesCountedSpec`. -/
+def fillEdgesSpec (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
     Mask :=
-  (fillEdgesCounted edges rule clip cfg).1
+  (fillEdgesCountedSpec edges rule clip cfg).1
 
 /-- The mask is never wider or taller than the clip window. -/
 theorem maskRect_le (es : Array Edge) (clip : IRect) :
@@ -812,11 +905,11 @@ theorem maskRect_le (es : Array Edge) (clip : IRect) :
   simp only [maskRect]
   constructor <;> omega
 
-/-- **Buffer shape.** The coverage buffer has exactly `w · h` bytes. -/
-theorem fillEdges_size (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config) :
-    (fillEdges edges rule clip cfg).data.size =
-      (fillEdges edges rule clip cfg).w * (fillEdges edges rule clip cfg).h := by
-  simp only [fillEdges, fillEdgesCounted]
+/-- **Buffer shape** of the reference rasterizer: exactly `w · h` bytes. -/
+theorem fillEdgesSpec_size (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config) :
+    (fillEdgesSpec edges rule clip cfg).data.size =
+      (fillEdgesSpec edges rule clip cfg).w * (fillEdgesSpec edges rule clip cfg).h := by
+  simp only [fillEdgesSpec, fillEdgesCountedSpec]
   have := (rowLoop_inv rule (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) cfg.samples
     (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.1
     ((maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).1 * subUnit)
@@ -824,6 +917,355 @@ theorem fillEdges_size (edges : Array Edge) (rule : FillRule) (clip : IRect) (cf
     (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.1 {}
     (by simp) (by simp)).2.1
   rw [this, Nat.mul_comm]; exact Nat.zero_add _
+
+/-- **S3 work bound for the reference rasterizer**: at most `h · (S · E + w + 1)`. -/
+theorem fillEdgesCountedSpec_steps_le (edges : Array Edge) (rule : FillRule) (clip : IRect)
+    (cfg : Config) :
+    (fillEdgesCountedSpec edges rule clip cfg).2 ≤
+      (fillEdgesCountedSpec edges rule clip cfg).1.h *
+        (cfg.samples * edges.size + (fillEdgesCountedSpec edges rule clip cfg).1.w + 1) := by
+  simp only [fillEdgesCountedSpec]
+  have := (rowLoop_inv rule (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) cfg.samples
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.1
+    ((maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).1 * subUnit)
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.2
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.1 {}
+    (by simp) (by simp)).2.2
+  rw [Array.size_mergeSort] at this
+  simpa using this
+
+/-! ## 6. The fast rasterizer (task 7.2f)
+
+Same sampling, same crossings, same spans as the reference (`rowLoop`), organised for speed:
+
+* the active edges live in one array (`AEdge`, all fields `Int64`, so no big-integer
+  arithmetic: under the fast-path guard `fastOK` every product stays below `2⁶³`) whose order
+  is carried from sample row to sample row and repaired by an **insertion sort** (`sortAct`,
+  linear on the nearly sorted input; a swap budget of `8·n + 64` per sample row falls back to
+  `Array.mergeSort`, so the worst case stays `O(n log n)`);
+* an edge that does not cross the current sample row stays in the array (flag `on` false,
+  stale `cx`) and the sweep skips it, so the sweep sees exactly the reference's sorted
+  crossings (ties in `x` are harmless: they only produce empty spans);
+* one `UInt32` difference accumulator of `w + 2` cells is reused for every row (the prefix
+  sum zeroes it as it reads; per-pixel sums are `≤ 256·S`, so wrapping arithmetic is exact).
+
+Inputs outside the guard (coordinates beyond `±2³⁰` subpixel units, windings other than
+`−1, 0, 1`, absurd mask rectangles) take the reference path. Equality with the reference is
+tested on random paths (suite `raster-fill-spec`); the buffer shape and the S3 work bound are
+proved for the combined rasterizer (`fillEdges_size`, `fillEdgesCounted_steps_le`). -/
+
+/-- An active edge of the fast rasterizer: the edge in 64-bit subpixel units plus its
+crossing with the current sample row (`cx`, meaningful when `on`). -/
+structure AEdge where
+  /-- Upper endpoint x. -/
+  x0 : Int64
+  /-- Upper endpoint y. -/
+  y0 : Int64
+  /-- Lower endpoint y. -/
+  y1 : Int64
+  /-- `x1 − x0`. -/
+  dx : Int64
+  /-- `y1 − y0` (`> 0`). -/
+  dy : Int64
+  /-- Winding contribution. -/
+  wind : Int64
+  /-- Crossing x at the current sample row (stale when not `on`). -/
+  cx : Int64
+  /-- Does the edge cross the current sample row? -/
+  on : Bool
+  deriving Inhabited
+
+/-- An edge in fast form (64-bit wrap-around conversion; `fastOK` guarantees it is exact). -/
+def AEdge.ofEdge (e : Edge) : AEdge :=
+  ⟨e.x0.toInt64, e.y0.toInt64, e.y1.toInt64, (e.x1 - e.x0).toInt64, (e.y1 - e.y0).toInt64,
+    e.wind.toInt64, e.x0.toInt64, false⟩
+
+/-- The edge's crossing with sample row `ys` (`Edge.xAt` in 64 bits), if it crosses it (a
+non-crossing edge keeps its stale `cx`, so the sort order stays nearly right). -/
+@[inline] def AEdge.atRow (ys : Int64) (e : AEdge) : AEdge :=
+  if e.y0 ≤ ys && ys < e.y1 then
+    { e with cx := if e.dx == 0 then e.x0 else e.x0 + fdiv64 ((ys - e.y0) * e.dx) e.dy,
+             on := true }
+  else { e with on := false }
+
+/-- Update the crossings of `a[i …]` for the sample row `ys`. -/
+def crossAll (ys : Int64) : (fuel i : Nat) → Array AEdge → Array AEdge
+  | 0, _, a => a
+  | fuel + 1, i, a => crossAll ys fuel (i + 1) (a.modify i (AEdge.atRow ys))
+
+private theorem crossAll_size (ys : Int64) : ∀ fuel i (a : Array AEdge),
+    (crossAll ys fuel i a).size = a.size
+  | 0, _, _ => rfl
+  | fuel + 1, i, a => by simp only [crossAll]; rw [crossAll_size]; simp
+
+/-- Move `a[j]` left past larger crossings (one insertion-sort step), spending one unit of
+`bud` per swap; returns the remaining budget (0: budget exhausted, maybe unsorted). -/
+def sinkDown : (a : Array AEdge) → (j bud : Nat) → Array AEdge × Nat
+  | a, 0, bud => (a, bud)
+  | a, _ + 1, 0 => (a, 0)
+  | a, j + 1, bud + 1 =>
+    if h : j + 1 < a.size then
+      if a[j + 1].cx < a[j].cx then sinkDown (a.swapIfInBounds j (j + 1)) j bud
+      else (a, bud + 1)
+    else (a, bud + 1)
+
+private theorem sinkDown_size : ∀ (a : Array AEdge) j bud, (sinkDown a j bud).1.size = a.size
+  | a, 0, bud => rfl
+  | a, _ + 1, 0 => rfl
+  | a, j + 1, bud + 1 => by
+    simp only [sinkDown]
+    split
+    · split
+      · rw [sinkDown_size]; simp
+      · rfl
+    · rfl
+
+/-- Insertion sort of `a[i …]` by crossing, sharing the swap budget. -/
+def insLoop : (a : Array AEdge) → (fuel i bud : Nat) → Array AEdge × Nat
+  | a, 0, _, bud => (a, bud)
+  | a, fuel + 1, i, bud =>
+    let r := sinkDown a i bud
+    insLoop r.1 fuel (i + 1) r.2
+
+private theorem insLoop_size :
+    ∀ (a : Array AEdge) fuel i bud, (insLoop a fuel i bud).1.size = a.size
+  | a, 0, _, _ => rfl
+  | a, fuel + 1, i, bud => by
+    simp only [insLoop]; rw [insLoop_size, sinkDown_size]
+
+/-- Are the crossings of `a[i …]` (with `prev` before them) in non-decreasing order? -/
+def sortedFrom (a : Array AEdge) : (fuel i : Nat) → Int64 → Bool
+  | 0, _, _ => true
+  | fuel + 1, i, prev =>
+    if h : i < a.size then prev ≤ a[i].cx && sortedFrom a fuel (i + 1) a[i].cx else true
+
+/-- Sort the active edges by crossing: insertion sort (the order of the previous sample row
+is nearly right), falling back to `Array.mergeSort` when the swap budget runs out. -/
+def sortAct (a : Array AEdge) : Array AEdge :=
+  let r := insLoop a a.size 1 (8 * a.size + 64)
+  if 0 < r.2 then r.1
+  else if sortedFrom r.1 r.1.size 0 Int64.minValue then r.1
+  else r.1.mergeSort (fun x y => x.cx ≤ y.cx)
+
+/-- Sorting keeps every active edge: `sortAct` preserves the array size. -/
+theorem sortAct_size (a : Array AEdge) : (sortAct a).size = a.size := by
+  simp only [sortAct]
+  split
+  · exact insLoop_size _ _ _ _
+  · split
+    · exact insLoop_size _ _ _ _
+    · rw [Array.size_mergeSort]; exact insLoop_size _ _ _ _
+
+/-- `addSpan` on the `UInt32` accumulator: add `[xa, xb)` (relative subpixel units, clamped
+to `[0, lim]`, `lim = 256·w`). -/
+@[inline] def addSpanF (acc : Array UInt32) (lim xa xb : Int64) : Array UInt32 :=
+  let a := max 0 (min lim xa)
+  let b := max 0 (min lim xb)
+  if a < b then
+    let ia := (a / 256).toUInt64.toNat
+    let fa := (a % 256).toUInt64.toUInt32
+    let ib := (b / 256).toUInt64.toNat
+    let fb := (b % 256).toUInt64.toUInt32
+    if ia = ib then
+      let d := (b - a).toUInt64.toUInt32
+      (acc.modify ia (· + d)).modify (ia + 1) (· - d)
+    else
+      (((acc.modify ia (· + (256 - fa))).modify (ia + 1) (· + fa)).modify ib
+        (· + (fb - 256))).modify (ib + 1) (· - fb)
+  else acc
+
+/-- Sweep the sorted active edges left to right (winding `wn`, previous crossing `px`),
+adding inside spans to `acc` (`eo`: even-odd rule, else nonzero). -/
+def sweepF (eo : Bool) (lim bx : Int64) (act : Array AEdge) :
+    (fuel i : Nat) → (wn px : Int64) → Array UInt32 → Array UInt32
+  | 0, _, _, _, acc => acc
+  | fuel + 1, i, wn, px, acc =>
+    if h : i < act.size then
+      let e := act[i]
+      if !e.on then sweepF eo lim bx act fuel (i + 1) wn px acc
+      else
+        let ins := if eo then wn % 2 != 0 else wn != 0
+        let acc := if ins then addSpanF acc lim (px - bx) (e.cx - bx) else acc
+        sweepF eo lim bx act fuel (i + 1) (wn + e.wind) e.cx acc
+    else acc
+
+/-- Accumulate the `fuel` sample rows `j, j+1, …` of the pixel row starting at `top`. -/
+def sampleLoopF (eo : Bool) (S : Nat) (lim bx top : Int64) :
+    (fuel j : Nat) → Array AEdge → Array UInt32 → Array AEdge × Array UInt32
+  | 0, _, act, acc => (act, acc)
+  | fuel + 1, j, act, acc =>
+    let ys := top + ((2 * j.toInt64 + 1) * 128) / S.toInt64
+    let act := sortAct (crossAll ys act.size 0 act)
+    sampleLoopF eo S lim bx top fuel (j + 1) act (sweepF eo lim bx act act.size 0 0 0 acc)
+
+private theorem sampleLoopF_size (eo : Bool) (S : Nat) (lim bx top : Int64) : ∀ fuel j act acc,
+    (sampleLoopF eo S lim bx top fuel j act acc).1.size = act.size
+  | 0, _, _, _ => rfl
+  | fuel + 1, j, act, acc => by
+    simp only [sampleLoopF]; rw [sampleLoopF_size, sortAct_size, crossAll_size]
+
+/-- Coverage byte from the accumulated `c` (`full = 256·S`): `covByte` in 32 bits. -/
+@[inline] def covByteF (full c : UInt32) : UInt8 :=
+  (min 255 ((c * 255 + full / 2) / full)).toUInt8
+
+/-- Prefix-sum `acc[i …]` into `fuel` coverage bytes appended to `out`, zeroing the cells it
+reads (and the two guard cells after the row), so the accumulator is ready for the next row. -/
+def pushRowF (full : UInt32) : (fuel i : Nat) → UInt32 → Array UInt32 → ByteArray →
+    Array UInt32 × ByteArray
+  | 0, i, _, acc, out => ((acc.setIfInBounds i 0).setIfInBounds (i + 1) 0, out)
+  | fuel + 1, i, cum, acc, out =>
+    let c := cum + acc.getD i 0
+    pushRowF full fuel (i + 1) c (acc.setIfInBounds i 0) (out.push (covByteF full c))
+
+private theorem pushRowF_size (full : UInt32) : ∀ fuel i cum acc out,
+    (pushRowF full fuel i cum acc out).2.size = out.size + fuel
+  | 0, _, _, _, _ => rfl
+  | fuel + 1, i, cum, acc, out => by
+    simp only [pushRowF]; rw [pushRowF_size, ByteArray.size_push]; omega
+
+/-- Move the edges starting above `bot` (sorted by `y0`) from `es[idx …]` to `act`. -/
+def activateF (es : Array AEdge) (bot : Int64) :
+    (fuel idx : Nat) → Array AEdge → Nat × Array AEdge
+  | 0, idx, act => (idx, act)
+  | fuel + 1, idx, act =>
+    if h : idx < es.size then
+      if es[idx].y0 < bot then activateF es bot fuel (idx + 1) (act.push es[idx])
+      else (idx, act)
+    else (idx, act)
+
+private theorem activateF_inv (es : Array AEdge) (bot : Int64) : ∀ fuel idx act,
+    act.size ≤ idx → idx ≤ es.size →
+      (activateF es bot fuel idx act).2.size ≤ (activateF es bot fuel idx act).1 ∧
+        (activateF es bot fuel idx act).1 ≤ es.size
+  | 0, idx, act, h1, h2 => by simp [activateF]; omega
+  | fuel + 1, idx, act, h1, h2 => by
+    simp only [activateF]
+    split
+    · split
+      · exact activateF_inv es bot fuel (idx + 1) _ (by simp; omega) (by omega)
+      · exact ⟨h1, h2⟩
+    · exact ⟨h1, h2⟩
+
+/-- Fast rasterizer state across pixel rows. -/
+structure FRow where
+  /-- Next edge (in `y0` order) not yet activated. -/
+  idx : Nat := 0
+  /-- Active edges, in the crossing order of the last sample row. -/
+  act : Array AEdge := #[]
+  /-- The reused difference accumulator (`w + 2` cells, all zero between rows). -/
+  acc : Array UInt32 := #[]
+  /-- Coverage bytes so far. -/
+  out : ByteArray := ByteArray.empty
+  /-- Counted work (the reference's cost model: `S · |active| + w + 1` per row). -/
+  steps : Nat := 0
+  deriving Inhabited
+
+/-- Rasterize one pixel row `r` (absolute device row) — `rowStep`, fast. -/
+def rowStepF (eo : Bool) (es : Array AEdge) (S w : Nat) (lim bx : Int64) (r : Int64)
+    (st : FRow) : FRow :=
+  let top := r * 256
+  let ev := activateF es (top + 256) es.size st.idx st.act
+  let act := ev.2.filter (fun e => top < e.y1)
+  let sa := sampleLoopF eo S lim bx top S 0 act st.acc
+  let pr := pushRowF (256 * S).toUInt32 w 0 0 sa.2 st.out
+  { idx := ev.1, act := sa.1, acc := pr.1, out := pr.2,
+    steps := st.steps + (S * act.size + w + 1) }
+
+/-- Rasterize `fuel` pixel rows starting at row `r` — `rowLoop`, fast. -/
+def rowLoopF (eo : Bool) (es : Array AEdge) (S w : Nat) (lim bx : Int64) :
+    (fuel : Nat) → Int64 → FRow → FRow
+  | 0, _, st => st
+  | fuel + 1, r, st => rowLoopF eo es S w lim bx fuel (r + 1) (rowStepF eo es S w lim bx r st)
+
+/-- **Row-loop invariant and S3 work bound** of the fast rasterizer (as `rowLoop_inv`). -/
+theorem rowLoopF_inv (eo : Bool) (es : Array AEdge) (S w : Nat) (lim bx : Int64) :
+    ∀ (fuel : Nat) (r : Int64) (st : FRow), st.act.size ≤ st.idx → st.idx ≤ es.size →
+      (rowLoopF eo es S w lim bx fuel r st).out.size = st.out.size + fuel * w ∧
+      (rowLoopF eo es S w lim bx fuel r st).steps ≤ st.steps + fuel * (S * es.size + w + 1)
+  | 0, _, st, h1, h2 => by simp [rowLoopF]
+  | fuel + 1, r, st, h1, h2 => by
+    simp only [rowLoopF]
+    have ha := activateF_inv es (r * 256 + 256) es.size st.idx st.act h1 h2
+    have hf := Array.size_filter_le (p := fun e => decide (r * 256 < e.y1))
+      (xs := (activateF es (r * 256 + 256) es.size st.idx st.act).2)
+    have ih := rowLoopF_inv eo es S w lim bx fuel (r + 1) (rowStepF eo es S w lim bx r st)
+      (by simp only [rowStepF]; rw [sampleLoopF_size]; omega) (by simp only [rowStepF]; omega)
+    have hm : S * ((activateF es (r * 256 + 256) es.size st.idx st.act).2.filter
+        (fun e => decide (r * 256 < e.y1))).size ≤ S * es.size :=
+      Nat.mul_le_mul_left _ (by omega)
+    have hs1 : (rowStepF eo es S w lim bx r st).out.size = st.out.size + w := by
+      simp only [rowStepF]; rw [pushRowF_size]
+    have hs2 : (rowStepF eo es S w lim bx r st).steps ≤ st.steps + (S * es.size + w + 1) := by
+      simp only [rowStepF]; omega
+    refine ⟨?_, ?_⟩
+    · rw [ih.1, hs1, Nat.succ_mul]; omega
+    · have := ih.2; rw [Nat.succ_mul]; omega
+
+/-- Fast-path bound on coordinates: `|v| ≤ 2³⁰` subpixel units (`Limits.coordLimit`). -/
+def fastCoord (v : Int) : Bool := absLe v 1073741824
+
+/-- **Fast-path guard**: every edge coordinate within `±2³⁰`, windings in `{−1, 0, 1}`, and a
+mask rectangle `(x0, y0, w, h)` with `|x0|, |y0| ≤ 2³⁰`, `w ≤ 2²³`. Then all 64-bit
+arithmetic of the fast rasterizer is exact: sample rows lie within `2³⁰ + 256` of 0, so
+`(ys − y0)·dx` is below `(2³¹ + 512)·2³¹ < 2⁶³`. -/
+def fastOK (es : Array Edge) (rc : Int × Int × Nat × Nat) : Bool :=
+  es.all (fun e => fastCoord e.x0 && fastCoord e.y0 && fastCoord e.x1 && fastCoord e.y1 &&
+    (-1 ≤ e.wind && e.wind ≤ 1)) &&
+  fastCoord rc.1 && fastCoord rc.2.1 && rc.2.2.1 ≤ 8388608
+
+/-- The coverage rows of the mask rectangle `rc` with their counted work: the fast
+rasterizer under `fastOK`, else the reference `rowLoop`. -/
+def fillRows (rule : FillRule) (es : Array Edge) (S : Nat) (rc : Int × Int × Nat × Nat) :
+    ByteArray × Nat :=
+  if fastOK es rc then
+    let eo := match rule with | .evenOdd => true | .nonzero => false
+    let st := rowLoopF eo (es.map AEdge.ofEdge) S rc.2.2.1 (rc.2.2.1.toInt64 * 256)
+      (rc.1 * subUnit).toInt64 rc.2.2.2 rc.2.1.toInt64
+      { acc := Array.replicate (rc.2.2.1 + 2) 0 }
+    (st.out, st.steps)
+  else
+    let st := rowLoop rule es S rc.2.2.1 (rc.1 * subUnit) rc.2.2.2 rc.2.1 {}
+    (st.out, st.steps)
+
+/-- `fillRows` writes exactly `h · w` bytes and counts at most `h · (S · E + w + 1)` steps. -/
+theorem fillRows_spec (rule : FillRule) (es : Array Edge) (S : Nat)
+    (rc : Int × Int × Nat × Nat) :
+    (fillRows rule es S rc).1.size = rc.2.2.2 * rc.2.2.1 ∧
+      (fillRows rule es S rc).2 ≤ rc.2.2.2 * (S * es.size + rc.2.2.1 + 1) := by
+  simp only [fillRows]
+  split
+  · have h := rowLoopF_inv (match rule with | .evenOdd => true | .nonzero => false)
+      (es.map AEdge.ofEdge) S rc.2.2.1 (rc.2.2.1.toInt64 * 256) (rc.1 * subUnit).toInt64
+      rc.2.2.2 rc.2.1.toInt64 { acc := Array.replicate (rc.2.2.1 + 2) 0 } (by simp) (by simp)
+    rw [Array.size_map] at h
+    simpa using h
+  · have h := rowLoop_inv rule es S rc.2.2.1 (rc.1 * subUnit) rc.2.2.2 rc.2.1 {}
+      (by simp) (by simp)
+    simpa using And.intro h.2.1 h.2.2
+
+/-- **Coverage rasterizer** with its counted work: fill the polygon `edges` with `rule` into a
+coverage mask over (bounding box ∩ `clip`). Byte-identical to `fillEdgesCountedSpec`
+(tested); fast path of task 7.2f. -/
+def fillEdgesCounted (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
+    Mask × Nat :=
+  let es := edges.mergeSort (fun a b => a.y0 ≤ b.y0)
+  let S := cfg.samples
+  let rc := maskRect es clip
+  let st := fillRows rule es S rc
+  ({ x0 := rc.1, y0 := rc.2.1, w := rc.2.2.1, h := rc.2.2.2, data := st.1 }, st.2)
+
+/-- **Coverage rasterizer**: fill the polygon `edges` with `rule` into a coverage mask over
+(bounding box of the edges ∩ `clip`). -/
+def fillEdges (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
+    Mask :=
+  (fillEdgesCounted edges rule clip cfg).1
+
+/-- **Buffer shape.** The coverage buffer has exactly `w · h` bytes. -/
+theorem fillEdges_size (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config) :
+    (fillEdges edges rule clip cfg).data.size =
+      (fillEdges edges rule clip cfg).w * (fillEdges edges rule clip cfg).h := by
+  simp only [fillEdges, fillEdgesCounted]
+  rw [(fillRows_spec rule _ cfg.samples _).1, Nat.mul_comm]
 
 /-- **S3 work bound for the rasterizer.** The counted work is at most
 `h · (S · E + w + 1)` for `E` edges, mask height `h`, width `w`, `S` sample rows per pixel. -/
@@ -833,14 +1275,10 @@ theorem fillEdgesCounted_steps_le (edges : Array Edge) (rule : FillRule) (clip :
       (fillEdgesCounted edges rule clip cfg).1.h *
         (cfg.samples * edges.size + (fillEdgesCounted edges rule clip cfg).1.w + 1) := by
   simp only [fillEdgesCounted]
-  have := (rowLoop_inv rule (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) cfg.samples
-    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.1
-    ((maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).1 * subUnit)
-    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.2
-    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.1 {}
-    (by simp) (by simp)).2.2
+  have := (fillRows_spec rule (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) cfg.samples
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip)).2
   rw [Array.size_mergeSort] at this
-  simpa using this
+  exact this
 
 /-- **Fill a device path**: flatten then rasterize. -/
 def fillDPath (p : DPath) (rule : FillRule) (clip : IRect) (cfg : Config := {}) : Mask :=
@@ -852,7 +1290,7 @@ def fillPath (m : Aff) (p : Content.Path) (rule : FillRule) (clip : IRect) (cfg 
     Mask :=
   fillDPath (ofContentPath m p cfg) rule clip cfg
 
-/-! ## 6. Checks -/
+/-! ## 7. Checks -/
 
 /-- Device path from pixel-unit integer points (test helper). -/
 private def px (x y : Int) : FPt := ⟨x * 256, y * 256⟩
