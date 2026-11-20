@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.7, 9.8; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7, 9.8; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -33,8 +33,11 @@
 #      comment, Escape and page change dismiss (9.8);
 #   1j. saving marks into the PDF (SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen on the saved
 #      file): unsaved indicator, Save / Save As / quit and close prompts, saved marks restored
-#      and read-only, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
-#      shows the highlight (9.5c);
+#      and selectable, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
+#      shows the highlight (9.5c); then (SAFEPDF_VIEWER_SMOKE_MODE=edit on a copy of the
+#      result) saved marks recoloured, deleted, commented and edited, saved, reopened, and a
+#      third revision on top; qpdf --check, prefixes, no duplicate ids, mutool shows the new
+#      colour and not the deleted highlight (9.5g);
 #   1k. view modes (SAFEPDF_VIEWER_SMOKE_MODE=modes) on a generated three-page text PDF, each mode
 #      chosen through the View menu: continuous (three page frames, the wheel scrolls the
 #      document and the page field follows 1, 2, 3, a highlight on page 2, a search hit on page
@@ -652,7 +655,7 @@ sys.exit(1 if errs else 0)
 # and enable Save; Quit and Ctrl+W answered Cancel keep them; Ctrl+S writes
 # text-annotated.pdf next to the PDF without a question and opens it (the highlight now drawn
 # by the renderer from its /AP: yellow pixels; the note text restored); a second Ctrl+S has
-# nothing to save; the saved highlight cannot be deleted or recoloured; a new highlight + Ctrl+S
+# nothing to save; the saved highlight can be selected; a new highlight + Ctrl+S
 # appends to the same file (3 marks, distinct ids); Save As writes saveas.pdf; Ctrl+W with an
 # unsaved note answered No discards it. The reopen run restores the 3 marks (pixels, note popup
 # text), refuses then (after Yes) performs Save As onto the opened file, and Quit answered Yes
@@ -685,8 +688,6 @@ want = {
     "note-after-save": "true 0",
     "save-nothing": "true true",
     "saved-selected": "true",
-    "saved-delete": "2 true",
-    "saved-recolour": "true " + yellow,
     "dirty2": "true true",
     "second-save": "true 3 false true",
     "file-marks": "3 3",
@@ -756,6 +757,97 @@ for y in range(int(792 - y1) + 2, int(792 - y0) - 1):
 print("mutool: %d/%d yellow pixels in the world box" % (yel, n))
 sys.exit(0 if n and yel * 3 >= n else 1)
 ' "$work/out-save/mutool.ppm" "$work/out-save/save.txt" || { echo "FAIL: mutool does not show the highlight" >&2; fail=1; }
+else echo "viewer-smoke: mutool missing, check skipped"; fi
+
+# 1j'. Editing saved marks (task 9.5g, SAFEPDF_VIEWER_SMOKE_MODE=edit) on a copy of the
+# text-annotated.pdf left by the reopen run (5 saved marks): the whole-page highlight and the
+# "safe" highlight are deleted, the "world" highlight recoloured green and commented, a note's
+# text edited; the pages follow at once (preview); Ctrl+S writes one revision into the opened
+# file and reopens it (4 marks: the comment as /Contents + /Popup of the highlight, restored
+# with its id); a second round (blue, comment deleted) adds a third revision on top (3 marks).
+# Externally: qpdf --check, each revision a byte prefix of the next, no duplicate ids, and
+# mutool draws "world" in the new colour and "safe" without a highlight.
+mkdir -p "$work/edit" "$work/out-edit"
+cp "$work/save/text-annotated.pdf" "$work/edit/text-annotated.pdf"
+cp "$work/save/text-annotated.pdf" "$work/out-edit/before.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=edit run_viewer "$work/out-edit" "$work/edit/text-annotated.pdf"
+cat "$work/out-edit/edit.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+green, blue = "83 255 188", "128 235 255"
+want = {
+    "restored": "5 false false",
+    "del-all": "4 true true true true",
+    "recolour": "(some green) " + green,
+    "comment": "true 5",
+    "del-safe": "true true",
+    "pending": "5 true true",
+    "saved": "true 4 false false true",
+    "after-world": "(some green) " + green,
+    "after-safe": "true true",
+    "after-comment": "true true true",
+    "after-note": "true",
+    "file-marks1": "4 4",
+    "third": "3 false (some blue) true " + blue,
+    "file-marks2": "3 3",
+}
+errs = ["edit %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-edit/edit.txt" || fail=1
+for f in "$work/out-edit/edit1.pdf" "$work/edit/text-annotated.pdf"; do
+  if command -v qpdf >/dev/null 2>&1; then
+    qpdf --check "$f" >/dev/null 2>&1 || { echo "FAIL: qpdf --check $f" >&2; fail=1; }
+  else echo "viewer-smoke: qpdf missing, check skipped"; fi
+done
+for pair in "out-edit/before.pdf out-edit/edit1.pdf" "out-edit/edit1.pdf edit/text-annotated.pdf"; do
+  set -- $pair
+  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+    || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
+done
+if command -v mutool >/dev/null 2>&1; then
+  mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-edit/edit1.ppm" "$work/out-edit/edit1.pdf" 1
+  mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-edit/final.ppm" "$work/edit/text-annotated.pdf" 1
+  python3 -I -c '
+import sys
+def ppm(p):
+    d = open(p, "rb").read()
+    parts, i = [], 0
+    while len(parts) < 4:
+        while d[i:i+1].isspace(): i += 1
+        j = i
+        while not d[j:j+1].isspace(): j += 1
+        parts.append(d[i:j]); i = j
+    return d, i + 1, int(parts[1])
+def box(name):
+    b = [l.split(": ", 1)[1] for l in open(sys.argv[3], encoding="utf-8") if l.startswith(name + ": ")][0]
+    return list(map(float, b.split()))
+def share(p, b, test):
+    d, i, w = ppm(p)
+    x0, y0, x1, y1 = b
+    n = k = 0
+    for y in range(int(792 - y1) + 2, int(792 - y0) - 1):
+        for x in range(int(x0) + 2, int(x1) - 1):
+            o = i + 3 * (y * w + x)
+            n += 1
+            if test(d[o], d[o + 1], d[o + 2]): k += 1
+    return k, n
+green = lambda r, g, b: r < 110 and g > 240 and 170 < b < 205
+blue = lambda r, g, b: 110 < r < 145 and 220 < g < 245 and b > 240
+tinted = lambda r, g, b: max(r, g, b) - min(r, g, b) > 40
+ok = True
+for p, col, cname in ((sys.argv[1], green, "green"), (sys.argv[2], blue, "blue")):
+    name = p.rsplit("/", 1)[-1]
+    k, n = share(p, box("world-box"), col)
+    print("mutool %s: %d/%d %s pixels in the world box" % (name, k, n, cname))
+    ok = ok and n > 0 and k * 3 >= n
+    k, n = share(p, box("safe-box"), tinted)
+    print("mutool %s: %d/%d tinted pixels in the safe box" % (name, k, n))
+    ok = ok and n > 0 and k == 0
+sys.exit(0 if ok else 1)
+' "$work/out-edit/edit1.ppm" "$work/out-edit/final.ppm" "$work/out-edit/edit.txt" \
+    || { echo "FAIL: mutool does not show the edited marks" >&2; fail=1; }
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
 # Encrypted input (SAFEPDF_VIEWER_SMOKE_MODE=encrypted): Ctrl+S with a note must not crash; until

@@ -66,6 +66,26 @@ fallback), an RGB colour in `[0, 1]`, an opacity, the comment text, the stable i
 * A9. **Validation**: a page index out of range is `Error.malformed`; a highlight without
   quads is `Error.malformed`. The writer then checks every dictionary (canonical, references
   in range) and re-parses the result strictly (rules W2, W8).
+* A10. **Edits of marks already in the file** (task 9.5g; `buildEdits`, `writeEdits`, writer
+  rule W11). An `EditSet` holds new marks (`adds`, written as by A8), **superseded** marks
+  (`SupMark`: the new mark record, the object `(num, gen)` of its annotation in the file, and
+  its existing `/Popup` object if any) and **removed** annotations (`removes`: page index and
+  object). A superseded mark's dictionary is built as for a new one (same `/NM`, so the
+  shell finds it again) under its own number and generation, `/M` = the caller's date,
+  `/CreationDate` = `Mark.created` (the original's, when the caller passes it), and a fresh
+  appearance stream (a new auxiliary object, numbered after those of the added marks, in
+  `sups` order; the old stream stays in the earlier revision). Its popup (A3): a highlight
+  that keeps a comment and has a popup object supersedes that popup too (new `/NM`, `/M`); one
+  that gains a comment gets a **new** popup object, appended to its page's `/Annots` after the
+  page's added marks; one that loses its comment drops `/Contents` and `/Popup` and its popup
+  reference is **removed** from the page's `/Annots`. Deleting a highlight with a comment is
+  the caller's `removes` entries for both the highlight and its popup (`SupMark` /
+  `removeMark`). Pages are touched (rewritten, W4) only when something is added to or removed
+  from their `/Annots`; pure supersessions leave the page dictionary alone.
+* A11. **Comment ids** (task 9.5g): the shell keeps a highlight's comment as a separate note
+  mark with its own id. When `Mark.commentId` is set, the popup's `/NM` is
+  `safepdf-mark-ID-popup-CID` (still not a mark name for `Shell.App.Marks.idOfNm`), so the
+  comment note gets its id back on reopen; without it, `safepdf-mark-ID-popup` as before.
 -/
 
 namespace SafePdf.Core.Write.Annots
@@ -282,6 +302,10 @@ structure Mark where
   date : String
   /-- Author (`/T`), empty for none. -/
   author : String := ""
+  /-- The `/CreationDate` to keep (rule A10, a superseded mark), empty for `date`. -/
+  created : String := ""
+  /-- The id of the comment note this highlight's popup stands for (rule A11). -/
+  commentId : Option Nat := none
   deriving Repr, Inhabited
 
 /-- Prefix of our `/NM` names (equal to `Shell.App.Marks.nmPrefix`). -/
@@ -358,24 +382,40 @@ def opt (b : Bool) (k : String) (v : PdfObject) : Dict := if b then [(nm k, v)] 
 def common (m : Mark) : Dict :=
   [(kC, colorObj m.color)] ++ opt (decide (m.opacity < 1)) "CA" (unitNum m.opacity) ++
     [(nm "F", .int 4)] ++
-    [(nm "M", asciiStr m.date), (nm "CreationDate", asciiStr m.date)] ++
+    [(nm "M", asciiStr m.date),
+      (nm "CreationDate", asciiStr (if m.created.isEmpty then m.date else m.created))] ++
     opt (!m.author.isEmpty) "T" (.string (textBytes m.author))
 
-/-- The highlight dictionary (rule A1); `num` its own number, `ap` its appearance stream's,
-`page` the page reference. -/
-def highlightDict (m : Mark) (num ap : Nat) (page : PdfObject) : Dict :=
+/-- The highlight dictionary (rule A1) with popup reference `popup` (used when the mark has
+a comment), appearance stream `ap`, page reference `page`. -/
+def highlightDictP (m : Mark) (popup : PdfObject) (ap : Nat) (page : PdfObject) : Dict :=
   mkAnnot "Highlight" (rectObj m.annotRect) (nmOf m.id) <|
     [(kQuadPoints, quadPointsObj m.quads)] ++ common m ++
     [(nm "Border", .array [.int 0, .int 0, .int 0])] ++
     opt m.hasPopup "Contents" (.string (textBytes m.contents)) ++
-    opt m.hasPopup "Popup" (.ref (num + 1) 0) ++
+    opt m.hasPopup "Popup" popup ++
     [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])]
+
+/-- The highlight dictionary (rule A1); `num` its own number, `ap` its appearance stream's,
+`page` the page reference. -/
+def highlightDict (m : Mark) (num ap : Nat) (page : PdfObject) : Dict :=
+  highlightDictP m (.ref (num + 1) 0) ap page
+
+/-- The popup's `/NM` (rules A3, A11). -/
+def popupNm (m : Mark) : String :=
+  nmOf m.id ++ "-popup" ++ match m.commentId with
+    | some c => "-" ++ toString c
+    | none => ""
+
+/-- The popup of a highlight with comment (rule A3), with parent reference `parent`. -/
+def popupDictP (m : Mark) (parent : PdfObject) (page : PdfObject) : Dict :=
+  mkAnnot "Popup" (rectObj m.annotRect) (popupNm m)
+    [(nm "Parent", parent), (nm "Open", .bool false), (nm "F", .int 4),
+      (nm "M", asciiStr m.date), (nm "P", page)]
 
 /-- The popup of a highlight with comment (rule A3); `parent` the highlight's number. -/
 def popupDict (m : Mark) (parent : Nat) (page : PdfObject) : Dict :=
-  mkAnnot "Popup" (rectObj m.annotRect) (nmOf m.id ++ "-popup")
-    [(nm "Parent", .ref parent 0), (nm "Open", .bool false), (nm "F", .int 4),
-      (nm "M", asciiStr m.date), (nm "P", page)]
+  popupDictP m (.ref parent 0) page
 
 /-- The note dictionary (rule A2). -/
 def noteDict (m : Mark) (ap : Nat) (page : PdfObject) : Dict :=
@@ -550,6 +590,139 @@ def writeMarks (limits : Limits) (doc : Doc.Doc) (marks : List Mark) :
   | .error e => .error e
   | .ok (ms, aux) => Incremental.writeAnnots limits doc ms aux
 
+/-! ## Edits of saved marks (rules A10, A11; task 9.5g) -/
+
+/-- A mark whose annotation is already in the file, to be superseded (rule A10). -/
+structure SupMark where
+  /-- The new mark record (same id). -/
+  mark : Mark
+  /-- The annotation object `(num, gen)` in the file. -/
+  ref : Nat × Nat
+  /-- Its existing `/Popup` object, if any. -/
+  popup : Option (Nat × Nat) := none
+  deriving Repr, Inhabited
+
+/-- Whether the superseded highlight needs a new popup object (it gains a comment). -/
+def SupMark.freshPopup (s : SupMark) : Bool := s.mark.hasPopup && s.popup.isNone
+
+/-- The popup to remove from the page (the highlight loses its comment). -/
+def SupMark.dropPopup (s : SupMark) : Option (Nat × Nat) :=
+  if s.mark.hasPopup then none else s.popup
+
+/-- The changes of one save (rule A10). -/
+structure EditSet where
+  /-- New marks. -/
+  adds : List Mark := []
+  /-- Marks already in the file, rewritten. -/
+  sups : List SupMark := []
+  /-- Annotations removed: page index and object `(num, gen)`. -/
+  removes : List (Nat × Nat × Nat) := []
+  deriving Repr, Inhabited
+
+/-- The `removes` entries deleting a mark stored at `ref` with popup `popup` on page `page`
+(rule A10: a highlight's popup goes with it). -/
+def removeMark (page : Nat) (ref : Nat × Nat) (popup : Option (Nat × Nat)) :
+    List (Nat × Nat × Nat) :=
+  (page, ref.1, ref.2) :: (popup.map fun r => (page, r.1, r.2)).toList
+
+/-- Distinct elements in order of first occurrence. -/
+def dedup : List Nat → List Nat
+  | [] => []
+  | x :: xs => x :: (dedup xs).filter (· != x)
+
+/-- The pages whose `/Annots` change (rule A10), in order of first occurrence. -/
+def EditSet.pages (e : EditSet) : List Nat :=
+  dedup (e.adds.map (·.page) ++
+    (e.sups.filter fun s => s.freshPopup || s.dropPopup.isSome).map (·.mark.page) ++
+    e.removes.map (·.1))
+
+/-- Number a list from `n`. -/
+def numbered {α : Type} : Nat → List α → List (α × Nat)
+  | _, [] => []
+  | n, a :: as => (a, n) :: numbered (n + 1) as
+
+/-- The page edits of `pages` (rule A10): added marks' dictionaries numbered from `num`
+(appearance streams from `ap`), then new popups of superseded highlights; removed references
+(explicit ones, then popups dropped). Also returns the fresh popup number of each superseded
+highlight that gains one. -/
+def editPages (doc : Doc.Doc) (e : EditSet) : Nat → Nat → List Nat →
+    Except Error (Incremental.Edits × List ((Nat × Nat) × Nat))
+  | _, _, [] => .ok ([], [])
+  | num, ap, p :: rest =>
+    match pageRef doc p with
+    | .error err => .error err
+    | .ok r =>
+      let ms := e.adds.filter (·.page == p)
+      let n1 := num + slotCount ms
+      let fp := numbered n1 (e.sups.filter fun s => s.mark.page == p && s.freshPopup)
+      let pops := fp.map fun (s, _) => popupDictP s.mark (.ref s.ref.1 s.ref.2) r
+      let rem := (e.removes.filter (·.1 == p)).map (fun x => (x.2.1, x.2.2)) ++
+        (e.sups.filter (·.mark.page == p)).filterMap SupMark.dropPopup
+      match editPages doc e (n1 + fp.length) (ap + ms.length) rest with
+      | .error err => .error err
+      | .ok (pes, fresh) =>
+        .ok (⟨p, rem, pageDicts r num ap ms ++ pops⟩ :: pes,
+          fp.map (fun (s, n) => (s.ref, n)) ++ fresh)
+
+/-- The superseding objects of one mark (rule A10): its dictionary under its own number and
+generation, and its kept popup's. -/
+def supDicts (doc : Doc.Doc) (fresh : List ((Nat × Nat) × Nat)) (s : SupMark) (ap : Nat) :
+    Except Error (List Incremental.Supersede) :=
+  match pageRef doc s.mark.page with
+  | .error err => .error err
+  | .ok r =>
+    let self : PdfObject := .ref s.ref.1 s.ref.2
+    match s.mark.kind with
+    | .note => .ok [(s.ref.1, s.ref.2, noteDict s.mark ap r)]
+    | .highlight =>
+      let popRef : PdfObject := match s.popup with
+        | some pr => .ref pr.1 pr.2
+        | none => match fresh.lookup s.ref with
+          | some n => .ref n 0
+          | none => .null
+      let keep := match s.popup with
+        | some pr => if s.mark.hasPopup then [(pr.1, pr.2, popupDictP s.mark self r)] else []
+        | none => []
+      .ok ((s.ref.1, s.ref.2, highlightDictP s.mark popRef ap r) :: keep)
+
+/-- All superseding objects, appearance streams numbered from `ap`. -/
+def allSups (doc : Doc.Doc) (fresh : List ((Nat × Nat) × Nat)) :
+    Nat → List SupMark → Except Error (List Incremental.Supersede)
+  | _, [] => .ok []
+  | ap, s :: ss =>
+    match supDicts doc fresh s ap, allSups doc fresh (ap + 1) ss with
+    | .ok a, .ok b => .ok (a ++ b)
+    | .error err, _ => .error err
+    | _, .error err => .error err
+
+/-- **The writer's input for an edit set** (rules A1–A11): page edits, supersessions and
+appearance streams, numbered as `Incremental.writeUpdate` will number them for `doc`. -/
+def buildEdits (doc : Doc.Doc) (e : EditSet) :
+    Except Error (Incremental.Edits × List Incremental.Supersede × List AuxStream) :=
+  let all := e.adds ++ e.sups.map (·.mark)
+  if all.any (fun m => m.kind == .highlight && m.quads.isEmpty) then
+    .error (.malformed 0 "highlight without quads")
+  else
+    let pages := e.pages
+    let base := doc.file.trailer.size
+    let nAnn := (pages.map fun p =>
+      slotCount (e.adds.filter (·.page == p)) +
+        (e.sups.filter fun s => s.mark.page == p && s.freshPopup).length).sum
+    let apBase := base + nAnn
+    match editPages doc e base apBase pages with
+    | .error err => .error err
+    | .ok (pes, fresh) =>
+      let addAps := (pages.flatMap fun p => e.adds.filter (·.page == p)).map apOf
+      match allSups doc fresh (apBase + addAps.length) e.sups with
+      | .error err => .error err
+      | .ok sups => .ok (pes, sups, addAps ++ e.sups.map (apOf ·.mark))
+
+/-- **Write an edit set into `doc`** as one incremental update (tasks 9.5a, 9.5b, 9.5g). -/
+def writeEdits (limits : Limits) (doc : Doc.Doc) (e : EditSet) : Except Error ByteArray :=
+  match buildEdits doc e with
+  | .error err => .error err
+  | .ok (pes, sups, aux) => Incremental.writeUpdate limits doc pes sups aux
+
 /-! ## Properties -/
 
 /-- Every page's dictionaries are annotation dictionaries (`IsAnnot`). -/
@@ -680,6 +853,10 @@ private def tnote (p i : Nat) : Mark :=
 #guard (grouped [tnote 2 1, tnote 0 2, tnote 2 3]).map (fun g => (g.1, g.2.map (·.id))) ==
   [(2, [1, 3]), (0, [2])]
 #guard op [coord 1.5, coord 2] "m" == ascii "1.5 2. m\n"
+#guard dedup [3, 1, 3, 2, 1] == [3, 1, 2]
+#guard popupNm { tnote 0 4 with commentId := some 9 } == "safepdf-mark-4-popup-9"
+#guard popupNm (tnote 0 4) == "safepdf-mark-4-popup"
+#guard removeMark 1 (5, 0) (some (6, 0)) == [(1, 5, 0), (1, 6, 0)]
 
 end Tests
 

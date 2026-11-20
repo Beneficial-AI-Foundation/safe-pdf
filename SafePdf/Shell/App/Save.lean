@@ -16,24 +16,37 @@ checks and stores.
   (`Quad.ofBox` of each page-space box), `/Rect` (a note's icon box `Mark.iconBox` inside the
   page's CropBox, as the viewer draws it; a highlight's is the union of its quads, computed by
   the writer), `/C` (`Color.unit`), opacity 1, `/Contents` (a note's text), the id (`/NM` =
-  `safepdf-mark-ID`) and the date. A highlight's comment is the separate note anchored to
-  the same quads (task 9.8), so it is written as its own `/Text` annotation with
-  `/QuadPoints` (rule A2 of 9.5b), not as pdf.js's `/Contents` + `/Popup` (rule A3).
+  `safepdf-mark-ID`) and the date. A highlight's comment (the note anchored to its quads with
+  a text, `Marks.Store.commentOf`, task 9.8) is written **into the highlight** as pdf.js does:
+  `/Contents` + a `/Popup` annotation (rule A3 of 9.5b) whose `/NM`
+  `safepdf-mark-ID-popup-CID` carries the comment note's id (rule A11, task 9.5g). Other
+  notes are `/Text` annotations with `/QuadPoints` for their anchor (rule A2). Files saved by
+  older builds (9.5c: the comment as a separate `/Text`) are still read; their comment note is
+  moved into the highlight on the next save (its `/Text` reference removed).
 * **Date** (`pdfDate`): the current UTC time as `D:YYYYMMDDHHmmSSZ` (§7.9.4), from
   `Std.Time.Timestamp.now` (wall clock) and the civil-from-days conversion `civil`.
   **Author**: none — no `/T` is written, so a saved file does not carry the login name.
-* **Only new marks** (`Marks.Store.unsaved`): marks read back from the file on open (or
-  written by an earlier save) are already in it and are not written again. The writer
-  (`Incremental.writeAnnots`, rules W3/W4) only appends annotations; it can neither remove one
-  from a page's `/Annots` nor supersede an annotation object. Saved marks are therefore
-  read-only in the viewer (recolour, delete and text edits are refused with a status
-  message) until a writer rule for that exists (follow-up task 9.5g).
+* **One update with additions, supersessions and removals** (`edits`, task 9.5g; writer rule
+  W11, `Annots.writeEdits`): the file's own marks are scanned (`scan`: object reference,
+  popup, comment, `/CreationDate` of each of our annotations) and compared with the store.
+  A mark not in the file is **added**; a mark in the file whose colour, text or comment
+  differs is **superseded** (its annotation re-emitted under its own object number with a new
+  dictionary and appearance stream, `/CreationDate` kept); an annotation of ours whose mark
+  is gone (deleted, or a comment now written into its highlight) is **removed** from its
+  page's `/Annots` together with its popup. Unchanged marks are not written again. Marks
+  stored as direct dictionaries in `/Annots` (not written by us) cannot be changed: Save
+  refuses with a message.
+* **Preview** (`preview`): while saved marks are edited, the viewer renders the document as
+  the next save would write it with only those edits (no additions — new marks are drawn
+  by the viewer itself), built in memory by the same writer and reopened strictly, so a
+  recoloured or deleted saved mark shows at once.
 * **Check before writing** (`write`): the writer's output must start with the original bytes
   (S8; the writer guarantees it, C7, and it is checked again here), must reopen through the
   **strict** parser (`Api.openBytes` with `allowRepair := false`), and reading the marks back
   (`readMarks`) must give every mark of the store (`sameMark`: page, kind, colour, text, quads
-  and icon box within 1/500 of a unit — the writer rounds coordinates to 1/1000), each new id
-  exactly once. Only then is the file written.
+  and icon box within 1/500 of a unit — the writer rounds coordinates to 1/1000; a comment
+  note takes its highlight's colour), each written id exactly once, and no deleted id. Only
+  then is the file written.
 * **Atomic write** (`writeAtomic`): the bytes go into a new temporary file in the target's
   directory (`.NAME.safepdf-N.tmp`, created exclusively), which is then renamed over the
   target; on any error the temporary file is removed and the target is untouched. A file is
@@ -44,11 +57,15 @@ checks and stores.
   session, and before replacing another existing file.
 * **Reading marks back** (`readMarks`): the annotations of every page's own `/Annots`
   (resolved one level, at most `Annot.maxAnnots` per page) whose `/NM` is
-  `safepdf-mark-ID` (`Marks.idOfNm`; our popups `safepdf-mark-ID-popup` and everybody
+  `safepdf-mark-ID` (`Marks.idOfNm`; our popups `safepdf-mark-ID-popup[-CID]` and everybody
   else's annotations are left to the renderer): `/Subtype /Highlight` → a highlight over the
-  boxes of its `/QuadPoints`; `/Subtype /Text` → a note with `/Contents`, anchored to its
-  `/QuadPoints` when it has any (rule A2 of 9.5b), else to the upper-left corner of its
-  `/Rect`; the colour is the palette colour nearest to `/C` (`nearestColor`).
+  boxes of its `/QuadPoints`, and when it has a non-empty `/Contents` also its comment: a note
+  with that text anchored to the same quads, in the highlight's colour, with the id `CID`
+  from its popup's `/NM` (a popup without one — files written by Core directly — gets a
+  fresh id after every other id of the file, in scan order); `/Subtype /Text` → a note with
+  `/Contents`, anchored to its `/QuadPoints` when it has any (rule A2 of 9.5b), else to the
+  upper-left corner of its `/Rect`; the colour is the palette colour nearest to `/C`
+  (`nearestColor`).
 -/
 
 namespace SafePdf.Shell.App.Save
@@ -103,13 +120,18 @@ def nowDate : IO String := do
 def quadOf (b : Box) : Write.Annots.Quad := Write.Annots.Quad.ofBox b.llx b.lly b.urx b.ury
 
 /-- **The Core record of a mark** on a page with CropBox `pb`, dated `date`, without author;
-`none` for a highlight without quads or a note without an icon box. -/
-def toCore (pb : Box) (date : String) (m : Mark) : Option Write.Annots.Mark :=
+`none` for a highlight without quads or a note without an icon box. A highlight's
+`comment` (the comment note, `Store.commentOf`) becomes its `/Contents` and popup (rule A3,
+with the note's id, rule A11). -/
+def toCore (pb : Box) (date : String) (m : Mark) (comment : Option Mark := none) :
+    Option Write.Annots.Mark :=
   match m.kind with
   | .highlight qs =>
     if qs.isEmpty then none
     else some { page := m.page, kind := .highlight, quads := qs.map quadOf,
-                rect := ⟨0, 0, 0, 0⟩, color := m.color.unit, id := m.id, date }
+                rect := ⟨0, 0, 0, 0⟩, color := m.color.unit, id := m.id, date,
+                contents := (comment.map (·.text)).getD "",
+                commentId := comment.map (·.id) }
   | .note t _ =>
     (m.iconBox pb).map fun ib =>
       { page := m.page, kind := .note, quads := m.quads.map quadOf,
@@ -147,6 +169,12 @@ def boxesOf : List Rat → List Box
 
 #guard boxesOf [100, 708, 166, 708, 100, 698, 166, 698, 1, 2] == [⟨100, 698, 166, 708⟩]
 
+/-- The text of a text-string value (empty when it is not a string). -/
+def textOf (o : PdfObject) : String :=
+  match o with
+  | .string bs => Api.textString bs
+  | _ => ""
+
 /-- The mark of one annotation dictionary `ad` on page `page`, when it is one of ours. -/
 def markOf (doc : Doc.Doc) (limits : Limits) (page : Nat) (ad : Dict) : Option Mark := do
   let get := Doc.Nav.getL doc limits ad
@@ -164,9 +192,7 @@ def markOf (doc : Doc.Doc) (limits : Limits) (page : Nat) (ad : Dict) : Option M
     if n == Name.ofString "Highlight" then
       if quads.isEmpty then none else some ⟨id, page, color, .highlight quads⟩
     else if n == Name.ofString "Text" then
-      let text := match get "Contents" with
-        | .string bs => Api.textString bs
-        | _ => ""
+      let text := textOf (get "Contents")
       if quads.isEmpty then
         let r ← Doc.rectOf (get "Rect")
         let b := Box.ofRect r
@@ -175,8 +201,54 @@ def markOf (doc : Doc.Doc) (limits : Limits) (page : Nat) (ad : Dict) : Option M
     else none
   | _ => none
 
-/-- **Our marks in `doc`**, page by page in `/Annots` order (see the module doc). -/
-def readMarks (doc : Doc.Doc) (limits : Limits) : List Mark :=
+/-- One of our annotations in the file (task 9.5g). -/
+structure Entry where
+  /-- The mark as read (a highlight, or a `/Text` note). -/
+  mark : Mark
+  /-- Its object, when `/Annots` refers to it indirectly (else it cannot be changed). -/
+  ref : Option (Nat × Nat)
+  /-- A highlight's `/Popup` object. -/
+  popup : Option (Nat × Nat) := none
+  /-- A highlight's comment text (`/Contents`, empty for none). -/
+  comment : String := ""
+  /-- The comment note's id from the popup's `/NM` (rule A11). -/
+  commentId : Option Nat := none
+  /-- `/CreationDate`, kept when the annotation is superseded. -/
+  created : String := ""
+  deriving Inhabited
+
+/-- The comment id in a popup `/NM` `safepdf-mark-ID-popup-CID` (rule A11). -/
+def commentIdOf (id : Nat) (popupNm : String) : Option Nat :=
+  let pre := Marks.nmPrefix ++ toString id ++ "-popup-"
+  if popupNm.startsWith pre then (popupNm.drop pre.length).toString.toNat? else none
+
+#guard commentIdOf 4 "safepdf-mark-4-popup-9" == some 9 &&
+  commentIdOf 4 "safepdf-mark-4-popup" == none && commentIdOf 4 "safepdf-mark-5-popup-9" == none
+
+/-- The entry of `/Annots` element `a` on page `page`, when it is one of ours. -/
+def entryOf (doc : Doc.Doc) (limits : Limits) (page : Nat) (a : PdfObject) : Option Entry := do
+  let .dict ad := Doc.Nav.res doc limits a | none
+  let m ← markOf doc limits page ad
+  let ref := match a with
+    | .ref n g => some (n, g)
+    | _ => none
+  let created := match Doc.Nav.getL doc limits ad "CreationDate" with
+    | .string bs => String.fromUTF8? ⟨bs.toArray⟩ |>.getD ""
+    | _ => ""
+  if m.isNote then return { mark := m, ref, created }
+  let popup := match Doc.Nav.raw ad "Popup" with
+    | some (.ref n g) => some (n, g)
+    | _ => none
+  let popNm := match Doc.Nav.raw ad "Popup" with
+    | some o => match Doc.Nav.res doc limits o with
+      | .dict pd => textOf (Doc.Nav.getL doc limits pd "NM")
+      | _ => ""
+    | none => ""
+  return { mark := m, ref, popup, comment := textOf (Doc.Nav.getL doc limits ad "Contents"),
+           commentId := commentIdOf m.id popNm, created }
+
+/-- **Our annotations in `doc`**, page by page in `/Annots` order (see the module doc). -/
+def scan (doc : Doc.Doc) (limits : Limits) : List Entry :=
   (List.range doc.pages.size).flatMap fun i =>
     match doc.pages[i]? with
     | none => []
@@ -185,11 +257,26 @@ def readMarks (doc : Doc.Doc) (limits : Limits) : List Mark :=
       | none => []
       | some pd =>
         match Doc.Nav.getL doc limits pd "Annots" with
-        | .array xs => (xs.take Annot.maxAnnots).filterMap fun a =>
-            match Doc.Nav.res doc limits a with
-            | .dict ad => markOf doc limits i ad
-            | _ => none
+        | .array xs => (xs.take Annot.maxAnnots).filterMap (entryOf doc limits i)
         | _ => []
+
+/-- The marks of scanned entries: each highlight followed by its comment note (rule A11;
+comments without an id get fresh ids after every other id, in order). -/
+def marksOf (es : List Entry) : List Mark :=
+  let top := es.foldl (fun t e => max t (max e.mark.id (e.commentId.getD 0))) 0
+  let step (acc : List Mark × Nat) (e : Entry) : List Mark × Nat :=
+    let (ms, next) := acc
+    if e.mark.isNote || e.comment.isEmpty then (ms ++ [e.mark], next)
+    else
+      let (cid, next) := match e.commentId with
+        | some c => (c, next)
+        | none => (next, next + 1)
+      (ms ++ [e.mark, ⟨cid, e.mark.page, e.mark.color, .note e.comment (.quads e.mark.quads)⟩],
+        next)
+  (es.foldl step ([], top + 1)).1
+
+/-- **Our marks in `doc`**, page by page in `/Annots` order (see the module doc). -/
+def readMarks (doc : Doc.Doc) (limits : Limits) : List Mark := marksOf (scan doc limits)
 
 /-! ## Checks -/
 
@@ -211,9 +298,13 @@ def sameMark (pb : Box) (m got : Mark) : Bool :=
   close ((m.iconBox pb).map boxNums |>.getD []) ((got.iconBox pb).map boxNums |>.getD [])
 
 /-- The first problem of a read-back: `got` must contain every mark of `want` (`sameMark`),
-the ones in `fresh` (the ids just written) exactly once. `none` when all is well. -/
-def verify (box : Nat → Option Box) (want : List Mark) (fresh : List Nat) (got : List Mark) :
-    Option String :=
+the ones in `fresh` (the ids just written) exactly once, and none of `gone` (the ids just
+deleted). `none` when all is well. -/
+def verify (box : Nat → Option Box) (want : List Mark) (fresh : List Nat) (got : List Mark)
+    (gone : List Nat := []) : Option String :=
+  (gone.findSome? fun id =>
+    if got.any (·.id == id) then some s!"deleted mark {id} is still in the written file"
+    else none) <|>
   want.findSome? fun m =>
     let found := got.filter (·.id == m.id)
     match found with
@@ -266,7 +357,7 @@ def writeAtomic (path : String) (bytes : ByteArray) : IO Unit := do
 structure Outcome where
   /-- The file written. -/
   path : String
-  /-- Number of marks written in this update. -/
+  /-- Number of marks written (added or changed) or deleted in this update. -/
   marks : Nat
   /-- Bytes appended to the original (0: a plain copy, nothing new). -/
   appended : Nat
@@ -279,21 +370,89 @@ structure Outcome where
 def isPrefix (pre bs : ByteArray) : Bool :=
   pre.size ≤ bs.size && (bs.extract 0 pre.size).data == pre.data
 
-/-- The bytes Save would write for the store's unsaved marks (`bytes` unchanged when there
-are none), checked as described in the module doc; an error message otherwise. -/
-def build (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
-    Except String (ByteArray × List Mark) := do
-  let fresh := store.unsaved
-  let mut cms : List Write.Annots.Mark := []
-  for m in fresh do
+/-- The store as Save writes it: a comment note takes its highlight's colour (the popup
+form has none of its own). -/
+def normalize (store : Store) : List Mark :=
+  let hs := store.marks.toList.filter (!·.isNote)
+  store.marks.toList.map fun m =>
+    match hs.find? fun h => h.page == m.page && ((store.commentOf h).map (·.id)) == some m.id with
+    | some h => { m with color := h.color }
+    | none => m
+
+/-- What one save does (task 9.5g): the Core edit set, the ids it writes (added or
+superseded marks and comments) and the ids it deletes. -/
+structure Plan where
+  /-- The Core edit set. -/
+  edits : Write.Annots.EditSet := {}
+  /-- Ids written. -/
+  written : List Nat := []
+  /-- Ids deleted. -/
+  gone : List Nat := []
+
+/-- **The edits that bring the file `doc` (its entries `file`) to the store** (see the module
+doc); with `adds := false` only the changes of saved marks (the preview). -/
+def edits (doc : Doc.Doc) (file : List Entry) (store : Store) (date : String)
+    (adds : Bool := true) : Except String Plan := do
+  let ms := store.marks.toList
+  let comments := ms.filterMap fun m => if m.isNote then none else store.commentOf m
+  let folded (n : Mark) : Bool := comments.any (·.id == n.id)
+  let fileOf (m : Mark) : Option Entry :=
+    file.find? fun e => e.mark.id == m.id && e.mark.isNote == m.isNote
+  let mut plan : Plan := {}
+  for m in ms do
+    if m.isNote && folded m then continue
     let some pb := pageBox doc m.page
       | throw s!"mark {m.id}: page {m.page + 1} is not in the document"
-    let some c := toCore pb date m
+    let comment := if m.isNote then none else store.commentOf m
+    let some c := toCore pb date m comment
       | throw s!"mark {m.id} cannot be written (no quads or icon)"
-    cms := cms ++ [c]
+    let cids := (comment.map (·.id)).toList
+    match fileOf m with
+    | none =>
+      if adds then
+        plan := { plan with edits := { plan.edits with adds := plan.edits.adds ++ [c] },
+                            written := plan.written ++ m.id :: cids }
+    | some e =>
+      let fileComment := if e.comment.isEmpty then none else some (e.commentId, e.comment)
+      let wantComment := comment.map fun n => (some n.id, n.text)
+      let same := e.mark.color == m.color && e.mark.text == m.text &&
+        (m.isNote || fileComment == wantComment)
+      if !same then
+        let some ref := e.ref
+          | throw s!"mark {m.id} is stored directly in the page's /Annots and cannot be changed"
+        let sm : Write.Annots.SupMark := ⟨{ c with created := e.created }, ref, e.popup⟩
+        plan := { plan with edits := { plan.edits with sups := plan.edits.sups ++ [sm] },
+                            written := plan.written ++ m.id :: cids }
+  -- Our annotations whose mark is gone (deleted, or a comment now in its highlight).
+  for e in file do
+    let keep := ms.any fun m => m.id == e.mark.id && m.isNote == e.mark.isNote &&
+      !(m.isNote && folded m)
+    if !keep then
+      let some ref := e.ref
+        | throw s!"mark {e.mark.id} is stored directly in the page's /Annots and cannot be deleted"
+      let gone := if ms.any (·.id == e.mark.id) then [] else [e.mark.id]
+      let goneC := match e.commentId with
+        | some c => if ms.any (·.id == c) then [] else [c]
+        | none => []
+      plan := { plan with
+        edits := { plan.edits with
+          removes := plan.edits.removes ++ Write.Annots.removeMark e.mark.page ref e.popup },
+        gone := plan.gone ++ gone ++ goneC }
+  return plan
+
+/-- Whether an edit set changes nothing. -/
+def Plan.isEmpty (p : Plan) : Bool :=
+  p.edits.adds.isEmpty && p.edits.sups.isEmpty && p.edits.removes.isEmpty
+
+/-- The bytes Save would write for the store's changes (`bytes` unchanged when there are
+none), checked as described in the module doc; an error message otherwise. Also returns the
+marks read back and the number of marks written or deleted. -/
+def build (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
+    Except String (ByteArray × List Mark × Nat) := do
+  let plan ← edits doc (scan doc limits) store date
   let orig := doc.file.bytes
-  let out ← if cms.isEmpty then pure orig
-    else match Write.Annots.writeMarks limits doc cms with
+  let out ← if plan.isEmpty then pure orig
+    else match Write.Annots.writeEdits limits doc plan.edits with
       | .ok b => pure b
       | .error e => throw (renderError e)
   if !isPrefix orig out then throw "internal: the original bytes are not a prefix of the result"
@@ -301,21 +460,34 @@ def build (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
     | .ok d => pure d
     | .error e => throw s!"the result does not reopen strictly: {e.message}"
   let got := readMarks d.doc limits
-  match verify (pageBox d.doc) store.marks.toList (fresh.map (·.id)) got with
+  match verify (pageBox d.doc) (normalize store) plan.written got plan.gone with
   | some msg => throw msg
-  | none => return (out, got)
+  | none => return (out, got, plan.written.length + plan.gone.length)
 
-/-- **Save**: builds and checks the bytes for the store's unsaved marks (`build`), then writes
+/-- **The preview** (task 9.5g): `doc` with only the changes of saved marks applied (an
+in-memory incremental update, reopened strictly); `none` when there are none. -/
+def preview (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
+    Except String (Option Doc.Doc) := do
+  let plan ← edits doc (scan doc limits) store date (adds := false)
+  if plan.isEmpty then return none
+  let out ← match Write.Annots.writeEdits limits doc plan.edits with
+    | .ok b => pure b
+    | .error e => throw (renderError e)
+  match Api.openBytes out { limits, allowRepair := false } with
+  | .ok d => return some d.doc
+  | .error e => throw s!"the preview does not reopen strictly: {e.message}"
+
+/-- **Save**: builds and checks the bytes for the store's changes (`build`), then writes
 them to `target` atomically. -/
 def write (limits : Limits) (doc : Doc.Doc) (store : Store) (target : String) :
     IO (Except String Outcome) := do
   let date ← nowDate
   match build limits doc store date with
   | .error e => return .error e
-  | .ok (bytes, got) =>
+  | .ok (bytes, got, n) =>
     try
       writeAtomic target bytes
-      return .ok { path := target, marks := store.unsaved.length,
+      return .ok { path := target, marks := n,
                    appended := bytes.size - doc.file.bytes.size, size := bytes.size,
                    total := got.length }
     catch e => return .error s!"cannot write {target}: {e}"
