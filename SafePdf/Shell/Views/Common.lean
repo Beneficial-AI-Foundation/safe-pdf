@@ -61,6 +61,7 @@ def renderLimitKind : LimitKind → String
   | .filters => "filters per stream"
   | .fontGlyphs => "glyphs per font program"
   | .fontSubrs => "subroutine index per font program"
+  | .fontDicts => "Font DICTs per CFF font program"
 
 /-- Human-readable rendering of a core `Error`. -/
 def renderError : Error → String
