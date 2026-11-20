@@ -47,8 +47,10 @@ on them; each construct is "save the backdrop `B`, paint into a scratch buffer `
   alpha 0.5 are composited **once** (no double darkening). Approximations: **isolated** groups
   whose content itself uses non-`Normal` blend modes blend that content with the page
   instead of with transparent black (non-isolated semantics; exact for `Normal` content);
-  **knockout** (`/K`) is ignored (items composite over each other, not over the group's
-  initial backdrop); the group colour space `/CS` is ignored (device RGB).
+  the group colour space `/CS` is ignored (device RGB). **Knockout** (`/K`) groups are
+  implemented (task 7.3i, MuPDF `fz_knockout_begin/end`): each item composites over the
+  group's initial backdrop and is merged by its coverage (see the knockout frame below); the
+  interpreter emits such a group for translucent or blended fill+stroke (`Paint.items`).
 * **Soft masks** (`maskFrom`): the mask group's items are drawn into a fresh buffer, then
   - `/Luminosity`: backdrop = `/BC` (opaque), mask = `Y = round((30 R + 59 G + 11 B) / 100)`
     of the result (§11.5.3, the 0.30/0.59/0.11 weights of `Lum`);
