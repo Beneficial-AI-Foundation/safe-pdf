@@ -2,7 +2,7 @@ import SafePdf.Quarantine.DCT
 import SafePdf.Core.Raster.Image
 
 /-!
-# Baseline JPEG decoder suite (task 7.6a)
+# JPEG decoder suite (tasks 7.6a baseline, 7.6b progressive)
 
 Plan.md §3 (quarantine zone, revalidation), §6 Phase 7. Checks `SafePdf.Quarantine.DCT`:
 
@@ -10,12 +10,18 @@ Plan.md §3 (quarantine zone, revalidation), §6 Phase 7. Checks `SafePdf.Quaran
   libjpeg-turbo's `cjpeg`: gray, 4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1, a 3-pixel-wide 4:2:0
   image (plain replication), restart intervals, an RGB JPEG (Adobe transform 0), quality
   100 (16-bit-range coefficients), three non-interleaved scans, and CMYK / YCCK files with
-  an Adobe marker assembled from four scans) against `Tests/images/*.ref` — the decode of
+  an Adobe marker assembled from four scans; progressive (7.6b, `p*`): `cjpeg -progressive`
+  gray / 4:4:4 / 4:2:2 / 4:2:0, a 3-pixel-wide image, restart intervals, quality 100,
+  refinement-heavy `-scans` scripts (colour, colour with restarts, gray with single-coefficient
+  bands), a smooth image (long end-of-band runs) and `jpegtran -progressive` of the CMYK
+  file) against `Tests/images/*.ref` — the decode of
   `djpeg -dct int`, i.e. libjpeg-turbo with MuPDF's settings (islow IDCT, fancy upsampling).
   Expected: **bit-exact** (the count of differing samples and the largest difference are
   printed on failure);
 * **malformed input** is an error, never a crash: no `SOI`, a truncated header, a
-  progressive / arithmetic `SOF`, 12-bit precision, an over-full Huffman table, a scan
+  lossless / arithmetic `SOF`, a sequential scan in a progressive frame, bad progression
+  parameters (`Al > 13`, an AC band of two components, `Se < Ss`), more than
+  `DCT.maxScans` scans (256 scans decode), a cut progressive file, 12-bit precision, an over-full Huffman table, a scan
   before its frame, the `maxImagePixels` limit; a JPEG cut in the middle of its entropy
   data still decodes (zero bits, like libjpeg); 2000 single-byte corruptions and 300
   truncations of the fixtures each either fail or keep the size law;
@@ -24,7 +30,10 @@ Plan.md §3 (quarantine zone, revalidation), §6 Phase 7. Checks `SafePdf.Quaran
   a `/DCTDecode` XObject decodes through `loadImages` (a broken one is the placeholder);
 * **timing** (printed): a synthetic 1008 × 1008 4:2:0 stream built here (`synth420`: small
   Huffman tables, DC differences and one AC coefficient per other block) — a fixture of
-  that size would not fit the fixture budget.
+  that size would not fit the fixture budget — and its progressive twin (`synthProg`: DC
+  scan, per component an AC first scan that is one end-of-band run and an AC refinement
+  that makes the coefficients nonzero), which must decode to the same samples;
+  `SAFEPDF_DCT_BENCH=FILE` also times the decoding of `FILE`.
 -/
 
 namespace SafePdf.Tests.DCT
@@ -35,7 +44,8 @@ open SafePdf.Quarantine
 /-- Fixture names (files `Tests/images/NAME.jpg` / `.ref`). -/
 def fixtures : List String :=
   ["gray", "s444", "s422", "s420", "s440", "s411", "narrow", "rst", "rgb", "q100", "scans",
-   "cmyk", "ycck"]
+   "cmyk", "ycck", "pgray", "p444", "p422", "p420", "pnarrow", "prst", "pq100", "pscans",
+   "pscanrst", "pscangray", "psmooth", "pcmyk"]
 
 /-- Parse a reference file: header line `W H NC`, then the samples. -/
 def parseRef (b : ByteArray) : Option (Nat × Nat × Nat × ByteArray) := do
@@ -131,6 +141,70 @@ def synth420 (mx my : Nat) : ByteArray := Id.run do
   bw := bw.put 0x7F 7
   return ByteArray.mk (hdr.map UInt8.ofNat).toArray ++ bw.out ++ ByteArray.mk #[0xFF, 0xD9]
 
+/-- Zero-padded bits to the next byte boundary (1-bits, like libjpeg's padding). -/
+def BW.flush (w : BW) : BW := if w.n % 8 = 0 then w else w.put (2 ^ (8 - w.n % 8) - 1) (8 - w.n % 8)
+
+/-- The progressive twin of `synth420 mx my` (same coefficients, so the same samples):
+`SOF2`; an interleaved DC first scan (the DC codes of `synth420`); for each component an AC
+first scan of band 1–1 at `Al = 1` (all zero: one end-of-band run over the component) and
+an AC refinement `Ah = 1, Al = 0` making coefficient 1 equal to 1 in every block of even
+`synth420` index (a newly nonzero coefficient; other blocks: `EOB`). AC table: `EOB0`,
+`0x01`, `EOB1 … EOB14`, 5-bit codes `0, 1, 2, …`. -/
+def synthProg (mx my : Nat) : ByteArray := Id.run do
+  let seg := fun (m : Nat) (body : List Nat) =>
+    [0xFF, m, (body.length + 2) / 256, (body.length + 2) % 256] ++ body
+  let dqt := seg 0xDB (0 :: List.replicate 64 2)
+  let dht0 := seg 0xC4 (0x00 :: ([0, 0, 0, 12] ++ List.replicate 12 0) ++ List.range 12)
+  let dht1 := seg 0xC4 (0x10 :: ([0, 0, 0, 0, 16] ++ List.replicate 11 0) ++
+    (0x00 :: 0x01 :: (List.range 14).map (fun r => (r + 1) * 16)))
+  let w := 16 * mx
+  let h := 16 * my
+  let sof := seg 0xC2 [8, h / 256, h % 256, w / 256, w % 256, 3, 1, 0x22, 0, 2, 0x11, 0, 3, 0x11, 0]
+  let mut out : List Nat := [0xFF, 0xD8] ++ dqt ++ dht0 ++ dht1 ++ sof ++
+    seg 0xDA [3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 0, 0]
+  let mut bw : BW := {}
+  let mut k := 0
+  for _ in [0:mx * my] do
+    for _ in [0:6] do
+      let d := k % 7
+      let cat := if d = 0 then 0 else if d < 2 then 1 else if d < 4 then 2 else 3
+      bw := bw.put cat 4
+      if 0 < cat then
+        bw := bw.put (if k % 2 = 0 then d else (2 ^ cat - 1 - d)) cat
+      k := k + 1
+  let mut body := bw.flush.out
+  for c in [0:3] do
+    let (bw2, bh2) := if c = 0 then (2 * mx, 2 * my) else (mx, my)
+    let n := bw2 * bh2
+    -- AC first, band 1-1, Al = 1: one end-of-band run of n blocks.
+    out := out ++ (body.toList.map (·.toNat)) ++ seg 0xDA [1, c + 1, 0x00, 1, 1, 0x01]
+    let r := Nat.log2 n
+    bw := {}
+    bw := bw.put (if r = 0 then 0 else r + 1) 5
+    if 0 < r then bw := bw.put (n - 2 ^ r) r
+    out := out ++ (bw.flush.out.toList.map (·.toNat)) ++ seg 0xDA [1, c + 1, 0x00, 1, 1, 0x10]
+    -- AC refinement, Ah = 1, Al = 0.
+    bw := {}
+    for by_ in [0:bh2] do
+      for bx in [0:bw2] do
+        let kk := if c = 0 then ((by_ / 2) * mx + bx / 2) * 6 + (by_ % 2) * 2 + bx % 2
+          else (by_ * mx + bx) * 6 + 3 + c
+        if kk % 2 = 0 then
+          bw := bw.put 1 5
+          bw := bw.put 1 1
+        else bw := bw.put 0 5
+    body := bw.flush.out
+  out := out ++ (body.toList.map (·.toNat)) ++ [0xFF, 0xD9]
+  return ByteArray.mk (out.map UInt8.ofNat).toArray
+
+/-- A progressive JPEG with `n` extra DC refinement scans (one zero byte of data each)
+appended to `base` before its `EOI`. -/
+def extraScans (base : ByteArray) (n : Nat) : ByteArray := Id.run do
+  let mut b := base.extract 0 (base.size - 2)
+  for _ in [0:n] do
+    b := b ++ ByteArray.mk #[0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 0, 0x10, 0]
+  return b ++ ByteArray.mk #[0xFF, 0xD9]
+
 /-- Run the suite. -/
 def run : IO Nat := do
   let mut failures := 0
@@ -159,8 +233,10 @@ def run : IO Nat := do
     [ ("empty", ByteArray.empty, isErr),
       ("no SOI", s420.extract 2 s420.size, isErr),
       ("truncated header", s420.extract 0 (sof + 6), isErr),
-      ("progressive", patch s420 (sof + 1) 0xC2,
+      ("lossless", patch s420 (sof + 1) 0xC3,
         fun r => match r with | .error (.unsupported _) => true | _ => false),
+      ("sequential scan in a progressive frame", patch s420 (sof + 1) 0xC2,
+        fun r => match r with | .error (.malformed _ _) => true | _ => false),
       ("arithmetic", patch s420 (sof + 1) 0xC9,
         fun r => match r with | .error (.unsupported _) => true | _ => false),
       ("12-bit", patch s420 (sof + 4) 12,
@@ -169,6 +245,21 @@ def run : IO Nat := do
       ("bad Huffman table", patch (patch s420 (dht + 5) 2) (dht + 6) 1, isErr),
       ("scan before frame", (s420.extract 0 sof) ++ (s420.extract sos s420.size), isErr),
       ("cut in the scan", s420.extract 0 (sos + 40), fun r => !isErr r && lawOk r) ]
+  let pgray ← IO.FS.readBinFile (dir / "pgray.jpg")
+  let p420 ← IO.FS.readBinFile (dir / "p420.jpg")
+  let psos := (findMarker p420 0xDA).getD 0
+  -- The first scan of p420 is the interleaved DC scan (3 components): Ss, Se, AhAl at +11.
+  let psosAc := ((List.range (p420.size - 1)).filter fun i =>
+    p420.get! i == 0xFF && p420.get! (i + 1) == 0xDA).getD 1 0
+  let bad := bad ++
+    [ ("Al > 13", patch p420 (psos + 13) 0x0E, isErr),
+      ("DC scan with Se > 0", patch p420 (psos + 12) 5, isErr),
+      ("AC band of two components", patch (patch p420 (psos + 11) 1) (psos + 12) 5, isErr),
+      ("AC scan Se < Ss", patch (patch p420 (psosAc + 7) 9) (psosAc + 8) 3, isErr),
+      ("too many scans", extraScans pgray 260,
+        fun r => match r with | .error (.unsupported _) => true | _ => false),
+      ("many scans", extraScans pgray 250, fun r => !isErr r && lawOk r),
+      ("cut progressive", p420.extract 0 (p420.size / 2), fun r => !isErr r && lawOk r) ]
   for (what, b, ok) in bad do
     if !ok (DCT.decode {} none b) then
       failures := failures + 1; report s!"malformed: {what}"
@@ -228,14 +319,40 @@ def run : IO Nat := do
     if a.w != 33 || a.h != 27 || a.data.get! 0 != refGray.get! 0 || b.w != 1 || b.h != 1 then
       failures := failures + 1; report s!"loadImages DCT: {a.w}x{a.h} {b.w}x{b.h}"
   | _, _ => failures := failures + 1; report "loadImages DCT: missing pixmaps"
-  -- 5. Timing (synthetic 4:2:0, 1008 × 1008).
+  -- 5. Timing (synthetic 4:2:0, 1008 × 1008), baseline and progressive.
   let big := synth420 63 63
   let t0 ← IO.monoNanosNow
-  match DCT.decode {} none big with
+  let bigImg := DCT.decode {} none big
+  match bigImg with
   | .ok img =>
     let t1 ← IO.monoNanosNow
     IO.println s!"  dct: synthetic 4:2:0 {img.w}x{img.h} ({big.size} bytes) decoded in {(t1 - t0) / 1000000} ms"
   | .error e => failures := failures + 1; report s!"synthetic 4:2:0: {repr e}"
+  let bigP := synthProg 63 63
+  let t0 ← IO.monoNanosNow
+  match DCT.decode {} none bigP, bigImg with
+  | .ok img, .ok ref =>
+    let t1 ← IO.monoNanosNow
+    IO.println s!"  dct: synthetic progressive 4:2:0 {img.w}x{img.h} ({bigP.size} bytes) decoded in {(t1 - t0) / 1000000} ms"
+    let (n, mx) := diff img.data ref.data
+    if n != 0 then failures := failures + 1; report s!"synthetic progressive: {n} samples differ from baseline (max {mx})"
+  | .error e, _ => failures := failures + 1; report s!"synthetic progressive 4:2:0: {repr e}"
+  | _, _ => pure ()
+  if let some path ← IO.getEnv "SAFEPDF_DCT_BENCH" then
+    let b ← IO.FS.readBinFile path
+    let t0 ← IO.monoNanosNow
+    match DCT.decode {} none b with
+    | .ok img =>
+      let t1 ← IO.monoNanosNow
+      IO.println s!"  dct: {path} {img.w}x{img.h}x{img.nc} decoded in {(t1 - t0) / 1000000} ms"
+      let refPath := (System.FilePath.mk path).withExtension "ref"
+      if ← refPath.pathExists then
+        match parseRef (← IO.FS.readBinFile refPath) with
+        | some (_, _, _, exp) =>
+          let (n, mx) := diff img.data exp
+          IO.println s!"  dct: {refPath}: {n} samples differ (max {mx})"
+        | none => IO.println s!"  dct: {refPath}: bad reference file"
+    | .error e => IO.println s!"  dct: {path}: {repr e}"
   return failures
 
 end SafePdf.Tests.DCT
