@@ -1,6 +1,7 @@
 import SafePdf.Core.Content.Run
 import SafePdf.Core.Font.Widths
 import SafePdf.Core.Font.Type1
+import SafePdf.Core.Font.CFF
 import SafePdf.Core.Font.CMap
 import SafePdf.Core.Doc
 
@@ -35,18 +36,30 @@ rely on it). Every collected font object becomes a `FontInfo`:
 * **Widths** (text-space `w0`, glyph width / 1000): `Font.FontMetrics.ofDict` (task 6.4); for a
   simple Type 1 font whose width is unknown there (no `/Widths`, not a standard 14 font) the
   embedded program (`/FontDescriptor /FontFile`, `Font.Type1.parse`, task 6.3) gives the
-  advance of the glyph the font's encoding names; Type 3 widths are scaled by `/FontMatrix`;
-  Type0 fonts with another CMap take `/W` with CID = code value (an approximation: CID
-  mapping through non-identity CMaps is not implemented).
+  advance of the glyph the font's encoding names, and likewise an embedded CFF program
+  (`/FontFile3 /Subtype /Type1C`, `Font.CFF.parse`, tasks 6.2/6.2b: the glyph the encoding
+  names through the CFF charset, else the glyph the code selects through the CFF's own
+  encoding); Type 3 widths are scaled by `/FontMatrix`; Type0 fonts take `/W`, then `/DW`;
+  a CID with neither, in a `/CIDFontType0` descendant with an embedded CFF
+  (`/FontFile3 /Subtype /CIDFontType0C`), takes the CFF advance of that CID (CID → GID
+  through the CFF charset, `CFFFont.advanceOfCID`). Type0 fonts with another CMap than
+  `Identity-H/V` use CID = code value (an approximation: CID mapping through non-identity
+  CMaps is not implemented). `/FontFile3 /Subtype /OpenType` is not read (unsupported).
 * **Unicode** (§9.10.2), in order: the `/ToUnicode` CMap (`Font.CMap`; for simple fonts a
   mapping to control characters only is ignored as a producer error); for simple fonts the
   encoding's glyph name through the Adobe Glyph List (`Font.glyphToUnicode`; the encoding uses
-  the embedded Type 1 built-in encoding as base when the program was parsed); for simple fonts
+  the embedded Type 1 or CFF program's built-in encoding as base when the program was parsed —
+  for CFF, the code's glyph name through the CFF encoding and charset,
+  `CFFFont.glyphNameOfCode`); for simple fonts
   a code in `32..126` whose glyph name is absent or not in the AGL as that ASCII character
   (heuristic, as poppler's mapping of unknown names: dvips Type 3 bitmap fonts); for Type0
   fonts with a predefined `UCS2`/`UTF16` CMap the code read as UTF-16BE; otherwise nothing
   (`Identity-H` with `Adobe-Identity`: no mapping, §9.10.2) and the glyph's text is U+FFFD.
   Ligatures U+FB00–FB06 are decomposed (`fi` → "fi"), control characters become spaces.
+* Every embedded program is parsed under `Limits` (Type 1: `maxFontGlyphs`, `maxFontSubrs`,
+  `glyphFuel`; CFF: `maxCFFGlyphs`, `maxFontSubrs`, `maxFontDicts`, `glyphFuel`, `fontFuel`)
+  and only when its metrics or encoding are needed; a program that fails to parse (malformed
+  or over a limit) is ignored and the dictionary's own information is used.
 * Object fetches for font dictionaries use the source's state at font-loading time and drop
   the state change (fetching is not charged by the document source); stream decodes
   (`/ToUnicode`, `/FontFile`, embedded CMaps) are threaded through the source state, i.e.
@@ -285,6 +298,60 @@ def loadType1 {σ : Type} (limits : Limits) (src : Source σ) (s : σ)
     | none => (none, s)
   | _ => (none, s)
 
+/-- Parse the embedded CFF program (`/FontFile3`) of a font dictionary `fd` (a simple font, or
+the descendant CIDFont of a Type0 font) when the stream's `/Subtype` is one of `subtypes`. -/
+def loadCFF {σ : Type} (limits : Limits) (src : Source σ) (s : σ)
+    (resolve : PdfObject → PdfObject) (fd : Dict) (subtypes : List String) :
+    Option Font.CFF.CFFFont × σ :=
+  match getR resolve fd "FontDescriptor" with
+  | some (.dict desc) =>
+    match Dict.get? desc (nm "FontFile3") with
+    | some o =>
+      match fetchStream src s o with
+      | (some (sd, bytes), s') =>
+        if subtypes.contains ((nameStr? (getR resolve sd "Subtype")).getD "") then
+          ((Font.CFF.parse limits bytes).toOption, s')
+        else (none, s')
+      | (none, s') => (none, s')
+    | none => (none, s)
+  | _ => (none, s)
+
+/-- The built-in encoding of a name-keyed CFF program: code ↦ the glyph name its CFF encoding
+selects (`CFFFont.glyphNameOfCode`). -/
+def cffEncoding (f : Font.CFF.CFFFont) : Encoding :=
+  Array.ofFn (n := 256) fun i => f.glyphNameOfCode i.val.toUInt8
+
+/-- The text-space advance of a one-byte code from an embedded CFF program: the glyph the
+font's encoding names (looked up by name in the CFF charset), else the glyph the code selects
+through the CFF's own encoding. -/
+def cffCodeAdvance (f : Font.CFF.CFFFont) (enc : Encoding) (code : Nat) : Option Fixed :=
+  match (enc.glyph code).bind f.gidOfName? |>.bind f.advanceOfGid with
+  | some w => some w
+  | none => f.advance code.toUInt8
+
+/-- The width table (256 codes) of a simple font with an embedded CFF program: the 6.4
+metrics, except where they know nothing (`unknown`, or `/MissingWidth` of a font without
+`/Widths`), which take `cffCodeAdvance`. Computed once per font. -/
+def cffWidthTable (sm : SimpleMetrics) (hasWidths : Bool) (f : Font.CFF.CFFFont) : Array Fixed :=
+  Array.ofFn (n := 256) fun i =>
+    match sm.width i.val with
+    | (w, .unknown) => (cffCodeAdvance f sm.encoding i.val).getD w
+    | (w, .missingWidth) =>
+      if hasWidths then w else (cffCodeAdvance f sm.encoding i.val).getD w
+    | (w, _) => w
+
+/-- The width of a CID of a Type0 font: its `/W` entry, else `/DW` when the CIDFont has one,
+else the embedded CFF program's advance of that CID, else the default 1000. -/
+def cidWidth (cm : CIDMetrics) (hasDW : Bool) (cff : Option Font.CFF.CFFFont) (cid : Nat) :
+    Fixed :=
+  match cm.table[cid]? with
+  | some (some w) => w
+  | _ =>
+    if hasDW then cm.dw
+    else match cff.bind (·.advanceOfCID cid) with
+      | some w => w
+      | none => cm.dw
+
 /-- The width of a one-byte code of a simple font: the 6.4 metrics, else the embedded Type 1
 program's advance of the encoded glyph. -/
 def simpleWidth (sm : SimpleMetrics) (t1 : Option Font.Type1.Font1) (code : Nat) : Fixed :=
@@ -349,12 +416,28 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
   let tuDesc := if tu.isSome then " ToUnicode" else ""
   if subtype == "Type0" then
     let encName := (nameStr? (getR resolve fd "Encoding")).getD ""
-    match FontMetrics.ofDict resolve fd none with
-    | some m =>
+    let desc : Dict :=
+      match getR resolve fd "DescendantFonts" with
+      | some (.array (d :: _)) =>
+        match resolve d with
+        | .dict dd => dd
+        | _ => []
+      | _ => []
+    let cm := CIDMetrics.ofCIDFont resolve desc
+    let hasDW := (getR resolve desc "DW").isSome
+    -- the CFF program is read only when some width could need it (no `/DW`)
+    let needCFF := !hasDW && nameStr? (getR resolve desc "Subtype") == some "CIDFontType0"
+    let (cff, s1) := if needCFF then
+        loadCFF limits src s1 resolve desc ["CIDFontType0C", "Type1C"]
+      else (none, s1)
+    let cffDesc := if cff.isSome then " FontFile3" else ""
+    match Font.identityEncoding? resolve fd with
+    | some _ =>
       (⟨.two, (fun c => match c with
-          | [h, l] => (m.width (h.toNat * 256 + l.toNat)).1
+          | [h, l] => cidWidth cm hasDW cff (h.toNat * 256 + l.toNat)
           | _ => Fixed.zero),
-        (fun c => tu.bind (·.lookup c)), s!"Type0 {base} {encName}{tuDesc}", Fixed.one⟩, s1)
+        (fun c => tu.bind (·.lookup c)), s!"Type0 {base} {encName}{tuDesc}{cffDesc}", Fixed.one⟩,
+        s1)
     | none =>
       let (enc, s2) := cmapOf src s1 fd "Encoding"
       let split : SplitKind :=
@@ -362,20 +445,12 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
         | some e, _ => if e.codespace.isEmpty then .two else .cmap e
         | none, some t => if t.codespace.isEmpty then .two else .cmap t
         | none, none => .two
-      let desc : Dict :=
-        match getR resolve fd "DescendantFonts" with
-        | some (.array (d :: _)) =>
-          match resolve d with
-          | .dict dd => dd
-          | _ => []
-        | _ => []
-      let cm := CIDMetrics.ofCIDFont resolve desc
       let ucs := hasInfix encName "UCS2" || hasInfix encName "UTF16"
-      (⟨split, (fun c => (cm.width (Font.CMap.beValue c)).1),
+      (⟨split, (fun c => cidWidth cm hasDW cff (Font.CMap.beValue c)),
         (fun c => match tu.bind (·.lookup c) with
           | some u => some u
           | none => if ucs then some (Font.CMap.ofUtf16 c) else none),
-        s!"Type0 {base} {encName} (CID = code){tuDesc}", Fixed.one⟩, s2)
+        s!"Type0 {base} {encName} (CID = code){tuDesc}{cffDesc}", Fixed.one⟩, s2)
   else if subtype == "Type3" then
     let sm := SimpleMetrics.ofDict resolve fd none
     let a : Fixed :=
@@ -397,12 +472,25 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     let needT1 := (subtype == "Type1" || subtype == "MMType1") &&
       (!hasWidths || (tu.isNone && !encIsName))
     let (t1, s2) := if needT1 then loadType1 limits src s1 resolve fd else (none, s1)
-    let sm := SimpleMetrics.ofDict resolve fd (t1.map (·.encoding))
-    let t1Desc := if t1.isSome then " FontFile" else ""
+    -- no Type 1 program: an embedded CFF (`/FontFile3 /Subtype /Type1C`) plays its role
+    let (cff, s3) := if needT1 && t1.isNone then loadCFF limits src s2 resolve fd ["Type1C"]
+      else (none, s2)
+    let builtin : Option Encoding := match t1, cff with
+      | some f, _ => some f.encoding
+      | none, some f => some (cffEncoding f)
+      | none, none => none
+    let sm := SimpleMetrics.ofDict resolve fd builtin
+    let progDesc := if t1.isSome then " FontFile" else if cff.isSome then " FontFile3" else ""
+    let width : Nat → Fixed := match cff with
+      | some f =>
+        let tbl := cffWidthTable sm hasWidths f
+        fun code => tbl.getD code Fixed.zero
+      | none => simpleWidth sm t1
     (⟨.one, (fun c => match c with
-        | [b] => simpleWidth sm t1 b.toNat
+        | [b] => width b.toNat
         | _ => Fixed.zero),
-      simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding, s!"{subtype} {base}{tuDesc}{t1Desc}", Fixed.one⟩, s2)
+      simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding,
+      s!"{subtype} {base}{tuDesc}{progDesc}", Fixed.one⟩, s3)
 
 /-- Maximum number of font objects loaded per page. -/
 def maxFonts : Nat := 1024

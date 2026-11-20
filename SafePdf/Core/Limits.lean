@@ -49,11 +49,13 @@ structure Limits where
   steps. Excess yields `Error.limitExceeded .fontGlyphs`. -/
   maxFontGlyphs : Nat := 4096
   /-- Upper bound (exclusive) on subroutine indices in one embedded font program's `/Subrs`
-  (task 6.3). The subroutine table is allocated with `max index + 1` entries, so the cap bounds
+  (task 6.3); for CFF (task 6.2b) the maximum number of entries of a Global or local Subrs
+  INDEX. The Type 1 subroutine table is allocated with `max index + 1` entries, so the cap bounds
   that allocation. Excess yields `Error.limitExceeded .fontSubrs`. -/
   maxFontSubrs : Nat := 32768
   /-- Maximum number of operators and operands one glyph's charstring program may execute,
-  subroutine calls included (task 6.3, `Core.Font.Type1.evalGlyph`). A glyph that runs out is
+  subroutine calls included (task 6.3, `Core.Font.Type1.evalGlyph`; task 6.2b,
+  `Core.Font.CFF.evalGlyph`). A glyph that runs out is
   **rejected** (listed in `Font1.rejected`, its advance unknown), not fatal to the font, so no
   `LimitKind` corresponds to it (like `maxRepairFailures`). -/
   glyphFuel : Nat := 20000
@@ -63,6 +65,21 @@ structure Limits where
   (the page still renders what it has, as for `maxOpsPerPage` truncation), so no `LimitKind`
   corresponds to it. -/
   maxFormsPerPage : Nat := 100000
+  /-- Maximum number of charstrings (CharStrings INDEX count) in one embedded CFF font program
+  (task 6.2b, `Core.Font.CFF.parse`). Separate from `maxFontGlyphs` (Type 1): CID-keyed CFF
+  fonts of CJK text legitimately have tens of thousands of glyphs, so the default is the
+  format's own 16-bit bound, and the per-font charstring work is bounded by `fontFuel`
+  instead of `maxCFFGlyphs · glyphFuel`. Excess yields `Error.limitExceeded .fontGlyphs`. -/
+  maxCFFGlyphs : Nat := 65535
+  /-- Maximum number of charstring interpreter steps for **all** glyphs of one CFF font
+  together (task 6.2b, `Core.Font.CFF.evalList`; default 2²⁵). Once it is spent the remaining
+  glyphs are **rejected** (their advances unknown), not fatal to the font, so no `LimitKind`
+  corresponds to it (like `glyphFuel`). -/
+  fontFuel : Nat := 1 <<< 25
+  /-- Maximum number of Font DICTs in a CID-keyed CFF font's `FDArray` (task 6.2b; FDSelect
+  stores one byte per entry, so real fonts have at most 256). Excess yields
+  `Error.limitExceeded .fontDicts`. -/
+  maxFontDicts : Nat := 256
   deriving Repr, Inhabited
 
 namespace Limits
