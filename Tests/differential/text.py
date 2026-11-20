@@ -220,7 +220,9 @@ def first_diff_excerpt(a, b):
 def load_ours(text):
     """-> (list of page texts, summary dict).  Page n is index n-1."""
     pages, summary = {}, None
-    for ln, line in enumerate(text.splitlines(), 1):
+    # Split on "\n" only: str.splitlines() also breaks at U+2028/U+2029/U+0085/0x1C-0x1E,
+    # which may occur inside a JSON string value.
+    for ln, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:

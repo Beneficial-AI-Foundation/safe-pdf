@@ -17,6 +17,9 @@ Stdlib only, deterministic (no compression). The generated PDFs are the test inp
                unmapped code (U+FFFD). Page 2: text rotated by 90 degrees (Tm 0 1 -1 0) and
                a line upside down (180 degrees). Page 3: /Contents is a FlateDecode stream
                with corrupt data (the page reports its decode error, empty text).
+* lineseps.pdf one page, a simple Helvetica font whose /ToUnicode maps code 1 to U+2028 and
+               code 2 to U+2029 (task 6.9: the JSON output must escape them so every JSON
+               object stays on one physical line for any line splitter).
 """
 
 import os
@@ -125,13 +128,43 @@ def unicode_():
     ])
 
 
+SEP_CMAP = b"""/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+2 beginbfchar
+<01> <2028>
+<02> <2029>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+"""
+
+
+def lineseps():
+    return pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+        b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        stream(b"BT /F1 12 Tf 72 700 Td (A\\001B\\002C) Tj ET\n"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 0 /LastChar 255 "
+        b"/ToUnicode 6 0 R >>",
+        stream(SEP_CMAP),
+    ])
+
+
 def main(argv):
     if len(argv) != 2:
         print(__doc__)
         return 2
     out = argv[1]
     os.makedirs(out, exist_ok=True)
-    for name, data in (("latin.pdf", latin()), ("unicode.pdf", unicode_())):
+    for name, data in (("latin.pdf", latin()), ("unicode.pdf", unicode_()),
+                       ("lineseps.pdf", lineseps())):
         with open(os.path.join(out, name), "wb") as fh:
             fh.write(data)
         print("wrote %s (%d bytes)" % (os.path.join(out, name), len(data)))

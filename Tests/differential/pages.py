@@ -86,7 +86,7 @@ class Bad(Exception):
 # ---- our side ---------------------------------------------------------------
 def load_ours(text):
     pages, summary = [], None
-    for ln, line in enumerate(text.splitlines(), 1):
+    for ln, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:
