@@ -61,9 +61,11 @@ rely on it). Every collected font object becomes a `FontInfo`:
   encoding's glyph name through the Adobe Glyph List (`Font.glyphToUnicode`; the encoding uses
   the embedded Type 1 or CFF program's built-in encoding as base when the program was parsed —
   for CFF, the code's glyph name through the CFF encoding and charset,
-  `CFFFont.glyphNameOfCode`); for simple fonts
-  a code in `32..126` whose glyph name is absent or not in the AGL as that ASCII character
-  (heuristic, as poppler's mapping of unknown names: dvips Type 3 bitmap fonts); for Type0
+  `CFFFont.glyphNameOfCode`; the program is also read when a `/ToUnicode` CMap leaves a code
+  with a non-zero width unmapped, `toUnicodeCovers`; glyph names through the full AGL and the
+  TeX glyph list, task 6.7b); for Type 3 fonts only (as MuPDF) a code in `32..126` without a
+  glyph name or whose glyph name the glyph list does not know, as that ASCII character (dvips
+  Type 3 bitmap fonts); for Type0
   fonts with a predefined `UCS2`/`UTF16` CMap the code read as UTF-16BE; otherwise nothing
   (`Identity-H` with `Adobe-Identity`: no mapping, §9.10.2) and the glyph's text is U+FFFD.
   Ligatures U+FB00–FB06 are decomposed (`fi` → "fi"), control characters become spaces.
@@ -468,14 +470,21 @@ def printable (s : String) : Bool := s.toList.any fun (c : Char) => 32 ≤ c.toN
 
 /-- The Unicode of a one-byte code of a simple font (§9.10.2 fallback chain). `dingbats`
 enables the ZapfDingbats `aNN` glyph names (task 6.4b), which other fonts reuse for unrelated
-glyphs. -/
-def simpleUnicode (dingbats : Bool) (tu : Option Font.CMap.CMap) (enc : Encoding) (c : List UInt8) : Option String :=
+glyphs. Only in a Type 3 font (`type3`) does a code in `32..126` read as that ASCII character
+when the encoding names no glyph for it or one the glyph list does not know (dvips bitmap fonts
+name glyphs arbitrarily). In other fonts such a code is unmapped (U+FFFD), as in MuPDF: the
+names of TeX math and extension fonts (`parenleftbig`, `suppress`, …) say nothing about the
+ASCII character at their code, and a code the font's encoding leaves out shows `.notdef`
+(task 6.7b). -/
+def simpleUnicode (dingbats type3 : Bool) (tu : Option Font.CMap.CMap) (enc : Encoding)
+    (c : List UInt8) : Option String :=
   match c with
   | [b] =>
     match (tu.bind (·.lookup c)).filter printable with
     | some u => some u
     | none =>
-      let ascii := if 32 ≤ b.toNat ∧ b.toNat ≤ 126 then some (String.ofList [Char.ofNat b.toNat])
+      let ascii := if type3 ∧ 32 ≤ b.toNat ∧ b.toNat ≤ 126 then
+          some (String.ofList [Char.ofNat b.toNat])
         else none
       match enc.glyph b.toNat with
       | some g =>
@@ -484,6 +493,24 @@ def simpleUnicode (dingbats : Bool) (tu : Option Font.CMap.CMap) (enc : Encoding
         | none => ascii
       | none => ascii
   | _ => tu.bind (·.lookup c)
+
+/-- Whether a simple font's `/ToUnicode` CMap maps, to printable text, every code of
+`/FirstChar` + `/Widths` whose width is not zero (codes past 255 are ignored). When it does not
+(a partial CMap, e.g. pdfTeX's for CMEX glyphs without a Unicode name), the embedded program's
+built-in encoding is still needed for the codes it leaves out (task 6.7b). -/
+def toUnicodeCovers (resolve : PdfObject → PdfObject) (fd : Dict) (tu : Font.CMap.CMap) : Bool :=
+  let first : Nat := match getR resolve fd "FirstChar" with
+    | some (.int i) => i.toNat
+    | _ => 0
+  let ws : List PdfObject := match getR resolve fd "Widths" with
+    | some (.array ws) => ws
+    | _ => []
+  (List.range ws.length).all fun k =>
+    let code := first + k
+    let zero := match ws[k]?.bind (fun w => Interp.num? (resolve w)) with
+      | some w => w.raw == 0
+      | none => true
+    zero || 255 < code || ((tu.lookup [code.toUInt8]).filter printable).isSome
 
 /-- The em size of a Type 3 font relative to text space, estimated as twice the mean non-zero
 `/Widths` entry (scaled by `FontMatrix a`): a Type 3 glyph space has no em (bitmap fonts of
@@ -565,7 +592,7 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     (⟨.one, (fun c => match c with
         | [b] => Fixed.mul (sm.width b.toNat).1 scale
         | _ => Fixed.zero),
-      simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding, s!"Type3{tuDesc}", type3SizeScale sm scale⟩, s1)
+      simpleUnicode (sm.std14 == some .zapfDingbats) true tu sm.encoding, s!"Type3{tuDesc}", type3SizeScale sm scale⟩, s1)
   else
     let hasWidths := match getR resolve fd "Widths" with
       | some (.array _) => true
@@ -573,8 +600,13 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     let encIsName := match getR resolve fd "Encoding" with
       | some (.name _) => true
       | _ => false
+    -- the program is read for its widths, or for its built-in encoding when no named
+    -- `/Encoding` replaces it and the ToUnicode CMap (if any) leaves codes unmapped
+    let tuCovers := match tu with
+      | some t => toUnicodeCovers resolve fd t
+      | none => false
     let needT1 := (subtype == "Type1" || subtype == "MMType1") &&
-      (!hasWidths || (tu.isNone && !encIsName))
+      (!hasWidths || (!tuCovers && !encIsName))
     let (t1, s2) := if needT1 then loadType1 limits src s1 resolve fd else (none, s1)
     -- no Type 1 program: an embedded CFF (`/FontFile3 /Subtype /Type1C`) plays its role
     let (cff, s3) := if needT1 && t1.isNone then loadCFF limits src s2 resolve fd ["Type1C"]
@@ -601,7 +633,7 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     (⟨.one, (fun c => match c with
         | [b] => width b.toNat
         | _ => Fixed.zero),
-      simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding,
+      simpleUnicode (sm.std14 == some .zapfDingbats) false tu sm.encoding,
       s!"{subtype} {base}{tuDesc}{progDesc}", Fixed.one⟩, s4)
 
 /-- Maximum number of font objects loaded per page. -/
