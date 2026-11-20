@@ -1056,3 +1056,7 @@ import SafePdf.Shell.App.Links
 -- Phase 7, task 7.7: substitute fonts
 #print axioms SafePdf.Core.Raster.Subst.widthTable_length_le
 #print axioms SafePdf.Core.Raster.Glyph.substCodes_size
+-- Phase 6, task 6.8d: ActualText marked content
+#print axioms SafePdf.Core.Text.shownItems_eq_extract
+#print axioms SafePdf.Spec.Content.mark_step
+#print axioms SafePdf.Core.Content.Interp.markOp_marks_le
