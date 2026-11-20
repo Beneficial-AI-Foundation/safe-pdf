@@ -7,7 +7,8 @@
 #
 # 1. Corpus pass: for every PDF (default: corpus/files/*.pdf) the compiled viewer is started
 #    under its own Xvfb (window 1600x1000, continuous mode: SAFEPDF_VIEWER_VIEW=continuous) and
-#    a driver (wish, talking to the viewer's Tk interpreter with Tk `send`) re-opens the file
+#    a driver (wish, talking to the viewer's Tk interpreter with Tk `send`, which the viewer keeps
+#    only under the test hook SAFEPDF_VIEWER_DRIVE=1 set here, task 8.7) re-opens the file
 #    through File > Open (tk_getOpenFile answered by the driver) and goes through every page
 #    with Go > Next page, waiting after each step until the page is on screen and no deferred
 #    render is pending. The driver wraps `::safepdf::emit` (the one entry point of every Tk
@@ -450,7 +451,8 @@ run_one() {
   start_x
   local t0 t1 vrc drc
   t0=$(date +%s.%N)
-  env -u DISPLAY DISPLAY="$disp" SAFEPDF_VIEWER_GEOMETRY=1600x1000 SAFEPDF_VIEWER_VIEW=continuous \
+  env -u DISPLAY DISPLAY="$disp" SAFEPDF_VIEWER_DRIVE=1 SAFEPDF_VIEWER_GEOMETRY=1600x1000 \
+    SAFEPDF_VIEWER_VIEW=continuous \
     "$viewer" "$abs" >"$log.stdout" 2>"$log.stderr" &
   viewer_pid=$!
   drc=0

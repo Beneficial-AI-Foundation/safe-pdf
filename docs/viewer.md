@@ -608,6 +608,47 @@ through `Tk_PhotoPutBlock`; event arguments come back as separate words. The onl
 is the constant UI setup (`Viewer.setupScript`). The smoke test opens a file named
 `odd [exit 7] $HOME {x" \.pdf` and checks that the title shows it verbatim.
 
+**No Tcl from other X clients** (task 8.7, defence in depth). A PDF never reaches Tcl as
+script (above), but two Tk mechanisms let *other clients of the X display* do it, and the
+viewer closes both:
+
+* **Tk `send`.** A Tk application registers its name on the display, and any client the X
+  server admits can `send` it a script, evaluated at global level (`exec` included). Right
+  after Tk starts, before the event loop ever runs, `Viewer.mainWith` evaluates
+  `Viewer.sendOffScript` (`rename ::send {}`); Tk's delete callback of `send` also removes the
+  application from the display's registry, so `winfo interps` elsewhere no longer lists it and
+  `send tk …` fails with "no application named". (Setting `tk appname` would register it again;
+  the viewer never does.) The **test hook** `SAFEPDF_VIEWER_DRIVE=1` keeps `send`:
+  `scripts/viewer-corpus.sh` sets it because its driver works through `send`; nothing else
+  should.
+* **The X resource database.** Tk fills every widget option not given at creation from the
+  option database, loaded from the display's `RESOURCE_MANAGER` property (which any client can
+  set, e.g. with `xrdb`) or `~/.Xdefaults`. Several options are scripts: `-command`,
+  `-validatecommand` (with `-validate`), `-invalidcommand`, `-postcommand`, `-tearoffcommand`,
+  `-x/yscrollcommand`, `-takefocus` (evaluated by keyboard traversal); others link variables
+  (`-textvariable`, `-listvariable`) or re-parent a toplevel (`-use`, `-screen`,
+  `-container`). Verified before the fix: `*Entry.validateCommand: exec touch …` ran in the
+  viewer. `Viewer.resourceGuardScript`, the first lines of `setupScript`, adds `*NAME {}` (and
+  `*validate none`, `*container 0`) at priority `interactive` (80); Tk ranks option entries by
+  priority before specificity and loads resources at `userDefault` (60), so they no longer reach
+  any widget (the main window's `-takefocus` is reset explicitly; it existed before). `option
+  clear` does not help: Tk reloads the resources on the next lookup.
+
+Reviewed and found safe (all data reaches Tcl as quoted words of `Tcl.cmd` via `Viewer.run`,
+or as variables inside constant procs, never as script): document and outline titles
+(`wm title`, `.ol.t insert` in `fillOutline`), link URIs (`::safepdf::askUri` inserts them into
+a text widget by variable; `clipboard append --`), file names (title, status line, dialogs'
+`-initialdir`/`-initialfile` through `::safepdf::askSavePath`/`askXfdf*` arguments), note and
+comment text (`::safepdf::noteEdit` inserts it by variable; it comes back as one `emit` word),
+XFDF content (parsed in Lean, `Xfdf.readFile`; only marks reach Tk, as above), search and
+go-to text (`emit … $::safepdf::query` is one word), render errors (`-text` of a canvas item).
+Every `after`/`-command`/`bind` script is a constant (`Menu.Cmd.script`, `Toolbar` tool
+scripts name constant icons), Tcl-side `expr` calls are braced, and the toolbar's
+`uplevel #0` runs only the constant command stored when the button was built. Other X-level
+inputs only trigger UI actions (`WM_DELETE_WINDOW` → Quit, which asks about unsaved marks;
+synthetic key events), and clipboard/selection requests from other clients only read data.
+The smoke test's `lockdown` case checks all of this from a second interpreter on the display.
+
 **Threads.** The shim's interpreter is used only from the thread running Lean's `main`. On
 macOS (Cocoa must run on the main thread) the shim sets `LEAN_MAIN_USE_THREAD=0` from a
 constructor, as bib-lean does; on Linux Lean's `main` keeps its large-stack thread.
@@ -791,6 +832,17 @@ Screenshots for comparison with the reference can be taken under Xvfb at the ref
 e.g. `Xvfb :97 -screen 0 1900x940x24 &`, then
 `DISPLAY=:97 SAFEPDF_VIEWER_GEOMETRY=1900x940 .lake/build/bin/viewer FILE.pdf &` and
 `DISPLAY=:97 import -window root shot.png` (ImageMagick).
+
+The `lockdown` case (8.7, `Viewer.smokeLockdown`) runs the viewer with `HOME` holding a
+hostile `~/.Xdefaults` (`*Entry.validateCommand`, `*TEntry.validateCommand`,
+`*Menu.postCommand`, `*Menu.tearOffCommand`, `*takeFocus` that would `exec touch pwned`,
+`*Entry.textVariable` pointing at a toolbar command, `*Toplevel.container: 1`) together with a
+second `wish` on the same display: the viewer records that `send` is gone and that the page
+field, the overflow menu, `.` and fresh probe widgets carry none of the resources, types into
+the entries, posts the menu and runs keyboard traversal; the `wish` checks that it got the
+resources itself (control), lists `winfo interps` (only itself) and tries `send` to every
+interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A second run with
+`SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
