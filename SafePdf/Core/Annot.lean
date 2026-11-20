@@ -2686,7 +2686,7 @@ def extractDocPageAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
     let (ap, b) := docAnnots limits doc page pt.fonts (Budget.after limits pt) b
-    (.ok (withAnnots o pt ap), b)
+    (.ok (withAnnots (o.forPage page) pt ap), b)
 
 /-! ## 6. Checks -/
 

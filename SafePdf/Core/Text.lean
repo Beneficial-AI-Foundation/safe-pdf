@@ -94,7 +94,10 @@ task 7.3l).
 ## Reading order (`layout`; heuristic, tested not proven, Plan.md §6)
 
 Glyphs are taken in content-stream order (filtered to visible ones unless
-`Options.includeInvisible`, the default being to keep invisible text such as OCR layers). A
+`Options.includeInvisible`, the default being to keep invisible text such as OCR layers, and
+leaving out glyphs whose box — advance × [−0.2, 0.8] of the size, `Glyph.bounds` — lies
+entirely outside `Options.pageBox`, the CropBox for document pages: MuPDF's `FZ_STEXT_CLIP`,
+task 6.8b; e.g. a mailing panel drawn above the CropBox of a cover page). A
 glyph joins the current line when its baseline is within `lineTol` (‰ of the font size) of the
 line's, or when it is a **sub/superscript** of the line (`scriptJoin`, task 6.7c): a glyph of
 smaller size raised by at most `scriptRaise` ‰ of the line's size, or a larger glyph lying that
@@ -963,6 +966,11 @@ structure Options where
   /-- How far past the previous glyph's advance end a backward-moving glyph may start and still
   keep content order (`attached`); MuPDF's `SPACE_MAX_DIST` (0.8 em). -/
   attachBack : Nat := 800
+  /-- The visible page area in default user space, `(llx, lly, urx, ury)`: glyphs lying
+  entirely outside it are left out of the lines and the text (`Glyph.offPage`; MuPDF's
+  `FZ_STEXT_CLIP`, which `mutool draw` sets). `none`: no clipping. `extractDocPage` fills it
+  with the page's CropBox (`Options.forPage`). -/
+  pageBox : Option (Fixed × Fixed × Fixed × Fixed) := none
 
 /-- Position along the baseline direction. -/
 def Glyph.u (g : Glyph) : Fixed := (rotFrame g.dir g.x g.y).1
@@ -975,6 +983,39 @@ def fmin (x y : Fixed) : Fixed := if y.raw < x.raw then y else x
 
 /-- The end of a glyph's advance along its baseline direction. -/
 def Glyph.uEnd (g : Glyph) : Fixed := Fixed.add g.u g.width
+
+/-- Coordinates of a direction's frame mapped back to page space (inverse of `rotFrame`). -/
+def unFrame (dir : Nat) (u v : Fixed) : Fixed × Fixed :=
+  match dir with
+  | 1 => (Fixed.neg v, u)
+  | 2 => (Fixed.neg u, Fixed.neg v)
+  | 3 => (v, Fixed.neg u)
+  | _ => (u, v)
+
+/-- The page-space box `(x0, y0, x1, y1)` of a glyph: its advance along the baseline, and
+across it from `0.2` of the size below the baseline to `0.8` above (the API's `glyphBox`; an
+estimate of the ink box MuPDF takes from the outline). -/
+def Glyph.bounds (g : Glyph) : Fixed × Fixed × Fixed × Fixed :=
+  let s := fabs g.fontSize
+  let v0 := Fixed.sub g.v (Fixed.div s (Fixed.ofInt 5))
+  let v1 := Fixed.add g.v (Fixed.div (Fixed.mul s (Fixed.ofInt 4)) (Fixed.ofInt 5))
+  let p := unFrame g.dir (fmin g.u g.uEnd) v0
+  let q := unFrame g.dir (fmax g.u g.uEnd) v1
+  (fmin p.1 q.1, fmin p.2 q.2, fmax p.1 q.1, fmax p.2 q.2)
+
+/-- Whether a glyph lies **entirely outside** the box `(llx, lly, urx, ury)` (touching its
+edge from outside counts as outside), as MuPDF's `fz_glyph_entirely_outside_box`. -/
+def Glyph.offPage (b : Fixed × Fixed × Fixed × Fixed) (g : Glyph) : Bool :=
+  let (x0, y0, x1, y1) := g.bounds
+  x1.raw ≤ b.1.raw || y1.raw ≤ b.2.1.raw || b.2.2.1.raw ≤ x0.raw || b.2.2.2.raw ≤ y0.raw
+
+/-- Whether layout keeps a glyph: visible (or invisible text kept) and not entirely outside
+`pageBox`. -/
+def Options.keeps (o : Options) (g : Glyph) : Bool :=
+  (o.includeInvisible || g.visible) &&
+    match o.pageBox with
+    | some b => !g.offPage b
+    | none => true
 
 /-- A line: glyphs in content order, the baseline of its largest-size glyphs, its largest
 size, and its extent along the baseline. -/
@@ -1099,7 +1140,7 @@ def lineText (o : Options) (l : Line) : String :=
 
 /-- **Reading order**: the page text of a glyph list (see the module doc). -/
 def layout (o : Options) (gs : List Glyph) : Array Line × String :=
-  let lines := groupLines o (gs.filter fun g => o.includeInvisible || g.visible)
+  let lines := groupLines o (gs.filter o.keeps)
   let (text, _) := lines.foldl (fun (acc : String × Option Line) l =>
     let t := lineText o l
     match acc.2 with
@@ -1184,14 +1225,25 @@ def joinParts : List ByteArray → ByteArray
   | [] => ByteArray.empty
   | p :: ps => ps.foldl (fun acc b => (acc.push 32) ++ b) p
 
-/-- Extract the text of a page of an opened document, charging `budget`. -/
+/-- The options for a page: `pageBox` defaults to the page's CropBox (which lies inside its
+MediaBox, `Doc.cropBox_sub_media`), the area MuPDF's text device clips to. -/
+def Options.forPage (o : Options) (page : Page) : Options :=
+  match o.pageBox with
+  | some _ => o
+  | none =>
+    let c := page.cropBox
+    { o with pageBox := some (Fixed.ofDecimal c.llx, Fixed.ofDecimal c.lly,
+                              Fixed.ofDecimal c.urx, Fixed.ofDecimal c.ury) }
+
+/-- Extract the text of a page of an opened document, charging `budget`. Lines and text leave
+out glyphs entirely outside the page's CropBox (`Options.forPage`); `glyphs` keeps them. -/
 def extractDocPage (limits : Limits) (doc : Doc) (page : Page) (budget : Budget)
     (o : Options := {}) : (Except Error PageText) × Budget :=
   match doc.decodeContentsB limits budget page with
   | (.error e, b) => (.error e, b)
   | (.ok parts, b) =>
     let (pt, b) := extractPage limits (docSource limits doc) (page.resources.getD [])
-      (joinParts parts) b o
+      (joinParts parts) b (o.forPage page)
     (.ok pt, b)
 
 /-! ## Spot checks -/
@@ -1275,6 +1327,21 @@ private def hello : ByteArray := page helv "BT /F1 12 Tf 72 700 Td (Hello World)
 #guard txt (page helv "BT /F1 10 Tf 3 Tr 72 700 Td (ocr) Tj ET" [helvObj]) == "ocr"
 #guard txt (page helv "BT /F1 10 Tf 3 Tr 72 700 Td (ocr) Tj ET" [helvObj])
   { includeInvisible := false } == ""
+-- task 6.8b: glyphs entirely outside the CropBox (here the MediaBox [0 0 612 792]) are left out
+-- of the text one by one ("Edg" past x = 612: MuPDF's FZ_STEXT_CLIP), but kept in `glyphs`
+#guard txt (page helv "BT /F1 12 Tf 72 900 Td (Above) Tj ET BT /F1 12 Tf 72 700 Td (In) Tj ET"
+  [helvObj]) == "In"
+#guard txt (page helv "BT /F1 12 Tf 592 700 Td (Edge) Tj ET" [helvObj]) == "Edg"
+#guard ((ext (page helv "BT /F1 12 Tf 72 900 Td (Above) Tj ET" [helvObj])).map
+  (·.glyphs.length)) == some 5
+-- an explicit `pageBox` wins over the CropBox
+#guard txt (page helv "BT /F1 12 Tf 72 900 Td (Above) Tj ET" [helvObj])
+  { pageBox := some (Fixed.zero, Fixed.zero, Fixed.ofInt 1000, Fixed.ofInt 1000) } == "Above"
+-- the box of a glyph drawn downwards (quarter turn 3): its advance downwards, ink towards +x
+private def gDown : Glyph :=
+  { text := "A", code := [65], item := 0, seq := 0, x := Fixed.ofInt 100, y := Fixed.ofInt 500,
+    width := Fixed.ofInt 10, dir := 3, fontSize := Fixed.ofInt 10, visible := true }
+#guard gDown.bounds == (Fixed.ofInt 98, Fixed.ofInt 490, Fixed.ofInt 108, Fixed.ofInt 500)
 
 -- a superscript raised 0.55 em by `Ts` stays on its line (beyond `lineTol`, `scriptJoin`)
 #guard txt (page helv "BT /F1 10 Tf 72 700 Td (mc) Tj /F1 7 Tf 5.5 Ts (2) Tj /F1 10 Tf 0 Ts ( x) Tj ET"
