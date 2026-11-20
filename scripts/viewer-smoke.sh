@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.7; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
 # (SAFEPDF_VIEWER_SMOKE=DIR) on
-#   1. a generated two-page PDF (scripts/viewer-smoke-pdf.py): page 1 must contain non-white
+#   1. a generated two-page PDF (scripts/viewer-smoke-pdf.py), shown at fit page (`f`; the
+#      viewer opens in Automatic Zoom): page 1 must contain non-white
 #      pixels, the viewer must reach page 2 through a Tk key event (from the prefetch cache),
 #      and page 2 (/Rotate 90) must come out landscape; then, driven by key events: 100 %,
 #      zoom in (125 %), zoom out twice (75 %), rotate (sizes and non-white pixel counts must
@@ -19,6 +20,9 @@
 #   1f. the same PDF through the menubar (SAFEPDF_VIEWER_SMOKE_MODE=menu): File / Edit / View /
 #      Go entries invoked by their .menubar paths, enabled states (9.1); mouse wheel across page
 #      boundaries both ways, small deltas, Button-4/5, Shift+wheel (9.2);
+#   1g. the toolbar and sidebar after PDF.js (SAFEPDF_VIEWER_SMOKE_MODE=toolbar) on that PDF and
+#      on the two-page one without an outline: page field, arrows, zoom drop-down, overflow
+#      menu, disabled tools, sidebar shown/hidden with its toggle, disclosure triangles (9.7);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -412,6 +416,83 @@ except (KeyError, ValueError) as e:
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-menu/menu.txt" || fail=1
+
+# 1g. Toolbar and sidebar after PDF.js (task 9.7, SAFEPDF_VIEWER_SMOKE_MODE=toolbar), on the
+# three-page PDF with labels i, ii, 1 and an outline, and on the two-page PDF without one:
+# layout of the three toolbar groups; the sidebar opens (with its toggle shown and pressed)
+# only with an outline; the page field shows the label or number and "(k of N)" / "of N";
+# generated clicks on the arrows page (and are disabled at the ends); Enter in the page field
+# jumps (number, label), an out-of-range number or text reverts to the current page, leaving
+# the field reverts it; End/Home update the field; the zoom drop-down lists the twelve PDF.js
+# choices, shows the chosen one, and shows custom zooms reached with -/+ as a percentage; the
+# overflow menu pages; the tool buttons are disabled and ignore clicks; a disclosure triangle
+# collapses and expands its subtree; the toggle button hides and shows the sidebar.
+mkdir -p "$work/out-tb-nav" "$work/out-tb-two"
+SAFEPDF_VIEWER_SMOKE_MODE=toolbar run_viewer "$work/out-tb-nav" "$work/nav.pdf"
+SAFEPDF_VIEWER_SMOKE_MODE=toolbar run_viewer "$work/out-tb-two" "$work/two.pdf"
+cat "$work/out-tb-nav/toolbar.txt" "$work/out-tb-two/toolbar.txt"
+python3 -I -c '
+import sys
+def load(path):
+    return dict(l.split(": ", 1) for l in open(path, encoding="utf-8").read().splitlines() if ": " in l)
+nav, two = load(sys.argv[1]), load(sys.argv[2])
+layout_r = ".bar.r=.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.print,.bar.save,.bar.s4,.bar.more"
+layout_m = ".bar.m=.bar.zout,.bar.s2,.bar.zin,.bar.zoom"
+common = {
+    "zoom-label0": "Automatic Zoom",
+    "zoom-sel0": "auto",
+    "zoom-menu": "Automatic Zoom|Actual Size|Page Fit|Page Width|50%|75%|100%|125%|150%|200%|300%|400%",
+    "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left",
+    "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
+    "tools": ",".join(w + "=disabled" for w in [".bar.highlight", ".bar.comment", ".bar.text",
+                                               ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),
+    "status-unchanged-after-tool": "true",
+    "history-after-entry": "2",
+}
+want_nav = dict(common, **{
+    "pages": "3", "has-outline": "true", "sidebar-shown": "true", "panes": ".ol .v",
+    "toggle-mapped": "1",
+    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of " + layout_m + " " + layout_r,
+    "field0": "i", "of0": "(1 of 3)",
+    "after-next": "2 ii (2 of 3)", "after-next-prev": "2 ii", "after-prev-at-start": "1 i",
+    "entry-last": "3 1", "entry-999": "3 1", "entry-abc": "3 1", "entry-first": "1 i",
+    "entry-revert": "1 i", "key-end": "3 1", "key-home": "1 i",
+    "more-last": "3 1", "more-first": "1 i",
+    "child-visible": "true", "child-visible-after-collapse": "false",
+    "child-visible-after-expand": "true",
+    "toggle-pressed0": "1", "after-toggle": "false .v 0", "after-toggle2": "true .ol .v",
+})
+want_two = dict(common, **{
+    "pages": "2", "has-outline": "false", "sidebar-shown": "false", "panes": ".v",
+    "toggle-mapped": "0",
+    "layout": ".bar.l=.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of " + layout_m + " " + layout_r,
+    "field0": "1", "of0": "of 2",
+    "after-next": "2 2 of 2", "after-next-prev": "1 1", "after-prev-at-start": "1 1",
+    "entry-last": "2 2", "entry-999": "2 2", "entry-abc": "2 2", "entry-first": "1 1",
+    "entry-revert": "1 1", "key-end": "2 2", "key-home": "1 1",
+    "more-last": "2 2", "more-first": "1 1",
+})
+errs = []
+for name, v, want in (("nav", nav, want_nav), ("two", two, want_two)):
+    errs += ["%s %s: %r, expected %r" % (name, k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+    if name == "two":
+        errs += ["two: unexpected %s" % k for k in ("child-visible", "after-toggle") if k in v]
+    # Zoom: label | radio value | shown percentage.
+    zw = {"zoom-page-width": ("Page Width", "page-width", None),
+          "zoom-page-fit": ("Page Fit", "page-fit", None),
+          "zoom-actual": ("Actual Size", "actual", 100),
+          "zoom-150": ("150%", "150", 150),
+          "zoom-in-200": ("200%", "200", 200),
+          "zoom-out-125": ("125%", "125", 125),
+          "zoom-custom-33": ("33%", "", 33),
+          "zoom-auto": ("Automatic Zoom", "auto", None)}
+    for k, (lbl, sel, pct) in zw.items():
+        parts = v.get(k, "||").split("|")
+        if parts[0] != lbl or parts[1] != sel or (pct is not None and abs(int(parts[2]) - pct) > 1):
+            errs.append("%s %s: %r, expected %s|%s|%s" % (name, k, v.get(k), lbl, sel, pct))
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-tb-nav/toolbar.txt" "$work/out-tb-two/toolbar.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
