@@ -154,15 +154,41 @@ alignment paired leftover '.', '0', '(' and ')' of different table cells. Number
 | comparator | before | after |
 |---|---|---|
 | `text-mupdf` | 0.9466 over 72 pages; p61-p72 0.47-0.67 | 0.9984 over 58 pages; 14 known pages 0.5786 (printed separately) |
-| `positions` | 99.2287% of 109,420 pairs within (844 out) | 100.0000% of 103,100 pairs; 14 known pages 4,953 pairs, 601 out (printed separately) |
+| `positions` | 99.2287% of 109,420 pairs within (844 out) | 100.0000% of 103,100 pairs; 14 known pages 6,067 pairs, 760 out (printed separately) |
 
-## Positions matcher: anchoring (task 6.8c)
+Whole corpus (81 files, 2,450 pages, a0f4718 inspector; `run.py --comparator text-mupdf
+--comparator positions`), before -> after this mechanism and the matcher fixes below:
+text vs MuPDF 0.9926 over 2,450 pages -> 0.9936 over 2,436 pages (+ 14 known pages at
+0.5786, printed separately); positions 99.9471% of 5,724,449 pairs within (3,030 out, 76/81
+files at 100%) -> 5,718,110 of 5,718,112 within (2 out: arxiv-2010.11929 p18 and
+arxiv-1706.00001 p4, 79/81 files at 100%; + 6,067 known-page pairs, 760 out, printed
+separately). `--no-known` gives the numbers with the known pages included.
 
-Independently of the known pages, the positions matcher no longer pairs characters that
-an LCS alignment picked out of unrelated text. A matching block shorter than 3 characters
-counts only when it lies on the alignment diagonal of the nearest long block before or
-after it (or of the page start / end); otherwise its characters are unmatched (stat
-`unanchored`). Details in the `positions.py` docstring (`anchored_blocks`).
+## Positions matcher: anchoring and runs (task 6.8c)
+
+Two matcher flaws paired characters that do not correspond, so they showed up as large
+"position errors"; both fixes only change *which* characters are paired, never the
+tolerance:
+
+* **Anchoring.** A matching block shorter than 3 characters counts only when it lies on
+  the alignment diagonal of the nearest long block before or after it (or of the page
+  start / end), or between those two diagonals within 4 characters of one of them (a
+  piece between two one-sided deletions, "c[al]c" vs "[al]"); otherwise its characters
+  are unmatched (stat `unanchored`). This removed the 17 outliers of arxiv-2501.12948 p52
+  (our Caesar-shifted text matched stray 'R', 'K', '9' of MuPDF's) and drops no pair that
+  was within tolerance on the healthy files checked (0704.0001, 0905.0002, 2006.11239,
+  2303.08774).
+* **Runs of identical characters.** difflib pairs a run of equal characters leftmost. On
+  www.ntsb.gov-RAR0801 p5 the TOC leaders are `/Span<</ActualText<feff002e>>> BDC ( )Tj
+  EMC` + 104 dots: MuPDF honours the ActualText ('.' at the space) and has 105 dots, we
+  have a space + 104 dots at exactly MuPDF's other 104 positions, so every dot was paired
+  one advance (3 pt) off. A run whose pairs are out of tolerance is now re-paired by
+  shifting it up to 2 slots onto identical reference characters that are unmatched (or
+  its own), when that puts more of its pairs within tolerance (stat `slid`; one-to-one
+  and order kept). RAR0801: 2,167 -> 0 pairs out of tolerance. (ActualText support in our
+  extraction is a separate Core task.)
+
+Details in the `positions.py` docstring (`anchored_blocks`, `slide_runs`).
 
 ## Licensing
 
