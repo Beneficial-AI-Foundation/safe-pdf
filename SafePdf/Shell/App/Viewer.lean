@@ -137,6 +137,14 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
   numbers) is built with `Tcl.cmd`/`Script.render`, whose literal words go through the proved
   `Tcl.quote` (`Tcl.parseScript_render`); the only raw script text is the constant UI setup.
+* **No Tcl from other X clients** (task 8.7, defence in depth): Tk's `send` would let any
+  client of the display evaluate Tcl (`exec` included) in the viewer, so `mainWith` deletes
+  the `send` command right after Tk starts (`sendOffScript`), which also withdraws the
+  application from the display's registry (`winfo interps`), unless the test hook
+  `SAFEPDF_VIEWER_DRIVE=1` keeps it for `scripts/viewer-corpus.sh`. The X resource database
+  (also writable by any client of the display) could give widgets script-valued options
+  (`*Entry.validateCommand`, `*Menu.postCommand`, `*takeFocus`, …); `setupScript` first
+  overrides every such option name (`resourceGuardScript`).
 * **Library documents** (task 10.1b, `viewer --biblean`): `mainWith` runs an `init` after the
   window is built; bib-lean's reader mode opens its bytes there from memory (`openBytes`,
   nothing on disk; `State.inMemory`), titled with `State.titleOverride`, with a `Library`
@@ -541,7 +549,36 @@ def marksChanged (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   if let some l := s.library then l.onMarksChanged s.marks
 
-/-- The constant UI setup script (no data in it). Widgets: the toolbar `.bar` after PDF.js
+/-- Deletes Tk's `send` command (task 8.7). Tk's delete callback for `send` also removes the
+application from the display's interpreter registry, so other X clients no longer find it
+(`winfo interps`) and a `send` to its name fails with "no application named …". Tk on
+Windows has no `send`; then nothing happens. -/
+def sendOffScript : String :=
+  "if {[llength [info commands ::send]]} { rename ::send {} }"
+
+/-- The X resource database guard (task 8.7, run first in `setupScript`). Tk fills widget
+options not given at creation from the option database, which Tk loads from the display's
+`RESOURCE_MANAGER` property (any client of the display can set it) or `~/.Xdefaults`, at
+priority `userDefault` (60). Several options are scripts or redirect a window: `-command`,
+`-validatecommand` (with `-validate`), `-invalidcommand`, `-postcommand`,
+`-tearoffcommand`, `-xscrollcommand`/`-yscrollcommand`, `-takefocus` (a script for keyboard
+traversal), `-textvariable`/`-listvariable`, and a toplevel's `-use`, `-screen`,
+`-container`. Entries for them at priority `interactive` (80) win over every resource loaded
+from the display (Tk ranks by priority before specificity), so a widget created without such
+an option gets the harmless default; options the viewer passes explicitly are unaffected.
+The main window `.` existed before this ran, so its `-takefocus` is reset explicitly. -/
+def resourceGuardScript : String := "
+foreach o {command validateCommand invalidCommand postCommand tearOffCommand xScrollCommand
+           yScrollCommand takeFocus textVariable listVariable use screen} {
+  option add *$o {} interactive
+}
+option add *validate none interactive
+option add *container 0 interactive
+. configure -takefocus {}
+"
+
+/-- The constant UI setup script (no data in it). It starts with `resourceGuardScript`
+(task 8.7). Widgets: the toolbar `.bar` after PDF.js
 (task 9.7: groups `.bar.l`, `.bar.m` (centred), `.bar.r`, filled from `Toolbar.layout` by
 `buildToolbar` with the procs defined here: canvas icon buttons `::safepdf::iconButton`, the
 page field `.bar.pg` + `.bar.of`, the zoom drop-down `.bar.zoom` + menu `.zoommenu`, the
@@ -554,6 +591,7 @@ high with 32 px round buttons and 16 px icons, separators, field and drop-down b
 def setupScript : String := "
 namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0 }
 namespace eval ::safepdf::icon {}
+" ++ resourceGuardScript ++ "
 wm title . safe-pdf
 wm geometry . 1200x960
 wm minsize . 480 240
@@ -4564,6 +4602,54 @@ def smokeScroll (st : IO.Ref State) (dir : String) : IO Unit := do
       canvas: {s.canvasW}x{s.canvasH}\nstatus: {← run [".status", "cget", "-text"]}\n"
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the Tcl lockdown (`SAFEPDF_VIEWER_SMOKE_MODE=lockdown`, task 8.7), run by
+`scripts/viewer-smoke.sh` with `HOME` holding a hostile `~/.Xdefaults` (script-valued
+resources that would create the file `pwned`) and, on the same display, a second Tk
+interpreter that tries `send` into the viewer. Step 0 records whether the `send` command
+exists, the registered interpreters and the options the resources target (on the page field,
+the overflow menu, the main window and freshly created probe widgets), exercises them
+(typing into the page field, posting the menu, keyboard traversal) and writes `up`; the next
+steps wait (at most 20 s) for the other interpreter's `attacked` file, then write
+`lockdown.txt` and close the window. -/
+def smokeLockdown (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : System.FilePath := (dir : System.FilePath) / name
+  let s ← st.get
+  st.modify ({ · with smokeStep := s.smokeStep + 1 })
+  if s.smokeStep == 0 then
+    discard <| run ["update"]
+    let get (w o : String) : IO String := do
+      try return s!"[{← run [w, "cget", o]}]" catch e => return s!"error {e}"
+    let mut out : Array String := #[]
+    out := out.push s!"send-command: [{← run ["info", "commands", "::send"]}]"
+    out := out.push s!"interps: [{← try run ["winfo", "interps"] catch e => pure s!"error {e}"}]"
+    out := out.push s!"pg-validate: {← get ".bar.pg.e" "-validate"} {← get ".bar.pg.e" "-validatecommand"}"
+    out := out.push s!"more-postcommand: {← get ".more" "-postcommand"}"
+    out := out.push s!"root-takefocus: {← get "." "-takefocus"}"
+    discard <| run ["entry", ".lockE"]
+    discard <| run ["menu", ".lockM"]
+    discard <| run ["toplevel", ".lockT"]
+    out := out.push s!"probe-entry: {← get ".lockE" "-validate"} {← get ".lockE" "-validatecommand"} {← get ".lockE" "-textvariable"} {← get ".lockE" "-takefocus"}"
+    out := out.push s!"probe-menu: {← get ".lockM" "-postcommand"} {← get ".lockM" "-tearoffcommand"}"
+    out := out.push s!"probe-toplevel: {← get ".lockT" "-use"} {← get ".lockT" "-screen"} {← get ".lockT" "-container"}"
+    -- Exercise what the resources would hook: validation, posting, traversal.
+    discard <| run [".bar.pg.e", "insert", "end", "1"]
+    discard <| run [".lockE", "insert", "end", "1"]
+    discard <| run [".lockM", "post", "0", "0"]
+    discard <| run [".lockM", "unpost"]
+    discard <| run ["tk_focusNext", "."]
+    discard <| run ["tk_focusNext", ".lockE"]
+    discard <| run ["destroy", ".lockE", ".lockM", ".lockT"]
+    discard <| run ["update"]
+    IO.FS.writeFile (file "lockdown.txt") ("\n".intercalate out.toList ++ "\n")
+    IO.FS.writeFile (file "up") ""
+    discard <| run ["after", "250", "::safepdf::emit smoke"]
+  else if (← (file "attacked").pathExists) || s.smokeStep > 80 then
+    let old ← IO.FS.readFile (file "lockdown.txt")
+    IO.FS.writeFile (file "lockdown.txt") (old ++ s!"attacked-file: {← (file "attacked").pathExists}\ndone\n")
+    discard <| run ["destroy", "."]
+  else
+    discard <| run ["after", "250", "::safepdf::emit smoke"]
+
 /-- Smoke steps of bib-lean's reader mode (`SAFEPDF_VIEWER_SMOKE_MODE=biblean`, task 10.1b;
 run by `Tests/biblean/window-test.sh` and `annots-test.sh` under `viewer --biblean`), in three
 event-loop turns 1.5 s apart so the library sync (400 ms debounce) runs in between:
@@ -4665,6 +4751,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "modes" then smokeModes st dir else smokeScroll st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "lockdown" then
+    try smokeLockdown st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "lockdown.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "biblean" then
@@ -4881,6 +4973,9 @@ SAFEPDF_VIEWER_SMOKE_MODE=biblean: under viewer --biblean, a highlight, a note a
 library (task 10.1b);
 SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in
 the vertical mode and write timings (a benchmark).
+SAFEPDF_VIEWER_SMOKE_MODE=lockdown: Tk send and hostile X resources (task 8.7).
+SAFEPDF_VIEWER_DRIVE=1: test hook keeping Tk's send command (scripts/viewer-corpus.sh drives
+the viewer through it); without it other X clients cannot send Tcl to the viewer.
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).
 SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: initial view mode (facing:
 odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads)."
@@ -4896,7 +4991,13 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
     | ["--help"] | ["-h"] => IO.println usage; return 0
     | [f] => pure (some f)
     | _ => IO.eprintln usage; return 2
-  try Shim.init
+  try
+    Shim.init
+    -- Task 8.7: no Tcl from other X clients through `send`, unless the corpus driver
+    -- (`scripts/viewer-corpus.sh`) asks to drive the viewer that way. Before anything else:
+    -- Tk handles incoming sends only in the event loop, which has not run yet.
+    if (← IO.getEnv "SAFEPDF_VIEWER_DRIVE") != some "1" then
+      discard <| Shim.eval sendOffScript
   catch e =>
     IO.eprintln s!"viewer: cannot start Tk: {e}"
     return 3

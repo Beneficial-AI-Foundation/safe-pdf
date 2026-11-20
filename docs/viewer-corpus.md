@@ -74,8 +74,8 @@ takes about 5 minutes on the sandbox (8 cores, one file at a time).
 ### Limits of the method
 
 * `send` must work: Tk refuses it when the X server's access control is off (`xhost +`); the
-  private Xvfb started here has it on. If the viewer ever disables `send` (see *Findings*),
-  this script needs an equivalent hook.
+  private Xvfb started here has it on. Since task 8.7 the viewer deletes `send` at start-up
+  unless the test hook `SAFEPDF_VIEWER_DRIVE=1` is set, which this script sets.
 * Times are wall-clock on a shared machine (the sandbox: 8 cores, one viewer at a time); they
   are rendering times of the verified core plus Tk's photo upload, not frame timings.
 * Pages are visited front to back with Next page; scrolling with the wheel inside a page
@@ -157,7 +157,9 @@ the threshold is left at 1 GiB on purpose (see *Findings*, F1).
   access check admits can evaluate arbitrary Tcl in it (`exec` included) — this script relies
   on exactly that. A PDF cannot reach it, so it is outside the threat model of the core, but a
   shell meant to be safe could `rename send {}` in `Viewer.setupScript` unless a test hook asks for it; this script would then need such a
-  hook (e.g. keep `send` only when `SAFEPDF_VIEWER_DRIVE=1`).
+  hook (e.g. keep `send` only when `SAFEPDF_VIEWER_DRIVE=1`). **Fixed by 8.7:** `send` is deleted
+  unless `SAFEPDF_VIEWER_DRIVE=1`; X resources can no longer set script-valued widget options
+  either (docs/viewer.md, "No Tcl from other X clients").
 * No crash, no hang, no render error, no stderr output, no failed session step. The encrypted
   NTSB file (AES-256, R6) saves by incremental update (9.5f) and reopens with its marks.
 

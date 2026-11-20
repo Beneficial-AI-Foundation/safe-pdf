@@ -49,6 +49,9 @@
 #      3 scrolled into view), continuous facing (pages 1|2 side by side, the highlight drawn),
 #      facing (two pages, Next/Previous by two, a wheel notch turns a spread), even spreads
 #      (1 alone, then 2|3), back to single page (9.3);
+#   1l. Tcl lockdown (SAFEPDF_VIEWER_SMOKE_MODE=lockdown): Tk send from another interpreter on
+#      the display fails and hostile X resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1
+#      send works (8.7);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -985,6 +988,95 @@ except (KeyError, ValueError) as e:
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-modes/modes.txt" || fail=1
+
+# 1l. Tcl lockdown (task 8.7; SAFEPDF_VIEWER_SMOKE_MODE=lockdown): HOME holds a hostile
+#     ~/.Xdefaults (script-valued resources that would create the file `pwned`), and a second
+#     Tk interpreter on the same display tries `send` into the viewer. Without the test hook
+#     the viewer has no `send` command, is not in `winfo interps`, every send fails, and the
+#     resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1 the send works (the corpus
+#     driver's path). The other interpreter also checks that it got the hostile resources
+#     itself (so the guard, not a missing resource file, is what the test sees).
+lockwish=""
+for w in wish9.0 wish8.6 wish; do
+  if command -v "$w" >/dev/null; then lockwish="$w"; break; fi
+done
+if [ -z "$lockwish" ]; then
+  echo "viewer-smoke: wish missing, lockdown case skipped"
+else
+  cat > "$work/attacker.tcl" <<'TCL'
+wm withdraw .
+lassign $argv dir
+namespace eval ::safepdf {}
+set t0 [clock milliseconds]
+while {![file exists $dir/up] && [clock milliseconds] - $t0 < 40000} { after 50 }
+set f [open $dir/attack.txt w]
+entry .ctl
+puts $f "control-resources: [.ctl cget -validate] [.ctl cget -validatecommand]"
+.ctl configure -validate none
+puts $f "interps: [winfo interps]"
+set ok 0
+foreach i [lsort -unique [concat [winfo interps] tk viewer safe-pdf]] {
+  if {$i eq [tk appname]} continue
+  set code [catch {send $i {set ::safepdf::lockSent 1}} r]
+  puts $f "send $i: $code $r"
+  if {$code == 0} { incr ok }
+}
+puts $f "sends-ok: $ok"
+close $f
+close [open $dir/attacked w]
+exit
+TCL
+  # lock_run DIR [ENV...]: the viewer (smoke mode lockdown) and the attacker on one display.
+  lock_run() {
+    local d="$1"; shift
+    mkdir -p "$d/home"
+    cat > "$d/home/.Xdefaults" <<XD
+*Entry.validate: all
+*Entry.validateCommand: exec touch $d/pwned
+*TEntry.validate: all
+*TEntry.validateCommand: exec touch $d/pwned
+*Menu.postCommand: exec touch $d/pwned
+*Menu.tearOffCommand: exec touch $d/pwned
+*takeFocus: exec touch $d/pwned
+*Entry.textVariable: ::safepdf::btn(cmd,.bar.save)
+*Toplevel.container: 1
+XD
+    env HOME="$d/home" SAFEPDF_VIEWER_SMOKE="$d" SAFEPDF_VIEWER_SMOKE_MODE=lockdown "$@" \
+      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5"; wait $v' _ \
+      "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d"
+  }
+  lock_run "$work/out-lock" || { echo "FAIL: lockdown run failed" >&2; fail=1; }
+  cat "$work/out-lock/lockdown.txt" "$work/out-lock/attack.txt" 2>/dev/null || true
+  python3 -I -c '
+import os, sys
+d = sys.argv[1]
+def kv(name):
+    try:
+        text = open(os.path.join(d, name), encoding="utf-8").read()
+    except FileNotFoundError:
+        return {}
+    return dict(l.split(": ", 1) for l in text.splitlines() if ": " in l)
+v, a = kv("lockdown.txt"), kv("attack.txt")
+want = {"send-command": "[]", "pg-validate": "[none] []", "more-postcommand": "[]",
+        "root-takefocus": "[]", "probe-entry": "[none] [] [] []", "probe-menu": "[] []",
+        "probe-toplevel": "[] [] [0]", "attacked-file": "true"}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+if a.get("sends-ok") != "0": errs.append("a send into the viewer worked: %r" % a)
+if not a.get("control-resources", "").startswith("all exec touch"):
+    errs.append("the hostile resources were not loaded (control): %r" % a.get("control-resources"))
+if a.get("interps", "").split() not in ([], ["attacker.tcl"]):
+    errs.append("the viewer is still registered: %r" % a.get("interps"))
+if os.path.exists(os.path.join(d, "pwned")): errs.append("a hostile resource ran (pwned exists)")
+for e in errs: print("FAIL: lockdown: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-lock" || fail=1
+  lock_run "$work/out-drive" SAFEPDF_VIEWER_DRIVE=1 || { echo "FAIL: drive-hook run failed" >&2; fail=1; }
+  cat "$work/out-drive/attack.txt" 2>/dev/null || true
+  grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null \
+    || { echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1; }
+  [ ! -e "$work/out-drive/pwned" ] || { echo "FAIL: a hostile resource ran with the hook" >&2; fail=1; }
+fi
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
