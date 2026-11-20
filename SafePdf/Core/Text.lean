@@ -2,6 +2,7 @@ import SafePdf.Core.Content.Run
 import SafePdf.Core.Font.Widths
 import SafePdf.Core.Font.Type1
 import SafePdf.Core.Font.CFF
+import SafePdf.Core.Font.TrueType
 import SafePdf.Core.Font.CMap
 import SafePdf.Core.Doc
 
@@ -42,7 +43,17 @@ rely on it). Every collected font object becomes a `FontInfo`:
   encoding); Type 3 widths are scaled by `/FontMatrix`; Type0 fonts take `/W`, then `/DW`;
   a CID with neither, in a `/CIDFontType0` descendant with an embedded CFF
   (`/FontFile3 /Subtype /CIDFontType0C`), takes the CFF advance of that CID (CID → GID
-  through the CFF charset, `CFFFont.advanceOfCID`). Type0 fonts with another CMap than
+  through the CFF charset, `CFFFont.advanceOfCID`); in a `/CIDFontType2` descendant with an
+  embedded TrueType program (`/FontFile2`, `Font.TrueType.parse`, task 6.1) the CID selects a
+  glyph through `/CIDToGIDMap` (`/Identity`, the default, or a stream of 2-byte GIDs,
+  `CIDToGID`; a CID past the stream's end has no glyph) and takes its `hmtx` advance scaled by
+  `unitsPerEm` (task 6.7c); a CID without any of these takes 1000. A simple `/TrueType` font
+  with an embedded program takes, for every code that `/Widths` (or, with `/Widths`,
+  `/MissingWidth`) does not cover, the advance of the code's glyph under the cmap rules of
+  §9.6.6.4 (`TTFont.advanceText`; symbolic per the descriptor's `/Flags` bit 3, otherwise
+  through the font's encoding), ahead of the standard 14 metrics (`ttWidthTable`). Each
+  program is parsed once per font object (`loadFonts` builds every `FontKey` once) and only
+  when some width needs it. Type0 fonts with another CMap than
   `Identity-H/V` use CID = code value (an approximation: CID mapping through non-identity
   CMaps is not implemented). `/FontFile3 /Subtype /OpenType` is not read (unsupported).
 * **Unicode** (§9.10.2), in order: the `/ToUnicode` CMap (`Font.CMap`; for simple fonts a
@@ -80,7 +91,13 @@ for Type 3 fonts, whose glyph space has no em: `type3SizeScale`).
 Glyphs are taken in content-stream order (filtered to visible ones unless
 `Options.includeInvisible`, the default being to keep invisible text such as OCR layers). A
 glyph joins the current line when its baseline is within `lineTol` (‰ of the font size) of the
-line's; otherwise it starts a new line. Lines keep content-stream order (which follows columns
+line's, or when it is a **sub/superscript** of the line (`scriptJoin`, task 6.7c): a glyph of
+smaller size raised by at most `scriptRaise` ‰ of the line's size, or a larger glyph lying that
+far below a line of smaller glyphs (a footnote begun by its marker), provided it continues the
+line horizontally (`continuesLine`: from `scriptBack` before to `scriptAhead` after the line's
+end); otherwise it starts a new line. A line's baseline is that of its largest glyphs. The
+expected results follow MuPDF (`mutool draw -F txt`), except that stacked scripts stay on the
+line (`Tests/TextLayout.lean`). Lines keep content-stream order (which follows columns
 in TeX and word-processor output; a global top-to-bottom sort would interleave columns), glyphs
 inside a line are sorted left to right (stable). A space is inserted where the gap between a
 glyph's advance end and the next origin exceeds `wordGap` ‰ of the font size (gaps from `TJ`
@@ -316,6 +333,85 @@ def loadCFF {σ : Type} (limits : Limits) (src : Source σ) (s : σ)
     | none => (none, s)
   | _ => (none, s)
 
+/-- Parse the embedded TrueType program (`/FontDescriptor /FontFile2`) of a font dictionary `fd`
+(a simple `/TrueType` font, or the `/CIDFontType2` descendant of a Type0 font). -/
+def loadTT {σ : Type} (limits : Limits) (src : Source σ) (s : σ)
+    (resolve : PdfObject → PdfObject) (fd : Dict) : Option Font.TrueType.TTFont × σ :=
+  match getR resolve fd "FontDescriptor" with
+  | some (.dict desc) =>
+    match Dict.get? desc (nm "FontFile2") with
+    | some o =>
+      match fetchStream src s o with
+      | (some (_, bytes), s') => ((Font.TrueType.parse limits bytes).toOption, s')
+      | (none, s') => (none, s')
+    | none => (none, s)
+  | _ => (none, s)
+
+/-- The `/CIDToGIDMap` of a `/CIDFontType2` font (§9.7.4.2). -/
+inductive CIDToGID where
+  /-- `/Identity` (also the default when the entry is absent or not understood): GID = CID. -/
+  | identity
+  /-- A stream of big-endian 2-byte GIDs indexed by CID (its decoded bytes; the decode is
+  bounded by `Limits.maxDecodedStreamBytes` and charged to the document budget). -/
+  | table (b : ByteArray)
+
+/-- The glyph of a CID: GID = CID for `/Identity`; the 2-byte entry `cid` of the map stream,
+`none` past its end. -/
+def CIDToGID.gid : CIDToGID → Nat → Option Nat
+  | .identity, cid => some cid
+  | .table b, cid =>
+    match b[2 * cid]?, b[2 * cid + 1]? with
+    | some h, some l => some (h.toNat * 256 + l.toNat)
+    | _, _ => none
+
+/-- A stream-map GID is a 2-byte value. -/
+theorem CIDToGID.gid_table_lt {b : ByteArray} {cid g : Nat}
+    (h : (CIDToGID.table b).gid cid = some g) : g < 65536 := by
+  simp only [CIDToGID.gid] at h
+  split at h
+  · rename_i hb lb _ _
+    cases h
+    have := hb.toNat_lt
+    have := lb.toNat_lt
+    omega
+  · cases h
+
+/-- Read the `/CIDToGIDMap` of a CIDFont dictionary: a stream is fetched and decoded, any
+other value (the name `/Identity`, absent, malformed) is the identity. -/
+def loadCIDToGID {σ : Type} (src : Source σ) (s : σ) (desc : Dict) : CIDToGID × σ :=
+  match Dict.get? desc (nm "CIDToGIDMap") with
+  | some (.ref n g) =>
+    match fetchStream src s (.ref n g) with
+    | (some (_, b), s') => (.table b, s')
+    | (none, s') => (.identity, s')
+  | _ => (.identity, s)
+
+/-- The text-space advance of a CID from an embedded TrueType program: CID → GID through the
+`/CIDToGIDMap`, then the `hmtx` advance of that glyph scaled by `unitsPerEm`. -/
+def ttCIDAdvance (f : Font.TrueType.TTFont) (m : CIDToGID) (cid : Nat) : Option Fixed :=
+  (m.gid cid).bind f.advanceOfGlyphText
+
+/-- Whether a simple font is symbolic: bit 3 (value 4) of the font descriptor's `/Flags`
+(§9.8.2), which selects the cmap rules of §9.6.6.4. -/
+def isSymbolic (resolve : PdfObject → PdfObject) (fontDict : Dict) : Bool :=
+  match (Font.fontDescriptor? resolve fontDict).bind (Font.getInt? resolve · "Flags") with
+  | some f => f.toNat / 4 % 2 == 1
+  | none => false
+
+/-- The width table (256 codes) of a simple `/TrueType` font with an embedded program: the 6.4
+metrics where `/Widths` (or, when the font has `/Widths`, `/MissingWidth`) give the width, else
+the program's advance of the code's glyph (`TTFont.advanceText`, §9.6.6.4 cmap rules with the
+font's encoding), else the 6.4 value. Without `/Widths` the program wins over the standard 14
+metrics and `/MissingWidth`. Computed once per font. -/
+def ttWidthTable (sm : SimpleMetrics) (hasWidths symbolic : Bool) (f : Font.TrueType.TTFont) :
+    Array Fixed :=
+  Array.ofFn (n := 256) fun i =>
+    let prog := f.advanceText i.val.toUInt8 symbolic sm.encoding
+    match sm.width i.val with
+    | (w, .widths) => w
+    | (w, .missingWidth) => if hasWidths then w else prog.getD w
+    | (w, _) => prog.getD w
+
 /-- The built-in encoding of a name-keyed CFF program: code ↦ the glyph name its CFF encoding
 selects (`CFFFont.glyphNameOfCode`). -/
 def cffEncoding (f : Font.CFF.CFFFont) : Encoding :=
@@ -341,14 +437,15 @@ def cffWidthTable (sm : SimpleMetrics) (hasWidths : Bool) (f : Font.CFF.CFFFont)
     | (w, _) => w
 
 /-- The width of a CID of a Type0 font: its `/W` entry, else `/DW` when the CIDFont has one,
-else the embedded CFF program's advance of that CID, else the default 1000. -/
-def cidWidth (cm : CIDMetrics) (hasDW : Bool) (cff : Option Font.CFF.CFFFont) (cid : Nat) :
+else the embedded program's advance of that CID (`prog`: CFF `advanceOfCID`, or TrueType
+`ttCIDAdvance`), else the default 1000. -/
+def cidWidth (cm : CIDMetrics) (hasDW : Bool) (prog : Nat → Option Fixed) (cid : Nat) :
     Fixed :=
   match cm.table[cid]? with
   | some (some w) => w
   | _ =>
     if hasDW then cm.dw
-    else match cff.bind (·.advanceOfCID cid) with
+    else match prog cid with
       | some w => w
       | none => cm.dw
 
@@ -430,11 +527,18 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
     let (cff, s1) := if needCFF then
         loadCFF limits src s1 resolve desc ["CIDFontType0C", "Type1C"]
       else (none, s1)
-    let cffDesc := if cff.isSome then " FontFile3" else ""
+    let needTT := !hasDW && nameStr? (getR resolve desc "Subtype") == some "CIDFontType2"
+    let (tt, s1) := if needTT then loadTT limits src s1 resolve desc else (none, s1)
+    let (c2g, s1) := if tt.isSome then loadCIDToGID src s1 desc else (.identity, s1)
+    let prog : Nat → Option Fixed := match cff, tt with
+      | some f, _ => f.advanceOfCID
+      | none, some f => ttCIDAdvance f c2g
+      | none, none => fun _ => none
+    let cffDesc := if cff.isSome then " FontFile3" else if tt.isSome then " FontFile2" else ""
     match Font.identityEncoding? resolve fd with
     | some _ =>
       (⟨.two, (fun c => match c with
-          | [h, l] => cidWidth cm hasDW cff (h.toNat * 256 + l.toNat)
+          | [h, l] => cidWidth cm hasDW prog (h.toNat * 256 + l.toNat)
           | _ => Fixed.zero),
         (fun c => tu.bind (·.lookup c)), s!"Type0 {base} {encName}{tuDesc}{cffDesc}", Fixed.one⟩,
         s1)
@@ -446,7 +550,7 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
         | none, some t => if t.codespace.isEmpty then .two else .cmap t
         | none, none => .two
       let ucs := hasInfix encName "UCS2" || hasInfix encName "UTF16"
-      (⟨split, (fun c => cidWidth cm hasDW cff (Font.CMap.beValue c)),
+      (⟨split, (fun c => cidWidth cm hasDW prog (Font.CMap.beValue c)),
         (fun c => match tu.bind (·.lookup c) with
           | some u => some u
           | none => if ucs then some (Font.CMap.ofUtf16 c) else none),
@@ -480,17 +584,25 @@ def buildFont {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ) (fontObj
       | none, some f => some (cffEncoding f)
       | none, none => none
     let sm := SimpleMetrics.ofDict resolve fd builtin
-    let progDesc := if t1.isSome then " FontFile" else if cff.isSome then " FontFile3" else ""
-    let width : Nat → Fixed := match cff with
-      | some f =>
+    -- a TrueType program is read when some width is not given by `/Widths`/`/MissingWidth`
+    let needTT := subtype == "TrueType" &&
+      (!hasWidths || sm.table.any fun e => e.2 == .unknown)
+    let (tt, s4) := if needTT then loadTT limits src s3 resolve fd else (none, s3)
+    let progDesc := if t1.isSome then " FontFile" else if cff.isSome then " FontFile3"
+      else if tt.isSome then " FontFile2" else ""
+    let width : Nat → Fixed := match cff, tt with
+      | some f, _ =>
         let tbl := cffWidthTable sm hasWidths f
         fun code => tbl.getD code Fixed.zero
-      | none => simpleWidth sm t1
+      | none, some f =>
+        let tbl := ttWidthTable sm hasWidths (isSymbolic resolve fd) f
+        fun code => tbl.getD code Fixed.zero
+      | none, none => simpleWidth sm t1
     (⟨.one, (fun c => match c with
         | [b] => width b.toNat
         | _ => Fixed.zero),
       simpleUnicode (sm.std14 == some .zapfDingbats) tu sm.encoding,
-      s!"{subtype} {base}{tuDesc}{progDesc}", Fixed.one⟩, s3)
+      s!"{subtype} {base}{tuDesc}{progDesc}", Fixed.one⟩, s4)
 
 /-- Maximum number of font objects loaded per page. -/
 def maxFonts : Nat := 1024
@@ -769,6 +881,14 @@ structure Options where
   wordGap : Nat := 120
   /-- Baseline distance above which a blank line separates lines. -/
   paraGap : Nat := 2000
+  /-- Largest raise of a smaller-font run (superscript) above the line's baseline, ‰ of the
+  line's (larger) font size, for it to stay on the line (`scriptJoin`). -/
+  scriptRaise : Nat := 600
+  /-- How far a script run may start before the end of the line (‰ of the larger size):
+  stacked sub/superscripts, italic corrections. -/
+  scriptBack : Nat := 500
+  /-- How far after the end of the line a script run may start (‰ of the larger size). -/
+  scriptAhead : Nat := 1000
 
 /-- Position along the baseline direction. -/
 def Glyph.u (g : Glyph) : Fixed := (rotFrame g.dir g.x g.y).1
@@ -776,34 +896,78 @@ def Glyph.u (g : Glyph) : Fixed := (rotFrame g.dir g.x g.y).1
 /-- Position across the baseline direction. -/
 def Glyph.v (g : Glyph) : Fixed := (rotFrame g.dir g.x g.y).2
 
-/-- A line: glyphs in content order, the baseline of its first glyph, its largest size. -/
+/-- Minimum. -/
+def fmin (x y : Fixed) : Fixed := if y.raw < x.raw then y else x
+
+/-- The end of a glyph's advance along its baseline direction. -/
+def Glyph.uEnd (g : Glyph) : Fixed := Fixed.add g.u g.width
+
+/-- A line: glyphs in content order, the baseline of its largest-size glyphs, its largest
+size, and its extent along the baseline. -/
 structure Line where
   /-- Glyphs, content order. -/
   glyphs : Array Glyph
   /-- Baseline direction (of the first glyph). -/
   dir : Nat
-  /-- Baseline, across the direction (of the first glyph). -/
+  /-- Baseline, across the direction: of the first glyph, moved to the baseline of a glyph of
+  larger size when one joins (so a line begun by a superscript marker takes the baseline of
+  the body text that follows it). -/
   v : Fixed
   /-- Largest font size. -/
   size : Fixed
+  /-- Smallest glyph start along the baseline. -/
+  lo : Fixed
+  /-- Largest glyph end along the baseline. -/
+  hi : Fixed
   deriving Repr, Inhabited
+
+/-- A line of one glyph. -/
+def Line.ofGlyph (g : Glyph) : Line :=
+  ⟨#[g], g.dir, g.v, g.fontSize, fmin g.u g.uEnd, fmax g.u g.uEnd⟩
 
 /-- `x ≤ k‰ of s` on raw values. -/
 def withinPermille (x s : Fixed) (k : Nat) : Bool := (fabs x).raw * 1000 ≤ (fabs s).raw * k
 
-/-- Whether `g` continues line `l`. -/
+/-- Whether `g` starts where the line ends: no more than `scriptBack` ‰ of `size` before the
+line's end and no more than `scriptAhead` ‰ after it. -/
+def continuesLine (o : Options) (l : Line) (g : Glyph) (size : Fixed) : Bool :=
+  let d := Fixed.sub g.u l.hi
+  if d.raw < 0 then withinPermille d size o.scriptBack else withinPermille d size o.scriptAhead
+
+/-- **Sub/superscripts** (heuristic): `g` joins line `l` although its baseline is further than
+`lineTol` away when one side is a smaller-font script of the other and `g` continues the line
+horizontally: a smaller `g` raised above the line's baseline by at most `scriptRaise` ‰ of the
+line's size (footnote marker, exponent), or a larger `g` whose baseline lies below that of a
+line of smaller glyphs by at most `scriptRaise` ‰ of `g`'s size (a line begun by a marker). -/
+def scriptJoin (o : Options) (l : Line) (g : Glyph) : Bool :=
+  let d := Fixed.sub g.v l.v
+  if g.fontSize.raw < l.size.raw then
+    0 < d.raw && withinPermille d l.size o.scriptRaise && continuesLine o l g l.size
+  else if l.size.raw < g.fontSize.raw then
+    d.raw < 0 && withinPermille d g.fontSize o.scriptRaise && continuesLine o l g g.fontSize
+  else false
+
+/-- Whether `g` continues line `l`: its baseline is within `lineTol` of the line's, or it is a
+sub/superscript of it (`scriptJoin`). -/
 def sameLine (o : Options) (l : Line) (g : Glyph) : Bool :=
-  g.dir == l.dir && withinPermille (Fixed.sub g.v l.v) (fmax l.size g.fontSize) o.lineTol
+  g.dir == l.dir &&
+    (withinPermille (Fixed.sub g.v l.v) (fmax l.size g.fontSize) o.lineTol || scriptJoin o l g)
+
+/-- Add a glyph to a line; a glyph of larger size than the line's moves the baseline to its
+own. -/
+def Line.push (l : Line) (g : Glyph) : Line :=
+  { l with glyphs := l.glyphs.push g, size := fmax l.size g.fontSize,
+           v := if l.size.raw < g.fontSize.raw then g.v else l.v,
+           lo := fmin l.lo (fmin g.u g.uEnd), hi := fmax l.hi (fmax g.u g.uEnd) }
 
 /-- Group glyphs (content order) into lines. -/
 def groupLines (o : Options) (gs : List Glyph) : Array Line :=
   let (done, cur) := gs.foldl (fun (acc : Array Line × Option Line) g =>
     match acc.2 with
     | some l =>
-      if sameLine o l g then
-        (acc.1, some { l with glyphs := l.glyphs.push g, size := fmax l.size g.fontSize })
-      else (acc.1.push l, some ⟨#[g], g.dir, g.v, g.fontSize⟩)
-    | none => (acc.1, some ⟨#[g], g.dir, g.v, g.fontSize⟩)) (#[], none)
+      if sameLine o l g then (acc.1, some (l.push g))
+      else (acc.1.push l, some (Line.ofGlyph g))
+    | none => (acc.1, some (Line.ofGlyph g))) (#[], none)
   match cur with
   | some l => done.push l
   | none => done
@@ -997,6 +1161,12 @@ private def hello : ByteArray := page helv "BT /F1 12 Tf 72 700 Td (Hello World)
 #guard txt (page helv "BT /F1 10 Tf 3 Tr 72 700 Td (ocr) Tj ET" [helvObj]) == "ocr"
 #guard txt (page helv "BT /F1 10 Tf 3 Tr 72 700 Td (ocr) Tj ET" [helvObj])
   { includeInvisible := false } == ""
+
+-- a superscript raised 0.55 em by `Ts` stays on its line (beyond `lineTol`, `scriptJoin`)
+#guard txt (page helv "BT /F1 10 Tf 72 700 Td (mc) Tj /F1 7 Tf 5.5 Ts (2) Tj /F1 10 Tf 0 Ts ( x) Tj ET"
+  [helvObj]) == "mc2 x"
+#guard txt (page helv "BT /F1 10 Tf 72 700 Td (mc) Tj /F1 7 Tf 5.5 Ts (2) Tj /F1 10 Tf 0 Ts ( x) Tj ET"
+  [helvObj] ) { scriptRaise := 500 } == "mc\n2\n x"
 
 /-- A Type0 Identity-H font with `/W` and a ToUnicode CMap (2-byte codes, a `bfrange`). -/
 private def cidPdf : ByteArray := page "/F2 5 0 R" "BT /F2 10 Tf 72 700 Td <000100020003> Tj ET" [
