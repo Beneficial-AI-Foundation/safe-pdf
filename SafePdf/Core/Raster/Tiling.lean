@@ -77,7 +77,11 @@ most a window each in mode B). The cell painter's own work is bounded by the pai
 
 * Patterns inside a cell are whatever the painter does with them (with `pathPainter`: mid
   grey; the page renderer must not recurse without a depth).
-* Only `fillPath` items are looked up by `loadTilings` (pattern strokes and text are not).
+* Only `fillPath` items are looked up by `loadTilings` (pattern strokes and text are not:
+  task 7.3h2). Task 7.3h1 wires fills into the page renderer (`Glyph.renderItemG`, cells
+  painted by `pathPainter`); `TilingTable` is keyed by `(ResRef, name)` (`PatternUse.res`,
+  found by `Run.resLookup`) and `TilingTable.tileOf` gives the pattern matrix
+  `Matrix.mul pat.matrix use.base` and the PaintType 2 colour `use.under`.
 * The cell's graphics state starts from the default state, not the pattern's parent's (the
   CTM is the pattern matrix; line width etc. reset — ISO 32000-2 §8.7.3.1 says inherited).
 -/
@@ -88,7 +92,7 @@ open SafePdf SafePdf.Core
 open SafePdf.Core.Raster.Geom
 open SafePdf.Core.Raster.Fill (IRect Mask Config)
 open SafePdf.Core.Content (Fixed Comp Color Source FillStyle FillRule Matrix Clip Path
-  DisplayList DisplayItem Env St Frame)
+  DisplayList DisplayItem Env St Frame ResRef PatternUse)
 
 /-! ## 1. Caps -/
 
@@ -193,40 +197,67 @@ def loadTiling {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budge
     | (_, s) => (none, s, obs, bud)
   | _ => (none, s, obs, bud)
 
-/-- The tiling patterns of a page, by resource name (`none`: not a loadable tiling pattern,
-e.g. a shading pattern). -/
+/-- The tiling patterns of a page **by resource** (task 7.3h): keyed by where the pattern
+resource lives and its name (`PatternUse.res`, the colour's name), as
+`Shading.ShadingTable`, so patterns used inside forms and annotation appearances are found
+too (`none`: not a loadable tiling pattern, e.g. a shading pattern). -/
 structure TilingTable where
-  /-- Patterns by resource name. -/
-  patterns : List (Name × Option Tiling) := []
+  /-- Patterns by `(ResRef, name)`. -/
+  patterns : List ((ResRef × Name) × Option Tiling) := []
   /-- Budget left after loading. -/
   budget : Budget := { ops := 0, forms := 0 }
 
 instance : Inhabited TilingTable := ⟨{}⟩
 
-/-- The tiling pattern of a pattern name. -/
-def TilingTable.get? (t : TilingTable) (n : Name) : Option Tiling :=
-  ((t.patterns.find? (·.1 == n)).map (·.2)).join
+/-- The tiling pattern of a pattern resource. -/
+def TilingTable.get? (t : TilingTable) (r : ResRef) (n : Name) : Option Tiling :=
+  ((t.patterns.find? (·.1 == (r, n))).map (·.2)).join
 
-/-- **Load the tiling patterns of a display list**: every pattern named by a fill colour,
-once, from resources `res`, charging the shared budget `bud`. -/
-def loadTilings {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) (res : Dict)
+/-- Where the pattern of a colour lives and its name (`none` for a non-pattern colour);
+without a recorded use, the page's resources. -/
+def patternKey (c : Color) (u : Option PatternUse) : Option (ResRef × Name) :=
+  match c with
+  | .pattern n => some ((u.map (·.res)).getD .page, n)
+  | _ => none
+
+/-- The PaintType 2 colour of a pattern use (the `scn` operands, §8.7.3.3); black without
+operands. -/
+def underOf (u : Option PatternUse) : Color := (u.bind (·.under)).getD (.gray Comp.zero)
+
+/-- **The tiling pattern a fill colour denotes** (task 7.3h): the loaded pattern, its matrix
+pattern space → page space (`Matrix.mul pat.matrix use.base`: the pattern matrix maps to the
+default space of the content that set the pattern, the base matrix on to the page) and the
+PaintType 2 colour. -/
+def TilingTable.tileOf (t : TilingTable) (c : Color) (u : Option PatternUse) :
+    Option (Tiling × Aff × Color) :=
+  match patternKey c u with
+  | some (r, n) =>
+    (t.get? r n).map fun pat =>
+      (pat, Aff.ofMatrix (Matrix.mul pat.matrix ((u.map (·.base)).getD Matrix.identity)),
+        underOf u)
+  | none => none
+
+/-- **Load the tiling patterns of a display list**: every pattern named by a fill colour
+(items nested in soft masks too, `DisplayList.foldDeep` with `Limits.maxXObjectDepth` levels),
+once per `(ResRef, name)`, looked up by `Run.resLookup` (`pageRes`: the page's resources),
+charging the shared budget `bud`. -/
+def loadTilings {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) (pageRes : Dict)
     (items : DisplayList) : TilingTable × σ × ω :=
-  let r := items.foldl (fun (acc : TilingTable × σ × ω) it =>
+  Content.DisplayList.foldDeep (fun (acc : TilingTable × σ × ω) it =>
     match it with
     | .fillPath _ _ style _ =>
-      match style.color with
-      | .pattern n =>
+      match patternKey style.color style.pattern with
+      | some key =>
         let (t, s, obs) := acc
-        if t.patterns.any (·.1 == n) then acc else
-        let (o, s) := Content.Run.resEntry env.src s res "Pattern" n
+        if t.patterns.any (·.1 == key) then acc else
+        let (o, s) := Content.Run.resLookup env.src s pageRes "Pattern" key.1 key.2
         match o with
         | some o =>
           let (p, s, obs, b) := loadTiling env s obs t.budget o
-          ({ patterns := (n, p) :: t.patterns, budget := b }, s, obs)
-        | none => ({ t with patterns := (n, none) :: t.patterns }, s, obs)
-      | _ => acc
-    | _ => acc) ({ budget := bud }, s, obs)
-  r
+          ({ patterns := (key, p) :: t.patterns, budget := b }, s, obs)
+        | none => ({ t with patterns := (key, none) :: t.patterns }, s, obs)
+      | none => acc
+    | _ => acc) env.cfg.limits.maxXObjectDepth ({ budget := bud }, s, obs) items
 
 /-! ## 3. Cell layers -/
 
