@@ -28,7 +28,7 @@ Wave 46 (2026-11-20, branch phase-7-raster / PR #8): 7.9c (wt), 9.5g (wt), 9.5d 
 | 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | ready (2026-11-19) |
 | 4 | `phase-4-document` | `phase-3-filters` | [#5](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/5) | ready (2026-11-19) |
 | 5 | `phase-5-content` | `phase-4-document` | [#6](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/6) | ready (2026-11-19) |
-| 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | awaiting-ci (M6 ticked 2026-11-20; CI fix 6.c1 pushed) |
+| 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | ready (2026-11-20; CI run 44766606520 on 490f559 green) |
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | [#8](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/8) | draft (cut from 490f559 after M6) |
 | 8 | `phase-8-shell` | `phase-7-raster` | — | none |
 | 9 | `phase-9-gui` | `phase-8-shell` | — | none |
@@ -686,3 +686,4 @@ Exit criterion checked: [ ]
 * 2026-11-20 — wave 45 (phase 6, PR #7): 9.5f (annotate encrypted files, W10), 7.9 (render tail; + orchestrator-applied Text.lean width table), 10.3 (bib-lean fulltext + detection), 9.3 (view modes), 6.c1 (CI qpdf skip; biblean tests without xvfb-run) done; 7.9b, 7.9c added; **M6 ticked** on 7569011 (text 0.9949, positions 100%); commit "wave 45: 9.5f 7.9 10.3 9.3 6.c1 — M6 met, encrypted annotations, view modes"
 * 2026-11-20 — phase 6 milestone: M6 ticked; PR #7 awaiting CI (fix 6.c1 pushed); branch `phase-7-raster` cut from 490f559, draft PR #8 opened; later work lands there
 * 2026-11-20 — wave 46a (phase 7, PR #8): 10.2 (bib-lean annotation sync), 7.9b (per-page form cache) done; commit "wave 46a: 10.2 7.9b — bib-lean annotation sync, form cache"
+* 2026-11-20 — phase 6 milestone: PR #7 marked ready for review (CI `build` + `differential-objects` green on 490f559)
