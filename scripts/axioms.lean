@@ -1092,3 +1092,5 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Shell.App.Bubble.clampInto_lo
 #print axioms SafePdf.Shell.App.Bubble.clampInto_hi
 #print axioms SafePdf.Shell.App.Bubble.Ui.escape_closes
+-- Phase 6, task 6.8f: text clipped by clip paths
+#print axioms SafePdf.Core.Text.unclipped_of_none
