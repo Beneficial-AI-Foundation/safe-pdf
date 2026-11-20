@@ -11,7 +11,8 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   marks —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
   selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
   entries Highlight tool and Show all highlights: task 9.8; Find…), View
-  (Outline, zoom in/out, actual size, fit page/width, rotate), Go (previous/next/first/last
+  (Outline, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
+  two radio groups after PDF.js: Page / Vertical Scrolling, No / Odd / Even Spreads), Go (previous/next/first/last
   page, Go to page…, Back, Forward). The viewer builds the Tk menus from this list
   (`Viewer.buildMenus`) and keeps every entry's `-state` in step with `Cmd.enabled`
   (`entryStates`, applied only where it changed).
@@ -77,6 +78,16 @@ inductive Cmd where
   | rotateCw
   /-- Rotate the view 90° counter-clockwise. -/
   | rotateCcw
+  /-- Scroll mode Page: one page (or spread) at a time (task 9.3, PDF.js "Page Scrolling"). -/
+  | scrollPage
+  /-- Scroll mode Vertical: all pages stacked, scrolled continuously (task 9.3). -/
+  | scrollVertical
+  /-- Spread mode None: one page per row (task 9.3). -/
+  | spreadNone
+  /-- Spread mode Odd: pages 1|2, 3|4, … side by side (task 9.3). -/
+  | spreadOdd
+  /-- Spread mode Even: page 1 alone, then 2|3, 4|5, … (task 9.3). -/
+  | spreadEven
   /-- Previous page. -/
   | prevPage
   /-- Next page. -/
@@ -97,7 +108,8 @@ inductive Cmd where
 def Cmd.all : List Cmd :=
   [.openFile, .save, .saveAs, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
    .showAll, .find, .outline, .zoomIn, .zoomOut,
-   .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .prevPage, .nextPage, .firstPage,
+   .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .scrollPage, .scrollVertical,
+   .spreadNone, .spreadOdd, .spreadEven, .prevPage, .nextPage, .firstPage,
    .lastPage, .gotoPage, .back, .forward]
 
 /-- Menu label. -/
@@ -123,6 +135,11 @@ def Cmd.label : Cmd → String
   | .fitWidth => "Fit width"
   | .rotateCw => "Rotate right"
   | .rotateCcw => "Rotate left"
+  | .scrollPage => "Page Scrolling"
+  | .scrollVertical => "Vertical Scrolling"
+  | .spreadNone => "No Spreads"
+  | .spreadOdd => "Odd Spreads"
+  | .spreadEven => "Even Spreads"
   | .prevPage => "Previous page"
   | .nextPage => "Next page"
   | .firstPage => "First page"
@@ -154,6 +171,7 @@ def Cmd.accel : Cmd → String
   | .fitWidth => "W"
   | .rotateCw => "R"
   | .rotateCcw => "Shift+R"
+  | .scrollPage | .scrollVertical | .spreadNone | .spreadOdd | .spreadEven => ""
   | .prevPage => "PageUp"
   | .nextPage => "PageDown"
   | .firstPage => "Home"
@@ -185,6 +203,11 @@ def Cmd.underline : Cmd → Nat
   | .fitWidth => 4
   | .rotateCw => 7
   | .rotateCcw => 7
+  | .scrollPage => 5
+  | .scrollVertical => 0
+  | .spreadNone => 0
+  | .spreadOdd => 1
+  | .spreadEven => 0
   | .prevPage => 0
   | .nextPage => 0
   | .firstPage => 0
@@ -217,6 +240,11 @@ def Cmd.script : Cmd → String
   | .fitWidth => "::safepdf::emit zoom fitwidth"
   | .rotateCw => "::safepdf::emit rotate cw"
   | .rotateCcw => "::safepdf::emit rotate ccw"
+  | .scrollPage => "::safepdf::emit viewMode scroll page"
+  | .scrollVertical => "::safepdf::emit viewMode scroll vertical"
+  | .spreadNone => "::safepdf::emit viewMode spread none"
+  | .spreadOdd => "::safepdf::emit viewMode spread odd"
+  | .spreadEven => "::safepdf::emit viewMode spread even"
   | .prevPage => "::safepdf::emit prev"
   | .nextPage => "::safepdf::emit next"
   | .firstPage => "::safepdf::emit first"
@@ -245,6 +273,11 @@ structure Ctx where
   canForward : Bool := false
   /-- There are marks not saved into the file yet (task 9.5c). -/
   dirty : Bool := false
+  /-- The current page is in the first spread (task 9.3: Previous has nowhere to go in the
+  facing modes even when `page > 0`). -/
+  onFirst : Bool := false
+  /-- The current page is in the last spread (task 9.3). -/
+  onLast : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
 /-- Whether the command can run in `c` (menu entries and toolbar buttons are disabled
@@ -255,12 +288,13 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .deleteMark => c.hasDoc && c.hasMark
   | .save => c.hasDoc && c.dirty
   | .outline => c.hasDoc && c.hasOutline
-  | .prevPage | .firstPage => c.hasDoc && c.page > 0
-  | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages
+  | .prevPage | .firstPage => c.hasDoc && c.page > 0 && !c.onFirst
+  | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages && !c.onLast
   | .back => c.hasDoc && c.canBack
   | .forward => c.hasDoc && c.canForward
   | .saveAs | .close | .selectAll | .find | .addNote | .hlTool | .showAll | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
-  | .rotateCw | .rotateCcw | .gotoPage => c.hasDoc
+  | .rotateCw | .rotateCcw | .gotoPage | .scrollPage | .scrollVertical | .spreadNone
+  | .spreadOdd | .spreadEven => c.hasDoc
 
 /-- A menu entry. -/
 inductive Entry where
@@ -297,6 +331,23 @@ def barPath : String := ".menubar"
 /-- Tcl variable that mirrors whether the outline panel is shown (View → Outline check). -/
 def outlineVar : String := "::safepdf::outlineOn"
 
+/-- Tcl variable holding the scroll mode (`View.ScrollMode.key`; the View menu's and the
+overflow menu's radio entries, task 9.3). -/
+def scrollVar : String := "::safepdf::scrollMode"
+
+/-- Tcl variable holding the spread mode (`View.SpreadMode.key`, task 9.3). -/
+def spreadVar : String := "::safepdf::spreadMode"
+
+/-- The radio variable and value of a view-mode command (task 9.3): the menus show these
+commands as radio entries, checked while the mode is on. -/
+def Cmd.radio? : Cmd → Option (String × String)
+  | .scrollPage => some (scrollVar, "page")
+  | .scrollVertical => some (scrollVar, "vertical")
+  | .spreadNone => some (spreadVar, "none")
+  | .spreadOdd => some (spreadVar, "odd")
+  | .spreadEven => some (spreadVar, "even")
+  | _ => none
+
 /-- Tcl variable that mirrors whether the Highlight tool is on (Edit → Highlight tool). -/
 def hlToolVar : String := "::safepdf::hlTool"
 
@@ -312,7 +363,9 @@ def menubar : List Menu :=
        .check .showAll showAllVar, .sep, .cmd .find]⟩,
     ⟨".menubar.view", "View", 0,
       [.check .outline outlineVar, .sep, .cmd .zoomIn, .cmd .zoomOut, .cmd .actualSize,
-       .cmd .fitPage, .cmd .fitWidth, .sep, .cmd .rotateCw, .cmd .rotateCcw]⟩,
+       .cmd .fitPage, .cmd .fitWidth, .sep, .cmd .rotateCw, .cmd .rotateCcw, .sep,
+       .cmd .scrollPage, .cmd .scrollVertical, .sep, .cmd .spreadNone, .cmd .spreadOdd,
+       .cmd .spreadEven]⟩,
     ⟨".menubar.go", "Go", 0,
       [.cmd .prevPage, .cmd .nextPage, .cmd .firstPage, .cmd .lastPage, .sep, .cmd .gotoPage,
        .sep, .cmd .back, .cmd .forward]⟩ ]
@@ -405,5 +458,14 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c
 #guard (entryStates {}).length == entryList.length
+-- View modes (task 9.3): radio entries at the end of the View menu, two groups.
+#guard locate .scrollVertical == some (".menubar.view", 12) && locate .spreadEven == some (".menubar.view", 16)
+#guard (Cmd.all.filter (·.radio?.isSome)).map (·.radio?.map Prod.fst) ==
+  [some scrollVar, some scrollVar, some spreadVar, some spreadVar, some spreadVar]
+-- In the facing modes Previous/Next follow the spreads, not only the page number.
+#guard let c : Ctx := { hasDoc := true, page := 1, pages := 4, onFirst := true }
+  !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c
+#guard let c : Ctx := { hasDoc := true, page := 2, pages := 4, onLast := true }
+  !Cmd.nextPage.enabled c && !Cmd.lastPage.enabled c && Cmd.prevPage.enabled c
 
 end SafePdf.Shell.App.Menu

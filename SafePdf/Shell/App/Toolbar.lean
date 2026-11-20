@@ -19,7 +19,7 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save
   (task 9.5c: the command `Menu.Cmd.save`, PDF.js's download icon, enabled with unsaved marks)
   and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
-  Open).
+  Open, and the scroll and spread modes of task 9.3).
 * **Enabled states** (`targets`, `states`): menubar entries (`Menu.entryList`), toolbar
   buttons and overflow-menu entries all follow `Menu.Cmd.enabled`; the tool buttons follow
   `Tool.enabled`.
@@ -117,16 +117,21 @@ def ZoomChoice.statusName : ZoomChoice → String
   | .pageWidth => "fit width"
   | .pct _ => "fixed"
 
+/-- `ZoomChoice.zoom` with the Automatic Zoom's portrait test given separately (task 9.3: in
+the facing modes the fit box is two pages wide, `View.fitBox`, but PDF.js still asks whether
+the page itself is portrait). -/
+def ZoomChoice.zoomWith (c : ZoomChoice) (cw ch : Nat) (scaling pw ph : Rat) (portrait : Bool) :
+    Rat :=
+  match c.mode with
+  | some m => View.modeZoom m cw ch scaling pw ph
+  | none => min (View.fitZoom portrait cw ch pw ph) (View.pctZoom autoMaxPct scaling)
+
 /-- The zoom (pixels per page unit) of choice `c` for a page of `pw × ph` units (after
 rotation) in a canvas of `cw × ch` pixels at `scaling` pixels per point. Automatic Zoom is
 PDF.js's rule: page width for a portrait page (`pw ≤ ph`), page fit otherwise, at most
 `autoMaxPct`. -/
 def ZoomChoice.zoom (c : ZoomChoice) (cw ch : Nat) (scaling pw ph : Rat) : Rat :=
-  match c.mode with
-  | some m => View.modeZoom m cw ch scaling pw ph
-  | none =>
-    let fit := View.fitZoom (decide (pw ≤ ph)) cw ch pw ph
-    min fit (View.pctZoom autoMaxPct scaling)
+  c.zoomWith cw ch scaling pw ph (decide (pw ≤ ph))
 
 #guard ZoomChoice.presets.map ZoomChoice.label ==
   ["Automatic Zoom", "Actual Size", "Page Fit", "Page Width", "50%", "75%", "100%", "125%",
@@ -144,6 +149,9 @@ def ZoomChoice.zoom (c : ZoomChoice) (cw ch : Nat) (scaling pw ph : Rat) : Rat :
 #guard ZoomChoice.auto.zoom 400 900 (4 / 3) 612 792 == View.fitZoom true 400 900 612 792
 #guard ZoomChoice.auto.zoom 1000 300 (4 / 3) 792 612 == View.fitZoom false 1000 300 792 612
 #guard ZoomChoice.pageWidth.zoom 400 900 (4 / 3) 612 792 == View.fitZoom true 400 900 612 792
+-- Facing (task 9.3): Automatic Zoom fits the width of two portrait pages.
+#guard ZoomChoice.zoomWith .auto 1000 900 (4 / 3) 1224 792 true ==
+  View.fitZoom true 1000 900 1224 792
 
 /-! ## Page field -/
 
@@ -338,10 +346,12 @@ def morePath : String := ".more"
 
 /-- Entries of the overflow menu (`none`: separator): PDF.js's secondary toolbar items that
 the viewer has (first/last page, rotate) plus Find, Go to and Open, which no longer have
-toolbar buttons. Document properties are not available yet. -/
+toolbar buttons, and the scroll and spread modes (task 9.3; radio entries, `Menu.Cmd.radio?`).
+Document properties are not available yet. -/
 def overflow : List (Option Cmd) :=
   [some .openFile, none, some .find, some .gotoPage, none, some .firstPage, some .lastPage,
-   none, some .rotateCw, some .rotateCcw]
+   none, some .rotateCw, some .rotateCcw, none, some .scrollPage, some .scrollVertical, none,
+   some .spreadNone, some .spreadOdd, some .spreadEven]
 
 /-- The command entries of the overflow menu with their Tk menu indices. -/
 def overflowEntries : List (Nat × Cmd) :=
@@ -394,8 +404,9 @@ def states (c : Ctx) : List Bool :=
   (buttons.filter (·.enabled { c with dirty := true })).any (·.path == ".bar.save")
 #guard (overflowEntries.map (·.2.label)) ==
   ["Open...", "Find...", "Go to page...", "First page", "Last page", "Rotate right",
-   "Rotate left"]
-#guard overflowEntries.map (·.1) == [0, 2, 3, 5, 6, 8, 9]
+   "Rotate left", "Page Scrolling", "Vertical Scrolling", "No Spreads", "Odd Spreads",
+   "Even Spreads"]
+#guard overflowEntries.map (·.1) == [0, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 16]
 -- Every overflow command is also in the menubar (one vocabulary).
 #guard overflowEntries.all fun (_, k) => (Menu.locate k).isSome
 

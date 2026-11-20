@@ -15,7 +15,7 @@ import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
 
 /-!
-# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.5c, 9.7, 9.8; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.7, 9.8; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
 (File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
@@ -52,6 +52,16 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   `View.wheelStep`: small deltas accumulate, the page turns only after the view reached the
   edge and the wheel pushes on past it); Shift+wheel scrolls horizontally without turning
   pages; Ctrl+wheel zooms about the mouse pointer.
+* **View modes** (task 9.3, pure layout in `View`): the View menu and the overflow menu choose
+  the scroll mode (Page / Vertical Scrolling) and the spread mode (No / Odd / Even Spreads):
+  single page, continuous, facing, continuous facing. `computeLayout` places the pages
+  (`View.layoutRows`) as `Slot`s; every page on the canvas has a white frame and its own photo
+  `::safepdf::pgN`; the current page (its spread in the facing view) is rendered at once, the
+  other pages in view and their neighbours one per event-loop turn (`viewChanged`,
+  `renderMore`), and photos of pages out of view are deleted. In the continuous modes the
+  current page is the page under the window centre, the wheel just scrolls, and paging moves by
+  spreads. Pointer positions map through the slot of the page under them (`pagePointAt`), so
+  selection, links, marks, bubbles and search work on every page shown.
 * **Anchoring (C2).** Before a zoom or rotation change the viewer reads the canvas point under
   the mouse (Ctrl+wheel) or at the window centre, maps it to page space with `Geom.toPage`;
   after the new image is shown it maps that page point back with `Geom.toScreen`
@@ -134,13 +144,60 @@ inductive ScrollTo where
   | top
   /-- Bottom of the page. -/
   | bottom
-  /-- Keep the page point `p` under the window position `(wx, wy)` (C2 anchoring). -/
-  | anchor (wx wy : Nat) (p : Pt)
+  /-- Keep the point `p` of page `page` under the window position `(wx, wy)` (C2 anchoring). -/
+  | anchor (page wx wy : Nat) (p : Pt)
   /-- Show the page point (`left`, `top`) at the window's top-left corner (a destination's
   position; a missing coordinate is the page's left or top edge). -/
   | dest (left top : Option Rat)
   /-- Restore the scroll fractions `(x, y)` (history). -/
   | frac (x y : Rat)
+  /-- Put the view's top `f` page heights below the top of page `page` (task 9.3: a new
+  layout of the vertical modes keeps the place in the current page). -/
+  | within (page : Nat) (f : Rat)
+
+/-- How page `p` is displayed: zoom, total rotation (`/Rotate` + user rotation), page box,
+whether the zoom was capped and whether the image is cropped. -/
+structure ViewParams where
+  /-- Zoom in pixels per page unit. -/
+  zoom : Rat
+  /-- Total rotation. -/
+  rot : SafePdf.Core.Doc.Rotation
+  /-- CropBox. -/
+  box : Box
+  /-- The zoom was lowered to `View.maxViewPixels`. -/
+  capped : Bool
+  /-- The image is cropped to `Limits.maxPageSide`. -/
+  cropped : Bool
+
+/-- A page laid out in the scroll region (task 9.3): its place (`View.layoutRows`) and how it
+is displayed. -/
+structure Slot where
+  /-- Canvas position and pixel size of the page image. -/
+  place : View.Place
+  /-- Zoom, rotation and box it is drawn with. -/
+  vp : ViewParams
+
+/-- What a layout depends on (task 9.3): a change means a new layout. In the page scroll mode
+the spread shown is part of it; in the vertical modes the current page is not (scrolling never
+lays the pages out again). -/
+structure LayoutKey where
+  /-- Document generation. -/
+  gen : Nat
+  /-- Scroll mode. -/
+  scroll : View.ScrollMode
+  /-- Spread mode. -/
+  spread : View.SpreadMode
+  /-- Zoom choice. -/
+  zoomSel : Toolbar.ZoomChoice
+  /-- User rotation. -/
+  rot : SafePdf.Core.Doc.Rotation
+  /-- Canvas width. -/
+  canvasW : Nat
+  /-- Canvas height. -/
+  canvasH : Nat
+  /-- The spread shown (page scroll mode), else 0. -/
+  spreadIx : Nat
+  deriving DecidableEq
 
 /-- The viewer's state, kept in one `IO.Ref`. -/
 structure State where
@@ -169,8 +226,8 @@ structure State where
   subst : SafePdf.Core.Raster.Subst.SubstFonts := {}
   /-- Key of what is on screen (successful or failed render). -/
   shown : Option View.Key := none
-  /-- Canvas position and size of the shown image, zoom and total rotation it was drawn
-  with (for anchoring). -/
+  /-- Canvas position of the current page's image, zoom and total rotation it is drawn with
+  (the current page's `Slot`, mirrored for anchoring and the smoke tests). -/
   imgX : Nat := View.margin
   /-- See `imgX`. -/
   imgY : Nat := View.margin
@@ -180,7 +237,7 @@ structure State where
   shownRot : SafePdf.Core.Doc.Rotation := .r0
   /-- Scroll to apply after the next image is shown. -/
   pending : Option ScrollTo := none
-  /-- Scroll region size of the shown page (pixels). -/
+  /-- Scroll region size (pixels; the whole document in the vertical modes). -/
   regionW : Nat := 1
   /-- See `regionW`. -/
   regionH : Nat := 1
@@ -211,8 +268,8 @@ structure State where
   outlineShown : Bool := false
   /-- Links per page (`none`: not read yet). -/
   links : Array (Option (Array Links.Link)) := #[]
-  /-- Index of the link under the mouse pointer on the shown page. -/
-  hover : Option Nat := none
+  /-- The link under the mouse pointer: its page and index on that page. -/
+  hover : Option (Nat × Nat) := none
   /-- The status line text from before the pointer entered a link (restored on leaving). -/
   savedStatus : String := ""
   /-- Back/forward history of jumps. -/
@@ -234,8 +291,31 @@ structure State where
   markSel : Option Nat := none
   /-- The current highlight colour (`::safepdf::hlColor`). -/
   hlColor : Marks.Color := .yellow
-  /-- The page image on screen before the highlights are multiplied in (`Marks.composite`). -/
-  shownImg : Option Clip.Image := none
+  /-- The pages with a photo on the canvas (task 9.3: `::safepdf::pgN`, the visible pages and
+  one more on each side) and their render result before the highlights are multiplied in
+  (`Marks.composite`), or the render error. -/
+  photos : Array (Nat × Except String Clip.Image) := #[]
+  /-- Scroll mode (task 9.3, PDF.js "Page Scrolling" / "Vertical Scrolling"). -/
+  scroll : View.ScrollMode := .page
+  /-- Spread mode (task 9.3, PDF.js "No / Odd / Even Spreads"). -/
+  spread : View.SpreadMode := .none
+  /-- The laid-out pages (one spread in the page scroll mode, all pages in the vertical ones),
+  in page order. -/
+  slots : Array Slot := #[]
+  /-- What `slots` was computed for (`none`: no layout). -/
+  layoutKey : Option LayoutKey := none
+  /-- A `renderMore` event is scheduled. -/
+  renderQueued : Bool := false
+  /-- The view top (scroll-region pixel) the viewer itself scrolled to (a jump, a page key):
+  while the view stays there the current page is the one it went to, not the one under the
+  window centre (vertical modes). -/
+  ownTop : Option Nat := none
+  /-- The page of the last mouse press (the drag selects on it). -/
+  pressPage : Nat := 0
+  /-- Pages rendered so far and the time spent rendering them (ns; the `scroll` benchmark). -/
+  renders : Nat := 0
+  /-- See `renders`. -/
+  renderNs : Nat := 0
   /-- Highlight tool, pop-over, colour picker, thickness and "Show all" (task 9.8). -/
   ui : Bubble.Ui := {}
   /-- The bubble on screen: its kind and canvas rectangle (task 9.8). -/
@@ -255,8 +335,8 @@ structure State where
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
 
-/-- Name of the Tk photo image that shows the page. -/
-def photoName : String := "::safepdf::page"
+/-- Name of the Tk photo image that shows page `p` (task 9.3: one per page on the canvas). -/
+def photoOf (p : Nat) : String := s!"::safepdf::pg{p}"
 
 /-- Pages up to this many pixels are prefetched (2²² ≈ 4 Mpx, e.g. Letter at 250 %). -/
 def prefetchPixels : Nat := 1 <<< 22
@@ -269,29 +349,98 @@ def State.pageCount (s : State) : Nat :=
   | some d => d.pages.size
   | none => 0
 
-/-- How page `p` is displayed: zoom, total rotation (`/Rotate` + user rotation), page box,
-whether the zoom was capped and whether the image is cropped. -/
-structure ViewParams where
-  /-- Zoom in pixels per page unit. -/
-  zoom : Rat
-  /-- Total rotation. -/
-  rot : SafePdf.Core.Doc.Rotation
-  /-- CropBox. -/
-  box : Box
-  /-- The zoom was lowered to `View.maxViewPixels`. -/
-  capped : Bool
-  /-- The image is cropped to `Limits.maxPageSide`. -/
-  cropped : Bool
-
-/-- View parameters of page `p` of `doc` in state `s`. -/
-def viewParams (s : State) (doc : Doc) (p : Nat) : Option ViewParams :=
+/-- View parameters of page `p` of `doc` at the layout zoom `z0` (capped per page at
+`View.maxViewPixels`). -/
+def viewParamsAt (s : State) (doc : Doc) (p : Nat) (z0 : Rat) : Option ViewParams :=
   doc.pages[p]?.map fun page =>
     let r := rotAdd page.rotate s.rot
     let bx := Box.ofRect page.cropBox
-    let (pw, ph) := View.boxSize r bx
-    let z0 := s.zoomSel.zoom s.canvasW s.canvasH s.scaling pw ph
     let (z, capped) := View.capZoom View.maxViewPixels z0 r bx
     ⟨z, r, bx, capped, View.cropped limits.maxPageSide z r bx⟩
+
+/-- The zoom of a layout, chosen (`Toolbar.ZoomChoice.zoomWith`) for page `basis`: its size,
+or twice its width in the facing modes (`View.fitBox`, PDF.js), in the canvas less the gap
+between the pages of a spread (task 9.3). In the single-page view this is the zoom of the page
+itself, as before. -/
+def baseZoom (s : State) (doc : Doc) (basis : Nat) : Rat :=
+  match doc.pages[basis]? with
+  | some page =>
+    let r := rotAdd page.rotate s.rot
+    let (pw, ph) := View.boxSize r (Box.ofRect page.cropBox)
+    let (fw, fh) := View.fitBox s.spread pw ph
+    s.zoomSel.zoomWith (View.fitCanvasW s.spread s.canvasW) s.canvasH s.scaling fw fh
+      (decide (pw ≤ ph))
+  | none => 1
+
+/-- The rows of the layout (task 9.3): the current spread in the page scroll mode, every
+spread in the vertical ones (`View.spreads`). -/
+def layoutRowsOf (s : State) (n : Nat) : List (List Nat) :=
+  match s.scroll with
+  | .page => [View.spreadPages s.spread n (View.spreadOf s.spread s.page)]
+  | .vertical => View.spreads s.spread n
+
+/-- Lays out the pages of `doc` (task 9.3): zoom from the current page (`baseZoom`), page
+images of `Clip.pageSize` pixels placed by `View.layoutRows` (centred vertically in the page
+scroll mode). Returns the slots in page order and the scroll region's size. -/
+def computeLayout (s : State) (doc : Doc) : Array Slot × Nat × Nat :=
+  let n := doc.pages.size
+  let rows := layoutRowsOf s n
+  let z0 := baseZoom s doc s.page
+  let vps : Array (Option ViewParams) := (Array.range n).map fun p =>
+    if s.scroll == .vertical || rows.any (·.contains p) then viewParamsAt s doc p z0 else none
+  let sizes := vps.map fun o => match o with
+    | some vp => SafePdf.Core.Raster.Clip.pageSize limits.maxPageSide vp.zoom vp.rot vp.box
+    | none => (0, 0)
+  let (ps, rw, rh) := View.layoutRows sizes rows s.canvasW s.canvasH (s.scroll == .page)
+  (ps.filterMap fun pl => (vps[pl.page]?.join).map (⟨pl, ·⟩), rw, rh)
+
+/-- The layout key of the state (task 9.3). -/
+def layoutKeyOf (s : State) : LayoutKey :=
+  ⟨s.gen, s.scroll, s.spread, s.zoomSel, s.rot, s.canvasW, s.canvasH,
+   if s.scroll == .page then View.spreadOf s.spread s.page else 0⟩
+
+/-- The slot of page `p`, when it is laid out. -/
+def slotOf (s : State) (p : Nat) : Option Slot :=
+  s.slots.find? (·.place.page == p)
+
+/-- The places of the layout. -/
+def State.places (s : State) : Array View.Place :=
+  s.slots.map (·.place)
+
+/-- Canvas rectangle `(x0, y0, x1, y1)` of a page-space box on the page of slot `sl`. -/
+def Slot.rect (sl : Slot) (b : Box) : Rat × Rat × Rat × Rat :=
+  let p0 := toScreen sl.vp.zoom sl.vp.rot sl.vp.box ⟨b.llx, b.lly⟩
+  let p1 := toScreen sl.vp.zoom sl.vp.rot sl.vp.box ⟨b.urx, b.ury⟩
+  let x : Rat := sl.place.x
+  let y : Rat := sl.place.y
+  (min p0.x p1.x + x, min p0.y p1.y + y, max p0.x p1.x + x, max p0.y p1.y + y)
+
+/-- The page point (of slot `sl`'s page) at canvas point `(cx, cy)` (`Geom.toPage`, C2). -/
+def Slot.toPage (sl : Slot) (cx cy : Rat) : Pt :=
+  SafePdf.Core.Raster.Geom.toPage sl.vp.zoom sl.vp.rot sl.vp.box
+    ⟨cx - (sl.place.x : Rat), cy - (sl.place.y : Rat)⟩
+
+/-- Whether page `p` has a photo (or a render error) on the canvas. -/
+def State.hasPhoto (s : State) (p : Nat) : Bool :=
+  s.photos.any (·.1 == p)
+
+/-- What the status line adds for the view mode (nothing in the single-page view). -/
+def modeNote (s : State) : String :=
+  let sc := match s.scroll with
+    | .page => ""
+    | .vertical => "vertical scrolling"
+  let sp := match s.spread with
+    | .none => ""
+    | .odd => "odd spreads"
+    | .even => "even spreads"
+  match sc, sp with
+  | "", "" => ""
+  | a, "" => s!"; {a}"
+  | "", b => s!"; {b}"
+  | a, b => s!"; {a}, {b}"
+
+#guard modeNote {} == "" && modeNote { scroll := .vertical, spread := .odd } ==
+  "; vertical scrolling, odd spreads"
 
 /-- Last path component of a file name (for the window title). -/
 def baseName (path : String) : String :=
@@ -659,8 +808,22 @@ bind .ol.t <MouseWheel> {.ol.t yview scroll [expr {%D > 0 ? -2 : 2}] units; brea
 bind .ol.t <Button-4> {.ol.t yview scroll -2 units; break}
 bind .ol.t <Button-5> {.ol.t yview scroll 2 units; break}
 ttk::frame .v
+# View modes (9.3): radio variables of the View and overflow menus; in the vertical modes every
+# change of the vertical view (keys, scroll bar, wheel) is reported once per idle moment as
+# `viewChanged` (current page, renders).
+set ::safepdf::scrollMode page
+set ::safepdf::spreadMode none
+set ::safepdf::continuous 0
+set ::safepdf::vcPending 0
+proc ::safepdf::yscroll {a b} {
+  .ys set $a $b
+  if {$::safepdf::continuous && !$::safepdf::vcPending} {
+    set ::safepdf::vcPending 1
+    after idle {set ::safepdf::vcPending 0; ::safepdf::emit viewChanged}
+  }
+}
 canvas .c -background $::safepdf::col(body) -highlightthickness 0 -takefocus 1 -confine 1 \\
-  -xscrollcommand {.xs set} -yscrollcommand {.ys set}
+  -xscrollcommand {.xs set} -yscrollcommand ::safepdf::yscroll
 ttk::scrollbar .ys -orient vertical -command {.c yview}
 ttk::scrollbar .xs -orient horizontal -command {.c xview}
 grid .c -in .v -row 0 -column 0 -sticky nsew
@@ -668,9 +831,6 @@ grid .ys -in .v -row 0 -column 1 -sticky ns
 grid .xs -in .v -row 1 -column 0 -sticky ew
 grid rowconfigure .v 0 -weight 1
 grid columnconfigure .v 0 -weight 1
-image create photo ::safepdf::page
-.c create rectangle 0 0 0 0 -outline #c8c8d0 -width 1 -state hidden -tags pageframe
-.c create image 8 8 -anchor nw -image ::safepdf::page -tags page
 label .status -text {} -anchor w -background $::safepdf::col(bar) \\
   -foreground $::safepdf::col(dim) -font ::safepdf::fBar -padx 6 -pady 2 -borderwidth 0
 frame .statusline -height 1 -background $::safepdf::col(line)
@@ -1036,30 +1196,16 @@ def canvasRect (s : State) (bx : Box) (b : Box) : Rat × Rat × Rat × Rat :=
   (min p0.x p1.x + s.imgX, min p0.y p1.y + s.imgY, max p0.x p1.x + s.imgX,
    max p0.y p1.y + s.imgY)
 
-/-- The page point under window position `(wx, wy)` of the canvas (`Geom.toPage`, C2). -/
-def pagePoint (st : IO.Ref State) (wx wy : Int) : IO (Option Pt) := do
-  let s ← st.get
-  let some bx := shownBox s | return none
-  let cx ← run [".c", "canvasx", toString wx]
-  let cy ← run [".c", "canvasy", toString wy]
-  let (some cx, some cy) := (View.parseDecimal cx, View.parseDecimal cy) | return none
-  return some (toPage s.shownZoom s.shownRot bx ⟨cx - (s.imgX : Rat), cy - (s.imgY : Rat)⟩)
-
-/-- The marks of the shown page that are drawn: all of them, or only the notes while "Show
-all" is off (task 9.8). -/
-def visibleMarks (s : State) : List Marks.Mark :=
-  let ms := s.marks.onPage s.page
-  if s.ui.showAll then ms else ms.filter (·.isNote)
-
-/-- The visible marks the viewer draws itself: not the saved ones, which are in the file and
-drawn by the renderer from their appearance streams (task 9.5c). -/
-def drawnMarks (s : State) : List Marks.Mark :=
-  (visibleMarks s).filter (!s.marks.isSaved ·.id)
-
-/-- `canvasRect` as a `Bubble.Rect`. -/
+/-- `canvasRect` as a `Bubble.Rect` (the current page). -/
 def canvasR (s : State) (bx b : Box) : Bubble.Rect :=
   let (x0, y0, x1, y1) := canvasRect s bx b
   ⟨x0, y0, x1, y1⟩
+
+/-- The two numbers of an `xview`/`yview` result. -/
+def viewFracs (s : String) : Option (Rat × Rat) :=
+  match (s.splitOn " ").filter (!·.isEmpty) with
+  | [a, b] => do return (← View.parseDecimal a, ← View.parseDecimal b)
+  | _ => none
 
 /-- Canvas coordinates of window position `(wx, wy)`. -/
 def canvasPos (wx wy : Int) : IO (Option (Rat × Rat)) := do
@@ -1069,48 +1215,89 @@ def canvasPos (wx wy : Int) : IO (Option (Rat × Rat)) := do
     | some x, some y => some (x, y)
     | _, _ => none
 
-/-- Draws the canvas items of the shown page's marks (tag `mark`, task 9.4): note icons
-(`::safepdf::noteIcon`, tag `note` and `mID`), the dashed quads a note is anchored to, and the
-outline of the selected mark (tag `marksel`). Highlight fills are pixels (`showImage`). -/
-def drawMarks (s : State) (bx : Box) : IO Unit := do
-  for m in visibleMarks s do
+/-- The page under window position `(wx, wy)` (the one whose image contains it, else the
+nearest, `View.pageAt`; task 9.3) and the page point there (`Geom.toPage`, C2). -/
+def pagePointAt (st : IO.Ref State) (wx wy : Int) : IO (Option (Nat × Pt)) := do
+  let s ← st.get
+  if s.shown.isNone then return none
+  let some (cx, cy) ← canvasPos wx wy | return none
+  let some p := View.pageAt s.places cx.floor.toNat cy.floor.toNat | return none
+  let some sl := slotOf s p | return none
+  return some (p, sl.toPage cx cy)
+
+/-- The point of page `p` at window position `(wx, wy)`, also outside its image (a drag that
+started on `p`). -/
+def pagePointOn (st : IO.Ref State) (p : Nat) (wx wy : Int) : IO (Option Pt) := do
+  let s ← st.get
+  if s.shown.isNone then return none
+  let some sl := slotOf s p | return none
+  let some (cx, cy) ← canvasPos wx wy | return none
+  return some (sl.toPage cx cy)
+
+/-- The marks of page `p` that are drawn: all of them, or only the notes while "Show all" is
+off (task 9.8). -/
+def visibleMarks (s : State) (p : Nat) : List Marks.Mark :=
+  let ms := s.marks.onPage p
+  if s.ui.showAll then ms else ms.filter (·.isNote)
+
+/-- The visible marks of page `p` the viewer draws itself: not the saved ones, which are in the
+file and drawn by the renderer from their appearance streams (task 9.5c). -/
+def drawnMarks (s : State) (p : Nat) : List Marks.Mark :=
+  (visibleMarks s p).filter (!s.marks.isSaved ·.id)
+
+/-- `Slot.rect` as a `Bubble.Rect`. -/
+def Slot.rectR (sl : Slot) (b : Box) : Bubble.Rect :=
+  let (x0, y0, x1, y1) := sl.rect b
+  ⟨x0, y0, x1, y1⟩
+
+/-- Draws the canvas items of the marks of the page of slot `sl` (tag `mark`, task 9.4): note
+icons (`::safepdf::noteIcon`, tag `note` and `mID`), the dashed quads a note is anchored to,
+and the outline of the selected mark (tag `marksel`). Highlight fills are pixels
+(`showPhoto`). -/
+def drawMarks (s : State) (sl : Slot) : IO Unit := do
+  let bx := sl.vp.box
+  for m in visibleMarks s sl.place.page do
     let tags := s!"mark m{m.id}"
     if m.isNote then
       for q in m.quads do
-        let (x0, y0, x1, y1) := canvasRect s bx q
+        let (x0, y0, x1, y1) := sl.rect q
         discard <| run [".c", "create", "rectangle", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, "-outline", "#c99a00", "-dash", "4 2",
           "-width", "1", "-tags", tags]
       if let some ib := (if s.marks.isSaved m.id then none else m.iconBox bx) then
-        let (x0, y0, x1, y1) := canvasRect s bx ib
+        let (x0, y0, x1, y1) := sl.rect ib
         discard <| run ["::safepdf::noteIcon", ".c", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, m.color.hex, s!"{tags} note"]
     if s.markSel == some m.id then
       let boxes := if m.isNote then (m.iconBox bx).toList else m.quads
       for q in boxes do
-        let (x0, y0, x1, y1) := canvasRect s bx q
+        let (x0, y0, x1, y1) := sl.rect q
         discard <| run [".c", "create", "rectangle", toString (x0.floor - 2),
           toString (y0.floor - 2), toString (x1.ceil + 2), toString (y1.ceil + 2),
           "-outline", "#0060df", "-width", "2", "-tags", s!"{tags} marksel"]
 
-/-- Draws the bubble of the shown page (canvas items tagged `bub`, task 9.8; `Bubble`): after
-a text selection (not while dragging) the float bubble with the Highlight button, on a selected
-highlight the edit bubble (colour swatch and chevron, Comment, Delete) and, when open, its
-colour picker. Placed by `Bubble.place` in canvas coordinates inside the scroll region, so it
-scrolls with the page; every redraw (zoom, rotation, page change) places it again. Records
-what is drawn in `State.bubble` / `State.pickerAt` for the clicks. -/
-def drawBubble (st : IO.Ref State) (bx : Box) : IO Unit := do
+/-- Draws the bubble (canvas items tagged `bub`, task 9.8; `Bubble`): after a text selection
+(not while dragging) the float bubble with the Highlight button, on a selected highlight the
+edit bubble (colour swatch and chevron, Comment, Delete) and, when open, its colour picker.
+Placed by `Bubble.place` in canvas coordinates inside the scroll region, on the page of the
+selection or the mark (task 9.3: any laid-out page), so it scrolls with the page; every redraw
+(zoom, rotation, page change) places it again. Records what is drawn in `State.bubble` /
+`State.pickerAt` for the clicks. -/
+def drawBubble (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let selRects ← match s.sel with
     | some (p, a, b) =>
-      if p == s.page && s.pressPt.isNone then
-        match ← pageIndex st p with
-        | .ok ix => pure ((Select.rangeBoxes ix.cells a b).map (canvasR s bx))
-        | .error _ => pure []
-      else pure []
+      match slotOf s p with
+      | some sl =>
+        if s.pressPt.isNone then
+          match ← pageIndex st p with
+          | .ok ix => pure ((Select.rangeBoxes ix.cells a b).map sl.rectR)
+          | .error _ => pure []
+        else pure []
+      | none => pure []
     | none => pure []
-  let mark := (s.markSel.bind s.marks.find?).filter fun m => m.page == s.page && !m.isNote
-  let markRects := (mark.map fun m => m.quads.map (canvasR s bx)).getD []
+  let mark := (s.markSel.bind s.marks.find?).filter fun m => !m.isNote
+  let markRects := (mark.bind fun m => (slotOf s m.page).map fun sl => m.quads.map sl.rectR).getD []
   let area : Bubble.Rect := ⟨0, 0, (s.regionW : Rat), (s.regionH : Rat)⟩
   let placed := (Bubble.kindFor (!selRects.isEmpty) (!markRects.isEmpty) s.ui).bind fun k =>
     (Bubble.place (if k == .float then selRects else markRects) k.width Bubble.height area).map
@@ -1145,33 +1332,40 @@ def drawBubble (st : IO.Ref State) (bx : Box) : IO Unit := do
       discard <| run ["::safepdf::swatch", ".c", num x, num y, num Bubble.swatch, c.hex,
         if cur then "1" else "0", s!"bub picker c:{c.name}"]
 
-/-- Redraws the overlays of the shown page: the marks' canvas items (`drawMarks`), all search
-hits (tag `hit`, the current one in orange), the selection (tag `sel`) and the bubble (tag
-`bub`, `drawBubble`), in that stacking order. -/
+/-- The slots that get overlays: the pages with a photo and the current page (task 9.3). -/
+def overlaySlots (s : State) : List Slot :=
+  s.slots.toList.filter fun sl => sl.place.page == s.page || s.hasPhoto sl.place.page
+
+/-- Redraws the overlays of the pages on screen (`overlaySlots`): the marks' canvas items
+(`drawMarks`), all search hits (tag `hit`, the current one in orange), the selection (tag
+`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. -/
 def drawOverlay (st : IO.Ref State) : IO Unit := do
   discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
   st.modify ({ · with bubble := none, pickerAt := none })
   let s ← st.get
-  let some bx := shownBox s | return
-  drawMarks s bx
-  let rect (b : Box) (color tag : String) : IO Unit := do
-    let (x0, y0, x1, y1) := canvasRect s bx b
+  if s.shown.isNone then return
+  let slots := overlaySlots s
+  for sl in slots do drawMarks s sl
+  let rect (sl : Slot) (b : Box) (color tag : String) : IO Unit := do
+    let (x0, y0, x1, y1) := sl.rect b
     let style := if s.stipple then ["-fill", color, "-stipple", "gray50", "-outline", ""]
       else ["-fill", "", "-outline", color, "-width", "2"]
     discard <| run ([".c", "create", "rectangle", toString x0.floor, toString y0.floor,
       toString x1.ceil, toString y1.ceil] ++ style ++ ["-tags", tag])
   if !s.query.isEmpty then
-    if let .ok ix ← pageIndex st s.page then
-      let hits := ix.hits s.query
-      for i in [0:hits.size] do
-        if let some (a, b) := hits[i]? then
-          let color := if s.hit == some (s.page, i) then "orange" else "yellow"
-          for b in Select.rangeBoxes ix.cells a b do rect b color "hit"
+    for sl in slots do
+      let pg := sl.place.page
+      if let .ok ix ← pageIndex st pg then
+        let hits := ix.hits s.query
+        for i in [0:hits.size] do
+          if let some (a, b) := hits[i]? then
+            let color := if s.hit == some (pg, i) then "orange" else "yellow"
+            for b in Select.rangeBoxes ix.cells a b do rect sl b color "hit"
   if let some (p, a, b) := s.sel then
-    if p == s.page then
+    if let some sl := slotOf s p then
       if let .ok ix ← pageIndex st p then
-        for b in Select.rangeBoxes ix.cells a b do rect b "#3874f2" "sel"
-  drawBubble st bx
+        for b in Select.rangeBoxes ix.cells a b do rect sl b "#3874f2" "sel"
+  drawBubble st
 
 /-! ## Rendering -/
 
@@ -1199,31 +1393,109 @@ def fetch (st : IO.Ref State) (doc : Doc) (key : View.Key) :
     let t0 ← IO.monoNanosNow
     let r ← renderPage doc key.page key.zoom key.rot (← st.get).subst
     let t1 ← IO.monoNanosNow
-    st.modify fun s => { s with cache := s.cache.insert key r }
+    st.modify fun s => { s with cache := s.cache.insert key r, renderNs := s.renderNs + (t1 - t0),
+                                renders := s.renders + 1 }
     return (r, some (t1 - t0))
 
-/-- Applies the pending scroll for an image of `w × h` pixels at canvas `(ix, iy)` in a
-scroll region `rw × rh`, drawn with view parameters `vp`. -/
-def applyScroll (s : State) (vp : ViewParams) (ix iy rw rh : Nat) : IO Unit := do
-  match s.pending with
-  | some .top => discard <| run [".c", "yview", "moveto", "0"]
-  | some .bottom => discard <| run [".c", "yview", "moveto", "1"]
-  | some (.anchor wx wy p) =>
-    if 0 < vp.zoom then
-      let q := toScreen vp.zoom vp.rot vp.box p
-      let left : Rat := q.x + (ix : Rat) - (wx : Rat)
-      let top : Rat := q.y + (iy : Rat) - (wy : Rat)
-      discard <| run [".c", "xview", "moveto", fmtFrac (left / (max rw 1 : Nat))]
-      discard <| run [".c", "yview", "moveto", fmtFrac (top / (max rh 1 : Nat))]
-  | some (.dest left top) =>
-    if 0 < vp.zoom then
-      let q := toScreen vp.zoom vp.rot vp.box ⟨left.getD vp.box.llx, top.getD vp.box.ury⟩
-      discard <| run [".c", "xview", "moveto", fmtFrac ((q.x + (ix : Rat)) / (max rw 1 : Nat))]
-      discard <| run [".c", "yview", "moveto", fmtFrac ((q.y + (iy : Rat)) / (max rh 1 : Nat))]
-  | some (.frac x y) =>
-    discard <| run [".c", "xview", "moveto", fmtFrac x]
-    discard <| run [".c", "yview", "moveto", fmtFrac y]
-  | none => pure ()
+/-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view). -/
+def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
+  if (← st.get).hasPhoto p then
+    try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
+    discard <| run [".c", "delete", s!"p{p}", s!"e{p}"]
+    st.modify fun s => { s with photos := s.photos.filter (·.1 != p) }
+
+/-- Removes every page photo and page item from the canvas (task 9.3). -/
+def clearPages (st : IO.Ref State) : IO Unit := do
+  for (p, _) in (← st.get).photos do
+    try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
+  discard <| run [".c", "delete", "pageframe", "pimg", "perr"]
+  st.modify ({ · with photos := #[] })
+
+/-- Draws the layout on the canvas (task 9.3): a white page frame with a 1 px grey border per
+slot (tags `pageframe fN`; the placeholder until the page's photo arrives) and the scroll
+region. -/
+def buildCanvas (st : IO.Ref State) : IO Unit := do
+  clearPages st
+  let s ← st.get
+  for sl in s.slots do
+    let pl := sl.place
+    discard <| run [".c", "create", "rectangle", toString (pl.x - 1), toString (pl.y - 1),
+      toString (pl.x + pl.w), toString (pl.y + pl.h), "-outline", "#c8c8d0", "-fill", "white",
+      "-width", "1", "-tags", s!"pageframe f{pl.page}"]
+  discard <| run [".c", "configure", "-scrollregion", s!"0 0 {s.regionW} {s.regionH}"]
+
+/-- Shows a render result in slot `sl`: the image (with the page's marks multiplied in,
+`Marks.composite`) in the page's photo `::safepdf::pgN` on canvas item `pimg pN`, created
+below the overlays; or the error, as text in the page frame (tag `perr eN`). -/
+def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : IO Unit := do
+  let p := sl.place.page
+  let s ← st.get
+  match res with
+  | .ok img =>
+    if !s.hasPhoto p then
+      discard <| run ["image", "create", "photo", photoOf p]
+      discard <| run [".c", "create", "image", toString sl.place.x, toString sl.place.y,
+        "-anchor", "nw", "-image", photoOf p, "-tags", s!"pimg p{p}"]
+      discard <| run [".c", "lower", s!"p{p}"]
+      discard <| run [".c", "lower", "pageframe"]
+    Shim.photoPut (photoOf p) img.w.toUInt32 img.h.toUInt32
+      (Marks.composite sl.vp.zoom sl.vp.rot sl.vp.box img.w img.h img.data (drawnMarks s p))
+    st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .ok img) }
+  | .error e =>
+    dropPhoto st p
+    let pl := sl.place
+    discard <| run [".c", "create", "text", toString (pl.x + pl.w / 2), toString (pl.y + pl.h / 2),
+      "-text", s!"page {p + 1}: cannot render: {renderError e}", "-width",
+      toString (max 40 (pl.w - 20)), "-fill", "#5b5b66", "-justify", "center",
+      "-tags", s!"perr e{p}"]
+    discard <| run [".c", "lower", s!"e{p}"]
+    discard <| run [".c", "lower", "pageframe"]
+    st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .error (renderError e)) }
+
+/-- Renders page `p` (from the cache if it is there) into its photo, unless it has one or is
+not laid out. Returns the result and the render time (`none`: from the cache). -/
+def ensurePhoto (st : IO.Ref State) (p : Nat) : IO (Option (Except Error Clip.Image × Option Nat)) := do
+  let s ← st.get
+  let some doc := s.doc | return none
+  let some sl := slotOf s p | return none
+  if s.hasPhoto p then return none
+  let r ← fetch st doc ⟨s.gen, p, sl.vp.zoom, s.rot⟩
+  showPhoto st sl r.1
+  return some r
+
+/-- Makes `sl` the current page's slot: `shown` and the mirrored position, zoom and rotation
+(`imgX`, `imgY`, `shownZoom`, `shownRot`). -/
+def setMirror (st : IO.Ref State) (sl : Slot) : IO Unit :=
+  st.modify fun s =>
+    let k : View.Key := ⟨s.gen, sl.place.page, sl.vp.zoom, s.rot⟩
+    { s with shown := some k, imgX := sl.place.x, imgY := sl.place.y, shownZoom := sl.vp.zoom,
+             shownRot := sl.vp.rot }
+
+/-- The status line for the current page: file, page, zoom, rotation, image size, `how` it
+was obtained (render time, "from cache", "rendering…"), notes (zoom limited, cropped), the
+view mode (task 9.3); or the page's render error. -/
+def showStatus (st : IO.Ref State) (how : String) : IO Unit := do
+  let s ← st.get
+  let some path := s.path | return
+  let some sl := slotOf s s.page | return
+  let vp := sl.vp
+  let page := Links.pageText s.labels s.page s.pageCount
+  let r : Option (Except String Clip.Image) := (s.photos.find? (·.1 == s.page)).map (·.2)
+  match r with
+  | some (.error e) => setStatus s!"{path}: {page}: cannot render: {e}"
+  | r =>
+    let (w, h) := match r with
+      | some (.ok img) => (img.w, img.h)
+      | _ => (sl.place.w, sl.place.h)
+    let how := if r.isSome then how else "rendering..."
+    let pct := match s.zoomSel.mode with
+      | some (.scale p) => if vp.capped then View.zoomPct vp.zoom s.scaling else p
+      | _ => View.zoomPct vp.zoom s.scaling
+    let notes := (if vp.capped then
+        s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
+      (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
+    setStatus s!"{path}: {page}, {pct}% ({modeName s.zoomSel}), \
+      rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}"
 
 /-- Shows the current page in the toolbar's page field (`Toolbar.entryText`: the number, or
 the label when the document has labels) and the "of N" label next to it (task 9.7). -/
@@ -1231,92 +1503,212 @@ def showPageField (s : State) : IO Unit := do
   discard <| run ["::safepdf::setPage", Toolbar.entryText s.labels s.page,
     Toolbar.ofText s.labels s.page s.pageCount, "1"]
 
-/-- Updates title, labels and (when the page, document, zoom or rotation changed, or a scroll
-is pending) the page image. -/
+/-- Makes `p` the current page without moving the view (task 9.3: the page under the window
+centre while scrolling in the vertical modes): title, page field, status line. -/
+def setCurrent (st : IO.Ref State) (p : Nat) : IO Unit := do
+  let s ← st.get
+  let some sl := slotOf s p | return
+  st.modify ({ · with page := p, hover := none })
+  setMirror st sl
+  let s ← st.get
+  discard <| run ["wm", "title", ".", s.title]
+  st.modify ({ · with titleShown := s.title })
+  showPageField s
+  showStatus st "shown"
+
+/-- The visible band of the view: top, bottom, left and right in scroll-region pixels. -/
+def viewBand (s : State) : IO (Option (Nat × Nat × Nat × Nat)) := do
+  let some (a, b) := viewFracs (← run [".c", "yview"]) | return none
+  let some (xa, xb) := viewFracs (← run [".c", "xview"]) | return none
+  let px (f : Rat) (r : Nat) : Nat := (f * (r : Rat) + 1 / 2).floor.toNat
+  return some (px a s.regionH, px b s.regionH, px xa s.regionW, px xb s.regionW)
+
+/-- The pages to show for the view (`View.wantedPages`: visible, and one more each side) that
+have no photo yet, nearest to the current page first. -/
+def missingPages (st : IO.Ref State) : IO (List Nat) := do
+  let s ← st.get
+  if s.doc.isNone || s.shown.isNone then return []
+  let some (top, bot, _, _) ← viewBand s | return []
+  let miss := (View.wantedPages s.places top bot).filter (!s.hasPhoto ·)
+  let d (p : Nat) : Nat := if p ≥ s.page then p - s.page else s.page - p
+  return miss.mergeSort fun a b => d a ≤ d b
+
+/-- After the view moved (task 9.3): in the vertical modes the current page becomes the page
+under the window centre (`View.pageAt`), unless the view is still where the viewer put it
+(`ownTop`); photos of pages no longer wanted (`View.wantedPages`) are deleted, which bounds the
+memory Tk holds; missing pages are rendered one per event-loop turn (`renderMore`), so the
+window stays responsive and shows the white page frames meanwhile. -/
+def viewChanged (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || s.shown.isNone || s.slots.isEmpty then return
+  let some (top, bot, left, right) ← viewBand s | return
+  if s.scroll == .vertical && s.ownTop != some top then
+    st.modify ({ · with ownTop := none })
+    if let some p := View.pageAt s.places ((left + right) / 2) ((top + bot) / 2) then
+      if p != s.page then setCurrent st p
+  let s ← st.get
+  let want := View.wantedPages s.places top bot
+  let mut dropped := false
+  for (p, _) in s.photos do
+    if !want.contains p && p != s.page then
+      dropPhoto st p
+      dropped := true
+  if dropped then drawOverlay st
+  let s ← st.get
+  if !s.renderQueued && want.any (!s.hasPhoto ·) then
+    st.modify ({ · with renderQueued := true })
+    discard <| run ["after", "1", "::safepdf::emit renderMore"]
+
+/-- Renders one missing page (`missingPages`, the nearest to the current page) and schedules
+itself again while pages are missing (task 9.3). -/
+def renderMore (st : IO.Ref State) : IO Unit := do
+  st.modify ({ · with renderQueued := false })
+  match ← missingPages st with
+  | [] => pure ()
+  | p :: rest =>
+    let r ← ensurePhoto st p
+    drawOverlay st
+    if p == (← st.get).page then
+      showStatus st (match r with
+        | some (_, some t) => s!"rendered in {formatMs t} ms"
+        | _ => "from cache")
+    if !rest.isEmpty then
+      st.modify ({ · with renderQueued := true })
+      discard <| run ["after", "1", "::safepdf::emit renderMore"]
+
+/-- Renders every missing page now (smoke tests and benchmarks). -/
+def settle (st : IO.Ref State) : IO Unit := do
+  viewChanged st
+  for _ in [0:256] do
+    match ← missingPages st with
+    | [] => break
+    | p :: _ =>
+      discard <| ensurePhoto st p
+  drawOverlay st
+
+/-- Applies the pending scroll (`State.pending`) to the current layout. In the page scroll mode
+top and bottom are the region's ends; in the vertical modes the current page's place
+(`View.topFor`, `View.bottomFor`). Anchors and destinations map page points with
+`Geom.toScreen` on their page's slot (C2). In the vertical modes the resulting view top is
+remembered (`ownTop`). -/
+def applyScroll (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let some pend := s.pending | return
+  st.modify ({ · with pending := none })
+  let rw : Rat := (max s.regionW 1 : Nat)
+  let rh : Rat := (max s.regionH 1 : Nat)
+  let moveX (x : Rat) : IO Unit := discard <| run [".c", "xview", "moveto", fmtFrac (x / rw)]
+  let moveY (y : Rat) : IO Unit := discard <| run [".c", "yview", "moveto", fmtFrac (y / rh)]
+  let cur := slotOf s s.page
+  match pend with
+  | .top =>
+    match s.scroll, cur with
+    | .vertical, some sl => moveY (View.topFor sl.place : Nat)
+    | _, _ => discard <| run [".c", "yview", "moveto", "0"]
+  | .bottom =>
+    match s.scroll, cur with
+    | .vertical, some sl => moveY (View.bottomFor sl.place s.canvasH : Nat)
+    | _, _ => discard <| run [".c", "yview", "moveto", "1"]
+  | .anchor pg wx wy p =>
+    if let some sl := slotOf s pg then
+      if 0 < sl.vp.zoom then
+        let q := toScreen sl.vp.zoom sl.vp.rot sl.vp.box p
+        moveX (q.x + (sl.place.x : Rat) - (wx : Rat))
+        moveY (q.y + (sl.place.y : Rat) - (wy : Rat))
+  | .dest left top =>
+    if let some sl := cur then
+      if 0 < sl.vp.zoom then
+        let q := toScreen sl.vp.zoom sl.vp.rot sl.vp.box
+          ⟨left.getD sl.vp.box.llx, top.getD sl.vp.box.ury⟩
+        moveX (q.x + (sl.place.x : Rat))
+        moveY (q.y + (sl.place.y : Rat))
+  | .frac x y =>
+    discard <| run [".c", "xview", "moveto", fmtFrac x]
+    discard <| run [".c", "yview", "moveto", fmtFrac y]
+  | .within pg f =>
+    if let some sl := slotOf s pg then
+      moveY ((sl.place.y : Rat) + f * (sl.place.h : Rat))
+  if s.scroll == .vertical then
+    if let some (top, _, _, _) ← viewBand s then st.modify ({ · with ownTop := some top })
+
+/-- Updates title, page field, zoom field and (when the layout or the current page changed, or
+a scroll is pending) the page images. A new layout (`layoutKeyOf` changed: document, view
+mode, zoom, rotation, window size, or the spread shown in the page scroll mode) is computed by
+`computeLayout` and drawn by `buildCanvas`. The current page (in the page scroll mode its
+whole spread) is rendered at once; the other pages in view follow one per event-loop turn
+(`viewChanged`, `renderMore`). -/
 def refresh (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   discard <| run ["wm", "title", ".", s.title]
   st.modify ({ · with titleShown := s.title })
   match s.path, s.doc with
-  | some path, some doc =>
+  | some _, some doc =>
     showPageField s
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "1"]
-    let some vp := viewParams s doc s.page | return
-    let pct := match s.zoomSel.mode with
-      | some (.scale p) => if vp.capped then View.zoomPct vp.zoom s.scaling else p
-      | _ => View.zoomPct vp.zoom s.scaling
-    let key : View.Key := ⟨s.gen, s.page, vp.zoom, s.rot⟩
-    if s.shown == some key && s.pending.isNone then return
-    st.modify ({ · with shown := some key })
-    let (res, time) ← fetch st doc key
+    if doc.pages.size == 0 then return
+    let key := layoutKeyOf s
+    let relaid := s.layoutKey != some key
+    if relaid then
+      -- A new layout of the vertical modes keeps the view's place in the current page.
+      if s.scroll == .vertical && s.pending.isNone && s.layoutKey.isSome then
+        if let (some sl, some (top, _, _, _)) := (slotOf s s.page, ← viewBand s) then
+          if sl.place.h > 0 then
+            st.modify ({ · with pending := some (.within s.page
+              (((top : Int) - (sl.place.y : Int) : Rat) / (sl.place.h : Rat))) })
+      let s ← st.get
+      let (slots, rw, rh) := computeLayout s doc
+      st.modify ({ · with slots, regionW := rw, regionH := rh, layoutKey := some key,
+                          ownTop := none, shown := none })
+      buildCanvas st
     let s ← st.get
-    match res with
-    | .ok img =>
-      st.modify ({ · with shownImg := some img })
-      Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32
-        (Marks.composite vp.zoom vp.rot vp.box img.w img.h img.data (drawnMarks s))
-      -- Centre the page when it is smaller than the canvas; the scroll region is the page
-      -- plus the margin (at least the canvas).
-      let m := View.margin
-      let ix := max m ((s.canvasW - img.w) / 2)
-      let iy := max m ((s.canvasH - img.h) / 2)
-      let rw := max s.canvasW (img.w + 2 * m)
-      let rh := max s.canvasH (img.h + 2 * m)
-      discard <| run [".c", "coords", "page", toString ix, toString iy]
-      discard <| run [".c", "coords", "pageframe", toString (ix - 1), toString (iy - 1),
-        toString (ix + img.w), toString (iy + img.h)]
-      discard <| run [".c", "itemconfigure", "pageframe", "-state", "normal"]
-      discard <| run [".c", "configure", "-scrollregion", s!"0 0 {rw} {rh}"]
-      applyScroll s vp ix iy rw rh
-      st.modify ({ · with imgX := ix, imgY := iy, shownZoom := vp.zoom, shownRot := vp.rot,
-                          pending := none, regionW := rw, regionH := rh })
-      drawOverlay st
-      let how := match time with
-        | some t => s!"rendered in {formatMs t} ms"
-        | none => "from cache"
-      let notes := (if vp.capped then
-          s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
-        (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
-      setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}, {pct}% ({modeName s.zoomSel}), \
-        rotation {View.rotDeg s.rot}, {img.w}x{img.h} px, {how}{notes}"
-      if s.page + 1 < s.pageCount then
-        discard <| run ["after", "100", "::safepdf::emit prefetch"]
-    | .error e =>
-      st.modify ({ · with pending := none, shownImg := none })
-      discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
-      st.modify ({ · with bubble := none, pickerAt := none })
-      discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
-      discard <| run [photoName, "blank"]
-      setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}: cannot render: {renderError e}"
+    let some sl := slotOf s s.page | return
+    let curKey : View.Key := ⟨s.gen, s.page, sl.vp.zoom, s.rot⟩
+    if !relaid && s.shown == some curKey && s.pending.isNone then return
+    setMirror st sl
+    let res ← ensurePhoto st s.page
+    if s.scroll == .page then
+      for sl' in s.slots do discard <| ensurePhoto st sl'.place.page
+    applyScroll st
+    viewChanged st
+    drawOverlay st
+    showStatus st (match res with
+      | some (_, some t) => s!"rendered in {formatMs t} ms"
+      | _ => "from cache")
+    let s ← st.get
+    if s.scroll == .page && View.nextPage s.spread s.pageCount s.page != s.page then
+      discard <| run ["after", "100", "::safepdf::emit prefetch"]
   | _, _ =>
     discard <| run ["::safepdf::setPage", "", "", "0"]
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
     discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
-    st.modify ({ · with bubble := none, pickerAt := none })
-    discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
-    discard <| run [photoName, "blank"]
+    st.modify ({ · with bubble := none, pickerAt := none, slots := #[], layoutKey := none,
+                        shown := none })
+    clearPages st
 
-/-- Shows the current page image again with the marks of the page multiplied in, and redraws
-the overlays (after a mark was added, removed or recoloured; task 9.4). -/
+/-- Shows the page images again with the marks of each page multiplied in, and redraws the
+overlays (after a mark was added, removed or recoloured; task 9.4). -/
 def repaint (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  if let (some img, some bx) := (s.shownImg, shownBox s) then
-    Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32
-      (Marks.composite s.shownZoom s.shownRot bx img.w img.h img.data (drawnMarks s))
+  for (p, r) in s.photos do
+    if let (.ok img, some sl) := (r, slotOf s p) then
+      Shim.photoPut (photoOf p) img.w.toUInt32 img.h.toUInt32
+        (Marks.composite sl.vp.zoom sl.vp.rot sl.vp.box img.w img.h img.data (drawnMarks s p))
   drawOverlay st
 
-/-- Renders the page after the current one into the cache when it is small enough
-(`prefetchPixels`) and not cached yet. -/
+/-- Renders the pages of the next spread (page scroll mode; the next page in the single-page
+view) into the cache when they are small enough (`prefetchPixels`) and not cached yet. The
+vertical modes render their neighbours through `viewChanged` instead. -/
 def prefetch (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some doc := s.doc | return
-  let p := s.page + 1
-  let some vp := viewParams s doc p | return
-  let key : View.Key := ⟨s.gen, p, vp.zoom, s.rot⟩
-  if s.cache.contains key then return
-  let (w, h) := View.pixelSize vp.zoom vp.rot vp.box
-  if w * h > prefetchPixels then return
-  discard <| fetch st doc key
+  if s.scroll != .page then return
+  let q := View.nextPage s.spread s.pageCount s.page
+  if q == s.page then return
+  let (slots, _, _) := computeLayout { s with page := q } doc
+  for sl in slots do
+    let key : View.Key := ⟨s.gen, sl.place.page, sl.vp.zoom, s.rot⟩
+    if !(← st.get).cache.contains key && sl.place.w * sl.place.h ≤ prefetchPixels then
+      discard <| fetch st doc key
 
 /-! ## Outline panel (task 8.2d) -/
 
@@ -1384,20 +1776,20 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
-                              history := {}, marks := {}, markSel := none, shownImg := none }
+                              history := {}, marks := {}, markSel := none, slots := #[],
+                              layoutKey := none, ownTop := none }
+  clearPages st
   discard <| run ["destroy", ".note"]
   fillOutline st
   showOutline st false
   st.modify ({ · with toggleShown := none })
   match ← Inspect.load {} path with
   | .error msg =>
-    discard <| run [photoName, "blank"]
     refresh st
     setStatus s!"{path}: cannot read: {msg}"
   | .ok input =>
     match Views.Pages.docOf limits input.result with
     | .error e =>
-      discard <| run [photoName, "blank"]
       refresh st
       setStatus s!"{path}: cannot open: {renderError e}"
     | .ok doc =>
@@ -1431,24 +1823,19 @@ def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit :=
   if s.pageCount == 0 then return
   let p := min p (s.pageCount - 1)
   if p != s.page then
-    st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none,
-                        hover := none, wheel := {}, markSel := none })
+    let keep := s.scroll == .vertical
+    st.modify ({ · with page := p, pending := some whereTo, sel := if keep then s.sel else none,
+                        pressPt := none, hover := none, wheel := {},
+                        markSel := if keep then s.markSel else none })
     discard <| run [".c", "configure", "-cursor", ""]
     refresh st
 
-/-- Remembers the page point at window position `(wx, wy)` of the canvas, so that the next
-refresh keeps it there (C2 anchoring). Nothing when no page is shown. -/
+/-- Remembers the page point at window position `(wx, wy)` of the canvas (on the page under
+it, task 9.3), so that the next refresh keeps it there (C2 anchoring). Nothing when no page is
+shown. -/
 def anchorAt (st : IO.Ref State) (wx wy : Nat) : IO Unit := do
-  let s ← st.get
-  let some doc := s.doc | return
-  let some page := doc.pages[s.page]? | return
-  if s.shown.isNone || !(0 < s.shownZoom) then return
-  let cx ← run [".c", "canvasx", toString wx]
-  let cy ← run [".c", "canvasy", toString wy]
-  let (some cx, some cy) := (View.parseDecimal cx, View.parseDecimal cy) | return
-  let q : Pt := ⟨cx - (s.imgX : Rat), cy - (s.imgY : Rat)⟩
-  let p := toPage s.shownZoom s.shownRot (Box.ofRect page.cropBox) q
-  st.modify ({ · with pending := some (.anchor wx wy p) })
+  let some (pg, p) ← pagePointAt st wx wy | return
+  st.modify ({ · with pending := some (.anchor pg wx wy p) })
 
 /-- The window position to anchor at: the given one, else the canvas centre. -/
 def anchorPos (s : State) (pos : Option (Nat × Nat)) : Nat × Nat :=
@@ -1488,17 +1875,12 @@ def zoomChoose (st : IO.Ref State) (key : String) : IO Unit := do
   | some c => setMode st c none
   | none => setStatus s!"internal: unknown zoom choice {key}"
 
-/-- The two numbers of an `xview`/`yview` result. -/
-def viewFracs (s : String) : Option (Rat × Rat) :=
-  match (s.splitOn " ").filter (!·.isEmpty) with
-  | [a, b] => do return (← View.parseDecimal a, ← View.parseDecimal b)
-  | _ => none
-
 /-- Handles `wheel AXIS KIND D` (task 9.2): a wheel or trackpad delta `D` of kind `KIND`
 (`notch`, `line`, `pixel`; `View.WheelKind`) on axis `x` or `y`. `View.wheelStep` decides:
 scroll within the page (small deltas accumulate), or, on the vertical axis after reaching the
-edge and pushing on past it by `View.wheelThreshold`, turn to the top of the next page or the
-bottom of the previous one, as the keys do. -/
+edge and pushing on past it by `View.wheelThreshold`, turn to the top of the next page (spread)
+or the bottom of the previous one, as the keys do. In the vertical modes the wheel only
+scrolls (task 9.3). -/
 def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || s.shown.isNone then return
@@ -1515,8 +1897,9 @@ def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
   let top := (a * r + 1 / 2).floor.toNat
   let view := ((b - a) * r + 1 / 2).floor.toNat
   let now ← IO.monoMsNow
-  let (w, act) := View.wheelStep s.wheel now (View.wheelPixels kind d view) (kind == .pixel) isY
-    top view region (View.wheelThreshold kind view)
+  -- In the vertical modes the wheel simply scrolls the whole document (task 9.3).
+  let (w, act) := View.wheelStep s.wheel now (View.wheelPixels kind d view) (kind == .pixel)
+    (isY && s.scroll == .page) top view region (View.wheelThreshold kind view)
   match act with
   | .none => st.modify ({ · with wheel := w })
   | .scrollTo p =>
@@ -1524,11 +1907,14 @@ def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
     -- Tk rounds `moveto` to the nearest pixel, so the fraction p / region lands on p.
     discard <| run [".c", if isY then "yview" else "xview", "moveto",
       fmtFrac ((p : Rat) / (max region 1 : Nat))]
+    viewChanged st
   | .next =>
-    if s.page + 1 < s.pageCount then goTo st (s.page + 1) .top
+    let q := View.nextPage s.spread s.pageCount s.page
+    if q != s.page then goTo st q .top
     st.modify ({ · with wheel := w })
   | .prev =>
-    if s.page > 0 then goTo st (s.page - 1) .bottom
+    let q := View.prevPage s.spread s.page
+    if q != s.page then goTo st q .bottom
     st.modify ({ · with wheel := w })
 
 /-- Rotates the view by a quarter turn (`cw` or `ccw`), keeping the window centre's page
@@ -1540,6 +1926,30 @@ def rotate (st : IO.Ref State) (cw : Bool) : IO Unit := do
   anchorAt st wx wy
   st.modify fun s => { s with rot := if cw then View.rotCw s.rot else View.rotCcw s.rot }
   refresh st
+
+/-- Handles `viewMode scroll KEY` / `viewMode spread KEY` (task 9.3; View menu and the overflow
+menu's radio entries): switches the scroll mode (`page`, `vertical`) or the spread mode
+(`none`, `odd`, `even`), keeping the current page, shown from its top. The radio variables
+(`Menu.scrollVar`, `Menu.spreadVar`) and `::safepdf::continuous` (which makes key scrolling
+report `viewChanged`) are set to the state whatever happens. -/
+def setViewMode (st : IO.Ref State) (what key : String) : IO Unit := do
+  let s ← st.get
+  let s' := match what with
+    | "scroll" => (View.ScrollMode.ofKey key).map fun m => { s with scroll := m }
+    | "spread" => (View.SpreadMode.ofKey key).map fun m => { s with spread := m }
+    | _ => none
+  let changed := match s' with
+    | some s' => s.doc.isSome && (s'.scroll != s.scroll || s'.spread != s.spread)
+    | none => false
+  if changed then
+    if let some s' := s' then
+      st.modify ({ · with scroll := s'.scroll, spread := s'.spread, pending := some .top,
+                          wheel := {} })
+  let s ← st.get
+  discard <| run ["set", Menu.scrollVar, s.scroll.key]
+  discard <| run ["set", Menu.spreadVar, s.spread.key]
+  discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
+  if changed then refresh st
 
 /-! ## Saving (task 9.5c) -/
 
@@ -1672,7 +2082,8 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
                               hover := none, history := {}, toggleShown := none,
-                              marks := {}, markSel := none, shownImg := none,
+                              marks := {}, markSel := none, slots := #[], layoutKey := none,
+                              ownTop := none,
                               ui := { s.ui with tool := false, popover := false,
                                                 picker := false },
                               bubble := none, pickerAt := none, bubblePress := false }
@@ -1719,8 +2130,13 @@ def buildMenus : IO Unit := do
         colorMenu path
         discard <| run [m.path, "add", "cascade", "-label", Menu.colorsLabel, "-menu", path]
       | .cmd c =>
-        discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accel,
-          "-underline", toString c.underline, "-command", c.script]
+        match c.radio? with
+        | some (var, val) =>
+          discard <| run [m.path, "add", "radiobutton", "-label", c.label, "-variable", var,
+            "-value", val, "-underline", toString c.underline, "-command", c.script]
+        | none =>
+          discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accel,
+            "-underline", toString c.underline, "-command", c.script]
       | .check c var =>
         discard <| run [m.path, "add", "checkbutton", "-label", c.label, "-accelerator", c.accel,
           "-underline", toString c.underline, "-variable", var, "-onvalue", "1",
@@ -1763,15 +2179,23 @@ def buildToolbar : IO Unit := do
     match e with
     | none => discard <| run [Toolbar.morePath, "add", "separator"]
     | some c =>
-      discard <| run [Toolbar.morePath, "add", "command", "-label", c.label, "-accelerator",
-        c.accel, "-command", c.script]
+      match c.radio? with
+      | some (var, val) =>
+        discard <| run [Toolbar.morePath, "add", "radiobutton", "-label", c.label, "-variable",
+          var, "-value", val, "-command", c.script]
+      | none =>
+        discard <| run [Toolbar.morePath, "add", "command", "-label", c.label, "-accelerator",
+          c.accel, "-command", c.script]
 
 /-- The part of the state the enabled rules look at. -/
 def menuCtx (s : State) : Menu.Ctx :=
   { hasDoc := s.doc.isSome && s.pageCount > 0, page := s.page, pages := s.pageCount,
     hasSel := s.sel.isSome, hasMark := s.markSel.isSome, hasOutline := !s.outline.isEmpty,
     canBack := !s.history.back.isEmpty, canForward := !s.history.fwd.isEmpty,
-    dirty := s.doc.isSome && s.marks.dirty }
+    dirty := s.doc.isSome && s.marks.dirty,
+    onFirst := View.spreadOf s.spread s.page == 0,
+    onLast := s.pageCount > 0 &&
+      View.spreadOf s.spread s.page == View.spreadOf s.spread (s.pageCount - 1) }
 
 /-- Sets the `-state` of every menubar entry, overflow-menu entry and toolbar button whose
 enabled state (`Toolbar.states`) changed since the last call, and shows or hides the sidebar
@@ -1824,7 +2248,8 @@ def showAt (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo) : IO Unit := do
   if s.pageCount == 0 then return
   let p := min p (s.pageCount - 1)
   st.modify fun s => { s with page := p, pending := some whereTo, pressPt := none, hover := none,
-                              sel := if p == s.page then s.sel else none, wheel := {} }
+                              sel := if p == s.page || s.scroll == .vertical then s.sel else none,
+                              wheel := {} }
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
 
@@ -1869,10 +2294,10 @@ def activate (st : IO.Ref State) (a : Links.Action) : IO Unit := do
     let s ← st.get
     setStatus (Links.describe s.labels s.pageCount a)
 
-/-- The link of the shown page under window position `(wx, wy)`, if any. -/
-def linkUnder (st : IO.Ref State) (wx wy : Int) : IO (Option (Nat × Links.Link)) := do
-  let some p ← pagePoint st wx wy | return none
-  return Links.linkAt (← linksOf st (← st.get).page) p
+/-- The link under window position `(wx, wy)` (on the page under it, task 9.3), if any. -/
+def linkUnder (st : IO.Ref State) (wx wy : Int) : IO (Option ((Nat × Nat) × Links.Link)) := do
+  let some (pg, p) ← pagePointAt st wx wy | return none
+  return (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
 
 /-- Pointer motion: over a link the cursor becomes a hand and the status line shows the
 target (the full address of a URI); leaving it restores the status line. -/
@@ -2040,9 +2465,9 @@ def highlight (st : IO.Ref State) (color : Option String) : IO Unit := do
 def openNote (st : IO.Ref State) (id : Nat) : IO Unit := do
   let s ← st.get
   let some m := s.marks.find? id | return
-  let some bx := shownBox s | return
-  let some ib := m.iconBox bx | return
-  let (_, y0, x1, _) := canvasRect s bx ib
+  let some sl := slotOf s m.page | return
+  let some ib := m.iconBox sl.vp.box | return
+  let (_, y0, x1, _) := sl.rect ib
   let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
     View.parseDecimal (← run [".c", "canvasy", "0"])) | return
   let (some rx, some ry) := ((← run ["winfo", "rootx", ".c"]).toInt?,
@@ -2061,31 +2486,37 @@ def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || (shownBox s).isNone then return
   let mut anchor : Option Marks.Anchor := none
+  let mut page := s.page
   if let some (p, a, b) := s.sel then
-    if p == s.page then
+    if (slotOf s p).isSome then
       if let .ok ix ← pageIndex st p then
         let qs := Select.rangeBoxes ix.cells a b
-        if !qs.isEmpty then anchor := some (.quads qs)
+        if !qs.isEmpty then
+          anchor := some (.quads qs)
+          page := p
   -- The comment of the selected highlight (the edit bubble's Comment, task 9.8): its note,
   -- or a new note anchored to its quads in its colour.
   let mut color := Marks.Color.yellow
   if anchor.isNone && pos.isNone then
     if let some m := s.markSel.bind s.marks.find? then
-      if m.page == s.page && !m.isNote && !m.quads.isEmpty then
-        if let some id := s.marks.noteOn s.page m.quads then
-          setStatus s!"page {s.page + 1}: comment of the {m.color.name} highlight"
+      if (slotOf s m.page).isSome && !m.isNote && !m.quads.isEmpty then
+        if let some id := s.marks.noteOn m.page m.quads then
+          setStatus s!"page {m.page + 1}: comment of the {m.color.name} highlight"
           openNote st id
           return
         anchor := some (.quads m.quads)
+        page := m.page
         color := m.color
   if anchor.isNone then
     let (wx, wy) := pos.getD (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
-    anchor := (← pagePoint st wx wy).map .point
+    if let some (pg, p) ← pagePointAt st wx wy then
+      anchor := some (.point p)
+      page := pg
   let some anc := anchor | return
-  let (marks, id) := s.marks.addNote s.page color "" anc
+  let (marks, id) := s.marks.addNote page color "" anc
   st.modify ({ · with marks, markSel := some id, sel := none })
   repaint st
-  setStatus s!"page {s.page + 1}: note added (type its text, then Save)"
+  setStatus s!"page {page + 1}: note added (type its text, then Save)"
   openNote st id
 
 /-- Handles `noteSave ID TEXT` from the note popup. -/
@@ -2119,14 +2550,14 @@ def markDelete (st : IO.Ref State) : IO Unit := do
   | some id => deleteMark st id
   | none => if s.doc.isSome then setStatus "no mark selected (click a highlight or note)"
 
-/-- Selects the mark under page point `p` of the shown page, if any (a note also opens its
+/-- Selects the mark under point `p` of page `pg`, if any (a note also opens its
 popup when `openIt` is set). Returns whether there was one. -/
-def selectMarkAt (st : IO.Ref State) (p : Pt) (openIt : Bool) : IO Bool := do
+def selectMarkAt (st : IO.Ref State) (pg : Nat) (p : Pt) (openIt : Bool) : IO Bool := do
   let s ← st.get
-  let some bx := shownBox s | return false
+  let some sl := slotOf s pg | return false
   let store := if s.ui.showAll then s.marks
     else { s.marks with marks := s.marks.marks.filter (·.isNote) }
-  match store.hitAt bx s.page p with
+  match store.hitAt sl.vp.box pg p with
   | some id =>
     st.modify ({ · with markSel := some id })
     drawOverlay st
@@ -2145,8 +2576,8 @@ def popup (st : IO.Ref State) (x y rx ry : String) : IO Unit := do
   discard <| run ["set", "::safepdf::popX", x]
   discard <| run ["set", "::safepdf::popY", y]
   if let (some wx, some wy) := (x.toInt?, y.toInt?) then
-    if let some p ← pagePoint st wx wy then
-      if !(← selectMarkAt st p false) && (← st.get).markSel.isSome then
+    if let some (pg, p) ← pagePointAt st wx wy then
+      if !(← selectMarkAt st pg p false) && (← st.get).markSel.isSome then
         st.modify ({ · with markSel := none })
         drawOverlay st
   let s ← st.get
@@ -2294,7 +2725,8 @@ def press (st : IO.Ref State) (wx wy : Int) : IO Unit := do
   if ← bubbleClick st wx wy then return
   st.modify fun s => { s with sel := none, pressPt := none, markSel := none,
                               ui := { s.ui with picker := false } }
-  if let some p ← pagePoint st wx wy then st.modify ({ · with pressPt := some p })
+  if let some (pg, p) ← pagePointAt st wx wy then
+    st.modify ({ · with pressPt := some p, pressPage := pg })
   drawOverlay st
 
 /-- Mouse drag (`final`: release) to `(wx, wy)`: selects the glyphs from the one nearest to
@@ -2307,23 +2739,25 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
     return
   let some p0 := s.pressPt | return
   if final then st.modify ({ · with pressPt := none })
-  let some p1 ← pagePoint st wx wy | return
+  -- The drag selects on the page it started on (task 9.3).
+  let pg := s.pressPage
+  let some p1 ← pagePointOn st pg wx wy | return
   if final && p0 == p1 then
     -- A click in place: select the mark under it (task 9.4; marks lie above links), else
     -- activate the link under it (task 8.2d).
-    if ← selectMarkAt st p1 true then return
-    if let some (_, l) := Links.linkAt (← linksOf st s.page) p1 then activate st l.action
+    if ← selectMarkAt st pg p1 true then return
+    if let some (_, l) := Links.linkAt (← linksOf st pg) p1 then activate st l.action
     return
-  match ← pageIndex st s.page with
+  match ← pageIndex st pg with
   | .ok ix =>
     if let some (a, b) := Select.dragRange ix.cells p0 p1 then
-      st.modify ({ · with sel := some (s.page, a, b) })
+      st.modify ({ · with sel := some (pg, a, b) })
       drawOverlay st
       if final then
         selStatus st
         -- With the Highlight tool on, the mouse-up highlights at once (PDF.js, task 9.8).
         if (← st.get).ui.highlightOnRelease true then highlight st none
-  | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
+  | .error e => setStatus s!"page {pg + 1}: no text: {e}"
 
 /-- Double click at `(wx, wy)`: selects the word of the nearest glyph (`Select.wordAt`). -/
 def selectWord (st : IO.Ref State) (wx wy : Int) : IO Unit := do
@@ -2333,16 +2767,16 @@ def selectWord (st : IO.Ref State) (wx wy : Int) : IO Unit := do
   if let some (cx, cy) ← canvasPos wx wy then
     if (s.bubble.any fun (_, r) => r.contains cx cy) || (s.pickerAt.any (·.contains cx cy)) then
       return
-  let some p ← pagePoint st wx wy | return
-  match ← pageIndex st s.page with
+  let some (pg, p) ← pagePointAt st wx wy | return
+  match ← pageIndex st pg with
   | .ok ix =>
     if let some i := Select.nearest ix.cells p then
       let (a, b) := Select.wordAt ix.cells i
-      st.modify ({ · with sel := some (s.page, a, b) })
+      st.modify ({ · with sel := some (pg, a, b) })
       drawOverlay st
       selStatus st
       if (← st.get).ui.highlightOnRelease true then highlight st none
-  | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
+  | .error e => setStatus s!"page {pg + 1}: no text: {e}"
 
 /-- Selects all the text of the current page (Ctrl+A). -/
 def selectAll (st : IO.Ref State) : IO Unit := do
@@ -2373,13 +2807,12 @@ def copySel (st : IO.Ref State) : IO Unit := do
 def scrollToHit (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some (p, k) := s.hit | return
-  if p != s.page then return
-  let some bx := shownBox s | return
+  let some sl := slotOf s p | return
   let .ok ix ← pageIndex st p | return
   let some (a, b) := (ix.hits s.query)[k]? | return
   let some u := (Select.rangeBoxes ix.cells a b).foldl (fun acc b =>
     some (match acc with | some u => Select.Box.union u b | none => b)) none | return
-  let (x0, y0, x1, y1) := canvasRect s bx u
+  let (x0, y0, x1, y1) := sl.rect u
   let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
     View.parseDecimal (← run [".c", "canvasy", "0"])) | return
   let cw : Rat := s.canvasW
@@ -2388,6 +2821,7 @@ def scrollToHit (st : IO.Ref State) : IO Unit := do
     discard <| run [".c", "xview", "moveto", fmtFrac (((x0 + x1) / 2 - cw / 2) / (s.regionW : Rat))]
   if y0 < vy || vy + ch < y1 then
     discard <| run [".c", "yview", "moveto", fmtFrac (((y0 + y1) / 2 - ch / 2) / (s.regionH : Rat))]
+  viewChanged st
 
 /-- The next (`forward`) or previous search hit after the current one, as (page, index on
 the page, hits on the page, wrapped around). Searches the current page, then the following
@@ -2519,7 +2953,7 @@ def smokeText (st : IO.Ref State) (dir : String) : IO Unit := do
           let s' ← st.get
           IO.FS.writeFile (file "word-rect.txt")
             s!"{← run [".c", "coords", "sel"]}\n{s'.imgX} {s'.imgY}\n"
-          try discard <| run [photoName, "write", file "text-page-1.ppm", "-format", "ppm"]
+          try discard <| run [photoOf 0, "write", file "text-page-1.ppm", "-format", "ppm"]
           catch _ => pure ()
       if let some (_, b) := (ix.hits (Select.normQuery "world"))[0]? then
         if let (some p0, some p1) := (← cellWindowPos st ix 0, ← cellWindowPos st ix b) then
@@ -2979,7 +3413,7 @@ def smokeMarks (st : IO.Ref State) (dir : String) : IO Unit := do
     let s ← st.get
     let some bx := shownBox s | return "<no page>"
     let q := toScreen s.shownZoom s.shownRot bx p
-    try run [photoName, "get", toString q.x.floor, toString q.y.floor]
+    try run [photoOf s.page, "get", toString q.x.floor, toString q.y.floor]
     catch _ => pure "<outside>"
   let clickAt (pos : String × String) : IO Unit := do
     sendEvent ".c" "<ButtonPress-1>" ["-x", pos.1, "-y", pos.2]
@@ -3129,7 +3563,7 @@ def smokeBubble (st : IO.Ref State) (dir : String) : IO Unit := do
     let s ← st.get
     let some bx := shownBox s | return "<no page>"
     let q := toScreen s.shownZoom s.shownRot bx p
-    try run [photoName, "get", toString q.x.floor, toString q.y.floor]
+    try run [photoOf s.page, "get", toString q.x.floor, toString q.y.floor]
     catch _ => pure "<outside>"
   let idle : IO Unit := discard <| run ["update", "idletasks"]
   let clickAt (pos : String × String) : IO Unit := do
@@ -3315,7 +3749,7 @@ def saveKit (st : IO.Ref State) : SaveKit where
     let s ← st.get
     let some bx := shownBox s | return "<no page>"
     let q := toScreen s.shownZoom s.shownRot bx p
-    try run [photoName, "get", toString q.x.floor, toString q.y.floor]
+    try run [photoOf s.page, "get", toString q.x.floor, toString q.y.floor]
     catch _ => pure "<outside>"
   clickAt pos := do
     sendEvent ".c" "<ButtonPress-1>" ["-x", pos.1, "-y", pos.2]
@@ -3516,6 +3950,203 @@ def smokeEncrypted (st : IO.Ref State) (dir : String) : IO Unit := do
     s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nstatus: {status}\n"
   discard <| run ["destroy", "."]
 
+/-- Window position of the centre of a page-space box on page `p` (any laid-out page, task 9.3). -/
+def boxWindowPosOn (st : IO.Ref State) (p : Nat) (b : Box) : IO (Option (String × String)) := do
+  let s ← st.get
+  let some sl := slotOf s p | return none
+  let (x0, y0, x1, y1) := sl.rect b
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return none
+  return some (toString ((x0 + x1) / 2 - vx).floor, toString ((y0 + y1) / 2 - vy).floor)
+
+/-- The pixel ("R G B") of page `p`'s photo at page point `q`. -/
+def photoPixel (st : IO.Ref State) (p : Nat) (q : Pt) : IO String := do
+  let s ← st.get
+  let some sl := slotOf s p | return "<not laid out>"
+  if !s.hasPhoto p then return "<no photo>"
+  let d := toScreen sl.vp.zoom sl.vp.rot sl.vp.box q
+  try run [photoOf p, "get", toString d.x.floor, toString d.y.floor]
+  catch _ => pure "<outside>"
+
+/-- Smoke steps of the view modes (`SAFEPDF_VIEWER_SMOKE_MODE=modes`, task 9.3), on a
+three-page text PDF (substitute fonts off, so the pages are white) whose pages say `Alpha`,
+`Bravo` and `zebra`. Every mode is chosen through its View menu entry. Continuous: three page
+frames, the wheel scrolls through the document and the page field follows 1, 2, 3 without page
+turns, Home goes back; Next page; a double click on `Bravo` (page 2) + `h` highlights it (photo
+pixels yellow); a search for `zebra` from page 1 goes to page 3 and scrolls the hit into the
+view. Continuous facing (odd): pages 1 and 2 side by side, the highlight still drawn. Facing
+(page scrolling, odd spreads): two frames, Next moves 1 → 3, Previous back, Next disabled in the
+last spread, a wheel notch at fit page turns to the next spread. Even spreads: page 1 alone,
+Next → 2|3. Back to single page. Writes `modes.txt`. -/
+def smokeModes (st : IO.Ref State) (dir : String) : IO Unit := do
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let invoke (c : Menu.Cmd) : IO Unit := do
+    let path := ((Menu.locate c).map (·.1)).getD ".menubar.view"
+    discard <| run [path, "invoke", c.label]
+    discard <| run ["update", "idletasks"]
+  let field : IO String := run ["set", "::safepdf::pageText"]
+  let page : IO Nat := return (← st.get).page + 1
+  let slotsStr : IO String := do
+    return ",".intercalate ((← st.get).slots.toList.map fun sl => toString (sl.place.page + 1))
+  let frames : IO Nat := tagCount "pageframe"
+  let yv : IO String := run [".c", "yview"]
+  let .ok ix2 ← pageIndex st 1 | throw (IO.userError "no text on page 2")
+  let some (ba, bb) := (ix2.hits (Select.normQuery "Bravo"))[0]? | throw (IO.userError "no Bravo")
+  let some bravo := (Select.rangeBoxes ix2.cells ba bb).head? | throw (IO.userError "no box")
+  let bravoC : Pt := ⟨(bravo.llx + bravo.urx) / 2, (bravo.lly + bravo.ury) / 2⟩
+  out := out.push s!"frames-single: {← frames}"
+  -- 1. Continuous (Vertical Scrolling).
+  invoke .scrollVertical
+  settle st
+  out := out.push s!"scroll-var: {← run ["set", Menu.scrollVar]}"
+  out := out.push s!"frames-continuous: {← frames}"
+  out := out.push s!"slots-continuous: {← slotsStr}"
+  let s ← st.get
+  out := out.push s!"region-vs-canvas: {s.regionH} {s.canvasH}"
+  -- The wheel scrolls the whole document; the page field follows the page under the centre.
+  let mut seen : Array String := #[← field]
+  let mut maxPhotos := (← st.get).photos.size
+  let mut notches := 0
+  let mut lastTop : Rat := -1
+  let mut monotone := true
+  for _ in [0:400] do
+    if let some (a, b) := viewFracs (← yv) then
+      if b ≥ 1 then break
+      if a < lastTop then monotone := false
+      lastTop := a
+    sendEvent ".c" "<MouseWheel>" ["-delta", "-120", "-x", "200", "-y", "200"]
+    notches := notches + 1
+    settle st
+    let f ← field
+    if seen.back? != some f then seen := seen.push f
+    maxPhotos := max maxPhotos (← st.get).photos.size
+  out := out.push s!"wheel-pages-seen: {",".intercalate seen.toList}"
+  out := out.push s!"wheel-notches: {notches}"
+  out := out.push s!"wheel-monotone: {monotone}"
+  out := out.push s!"wheel-end: {← yv}"
+  out := out.push s!"page-at-end: {← page}"
+  out := out.push s!"max-photos: {maxPhotos}"
+  sendKey "Home"
+  settle st
+  out := out.push s!"page-after-home: {← page} {← field}"
+  out := out.push s!"y-after-home: {← yv}"
+  -- 2. Next page; a highlight on page 2 (double click on `Bravo`, then `h`).
+  invoke .nextPage
+  settle st
+  out := out.push s!"page-after-next: {← page} {← field}"
+  -- Zooming in keeps the page point at the window centre there (C2 anchoring on its slot).
+  let cx : Int := ((← st.get).canvasW / 2 : Nat)
+  let cy : Int := ((← st.get).canvasH / 2 : Nat)
+  let before ← pagePointAt st cx cy
+  sendKey "plus"
+  settle st
+  let after ← pagePointAt st cx cy
+  out := out.push s!"zoom-anchor: {match before, after with
+    | some (p0, q0), some (p1, q1) =>
+      decide (p0 == p1 ∧ (q0.x - q1.x) * (q0.x - q1.x) + (q0.y - q1.y) * (q0.y - q1.y) ≤ 4)
+    | _, _ => false} {← page}"
+  let some bpos ← boxWindowPosOn st 1 bravo | throw (IO.userError "page 2 not laid out")
+  for _ in [0:2] do
+    sendEvent ".c" "<ButtonPress-1>" ["-x", bpos.1, "-y", bpos.2]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", bpos.1, "-y", bpos.2]
+  out := out.push s!"sel-page: {((← st.get).sel.map (·.1 + 1)).getD 0}"
+  sendKey "h"
+  settle st
+  out := out.push s!"marks: {(← st.get).marks.marks.toList.map (·.page + 1)}"
+  out := out.push s!"hl-continuous: {← photoPixel st 1 bravoC}"
+  -- 3. Search from page 1: the hit on page 3 is scrolled into view.
+  sendKey "Home"
+  settle st
+  sendEvent ".c" "<Control-Key-f>"
+  discard <| run ["update", "idletasks"]
+  discard <| run ["set", "::safepdf::query", "zebra"]
+  sendEvent ".find.e" "<Key-Return>"
+  settle st
+  out := out.push s!"find-status: {← run [".status", "cget", "-text"]}"
+  out := out.push s!"page-after-find: {← page} {← field}"
+  let hitBox := ((← run [".c", "bbox", "hit"]).splitOn " ").filterMap String.toInt?
+  let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+  let ch : Rat := (← st.get).canvasH
+  out := out.push s!"hit-in-view: {match hitBox with
+    | [_, y0, _, y1] => decide (vy ≤ (y0 : Rat) ∧ (y1 : Rat) ≤ vy + ch)
+    | _ => false}"
+  sendEvent ".find.e" "<Key-Escape>"
+  -- 4. Continuous facing (odd spreads): pages 1 and 2 side by side.
+  invoke .spreadOdd
+  settle st
+  out := out.push s!"spread-var: {← run ["set", Menu.spreadVar]}"
+  let s ← st.get
+  let ys := s.slots.toList.map fun sl => sl.place.y
+  let xs := s.slots.toList.map fun sl => sl.place.x
+  out := out.push s!"cfacing-rows: {match ys, xs with
+    | [y0, y1, y2], [x0, x1, _] => decide (y0 == y1 ∧ x0 < x1 ∧ y2 > y0)
+    | _, _ => false}"
+  invoke .firstPage
+  settle st
+  out := out.push s!"hl-cfacing: {← photoPixel st 1 bravoC}"
+  -- 5. Facing: page scrolling, odd spreads.
+  invoke .scrollPage
+  settle st
+  out := out.push s!"facing-frames: {← frames} {← slotsStr} {← page}"
+  out := out.push s!"hl-facing: {← photoPixel st 1 bravoC}"
+  invoke .nextPage
+  out := out.push s!"facing-next: {← page} {← field} {← slotsStr}"
+  out := out.push s!"facing-next-state: {← run [".menubar.go", "entrycget", Menu.Cmd.nextPage.label, "-state"]}"
+  invoke .nextPage
+  out := out.push s!"facing-next-at-end: {← page}"
+  invoke .prevPage
+  out := out.push s!"facing-prev: {← page} {← slotsStr}"
+  -- A wheel notch at fit page turns to the next spread.
+  sendKey "f"
+  sendEvent ".c" "<MouseWheel>" ["-delta", "-120", "-x", "200", "-y", "200"]
+  out := out.push s!"facing-wheel: {← page} {← slotsStr}"
+  sendEvent ".c" "<MouseWheel>" ["-delta", "120", "-x", "200", "-y", "200"]
+  out := out.push s!"facing-wheel-up: {← page} {← slotsStr}"
+  -- 6. Even spreads: page 1 alone, then 2|3.
+  invoke .spreadEven
+  out := out.push s!"even-first: {← page} {← slotsStr}"
+  invoke .nextPage
+  out := out.push s!"even-next: {← page} {← slotsStr}"
+  out := out.push s!"even-next-state: {← run [".menubar.go", "entrycget", Menu.Cmd.nextPage.label, "-state"]}"
+  out := out.push s!"hl-even: {← photoPixel st 1 bravoC}"
+  -- 7. Back to the single page.
+  invoke .spreadNone
+  out := out.push s!"single-again: {← page} {← slotsStr} {← frames}"
+  out := out.push s!"status: {← run [".status", "cget", "-text"]}"
+  IO.FS.writeFile ((dir : System.FilePath) / "modes.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Scrolls the document from top to bottom with generated wheel notches in the view mode set
+by `SAFEPDF_VIEWER_VIEW` (task 9.3; in the vertical modes the wheel scrolls the document, in
+the page modes it turns the pages), rendering every page that comes into view before the next
+notch (`SAFEPDF_VIEWER_SMOKE_MODE=scroll`; a benchmark, not part of the smoke test). Writes
+`scroll.txt`: wall time, notches, pages rendered and the time spent rendering, the most photos
+alive at once, the cache. -/
+def smokeScroll (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  let t0 ← IO.monoNanosNow
+  settle st
+  let mut notches := 0
+  let mut maxPhotos := (← st.get).photos.size
+  for _ in [0:5000] do
+    let s ← st.get
+    if let some (_, b) := viewFracs (← run [".c", "yview"]) then
+      if b ≥ 1 && s.page + 1 ≥ s.pageCount then break
+    sendEvent ".c" "<MouseWheel>" ["-delta", "-120", "-x", "200", "-y", "200"]
+    notches := notches + 1
+    settle st
+    maxPhotos := max maxPhotos (← st.get).photos.size
+  let t1 ← IO.monoNanosNow
+  let s ← st.get
+  IO.FS.writeFile ((dir : System.FilePath) / "scroll.txt")
+    s!"pages: {s.pageCount}\nnotches: {notches}\ntotal-ms: {formatMs (t1 - t0)}\n\
+      renders: {s.renders}\nrender-ms: {formatMs s.renderNs}\n\
+      max-photos: {maxPhotos}\ncache-entries: {s.cache.entries.size}\n\
+      cache-mib: {s.cache.bytes / 1048576}\nlast-page: {s.page + 1}\n\
+      canvas: {s.canvasW}x{s.canvasH}\nstatus: {← run [".status", "cget", "-text"]}\n"
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -3551,6 +4182,14 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "modes" || s.smokeMode == "scroll" then
+    let name := s!"{s.smokeMode}.txt"
+    try
+      if s.smokeMode == "modes" then smokeModes st dir else smokeScroll st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "marks" then
     try smokeMarks st dir
     catch e =>
@@ -3560,7 +4199,7 @@ def smoke (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with smokeStep := s.smokeStep + 1 })
   -- Writing an empty photo fails in Tk; that only means there is nothing to write.
   let write (name : String) : IO Unit :=
-    try discard <| run [photoName, "write", ((dir : System.FilePath) / name).toString,
+    try discard <| run [photoOf (← st.get).page, "write", ((dir : System.FilePath) / name).toString,
       "-format", "ppm"]
     catch _ => pure ()
   let next : IO Unit := discard <| run ["after", "300", "::safepdf::emit smoke"]
@@ -3635,9 +4274,12 @@ def intPos (x y : String) : Option (Int × Int) :=
 def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   let s ← st.get
   match args.toList with
-  | ["next"] => goTo st (s.page + 1)
-  | ["prev"] => if s.page > 0 then goTo st (s.page - 1)
-  | ["prevEnd"] => if s.page > 0 then goTo st (s.page - 1) .bottom
+  | ["next"] => goTo st (View.nextPage s.spread s.pageCount s.page)
+  | ["prev"] => goTo st (View.prevPage s.spread s.page)
+  | ["prevEnd"] => goTo st (View.prevPage s.spread s.page) .bottom
+  | ["viewChanged"] => viewChanged st
+  | ["renderMore"] => renderMore st
+  | ["viewMode", what, key] => setViewMode st what key
   | ["first"] => goTo st 0
   | ["last"] => goTo st (s.pageCount - 1)
   | ["open"] => openDialog st
@@ -3726,6 +4368,7 @@ Opens FILE (or asks for one) in a window.
 Keys: Next/space, Prior/BackSpace scroll by a window (then next/previous page);
 Down/Up/Right/Left scroll; Home/End first/last page; + - zoom in/out; 0 actual size;
 f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+W close;
+View menu: Page/Vertical Scrolling, No/Odd/Even Spreads (continuous and facing pages);
 Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
@@ -3747,7 +4390,11 @@ SAFEPDF_VIEWER_SMOKE_MODE=marks: the highlight and note steps;
 SAFEPDF_VIEWER_SMOKE_MODE=bubble: the selection bubble and Highlight pop-over steps;
 SAFEPDF_VIEWER_SMOKE_MODE=save / reopen / encrypted: the save flow, reopening the saved file,
 saving an encrypted file).
-SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960)."
+SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in
+the vertical mode and write timings (a benchmark).
+SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).
+SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: initial view mode (facing:
+odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
 start (no display, missing Tk). -/
@@ -3774,6 +4421,13 @@ def main (args : List String) : IO UInt32 := do
       if let some (w, h) := parseGeometry g then
         discard <| run ["wm", "geometry", ".", s!"{w}x{h}"]
     if smokeDir.isSome then discard <| run ["set", "::safepdf::autoConfirm", "1"]
+    -- The initial view mode (task 9.3).
+    if let some v ← IO.getEnv "SAFEPDF_VIEWER_VIEW" then
+      if let some (sc, sp) := View.viewModeOf v then
+        st.modify ({ · with scroll := sc, spread := sp })
+        discard <| run ["set", Menu.scrollVar, sc.key]
+        discard <| run ["set", Menu.spreadVar, sp.key]
+        discard <| run ["set", "::safepdf::continuous", if sc == .vertical then "1" else "0"]
     if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
     if let some sc := View.parseDecimal (← Shim.eval "tk scaling") then

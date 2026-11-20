@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.5c, 9.7, 9.8; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.7, 9.8; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -35,6 +35,12 @@
 #      file): unsaved indicator, Save / Save As / quit and close prompts, saved marks restored
 #      and read-only, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
 #      shows the highlight (9.5c);
+#   1k. view modes (SAFEPDF_VIEWER_SMOKE_MODE=modes) on a generated three-page text PDF, each mode
+#      chosen through the View menu: continuous (three page frames, the wheel scrolls the
+#      document and the page field follows 1, 2, 3, a highlight on page 2, a search hit on page
+#      3 scrolled into view), continuous facing (pages 1|2 side by side, the highlight drawn),
+#      facing (two pages, Next/Previous by two, a wheel notch turns a spread), even spreads
+#      (1 alone, then 2|3), back to single page (9.3);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -367,7 +373,8 @@ want = {
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Save|Save As...|Close|Quit",
     "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
-    "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left",
+    "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
+                            "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
                     "Back=disabled,Forward=disabled,Copy=disabled,Outline=normal",
@@ -455,7 +462,8 @@ common = {
     "zoom-label0": "Automatic Zoom",
     "zoom-sel0": "auto",
     "zoom-menu": "Automatic Zoom|Actual Size|Page Fit|Page Width|50%|75%|100%|125%|150%|200%|300%|400%",
-    "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left",
+    "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left|"
+                 "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
     "tools": ".bar.highlight=normal," + ",".join(w + "=disabled" for w in [
         ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]),  # Save: no unsaved marks
@@ -763,6 +771,70 @@ if grep -qx 'outcome: refused' "$work/out-enc/encrypted.txt"; then
   grep -q '^status: cannot save to rc4-128-annotated.pdf: ' "$work/out-enc/encrypted.txt" \
     && [ ! -e "$work/enc/rc4-128-annotated.pdf" ] || { echo "FAIL: encrypted refusal not shown, or a file was written" >&2; fail=1; }
 fi
+
+# 1k. View modes (task 9.3) on a three-page text PDF (Helvetica, substitute fonts off: white
+# pages): `Alpha` on page 1, `Bravo` on page 2 (y 400), `zebra` on page 3. Every mode through its
+# View menu entry (SAFEPDF_VIEWER_SMOKE_MODE=modes, `Viewer.smokeModes`).
+python3 -I -c '
+import sys
+pages = [b"BT /F1 18 Tf 72 700 Td (Alpha on page one) Tj ET\n",
+         b"BT /F1 18 Tf 72 400 Td (Bravo on page two) Tj ET\n",
+         b"BT /F1 18 Tf 72 700 Td (A zebra on page three) Tj ET\n"]
+n = len(pages)
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"%d 0 R" % (3 + 2 * i) for i in range(n)), n)]
+for i, c in enumerate(pages):
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R "
+                b"/Resources << /Font << /F1 %d 0 R >> >> >>" % (4 + 2 * i, 3 + 2 * n))
+    objs.append(b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream")
+objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$work/modes.pdf"
+mkdir -p "$work/out-modes"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=modes run_viewer "$work/out-modes" "$work/modes.pdf"
+cat "$work/out-modes/modes.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines()
+         if ": " in l)
+yellow = "255 255 152"
+want = {
+    "frames-single": "1",
+    "scroll-var": "vertical", "frames-continuous": "3", "slots-continuous": "1,2,3",
+    "wheel-pages-seen": "1,2,3", "wheel-monotone": "true", "page-at-end": "3",
+    "page-after-home": "1 1", "page-after-next": "2 2", "zoom-anchor": "true 2",
+    "sel-page": "2", "marks": "[2]", "hl-continuous": yellow,
+    "find-status": "\"zebra\": hit 1/1 on page 3", "page-after-find": "3 3", "hit-in-view": "true",
+    "spread-var": "odd", "cfacing-rows": "true", "hl-cfacing": yellow,
+    "facing-frames": "2 1,2 1", "hl-facing": yellow,
+    "facing-next": "3 3 3", "facing-next-state": "disabled", "facing-next-at-end": "3",
+    "facing-prev": "1 1,2", "facing-wheel": "3 3", "facing-wheel-up": "1 1,2",
+    "even-first": "1 1", "even-next": "2 2,3", "even-next-state": "disabled", "hl-even": yellow,
+    "single-again": "2 2 1",
+}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+try:
+    rh, ch = map(int, v["region-vs-canvas"].split())
+    if rh < 3 * ch: errs.append("the continuous scroll region is not three pages high: %d" % rh)
+    if int(v["wheel-notches"]) < 10: errs.append("the wheel went through the document too fast")
+    if v["wheel-end"].split()[1] not in ("1.0", "1"): errs.append("the wheel did not reach the end")
+    if v["y-after-home"].split()[0] not in ("0.0", "0"): errs.append("Home did not go to the top")
+    if not 2 <= int(v["max-photos"]) <= 3: errs.append("photos kept: %s" % v["max-photos"])
+except (KeyError, ValueError) as e:
+    errs.append("missing or bad value: %r" % e)
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-modes/modes.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
