@@ -114,7 +114,7 @@ Design rules:
 | S5 | Isolation of unverified code | Any FFI decoder runs sandboxed; its outputs are revalidated. (Process-level sandbox is a shell concern; the *revalidation* is proven) |
 | S6 | Unambiguous interpretation | Each (file, object id) resolves to at most one object, even across incremental updates; parse is deterministic: `parse bytes = parse bytes` trivially, but also *version-stable* via the executable spec |
 | S7 | Local, visible failure | A malformed object/page yields `Error`, never an exception; page n failing does not affect page m; repaired files are flagged `.repaired := true` |
-| S8 | Integrity & privacy | Read-only by construction (S4); permission flags treated as advisory; no network by construction |
+| S8 | Integrity & privacy | The core never modifies a file in place (S4); on an explicit save the annotation writer emits `bytes ++ update`, the original bytes a prefix (C7), to a new file or to bib-lean's `PUT` route; permission flags treated as advisory; no network in the core (the bib-lean reader mode's HTTP client is shell code) |
 
 ### Correctness properties — proven
 
@@ -126,6 +126,7 @@ Design rules:
 | C4 | Repair conservativity | On files accepted by the strict parser, repair path ≡ strict path |
 | C5 | Spec conformance | Efficient parser ≡ executable denotational spec (the EverParse pattern) |
 | C6 | Extracted = displayed | The text extraction and the display list are derived from the *same* interpreter pass, so indexed text is the rendered text (anti text-poisoning) |
+| C7 | Incremental update is conservative | `writeAnnots doc marks = bytes ++ update` (ISO 32000-2 §7.5.6: new objects, updated page dictionaries, a cross-reference section with `/Prev`); the strict parser on `bytes ++ update` yields every original object unchanged and, as the pages' annotations, exactly `marks` (`annotationsOf (parse (writeAnnots doc marks)) = marks`); the update is checked by the same parser, there is no writer-side spec |
 
 ### Tested, not proven
 
@@ -308,8 +309,9 @@ established in 8.2). The verified core is untouched.
     green, blue, pink, red; thickness slider for free highlights; "Show all" toggle),
     Add comment/note, Add text, Draw (ink), Add image (stamp) — then Print and Save, and a
     `»` overflow menu (first/last page, rotate, scroll and spread modes, document
-    properties). Tools that need a PDF writer follow S8: **Save writes the XFDF sidecar,
-    never the PDF**; Print and image stamps may land after M9 (recorded in the ledger).
+    properties). Save writes the annotations into the PDF as an **incremental update** to a new
+    revision of the file (C7; the original bytes are never modified in place, S8); Print and
+    image stamps may land after M9 (recorded in the ledger).
   - *Selection bubble*: selecting text pops a small floating toolbar next to the
     selection — highlight (colour swatch with a drop-down to change colour), comment,
     and delete when an existing highlight is selected — as PDF.js does.
@@ -329,18 +331,59 @@ established in 8.2). The verified core is untouched.
   page, edited in a small popup.
 - **Right-click menu** grows *Highlight* (color submenu) and *Add note…* next to
   Copy / Select all / Find.
-- **Persistence — XFDF sidecar**: user highlights and notes are saved in a sidecar `.xfdf`
-  file next to the PDF, in XFDF (ISO 19444-1), the standard XML interchange format for PDF
-  annotations (Acrobat and others import/export it; highlights as `QuadPoints`, notes as
-  text annotations, both in page space). The PDF itself is **never written** — S8
-  (read-only by construction) stands; the other usual format, annotation objects written
-  into the PDF by incremental update (ISO 32000 §12.5), needs a file writer and is at most
-  a later "export annotated copy" feature, never an in-place change.
+- **Persistence — annotations inside the PDF** (decided 2026-11-20; replaces the XFDF
+  sidecar as the primary store): user highlights and notes are written as annotation
+  objects (`/Subtype /Highlight` with `/QuadPoints` from the C3 glyph boxes, `/Text` notes
+  with `/Contents`, `/C` colour, `/M` date, a generated appearance stream so viewers that
+  do not synthesise one still draw them) and appended to the file as an **incremental
+  update** (ISO 32000-2 §7.5.6: the new objects, the page dictionaries with their `/Annots`
+  extended, a cross-reference section and trailer with `/Prev`). The original bytes are a
+  prefix of the result and are never modified in place (S8); the writer is a core function
+  with the conservativity theorem C7, and the result is validated by opening it with our
+  own strict parser before it is written out. Standalone use writes `FILE-annotated.pdf`
+  (or overwrites on request, after the validation); the bib-lean reader mode (Phase 10)
+  sends it through bib-lean's `PUT` route instead, which keeps the previous revision. Other
+  viewers (pdf.js, Acrobat, Okular) therefore find the highlights. XFDF (ISO 19444-1)
+  remains as an import/export option, no longer the store.
 - **M9**: a paper reads end-to-end with the wheel in every view mode; a highlight and a
-  note survive close/reopen through the sidecar; the sidecar imports into Acrobat/Okular;
+  note survive close/reopen inside the PDF (C7 proved; the annotated file opens in
+  Acrobat/Okular/pdf.js with the highlights visible, and in our strict parser unchanged);
   side-by-side screenshots of the same paper in our viewer and in Firefox's PDF.js show the
   same toolbar layout (sidebar only with an outline, page box with arrows, centred zoom,
   tools on the right) and the same selection bubble.
+
+### Phase 10 — bib-lean reader mode
+
+The viewer as the reader of the sibling project bib-lean, through its viewer-neutral reader
+contract (`bib-lean/docs/READER-CONTRACT.md`): bib-lean runs the viewer as a child
+process (`reader = safepdf`) with `--biblean` and the page argument. bib-lean obtains the
+binary by **requiring this repository as a Lake dependency pinned by commit** and building
+the `viewer` target from source (decided 2026-11-20 on the bib-lean side; option 1 of
+three, over a fetch-and-build script and over release binaries): `viewer` therefore stays
+a **non-default target** here, so bib-lean's plain `lake build` never needs Tk, and both
+projects keep Lean v4.36.0 and the Batteries v4.36.0 tag in step, which Lake requires of
+a dependency. Nothing here depends on bib-lean's code. Shell work; the core gains only
+the annotation writer of Phase 9.
+- **Launch** (`--biblean`): the token read from file descriptor 3 (never argv or the
+  environment), `BIBLEAN_SERVER`, `BIBLEAN_ATTACHMENT` and `BIBLEAN_PAGE` from the
+  environment; a small HTTP/1.1 client over loopback (`bib-lean/BibLean/Client/Http.lean`
+  is the model); `GET /api/attachments/{key}/file` into `Api.openBytes`; the title from
+  `GET /api/items/{key}` and its parent.
+- **Annotations both ways**: the stored set loaded from the item route (bib-lean's
+  stored form → marks), the whole set posted as the contract's neutral JSON (kind,
+  pageIndex, rects, text, comment, color, sortIndex, id) after each change and on exit,
+  ids kept so bib-lean's item keys stay stable; and the annotated file (Phase 9 writer)
+  sent through `PUT /api/attachments/{key}/file` so other viewers find the highlights.
+- **Text**: every page's extracted text to `/fulltext`; DOI and arXiv identifiers found
+  on pages 1–2 to `/detected` (bib-lean treats them as proposals).
+- **Conformance**: a headless `--biblean --self-test` that runs the contract's sequence
+  without a window (GET the file, POST two annotations, POST a detection, PUT the
+  re-saved file, exit 0), so bib-lean's `tests/reader/contract.sh` passes with
+  `--reader exec`; a scripted Tk session for the window path; a stub server in our tests
+  so this phase needs no bib-lean checkout to run.
+- **M10**: bib-lean's contract script S1–S25 passes against the viewer; a highlight made
+  in the viewer appears in bib-lean's window and is found by its search; the stored file
+  opened in pdf.js shows the same highlight.
 
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
@@ -411,6 +454,17 @@ Proofs show we meet *our* spec; testing shows our spec matches the *world*.
   need either server-side parsing (reintroducing the network boundary the threat model
   avoids) or an immature Lean→WASM target. Browser-rendered SVG dumps remain fine as a
   *development* inspector view — the core never runs in a browser.
+- **Annotations live inside the PDF, by incremental update** (2026-11-20): user highlights
+  and notes are written as standard annotation objects appended to the file (ISO 32000-2
+  §7.5.6), never in place, with the conservativity theorem C7 and a re-parse by our own
+  strict parser before anything is written. Reason: other viewers must find them; a
+  sidecar only we read would make the annotations ours alone. XFDF stays as interchange.
+- **bib-lean integration: this repository is a Lake dependency of bib-lean, pinned by
+  commit and built from source; the viewer is launched through bib-lean's reader
+  contract** (2026-11-20): `viewer --biblean` speaks the contract over loopback HTTP with
+  the token on file descriptor 3; `viewer` stays a non-default target so a dependent's
+  plain `lake build` never needs Tk; the Lean and Batteries pins must stay in step with
+  bib-lean's (Phase 10).
 
 **Open — revisit at the marked milestone:**
 - *Inflate performance in Lean* (M3): if proven-Lean inflate is too slow on big scanned PDFs,
