@@ -21,6 +21,9 @@ Hand-built PDFs:
   stacked sub/superscripts, and a far-away raised glyph that must not join; the expected texts
   are MuPDF's (`mutool draw -F txt`) except for the stacked case (see `layoutCases`).
 
+* **Word gaps and oblique text** (task 6.8e, `gapCases`): gaps measured from the pen without
+  `Tc`/`Tw` and in units of the glyph added, labels rotated by 45° and 30°, captions below huge
+  titles, a raised radical sign — all as MuPDF.
 * **Clipping** (task 6.8f, `clipCases`): text outside the bounding box of the clip.
 
 Each case checks glyph texts and origins (x in thousandths) or the page text.
@@ -232,6 +235,42 @@ def orderCases : List (String × String × String) :=
     ("prose: a 0.13 em gap is below MuPDF's 0.15 em",
       "BT /F1 10 Tf 72 700 Td [(tight) -130 (gap) -160 (wide)] TJ ET", "tightgap wide") ]
 
+/-- Word gaps, line building and clipping as MuPDF 1.25.1 (task 6.8e/6.8f); each expected text
+equals `mutool draw -F txt` on the same `mixedDoc` page.
+
+* **Gaps from the pen without `Tc`**: MuPDF measures a gap from the glyph's origin plus its own
+  advance `w0 · Tfs · Th`, so character spacing counts as gap: letter-spaced capitals
+  (`Tc` 2.64 at 12 pt, 0.22 em) read `R A I L`; a 1.2 pt `TJ` gap plus `Tc` 1 is a space, a
+  1.92 pt `TJ` gap minus `Tc` 1 is not.
+* **Oblique text**: labels rotated by 45° and 30° (chart axes) are measured along their own
+  baseline: no spaces inside words, one line per label.
+* **Line building in units of the glyph added**: a 13 pt caption 40 pt below a 100 pt title
+  starts its own line; a radical sign raised 0.77 em right after a word stays on the line
+  (`by √dk`); a 7 pt superscript 1.4 pt after its base letter (0.2 em of its own size) is a
+  word gap (`W O`). -/
+def gapCases : List (String × String × String) :=
+  [ ("letter spacing Tc 0.22 em",
+      "BT /F1 12 Tf 2.64 Tc 72 700 Td (RAIL) Tj ET", "R A I L"),
+    ("TJ gap plus Tc is a space",
+      "BT /F1 12 Tf 1 Tc 72 700 Td [(Ti) -100 (ght)] TJ ET", "Ti ght"),
+    ("TJ gap minus Tc is not",
+      "BT /F1 12 Tf -1 Tc 72 700 Td [(Ti) -160 (ght)] TJ ET", "Tight"),
+    ("labels rotated by 45 degrees",
+      "BT /F1 10 Tf 0.7071 0.7071 -0.7071 0.7071 100 100 Tm (Math) Tj ET " ++
+        "BT /F1 10 Tf 0.7071 0.7071 -0.7071 0.7071 130 100 Tm (Biology) Tj ET",
+      "Math\n\nBiology"),
+    ("label rotated by 30 degrees with a TJ word gap",
+      "BT /F1 10 Tf 0.866 0.5 -0.5 0.866 100 300 Tm [(Functional) -300 (Equation)] TJ ET",
+      "Functional Equation"),
+    ("small caption below a huge title",
+      "BT /F1 100 Tf 72 600 Td (Big) Tj ET BT /F1 13 Tf 260 560 Td (CAPTION) Tj ET",
+      "Big\n\nCAPTION"),
+    ("raised radical sign after a word",
+      "BT /F1 10 Tf 72 700 Td (by) Tj ET BT /F2 10 Tf 85.5 707.7 Td (\\326) Tj ET " ++
+        "BT /F1 10 Tf 90.98 700 Td (dk) Tj ET", "by √dk"),
+    ("superscript gap measured in its own size",
+      "BT /F1 10 Tf 72 700 Td (W) Tj ET BT /F1 7 Tf 82.8 704 Td (O) Tj ET", "W O") ]
+
 /-- Clipped text (task 6.8f), as MuPDF 1.25.1 under `FZ_STEXT_CLIP` (`mutool draw -F txt` on
 the same `mixedDoc` pages): a glyph whose box lies entirely outside the bounding box of the
 current clip (the intersection of all clip paths' boxes) is not extracted; a glyph straddling
@@ -270,7 +309,7 @@ def run : IO Nat := do
     | none =>
       IO.println s!"  FAIL {label}: extraction failed"
       bad := bad + 1
-  for (label, c, text) in orderCases ++ clipCases do
+  for (label, c, text) in orderCases ++ gapCases ++ clipCases do
     match extract (mixedDoc c) with
     | some (_, t, _) =>
       if t != text then
