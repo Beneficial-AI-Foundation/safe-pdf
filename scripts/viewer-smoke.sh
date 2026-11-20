@@ -11,6 +11,8 @@
 #      scale/swap accordingly); at 200 % the zoom must keep the window centre on the page
 #      centre (C2 anchoring), Down/Next must scroll within the page, repeated Next must reach
 #      page 2 and Prior at its top the bottom of page 1;
+#   1d. a generated two-page text PDF (SAFEPDF_VIEWER_SMOKE_MODE=text): select all + copy
+#      gives the page text, double click a word, drag a range, search across pages (8.2c);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -138,6 +140,91 @@ run_viewer "$work/out-odd" "$work/$odd"
 grep -qxF "title: $odd - page 2/2 - safe-pdf" "$work/out-odd/state.txt" \
   || { echo "FAIL: odd file name not shown verbatim" >&2; fail=1; }
 echo "odd name: $(grep '^title:' "$work/out-odd/state.txt")"
+
+# 1d. Selection, copy and search (task 8.2c) on a generated two-page text PDF (Helvetica):
+# Ctrl+A + Ctrl+C must put the page text (as the inspector's text view extracts it) on the
+# clipboard; a double click on "safe" copies "safe"; a drag from the first glyph to the end of
+# "world" copies "Hello safe world"; searching "ZEBRA  crossing" moves to page 2 and reports
+# hit 1/1; an absent phrase reports "not found".
+python3 -I -c '
+import sys
+# The renderer does not paint non-embedded standard fonts, so a black marker rectangle lies
+# under "safe": x = 72 + 18 * 2.556 (Helvetica widths of "Hello ") = 118.008, width
+# 18 * 1.890 = 34.02, from the baseline up 0.7 em.
+pages = [b"0 g 118.008 700 34.02 12.6 re f\n"
+         b"BT /F1 18 Tf 72 700 Td (Hello safe world) Tj 0 -30 Td (Second line here) Tj ET\n",
+         b"BT /F1 18 Tf 72 700 Td (A zebra crossing on page two) Tj ET\n"]
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>"]
+for i, c in enumerate(pages):
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R "
+                b"/Resources << /Font << /F1 7 0 R >> >> >>" % (4 + 2 * i))
+    objs.append(b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream")
+objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$work/text.pdf"
+mkdir -p "$work/out-text"
+SAFEPDF_VIEWER_SMOKE_MODE=text run_viewer "$work/out-text" "$work/text.pdf"
+SAFEPDF_PAGE=1 "$repo/.lake/build/bin/inspect" --json --view text "$work/text.pdf" > "$work/text.json" || true
+for f in clip-all word drag; do echo "$f: $(cat "$work/out-text/$f.txt" | tr '\n' '|')"; done
+cat "$work/out-text/sel.txt" "$work/out-text/find.txt"
+python3 -I -c '
+import json, sys
+d = sys.argv[1]
+expected = None
+for line in open(sys.argv[2]):
+    o = json.loads(line)
+    if o.get("page") == 1: expected = o["text"]
+rd = lambda n: open(d + "/" + n, encoding="utf-8").read()
+kv = lambda n: dict(l.split(": ", 1) for l in rd(n).splitlines() if ": " in l)
+errs = []
+if expected is None or not expected.strip(): errs.append("inspector extracted no text for page 1")
+elif rd("clip-all.txt") != expected:
+    errs.append("select-all + copy %r != page text %r" % (rd("clip-all.txt"), expected))
+if rd("word.txt") != "safe": errs.append("double click did not select the word: %r" % rd("word.txt"))
+if rd("drag.txt") != "Hello safe world": errs.append("drag selection: %r" % rd("drag.txt"))
+s = kv("sel.txt")
+if int(s["sel-items"]) < 2: errs.append("select-all drew no highlight per line")
+f = kv("find.txt")
+if f["page"] != "2": errs.append("search did not move to page 2")
+if "hit 1/1 on page 2" not in f["status"]: errs.append("search status: " + f["status"])
+if int(f["hit-items"]) < 1: errs.append("search hit not highlighted")
+if "hit 1/1 on page 2 (wrapped)" not in f["status-f3"]: errs.append("F3: " + f["status-f3"])
+if "hit 1/1 on page 2" not in f["status-shift-f3"]: errs.append("Shift+F3: " + f["status-shift-f3"])
+if "not found" not in f["status-absent"]: errs.append("absent query: " + f["status-absent"])
+if f["hit-items-closed"] != "0": errs.append("closing the search left highlights")
+# The highlight of "safe" (canvas coordinates, minus the image offset) must cover the marker
+# under the word in the rendered page (an independent check of the page <-> device mapping):
+# >= 95% of all dark pixels of the page inside it, >= 50% of it dark.
+r = rd("word-rect.txt").split("\n")
+x0, y0, x1, y1 = (float(v) for v in r[0].split()[:4])
+ix, iy = (int(v) for v in r[1].split())
+p = open(d + "/text-page-1.ppm", "rb").read()
+magic, size, _, px = p.split(b"\n", 3)  # Tk writes "P6\nW H\n255\n" + pixels
+w, h = (int(v) for v in size.split())
+dark = tot = 0
+for y in range(max(0, int(y0) - iy), min(h, int(y1) - iy)):
+    for x in range(max(0, int(x0) - ix), min(w, int(x1) - ix)):
+        tot += 1
+        k = 3 * (y * w + x)
+        dark += px[k] < 128
+alldark = sum(1 for k in range(0, 3 * w * h, 3) if px[k] < 128)
+if tot == 0 or alldark == 0 or dark * 2 < tot or dark * 100 < 95 * alldark:
+    errs.append("word highlight %s does not cover the marker (%d/%d dark, %d on the page)"
+                % (r[0], dark, tot, alldark))
+print("word highlight %s: %d/%d dark pixels (%d on the page)" % (r[0], dark, tot, alldark))
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-text" "$work/text.json" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"

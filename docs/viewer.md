@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search)
 
 * Window: toolbar (Open…, `< Prev`, `Next >`, `-`, `+`, `100%`, `Fit page`, `Fit width`,
   `Rotate left`, `Rotate right`, "page k of n", zoom %), a scrollable canvas (scroll bars)
@@ -68,8 +68,54 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 | `Ctrl`+wheel | zoom in/out about the mouse pointer |
 | `Ctrl+O` / `Ctrl+Q` | open / quit |
 
-Later tasks: 8.2c selection/copy/search, 8.2d outline/links/page labels; continuous scrolling
-(several pages on one canvas) is optional and not done.
+## Selection, copy and search (8.2c)
+
+All text comes from the verified extraction: a page's text is extracted on first use
+(`Annot.extractDocPageAnnots` with a fresh budget, the same pass and reading order as
+`inspect --view text`) and cached for the open document as a `Select.PageIndex`: the glyphs
+in reading order (`Text.layout` lines, `Text.lineOrder` within a line) with their page-space
+boxes (C3: glyph origin, advance and size; 0.2 em below to 0.8 em above the baseline, in the
+glyph's direction) and the separators the layout puts between them, so selecting the whole
+page copies exactly the page text of the text view.
+
+* **Drag** on the page: the press and the current mouse position are mapped to page space
+  with `Geom.toPage`; the glyphs from the one nearest to the press to the one nearest to the
+  pointer, in reading order, are selected (`Select.dragRange`). A click without moving clears
+  the selection. **Double-click** selects a word (letters, digits, non-ASCII characters
+  without a separator in between, `Select.wordAt`). **Ctrl+A** selects the page.
+* The selection is drawn as canvas rectangles over the page image (one per line run,
+  `Select.rangeBoxes`, mapped back with `Geom.toScreen`), stippled 50 % blue; the page is not
+  re-rendered. On macOS (Aqua has no stipples) highlights are outlines instead.
+* **Ctrl+C** (or the right-button menu: Copy, Select all, Find…) copies the selected text
+  (`Select.rangeText`) with `clipboard clear; clipboard append -- TEXT`, the text one word
+  quoted by `Tcl.quote`. The selection is per page and cleared when the page changes.
+* **Search**: **Ctrl+F** opens a find bar under the toolbar (the entry does not carry the
+  window's key bindings, so typing does not zoom or scroll). **Enter**/**F3** finds the next
+  hit, **Shift+Enter**/**Shift+F3** the previous one, **Escape** closes the bar and removes
+  the highlights. Matching is case-insensitive (ASCII and Latin-1 letters) on the page text
+  with every whitespace run (spaces, line breaks) collapsed to one space
+  (`Select.normChars`, `Select.normQuery`); a match maps back to the glyphs of its first and
+  last character (`Select.hitRange`; `Select.findAll_sound` proves every reported position is
+  a match). The search runs from the current hit through the current page, then the
+  following (or preceding) pages, wrapping around; pages are extracted lazily as it goes.
+  All hits of the shown page are highlighted in yellow, the current one in orange, and the
+  current hit is scrolled into view. The status line says `"q": hit k/n on page p` (k of the
+  n hits on that page, `(wrapped)` after wrapping around) or `"q": not found`.
+* Not done: selection across pages, hits counted over the whole document (the count is per
+  page, so that a search never has to extract every page first), full Unicode case folding.
+
+| Key / mouse | Action |
+|---|---|
+| drag (button 1) | select text |
+| double-click | select a word |
+| `Ctrl+A` / `Ctrl+C` | select the page / copy |
+| right button | menu: Copy, Select all, Find… |
+| `Ctrl+F` | open the find bar |
+| `Enter`, `F3` / `Shift+Enter`, `Shift+F3` | next / previous hit |
+| `Escape` (in the find bar) | close the find bar |
+
+Later tasks: 8.2d outline/links/page labels; continuous scrolling (several pages on one
+canvas) is optional and not done.
 
 ## Structure
 
@@ -79,7 +125,8 @@ Later tasks: 8.2c selection/copy/search, 8.2d outline/links/page labels; continu
 | `SafePdf/Shell/App/Shim.lean` | `@[extern]` bindings and the exported dispatcher `safepdf_gui_dispatch`. Only the `viewer` executable may import it. |
 | `SafePdf/Shell/App/Tcl.lean`, `TclLemmas.lean` | Tcl scripts as data and the proof that `Tcl.quote` is injection-free (`parseWordStr_quote`, `parseScript_render`, …). Copied from bib-lean `BibLean/Gui/Tcl.lean` + `Tcl/Lemmas.lean`. Built by default (lib `SafePdfApp`). |
 | `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, the LRU page cache. |
-| `SafePdf/Shell/App/Viewer.lean` | State, rendering, scrolling/zoom/rotation handlers, prefetch, smoke mode. |
+| `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
+| `SafePdf/Shell/App/Viewer.lean` | State, rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
 **No data in script text.** Every Tcl command that carries data (file names, error text,
@@ -114,6 +161,18 @@ centre (C2 anchoring, both axes within 1 %); `Down` and `Next` scroll within pag
 `Next` reaches the top of page 2, `Prior` there the bottom of page 1; the odd file name above;
 and that a non-PDF, `Tests/adversarial/pages-kids-cycle.pdf` and a missing file each end
 normally with the error in the status line.
+
+Selection and search (8.2c) run in a second smoke variant
+(`SAFEPDF_VIEWER_SMOKE_MODE=text`, `Viewer.smokeText`) on a generated two-page Helvetica PDF:
+Ctrl+A + Ctrl+C must put exactly the page text of `inspect --view text` (page 1) on the
+clipboard (`clipboard get`), with one highlight rectangle per line; a double click (two
+generated button presses) on `safe` copies `safe`; a drag (press, button-1 motion, release)
+from the first glyph to the end of `world` copies `Hello safe world`; the highlight of `safe`
+must cover a black marker rectangle drawn under the word in the PDF (an independent check of
+the page ↔ device mapping, since standard fonts without an embedded program are not painted);
+Ctrl+F with `ZEBRA  crossing` + Enter must move to page 2 and report `hit 1/1 on page 2` with
+a highlight; F3 and Shift+F3 wrap to the same hit; an absent phrase reports `not found`;
+Escape removes the highlights.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
