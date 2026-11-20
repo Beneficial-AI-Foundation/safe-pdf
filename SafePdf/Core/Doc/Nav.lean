@@ -37,8 +37,8 @@ counted in a `warnings` field (where the result has one), never an `Error`.
   (PDF 1.1) and in the `/Names /Dests` name tree: names try the dictionary first, strings the
   tree first. The value is an array or a dictionary with `/D`; any other value, or no entry,
   is `Target.unresolved` with the name (kept as data). Named values are not followed further.
-* N5. **Actions** (§12.6.4.2): `/A` with `/S /GoTo` resolves its `/D` as N4; any other action
-  type is kept as `Target.action` with its `/S` bytes (URI, GoToR, Launch, … — not followed).
+* N5. **Actions** (§12.6.4.2): `/A` with `/S /GoTo` resolves its `/D` as N4; any `/S /URI` is kept as `Target.uri` with its `/URI` string (at most `maxUriBytes`); any other action
+  type is kept as `Target.action` with its `/S` bytes (GoToR, Launch, … — not followed).
   `/Dest` takes precedence over `/A` (§12.3.3, §12.5.6.5).
 * N6. **Outline** (§12.3.3; `outline`). From `/Outlines /First`, a preorder worklist of
   `(reference, depth)`: a visited item pushes its `/First` (depth + 1) and then its `/Next`
@@ -341,9 +341,16 @@ inductive Target (n : Nat) where
   | dest (d : Dest n)
   /-- A named destination that was not found or whose value is malformed. -/
   | unresolved (name : List UInt8)
+  /-- A URI action (`/S /URI`) with its `/URI` string, raw bytes of at most `maxUriBytes`
+  (never followed). -/
+  | uri (bytes : List UInt8)
   /-- Another action type, kept with its `/S` name bytes (not followed). -/
   | action (kind : List UInt8)
   deriving DecidableEq, Repr
+
+/-- Longest `/URI` string kept by `Target.uri`; a longer one leaves a bare `Target.action`
+(a URI is never truncated: a prefix could name another address). -/
+def maxUriBytes : Nat := 8192
 
 /-- The index of the page whose object number is `num`, if any. -/
 def pageIndex (pages : Array Page) (num : Nat) : Option (Fin pages.size) :=
@@ -417,13 +424,18 @@ def resolveDest (doc : Doc) (limits : Limits) (o : PdfObject) : Target doc.pages
   | .string s => named false s
   | _ => .none
 
-/-- Resolve an action (rule N5): `GoTo` resolves its `/D`; other types are kept by name. -/
+/-- Resolve an action (rule N5): `GoTo` resolves its `/D`; `URI` keeps its string; other types
+are kept by name. -/
 def resolveAction (doc : Doc) (limits : Limits) (a : PdfObject) : Target doc.pages.size :=
   match res doc limits a with
   | .dict ad =>
     match getL doc limits ad "S" with
     | .name s =>
       if s = Name.ofString "GoTo" then resolveDest doc limits ((raw ad "D").getD .null)
+      else if s = Name.ofString "URI" then
+        match getL doc limits ad "URI" with
+        | .string u => if u.length ≤ maxUriBytes then .uri u else .action s.bytes
+        | _ => .action s.bytes
       else .action s.bytes
     | _ => .none
   | _ => .none
@@ -1040,6 +1052,20 @@ private def navPdf : ByteArray := mkPdf [
   pageLabel doc Limits.default 2 == B "A-1" &&
   (labelTable doc Limits.default).warnings == 0
 
+-- URI actions keep their string; a missing or over-long string leaves a bare action.
+#guard withDoc navPdf fun doc => resolveAction doc Limits.default
+    (.dict [(Name.ofString "S", .name (Name.ofString "URI")), (Name.ofString "URI", .string (B "a(b)"))]) ==
+  .uri (B "a(b)")
+#guard withDoc navPdf fun doc => resolveAction doc Limits.default
+    (.dict [(Name.ofString "S", .name (Name.ofString "URI"))]) == .action (B "URI")
+#guard withDoc navPdf fun doc => resolveAction doc Limits.default
+    (.dict [(Name.ofString "S", .name (Name.ofString "URI")),
+            (Name.ofString "URI", .string (List.replicate (maxUriBytes + 1) 0x61))]) == .action (B "URI")
+#guard withDoc navPdf fun doc => resolveAction doc Limits.default
+    (.dict [(Name.ofString "S", .name (Name.ofString "URI")),
+            (Name.ofString "URI", .string (List.replicate maxUriBytes 0x61))]) ==
+  .uri (List.replicate maxUriBytes 0x61)
+
 -- Links on page 0: a GoTo link (rect normalized), a URI link kept as an action; the text
 -- annotation is skipped. Page 1 has none.
 #guard withDoc navPdf fun doc =>
@@ -1048,7 +1074,7 @@ private def navPdf : ByteArray := mkPdf [
       [((some 1, none, some .fit), (resolveAction doc Limits.default
           (.dict [(Name.ofString "S", .name (Name.ofString "GoTo")),
                   (Name.ofString "D", .array [.ref 4 0, .name (Name.ofString "Fit")])]))),
-       ((none, none, none), .action (B "URI"))] &&
+       ((none, none, none), .uri (B "http://x"))] &&
     (pageLinks doc Limits.default ⟨0, by omega⟩).map (fun l => (l.rect.llx, l.rect.lly, l.rect.urx,
       l.rect.ury)) == [(⟨10, 0⟩, ⟨10, 0⟩, ⟨100, 0⟩, ⟨30, 0⟩), (⟨0, 0⟩, ⟨0, 0⟩, ⟨5, 0⟩, ⟨5, 0⟩)] &&
     (pageLinks doc Limits.default ⟨1, h⟩).isEmpty
