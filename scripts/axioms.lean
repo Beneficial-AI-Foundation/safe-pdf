@@ -13,6 +13,7 @@ This file is outside the library and is never imported.
 import SafePdf
 import SafePdf.Shell.App.TclLemmas
 import SafePdf.Shell.App.View
+import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 
@@ -1071,3 +1072,6 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Spec.Write.plan_page
 #print axioms SafePdf.Spec.Write.newDict_lookup_ne
 #print axioms SafePdf.Spec.Write.serialize_roundtrip
+-- Phase 9, task 9.4: marks model
+#print axioms SafePdf.Shell.App.Marks.Store.add_id
+#print axioms SafePdf.Shell.App.Marks.Store.add_next
