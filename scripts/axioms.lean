@@ -13,6 +13,7 @@ This file is outside the library and is never imported.
 import SafePdf
 import SafePdf.Shell.App.TclLemmas
 import SafePdf.Shell.App.View
+import SafePdf.Shell.App.Select
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -996,3 +997,13 @@ import SafePdf.Shell.App.View
 -- Phase 8, task 8.3b: shared annotation budget, annotation text
 #print axioms SafePdf.Core.Annot.docAnnots_shared_ops
 #print axioms SafePdf.Core.Annot.withAnnots_glyphs
+
+-- Phase 7, task 7.3h2: tiling strokes, text, full cell painter
+#print axioms SafePdf.Core.Raster.Tiling.renderTilingStroke_size
+#print axioms SafePdf.Core.Raster.Tiling.paintTilingMask_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemWith_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemWith_tx
+#print axioms SafePdf.Core.Raster.Glyph.cellPainterD_size
+
+-- Phase 8, task 8.2c: viewer search soundness
+#print axioms SafePdf.Shell.App.Select.findAll_sound
