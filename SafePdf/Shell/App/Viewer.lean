@@ -9,6 +9,7 @@ import SafePdf.Shell.App.Sidebar
 import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
+import SafePdf.Shell.App.Xfdf
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
@@ -122,6 +123,15 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   pdf.js); its icon is drawn by the viewer. The title starts with `* ` while there are
   unsaved changes; Close, Quit, the window's close button and Open… ask Save / Discard /
   Cancel. Writer errors go to the status line.
+* **XFDF** (task 9.11, Tk-free reader/writer in `Xfdf`): File → Import annotations… /
+  Export annotations… (also in the `»` menu) with Tk file dialogs filtered to `.xfdf`. Import
+  reads the file bounded and total (`Xfdf.readFile`, pages checked against the document),
+  adds the marks not already present as unsaved marks (`Xfdf.importItems`) and reports
+  "N imported, D already present, S skipped"; a refused file (DTD, unknown entity, limits,
+  not XFDF, unreadable) only puts `Xfdf.Error.message` into the status line and changes
+  nothing. Export writes every mark (`Xfdf.toXfdf`, a highlight's comment as `<contents>` of
+  the `<highlight>`) atomically (`Save.writeAtomic`) to the chosen file, `STEM.xfdf` next to
+  the PDF by default.
 * **Errors** (unreadable file, parse error, render error, Tcl error) are shown in the status
   line; the window stays usable. Every event handler catches its own exceptions.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
@@ -1047,6 +1057,17 @@ proc ::safepdf::askSavePath {dir file} {
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
   return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file \\
     -defaultextension .pdf -confirmoverwrite 1 -filetypes {{{PDF files} {.pdf .PDF}} {{All files} *}}]
+}
+# XFDF import/export (9.11): the file dialogs; ::safepdf::autoPath answers them in smoke mode.
+proc ::safepdf::askXfdfOpen {dir} {
+  if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
+  return [tk_getOpenFile -parent . -title {Import annotations} -initialdir $dir \\
+    -filetypes {{XFDF {.xfdf}} {{All files} *}}]
+}
+proc ::safepdf::askXfdfSave {dir file} {
+  if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
+  return [tk_getSaveFile -parent . -title {Export annotations} -initialdir $dir -initialfile $file \\
+    -defaultextension .xfdf -confirmoverwrite 1 -filetypes {{XFDF {.xfdf}} {{All files} *}}]
 }
 wm protocol . WM_DELETE_WINDOW {::safepdf::emit quit}
 bind . <Control-s> {::safepdf::emit save}
@@ -2095,6 +2116,75 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
   | _ =>
     setStatus s!"{what} cancelled: there are unsaved marks"
     return false
+
+/-! ## XFDF import and export (task 9.11) -/
+
+/-- The directory of `path` for a file dialog (`.` when it has none). -/
+def dirOf (path : String) : String :=
+  match (path : System.FilePath).parent with
+  | some d => if d.toString.isEmpty then "." else d.toString
+  | none => "."
+
+/-- The proposed export file of the PDF `path`: `STEM.xfdf` next to it. -/
+def xfdfTarget (path : String) : String :=
+  ((path : System.FilePath).withExtension "xfdf").toString
+
+#guard xfdfTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && xfdfTarget "a.b.PDF" == "a.b.xfdf"
+#guard dirOf "paper.pdf" == "." && dirOf "/tmp/x/paper.pdf" == "/tmp/x"
+
+/-- The status line after an import of `name`: added, already present and skipped counts, and
+the first skipped annotation's reason. -/
+def importStatus (name : String) (added dups : Nat) (rep : Xfdf.Report) : String :=
+  let first := match rep.skipped with
+    | k :: _ => s!" (first skipped: <{k.element}>: {k.reason})"
+    | [] => ""
+  s!"{name}: {added} imported, {dups} already present, {rep.skippedCount} skipped{first}"
+
+#guard importStatus "a.xfdf" 3 1 {} == "a.xfdf: 3 imported, 1 already present, 0 skipped"
+
+/-- **Import annotations…** (File menu, `»` menu): reads the XFDF file `path` (else asks for
+one, `::safepdf::askXfdfOpen`) with the document's page count as bound, adds its marks to the
+store as unsaved marks (`Xfdf.importItems`: marks already present are not added again) and
+redraws. A refused or unreadable file only shows its error in the status line. -/
+def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := do
+  let s ← st.get
+  let (some pdf, some _) := (s.path, s.doc) | return
+  let path ← match path with
+    | some p => pure p
+    | none => run ["::safepdf::askXfdfOpen", dirOf pdf]
+  if path.isEmpty then
+    setStatus "import cancelled"
+    return
+  match ← Xfdf.readFile {} path (pages := some s.pageCount) with
+  | .error e => setStatus s!"cannot import {baseName path}: {e}"
+  | .ok rep =>
+    let s ← st.get
+    let (marks, ids, dups) := Xfdf.importItems s.marks rep.items
+    st.modify ({ · with marks })
+    if !ids.isEmpty then
+      if !(← updatePreview st) then repaint st
+    setStatus (importStatus (baseName path) ids.length dups rep)
+
+/-- **Export annotations…** (File menu, `»` menu): writes every mark of the store (saved or
+not; `Xfdf.toXfdf`, dated now, `<f href>` the PDF's file name) to `path` (else asks,
+`::safepdf::askXfdfSave`, proposing `xfdfTarget`) through `Save.writeAtomic`. Errors go to the
+status line. -/
+def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := do
+  let s ← st.get
+  let (some pdf, some doc) := (s.path, s.doc) | return
+  let path ← match path with
+    | some p => pure p
+    | none =>
+      let fp : System.FilePath := xfdfTarget pdf
+      run ["::safepdf::askXfdfSave", dirOf pdf, fp.fileName.getD "annotations.xfdf"]
+  if path.isEmpty then
+    setStatus "export cancelled"
+    return
+  let xml := Xfdf.toXfdf s.marks (Save.pageBox doc) (← Save.nowDate) (some (baseName pdf))
+  try
+    Save.writeAtomic path xml.toUTF8
+    setStatus s!"exported {s.marks.marks.size} mark(s) to {baseName path}"
+  catch e => setStatus s!"cannot export to {baseName path}: {e}"
 
 /-- The `tk_getOpenFile` dialog (after the unsaved-marks question); opens the chosen file
 (nothing when cancelled). -/
@@ -4066,6 +4156,88 @@ def smokeEncrypted (st : IO.Ref State) (dir : String) : IO Unit := do
     s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nstatus: {status}\n"
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of XFDF import/export (`SAFEPDF_VIEWER_SMOKE_MODE=xfdf`, task 9.11) on a copy
+of the text PDF of `smokeText` (substitute fonts off, page 1 white): a yellow highlight on
+`world` with a comment (the edit bubble's Comment) and a note at (300, 400) with
+`smokeNoteText`; File → Export annotations… (`autoPath`) writes `marks.xfdf` (the comment as
+`<contents>` inside the `<highlight>`); every mark is deleted (the `world` pixels white
+again); `importXfdf` of `marks.xfdf` brings the three marks back (pixels yellow, the comment
+still the highlight's, the note text equal, all unsaved) and the status line counts them;
+importing it again adds nothing; the hostile samples copied into `DIR` (`billion-laughs.xfdf`,
+`xxe.xfdf`, `undeclared-entity.xfdf`), a missing file and a non-XFDF file each show an error
+and change nothing; Acrobat's sample imports 3 marks and skips 2. Results in `xfdf.txt`. -/
+def smokeXfdf (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let some world := ((ix.hits (Select.normQuery "world"))[0]?).bind fun (a, b) =>
+      (Select.rangeBoxes ix.cells a b).head? | throw (IO.userError "world not found")
+  let worldC : Pt := ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩
+  let some wpos ← boxWindowPos st world | throw (IO.userError "world not shown")
+  -- A summary of the store: marks, notes, the world highlight's comment text, the plain
+  -- note's text equal to `smokeNoteText`, unsaved.
+  let summary : IO String := do
+    let s ← st.get
+    let ms := s.marks.marks.toList
+    let hl := ms.find? (!·.isNote)
+    let comment := (hl.bind s.marks.commentOf).map (·.text)
+    let note := ms.find? fun m => m.isNote && !s.marks.isComment m
+    let okC := comment == some "Comment ✓ <&>"
+    let okN := (note.map (·.text)) == some smokeNoteText
+    return s!"{ms.length} {(ms.filter (·.isNote)).length} {okC} {okN} {s.marks.dirty}"
+  -- 1. Highlight, comment, note.
+  for _ in [0:2] do k.clickAt wpos
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  sendKey "Escape"
+  discard <| run ["after", "600"]
+  k.clickAt wpos
+  addNote st none
+  discard <| run ["update", "idletasks"]
+  discard <| run [".note.t", "insert", "end", "Comment ✓ <&>"]
+  discard <| run [".note.b.save", "invoke"]
+  discard <| run ["destroy", ".note"]
+  sendKey "Escape"
+  smokeNoteAt st 300 400 smokeNoteText
+  discard <| run ["destroy", ".note"]
+  out := out.push s!"marks: {← summary}"
+  out := out.push s!"world-px: {← k.px worldC}"
+  -- 2. Export through the File menu (the dialog answered by `autoPath`).
+  out := out.push s!"menu-states: {← k.menuState .importXfdf} {← k.menuState .exportXfdf}"
+  discard <| run ["set", "::safepdf::autoPath", file "marks.xfdf"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  out := out.push s!"export-status: {← k.status}"
+  out := out.push s!"export-default: {baseName (xfdfTarget ((← st.get).path.getD ""))}"
+  -- 3. Every mark removed.
+  for m in (← st.get).marks.marks.toList do deleteMark st m.id
+  out := out.push s!"removed: {(← st.get).marks.marks.size} {← k.px worldC}"
+  -- 4. Import: the marks are back.
+  importXfdf st (some (file "marks.xfdf"))
+  out := out.push s!"import-status: {← k.status}"
+  out := out.push s!"imported: {← summary}"
+  out := out.push s!"imported-px: {← k.px worldC} {← k.star}"
+  -- 5. Again: nothing new.
+  importXfdf st (some (file "marks.xfdf"))
+  out := out.push s!"reimport-status: {← k.status}"
+  out := out.push s!"reimported: {← summary}"
+  -- 6. Hostile and broken files: an error, nothing changed.
+  for name in ["billion-laughs.xfdf", "xxe.xfdf", "undeclared-entity.xfdf", "missing.xfdf",
+      "not-xfdf.xfdf"] do
+    let before ← summary
+    importXfdf st (some (file name))
+    let refused := (← k.status).startsWith s!"cannot import {name}: "
+    let same := before == (← summary)
+    out := out.push s!"hostile {name}: {refused} {same} {← run ["winfo", "exists", "."]}"
+    out := out.push s!"hostile-status {name}: {← k.status}"
+  -- 7. Another tool's export (Acrobat style): 3 marks, 2 skipped.
+  importXfdf st (some (file "acrobat.xfdf"))
+  out := out.push s!"acrobat-status: {← k.status}"
+  out := out.push s!"acrobat: {(← st.get).marks.marks.size}"
+  IO.FS.writeFile (file "xfdf.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Window position of the centre of a page-space box on page `p` (any laid-out page, task 9.3). -/
 def boxWindowPosOn (st : IO.Ref State) (p : Nat) (b : Box) : IO (Option (String × String)) := do
   let s ← st.get
@@ -4300,6 +4472,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "xfdf" then
+    try smokeXfdf st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "xfdf.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "modes" || s.smokeMode == "scroll" then
     let name := s!"{s.smokeMode}.txt"
     try
@@ -4439,6 +4617,8 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["close"] => if ← confirmDiscard st "closing" then closeFile st
   | ["save"] => discard <| save st
   | ["saveAs"] => discard <| saveAs st
+  | ["importXfdf"] => importXfdf st
+  | ["exportXfdf"] => exportXfdf st
   | ["quit"] =>
     if ← confirmDiscard st "quitting" then discard <| run ["after", "0", "destroy ."]
   | ["outline", id] => outlineClick st id
@@ -4497,6 +4677,7 @@ Add note...; click a mark to select it (a note opens its text), Delete removes i
 Ctrl+S saves the marks into FILE-annotated.pdf (an incremental update: the original bytes
 stay unchanged at its start); Ctrl+Shift+S saves to a chosen file; marks saved in a file are
 restored when it is opened; saved marks can be recoloured, deleted and edited (9.5g). Closing or quitting asks about unsaved marks.
+File > Import annotations... / Export annotations... read and write XFDF (STEM.xfdf by default).
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
@@ -4508,6 +4689,7 @@ SAFEPDF_VIEWER_SMOKE_MODE=marks: the highlight and note steps;
 SAFEPDF_VIEWER_SMOKE_MODE=bubble: the selection bubble and Highlight pop-over steps;
 SAFEPDF_VIEWER_SMOKE_MODE=save / reopen / encrypted: the save flow, reopening the saved file,
 saving an encrypted file).
+SAFEPDF_VIEWER_SMOKE_MODE=xfdf: XFDF export and import (task 9.11);
 SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in
 the vertical mode and write timings (a benchmark).
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).

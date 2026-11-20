@@ -8,7 +8,7 @@ constant Tcl script that runs it (`::safepdf::emit …` back into Lean, or a con
 and an enabled rule over a small view of the viewer state (`Ctx`).
 
 * **Menubar** (`menubar`): File (Open…, Save, Save As… — task 9.5c, Save only with unsaved
-  marks —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
+  marks —, Import annotations… / Export annotations… — XFDF, task 9.11 —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
   selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
   entries Highlight tool and Show all highlights: task 9.8; Find…), View
   (Outline, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
@@ -41,6 +41,10 @@ inductive Cmd where
   | save
   /-- Save the document with its marks to a chosen file (task 9.5c). -/
   | saveAs
+  /-- Import marks from an XFDF file (task 9.11; dialog). -/
+  | importXfdf
+  /-- Export the marks to an XFDF file (task 9.11; dialog, `STEM.xfdf` proposed). -/
+  | exportXfdf
   /-- Close the document (the window stays). -/
   | close
   /-- Quit the viewer. -/
@@ -106,7 +110,7 @@ inductive Cmd where
 
 /-- Every command, in menubar order. -/
 def Cmd.all : List Cmd :=
-  [.openFile, .save, .saveAs, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
+  [.openFile, .save, .saveAs, .importXfdf, .exportXfdf, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
    .showAll, .find, .outline, .zoomIn, .zoomOut,
    .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .scrollPage, .scrollVertical,
    .spreadNone, .spreadOdd, .spreadEven, .prevPage, .nextPage, .firstPage,
@@ -117,6 +121,8 @@ def Cmd.label : Cmd → String
   | .openFile => "Open..."
   | .save => "Save"
   | .saveAs => "Save As..."
+  | .importXfdf => "Import annotations..."
+  | .exportXfdf => "Export annotations..."
   | .close => "Close"
   | .quit => "Quit"
   | .copy => "Copy"
@@ -153,6 +159,7 @@ def Cmd.accel : Cmd → String
   | .openFile => "Ctrl+O"
   | .save => "Ctrl+S"
   | .saveAs => "Ctrl+Shift+S"
+  | .importXfdf | .exportXfdf => ""
   | .close => "Ctrl+W"
   | .quit => "Ctrl+Q"
   | .copy => "Ctrl+C"
@@ -185,6 +192,8 @@ def Cmd.underline : Cmd → Nat
   | .openFile => 0
   | .save => 0
   | .saveAs => 5
+  | .importXfdf => 0
+  | .exportXfdf => 0
   | .close => 0
   | .quit => 0
   | .copy => 0
@@ -222,6 +231,8 @@ def Cmd.script : Cmd → String
   | .openFile => "::safepdf::emit open"
   | .save => "::safepdf::emit save"
   | .saveAs => "::safepdf::emit saveAs"
+  | .importXfdf => "::safepdf::emit importXfdf"
+  | .exportXfdf => "::safepdf::emit exportXfdf"
   | .close => "::safepdf::emit close"
   | .quit => "::safepdf::emit quit"
   | .copy => "::safepdf::emit copy"
@@ -292,7 +303,7 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages && !c.onLast
   | .back => c.hasDoc && c.canBack
   | .forward => c.hasDoc && c.canForward
-  | .saveAs | .close | .selectAll | .find | .addNote | .hlTool | .showAll | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
+  | .saveAs | .importXfdf | .exportXfdf | .close | .selectAll | .find | .addNote | .hlTool | .showAll | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
   | .rotateCw | .rotateCcw | .gotoPage | .scrollPage | .scrollVertical | .spreadNone
   | .spreadOdd | .spreadEven => c.hasDoc
 
@@ -356,7 +367,8 @@ def showAllVar : String := "::safepdf::showAll"
 
 /-- The menubar: File / Edit / View / Go. -/
 def menubar : List Menu :=
-  [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .save, .cmd .saveAs, .cmd .close, .sep, .cmd .quit]⟩,
+  [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .save, .cmd .saveAs, .sep, .cmd .importXfdf,
+      .cmd .exportXfdf, .sep, .cmd .close, .sep, .cmd .quit]⟩,
     ⟨".menubar.edit", "Edit", 0,
       [.cmd .copy, .cmd .selectAll, .sep, .cmd .highlight, .colors ".menubar.edit.hl",
        .cmd .addNote, .cmd .deleteMark, .sep, .check .hlTool hlToolVar,
@@ -427,7 +439,8 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 #guard Cmd.all.all fun c => c.underline < c.label.length
 #guard menubar.map (·.label) == ["File", "Edit", "View", "Go"]
 -- Separators count in Tk indices.
-#guard locate .quit == some (".menubar.file", 5)
+#guard locate .quit == some (".menubar.file", 9)
+#guard locate .importXfdf == some (".menubar.file", 4) && locate .exportXfdf == some (".menubar.file", 5)
 #guard locate .save == some (".menubar.file", 1) && locate .saveAs == some (".menubar.file", 2)
 #guard locate .back == some (".menubar.go", 7)
 #guard locate .zoomIn == some (".menubar.view", 2)
@@ -454,6 +467,9 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 -- Save needs unsaved marks; Save As only a document.
 #guard !Cmd.save.enabled { hasDoc := true, pages := 1 } && Cmd.saveAs.enabled { hasDoc := true, pages := 1 } &&
   Cmd.save.enabled { hasDoc := true, pages := 1, dirty := true } && !Cmd.saveAs.enabled {}
+-- XFDF import/export (task 9.11) need a document only.
+#guard Cmd.importXfdf.enabled { hasDoc := true, pages := 1 } && Cmd.exportXfdf.enabled { hasDoc := true, pages := 1 } &&
+  !Cmd.importXfdf.enabled {} && !Cmd.exportXfdf.enabled {}
 -- A one-page document: no paging either way.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c
