@@ -135,8 +135,44 @@ def cjpeg(w, h, nc, data, opts):
     return run(["cjpeg"] + opts, pnm(w, h, nc, data))
 
 
-def djpeg(jpg):
-    return read_pnm(run(["djpeg", "-dct", "int", "-pnm"], jpg))
+def djpeg(jpg, strict=True):
+    """djpeg's decode; `strict=False` for truncated input (djpeg warns, exit status 2)."""
+    if strict:
+        return read_pnm(run(["djpeg", "-dct", "int", "-pnm"], jpg))
+    r = subprocess.run(["djpeg", "-dct", "int", "-pnm"], input=jpg, stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL)
+    return read_pnm(r.stdout)
+
+
+def marker_segments(jpg):
+    """(start, end, marker) of every marker segment before the first SOS."""
+    i, out = 2, []
+    while jpg[i + 1] != 0xDA:
+        n = jpg[i + 2] * 256 + jpg[i + 3]
+        out.append((i, i + 2 + n, jpg[i + 1]))
+        i += 2 + n
+    return out
+
+
+def strip_dht(jpg):
+    """The JPEG without its DHT segments (it must use the standard tables)."""
+    out = jpg
+    for a, e, m in reversed(marker_segments(jpg)):
+        if m == 0xC4:
+            out = out[:a] + out[e:]
+    return out
+
+
+def first_scans(jpg, n):
+    """A progressive JPEG cut after its first `n` scans, with an EOI (only DC known: libjpeg
+    interpolates the DC values and the low AC coefficients)."""
+    pos, k = 2, 0
+    while True:
+        i = jpg.index(b"\xff\xda", pos)
+        if k == n:
+            return jpg[:i] + b"\xff\xd9"
+        k += 1
+        pos = i + 2
 
 
 def segments(jpg):
@@ -260,6 +296,23 @@ def main():
     w, h = 96, 72
     jpg = cjpeg(w, h, 3, smooth(w, h, 3), ["-sample", "2x2", "-quality", "60", "-progressive"])
     fixtures.append(("psmooth", jpg, djpeg(jpg)))
+    # 7.6c: no DHT (standard tables, motion-JPEG style) and truncated files.
+    byname = {n: j for n, j, _ in fixtures}
+    for name, src in (("nodht", "s420"), ("nodhtgray", "gray")):
+        jpg = strip_dht(byname[src])
+        fixtures.append((name, jpg, djpeg(jpg)))
+    for name, src, frac in (
+            ("ts420", "s420", 0.6), ("trst", "rst", 0.5), ("tgray", "gray", 0.7),
+            ("tp420", "p420", 0.3), ("tp420b", "p420", 0.5), ("tp444", "p444", 0.7),
+            ("tpgray", "pgray", 0.5), ("tprst", "prst", 0.3), ("tpscans", "pscans", 0.5),
+            ("tpscanrst", "pscanrst", 0.7), ("tpscangray", "pscangray", 0.3),
+            ("tpsmooth", "psmooth", 0.7), ("tpnarrow", "pnarrow", 0.5)):
+        jpg = byname[src]
+        jpg = jpg[:int(len(jpg) * frac)]
+        fixtures.append((name, jpg, djpeg(jpg, strict=False)))
+    for name, src, nscans in (("dcp420", "p420", 1), ("dcpgray", "pgray", 1)):
+        jpg = first_scans(byname[src], nscans)
+        fixtures.append((name, jpg, djpeg(jpg)))
     # Four components with an Adobe marker.
     w, h = 19, 13
     for name, transform, seed in (("cmyk", 0, 11), ("ycck", 2, 12)):
