@@ -25,8 +25,10 @@ standard 14 metrics), §9.7.4.3 (CIDFont `/W` and `/DW`) and §9.7.5.2 (the pred
   `O(1)`. Rule, in order: (1) `/Widths[code − FirstChar]` when the font has `/Widths`, the
   code is in `FirstChar..LastChar` and the entry is a number; (2) only when the font has no
   `/Widths`: the standard 14 width (`Std14.ofBaseFont` of `/BaseFont`, glyph name from the
-  font's encoding); (3) `/MissingWidth` of the font descriptor when present; (4) `0` with
-  `WidthSource.unknown`. `/Widths` is truncated to 256 entries. Type 3 fonts are excluded
+  font's encoding); (3) `/MissingWidth` of the font descriptor when present; (4) a recognised
+  standard 14 font without `/Widths` gives the `.notdef` advance of the substitute
+  (`Std14.notdefWidth`, = its `space` width; MuPDF `ft_width` of glyph 0, so codes with no glyph
+  advance like MuPDF); (5) `0` with `WidthSource.unknown`. `/Widths` is truncated to 256 entries. Type 3 fonts are excluded
   (`FontMetrics.ofDict` gives `none`): their widths are in glyph space scaled by
   `/FontMatrix`, not by 1/1000.
 * **Exact /1000.** An integer width `w` becomes `Fixed` raw `w · 1000`; a real `m·10⁻ˢ`
@@ -133,7 +135,11 @@ def SimpleInputs.width (s : SimpleInputs) (code : Nat) : Fixed × WidthSource :=
     | none =>
       match s.missingWidth with
       | some w => (w, .missingWidth)
-      | none => (Fixed.zero, .unknown)
+      | none =>
+        match s.std14 with
+        | some f => if s.hasWidths then (Fixed.zero, .unknown)
+            else (Fixed.clamp ((f.notdefWidth : Int) * 1000), .std14)
+        | none => (Fixed.zero, .unknown)
 
 /-- Precomputed widths of a simple font: one entry per code `0..255`. -/
 structure SimpleMetrics where
@@ -403,8 +409,22 @@ private def helv : Dict :=
 #guard (SimpleMetrics.ofDict id helv none).width 0x20 == (fx 278000, .std14)
 #guard (SimpleMetrics.ofDict id helv none).width 0x57 == (fx 944000, .std14)
 #guard (SimpleMetrics.ofDict id helv none).width 0x80 == (fx 556000, .std14)
-#guard (SimpleMetrics.ofDict id helv none).width 0x01 == (Fixed.zero, .unknown)
+#guard (SimpleMetrics.ofDict id helv none).width 0x01 == (fx 278000, .std14)
 #guard (SimpleMetrics.ofDict id helv none).width 300 == (Fixed.zero, .unknown)
+
+/-- Helvetica with a `/Widths` array: codes outside it have no standard 14 fallback. -/
+private def helvW : Dict :=
+  helv ++ [(Name.ofString "FirstChar", .int 65), (Name.ofString "LastChar", .int 65),
+   (Name.ofString "Widths", .array [.int 700])]
+
+#guard (SimpleMetrics.ofDict id helvW none).width 65 == (fx 700000, .widths)
+#guard (SimpleMetrics.ofDict id helvW none).width 1 == (Fixed.zero, .unknown)
+
+/-- Helvetica without `/Widths` but with a `/MissingWidth`: the descriptor value wins. -/
+private def helvM : Dict :=
+  helv ++ [(Name.ofString "FontDescriptor", .dict [(Name.ofString "MissingWidth", .int 111)])]
+
+#guard (SimpleMetrics.ofDict id helvM none).width 1 == (fx 111000, .missingWidth)
 
 /-- A subset TrueType font with `/Widths` for codes 32..34 and a `/MissingWidth`. -/
 private def tt : Dict :=
