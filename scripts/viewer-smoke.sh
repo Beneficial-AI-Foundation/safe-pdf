@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7, 9.8; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -27,6 +27,10 @@
 #   1h. highlights and notes on the text PDF (SAFEPDF_VIEWER_SMOKE_MODE=marks): highlight,
 #      recolour, delete (pixel colours), a note at a point with its popup, marks kept across
 #      zoom, rotation and page changes (9.4);
+#   1i. the selection bubble and the Highlight pop-over (SAFEPDF_VIEWER_SMOKE_MODE=bubble) on the
+#      text PDF: bubble highlight, edit bubble recolour via its picker and delete, pop-over
+#      swatch, tool-mode highlight on mouse-up, thickness slider, Show all off/on (pixels),
+#      comment, Escape and page change dismiss (9.8);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -358,7 +362,7 @@ want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Close|Quit",
-    "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Find...",
+    "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
@@ -566,6 +570,70 @@ if "choose the highlight colour" not in v.get("status-highlight-nosel", ""):
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-marks/marks.txt" || fail=1
+
+# 1i. Selection bubble and Highlight pop-over (task 9.8, SAFEPDF_VIEWER_SMOKE_MODE=bubble) on the
+# text PDF of 1d: a drag over "world" shows the float bubble at the end of the selection; its
+# Highlight button highlights in yellow (pixels) and the edit bubble replaces it; a click on
+# blank paper dismisses it; a click on the highlight brings the edit bubble back, which follows
+# a zoom; its colour button opens the picker and the blue row recolours the highlight; its
+# Delete removes it (white again). The toolbar's Highlight button without a selection turns the
+# tool on and opens the pop-over (right-aligned under the button); its pink swatch makes pink
+# current; with the tool on a drag over "safe" highlights at once in pink; the slider follows a
+# press and a drag (thickness 20, then 24); "Show all" off makes the paper white again (and the
+# hidden highlight cannot be selected), on brings the pink back; the edit bubble's Comment adds
+# a note anchored to the highlight and reopens it later; Escape closes the pop-over and
+# dismisses the bubble; with the tool off (Edit menu) a new selection's bubble goes on Escape
+# and on a page change.
+mkdir -p "$work/out-bubble"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=bubble run_viewer "$work/out-bubble" "$work/text.pdf"
+cat "$work/out-bubble/bubble.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines()
+         if ": " in l)
+white, yellow, blue, pink = "255 255 255", "255 255 152", "128 235 255", "255 203 230"
+want = {
+    "bubble0": "none 0",
+    "sel-world": "true",
+    "bubble-float": "float true",
+    "bubble-at-end": "true",
+    "marks-after-bubble-highlight": "1",
+    "world-yellow": yellow,
+    "bubble-after-highlight": "edit true",
+    "bubble-after-blank": "none 0",
+    "bubble-edit": "edit true",
+    "bubble-zoom": "edit true",
+    "picker-open": "true true",
+    "world-blue": blue,
+    "picker-closed": "true 0",
+    "bubble-after-pick": "edit",
+    "marks-after-bubble-delete": "0",
+    "world-after-delete": white,
+    "bubble-after-delete": "none 0",
+    "popover": "1 1 1",
+    "popover-right-aligned": "true",
+    "color-after-swatch": "pink pink",
+    "marks-tool": "1 false",
+    "safe-pink": pink,
+    "thickness": "20 24",
+    "showall-off": white + " 0",
+    "hidden-not-selectable": "true",
+    "showall-on": pink + " 1",
+    "bubble-safe": "edit",
+    "comment-popup": "1 2",
+    "comment-anchored": "true",
+    "comment-reopened": "1 On safe 2",
+    "before-escape": "edit 1 2",
+    "after-escape": "none 0 0 true",
+    "tool-off": "false 0",
+    "float-again": "float 2",
+    "float-escape": "none false",
+    "page-change": "2 none 0",
+}
+errs = ["%s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-bubble/bubble.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"

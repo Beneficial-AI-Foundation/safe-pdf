@@ -7,13 +7,14 @@ import SafePdf.Shell.App.Menu
 import SafePdf.Shell.App.Toolbar
 import SafePdf.Shell.App.Sidebar
 import SafePdf.Shell.App.Marks
+import SafePdf.Shell.App.Bubble
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
 
 /-!
-# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7, 9.8; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
 (File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
@@ -90,6 +91,13 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   icons, note anchors and the selected-mark outline are canvas items (tag `mark`). A click on
   a mark selects it (a note also opens its popup); Delete or Edit → Delete mark removes it,
   a colour entry recolours it.
+* **Selection bubble and Highlight pop-over** (task 9.8, pure logic in `Bubble`): after a
+  text selection a floating Highlight button at the selection's end; on a selected highlight
+  the edit bubble (colour swatch with a picker, Comment, Delete), canvas items placed again on
+  every redraw (`drawBubble`); the toolbar's Highlight button without a selection toggles the
+  Highlight tool and its pop-over `.hlbar` (swatches, thickness slider, "Show all"; `syncTool`,
+  `drawPopover`); with the tool on a mouse-up that selects text highlights it at once; Escape
+  closes the pop-over and dismisses the bubble.
 * **Errors** (unreadable file, parse error, render error, Tcl error) are shown in the status
   line; the window stays usable. Every event handler catches its own exceptions.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
@@ -219,6 +227,17 @@ structure State where
   hlColor : Marks.Color := .yellow
   /-- The page image on screen before the highlights are multiplied in (`Marks.composite`). -/
   shownImg : Option Clip.Image := none
+  /-- Highlight tool, pop-over, colour picker, thickness and "Show all" (task 9.8). -/
+  ui : Bubble.Ui := {}
+  /-- The bubble on screen: its kind and canvas rectangle (task 9.8). -/
+  bubble : Option (Bubble.Kind × Bubble.Rect) := none
+  /-- The edit bubble's colour picker on screen (canvas rectangle). -/
+  pickerAt : Option Bubble.Rect := none
+  /-- The last mouse press hit a bubble or the picker: the drag, release and double click that
+  follow it are not text selection. -/
+  bubblePress : Bool := false
+  /-- The last press in the pop-over was on the thickness slider (drags move it). -/
+  popSlide : Bool := false
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -278,6 +297,13 @@ def fmtFrac (r : Rat) : String :=
   let n := (r * 1000000).floor.toNat
   s!"{n / 1000000}.{padLeft 6 '0' (toString (n % 1000000))}"
 
+/-- A canvas coordinate with two decimals (truncated toward −∞), for Tk. -/
+def num (r : Rat) : String :=
+  let c := (r * 100).floor
+  let a := c.natAbs
+  s!"{if c < 0 then "-" else ""}{a / 100}.{padLeft 2 '0' (toString (a % 100))}"
+
+#guard num 12 = "12.00" && num (3 / 2) = "1.50" && num (-1 / 4) = "-0.25"
 #guard fmtFrac (1 / 4) = "0.250000"
 #guard fmtFrac 2 = "1.000000"
 #guard fmtFrac (-1) = "0.000000"
@@ -822,14 +848,10 @@ clipboard.}
   return $::safepdf::uriAnswer
 }
 set ::safepdf::autoConfirm 0
-# Marks (9.4): current highlight colour, the right-clicked point, the toolbar's colour menu,
-# keys, the note icon and the note popup.
+# Marks (9.4): current highlight colour, the right-clicked point, keys, the note icon and the note popup.
 set ::safepdf::hlColor yellow
 set ::safepdf::popX {}
 set ::safepdf::popY {}
-proc ::safepdf::postHl {} {
-  tk_popup .hlpop [winfo rootx .bar.highlight] [expr {[winfo rooty .bar.highlight] + [winfo height .bar.highlight] + 2}]
-}
 bind . <Key-h> {::safepdf::emit highlight}
 bind . <Key-Delete> {::safepdf::emit markDelete}
 # A note icon (a speech bubble, after the /Text annotation's Comment icon) in the box
@@ -880,6 +902,66 @@ proc ::safepdf::noteDone {id what} {
   destroy .note
   if {$what eq {save}} { ::safepdf::emit noteSave $id $t } else { ::safepdf::emit noteDelete $id }
 }
+# Selection bubble, colour picker and Highlight pop-over (9.8), after PDF.js's editToolbar,
+# colorPicker and #editorHighlightParamsToolbar; positions come from Bubble.lean. Colours
+# sampled from Firefox's PDF.js (docs/viewer-reference/pdfjs-firefox.png).
+array set ::safepdf::col {
+  bubInk #6a5b92 bubLine #d0cfd5 shadow #e4e4e9 accent #6b45d3 swLine #b7b7c1 track #c6c5c7
+  trackOn #c1b0ec thumb #c3b5ee dot #b7b7c1 popLine #d7d7db off #8f8f9d
+}
+set ::safepdf::hlTool 0
+set ::safepdf::showAll 1
+proc ::safepdf::icon::trash {c} {
+  $c create line 9.5 11 22.5 11 -width 1.5 -capstyle round -tags inkf
+  $c create line 13.5 11 13.5 8.5 18.5 8.5 18.5 11 -width 1.5 -joinstyle round -tags inkf
+  $c create line 11 11 12 24 20 24 21 11 -width 1.5 -joinstyle round -tags inkf
+  $c create line 14.5 14.5 14.5 20.5 -width 1.3 -tags inkf
+  $c create line 17.5 14.5 17.5 20.5 -width 1.3 -tags inkf
+}
+# A toolbar icon (32 px box) drawn on canvas c centred at cx cy in ink colour, with tags.
+proc ::safepdf::bubIcon {c name cx cy tags} {
+  $c dtag inkf inkf; $c dtag inko inko
+  ::safepdf::icon::$name $c
+  $c itemconfigure inkf -fill $::safepdf::col(bubInk)
+  $c itemconfigure inko -outline $::safepdf::col(bubInk)
+  foreach t $tags { $c addtag $t withtag inkf; $c addtag $t withtag inko }
+  $c move inkf [expr {$cx - 16}] [expr {$cy - 16}]
+  $c move inko [expr {$cx - 16}] [expr {$cy - 16}]
+  $c dtag inkf inkf; $c dtag inko inko
+}
+# The bubble's rounded box (a pill) with a soft shadow.
+proc ::safepdf::bubBox {c x0 y0 x1 y1 r tags} {
+  ::safepdf::rrect $c $x0 [expr {$y0 + 2}] $x1 [expr {$y1 + 2}] $r -fill $::safepdf::col(shadow) -outline {} -tags $tags
+  ::safepdf::rrect $c $x0 $y0 $x1 $y1 $r -fill white -outline $::safepdf::col(bubLine) -width 1 -tags $tags
+}
+proc ::safepdf::bubDivider {c x y0 y1 tags} {
+  $c create line $x $y0 $x $y1 -fill $::safepdf::col(bubLine) -width 1 -tags $tags
+}
+# The colour button: a 16 px swatch and a chevron (pointing up while the picker is open).
+proc ::safepdf::bubColor {c bx cy hex open tags} {
+  $c create oval [expr {$bx + 4}] [expr {$cy - 8}] [expr {$bx + 20}] [expr {$cy + 8}] -fill $hex -outline $::safepdf::col(swLine) -width 1 -tags $tags
+  set d [expr {$open ? -1.8 : 1.8}]
+  $c create line [expr {$bx + 26.5}] [expr {$cy - $d}] [expr {$bx + 30}] [expr {$cy + $d}] [expr {$bx + 33.5}] [expr {$cy - $d}] -fill $::safepdf::col(bubInk) -width 1.3 -capstyle round -joinstyle round -tags $tags
+}
+# A swatch at cx cy of diameter d; the selected one ringed (2 px, 2 px away).
+proc ::safepdf::swatch {c cx cy d hex sel tags} {
+  set r [expr {$d / 2.0}]
+  if {$sel} {
+    $c create oval [expr {$cx - $r - 3}] [expr {$cy - $r - 3}] [expr {$cx + $r + 3}] [expr {$cy + $r + 3}] -outline $::safepdf::col(accent) -width 2 -tags $tags
+  }
+  $c create oval [expr {$cx - $r}] [expr {$cy - $r}] [expr {$cx + $r}] [expr {$cy + $r}] -fill $hex -outline $::safepdf::col(swLine) -width 1 -tags $tags
+}
+# The Highlight pop-over: a canvas placed under the toolbar, drawn by Lean (drawPopover).
+canvas .hlbar -width 220 -height 190 -background $::safepdf::col(body) -highlightthickness 0 -borderwidth 0 -takefocus 0 -cursor arrow
+bind .hlbar <ButtonPress-1> {::safepdf::emit popClick %x %y}
+bind .hlbar <B1-Motion> {::safepdf::emit popDrag %x %y}
+proc ::safepdf::popShow {x} {
+  set y [expr {[winfo rooty .barline] - [winfo rooty .] + 5}]
+  place .hlbar -in . -x $x -y $y
+  raise .hlbar
+}
+proc ::safepdf::popHide {} { place forget .hlbar }
+bind . <Key-Escape> {::safepdf::emit escape}
 focus .c
 "
 
@@ -927,11 +1009,30 @@ def pagePoint (st : IO.Ref State) (wx wy : Int) : IO (Option Pt) := do
   let (some cx, some cy) := (View.parseDecimal cx, View.parseDecimal cy) | return none
   return some (toPage s.shownZoom s.shownRot bx ⟨cx - (s.imgX : Rat), cy - (s.imgY : Rat)⟩)
 
+/-- The marks of the shown page that are drawn: all of them, or only the notes while "Show
+all" is off (task 9.8). -/
+def visibleMarks (s : State) : List Marks.Mark :=
+  let ms := s.marks.onPage s.page
+  if s.ui.showAll then ms else ms.filter (·.isNote)
+
+/-- `canvasRect` as a `Bubble.Rect`. -/
+def canvasR (s : State) (bx b : Box) : Bubble.Rect :=
+  let (x0, y0, x1, y1) := canvasRect s bx b
+  ⟨x0, y0, x1, y1⟩
+
+/-- Canvas coordinates of window position `(wx, wy)`. -/
+def canvasPos (wx wy : Int) : IO (Option (Rat × Rat)) := do
+  let cx ← run [".c", "canvasx", toString wx]
+  let cy ← run [".c", "canvasy", toString wy]
+  return match View.parseDecimal cx, View.parseDecimal cy with
+    | some x, some y => some (x, y)
+    | _, _ => none
+
 /-- Draws the canvas items of the shown page's marks (tag `mark`, task 9.4): note icons
 (`::safepdf::noteIcon`, tag `note` and `mID`), the dashed quads a note is anchored to, and the
 outline of the selected mark (tag `marksel`). Highlight fills are pixels (`showImage`). -/
 def drawMarks (s : State) (bx : Box) : IO Unit := do
-  for m in s.marks.onPage s.page do
+  for m in visibleMarks s do
     let tags := s!"mark m{m.id}"
     if m.isNote then
       for q in m.quads do
@@ -951,11 +1052,64 @@ def drawMarks (s : State) (bx : Box) : IO Unit := do
           toString (y0.floor - 2), toString (x1.ceil + 2), toString (y1.ceil + 2),
           "-outline", "#0060df", "-width", "2", "-tags", s!"{tags} marksel"]
 
+/-- Draws the bubble of the shown page (canvas items tagged `bub`, task 9.8; `Bubble`): after
+a text selection (not while dragging) the float bubble with the Highlight button, on a selected
+highlight the edit bubble (colour swatch and chevron, Comment, Delete) and, when open, its
+colour picker. Placed by `Bubble.place` in canvas coordinates inside the scroll region, so it
+scrolls with the page; every redraw (zoom, rotation, page change) places it again. Records
+what is drawn in `State.bubble` / `State.pickerAt` for the clicks. -/
+def drawBubble (st : IO.Ref State) (bx : Box) : IO Unit := do
+  let s ← st.get
+  let selRects ← match s.sel with
+    | some (p, a, b) =>
+      if p == s.page && s.pressPt.isNone then
+        match ← pageIndex st p with
+        | .ok ix => pure ((Select.rangeBoxes ix.cells a b).map (canvasR s bx))
+        | .error _ => pure []
+      else pure []
+    | none => pure []
+  let mark := (s.markSel.bind s.marks.find?).filter fun m => m.page == s.page && !m.isNote
+  let markRects := (mark.map fun m => m.quads.map (canvasR s bx)).getD []
+  let area : Bubble.Rect := ⟨0, 0, (s.regionW : Rat), (s.regionH : Rat)⟩
+  let placed := (Bubble.kindFor (!selRects.isEmpty) (!markRects.isEmpty) s.ui).bind fun k =>
+    (Bubble.place (if k == .float then selRects else markRects) k.width Bubble.height area).map
+      (k, ·)
+  let picker := match placed with
+    | some (.edit, r) => if s.ui.picker then some (Bubble.pickerRect r area) else none
+    | _ => none
+  st.modify ({ · with bubble := placed, pickerAt := picker })
+  let some (k, r) := placed | return
+  let cy := (r.y0 + r.y1) / 2
+  discard <| run ["::safepdf::bubBox", ".c", num r.x0, num r.y0, num r.x1, num r.y1,
+    num (Bubble.height / 2), "bub"]
+  for d in k.dividers do
+    discard <| run ["::safepdf::bubDivider", ".c", num (r.x0 + d), num (r.y0 + 1),
+      num (r.y1 - 1), "bub"]
+  for (b, x0, x1) in k.layout do
+    let tags := s!"bub b:{b.name}"
+    let cx := r.x0 + (x0 + x1) / 2
+    match b with
+    | .color =>
+      let hex := (mark.map (·.color.hex)).getD s.hlColor.hex
+      discard <| run ["::safepdf::bubColor", ".c", num (r.x0 + x0), num cy, hex,
+        if s.ui.picker then "1" else "0", tags]
+    | .highlight => discard <| run ["::safepdf::bubIcon", ".c", "highlight", num cx, num cy, tags]
+    | .comment => discard <| run ["::safepdf::bubIcon", ".c", "comment", num cx, num cy, tags]
+    | .delete => discard <| run ["::safepdf::bubIcon", ".c", "trash", num cx, num cy, tags]
+  if let some pr := picker then
+    discard <| run ["::safepdf::bubBox", ".c", num pr.x0, num pr.y0, num pr.x1, num pr.y1, "6",
+      "bub picker"]
+    for (c, x, y) in Bubble.pickerSwatches pr do
+      let cur := mark.any (·.color == c)
+      discard <| run ["::safepdf::swatch", ".c", num x, num y, num Bubble.swatch, c.hex,
+        if cur then "1" else "0", s!"bub picker c:{c.name}"]
+
 /-- Redraws the overlays of the shown page: the marks' canvas items (`drawMarks`), all search
-hits (tag `hit`, the current one in orange) and the selection (tag `sel`), in that stacking
-order. -/
+hits (tag `hit`, the current one in orange), the selection (tag `sel`) and the bubble (tag
+`bub`, `drawBubble`), in that stacking order. -/
 def drawOverlay (st : IO.Ref State) : IO Unit := do
-  discard <| run [".c", "delete", "sel", "hit", "mark"]
+  discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
+  st.modify ({ · with bubble := none, pickerAt := none })
   let s ← st.get
   let some bx := shownBox s | return
   drawMarks s bx
@@ -976,6 +1130,7 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
     if p == s.page then
       if let .ok ix ← pageIndex st p then
         for b in Select.rangeBoxes ix.cells a b do rect b "#3874f2" "sel"
+  drawBubble st bx
 
 /-! ## Rendering -/
 
@@ -1057,7 +1212,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
     | .ok img =>
       st.modify ({ · with shownImg := some img })
       Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32
-        (Marks.composite vp.zoom vp.rot vp.box img.w img.h img.data (s.marks.onPage s.page))
+        (Marks.composite vp.zoom vp.rot vp.box img.w img.h img.data (visibleMarks s))
       -- Centre the page when it is smaller than the canvas; the scroll region is the page
       -- plus the margin (at least the canvas).
       let m := View.margin
@@ -1086,14 +1241,16 @@ def refresh (st : IO.Ref State) : IO Unit := do
         discard <| run ["after", "100", "::safepdf::emit prefetch"]
     | .error e =>
       st.modify ({ · with pending := none, shownImg := none })
-      discard <| run [".c", "delete", "sel", "hit", "mark"]
+      discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
+      st.modify ({ · with bubble := none, pickerAt := none })
       discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
       discard <| run [photoName, "blank"]
       setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}: cannot render: {renderError e}"
   | _, _ =>
     discard <| run ["::safepdf::setPage", "", "", "0"]
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
-    discard <| run [".c", "delete", "sel", "hit", "mark"]
+    discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
+    st.modify ({ · with bubble := none, pickerAt := none })
     discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
     discard <| run [photoName, "blank"]
 
@@ -1103,7 +1260,7 @@ def repaint (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   if let (some img, some bx) := (s.shownImg, shownBox s) then
     Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32
-      (Marks.composite s.shownZoom s.shownRot bx img.w img.h img.data (s.marks.onPage s.page))
+      (Marks.composite s.shownZoom s.shownRot bx img.w img.h img.data (visibleMarks s))
   drawOverlay st
 
 /-- Renders the page after the current one into the cache when it is small enough
@@ -1351,9 +1508,15 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
                               hover := none, history := {}, toggleShown := none,
-                              marks := {}, markSel := none, shownImg := none }
+                              marks := {}, markSel := none, shownImg := none,
+                              ui := { s.ui with tool := false, popover := false,
+                                                picker := false },
+                              bubble := none, pickerAt := none, bubblePress := false }
   discard <| run ["pack", "forget", ".find", ".goto"]
   discard <| run ["destroy", ".note"]
+  discard <| run ["::safepdf::popHide"]
+  discard <| run ["::safepdf::btnToggled", ".bar.highlight", "0"]
+  discard <| run ["set", Menu.hlToolVar, "0"]
   fillOutline st
   showOutline st false
   discard <| run [".c", "configure", "-cursor", ""]
@@ -1374,8 +1537,7 @@ def colorMenu (path : String) : IO Unit := do
 
 /-- Builds the menubar `.menubar` from `Menu.menubar` (every word a literal through
 `Tcl.quote`; the `-command` scripts are the model's constants) and attaches it to the main
-window; then the mark entries of the context menu (`Menu.popupMarks`) and the toolbar's colour
-menu `.hlpop` (task 9.4). -/
+window; then the mark entries of the context menu (`Menu.popupMarks`, task 9.4). -/
 def buildMenus : IO Unit := do
   for c in Marks.Color.all do
     discard <| run ["image", "create", "photo", swatch c, "-width", "14", "-height", "14"]
@@ -1412,7 +1574,6 @@ def buildMenus : IO Unit := do
     | .cmd c | .check c _ =>
       discard <| run [Menu.popPath, "insert", ix, "command", "-label", c.label,
         "-accelerator", c.accel, "-command", c.popScript]
-  colorMenu ".hlpop"
 
 /-- Builds the toolbar from `Toolbar.layout` (task 9.7): icon buttons (`::safepdf::iconButton`
 with the model's constant icon name, tooltip and script), separators, the page field and the
@@ -1605,10 +1766,76 @@ def pageEntry (st : IO.Ref State) (txt : String) : IO Unit := do
 def markName (m : Marks.Mark) : String :=
   if m.isNote then "note" else s!"{m.color.name} highlight"
 
-/-- Sets the current highlight colour (and the colour menus' radio variable). -/
+/-- Draws the Highlight pop-over `.hlbar` (task 9.8, layout `Bubble.Popover`, after PDF.js's
+`#editorHighlightParamsToolbar`): "Highlight color" with the five swatches (the current colour
+ringed), "Thickness" with the small and large example dots and the slider, a divider, and the
+"Show all" switch. -/
+def drawPopover (s : State) : IO Unit := do
+  let c := ".hlbar"
+  let W := Bubble.Popover.width
+  let H := Bubble.Popover.height
+  let px := Bubble.Popover.padX
+  let sy := Bubble.Popover.sliderY
+  let text (y : Rat) (t : String) : IO Unit := do
+    discard <| run [c, "create", "text", num px, num y, "-anchor", "w", "-text", t, "-font",
+      "::safepdf::fBar", "-fill", "#15141a"]
+  discard <| run [c, "delete", "all"]
+  discard <| run ["::safepdf::rrect", c, "0.5", "0.5", num (W - 1 / 2), num (H - 1 / 2), "8",
+    "-fill", "white", "-outline", "#d7d7db"]
+  text Bubble.Popover.titleY "Highlight color"
+  for (i, col) in (List.range Marks.Color.all.length).zip Marks.Color.all do
+    discard <| run ["::safepdf::swatch", c, num (Bubble.Popover.swatchX i),
+      num Bubble.Popover.swatchY, num Bubble.Popover.swatchD, col.hex,
+      if col == s.hlColor then "1" else "0", s!"c:{col.name}"]
+  text Bubble.Popover.thickY "Thickness"
+  discard <| run [c, "create", "oval", num px, num (sy - 4), num (px + 8), num (sy + 4), "-fill",
+    "#b7b7c1", "-outline", ""]
+  discard <| run [c, "create", "oval", num (W - px - 24), num (sy - 12), num (W - px),
+    num (sy + 12), "-fill", "#b7b7c1", "-outline", ""]
+  let x0 := Bubble.Popover.sliderX0
+  let tx := Bubble.Popover.thumbX s.ui.thickness
+  discard <| run [c, "create", "line", num x0, num sy, num Bubble.Popover.sliderX1, num sy,
+    "-fill", "#c6c5c7", "-width", "2", "-capstyle", "round"]
+  discard <| run [c, "create", "line", num x0, num sy, num tx, num sy, "-fill", "#c1b0ec",
+    "-width", "2", "-capstyle", "round"]
+  discard <| run ["::safepdf::rrect", c, num (tx - 7), num (sy - 7), num (tx + 7), num (sy + 7),
+    "3", "-fill", "#c3b5ee", "-outline", "#b3a3e6", "-tags", "thumb"]
+  discard <| run [c, "create", "line", num px, num Bubble.Popover.dividerY, num (W - px),
+    num Bubble.Popover.dividerY, "-fill", "#d7d7db"]
+  text Bubble.Popover.toggleY "Show all"
+  let t := Bubble.Popover.toggleRect
+  let on := s.ui.showAll
+  discard <| run ["::safepdf::rrect", c, num t.x0, num t.y0, num t.x1, num t.y1, "8", "-fill",
+    if on then "#6b45d3" else "white", "-outline", if on then "#6b45d3" else "#8f8f9d",
+    "-tags", "switch"]
+  let (k0, k1) := if on then (t.x1 - 14, t.x1 - 3) else (t.x0 + 3, t.x0 + 14)
+  discard <| run [c, "create", "oval", num k0, num (t.y0 + 5 / 2), num k1, num (t.y1 - 5 / 2),
+    "-fill", if on then "white" else "#8f8f9d", "-outline", "", "-tags", "knob"]
+
+/-- Brings the Tk side in step with the Highlight tool state (task 9.8): the Edit menu's check
+variables, the toolbar button's toggled look, and the pop-over (drawn and placed under the
+Highlight button, right-aligned with it, `Bubble.Popover.left`; hidden when closed). -/
+def syncTool (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let b (v : Bool) : String := if v then "1" else "0"
+  discard <| run ["set", Menu.hlToolVar, b s.ui.tool]
+  discard <| run ["set", Menu.showAllVar, b s.ui.showAll]
+  discard <| run ["::safepdf::btnToggled", ".bar.highlight", b s.ui.tool]
+  if s.ui.popover && s.doc.isSome then
+    drawPopover s
+    let num? (w : List String) : IO Rat := return (View.parseDecimal (← run w)).getD 0
+    let bx := (← num? ["winfo", "rootx", ".bar.highlight"]) - (← num? ["winfo", "rootx", "."])
+    let bw ← num? ["winfo", "width", ".bar.highlight"]
+    let ww ← num? ["winfo", "width", "."]
+    discard <| run ["::safepdf::popShow", toString (Bubble.Popover.left bx bw ww).floor]
+  else discard <| run ["::safepdf::popHide"]
+
+/-- Sets the current highlight colour (and the colour menus' radio variable; the pop-over's
+ring follows). -/
 def setColor (st : IO.Ref State) (c : Marks.Color) : IO Unit := do
   st.modify ({ · with hlColor := c })
   discard <| run ["set", Menu.colorVar, c.name]
+  if (← st.get).ui.popover then syncTool st
 
 /-- Handles `highlight [COLOR]` (toolbar, `h`, Edit → Highlight selection, a colour entry):
 with a selection, highlights it (its quads are the C3 glyph boxes of the selected line runs,
@@ -1656,9 +1883,11 @@ def openNote (st : IO.Ref State) (id : Nat) : IO Unit := do
   discard <| run ["::safepdf::noteEdit", toString id, m.text, toString (max 0 x),
     toString (max 0 y)]
 
-/-- Handles `note [X Y]` (Edit → Add note…, or the context menu at window position `(X, Y)`):
-adds a note anchored to the selection on the shown page, else to the page point under
-`(X, Y)`, else to the page point at the window centre; selects it and opens its popup. -/
+/-- Handles `note [X Y]` (Edit → Add note…, the edit bubble's Comment, or the context menu at
+window position `(X, Y)`): adds a note anchored to the selection on the shown page; else,
+without a position and with a highlight selected, opens that highlight's comment (the note
+anchored to its quads, `Marks.Store.noteOn`) or adds one in its colour (task 9.8); else a note
+at the page point under `(X, Y)`, else at the window centre; selects it and opens its popup. -/
 def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || (shownBox s).isNone then return
@@ -1668,11 +1897,23 @@ def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
       if let .ok ix ← pageIndex st p then
         let qs := Select.rangeBoxes ix.cells a b
         if !qs.isEmpty then anchor := some (.quads qs)
+  -- The comment of the selected highlight (the edit bubble's Comment, task 9.8): its note,
+  -- or a new note anchored to its quads in its colour.
+  let mut color := Marks.Color.yellow
+  if anchor.isNone && pos.isNone then
+    if let some m := s.markSel.bind s.marks.find? then
+      if m.page == s.page && !m.isNote && !m.quads.isEmpty then
+        if let some id := s.marks.noteOn s.page m.quads then
+          setStatus s!"page {s.page + 1}: comment of the {m.color.name} highlight"
+          openNote st id
+          return
+        anchor := some (.quads m.quads)
+        color := m.color
   if anchor.isNone then
     let (wx, wy) := pos.getD (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
     anchor := (← pagePoint st wx wy).map .point
   let some anc := anchor | return
-  let (marks, id) := s.marks.addNote s.page .yellow "" anc
+  let (marks, id) := s.marks.addNote s.page color "" anc
   st.modify ({ · with marks, markSel := some id, sel := none })
   repaint st
   setStatus s!"page {s.page + 1}: note added (type its text, then Save)"
@@ -1708,7 +1949,9 @@ popup when `openIt` is set). Returns whether there was one. -/
 def selectMarkAt (st : IO.Ref State) (p : Pt) (openIt : Bool) : IO Bool := do
   let s ← st.get
   let some bx := shownBox s | return false
-  match s.marks.hitAt bx s.page p with
+  let store := if s.ui.showAll then s.marks
+    else { s.marks with marks := s.marks.marks.filter (·.isNote) }
+  match store.hitAt bx s.page p with
   | some id =>
     st.modify ({ · with markSel := some id })
     drawOverlay st
@@ -1740,14 +1983,115 @@ def popup (st : IO.Ref State) (x y rx ry : String) : IO Unit := do
     on (doc && s.markSel.isSome)]
   if s.smokeDir.isNone then discard <| run ["tk_popup", Menu.popPath, rx, ry]
 
-/-- The toolbar's Highlight button: with a selection, highlights it in the current colour;
-without one, opens the colour menu (`.hlpop`; PDF.js opens its colour pop-over). -/
+/-- Status line after the Highlight tool was turned on or off. -/
+def toolStatus (st : IO.Ref State) : IO Unit := do
+  if (← st.get).ui.tool then
+    setStatus "Highlight tool on: choose the highlight colour, then select text (it is \
+      highlighted at once; Escape closes the pop-over, the button ends the tool)"
+  else setStatus "Highlight tool off"
+
+/-- The toolbar's Highlight button (`Bubble.Ui.toolClick`): with a selection, highlights it in
+the current colour (task 9.4); without one, turns the Highlight tool on with its pop-over, or
+off (task 9.8, PDF.js's editor mode button). -/
 def toolHighlight (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  if s.sel.isSome then highlight st none
+  let (u, hl) := s.ui.toolClick s.sel.isSome
+  if hl then highlight st none
   else
-    if s.smokeDir.isNone then discard <| run ["::safepdf::postHl"]
-    setStatus "choose the highlight colour, then select text and press Highlight"
+    st.modify ({ · with ui := u })
+    syncTool st
+    toolStatus st
+
+/-- Edit → Highlight tool: turns the tool (and its pop-over) on or off (task 9.8). -/
+def hlToolToggle (st : IO.Ref State) : IO Unit := do
+  if (← st.get).doc.isNone then return
+  st.modify fun s => { s with ui := s.ui.toggleTool }
+  syncTool st
+  toolStatus st
+
+/-- "Show all" (the pop-over switch, Edit → Show all highlights; task 9.8): hides or shows all
+highlights of the page view (notes stay); a hidden highlight cannot stay selected. -/
+def toggleShowAll (st : IO.Ref State) : IO Unit := do
+  st.modify fun s =>
+    let on := !s.ui.showAll
+    let keep := on || ((s.markSel.bind s.marks.find?).map (·.isNote)).getD true
+    { s with ui := { s.ui with showAll := on }, markSel := if keep then s.markSel else none }
+  repaint st
+  syncTool st
+  setStatus (if (← st.get).ui.showAll then "highlights shown" else "highlights hidden (Show all is off)")
+
+/-- A press in the pop-over at `(x, y)` (`Bubble.Popover.hit`): a swatch makes its colour the
+current one and recolours a selected highlight (PDF.js applies the parameters to the selected
+editor); the slider sets the thickness (and follows drags, `popDrag`); the switch toggles
+"Show all". -/
+def popClick (st : IO.Ref State) (xs ys : String) : IO Unit := do
+  let (some x, some y) := (xs.toInt?, ys.toInt?) | return
+  st.modify ({ · with popSlide := false })
+  match Bubble.Popover.hit x y with
+  | some (.color c) =>
+    setColor st c
+    let s ← st.get
+    match s.markSel.bind s.marks.find? with
+    | some m =>
+      if !m.isNote then
+        st.modify ({ · with marks := s.marks.recolor m.id c })
+        repaint st
+        setStatus s!"highlight recoloured: {c.name}"
+      else setStatus s!"highlight colour: {c.name}"
+    | none => setStatus s!"highlight colour: {c.name}"
+  | some .slider =>
+    st.modify fun s => { s with popSlide := true,
+                                ui := s.ui.setThickness (Bubble.Popover.thicknessAt x) }
+    syncTool st
+    setStatus s!"thickness {(← st.get).ui.thickness} (used by free highlights)"
+  | some .toggle => toggleShowAll st
+  | none => pure ()
+
+/-- A drag in the pop-over after a press on the slider moves it (`Bubble.Popover.thicknessAt`). -/
+def popDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
+  let some x := xs.toInt? | return
+  let s ← st.get
+  if !s.popSlide then return
+  let v := Bubble.Popover.thicknessAt x
+  if v == s.ui.thickness then return
+  st.modify fun s => { s with ui := s.ui.setThickness v }
+  syncTool st
+  setStatus s!"thickness {v} (used by free highlights)"
+
+/-- Escape (task 9.8): closes the colour picker and the pop-over and dismisses the bubble (the
+text selection and the selected mark are cleared; the tool stays on). -/
+def escape (st : IO.Ref State) : IO Unit := do
+  st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none }
+  drawOverlay st
+  syncTool st
+
+/-- A mouse press at window `(wx, wy)` on the bubble or its colour picker (task 9.8): a picker
+row recolours the selected highlight; the colour button opens or closes the picker; the other
+buttons run their `Menu.Cmd` script (`Bubble.Btn.cmd?`) at the next idle moment, as a menu
+entry would. Returns whether the press was on them (then it is not a text selection). -/
+def bubbleClick (st : IO.Ref State) (wx wy : Int) : IO Bool := do
+  let s ← st.get
+  if s.bubble.isNone && s.pickerAt.isNone then return false
+  let some (cx, cy) ← canvasPos wx wy | return false
+  if let some pr := s.pickerAt then
+    if pr.contains cx cy then
+      st.modify ({ · with bubblePress := true })
+      if let some c := Bubble.pickerHit pr cx cy then
+        st.modify fun s => { s with ui := { s.ui with picker := false } }
+        highlight st (some c.name)
+      return true
+  if let some (k, r) := s.bubble then
+    if r.contains cx cy then
+      st.modify ({ · with bubblePress := true })
+      match Bubble.hit k r cx cy with
+      | some .color =>
+        st.modify fun s => { s with ui := { s.ui with picker := !s.ui.picker } }
+        drawOverlay st
+      | some b =>
+        if let some c := b.cmd? then discard <| run ["after", "idle", c.script]
+      | none => pure ()
+      return true
+  return false
 
 /-- Handles `tool NAME` (an annotation tool, Print or Save): Highlight works (task 9.4); the
 others are not available yet. -/
@@ -1770,7 +2114,10 @@ def selStatus (st : IO.Ref State) : IO Unit := do
 /-- Mouse press at window position `(wx, wy)`: clears the selection and remembers the page
 point where a drag starts. -/
 def press (st : IO.Ref State) (wx wy : Int) : IO Unit := do
-  st.modify ({ · with sel := none, pressPt := none, markSel := none })
+  st.modify ({ · with bubblePress := false })
+  if ← bubbleClick st wx wy then return
+  st.modify fun s => { s with sel := none, pressPt := none, markSel := none,
+                              ui := { s.ui with picker := false } }
   if let some p ← pagePoint st wx wy then st.modify ({ · with pressPt := some p })
   drawOverlay st
 
@@ -1779,6 +2126,9 @@ the press point to the one nearest to this point, in reading order. A release wh
 was (a click) selects nothing. -/
 def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
   let s ← st.get
+  if s.bubblePress then
+    if final then st.modify ({ · with bubblePress := false })
+    return
   let some p0 := s.pressPt | return
   if final then st.modify ({ · with pressPt := none })
   let some p1 ← pagePoint st wx wy | return
@@ -1793,13 +2143,20 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
     if let some (a, b) := Select.dragRange ix.cells p0 p1 then
       st.modify ({ · with sel := some (s.page, a, b) })
       drawOverlay st
-      if final then selStatus st
+      if final then
+        selStatus st
+        -- With the Highlight tool on, the mouse-up highlights at once (PDF.js, task 9.8).
+        if (← st.get).ui.highlightOnRelease true then highlight st none
   | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
 
 /-- Double click at `(wx, wy)`: selects the word of the nearest glyph (`Select.wordAt`). -/
 def selectWord (st : IO.Ref State) (wx wy : Int) : IO Unit := do
   st.modify ({ · with pressPt := none })
   let s ← st.get
+  -- The second click of a double click on the bubble is not a word selection (task 9.8).
+  if let some (cx, cy) ← canvasPos wx wy then
+    if (s.bubble.any fun (_, r) => r.contains cx cy) || (s.pickerAt.any (·.contains cx cy)) then
+      return
   let some p ← pagePoint st wx wy | return
   match ← pageIndex st s.page with
   | .ok ix =>
@@ -1808,6 +2165,7 @@ def selectWord (st : IO.Ref State) (wx wy : Int) : IO Unit := do
       st.modify ({ · with sel := some (s.page, a, b) })
       drawOverlay st
       selStatus st
+      if (← st.get).ui.highlightOnRelease true then highlight st none
   | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
 
 /-- Selects all the text of the current page (Ctrl+A). -/
@@ -2574,6 +2932,190 @@ def smokeMarks (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "marks.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the selection bubble and the Highlight pop-over
+(`SAFEPDF_VIEWER_SMOKE_MODE=bubble`, task 9.8), on the text PDF of `smokeText` (page 1 white
+except the black marker under `safe`; substitute fonts off): a drag over `world` shows the
+float bubble at the end of the selection; its Highlight button highlights in yellow and the
+edit bubble replaces it; a click on blank paper dismisses it; a click on the highlight shows
+the edit bubble again, which follows a zoom; its colour button opens the picker, whose blue
+row recolours the highlight; its Delete removes it. The toolbar's Highlight button (no
+selection) turns the tool on and opens the pop-over; its pink swatch makes pink current; a
+drag over `safe` then highlights at once in pink; the slider sets the thickness (press and
+drag); the "Show all" switch hides the highlight (white) and shows it again; the edit bubble's
+Comment adds a note anchored to the highlight's quads and reopens it later; Escape closes the
+pop-over and dismisses the bubble; with the tool off a new selection's bubble goes on Escape
+and on a page change. Results go into `bubble.txt` as `key: value` lines. -/
+def smokeBubble (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let px (p : Pt) : IO String := do
+    let s ← st.get
+    let some bx := shownBox s | return "<no page>"
+    let q := toScreen s.shownZoom s.shownRot bx p
+    try run [photoName, "get", toString q.x.floor, toString q.y.floor]
+    catch _ => pure "<outside>"
+  let idle : IO Unit := discard <| run ["update", "idletasks"]
+  let clickAt (pos : String × String) : IO Unit := do
+    let t := toString (← IO.monoMsNow)
+    sendEvent ".c" "<ButtonPress-1>" ["-x", pos.1, "-y", pos.2, "-time", t]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", pos.1, "-y", pos.2, "-time", t]
+    idle
+  -- Window position of a canvas point.
+  let winOf (x y : Rat) : IO (String × String) := do
+    let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+    let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+    return (toString (x - vx).floor, toString (y - vy).floor)
+  let btnPos (b : Bubble.Btn) : IO (Option (String × String)) := do
+    let some (k, r) := (← st.get).bubble | return none
+    let some (_, x0, x1) := k.layout.find? (·.1 == b) | return none
+    return some (← winOf (r.x0 + (x0 + x1) / 2) ((r.y0 + r.y1) / 2))
+  let clickBtn (b : Bubble.Btn) : IO Unit := do
+    if let some pos ← btnPos b then clickAt pos
+  let kindName : IO String := return match (← st.get).bubble with
+    | some (.float, _) => "float"
+    | some (.edit, _) => "edit"
+    | none => "none"
+  let count : IO Nat := return (← st.get).marks.marks.size
+  let popClickAt (x y : Rat) : IO Unit := do
+    sendEvent ".hlbar" "<ButtonPress-1>" ["-x", toString x.floor, "-y", toString y.floor]
+    sendEvent ".hlbar" "<ButtonRelease-1>" ["-x", toString x.floor, "-y", toString y.floor]
+  let .ok ix ← pageIndex st 0 | do
+    IO.FS.writeFile (file "bubble.txt") "error: no text index\n"
+    discard <| run ["destroy", "."]
+  let rangeOf (q : String) : Option (Nat × Nat) := (ix.hits (Select.normQuery q))[0]?
+  let (some (wa, wb), some (sa, sb)) := (rangeOf "world", rangeOf "safe") | do
+    IO.FS.writeFile (file "bubble.txt") "error: words not found\n"
+    discard <| run ["destroy", "."]
+  let dragSel (a b : Nat) : IO Unit := do
+    if let (some p0, some p1) := (← cellWindowPos st ix a, ← cellWindowPos st ix b) then
+      sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+      sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+      idle
+  let some world := (Select.rangeBoxes ix.cells wa wb).head? | return
+  let some safe := (Select.rangeBoxes ix.cells sa sb).head? | return
+  let worldC : Pt := ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩
+  let safeAbove : Pt := ⟨(safe.llx + safe.urx) / 2, (712.6 + safe.ury) / 2⟩
+  let some wpos ← boxWindowPos st world | return
+  let some spos ← boxWindowPos st safe | return
+  let some blank ← boxWindowPos st ⟨300, 400, 300, 400⟩ | return
+  -- The bubble's right edge and top against the last point of the boxes `bs` (page space).
+  let atEnd (bs : List Box) : IO Bool := do
+    let s ← st.get
+    let some bx := shownBox s | return false
+    let some (_, r) := s.bubble | return false
+    let some (lx, ly) := Bubble.lastPoint (bs.map (canvasR s bx)) | return false
+    return r.x1 == lx && r.y0 == ly + Bubble.gap
+  out := out.push s!"bubble0: {← kindName} {← tagCount "bub"}"
+  -- 1. A drag over `world`: the float bubble at the end of the selection.
+  dragSel wa wb
+  out := out.push s!"sel-world: {(← st.get).sel.isSome}"
+  out := out.push s!"bubble-float: {← kindName} {decide ((← tagCount "bub") > 0)}"
+  out := out.push s!"bubble-at-end: {← atEnd [world]}"
+  -- 2. Its Highlight button.
+  clickBtn .highlight
+  out := out.push s!"marks-after-bubble-highlight: {← count}"
+  out := out.push s!"world-yellow: {← px worldC}"
+  out := out.push s!"bubble-after-highlight: {← kindName} {← atEnd [world]}"
+  -- 3. A click on blank paper dismisses it.
+  clickAt blank
+  out := out.push s!"bubble-after-blank: {← kindName} {← tagCount "bub"}"
+  -- 4. A click on the highlight: the edit bubble; it follows a zoom.
+  clickAt wpos
+  out := out.push s!"bubble-edit: {← kindName} {(← st.get).markSel.isSome}"
+  sendKey "plus"
+  out := out.push s!"bubble-zoom: {← kindName} {← atEnd [world]}"
+  sendKey "minus"
+  -- 5. The colour button opens the picker; its blue row recolours the highlight.
+  clickBtn .color
+  out := out.push s!"picker-open: {(← st.get).pickerAt.isSome} {decide ((← tagCount "picker") > 0)}"
+  if let some pr := (← st.get).pickerAt then
+    if let some (_, x, y) := (Bubble.pickerSwatches pr).find? (·.1 == .blue) then
+      clickAt (← winOf x y)
+  out := out.push s!"world-blue: {← px worldC}"
+  out := out.push s!"picker-closed: {(← st.get).pickerAt.isNone} {← tagCount "picker"}"
+  out := out.push s!"bubble-after-pick: {← kindName}"
+  -- 6. Delete.
+  clickBtn .delete
+  out := out.push s!"marks-after-bubble-delete: {← count}"
+  out := out.push s!"world-after-delete: {← px worldC}"
+  out := out.push s!"bubble-after-delete: {← kindName} {← tagCount "bub"}"
+  -- 7. The toolbar's Highlight button without a selection: tool on, pop-over open.
+  sendEvent ".bar.highlight" "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+  sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  idle
+  out := out.push s!"popover: {← run ["winfo", "ismapped", ".hlbar"]} {← run ["set", Menu.hlToolVar]} {← run ["set", "::safepdf::btn(tog,.bar.highlight)"]}"
+  let px0 := (View.parseDecimal (← run ["winfo", "x", ".hlbar"])).getD 0
+  let bR := (View.parseDecimal (← run ["winfo", "rootx", ".bar.highlight"])).getD 0 -
+    (View.parseDecimal (← run ["winfo", "rootx", "."])).getD 0 +
+    (View.parseDecimal (← run ["winfo", "width", ".bar.highlight"])).getD 0
+  out := out.push s!"popover-right-aligned: {px0 + Bubble.Popover.width == bR}"
+  popClickAt (Bubble.Popover.swatchX 3) Bubble.Popover.swatchY
+  out := out.push s!"color-after-swatch: {(← st.get).hlColor.name} {← run ["set", Menu.colorVar]}"
+  -- 8. With the tool on, a drag over `safe` highlights at once.
+  dragSel sa sb
+  out := out.push s!"marks-tool: {← count} {(← st.get).sel.isSome}"
+  out := out.push s!"safe-pink: {← px safeAbove}"
+  -- 9. The slider: a press sets the thickness, a drag moves it.
+  popClickAt (Bubble.Popover.thumbX 20) Bubble.Popover.sliderY
+  let t1 := (← st.get).ui.thickness
+  sendEvent ".hlbar" "<ButtonPress-1>" ["-x", toString (Bubble.Popover.thumbX 20).floor, "-y",
+    toString Bubble.Popover.sliderY.floor]
+  sendEvent ".hlbar" "<B1-Motion>" ["-x", "300", "-y", toString Bubble.Popover.sliderY.floor,
+    "-state", "256"]
+  sendEvent ".hlbar" "<ButtonRelease-1>" ["-x", "300", "-y", toString Bubble.Popover.sliderY.floor,
+    "-state", "256"]
+  out := out.push s!"thickness: {t1} {(← st.get).ui.thickness}"
+  -- 10. "Show all" off hides the highlight, on shows it again.
+  let t := Bubble.Popover.toggleRect
+  popClickAt ((t.x0 + t.x1) / 2) ((t.y0 + t.y1) / 2)
+  out := out.push s!"showall-off: {← px safeAbove} {← run ["set", Menu.showAllVar]}"
+  clickAt spos
+  out := out.push s!"hidden-not-selectable: {(← st.get).markSel.isNone}"
+  popClickAt ((t.x0 + t.x1) / 2) ((t.y0 + t.y1) / 2)
+  out := out.push s!"showall-on: {← px safeAbove} {← run ["set", Menu.showAllVar]}"
+  -- 11. Comment through the edit bubble: a note on the highlight's quads; reopened later.
+  clickAt spos
+  out := out.push s!"bubble-safe: {← kindName}"
+  let hlId := (← st.get).markSel
+  clickBtn .comment
+  out := out.push s!"comment-popup: {← run ["winfo", "exists", ".note"]} {← count}"
+  let anchored : IO Bool := do
+    let s ← st.get
+    let some h := hlId.bind s.marks.find? | return false
+    return (s.marks.noteOn 0 h.quads).isSome
+  out := out.push s!"comment-anchored: {← anchored}"
+  try
+    discard <| run [".note.t", "insert", "end", "On safe"]
+    discard <| run [".note.b.save", "invoke"]
+  catch _ => pure ()
+  clickAt spos
+  clickBtn .comment
+  let shown ← try run [".note.t", "get", "1.0", "end - 1 chars"] catch _ => pure "<none>"
+  out := out.push s!"comment-reopened: {← run ["winfo", "exists", ".note"]} {shown} {← count}"
+  discard <| run ["destroy", ".note"]
+  -- 12. Escape closes the pop-over and dismisses the bubble (the tool stays on). (Wait past
+  -- Tk's double-click time first: generated clicks in quick succession count as a double
+  -- click, which with the tool on would highlight the word.)
+  discard <| run ["after", "600"]
+  clickAt spos
+  out := out.push s!"before-escape: {← kindName} {← run ["winfo", "ismapped", ".hlbar"]} {← count}"
+  sendKey "Escape"
+  out := out.push s!"after-escape: {← kindName} {← tagCount "bub"} {← run ["winfo", "ismapped", ".hlbar"]} {(← st.get).ui.tool}"
+  -- 13. Tool off (Edit menu); a selection's bubble goes on Escape and on a page change.
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.hlTool.label]
+  out := out.push s!"tool-off: {(← st.get).ui.tool} {← run ["set", Menu.hlToolVar]}"
+  dragSel wa wb
+  out := out.push s!"float-again: {← kindName} {← count}"
+  sendKey "Escape"
+  out := out.push s!"float-escape: {← kindName} {(← st.get).sel.isSome}"
+  dragSel wa wb
+  sendKey "End"
+  out := out.push s!"page-change: {(← st.get).page + 1} {← kindName} {← tagCount "bub"}"
+  IO.FS.writeFile (file "bubble.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -2593,6 +3135,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
   if s.smokeMode == "nav" then smokeNav st dir; return
   if s.smokeMode == "menu" then smokeMenu st dir; return
   if s.smokeMode == "toolbar" then smokeToolbar st dir; return
+  if s.smokeMode == "bubble" then
+    try smokeBubble st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "bubble.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "marks" then
     try smokeMarks st dir
     catch e =>
@@ -2711,6 +3259,11 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["noteSave", id, text] => noteSave st id text
   | ["noteDelete", id] => if let some id := id.toNat? then deleteMark st id
   | ["markDelete"] => markDelete st
+  | ["hlTool"] => hlToolToggle st
+  | ["showAll"] => toggleShowAll st
+  | ["escape"] => escape st
+  | ["popClick", x, y] => popClick st x y
+  | ["popDrag", x, y] => popDrag st x y
   | ["popup", x, y, rx, ry] => popup st x y rx ry
   | ["wheel", axis, kind, d] => wheel st axis kind d
   | ["close"] => closeFile st
@@ -2722,6 +3275,7 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
       if w ≥ 2 && h ≥ 2 && (w, h) != (s.canvasW, s.canvasH) then
         st.modify ({ · with canvasW := w, canvasH := h })
         refresh st
+        if (← st.get).ui.popover then syncTool st
     | _, _ => pure ()
   | _ => setStatus s!"internal: unknown event {args}"
 
@@ -2761,7 +3315,9 @@ f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ct
 Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
-h or the Highlight button highlights the selection; right button: Highlight colours,
+h or the Highlight button highlights the selection (the button without one: Highlight
+tool and its pop-over); a selection shows a Highlight bubble, a selected highlight its
+colour/comment/delete bubble; Escape dismisses them; right button: Highlight colours,
 Add note...; click a mark to select it (a note opens its text), Delete removes it.
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
@@ -2770,7 +3326,8 @@ SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR,
 SAFEPDF_VIEWER_SMOKE_MODE=nav: the outline/link/history/go-to steps;
 SAFEPDF_VIEWER_SMOKE_MODE=menu: the menubar steps;
 SAFEPDF_VIEWER_SMOKE_MODE=toolbar: the toolbar and sidebar steps;
-SAFEPDF_VIEWER_SMOKE_MODE=marks: the highlight and note steps).
+SAFEPDF_VIEWER_SMOKE_MODE=marks: the highlight and note steps;
+SAFEPDF_VIEWER_SMOKE_MODE=bubble: the selection bubble and Highlight pop-over steps).
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to

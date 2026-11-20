@@ -24,7 +24,7 @@ each one into an annotation dictionary (`/Highlight` with `/QuadPoints`, `/Text`
   is the point, at a quad anchor it sits right of the first quad's upper-right corner; it is
   moved inside the page box when it would stick out (`Mark.iconBox`).
 * **Store** (`Store`): the marks of a document in creation order (later ones on top) and the
-  next id. Ids are never reused (`Store.add_id`, `Store.add_next`); `Store.restore` keeps
+  next id; `Store.noteOn` finds the note anchored to a highlight's quads (its comment, 9.8). Ids are never reused (`Store.add_id`, `Store.add_next`); `Store.restore` keeps
   the ids of marks read back from a file (9.5c). Operations: add, remove, recolour, edit the
   text, find, the marks of a page, hit-testing (`Store.hitAt`: the topmost mark whose icon
   or quads contain a page point; icons are above highlights).
@@ -251,6 +251,14 @@ def Store.restore (s : Store) (m : Mark) : Store :=
 def Store.find? (s : Store) (id : Nat) : Option Mark :=
   s.marks.find? (·.id == id)
 
+/-- The note of page `page` anchored to exactly the quads `qs` (the comment of a highlight
+over `qs`, task 9.8), the newest first. -/
+def Store.noteOn (s : Store) (page : Nat) (qs : List Box) : Option Nat :=
+  ((s.marks.filter (·.page == page)).toList.reverse.find? fun m =>
+    match m.kind with
+    | .note _ (.quads qs') => qs' == qs
+    | _ => false).map (·.id)
+
 /-- Removes the mark `id` (nothing when absent). -/
 def Store.remove (s : Store) (id : Nat) : Store :=
   { s with marks := s.marks.filter (·.id != id) }
@@ -278,11 +286,16 @@ def Box.contains (b : Box) (p : Pt) : Bool :=
 
 /-- The topmost mark of page `page` under the page point `pt` (page box `pb` for note icons):
 note icons first (they are drawn above the highlights), then quads, later marks before
-earlier ones. -/
+earlier ones; on the quads of a highlight with a comment (a note anchored to the same quads)
+the highlight. -/
 def Store.hitAt (s : Store) (pb : Box) (page : Nat) (pt : Pt) : Option Nat :=
   let ms := (s.onPage page).reverse
   let icon := ms.find? fun m => (m.iconBox pb).any (Box.contains · pt)
   let quad := ms.find? fun m => m.quads.any (Box.contains · pt)
+  -- On the quads of a commented highlight (a note anchored to exactly its quads, task 9.8)
+  -- the highlight wins; the comment is reached through its icon.
+  let quad := quad.map fun m =>
+    if m.isNote then (ms.find? fun h => !h.isNote && h.quads == m.quads).getD m else m
   (icon <|> quad).map (·.id)
 
 /-! ## Pixels -/
@@ -378,6 +391,9 @@ private def sample : Store :=
 #guard ((sample.find? 4).bind (Mark.iconBox pb)) == some ⟨111, 676, 131, 696⟩
 #guard (Mark.iconBox pb ⟨9, 0, .yellow, .note "" (.point ⟨605, 5⟩)⟩) == some ⟨592, 0, 612, 20⟩
 #guard ((sample.find? 1).bind (Mark.iconBox pb)).isNone
+-- The comment of a highlight: the note anchored to the same quads, on the same page.
+#guard sample.noteOn 0 [q2] == some 4 && sample.noteOn 1 [q2] == none &&
+  sample.noteOn 0 [q1, q2] == none
 -- Hit-testing: icons above highlights, later marks above earlier ones, the right page only.
 #guard sample.hitAt pb 0 ⟨310, 390⟩ == some 2
 #guard sample.hitAt pb 0 ⟨150, 700⟩ == some 1
@@ -385,6 +401,9 @@ private def sample : Store :=
 #guard sample.hitAt pb 0 ⟨115, 680⟩ == some 4
 #guard sample.hitAt pb 1 ⟨105, 690⟩ == some 3
 #guard sample.hitAt pb 0 ⟨500, 100⟩ == none
+-- A highlight's comment (same quads) does not hide the highlight; its icon selects it.
+#guard let s := (sample.addNote 1 .green "comment" (.quads [q2])).1
+  s.hitAt pb 1 ⟨105, 690⟩ == some 3 && s.hitAt pb 1 ⟨120, 690⟩ == some 5
 -- Multiply: white takes the colour, black stays black, alpha is kept.
 #guard mul8 255 0x98 == 0x98 && mul8 0 0xFF == 0 && mul8 128 128 == 64
 #guard (multiplyRect (ByteArray.mk #[255, 255, 255, 255, 0, 0, 0, 255]) 2 0 0 2 1
