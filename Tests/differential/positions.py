@@ -61,10 +61,17 @@ two sides order blocks differently, only one ordering's characters match (e.g. a
 unmatched counts, never as distance errors.  Anchoring: a matching block shorter
 than ANCHOR_MIN (3) characters is kept only when it lies on the alignment diagonal
 (j - i) of the nearest long block before or after it (page start = diagonal 0, page
-end = len(ref) - len(ours)); otherwise it is a coincidental match between unrelated
+end = len(ref) - len(ours)), or between those two diagonals and within ANCHOR_GAP (4)
+characters of one of those blocks (a piece between two one-sided deletions); otherwise it is a coincidental match between unrelated
 stretches of text -- e.g. a lone '.' picked out of a table whose digits one side
 lost -- and its characters count as unmatched (stat `unanchored`) instead of as a
-far-apart "position error" (anchored_blocks; added in task 6.8c).  Cost: ~4 s for
+far-apart "position error" (anchored_blocks; added in task 6.8c).  Runs of identical
+characters: difflib pairs a run leftmost, so when one side has an extra copy next to
+the run (RAR0801 p5 TOC leaders: MuPDF turns a space into an ActualText '.', 105 dots
+to our 104) every pair is one advance off; a run whose pairs are out of tolerance is
+re-paired by shifting it up to SLIDE_MAX (2) slots onto identical, unmatched (or its
+own) reference characters when that puts more of its pairs within tolerance
+(slide_runs, stat `slid`; one-to-one and order kept; task 6.8c).  Cost: ~4 s for
 a 20 000-char page.  A matched pair is MEASURED when neither side is a tail and the
 character is not U+FFFD (two unmapped glyphs "agree" by accident); its distance is the Euclidean distance of the two origins in pt (user space).
 
@@ -92,7 +99,7 @@ characters covered by the text comparators' similarity instead.  We also count
 
 Stats per file (summed by run.py): pages, page_count_mismatch, ours_failed,
 chars_ours, chars_ref, matched, unmatched_ours, unmatched_ref, compared (= the
-measured pairs), within, size_mismatch, unanchored, and known_pages / known_compared /
+measured pairs), within, size_mismatch, unanchored, slid, and known_pages / known_compared /
 known_within for pages run.py names as known reference defects
 (known-reference-defects.json; those pages are excluded from every other count and
 reported separately, see docs/corpus.md).  Corpus-wide distance statistics (median,
@@ -126,6 +133,8 @@ TOL_REL = 0.1
 SIZE_REL = 0.1
 SYNTHETIC = 4          # FZ_STEXT_SYNTHETIC
 ANCHOR_MIN = 3         # matching blocks shorter than this must sit on a long block's diagonal
+ANCHOR_GAP = 4         # ... or lie between two long blocks' diagonals, this close to one
+SLIDE_MAX = 2          # runs of identical characters may be re-paired up to this many slots
 WORST_KEEP = 50
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -279,51 +288,119 @@ def anchored_blocks(blocks, n_ours, n_ref):
     """Split SequenceMatcher matching blocks (i, j, k) into (anchored, unanchored).
 
     A block of at least ANCHOR_MIN characters is always anchored.  A shorter block is
-    anchored only when it lies on the same alignment diagonal (j - i) as the nearest
-    long block before it or after it; the page start (diagonal 0) and the page end
-    (diagonal n_ref - n_ours) count as long blocks.  So a character kept between two
-    substituted ones ("a?b" vs "aXb") stays matched, while a stray '.', '0' or 'R'
-    that the alignment picked out of two unrelated stretches of text (different
+    anchored when it lies on the alignment diagonal (j - i) of the nearest long block
+    before it or after it, or when its diagonal lies between those two diagonals and it
+    is within ANCHOR_GAP characters (on both sides) of one of them; the page start
+    (diagonal 0) and the page end (diagonal n_ref - n_ours) count as long blocks.  So a
+    character kept between substituted ones ("a?b" vs "aXb") and a short piece between
+    two one-sided deletions ("c[al]c" vs "[al]") stay matched, while a stray '.', '0' or
+    'R' that the alignment picked out of two unrelated stretches of text (different
     extraction, wrong mapping, a reference that drops characters) is not paired."""
     blocks = [b for b in blocks if b[2] > 0]
-    longs = [(i, j - i) for i, j, k in blocks if k >= ANCHOR_MIN]
+    longs = [(i, j, k) for i, j, k in blocks if k >= ANCHOR_MIN]
     starts = [x[0] for x in longs]
     good, stray = [], []
     for i, j, k in blocks:
         if k < ANCHOR_MIN:
             q = bisect.bisect_left(starts, i)
-            before = longs[q - 1][1] if q > 0 else 0
-            after = longs[q][1] if q < len(longs) else n_ref - n_ours
-            if j - i not in (before, after):
+            pb = longs[q - 1] if q > 0 else (0, 0, 0)
+            na = longs[q] if q < len(longs) else (n_ours, n_ref, 0)
+            db, da, d = pb[1] - pb[0], na[1] - na[0], j - i
+            ok = d in (db, da)
+            if not ok and min(db, da) <= d <= max(db, da):
+                ok = ((i - (pb[0] + pb[2]) <= ANCHOR_GAP and j - (pb[1] + pb[2]) <= ANCHOR_GAP)
+                      or (na[0] - (i + k) <= ANCHOR_GAP and na[1] - (j + k) <= ANCHOR_GAP))
+            if not ok:
                 stray.append((i, j, k))
                 continue
         good.append((i, j, k))
     return good, stray
 
 
+def _measure(o, r, ctm):
+    """(dist, size, ok) of one candidate pair; None when it is not measured."""
+    if o[4] or r[4] or o[0] == "\ufffd":
+        return None
+    rx, ry = invert(ctm, r[1], r[2])
+    d = math.hypot(o[1] - rx, o[2] - ry)
+    size = min(o[3], r[3]) if o[3] > 0 and r[3] > 0 else max(o[3], r[3])
+    return d, size, d <= tolerance(size)
+
+
+def slide_runs(ours, ref, links, ctm):
+    """Re-pair runs of identical characters by position.  `links` is the list of matched
+    index pairs (i, j) in order.  difflib pairs a run of equal characters leftmost: when
+    one side has an extra copy next to the run (e.g. a TOC leader where MuPDF turns the
+    leading space into an ActualText '.' -- RAR0801 p5 -- so it has 105 dots to our 104),
+    every pair of the run is off by one glyph advance.  For each maximal run of matched
+    pairs (i, j), (i+1, j+1), ... with one character, shift its reference indices by
+    s in +-1..SLIDE_MAX when every shifted index holds the same character and is either
+    the run's own or unmatched, and keep the shift with the most pairs within
+    tolerance if it beats the original.  One-to-one and order are preserved."""
+    used = {j for _, j in links}
+    out = list(links)
+    n = len(out)
+    a = 0
+    while a < n:
+        ch = ours[out[a][0]][0]
+        b = a + 1
+        while (b < n and out[b][0] == out[b - 1][0] + 1 and out[b][1] == out[b - 1][1] + 1
+               and ours[out[b][0]][0] == ch):
+            b += 1
+        run = out[a:b]
+
+        def score(shift):
+            ok = 0
+            for i, j in run:
+                m = _measure(ours[i], ref[j + shift], ctm)
+                ok += 1 if m is not None and m[2] else 0
+            return ok
+
+        base = score(0)
+        if base < len(run):
+            own = {j for _, j in run}
+            best, best_s = base, 0
+            for sh in [x for k in range(1, SLIDE_MAX + 1) for x in (k, -k)]:
+                js = [j + sh for _, j in run]
+                if js[0] < 0 or js[-1] >= len(ref):
+                    continue
+                if any(ref[j][0] != ch or (j in used and j not in own) for j in js):
+                    continue
+                sc = score(sh)
+                if sc > best:
+                    best, best_s = sc, sh
+            if best_s:
+                for t in range(a, b):
+                    out[t] = (out[t][0], out[t][1] + best_s)
+                used = (used - own) | {j for _, j in out[a:b]}
+        a = b
+    return out
+
+
 def compare_page(ours, ref, ctm):
     """-> dict with counts and the measured pairs [(dist, ch, (x,y), (rx,ry), size, ok)]."""
     sm = difflib.SequenceMatcher(None, [c[0] for c in ours], [c[0] for c in ref],
                                  autojunk=False)
-    matched = 0
     pairs = []
     size_mismatch = 0
     blocks, stray = anchored_blocks(sm.get_matching_blocks(), len(ours), len(ref))
-    for i, j, k in blocks:
-        matched += k
-        for t in range(k):
-            o, r = ours[i + t], ref[j + t]
-            if o[4] or r[4] or o[0] == "\ufffd":
-                continue
-            rx, ry = invert(ctm, r[1], r[2])
-            d = math.hypot(o[1] - rx, o[2] - ry)
-            size = min(o[3], r[3]) if o[3] > 0 and r[3] > 0 else max(o[3], r[3])
-            if size > 0 and abs(o[3] - r[3]) > SIZE_REL * size:
-                size_mismatch += 1
-            pairs.append((d, o[0], (o[1], o[2]), (rx, ry), size, d <= tolerance(size)))
+    links = [(i + t, j + t) for i, j, k in blocks for t in range(k)]
+    slid = slide_runs(ours, ref, links, ctm)
+    for i, j in slid:
+        o, r = ours[i], ref[j]
+        m = _measure(o, r, ctm)
+        if m is None:
+            continue
+        d, size, ok = m
+        if size > 0 and abs(o[3] - r[3]) > SIZE_REL * size:
+            size_mismatch += 1
+        rx, ry = invert(ctm, r[1], r[2])
+        pairs.append((d, o[0], (o[1], o[2]), (rx, ry), size, ok))
+    matched = len(links)
     return {"chars_ours": len(ours), "chars_ref": len(ref), "matched": matched,
             "unmatched_ours": len(ours) - matched, "unmatched_ref": len(ref) - matched,
             "unanchored": sum(b[2] for b in stray),
+            "slid": sum(1 for x, y in zip(links, slid) if x != y),
             "pairs": pairs, "size_mismatch": size_mismatch}
 
 
@@ -346,7 +423,7 @@ def _totals(rows):
     within = sum(1 for x in pairs if x[5])
     out = {k: sum(r[k] for r in rows) for k in (
         "chars_ours", "chars_ref", "matched", "unmatched_ours", "unmatched_ref", "unanchored",
-        "size_mismatch")}
+        "slid", "size_mismatch")}
     out.update({"compared": len(pairs), "within": within,
                 "pct_within": 100.0 if not pairs else 100.0 * within / len(pairs)})
     out.update(dist_summary([x[0] for x in pairs]))
@@ -419,6 +496,8 @@ def format_report(rep):
         s += "; size-mismatch %d" % rep["size_mismatch"]
     if rep.get("unanchored"):
         s += "; unanchored %d" % rep["unanchored"]
+    if rep.get("slid"):
+        s += "; slid %d" % rep["slid"]
     if rep.get("known"):
         k = rep["known"]
         s += ("; KNOWN reference defect on %s (excluded above: measured %d, within %.2f%%, "
@@ -442,7 +521,7 @@ def stats_of(rep):
         "matched": rep["matched"], "unmatched_ours": rep["unmatched_ours"],
         "unmatched_ref": rep["unmatched_ref"], "compared": rep["compared"],
         "within": rep["within"], "size_mismatch": rep["size_mismatch"],
-        "unanchored": rep["unanchored"],
+        "unanchored": rep["unanchored"], "slid": rep["slid"],
         "known_pages": len(k["pages"]) if k else 0,
         "known_compared": k["compared"] if k else 0,
         "known_within": k["within"] if k else 0,
@@ -501,6 +580,7 @@ def summary_lines(stats, min_within=None, tag="positions"):
     rep["worst"] = [{"dist": t[0], "file": t[1], "page": t[2], "char": t[3],
                      "ours": list(t[4]), "ref": list(t[5]), "size": t[6]} for t in worst]
     rep["unanchored"] = stats.get("unanchored", 0)
+    rep["slid"] = stats.get("slid", 0)
     rep["known"] = kreport
     lines += klines
     fail = min_within is not None and pct < min_within
@@ -703,7 +783,8 @@ def selftest():
             ("hello.world", "hello?world", 10),           # 1-char swap: all still paired
             ("Table 2.", "Table .", 7),                   # deletion: '.' sits on the end diagonal
             ("aaaa.bbbbb", "ccccc.dddd", 0),              # lone '.', unrelated text: dropped
-            ("x9.5yzzzz", "zzzz.q", 4)]:                  # stray '.' after the 'zzzz' block
+            ("x9.5yzzzz", "zzzz.q", 4),                   # stray '.' after the 'zzzz' block
+            ("theoreticalcalculation", "theoreticalalulation", 20)]:  # 'al' between deletions
         sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
         good, stray = anchored_blocks(sm.get_matching_blocks(), len(a), len(b))
         got = sum(k for _, _, k in good)
@@ -715,6 +796,23 @@ def selftest():
     pg = compare_page(o, r, [1, 0, 0, -1, 0, 792])
     want(pg["pairs"] == [] and pg["unanchored"] == 1 and pg["matched"] == 0,
          "stray '.' unanchored: %r" % {k: v for k, v in pg.items() if k != "pairs"})
+    # Runs of identical characters: ref has one extra leader dot in front (RAR0801 p5);
+    # leftmost pairing puts every dot 3 pt off, the slide re-pairs them all within.
+    o = [(".", 201.0 + 3 * n, 700.0, 10.0, False) for n in range(10)]
+    r = [(".", 198.996, 92.0, 10.0, False)] + [(".", 201.0 + 3 * n, 92.0, 10.0, False)
+                                               for n in range(10)]
+    pg = compare_page(o, r, [1, 0, 0, -1, 0, 792])
+    want(pg["slid"] == 10 and len(pg["pairs"]) == 10 and all(x[5] for x in pg["pairs"])
+         and pg["matched"] == 10 and pg["unmatched_ref"] == 1,
+         "leader slide: %r" % {k: v for k, v in pg.items() if k != "pairs"})
+    # No slide when no shifted pairing is better, nor onto a reference char matched elsewhere.
+    r2 = [(".", 201.0 + 3 * n + 5, 92.0, 10.0, False) for n in range(11)]
+    pg = compare_page(o, r2, [1, 0, 0, -1, 0, 792])
+    want(pg["slid"] == 0 and not any(x[5] for x in pg["pairs"]), "no useless slide")
+    links = slide_runs([("a", 0, 0, 10, False), (".", 3, 0, 10, False)],
+                       [(".", 0, 0, 10, False), ("a", 0, 0, 10, False), (".", 90, 0, 10, False)],
+                       [(0, 1), (1, 2)], [1, 0, 0, 1, 0, 0])
+    want(links == [(0, 1), (1, 2)], "slide never takes a char of another run: %r" % links)
     # Known reference defects: the listed pages leave every total and the status test.
     want(page_ranges([72, 51, 60, 61, 62]) == "p51,p60-62,p72", "page_ranges")
     repk = compare(_fixture("positions_rot90.ours.jsonl"),
