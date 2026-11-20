@@ -54,6 +54,12 @@ never an error (M5: the interpreter never fails).
   Because a form tree without cycles can still fan out ("billion laughs"), at most
   `Env.maxForms` (default `Limits.maxFormsPerPage` = 100,000) forms are expanded per page;
   further form `Do`s are skipped with a warning.
+* **Form cache** (task 7.9b): forms and soft-mask groups are read through `Env.formCode`
+  (decode + tokenize, `Source.code`). `runPage` installs a per-page cache (`FormCache.env`)
+  keyed by object number, generation and stream, bounded by `Limits.maxFormCacheEntries` and
+  `Limits.maxFormCacheBytes`, so a form drawn many times is decoded once per page run (and
+  charged to the document budget once; see the section "Per-page form cache").
+  `runPageUncached` is the runner without it.
 * **`Do` on an image** (`/Subtype /Image`): `DisplayItem.image (.xobject name num gen)` with the
   CTM (the unit square), the fill snapshot (stencil masks, §8.9.6.2) and the clip. The image
   data is **not** decoded (rendering is phase 7); its dictionary is summarised by consumers.
@@ -131,6 +137,15 @@ def Source.empty : Source Unit :=
   ⟨fun s _ _ => (.error (.malformed 0 "no document"), s),
    fun s _ _ => (.error (.malformed 0 "no document"), s)⟩
 
+/-- A form's content (task 7.9b): stream object `num` decoded through the source and
+tokenized with `Ops.tokenize lim`. The runner's default way to read a form or soft-mask group
+(`Env.formCode`). -/
+def Source.code {σ : Type} (src : Source σ) (lim : Limits) (s : σ) (num _gen : Nat) (st : Stream) :
+    (Except Error TokResult) × σ :=
+  match src.decode s num st with
+  | (.ok bytes, s) => (.ok (Ops.tokenize lim bytes), s)
+  | (.error e, s) => (.error e, s)
+
 /-- The runner's environment: interpreter configuration, document source, and an observer
 called once per executed operator with its warning and unknown-operator counts (the `ops`
 view's histogram; `fun w _ _ _ => w` when unused). -/
@@ -147,6 +162,11 @@ structure Env (σ ω : Type) where
   `maxOpsPerPage` operators, i.e. millions of form decodes (≈ 30 s). With it the run stops
   expanding after `maxForms` forms (each further form `Do` is skipped with a warning). -/
   maxForms : Nat := cfg.limits.maxFormsPerPage
+  /-- How the content of a form or soft-mask group `num gen` (stream already fetched) is read:
+  decoded and tokenized, threading the source state (task 7.9b). By default `Source.code`
+  (decode through `src`, then `Ops.tokenize`); `runPage` installs the per-page cache
+  (`FormCache.env`) over that default. -/
+  formCode : σ → Nat → Nat → Stream → (Except Error TokResult) × σ := src.code cfg.limits
 
 /-- The resource context of the content being run. -/
 structure Frame where
@@ -971,10 +991,9 @@ inductive DoOut (σ : Type) where
   /-- Expand a form. -/
   | form (job : FormJob) (s : σ)
 
-/-- Prepare form `n` (dictionary `d`, decoded content `bytes`). -/
-def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n g : Nat) (d : Dict)
-    (bytes : ByteArray) (s : σ) : DoOut σ :=
-  let t := Ops.tokenize env.cfg.limits bytes
+/-- Prepare form `n` (dictionary `d`, tokenized content `t`). -/
+def formJobT {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n g : Nat) (d : Dict)
+    (t : TokResult) (s : σ) : DoOut σ :=
   let r := formResources env.src s d fr.res fr.owner n
   let gs := m.core.gs
   let ctm := Matrix.mul (formMatrix d) gs.ctm
@@ -989,12 +1008,24 @@ def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n g : N
     m.patFill, m.patStroke⟩
     grp.2
 
+/-- Prepare form `n` (dictionary `d`, decoded content `bytes`): `formJobT` of the tokenized
+bytes. -/
+def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n g : Nat) (d : Dict)
+    (bytes : ByteArray) (s : σ) : DoOut σ :=
+  formJobT env fr m n g d (Ops.tokenize env.cfg.limits bytes) s
+
+/-- `formJobT` prepares form `n`. -/
+theorem formJobT_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n g : Nat}
+    {d : Dict} {t : TokResult} {s : σ} {job : FormJob} {s' : σ}
+    (h : formJobT env fr m n g d t s = .form job s') : job.num = n := by
+  unfold formJobT at h
+  cases h; rfl
+
 /-- `formJob` prepares form `n`. -/
 theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n g : Nat}
     {d : Dict} {bytes : ByteArray} {s : σ} {job : FormJob} {s' : σ}
-    (h : formJob env fr m n g d bytes s = .form job s') : job.num = n := by
-  unfold formJob at h
-  cases h; rfl
+    (h : formJob env fr m n g d bytes s = .form job s') : job.num = n :=
+  formJobT_num h
 
 /-- `Do /Name` (`nest`: fuel is left for a form). -/
 def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Machine) (s : σ)
@@ -1011,9 +1042,9 @@ def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mach
     | (.form n g st, s) =>
       if fr.visited.contains n then .done none 1 s
       else if nest then
-        match env.src.decode s n st with
+        match env.formCode s n g st with
         | (.error _, s) => .done none 1 s
-        | (.ok bytes, s) => formJob env fr m n g st.dict bytes s
+        | (.ok t, s) => formJobT env fr m n g st.dict t s
       else .done none 1 s
 
 /-- The machine a form runs in: the given graphics state, everything else fresh. -/
@@ -1084,9 +1115,9 @@ def maskJob {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mac
           if fr.visited.contains n || !nest then .bad s else
           match env.src.fetch s n g with
           | (.ok (.stream st), s) =>
-            match env.src.decode s n st with
-            | (.ok bytes, s) =>
-              match formJob env fr (withGs m (resetTx m.core.gs)) n g st.dict bytes s with
+            match env.formCode s n g st with
+            | (.ok t, s) =>
+              match formJobT env fr (withGs m (resetTx m.core.gs)) n g st.dict t s with
               | .form job s =>
                 .form { kind, backdrop := bc.getD (.gray Comp.zero), bbox := job.clip } job s
               | .done _ _ s => .bad s
@@ -1240,7 +1271,7 @@ theorem doStep_form_fresh {σ ω : Type} {env : Env σ ω} {nest : Bool} {fr : F
         · simp only [hv, Bool.false_eq_true, ↓reduceIte] at h
           split at h
           · cases h
-          · rw [formJob_num h]
+          · rw [formJobT_num h]
             exact ⟨by simpa using hv, rfl⟩
 
 /-- `exec` through `viaExec` keeps its per-operator bound. -/
@@ -1481,6 +1512,188 @@ theorem runOps_good {σ ω : Type} (env : Env σ ω) :
     cases hrun
     exact runOps_good env f k' fr' st' ops' h'
 
+/-! ## Per-page form cache (task 7.9b)
+
+A form drawn many times on a page (a plot marker: 21,879 `Do`s of one form on arXiv 2307.09288
+p25) was decoded and tokenized at every `Do`. `runPage` runs the page with `FormCache.env`:
+the source state is paired with a `FormCache`, and `Env.formCode` looks a form up by object
+number, generation **and stream** (so a hit is always the content of the very same stream)
+before decoding it. The cache lives for one page run, holds at most
+`Limits.maxFormCacheEntries` forms of at most `Limits.maxFormCacheBytes` decoded bytes in all
+(a form that does not fit is simply not cached), and only successful decodes are cached.
+
+**Budget charging.** A hit does not call the source, so a cached form charges the document's
+decoded-bytes budget (`Filter.Budget`, task 3.10) **once per page run** instead of once per
+`Do`. The budget theorems (`Filter.decodeAllB_total`, `Doc.decodeContentsB_total`, …) bound the
+bytes *actually decoded* by the budget; they are unchanged and still true, since fewer decodes
+happen. Every cached entry was charged when it was decoded, so the cache holds no bytes the
+budget has not paid for. What changes is only that a page whose repeated form decodes used to
+exhaust the budget now gets those forms drawn (`FormCache.code_fst_eq`: whenever the decode
+result does not depend on the source state, the cached content equals the uncached one).
+-/
+
+/-- A cached form: its reference, its stream, its tokenized content and its decoded size. -/
+structure FormEntry where
+  /-- Object number. -/
+  num : Nat
+  /-- Generation number. -/
+  gen : Nat
+  /-- The form's stream (as fetched). -/
+  st : Stream
+  /-- Its content, tokenized. -/
+  code : TokResult
+  /-- Its decoded size in bytes. -/
+  size : Nat
+
+/-- An entry is genuine: for some source state its stream decoded successfully through `src`
+to `size` bytes, whose tokenization is `code`. -/
+def FormEntry.Valid {σ : Type} (src : Source σ) (lim : Limits) (e : FormEntry) : Prop :=
+  ∃ s0 bytes s1, src.decode s0 e.num e.st = (.ok bytes, s1) ∧ e.code = Ops.tokenize lim bytes ∧
+    e.size = bytes.size
+
+/-- **The per-page form cache**: genuine entries only (`valid`), at most
+`maxFormCacheEntries` of them with at most `maxFormCacheBytes` decoded bytes in all — by
+construction, every value of this type satisfies these invariants. -/
+structure FormCache {σ : Type} (src : Source σ) (lim : Limits) where
+  /-- The entries, most recently inserted first. -/
+  entries : List FormEntry
+  /-- Their total decoded size. -/
+  bytes : Nat
+  /-- Every entry is genuine. -/
+  valid : ∀ e ∈ entries, e.Valid src lim
+  /-- `bytes` is the total decoded size. -/
+  bytes_eq : bytes = (entries.map FormEntry.size).sum
+  /-- Count bound. -/
+  count_le : entries.length ≤ lim.maxFormCacheEntries
+  /-- Size bound. -/
+  bytes_le : bytes ≤ lim.maxFormCacheBytes
+
+namespace FormCache
+
+variable {σ : Type} {src : Source σ} {lim : Limits}
+
+/-- The empty cache. -/
+def empty : FormCache src lim :=
+  ⟨[], 0, by simp, by simp, Nat.zero_le _, Nat.zero_le _⟩
+
+/-- The entry for form `num gen` with stream `st`, if cached. -/
+def find? (c : FormCache src lim) (num gen : Nat) (st : Stream) : Option FormEntry :=
+  c.entries.find? fun e => e.num == num && e.gen == gen && decide (e.st = st)
+
+/-- Insert a genuine entry when it fits both bounds; otherwise the cache is unchanged. -/
+def insert (c : FormCache src lim) (e : FormEntry) (h : e.Valid src lim) : FormCache src lim :=
+  if hc : c.entries.length < lim.maxFormCacheEntries ∧ c.bytes + e.size ≤ lim.maxFormCacheBytes
+  then
+    ⟨e :: c.entries, c.bytes + e.size,
+      fun x hx => by
+        rcases List.mem_cons.mp hx with rfl | hx
+        · exact h
+        · exact c.valid x hx,
+      by have := c.bytes_eq; simp only [List.map_cons, List.sum_cons]; omega,
+      by simp only [List.length_cons]; omega,
+      hc.2⟩
+  else c
+
+/-- **Cached form content** (`Env.formCode` of `FormCache.env`): a hit returns the cached
+tokens without touching the source state; a miss decodes through `src` and tokenizes
+(`Source.code`), caching a success. -/
+def code (src : Source σ) (lim : Limits) (p : σ × FormCache src lim) (num gen : Nat)
+    (st : Stream) : (Except Error TokResult) × (σ × FormCache src lim) :=
+  match p.2.find? num gen st with
+  | some e => (.ok e.code, p)
+  | none =>
+    match h : src.decode p.1 num st with
+    | (.ok bytes, s1) =>
+      (.ok (Ops.tokenize lim bytes),
+        (s1, p.2.insert ⟨num, gen, st, Ops.tokenize lim bytes, bytes.size⟩
+          ⟨p.1, bytes, s1, h, rfl, rfl⟩))
+    | (.error e, s1) => (.error e, (s1, p.2))
+
+/-- The source over `σ × FormCache`: fetches and decodes act on the first component. -/
+def source (src : Source σ) (lim : Limits) : Source (σ × FormCache src lim) :=
+  ⟨fun p n g => let r := src.fetch p.1 n g; (r.1, (r.2, p.2)),
+   fun p n st => let r := src.decode p.1 n st; (r.1, (r.2, p.2))⟩
+
+/-- A hit is the entry of the same form and stream. -/
+theorem find?_spec {c : FormCache src lim} {num gen : Nat} {st : Stream} {e : FormEntry}
+    (h : c.find? num gen st = some e) :
+    e.num = num ∧ e.gen = gen ∧ e.st = st ∧ e.Valid src lim := by
+  have hp := List.find?_some h
+  have hm := List.mem_of_find?_eq_some h
+  simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hp
+  exact ⟨hp.1.1, hp.1.2, hp.2, c.valid e hm⟩
+
+/-- **A hit leaves the source state alone** (nothing decoded, nothing charged). -/
+theorem code_hit {p : σ × FormCache src lim} {num gen : Nat} {st : Stream} {e : FormEntry}
+    (h : p.2.find? num gen st = some e) : code src lim p num gen st = (.ok e.code, p) := by
+  unfold code
+  rw [h]
+
+/-- **A miss is the uncached reading** (`Source.code`) on the source state. -/
+theorem code_miss {p : σ × FormCache src lim} {num gen : Nat} {st : Stream}
+    (h : p.2.find? num gen st = none) :
+    (code src lim p num gen st).1 = (src.code lim p.1 num gen st).1 ∧
+      (code src lim p num gen st).2.1 = (src.code lim p.1 num gen st).2 := by
+  unfold code Source.code
+  rw [h]
+  simp only
+  split
+  · rename_i bytes s1 hd
+    simp [hd]
+  · rename_i er s1 hd
+    simp [hd]
+
+/-- **Soundness of the cache**: any content `code` returns is the tokenization of a
+successful decode, through `src`, of the very stream asked for. -/
+theorem code_ok {p : σ × FormCache src lim} {num gen : Nat} {st : Stream} {t : TokResult}
+    {p' : σ × FormCache src lim} (h : code src lim p num gen st = (.ok t, p')) :
+    ∃ s0 bytes s1, src.decode s0 num st = (.ok bytes, s1) ∧ t = Ops.tokenize lim bytes := by
+  rcases hf : p.2.find? num gen st with _ | e
+  · have hm := code_miss (gen := gen) hf
+    rw [h] at hm
+    unfold Source.code at hm
+    revert hm
+    rcases hd : src.decode p.1 num st with ⟨_ | bytes, s1⟩
+    · intro hm; cases hm.1
+    · intro hm
+      simp only [Except.ok.injEq] at hm
+      exact ⟨p.1, bytes, s1, hd, hm.1⟩
+  · rw [code_hit hf] at h
+    simp only [Prod.mk.injEq, Except.ok.injEq] at h
+    obtain ⟨hn, -, hs, s0, bytes, s1, hd, hc, -⟩ := find?_spec hf
+    refine ⟨s0, bytes, s1, ?_, ?_⟩
+    · rw [← hn, ← hs]; exact hd
+    · rw [← h.1, hc]
+
+/-- **Same content as without the cache** whenever decoding form `num`'s stream does not
+depend on the source state (budget-free sources; a document budget that does not run out):
+the cached reading equals `Source.code`. -/
+theorem code_fst_eq {p : σ × FormCache src lim} {num gen : Nat} {st : Stream}
+    (hdet : ∀ s0 s1, (src.decode s0 num st).1 = (src.decode s1 num st).1) :
+    (code src lim p num gen st).1 = (src.code lim p.1 num gen st).1 := by
+  rcases hf : p.2.find? num gen st with _ | e
+  · exact (code_miss hf).1
+  · rw [code_hit hf]
+    obtain ⟨hn, -, hs, s0, bytes, s1, hd, hc, -⟩ := find?_spec hf
+    have h1 := hdet p.1 s0
+    rw [← hn, ← hs, hd] at h1
+    unfold Source.code
+    rw [← hn, ← hs]
+    revert h1
+    rcases src.decode p.1 e.num e.st with ⟨r, s2⟩
+    intro h1
+    simp only at h1
+    subst h1
+    simp only [hc]
+
+end FormCache
+
+/-- The environment with the per-page form cache: the same configuration, observer and form
+budget; the source state paired with a `FormCache`; `formCode` reads through the cache. -/
+def FormCache.env {σ ω : Type} (env : Env σ ω) : Env (σ × FormCache env.src env.cfg.limits) ω :=
+  { cfg := env.cfg, src := FormCache.source env.src env.cfg.limits, observe := env.observe,
+    maxForms := env.maxForms, formCode := FormCache.code env.src env.cfg.limits }
+
 end Run
 
 open Run
@@ -1489,11 +1702,23 @@ open Run
 def St.init {σ ω : Type} (s : σ) (obs : ω) : St σ ω :=
   ⟨{}, #[], 0, 0, 0, 0, false, s, obs⟩
 
-/-- **Entry point.** Run a page's tokenized content with its resources: nesting fuel
-`Limits.maxXObjectDepth`, from the initial machine. Total; never fails. -/
+/-- Run a page's tokenized content with its resources, **without** the per-page form cache
+(each form `Do` reads the form through `env.formCode`): nesting fuel `Limits.maxXObjectDepth`,
+from the initial machine. Total; never fails. The reference for `runPage`. -/
+def runPageUncached {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ)
+    (obs : ω) : St σ ω :=
+  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
+
+/-- Forget the second component of the source state. -/
+def St.fstState {σ κ ω : Type} (st : St (σ × κ) ω) : St σ ω :=
+  ⟨st.m, st.items, st.warnings, st.unsupported, st.ops, st.forms, st.truncated, st.s.1, st.obs⟩
+
+/-- **Entry point.** Run a page's tokenized content with its resources: `runPageUncached`
+under `FormCache.env` (task 7.9b: each form is decoded and tokenized once per page run, within
+the cache bounds), the cache dropped at the end. Total; never fails. -/
 def runPage {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ) (obs : ω) :
     St σ ω :=
-  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
+  (runPageUncached (FormCache.env env) res ops (s, FormCache.empty) obs).fstState
 
 /-- Tokenize and run decoded page content; tokenizer warnings and truncation are added. -/
 def runBytes {σ ω : Type} (env : Env σ ω) (res : Dict) (bytes : ByteArray) (s : σ)
@@ -1507,22 +1732,34 @@ theorem St.init_good {σ ω : Type} (lim : Limits) (s : σ) (obs : ω) :
     Good lim 0 (St.init s obs) :=
   ⟨by simp [St.init, pendBit], Nat.zero_le _⟩
 
+/-- Operator bound of the uncached run. -/
+theorem runPageUncached_ops_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op)
+    (s : σ) (obs : ω) : (runPageUncached env res ops s obs).ops ≤ env.cfg.limits.maxOpsPerPage :=
+  (runOps_good env _ 0 _ _ ops (St.init_good _ s obs)).2
+
+/-- Item bound of the uncached run. -/
+theorem runPageUncached_items_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op)
+    (s : σ) (obs : ω) :
+    (runPageUncached env res ops s obs).items.size ≤
+      Paint.maxItems * (runPageUncached env res ops s obs).ops := by
+  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0, 0, Matrix.identity⟩
+    (St.init s obs) ops (St.init_good _ s obs)).1
+  unfold runPageUncached
+  omega
+
 /-- **Operator bound**: at most `Limits.maxOpsPerPage` operators are executed, page and forms
 together, however the forms nest. -/
 theorem runPage_ops_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ)
     (obs : ω) : (runPage env res ops s obs).ops ≤ env.cfg.limits.maxOpsPerPage :=
-  (runOps_good env _ 0 _ _ ops (St.init_good _ s obs)).2
+  runPageUncached_ops_le (FormCache.env env) res ops _ obs
 
 /-- **Item bound** (generalises `interp_items_le` to forms): at most `Paint.maxItems` items per
 executed operator. -/
 theorem runPage_items_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ)
     (obs : ω) :
     (runPage env res ops s obs).items.size ≤
-      Paint.maxItems * (runPage env res ops s obs).ops := by
-  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
-    (St.init_good _ s obs)).1
-  unfold runPage
-  omega
+      Paint.maxItems * (runPage env res ops s obs).ops :=
+  runPageUncached_items_le (FormCache.env env) res ops _ obs
 
 /-- **Display-list bound** for the bytes entry point: at most
 `Paint.maxItems · Limits.maxOpsPerPage` items, whatever the page's forms do. -/
