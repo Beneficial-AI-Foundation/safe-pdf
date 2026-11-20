@@ -38,8 +38,10 @@ zero-based page to open at (`0` when none was asked for).
 The token is held in a type without `ToString`/`Repr` and only ever written into the
 `Authorization: Bearer` header of requests to the loopback origin. Error messages name the
 method, the path (holding only the key) and the HTTP status, never the token or a body.
-**Not yet met**: the contract's SHOULD "close fd 3 after reading" (the pipe is drained; closing
-the inherited descriptor needs a C call, task 10.1b).
+File descriptor 3 is **closed** right after a valid token was read from it (contract SHOULD;
+task 10.1b): `close(3)` in the C shim (`safepdf_close_fd3`, `Shim.closeFd3`), installed by
+`Main.lean` as `Launch.closeTokenFd` and called by `Launch.openFromBibLean`, so the window,
+`--probe` and `--self-test` all close it. After a failed read fd 3 is left alone.
 
 ## Modes
 
@@ -58,12 +60,27 @@ from `GET /api/items/{key}` and its parent; posts every page's text to `/fulltex
 first DOI/arXiv id of pages 1–2 to `/detected` (only for an attachment without a parent item)
 on a background thread that never blocks viewing.
 
-Interim until task 10.1b: the window is opened from a private temporary copy (0600 file in a
-0700 directory, removed on exit), the requested page is not applied yet, and annotations
-reach bib-lean only through **Save**: on exit, a file saved by the window is `PUT` and its
-marks (merged with the stored set) are posted. 10.1b wires the live sync (`Annots.Sync`:
-load the stored set at open, post the whole set after every change, `PUT` on Save, flush on
-close) and opens from memory.
+The window opens the fetched bytes **from memory** (`Viewer.openBytes`; no temporary file,
+nothing written to disk), shows the library's title (`State.titleOverride`: the parent item's
+title, else the attachment's) instead of a file name, at the requested page (`BIBLEAN_PAGE`,
+else `--page`). Annotations sync live (task 10.2's `Annots.Sync`, attached to the window as a
+`Viewer.Library`, task 10.1b):
+
+* **at open** the stored set from `GET /api/items/{key}` is merged into the marks read back
+  from the file (`Sync.load`); our stored marks that are not in the file yet show as unsaved
+  (`* ` in the title), other viewers' elements are kept aside and posted back verbatim;
+* **after every change** of the marks (highlight, note, text, recolour, delete, XFDF import,
+  Save) the whole set is posted, debounced 400 ms (as bib-lean's own reader);
+* **Save** is labelled *Save to library* (menu and toolbar tooltip; bib-lean's reader saves to
+  the library too): `Save.build`'s bytes (the original plus an incremental update, reopened
+  strictly and read back) go to `PUT /api/attachments/{key}/file` — no local file — then the
+  window reopens those bytes from memory on the same page and the set is posted again. Save
+  As… still writes a local copy (the window stays on the library's document, whose marks stay
+  unsaved there). Close and Quit ask about marks not yet saved into the library's file (they
+  are already in its annotation list);
+* **on Close** (Ctrl+W) and **after the window closed** pending requests are flushed for at
+  most 3 s; when something is still pending (a server that never answers) the process exits
+  at once. Opening another file (Ctrl+O) lets the library go: the new file is a local one.
 
 ### `--self-test`
 
@@ -100,15 +117,15 @@ Run it by hand through bib-lean:
 | `scripts/biblean-contract.sh --biblean BIN` | bib-lean's contract checks **S1–S25** (its `tests/reader/contract.sh`, re-implemented with our viewer in place of its curl stub; the checks on the stub's own payload — S2–S5, S8, S9, S11, S14, S15, S21, S23, S24 — are adapted to the self-test's) against a real `biblean` binary BIN in fresh temporary libraries, plus X1–X7 (the stored file holds the marks, our exit codes, token hygiene). BIN is never built from here: copy a built one out of a bib-lean checkout. `--pdf FILE` picks the fixture (default `Tests/biblean/text-pdf.py`'s; bib-lean's `tests/fixtures/reader-sample.pdf` works too). |
 | `scripts/biblean-contract.sh` (`--stub`) / `Tests/biblean/selftest-test.sh` | the viewer-side checks against our stub server `Tests/biblean/stub_server.py`; the bib-lean-side ones (launcher, config, sessions, fsck) print `skip`. No bib-lean needed. |
 | `Tests/biblean/launch-test.sh`, `text-test.sh`, `annots-test.sh` | launch, text/detection and annotation sync through `--probe` and the window (Xvfb) against the stub server. |
+| `Tests/biblean/window-test.sh` | the window (task 10.1b, smoke mode `biblean`): the library's title, the requested page, no temporary or local file, fd 3 closed while the window is up, the stored set loaded, a highlight posted before any save, Save to library = `PUT` then `POST`. |
 
 Run them with `env -u DISPLAY` (they start their own Xvfb where needed; `xvfb-run` reuses
 fd 3 and breaks the token pipe).
 
 ## Not implemented yet
 
-* Live annotation sync from the window, opening from memory, `BIBLEAN_PAGE` in the window,
-  closing fd 3 (task 10.1b).
-* A scripted Tk session of the window path against a real bib-lean (10.1b), and M10's manual
+* A scripted Tk session of the window path against a real bib-lean (the window is tested
+  against the stub server only), and M10's manual
   parts: a highlight made in the viewer appearing in bib-lean's window and its search, and the
   stored file opened in pdf.js showing it.
 * `SIGTERM` handling beyond the runtime's default (the contract's SHOULD "exit promptly on

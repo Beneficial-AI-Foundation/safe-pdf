@@ -45,6 +45,12 @@ opaque mainLoop : IO Unit
 @[extern "safepdf_tk_quit"]
 opaque quit : IO Unit
 
+/-- Closes file descriptor 3, bib-lean's token pipe (task 10.1b; contract §2 "SHOULD close fd
+3 after" reading the token). Not Tk: it is in the shim because that is the `viewer`
+executable's only C object. `Main.lean` installs it as `BibLean.Launch.closeTokenFd`. -/
+@[extern "safepdf_close_fd3"]
+opaque closeFd3 : IO Unit
+
 /-- The handler `guiDispatch` forwards every `::safepdf::emit` call to. -/
 initialize emitHandler : IO.Ref (Array String → IO Unit) ← IO.mkRef fun _ => pure ()
 

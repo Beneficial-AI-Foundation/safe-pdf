@@ -13,8 +13,9 @@
 # exit codes: wrong token (1, the server saw a wrong token), non-loopback server (2, no
 # request sent), missing or malformed fd 3 (3), bad attachment key (2), unknown attachment
 # (1). The token never appears in the viewer's output. Then the window path under Xvfb
-# (smoke mode, SAFEPDF_VIEWER_SMOKE): the window title shows the title, and the private
-# temporary copy is removed when the window closes. Exit 0 on success.
+# (smoke mode, SAFEPDF_VIEWER_SMOKE): the window title shows the library's title, and no
+# temporary file is ever made (task 10.1b: the window opens the bytes from memory; the
+# window's sync, page and fd 3 checks are Tests/biblean/window-test.sh). Exit 0 on success.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -200,13 +201,12 @@ if [ "$display" = 1 ]; then
     timeout 60 "${wrap[@]}" "$viewer" --biblean >"$work/win.out" 2>"$work/win.err" \
     3< <(printf '%s\n' "$token")
   rc=$?
-  set -e
   check "$rc" "L25 the window run exits 0" "exit $rc: $(cat "$work/win.err")"
-  want="title: On \"Safe\" PDFs: ab \$(x) é.pdf - page 2/2 - safe-pdf"
+  want="title: $title - page 2/2 - safe-pdf"
   grep -qxF "$want" "$work/smoke/state.txt" 2>/dev/null
-  check $? "L26 the window title shows the item's title" "$(cat "$work/smoke/state.txt" 2>/dev/null)"
+  check $? "L26 the window title is the item's title (not a file name)" "$(cat "$work/smoke/state.txt" 2>/dev/null)"
   [ -z "$(ls -A "$work/tmp")" ]
-  check $? "L27 the private temporary copy is removed after the window closes" "$(ls -lAR "$work/tmp")"
+  check $? "L27 no temporary file is made (the window opens the bytes from memory)" "$(ls -lAR "$work/tmp")"
 fi
 
 echo "launch-test: $pass passed, $fail failed"

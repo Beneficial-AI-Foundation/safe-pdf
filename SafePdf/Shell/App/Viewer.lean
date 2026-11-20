@@ -137,6 +137,12 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
   numbers) is built with `Tcl.cmd`/`Script.render`, whose literal words go through the proved
   `Tcl.quote` (`Tcl.parseScript_render`); the only raw script text is the constant UI setup.
+* **Library documents** (task 10.1b, `viewer --biblean`): `mainWith` runs an `init` after the
+  window is built; bib-lean's reader mode opens its bytes there from memory (`openBytes`,
+  nothing on disk; `State.inMemory`), titled with `State.titleOverride`, with a `Library`
+  attached: every change of the marks is reported (`marksChanged`), Save is "Save to library"
+  (`saveToLibrary`: `Save.build`'s bytes to the library, then reopened from memory), Save As…
+  writes a local copy and stays on the library's document, Close flushes the library.
 * **Smoke mode** (`SAFEPDF_VIEWER_SMOKE=DIR`, used by `scripts/viewer-smoke.sh`): drives the
   viewer with Tk key events (`event generate`) and writes photos and state files into `DIR`
   (see `smoke`), then exits.
@@ -214,10 +220,34 @@ structure LayoutKey where
   spreadIx : Nat
   deriving DecidableEq
 
+/-- The library the open document belongs to (task 10.1b, bib-lean's reader mode): hooks into
+`BibLean.Annots.Sync`, kept Tk- and HTTP-free here so the viewer does not depend on the
+bib-lean modules. Each hook returns at once (the sync works on its own thread), except
+`flush`. -/
+structure Library where
+  /-- The marks after every change of `State.marks` (add, remove, recolour, text, import, a
+  save): posted as the library's annotation set after the debounce. -/
+  onMarksChanged : Marks.Store → IO Unit
+  /-- The document's bytes with the marks written in (`Save.build`), on Save: the library's
+  new file (`PUT`). -/
+  onSaved : ByteArray → IO Unit
+  /-- Sends what is pending without the debounce, waiting at most a grace period; `true` when
+  everything was sent (Close; `Main.lean` calls it again after the window closed). -/
+  flush : IO Bool
+
 /-- The viewer's state, kept in one `IO.Ref`. -/
 structure State where
-  /-- Path of the open file, if any. -/
+  /-- Path of the open file, if any (`inMemory`: only a display name). -/
   path : Option String := none
+  /-- The document was opened from memory (`openBytes`, task 10.1b): there is no file at
+  `path`, which only names the document (dialogs propose files next to it). -/
+  inMemory : Bool := false
+  /-- Shown in the window title instead of the file name (task 10.1b: bib-lean's item title). -/
+  titleOverride : Option String := none
+  /-- The library the document comes from (task 10.1b, `viewer --biblean`): marks are synced
+  to it after every change and Save sends the annotated file to it instead of writing a local
+  file (`saveToLibrary`); `none` for a local file. -/
+  library : Option Library := none
   /-- The opened document (`none`: no file, or it failed to open). -/
   doc : Option Doc := none
   /-- The document the pages are rendered from while saved marks are edited (task 9.5g:
@@ -465,13 +495,14 @@ def baseName (path : String) : String :=
   (System.FilePath.mk path).fileName.getD path
 
 /-- Window title: `safe-pdf`, or `NAME - page k/n - safe-pdf`, with `* ` in front while there
-are unsaved marks (task 9.5c). -/
+are unsaved marks (task 9.5c); `NAME` is `titleOverride` when set (task 10.1b), else the
+file name. -/
 def State.title (s : State) : String :=
   match s.path, s.doc with
   | some p, some _ =>
     let star := if s.marks.dirty then "* " else ""
-    s!"{star}{baseName p} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
-  | some p, none => s!"{baseName p} - safe-pdf"
+    s!"{star}{s.titleOverride.getD (baseName p)} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
+  | some p, none => s!"{s.titleOverride.getD (baseName p)} - safe-pdf"
   | none, _ => "safe-pdf"
 
 /-- A fraction in `[0, 1]` as a decimal with six digits (for `xview`/`yview moveto`). -/
@@ -503,6 +534,12 @@ def run (words : List String) : IO String :=
 /-- Shows `msg` in the status line. -/
 def setStatus (msg : String) : IO Unit := do
   discard <| run [".status", "configure", "-text", msg]
+
+/-- Reports the marks to the library after a change of `State.marks` (task 10.1b; nothing
+for a local file). -/
+def marksChanged (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if let some l := s.library then l.onMarksChanged s.marks
 
 /-- The constant UI setup script (no data in it). Widgets: the toolbar `.bar` after PDF.js
 (task 9.7: groups `.bar.l`, `.bar.m` (centred), `.bar.r`, filled from `Toolbar.layout` by
@@ -1801,9 +1838,10 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
   discard <| run [".ol.t", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
   discard <| run ["::safepdf::olSetTri", toString i, Sidebar.triangle true on]
 
-/-- Opens `path`: reads and parses it, builds the page tree, shows page 1. Every failure
-ends up in the status line with an empty page. -/
-def openFile (st : IO.Ref State) (path : String) : IO Unit := do
+/-- Opens the document `load` gives under the name `path`: builds the page tree, shows page 1.
+A failure (`load`'s message, e.g. `cannot read: …`) ends up in the status line with an empty
+page. Shared by `openFile` and `openBytes`. -/
+def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc)) : IO Unit := do
   st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
                               shown := none }
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
@@ -1816,39 +1854,70 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
   fillOutline st
   showOutline st false
   st.modify ({ · with toggleShown := none })
-  match ← Inspect.load {} path with
+  match ← load with
   | .error msg =>
     refresh st
-    setStatus s!"{path}: cannot read: {msg}"
-  | .ok input =>
-    match Views.Pages.docOf limits input.result with
-    | .error e =>
+    setStatus s!"{path}: {msg}"
+  | .ok doc =>
+    -- Our marks already in the file (task 9.5c): restored with their ids, saved.
+    let marks ← IO.lazyPure fun _ => Marks.Store.load (Save.readMarks doc limits)
+    st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none,
+                        marks })
+    let (labels, outline) ← IO.lazyPure fun _ =>
+      (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
+    st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
+    fillOutline st
+    showOutline st (Sidebar.shownOnLoad (!outline.isEmpty))
+    -- Lay the window out again so that the first render uses the canvas size beside the
+    -- outline panel.
+    discard <| run ["update", "idletasks"]
+    if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
+        (← run ["winfo", "height", ".c"]).toNat?) then
+      if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
+    if doc.pages.size == 0 then
       refresh st
-      setStatus s!"{path}: cannot open: {renderError e}"
-    | .ok doc =>
-      -- Our marks already in the file (task 9.5c): restored with their ids, saved.
-      let marks ← IO.lazyPure fun _ => Marks.Store.load (Save.readMarks doc limits)
-      st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none,
-                          marks })
-      let (labels, outline) ← IO.lazyPure fun _ =>
-        (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
-      st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
-      fillOutline st
-      showOutline st (Sidebar.shownOnLoad (!outline.isEmpty))
-      -- Lay the window out again so that the first render uses the canvas size beside the
-      -- outline panel.
-      discard <| run ["update", "idletasks"]
-      if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
-          (← run ["winfo", "height", ".c"]).toNat?) then
-        if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
-      if doc.pages.size == 0 then
-        refresh st
-        setStatus s!"{path}: the document has no pages"
-      else
-        refresh st
-        if marks.marks.size > 0 then
-          setStatus s!"{← run [".status", "cget", "-text"]}; {marks.marks.size} saved marks \
-            restored from the file"
+      setStatus s!"{path}: the document has no pages"
+    else
+      refresh st
+      if marks.marks.size > 0 then
+        setStatus s!"{← run [".status", "cget", "-text"]}; {marks.marks.size} saved marks \
+          restored from the file"
+
+/-- The label of File → Save and the toolbar Save button's tooltip: "Save to library" while
+the document belongs to a library (task 10.1b; bib-lean's own reader saves to the library
+too), else "Save". -/
+def setSaveLabels (library : Bool) : IO Unit := do
+  if let some (m, i) := Menu.locate .save then
+    discard <| run [m, "entryconfigure", toString i, "-label",
+      if library then "Save to library" else Menu.Cmd.save.label]
+  discard <| run ["set", "::safepdf::btn(tip,.bar.save)",
+    if library then "Save to library (Ctrl+S)" else "Save (Ctrl+S)"]
+
+/-- Opens the file `path` (`Inspect.load`: size check against `Limits.maxInputBytes`, then
+`SafePdf.parseWith`). A local file: a library the window had (task 10.1b) is let go, its
+pending posts still go out on their own thread. -/
+def openFile (st : IO.Ref State) (path : String) : IO Unit := do
+  if (← st.get).library.isSome then setSaveLabels false
+  st.modify ({ · with inMemory := false, titleOverride := none, library := none })
+  openWith st path do
+    match ← Inspect.load {} path with
+    | .error msg => return .error s!"cannot read: {msg}"
+    | .ok input =>
+      match Views.Pages.docOf limits input.result with
+      | .error e => return .error s!"cannot open: {renderError e}"
+      | .ok doc => return .ok doc
+
+/-- **Opens a document from memory** (task 10.1b: bib-lean's reader mode fetches the file over
+HTTP and never writes it to disk): `bytes` through `SafePdf.Api.openBytes` (the viewer's
+limits, the lenient path allowed as for files), shown under the name `name` (the title uses
+`titleOverride` when set). `State.library` and `titleOverride` are kept, so a library reopens
+its saved bytes with this. -/
+def openBytes (st : IO.Ref State) (name : String) (bytes : ByteArray) : IO Unit := do
+  st.modify ({ · with inMemory := true })
+  openWith st name do
+    match SafePdf.Api.openBytes bytes { limits } with
+    | .ok d => return .ok d.doc
+    | .error e => return .error s!"cannot open: {e.message}"
 
 /-- Moves to page `p` (clamped to the document), scrolled to `where`, and refreshes. -/
 def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit := do
@@ -2052,16 +2121,77 @@ def saveTo (st : IO.Ref State) (target : String) : IO Bool := do
       unchanged at its start"
     return true
 
+/-- **Save to library** (task 10.1b, Save in bib-lean's reader mode): `Save.build`'s bytes (the
+incremental update, checked by a strict reopen and read-back) go to the library
+(`Library.onSaved`: bib-lean's `PUT`, which keeps the previous file) instead of a local file —
+nothing is written to disk; then the window reopens those bytes from memory on the same page
+(the marks become saved, drawn by the renderer) and reports the marks
+(`Library.onMarksChanged`, posted after the file). Errors go to the status line. -/
+def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc) : IO Bool := do
+  let s ← st.get
+  setStatus "saving to the library..."
+  match Save.build limits doc s.marks (← Save.nowDate) with
+  | .error e =>
+    setStatus s!"cannot save to the library: {e}"
+    return false
+  | .ok (bytes, got, n) =>
+    lib.onSaved bytes
+    openBytes st name bytes
+    goTo st s.page
+    marksChanged st
+    let appended := bytes.size - doc.file.bytes.size
+    setStatus s!"saved {n} new, changed or deleted mark(s) to the library ({appended} bytes \
+      appended; {got.length} marks in its file)"
+    return true
+
+/-- **Save As…** (Ctrl+Shift+S, File → Save As…): asks for a file (`tk_getSaveFile`, which
+confirms replacing an existing file), proposing `Save.defaultTarget`; writing over the opened
+file needs an explicit yes. Writes the unsaved marks (a plain copy when there are none). For a
+library's document (task 10.1b) it writes a local copy and stays on the library's document. -/
+def saveAs (st : IO.Ref State) : IO Bool := do
+  let s ← st.get
+  let (some path, some _) := (s.path, s.doc) | return false
+  let fp : System.FilePath := Save.defaultTarget path
+  let dir := match fp.parent with
+    | some d => if d.toString.isEmpty then "." else d.toString
+    | none => "."
+  let chosen ← run ["::safepdf::askSavePath", dir, fp.fileName.getD "document.pdf"]
+  if chosen.isEmpty then
+    setStatus "save cancelled"
+    return false
+  -- A library's document (task 10.1b): a local copy; the window stays on the library's
+  -- document and its marks stay unsaved there (Save sends them to the library).
+  if s.library.isSome then
+    let some doc := s.doc | return false
+    match ← Save.write limits doc s.marks chosen with
+    | .error e =>
+      setStatus s!"cannot save to {baseName chosen}: {e}"
+      return false
+    | .ok o =>
+      setStatus s!"saved a local copy with {o.total} mark(s) to {o.path}; the library's file \
+        is unchanged (Save to library sends the marks there)"
+      return true
+  if !s.inMemory && (← samePath chosen path) && !(← isOwn st chosen) then
+    let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks are \
+      appended as a new revision; its present bytes stay unchanged at its start."
+    if a != "yes" then
+      setStatus "save cancelled"
+      return false
+  saveTo st chosen
+
 /-- **Save** (Ctrl+S, File → Save, the toolbar's Save): writes the unsaved marks to
 `Save.defaultTarget` (`FILE-annotated.pdf`, or the opened `…-annotated.pdf` itself). Asks before
 writing into the opened file or replacing another existing file, unless this session wrote
 it. Returns whether the marks are saved afterwards. -/
 def save (st : IO.Ref State) : IO Bool := do
   let s ← st.get
-  let (some path, some _) := (s.path, s.doc) | return false
+  let (some path, some doc) := (s.path, s.doc) | return false
   if !s.marks.dirty then
     setStatus "no unsaved marks: nothing to save"
     return true
+  if let some lib := s.library then return ← saveToLibrary st lib path doc
+  -- Opened from memory without a library: there is no file to put the marks next to.
+  if s.inMemory then return ← saveAs st
   let target := Save.defaultTarget path
   let n := s.marks.pending
   if !(← isOwn st target) then
@@ -2080,28 +2210,6 @@ def save (st : IO.Ref State) : IO Bool := do
         return false
   saveTo st target
 
-/-- **Save As…** (Ctrl+Shift+S, File → Save As…): asks for a file (`tk_getSaveFile`, which
-confirms replacing an existing file), proposing `Save.defaultTarget`; writing over the opened
-file needs an explicit yes. Writes the unsaved marks (a plain copy when there are none). -/
-def saveAs (st : IO.Ref State) : IO Bool := do
-  let s ← st.get
-  let (some path, some _) := (s.path, s.doc) | return false
-  let fp : System.FilePath := Save.defaultTarget path
-  let dir := match fp.parent with
-    | some d => if d.toString.isEmpty then "." else d.toString
-    | none => "."
-  let chosen ← run ["::safepdf::askSavePath", dir, fp.fileName.getD "document.pdf"]
-  if chosen.isEmpty then
-    setStatus "save cancelled"
-    return false
-  if (← samePath chosen path) && !(← isOwn st chosen) then
-    let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks are \
-      appended as a new revision; its present bytes stay unchanged at its start."
-    if a != "yes" then
-      setStatus "save cancelled"
-      return false
-  saveTo st chosen
-
 /-- Before `what` (closing, quitting, opening another file): with unsaved marks asks Save /
 Discard / Cancel (yes / no / cancel). Returns whether to go on. -/
 def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
@@ -2109,8 +2217,16 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
   let (some path, some _) := (s.path, s.doc) | return true
   if !s.marks.dirty then return true
   let n := s.marks.pending
-  match ← ask "yesnocancel" "Unsaved marks" s!"{n} mark(s) on {baseName path} are not saved. \
-      Save them to {baseName (Save.defaultTarget path)} before {what}? (No discards them.)" with
+  let msg := if s.library.isSome then
+      s!"{n} mark(s) on {s.titleOverride.getD (baseName path)} are not saved into the \
+        library's file (its annotation list has them already). Save to library before {what}? \
+        (No leaves the file as it is.)"
+    else if s.inMemory then
+      s!"{n} mark(s) on {s.titleOverride.getD (baseName path)} are not saved. Save them to a \
+        file before {what}? (No discards them.)"
+    else s!"{n} mark(s) on {baseName path} are not saved. \
+      Save them to {baseName (Save.defaultTarget path)} before {what}? (No discards them.)"
+  match ← ask "yesnocancel" "Unsaved marks" msg with
   | "yes" => save st
   | "no" => return true
   | _ =>
@@ -2162,6 +2278,7 @@ def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
     let (marks, ids, dups) := Xfdf.importItems s.marks rep.items
     st.modify ({ · with marks })
     if !ids.isEmpty then
+      marksChanged st
       if !(← updatePreview st) then repaint st
     setStatus (importStatus (baseName path) ids.length dups rep)
 
@@ -2197,9 +2314,15 @@ def openDialog (st : IO.Ref State) : IO Unit := do
 /-! ## Menubar (task 9.1) -/
 
 /-- Closes the document (File → Close, Ctrl+W): the window stays, empty, as after starting
-without a file. -/
+without a file. A library's document is flushed first (`Library.flush`) and the library let go
+(task 10.1b). -/
 def closeFile (st : IO.Ref State) : IO Unit := do
-  st.modify fun s => { s with path := none, doc := none, view := none, page := 0, shown := none,
+  -- A library's document (task 10.1b): send what is pending now, then let the library go.
+  if let some l := (← st.get).library then
+    unless ← l.flush do setStatus "the library did not answer in time; still trying"
+    setSaveLabels false
+  st.modify fun s => { s with path := none, inMemory := false, titleOverride := none,
+                              library := none, doc := none, view := none, page := 0, shown := none,
                               gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
@@ -2568,6 +2691,7 @@ def highlight (st : IO.Ref State) (color : Option String) : IO Unit := do
     match s.marks.addHighlight p c (Select.rangeBoxes ix.cells a b) with
     | some (marks, id) =>
       st.modify ({ · with marks, markSel := some id, sel := none })
+      marksChanged st
       repaint st
       setStatus s!"page {p + 1}: highlighted {(Select.rangeText ix.cells a b).length} \
         characters in {c.name} (click it to select it; Delete removes it)"
@@ -2576,6 +2700,7 @@ def highlight (st : IO.Ref State) (color : Option String) : IO Unit := do
     match s.markSel, chosen with
     | some id, some c =>
       st.modify ({ · with marks := s.marks.recolor id c })
+      marksChanged st
       if !(← updatePreview st) then repaint st
       setStatus s!"mark recoloured: {c.name}"
     | _, some c => setStatus s!"highlight colour: {c.name} (select text, then Highlight)"
@@ -2635,6 +2760,7 @@ def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let some anc := anchor | return
   let (marks, id) := s.marks.addNote page color "" anc
   st.modify ({ · with marks, markSel := some id, sel := none })
+  marksChanged st
   repaint st
   setStatus s!"page {page + 1}: note added (type its text, then Save)"
   openNote st id
@@ -2648,6 +2774,7 @@ def noteSave (st : IO.Ref State) (idS text : String) : IO Unit := do
     setStatus "note unchanged"
     return
   st.modify ({ · with marks := s.marks.setText id text })
+  marksChanged st
   if !(← updatePreview st) then drawOverlay st
   setStatus s!"note saved ({text.length} characters)"
 
@@ -2657,6 +2784,7 @@ def deleteMark (st : IO.Ref State) (id : Nat) : IO Unit := do
   let some m := s.marks.find? id | return
   st.modify ({ · with marks := s.marks.removeWithComment id,
                       markSel := if s.markSel == some id then none else s.markSel })
+  marksChanged st
   if !(← updatePreview st) then repaint st
   setStatus s!"{markName m} deleted"
 
@@ -2758,6 +2886,7 @@ def popClick (st : IO.Ref State) (xs ys : String) : IO Unit := do
     | some m =>
       if !m.isNote then
         st.modify ({ · with marks := s.marks.recolor m.id c })
+        marksChanged st
         if !(← updatePreview st) then repaint st
         setStatus s!"highlight recoloured: {c.name}"
       else setStatus s!"highlight colour: {c.name}"
@@ -4435,6 +4564,58 @@ def smokeScroll (st : IO.Ref State) (dir : String) : IO Unit := do
       canvas: {s.canvasW}x{s.canvasH}\nstatus: {← run [".status", "cget", "-text"]}\n"
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of bib-lean's reader mode (`SAFEPDF_VIEWER_SMOKE_MODE=biblean`, task 10.1b;
+run by `Tests/biblean/window-test.sh` and `annots-test.sh` under `viewer --biblean`), in three
+event-loop turns 1.5 s apart so the library sync (400 ms debounce) runs in between:
+step 0 records the window (title, page, marks, Save's label and tooltip, whether the document
+is in memory) and writes `up` (the test looks at the process while the window is up), then
+highlights the first word of the shown page (`highlight`, nothing saved); step 1 adds a note
+next to it (context menu) and presses Ctrl+S at once (Save to library), recording the state
+after; step 2 writes `biblean.txt` and closes the window. -/
+def smokeBiblean (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : System.FilePath := (dir : System.FilePath) / name
+  let s ← st.get
+  st.modify ({ · with smokeStep := s.smokeStep + 1 })
+  let next : IO Unit := discard <| run ["after", "1500", "::safepdf::emit smoke"]
+  let marksLine (s : State) : String :=
+    s!"{s.marks.marks.size} saved {s.marks.saved.length} dirty {s.marks.dirty}"
+  let append (l : String) : IO Unit := do
+    let old ← try IO.FS.readFile (file "biblean.txt") catch _ => pure ""
+    IO.FS.writeFile (file "biblean.txt") (old ++ l ++ "\n")
+  match s.smokeStep with
+  | 0 =>
+    discard <| run ["update"]
+    let lbl ← match Menu.locate .save with
+      | some (m, i) => run [m, "entrycget", toString i, "-label"]
+      | none => pure "?"
+    append s!"title: {← run ["wm", "title", "."]}"
+    append s!"page: {s.page + 1}/{s.pageCount}"
+    append s!"in-memory: {s.inMemory} library: {s.library.isSome}"
+    append s!"marks0: {marksLine s}"
+    append s!"save-label: {lbl} | {← run ["set", "::safepdf::btn(tip,.bar.save)"]}"
+    IO.FS.writeFile (file "up") ""
+    let .ok ix ← pageIndex st s.page | throw (IO.userError "no text index")
+    let (a, b) := Select.wordAt ix.cells 0
+    st.modify ({ · with sel := some (s.page, a, b) })
+    highlight st none
+    let s1 ← st.get
+    append s!"highlighted: {Select.rangeText ix.cells a b} {marksLine s1}"
+    next
+  | 1 =>
+    let some m := s.markSel.bind s.marks.find? | throw (IO.userError "no selected highlight")
+    let some q := m.quads.head? | throw (IO.userError "highlight without quads")
+    smokeNoteAt st (q.urx + 40) ((q.lly + q.ury) / 2) "library note"
+    append s!"noted: {marksLine (← st.get)}"
+    sendEvent ".c" "<Control-Key-s>"
+    let s2 ← st.get
+    append s!"after-save: {marksLine s2} title {s2.title}"
+    append s!"after-save-path: {s2.path.getD "-"} in-memory {s2.inMemory} library {s2.library.isSome} page {s2.page + 1}"
+    append s!"status: {← run [".status", "cget", "-text"]}"
+    next
+  | _ =>
+    append "done"
+    discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -4484,6 +4665,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "modes" then smokeModes st dir else smokeScroll st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "biblean" then
+    try smokeBiblean st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "biblean.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "marks" then
@@ -4690,15 +4877,20 @@ SAFEPDF_VIEWER_SMOKE_MODE=bubble: the selection bubble and Highlight pop-over st
 SAFEPDF_VIEWER_SMOKE_MODE=save / reopen / encrypted: the save flow, reopening the saved file,
 saving an encrypted file).
 SAFEPDF_VIEWER_SMOKE_MODE=xfdf: XFDF export and import (task 9.11);
+SAFEPDF_VIEWER_SMOKE_MODE=biblean: under viewer --biblean, a highlight, a note and Save to
+library (task 10.1b);
 SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in
 the vertical mode and write timings (a benchmark).
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).
 SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: initial view mode (facing:
 odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads)."
 
-/-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
-start (no display, missing Tk). -/
-def main (args : List String) : IO UInt32 := do
+/-- Runs the viewer with `init` run once the window is built (task 10.1b: `viewer --biblean`
+opens its document from memory there, `openBytes`), after the file named in `args`, if any.
+When neither opened anything, the window asks for a file (`tk_getOpenFile`, not in smoke
+mode). Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to start (no
+display, missing Tk). -/
+def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 := do
   let file ← match args with
     | [] => pure none
     | ["--help"] | ["-h"] => IO.println usage; return 0
@@ -4741,14 +4933,19 @@ def main (args : List String) : IO UInt32 := do
   catch e =>
     IO.eprintln s!"viewer: cannot build the window: {e}"
     return 3
-  match file with
-  | some f => guarded (openFile st f)
-  | none =>
+  if let some f := file then guarded (openFile st f)
+  guarded (init st)
+  if (← st.get).path.isNone then
     setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
     if smokeDir.isNone then discard <| run ["after", "idle", "::safepdf::emit open"]
   guarded (syncMenus st)
   if smokeDir.isSome then discard <| run ["after", "300", "::safepdf::emit smoke"]
   Shim.mainLoop
   return 0
+
+/-- Runs the viewer (`mainWith` without an `init`): opens the file named in `args`, else asks
+for one. -/
+def main (args : List String) : IO UInt32 :=
+  mainWith args fun _ => pure ()
 
 end SafePdf.Shell.App.Viewer

@@ -47,9 +47,11 @@ error messages name the method, the path (holding only the key) and the HTTP sta
 offers no way to wipe a `ByteArray`, so the bytes stay in memory until collected (they are
 kept in `Session` for the later tasks 10.2–10.3, which post annotations and text). The
 descriptor is read through `/dev/fd/3`, which opens a *new* descriptor (closed when the
-handle is dropped); the inherited fd 3 itself cannot be closed from Lean without a C call,
-so the contract's SHOULD "close fd 3 after" is not met (the pipe is drained to its end; the
-viewer starts no child processes that could inherit it).
+handle is dropped); the inherited fd 3 itself is closed right after a valid token was read
+(task 10.1b, the contract's SHOULD "close fd 3 after") by `closeTokenFd`, which the `viewer`
+executable sets to the C shim's `close(3)` (`Shim.closeFd3`; this module stays free of C so
+it links anywhere). This covers every `--biblean` path (window, `--probe`, `--self-test`).
+After a failed read fd 3 is left alone: it is then not known to be the token pipe.
 
 **Nothing from the library on stderr** (bib-lean `docs/SECURITY.md`): errors carry keys and
 statuses only, never titles or bodies.
@@ -215,6 +217,11 @@ def Failure.message : Failure → String
 /-- The file the token is read from: the inherited file descriptor 3. -/
 def tokenFd : System.FilePath := "/dev/fd/3"
 
+/-- Closes the inherited file descriptor 3 after a valid token was read from it (task
+10.1b). A no-op unless the executable installs the C call (`Main.lean`: `Shim.closeFd3`);
+tests that pass their own `tokenPath` keep the no-op. -/
+initialize closeTokenFd : IO.Ref (IO Unit) ← IO.mkRef (pure ())
+
 /-- Reads the token once from `path` (default `/dev/fd/3`): up to the first `\n` or the end of
 the file, at most 66 bytes, then `Token.ofLine?`. `none` when the descriptor is not open or
 does not hold a valid token. -/
@@ -263,6 +270,8 @@ def openFromBibLean (env : String → IO (Option String) := fun n => IO.getEnv n
     | return .error (.usage "BIBLEAN_ATTACHMENT is not set (not launched by bib-lean)")
   unless keyOk key do return .error (.usage "BIBLEAN_ATTACHMENT is not an item key")
   let some token ← readToken tokenPath | return .error .noToken
+  -- Contract §2: SHOULD close fd 3 after reading (only the inherited descriptor).
+  if tokenPath == tokenFd then (← closeTokenFd.get)
   let s : Session := { origin, key, token }
   let path := s!"/api/attachments/{key}/file"
   let r ← try get s path fileLimits

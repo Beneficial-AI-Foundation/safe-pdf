@@ -200,7 +200,7 @@ if [ "$display" = 1 ]; then
   check $? "T12 the window's background posts arrived (detection, 3-page full text)" "$(cat "$work/log")"
   start_stub "$work/text.pdf" "" --fail-text close
   window w2
-  [ "$rc" = 0 ] && grep -q '^title: Full Text PDF.pdf - page [1-3]/3 - safe-pdf$' "$work/smoke/state.txt"
+  [ "$rc" = 0 ] && grep -q '^title: Full Text PDF - page [1-3]/3 - safe-pdf$' "$work/smoke/state.txt"
   check $? "T13 failing posts do not break the window (exit 0, document shown)" \
     "exit $rc: $(cat "$work/w2.err" "$work/smoke/state.txt" 2>/dev/null)"
   grep -q 'fulltext: failed' "$work/w2.err" && ! grep -qF "$token" "$work/w2.err" "$work/w2.out"

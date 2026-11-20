@@ -4,7 +4,7 @@ import SafePdf.Shell.App.BibLean.Annots
 import SafePdf.Shell.App.BibLean.SelfTest
 
 /-!
-# Entry point of the `viewer` executable (tasks 8.2a, 10.1, 10.2, 10.3, 10.4; Plan.md §6 Phases 8 and 10, §8, §10)
+# Entry point of the `viewer` executable (tasks 8.2a, 10.1, 10.1b, 10.2, 10.3, 10.4; Plan.md §6 Phases 8 and 10, §8, §10)
 
 The native viewer shell (unverified). See `SafePdf.Shell.App.Viewer` and `docs/viewer.md`.
 
@@ -26,26 +26,27 @@ environment and fetches the PDF and its title over loopback HTTP. Exit codes (co
   `name: value` line per step and the verdict `viewer self-test: ok|FAILED (…)`; exit 0 when
   every step passed, 1 otherwise (2 usage, 3 no token, as above). Not combinable with
   `--probe`. Used by `scripts/biblean-contract.sh` and `Tests/biblean/selftest-test.sh`.
-* Otherwise the window. **Interim** until `Viewer.lean` has an entry point taking bytes (task
-  10.1 report): the bytes go into a private temporary directory (`IO.FS.createTempDir`, mode
-  0700; the file made 0600 before it is written), named after the title (`fileNameOf`, so
-  the window title shows it), opened with `Viewer.main`, and the directory is removed when
-  the window closes (contract §2: only private temporary files that are removed). The
-  requested page is not applied yet on this path.
+* Otherwise the window (task 10.1b, `windowInit`): the document is opened **from memory**
+  (`Viewer.openBytes`; nothing is written to disk), titled with the library's title, at the
+  requested page. Annotations (task 10.2, `BibLean.Annots.Sync`, attached as
+  `Viewer.Library`): the stored set is merged into the marks read back from the file
+  (`Sync.load`); every change of the marks is posted (debounced); Save (labelled "Save to
+  library") sends `Save.build`'s bytes with `PUT` instead of writing a file, then the marks;
+  Save As… still writes a local copy. When the window closes, `Sync.flush` gets at most
+  `annotsGraceMs`; when something is still pending the process exits at once
+  (`IO.Process.exit`). With `--probe`, the stored set is loaded and summarised (`annotations:`
+  line); `--annots echo` posts it back unchanged, `--annots demo` runs `annotsDemo`; the
+  outcomes are printed as `sync:` lines and `sync-done:` tells whether everything was sent in
+  time.
 
-  Annotations (task 10.2, `BibLean.Annots`): until the viewer calls the sync's hooks (task
-  10.1b), the window path only handles a Save: when the window wrote
-  `Save.defaultTarget` of the private copy, that file is sent with `PUT` and its marks,
-  merged with the stored set, are posted (`Annots.afterWindow`, at most `annotsGraceMs`).
-  With `--probe`, the stored set is loaded and summarised (`annotations:` line);
-  `--annots echo` posts it back unchanged, `--annots demo` runs `annotsDemo`; the outcomes are
-  printed as `sync:` lines and `sync-done:` tells whether everything was sent in time.
+  File descriptor 3 is closed right after the token was read (`Launch.closeTokenFd`, set to
+  `Shim.closeFd3` here; every path).
 
   The text posts (task 10.3) run on a **dedicated thread** (`IO.asTask (prio := .dedicated)`)
   started before the window, so the window never waits for them. When the window closes,
   they get at most `textGraceMs` more to finish, then the task is cancelled (it stops at the
   next page); if it is still inside a post, the process exits without waiting for it (after
-  the temporary directory is removed). A failed post only prints its outcome on stderr
+  the annotations were flushed). A failed post only prints its outcome on stderr
   (status or connection error, nothing from the library).
 -/
 
@@ -85,8 +86,8 @@ def textGraceMs : UInt32 := 3000
 window, five in the probe. -/
 def annotsGraceMs : Nat := 3000
 
-/-- The probe's scripted annotation session (`--annots demo`, task 10.2), standing in for the
-viewer's hooks until 10.1b: a highlight over the first word of page 1, recoloured three times
+/-- The probe's scripted annotation session (`--annots demo`, task 10.2; the window calls the
+same hooks since 10.1b): a highlight over the first word of page 1, recoloured three times
 30 ms apart (each change reported with `onMarksChanged`, so the debounce must fold them into
 one post), a note near the CropBox's upper-left corner, then Save (`Save.build`'s bytes go to
 `onSaved`, i.e. the `PUT`; the marks become saved, which changes nothing in the posted set).
@@ -114,8 +115,33 @@ def annotsDemo (y : BibLean.Annots.Sync) (s : Marks.Store) : IO String := do
     return s!"highlight {hid} on {(Select.rangeText pi.cells a b).length} characters, a note, \
       saved {bytes.size} bytes"
 
+/-- The window's start in bib-lean's reader mode (task 10.1b): the document is opened from
+memory (`Viewer.openBytes`, named `Launch.fileNameOf` for Save As…'s proposal, titled with
+the library's title), the library's annotation sync attached as `Viewer.Library` (Save goes to
+the library, every change of the marks is reported), the stored set merged into the marks read
+back from the file (`Sync.load`) and the requested page shown. -/
+def windowInit (o : BibLean.Launch.Opened) (sync : BibLean.Annots.Sync)
+    (st : IO.Ref Viewer.State) : IO Unit := do
+  st.modify ({ · with titleOverride := some o.title,
+                      library := some { onMarksChanged := sync.onMarksChanged,
+                                        onSaved := sync.onSaved,
+                                        flush := sync.flush annotsGraceMs } })
+  Viewer.setSaveLabels true
+  Viewer.openBytes st (BibLean.Launch.fileNameOf o.session.key o.title) o.bytes
+  let s ← st.get
+  if s.doc.isNone then return
+  -- `s.marks` is the file's store (`Store.load (Save.readMarks …)`, read by `openBytes`).
+  let marks ← sync.load s.marks
+  st.modify ({ · with marks })
+  if marks.marks.size != s.marks.marks.size then
+    Viewer.repaint st
+    Viewer.setStatus s!"{marks.marks.size - s.marks.marks.size} mark(s) loaded from the library"
+  if let some p := o.page then Viewer.goTo st p
+
 /-- `viewer --biblean …` (see the module documentation). -/
 def bibleanMain (args : List String) : IO UInt32 := do
+  -- Contract §2: close the token pipe (fd 3) once the token is read (task 10.1b).
+  BibLean.Launch.closeTokenFd.set Shim.closeFd3
   let usage := "usage: viewer --biblean [--page N] [--probe [--annots echo|demo] | --self-test]   \
     (token: one line on fd 3)"
   let some a := (parseBibleanArgs args {}).filter fun a => !(a.selfTest && (a.probe || a.annots.isSome))
@@ -156,26 +182,9 @@ def bibleanMain (args : List String) : IO UInt32 := do
       unless r.ok do
         IO.eprintln s!"viewer --biblean: detected: {r.detected}; fulltext: {r.fulltext}"
     let sync ← BibLean.Annots.Sync.create o
-    let dir ← IO.FS.createTempDir
-    let code ← try
-      let p := dir / BibLean.Launch.fileNameOf o.session.key o.title
-      IO.FS.writeFile p ""
-      IO.setAccessRights p { user := { read := true, write := true } }
-      IO.FS.writeBinFile p o.bytes
-      let code ← Viewer.main [p.toString]
-      -- Interim (task 10.1b adds the viewer hooks): a Save in the window wrote
-      -- `Save.defaultTarget p`; it goes to bib-lean as the new file and its marks as the set.
-      let target : System.FilePath := Save.defaultTarget p.toString
-      try
-        let r ← BibLean.Annots.afterWindow sync target annotsGraceMs
-        unless r == "sent" || r == "nothing saved" do
-          IO.eprintln s!"viewer --biblean: annotations: {r}"
-      catch e => IO.eprintln s!"viewer --biblean: annotations: {e}"
-      pure code
-    finally
-      try IO.FS.removeDirAll dir catch _ => pure ()
-    -- A request stuck in a server that never answers must not hold the process.
-    if (← sync.state.get).running then
+    let code ← Viewer.mainWith [] (windowInit o sync)
+    -- Close/quit: send what is pending; a server that never answers must not hold the process.
+    unless ← sync.flush annotsGraceMs do
       IO.Process.exit (if code > 255 then 1 else code.toUInt8)
     let grace ← IO.asTask (IO.sleep textGraceMs)
     let _ ← IO.waitAny [text, grace]
