@@ -474,6 +474,12 @@ inductive Layer where
   | opened (back : ByteArray) (fx : Fx) (dirty : Option IRect)
   /-- A layer painted directly (trivial group, or beyond `maxLayerDepth`). -/
   | skipped
+  /-- A **knockout** frame (task 7.3i), pushed on top of a knockout group's own frame: `base`
+  is the group's initial content (its backdrop, or the neutral colour). Items with constant
+  alpha ≠ 1 painted while it is the innermost frame composite over `base`, not over the
+  earlier items of the group (`knockItem`). Painting passes through it to the enclosing open
+  layer (like `skipped`); it counts as an open layer (it holds a page buffer). -/
+  | knock (base : ByteArray)
 
 /-- Transparency state of a page render. -/
 structure TxState where
@@ -490,11 +496,13 @@ def openCount : List Layer → Nat
   | [] => 0
   | .opened .. :: rest => openCount rest + 1
   | .skipped :: rest => openCount rest
+  | .knock _ :: rest => openCount rest + 1
 
 /-- A layer's saved backdrop has the page size (or there is none). -/
 def Layer.Ok (W H : Nat) : Layer → Prop
   | .opened back _ _ => back.size = 4 * W * H
   | .skipped => True
+  | .knock base => base.size = 4 * W * H
 
 /-- Every saved backdrop has the page size. -/
 def TxState.Sized (W H : Nat) (t : TxState) : Prop := ∀ l ∈ t.stack, l.Ok W H
@@ -532,6 +540,7 @@ def addDirty : Option IRect → Option IRect → Option IRect
 def touchStack (r : Option IRect) : List Layer → List Layer
   | [] => []
   | .skipped :: rest => .skipped :: touchStack r rest
+  | .knock b :: rest => .knock b :: touchStack r rest
   | .opened back fx d :: rest => .opened back fx (addDirty d r) :: rest
 
 /-- Record that the pixels within `r` may have changed in the current buffer. -/
@@ -563,6 +572,11 @@ theorem touchStack_ok (W H : Nat) (r : Option IRect) (l : List Layer)
       rcases hx with rfl | hx
       · exact h (.opened back fx d) (List.mem_cons_self ..)
       · exact h x (List.mem_cons_of_mem _ hx)
+    | knock b =>
+      simp only [touchStack, List.mem_cons] at hx
+      rcases hx with rfl | hx
+      · exact h (.knock b) (List.mem_cons_self ..)
+      · exact ih (fun z hz => h z (List.mem_cons_of_mem _ hz)) x hx
 
 /-- Touching keeps the `Sized` invariant. -/
 theorem touch_sized (W H : Nat) (t : TxState) (r : Option IRect) (h : t.Sized W H) :
@@ -674,6 +688,7 @@ def endLayer (W H : Nat) (r : IRect) (t : TxState) (buf : ByteArray) : TxState �
   match t.stack with
   | [] => (t, buf)
   | .skipped :: rest => ({ t with stack := rest }, buf)
+  | .knock _ :: rest => ({ t with stack := rest }, buf)
   | .opened back fx d :: rest =>
     let rr := (match d with | some d => r.inter d | none => r).inter (pageRect W H)
     let t' := { t with stack := touchStack (some rr) rest, spare := buf }
@@ -717,6 +732,9 @@ theorem endLayer_size (W H : Nat) (r : IRect) (t : TxState) (buf : ByteArray)
   unfold endLayer
   split
   · exact ⟨hb, ht⟩
+  · rename_i rest heq
+    refine ⟨hb, fun l hl => ht l ?_⟩
+    simp [heq, hl]
   · rename_i rest heq
     refine ⟨hb, fun l hl => ht l ?_⟩
     simp [heq, hl]
@@ -784,14 +802,59 @@ theorem beginItem_open_le (W H : Nat) (t : TxState) (buf : ByteArray) (fx : Fx)
     · exact beginLayer_open_le W H t buf fx h
   · exact beginLayer_open_le W H t buf fx h
 
+/-- For a knockout group (task 7.3i): push a `knock` frame holding the group's initial content
+`r.2` on top of the group's frame, if fewer than `maxLayerDepth` buffers are held (else the
+knockout is ignored: documented degradation). -/
+def pushKnock (k : Bool) (r : TxState × ByteArray) : TxState × ByteArray :=
+  if k ∧ openCount r.1.stack < maxLayerDepth then
+    ({ r.1 with stack := .knock r.2 :: r.1.stack }, r.2)
+  else r
+
+/-- Drop a `knock` frame on top of the stack (the end of a knockout group, before its own frame
+is closed). -/
+def popKnock (t : TxState) : TxState :=
+  match t.stack with
+  | .knock _ :: rest => { t with stack := rest }
+  | _ => t
+
+/-- The base buffer of the innermost frame when it is a `knock` frame. -/
+def knockBase (t : TxState) : Option ByteArray :=
+  match t.stack with
+  | .knock b :: _ => some b
+  | _ => none
+
+/-- Pushing a knockout frame keeps the page size and the `Sized` invariant. -/
+theorem pushKnock_size (W H : Nat) (k : Bool) (r : TxState × ByteArray)
+    (hb : r.2.size = 4 * W * H) (ht : r.1.Sized W H) :
+    (pushKnock k r).2.size = 4 * W * H ∧ (pushKnock k r).1.Sized W H := by
+  unfold pushKnock
+  split
+  · refine ⟨hb, ?_⟩
+    intro l hl
+    simp only [List.mem_cons] at hl
+    rcases hl with rfl | hl
+    · exact hb
+    · exact ht l hl
+  · exact ⟨hb, ht⟩
+
+/-- Dropping a knockout frame keeps the `Sized` invariant. -/
+theorem popKnock_sized (W H : Nat) (t : TxState) (ht : t.Sized W H) : (popKnock t).Sized W H := by
+  unfold popKnock
+  split
+  · rename_i b rest heq
+    intro l hl
+    exact ht l (by simp [heq, hl])
+  · exact ht
+
 /-- A transparency group's layer: alpha `ca`, blend mode and soft mask of the group. A group
 with alpha 1, `Normal` and no (kept) mask is painted directly (`.skipped`; exact without
-knockout). -/
+knockout). A knockout group (`/K true`, task 7.3i) then gets a `knock` frame (`pushKnock`). -/
 def beginGroup (W H : Nat) (t : TxState) (buf : ByteArray) (g : GroupInfo) : TxState × ByteArray :=
   let fx : Fx := { alpha := compByte g.alpha, blend := g.blend, mask := g.smask.bind t.mask? }
-  if fx.alpha = 255 ∧ fx.blend = .normal ∧ fx.mask.isNone then
-    ({ t with stack := .skipped :: t.stack }, buf)
-  else beginLayer W H t buf fx
+  pushKnock g.knockout <|
+    if fx.alpha = 255 ∧ fx.blend = .normal ∧ fx.mask.isNone then
+      ({ t with stack := .skipped :: t.stack }, buf)
+    else beginLayer W H t buf fx
 
 /-- Opening a group keeps the page size and the `Sized` invariant. -/
 theorem beginGroup_size (W H : Nat) (t : TxState) (buf : ByteArray) (g : GroupInfo)
@@ -799,14 +862,17 @@ theorem beginGroup_size (W H : Nat) (t : TxState) (buf : ByteArray) (g : GroupIn
     (beginGroup W H t buf g).2.size = 4 * W * H ∧ (beginGroup W H t buf g).1.Sized W H := by
   unfold beginGroup
   simp only
-  split
-  · refine ⟨hb, ?_⟩
-    intro l hl
-    simp only [List.mem_cons] at hl
-    rcases hl with rfl | hl
-    · trivial
-    · exact ht l hl
-  · exact beginLayer_size W H t buf _ hb ht
+  apply pushKnock_size
+  · split
+    · exact hb
+    · exact (beginLayer_size W H t buf _ hb ht).1
+  · split
+    · intro l hl
+      simp only [List.mem_cons] at hl
+      rcases hl with rfl | hl
+      · trivial
+      · exact ht l hl
+    · exact (beginLayer_size W H t buf _ hb ht).2
 
 /-- The layer effect of a painting item: its blend mode and (kept) soft mask; `none` when it
 paints plainly. -/
@@ -982,6 +1048,219 @@ def paintFx {S : Type} (P : Painter S) (W H : Nat) (s : S) (it : DisplayItem) : 
       let r2 := endLayer W H (Clip.pageRect W H) t1 (P.buf s2)
       P.setBuf (P.setTx s2 r2.1) r2.2
 
+/-- The driver's invariant: a page-size buffer and page-size saved backdrops. -/
+def Inv {S : Type} (P : Painter S) (W H : Nat) (s : S) : Prop :=
+  (P.buf s).size = 4 * W * H ∧ (P.tx s).Sized W H
+
+/-! ### Knockout (task 7.3i)
+
+MuPDF (`draw-device.c`, `fz_knockout_begin`/`fz_knockout_end`, 1.25.1) paints an item of
+constant alpha ≠ 1 inside a knockout group onto a copy of the group's initial backdrop `B`,
+records its **shape** (coverage without alpha), and merges: `dest = lerp(dest, B ⊕ item,
+shape)`; items with alpha 1 are painted directly. Here (`knockItem`): `B ⊕ item` is the item
+painted (with its blend mode and soft mask, `paintC`) onto the `knock` frame's `base`, and the
+shape comes from two plain renders of the item made opaque (`opaqueItem`: alpha 1, `Normal`,
+no mask) over black (`R₀ = s·C`) and white (`R₁ = 1 − s + s·C`): `s = 255 − (ΣR₁ − ΣR₀)/3`
+(exact for coverage 0 and 255, ±1 at anti-aliased edges). Outside the item's bound `s = 0`, so
+the merge runs over the bound only (`renderTx`) or the whole page (`renderTxSpec`) with the same
+bytes. A glyph run that fills and strokes is, as in MuPDF (`pdf-op-run.c`, `pdf_show_text`),
+its own knockout group of a fill run and a stroke run (`splitRun?`), unless the stroke's alpha
+is 0, or 1 with `Normal`. -/
+
+/-- The constant alpha byte of a painting item (255 for the others; a run that both fills and
+strokes: the smaller of its two alphas). -/
+def itemAlpha : DisplayItem → Nat
+  | .fillPath _ _ st _ => compByte st.alpha
+  | .strokePath _ st _ => compByte st.alpha
+  | .glyphRun r _ =>
+    match r.renderMode with
+    | .stroke | .strokeClip => compByte r.stroke.alpha
+    | .fillStroke | .fillStrokeClip => min (compByte r.fill.alpha) (compByte r.stroke.alpha)
+    | _ => compByte r.fill.alpha
+  | .image _ _ f _ => compByte f.alpha
+  | .shading _ _ _ f _ => compByte f.alpha
+  | _ => 255
+
+/-- A fill snapshot made opaque: alpha 1, `Normal`, no soft mask. -/
+def opaqueFill (f : Content.FillStyle) : Content.FillStyle :=
+  { f with alpha := Comp.one, blend := .normal, smask := none }
+
+/-- A stroke snapshot made opaque: alpha 1, `Normal`, no soft mask. -/
+def opaqueStroke (f : Content.StrokeStyle) : Content.StrokeStyle :=
+  { f with alpha := Comp.one, blend := .normal, smask := none }
+
+/-- The item painted with alpha 1, `Normal` and no soft mask (its shape, `knockItem`). -/
+def opaqueItem : DisplayItem → DisplayItem
+  | .fillPath p rule st c => .fillPath p rule (opaqueFill st) c
+  | .strokePath p st c => .strokePath p (opaqueStroke st) c
+  | .glyphRun r c => .glyphRun { r with fill := opaqueFill r.fill, stroke := opaqueStroke r.stroke } c
+  | .image src m f c => .image src m (opaqueFill f) c
+  | .shading n res m f c => .shading n res m (opaqueFill f) c
+  | it => it
+
+/-- A glyph run that fills and strokes, as MuPDF's knockout group (`pdf_show_text`): its fill
+run and its stroke run, unless the stroke's alpha is 0, or 1 with `Normal`. -/
+def splitRun? : DisplayItem → Option (DisplayItem × DisplayItem)
+  | .glyphRun r c =>
+    match r.renderMode with
+    | .fillStroke | .fillStrokeClip =>
+      let a := compByte r.stroke.alpha
+      if a = 0 ∨ (a = 255 ∧ r.stroke.blend = .normal) then none
+      else some (.glyphRun { r with renderMode := .fill } c, .glyphRun { r with renderMode := .stroke } c)
+    | _ => none
+  | _ => none
+
+/-- Merge pixel `i`: shape `s` from the renders over black (`r0`) and white (`r1`), then
+`dest = lerp(dest, c, s)`. -/
+def knockPx (c r0 r1 : ByteArray) (i : Nat) (dest : ByteArray) : ByteArray :=
+  let o := 4 * i
+  let sa := getB r0 o + getB r0 (o + 1) + getB r0 (o + 2)
+  let sb := getB r1 o + getB r1 (o + 1) + getB r1 (o + 2)
+  let q := if sa ≤ sb then (sb - sa + 1) / 3 else 0
+  let sh := 255 - min 255 q
+  if sh = 0 then dest else
+  let d := setB dest o (Clip.blend (getB c o) (getB dest o) sh)
+  let d := setB d (o + 1) (Clip.blend (getB c (o + 1)) (getB dest (o + 1)) sh)
+  setB d (o + 2) (Clip.blend (getB c (o + 2)) (getB dest (o + 2)) sh)
+
+/-- `knockPx` preserves the size. -/
+theorem knockPx_size (c r0 r1 : ByteArray) (i : Nat) (dest : ByteArray) :
+    (knockPx c r0 r1 i dest).size = dest.size := by
+  unfold knockPx
+  dsimp only
+  repeat' split
+  all_goals simp only [setB_size]
+
+/-- `n` pixels from index `i`. -/
+def knockSpan (c r0 r1 : ByteArray) : (n i : Nat) → ByteArray → ByteArray
+  | 0, _, d => d
+  | n + 1, i, d => knockSpan c r0 r1 n (i + 1) (knockPx c r0 r1 i d)
+
+/-- `knockSpan` preserves the size. -/
+theorem knockSpan_size (c r0 r1 : ByteArray) (n i : Nat) (d : ByteArray) :
+    (knockSpan c r0 r1 n i d).size = d.size := by
+  induction n generalizing i d with
+  | zero => rfl
+  | succ n ih => simp only [knockSpan, ih, knockPx_size]
+
+/-- Rows `y, y + 1, …` (`n` of them), columns `[x0, x0 + cw)`. -/
+def knockRows (W : Nat) (c r0 r1 : ByteArray) (x0 cw : Nat) : (n y : Nat) → ByteArray → ByteArray
+  | 0, _, d => d
+  | n + 1, y, d => knockRows W c r0 r1 x0 cw n (y + 1) (knockSpan c r0 r1 cw (y * W + x0) d)
+
+/-- `knockRows` preserves the size. -/
+theorem knockRows_size (W : Nat) (c r0 r1 : ByteArray) (x0 cw n y : Nat) (d : ByteArray) :
+    (knockRows W c r0 r1 x0 cw n y d).size = d.size := by
+  induction n generalizing y d with
+  | zero => rfl
+  | succ n ih => simp only [knockRows, ih, knockSpan_size]
+
+/-- **Knockout merge** over the rectangle `r` (clamped to the page): per pixel
+`dest = lerp(dest, c, shape)`, the shape from `r0`/`r1`. -/
+def knockMerge (W H : Nat) (r : IRect) (dest c r0 r1 : ByteArray) : ByteArray :=
+  let x0 := (max r.x0 0).toNat
+  let x1 := (min r.x1 W).toNat
+  let y0 := (max r.y0 0).toNat
+  let y1 := (min r.y1 H).toNat
+  knockRows W c r0 r1 x0 (x1 - x0) (y1 - y0) y0 dest
+
+/-- The knockout merge keeps the destination's size. -/
+theorem knockMerge_size (W H : Nat) (r : IRect) (dest c r0 r1 : ByteArray) :
+    (knockMerge W H r dest c r0 r1).size = dest.size :=
+  knockRows_size _ _ _ _ _ _ _ _ _
+
+/-- **Paint one knockout element** (an item of alpha ≠ 1 under a `knock base` frame): the item
+over `base` with `paintC` (which applies its blend mode and soft mask; masks are kept, the
+layer stack starts empty), its shape from two opaque renders, merged into the current buffer
+over `r`; the enclosing layer's dirty rectangle grows by the item's bound. -/
+def knockItem {S : Type} (P : Painter S) (W H : Nat) (paintC : S → DisplayItem → S) (r : IRect)
+    (base : ByteArray) (s : S) (it : DisplayItem) : S :=
+  let t := P.tx s
+  let dest := P.buf s
+  let s1 := paintC (P.setBuf (P.setTx s { masks := t.masks }) base) it
+  let c := P.buf s1
+  let op := opaqueItem it
+  let s2 := P.paint (P.setBuf (P.setTx s1 {}) (fillBuf W H 0)) op
+  let r0 := P.buf s2
+  let s3 := P.paint (P.setBuf s2 (fillBuf W H 255)) op
+  let r1 := P.buf s3
+  P.setBuf (P.setTx s3 (t.touch (P.bound it))) (knockMerge W H r dest c r0 r1)
+
+/-- Paint an item with `paintC`, as a knockout element when the innermost frame is a `knock`
+frame and the item's alpha is not 1. The merge rectangle is the item's bound (`fast`) or the
+page. -/
+def paintK {S : Type} (P : Painter S) (W H : Nat) (paintC : S → DisplayItem → S) (fast : Bool)
+    (s : S) (it : DisplayItem) : S :=
+  match knockBase (P.tx s) with
+  | some b =>
+    if itemAlpha it = 255 then paintC s it
+    else
+      let pg := Clip.pageRect W H
+      let r := if fast then ((P.bound it).getD pg).inter pg else pg
+      knockItem P W H paintC r b s it
+  | none => paintC s it
+
+/-- `paintK`, with a glyph run that fills and strokes painted as its own knockout group
+(`splitRun?`; a `knock` frame on the current buffer around its fill run and its stroke run, if
+fewer than `maxLayerDepth` buffers are held). -/
+def paintKT {S : Type} (P : Painter S) (W H : Nat) (paintC : S → DisplayItem → S) (fast : Bool)
+    (s : S) (it : DisplayItem) : S :=
+  match splitRun? it with
+  | some (fi, si) =>
+    let t := P.tx s
+    if openCount t.stack < maxLayerDepth then
+      let s1 := P.setTx s { t with stack := .knock (P.buf s) :: t.stack }
+      let s2 := paintK P W H paintC fast (paintK P W H paintC fast s1 fi) si
+      P.setTx s2 (popKnock (P.tx s2))
+    else paintC s it
+  | none => paintK P W H paintC fast s it
+
+/-- A knockout element keeps the invariant. -/
+theorem knockItem_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
+    (paintC : S → DisplayItem → S) (r : IRect) (base : ByteArray) (s : S) (it : DisplayItem)
+    (h : Inv P W H s) : Inv P W H (knockItem P W H paintC r base s it) := by
+  unfold knockItem
+  dsimp only
+  refine ⟨?_, ?_⟩
+  · rw [hP.buf_setBuf, knockMerge_size]; exact h.1
+  · rw [hP.tx_setBuf, hP.tx_setTx]; exact touch_sized W H _ _ h.2
+
+/-- `paintK` keeps the invariant, given that `paintC` does. -/
+theorem paintK_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
+    (paintC : S → DisplayItem → S) (hC : ∀ s it, Inv P W H s → Inv P W H (paintC s it))
+    (fast : Bool) (s : S) (it : DisplayItem) (h : Inv P W H s) :
+    Inv P W H (paintK P W H paintC fast s it) := by
+  unfold paintK
+  split
+  · split
+    · exact hC s it h
+    · exact knockItem_inv P hP W H paintC _ _ s it h
+  · exact hC s it h
+
+/-- `paintKT` keeps the invariant, given that `paintC` does. -/
+theorem paintKT_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat)
+    (paintC : S → DisplayItem → S) (hC : ∀ s it, Inv P W H s → Inv P W H (paintC s it))
+    (fast : Bool) (s : S) (it : DisplayItem) (h : Inv P W H s) :
+    Inv P W H (paintKT P W H paintC fast s it) := by
+  unfold paintKT
+  split
+  · rename_i fi si _
+    dsimp only
+    split
+    · have h1 : Inv P W H (P.setTx s { P.tx s with stack := .knock (P.buf s) :: (P.tx s).stack }) := by
+        refine ⟨by rw [hP.buf_setTx]; exact h.1, ?_⟩
+        rw [hP.tx_setTx]
+        intro l hl
+        simp only [List.mem_cons] at hl
+        rcases hl with rfl | hl
+        · exact h.1
+        · exact h.2 l hl
+      have h2 := paintK_inv P hP W H paintC hC fast _ si
+        (paintK_inv P hP W H paintC hC fast _ fi h1)
+      exact ⟨by rw [hP.buf_setTx]; exact h2.1, by rw [hP.tx_setTx]; exact popKnock_sized W H _ h2.2⟩
+    · exact hC s it h
+  · exact paintK_inv P hP W H paintC hC fast s it h
+
 /-- **The transparency driver** for one item (fuel: soft-mask nesting): groups open and close
 layers, soft-mask items define masks (their items drawn by the driver at one less fuel into
 a fresh buffer, with an empty layer stack), painting items with a blend mode or soft mask are
@@ -991,7 +1270,7 @@ def renderTx {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayItem 
     let r := beginGroup W H (P.tx s) (P.buf s) g
     P.setBuf (P.setTx s r.1) r.2
   | _, s, .groupEnd =>
-    let t := P.tx s
+    let t := popKnock (P.tx s)
     let s0 := P.setTx s {}
     let r := endLayer W H (Clip.pageRect W H) t (P.buf s0)
     P.setBuf (P.setTx s0 r.1) r.2
@@ -1000,11 +1279,7 @@ def renderTx {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayItem 
     let draw : ByteArray → ByteArray := fun base =>
       P.buf (items.foldl (renderTx P W H f) (P.setBuf (P.setTx s { masks := (P.tx s).masks }) base))
     P.setTx s ((P.tx s).addMask id (maskFrom info W H draw))
-  | _, s, it => paintFx P W H s it
-
-/-- The driver's invariant: a page-size buffer and page-size saved backdrops. -/
-def Inv {S : Type} (P : Painter S) (W H : Nat) (s : S) : Prop :=
-  (P.buf s).size = 4 * W * H ∧ (P.tx s).Sized W H
+  | _, s, it => paintKT P W H (paintFx P W H) true s it
 
 /-- `addMask` keeps the layer stack. -/
 theorem addMask_stack (t : TxState) (id : Nat) (m : ByteArray) : (t.addMask id m).stack = t.stack :=
@@ -1051,7 +1326,8 @@ theorem renderTx_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat) :
   | groupEnd =>
     simp only [renderTx]
     have hb0 : (P.buf (P.setTx s {})).size = 4 * W * H := by rw [hP.buf_setTx]; exact h.1
-    have := endLayer_size W H (Clip.pageRect W H) (P.tx s) (P.buf (P.setTx s {})) hb0 h.2
+    have := endLayer_size W H (Clip.pageRect W H) (popKnock (P.tx s)) (P.buf (P.setTx s {})) hb0
+      (popKnock_sized W H _ h.2)
     exact ⟨by rw [hP.buf_setBuf]; exact this.1, by rw [hP.tx_setBuf, hP.tx_setTx]; exact this.2⟩
   | softMask id info items =>
     cases f with
@@ -1062,7 +1338,10 @@ theorem renderTx_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat) :
       rw [hP.tx_setTx]
       intro l hl
       exact h.2 l hl
-  | _ => all_goals (cases f <;> (simp only [renderTx]; exact paintFx_inv P hP W H s _ h))
+  | _ =>
+    all_goals
+      have hk := paintKT_inv P hP W H _ (paintFx_inv P hP W H) true s
+      cases f <;> (simp only [renderTx]; exact hk _ h)
 
 /-- Folding the driver keeps the invariant. -/
 theorem foldl_renderTx_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H f : Nat)
@@ -1102,15 +1381,17 @@ def endLayerSpec (W H : Nat) (r : IRect) (t : TxState) (buf : ByteArray) : TxSta
   match t.stack with
   | [] => (t, buf)
   | .skipped :: rest => ({ t with stack := rest }, buf)
+  | .knock _ :: rest => ({ t with stack := rest }, buf)
   | .opened back fx _ :: rest => ({ t with stack := rest }, combine W H r back buf fx)
 
-/-- `beginGroup` of 7.3c. -/
+/-- `beginGroup` of 7.3c, with the knockout frame of task 7.3i. -/
 def beginGroupSpec (W H : Nat) (t : TxState) (buf : ByteArray) (g : GroupInfo) :
     TxState × ByteArray :=
   let fx : Fx := { alpha := compByte g.alpha, blend := g.blend, mask := g.smask.bind t.mask? }
-  if fx.alpha = 255 ∧ fx.blend = .normal ∧ fx.mask.isNone then
-    ({ t with stack := .skipped :: t.stack }, buf)
-  else beginLayerSpec W H t buf fx
+  pushKnock g.knockout <|
+    if fx.alpha = 255 ∧ fx.blend = .normal ∧ fx.mask.isNone then
+      ({ t with stack := .skipped :: t.stack }, buf)
+    else beginLayerSpec W H t buf fx
 
 /-- `paintFx` of 7.3c. -/
 def paintFxSpec {S : Type} (P : Painter S) (W H : Nat) (s : S) (it : DisplayItem) : S :=
@@ -1128,7 +1409,7 @@ def renderTxSpec {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayI
     let r := beginGroupSpec W H (P.tx s) (P.buf s) g
     P.setBuf (P.setTx s r.1) r.2
   | _, s, .groupEnd =>
-    let r := endLayerSpec W H (Clip.pageRect W H) (P.tx s) (P.buf s)
+    let r := endLayerSpec W H (Clip.pageRect W H) (popKnock (P.tx s)) (P.buf s)
     P.setBuf (P.setTx s r.1) r.2
   | 0, s, .softMask .. => s
   | f + 1, s, .softMask id info items =>
@@ -1136,7 +1417,7 @@ def renderTxSpec {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayI
       P.buf (items.foldl (renderTxSpec P W H f)
         (P.setBuf (P.setTx s { masks := (P.tx s).masks }) base))
     P.setTx s ((P.tx s).addMask id (maskFromSpec info W H draw))
-  | _, s, it => paintFxSpec P W H s it
+  | _, s, it => paintKT P W H (paintFxSpec P W H) false s it
 
 /-! ## 8. Checks -/
 
