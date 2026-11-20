@@ -7,7 +7,8 @@ toolbar, the context menu or a key; each has a label, the accelerator shown in m
 constant Tcl script that runs it (`::safepdf::emit …` back into Lean, or a constant UI proc),
 and an enabled rule over a small view of the viewer state (`Ctx`).
 
-* **Menubar** (`menubar`): File (Open…, Close, Quit), Edit (Copy, Select all, Find…), View
+* **Menubar** (`menubar`): File (Open…, Close, Quit), Edit (Copy, Select all, Highlight
+  selection, the Highlight colour cascade, Add note…, Delete mark, Find…; marks: task 9.4), View
   (Outline, zoom in/out, actual size, fit page/width, rotate), Go (previous/next/first/last
   page, Go to page…, Back, Forward). The viewer builds the Tk menus from this list
   (`Viewer.buildMenus`) and keeps every entry's `-state` in step with `Cmd.enabled`
@@ -17,7 +18,11 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   vocabulary.
 * **Keys stay**: the accelerators shown here are the key bindings of `Viewer.setupScript`
   (Ctrl+O, Ctrl+W, Ctrl+Q, Ctrl+C, Ctrl+A, Ctrl+F, F9, `+`, `-`, `0`, `f`, `w`, `r`, `R`,
-  PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right); a menu accelerator is only a label in Tk.
+  PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right, `h`, Delete); a menu accelerator is only a
+  label in Tk.
+* **Context menu** (right button): Copy, Select all, Find…, then the mark entries
+  `popupMarks` — Highlight (colour cascade), Add note… (at the clicked point, `Cmd.popScript`),
+  Delete mark (task 9.4).
 
 Scripts are constants (no data in script text, `docs/viewer.md`): they are passed to Tk as
 one `Tcl.quote`d word of `-command` and evaluated by Tk when the entry is invoked.
@@ -39,6 +44,12 @@ inductive Cmd where
   | selectAll
   /-- Open the find bar. -/
   | find
+  /-- Highlight the selection in the current colour (task 9.4). -/
+  | highlight
+  /-- Add a note to the selection, or at a page point (task 9.4). -/
+  | addNote
+  /-- Delete the selected mark (task 9.4). -/
+  | deleteMark
   /-- Show/hide the outline panel. -/
   | outline
   /-- Zoom in one step. -/
@@ -73,7 +84,7 @@ inductive Cmd where
 
 /-- Every command, in menubar order. -/
 def Cmd.all : List Cmd :=
-  [.openFile, .close, .quit, .copy, .selectAll, .find, .outline, .zoomIn, .zoomOut,
+  [.openFile, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .find, .outline, .zoomIn, .zoomOut,
    .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .prevPage, .nextPage, .firstPage,
    .lastPage, .gotoPage, .back, .forward]
 
@@ -85,6 +96,9 @@ def Cmd.label : Cmd → String
   | .copy => "Copy"
   | .selectAll => "Select all"
   | .find => "Find..."
+  | .highlight => "Highlight selection"
+  | .addNote => "Add note..."
+  | .deleteMark => "Delete mark"
   | .outline => "Outline"
   | .zoomIn => "Zoom in"
   | .zoomOut => "Zoom out"
@@ -109,6 +123,9 @@ def Cmd.accel : Cmd → String
   | .copy => "Ctrl+C"
   | .selectAll => "Ctrl+A"
   | .find => "Ctrl+F"
+  | .highlight => "H"
+  | .addNote => ""
+  | .deleteMark => "Delete"
   | .outline => "F9"
   | .zoomIn => "+"
   | .zoomOut => "-"
@@ -133,6 +150,9 @@ def Cmd.underline : Cmd → Nat
   | .copy => 0
   | .selectAll => 7
   | .find => 0
+  | .highlight => 0
+  | .addNote => 4
+  | .deleteMark => 0
   | .outline => 0
   | .zoomIn => 5
   | .zoomOut => 5
@@ -158,6 +178,9 @@ def Cmd.script : Cmd → String
   | .copy => "::safepdf::emit copy"
   | .selectAll => "::safepdf::emit selectall"
   | .find => "::safepdf::showFind"
+  | .highlight => "::safepdf::emit highlight"
+  | .addNote => "::safepdf::emit note"
+  | .deleteMark => "::safepdf::emit markDelete"
   | .outline => "::safepdf::emit outlineToggle"
   | .zoomIn => "::safepdf::emit zoom in"
   | .zoomOut => "::safepdf::emit zoom out"
@@ -186,6 +209,8 @@ structure Ctx where
   hasSel : Bool := false
   /-- The document has an outline. -/
   hasOutline : Bool := false
+  /-- A mark (highlight or note) is selected (task 9.4). -/
+  hasMark : Bool := false
   /-- The back stack is not empty. -/
   canBack : Bool := false
   /-- The forward stack is not empty. -/
@@ -196,13 +221,14 @@ structure Ctx where
 otherwise; the handlers check again, so a key on a disabled command does nothing). -/
 def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .openFile | .quit => true
-  | .copy => c.hasDoc && c.hasSel
+  | .copy | .highlight => c.hasDoc && c.hasSel
+  | .deleteMark => c.hasDoc && c.hasMark
   | .outline => c.hasDoc && c.hasOutline
   | .prevPage | .firstPage => c.hasDoc && c.page > 0
   | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages
   | .back => c.hasDoc && c.canBack
   | .forward => c.hasDoc && c.canForward
-  | .close | .selectAll | .find | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
+  | .close | .selectAll | .find | .addNote | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
   | .rotateCw | .rotateCcw | .gotoPage => c.hasDoc
 
 /-- A menu entry. -/
@@ -211,6 +237,8 @@ inductive Entry where
   | cmd (c : Cmd)
   /-- A check entry bound to the Tcl variable `var` (the viewer keeps it in step). -/
   | check (c : Cmd) (var : String)
+  /-- The highlight-colour cascade `path` (radio entries of `Marks.Color.all`, task 9.4). -/
+  | colors (path : String)
   /-- A separator. -/
   | sep
   deriving DecidableEq, Repr, Inhabited
@@ -218,7 +246,7 @@ inductive Entry where
 /-- The command of an entry. -/
 def Entry.cmd? : Entry → Option Cmd
   | .cmd c | .check c _ => some c
-  | .sep => none
+  | .colors _ | .sep => none
 
 /-- One cascade of the menubar. -/
 structure Menu where
@@ -241,13 +269,47 @@ def outlineVar : String := "::safepdf::outlineOn"
 /-- The menubar: File / Edit / View / Go. -/
 def menubar : List Menu :=
   [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .close, .sep, .cmd .quit]⟩,
-    ⟨".menubar.edit", "Edit", 0, [.cmd .copy, .cmd .selectAll, .sep, .cmd .find]⟩,
+    ⟨".menubar.edit", "Edit", 0,
+      [.cmd .copy, .cmd .selectAll, .sep, .cmd .highlight, .colors ".menubar.edit.hl",
+       .cmd .addNote, .cmd .deleteMark, .sep, .cmd .find]⟩,
     ⟨".menubar.view", "View", 0,
       [.check .outline outlineVar, .sep, .cmd .zoomIn, .cmd .zoomOut, .cmd .actualSize,
        .cmd .fitPage, .cmd .fitWidth, .sep, .cmd .rotateCw, .cmd .rotateCcw]⟩,
     ⟨".menubar.go", "Go", 0,
       [.cmd .prevPage, .cmd .nextPage, .cmd .firstPage, .cmd .lastPage, .sep, .cmd .gotoPage,
        .sep, .cmd .back, .cmd .forward]⟩ ]
+
+/-- Label of the highlight-colour cascades (Edit menu, context menu). -/
+def colorsLabel : String := "Highlight colour"
+
+/-- Label of the highlight-colour cascade in the context menu (Plan: "Highlight (color
+submenu)"). -/
+def popColorsLabel : String := "Highlight"
+
+/-- Tcl variable holding the current highlight colour (`Marks.Color.name`), shared by the
+radio entries of every colour menu. -/
+def colorVar : String := "::safepdf::hlColor"
+
+/-- Script of a colour entry: highlight the selection in the chosen colour, or recolour the
+selected mark, or just make it the current colour (`Viewer.highlight`). -/
+def colorScript : String := "::safepdf::emit highlight $::safepdf::hlColor"
+
+/-- The context-menu variant of a command's script: Add note… takes the point that was
+right-clicked (`::safepdf::popX`/`popY`, window coordinates set when the menu opens). -/
+def Cmd.popScript : Cmd → String
+  | .addNote => "::safepdf::emit note $::safepdf::popX $::safepdf::popY"
+  | c => c.script
+
+/-- Tk path of the context menu. -/
+def popPath : String := ".pop"
+
+/-- Index in the context menu of the first mark entry (after Copy, Select all, Find…). -/
+def popFirst : Nat := 3
+
+/-- The mark entries of the context menu, appended after Copy / Select all / Find…: a
+separator, the Highlight colour cascade (`.pop.hl`), Add note…, Delete mark. -/
+def popupMarks : List Entry :=
+  [.sep, .colors ".pop.hl", .cmd .addNote, .cmd .deleteMark]
 
 /-- Every command entry of the menubar as (menu path, entry index, command); the index counts
 separators, as Tk's menu indices do (menus have no tear-off entry). -/
@@ -277,16 +339,23 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 #guard locate .quit == some (".menubar.file", 3)
 #guard locate .back == some (".menubar.go", 7)
 #guard locate .zoomIn == some (".menubar.view", 2)
+#guard locate .highlight == some (".menubar.edit", 3)
+#guard locate .deleteMark == some (".menubar.edit", 6)
+#guard locate .find == some (".menubar.edit", 8)
+#guard Cmd.addNote.popScript != Cmd.addNote.script && Cmd.copy.popScript == Cmd.copy.script
 -- Enabled rules.
 #guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit]
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3 }
   !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c &&
   Cmd.lastPage.enabled c && !Cmd.copy.enabled c && !Cmd.outline.enabled c &&
-  !Cmd.back.enabled c && Cmd.zoomIn.enabled c
+  !Cmd.back.enabled c && Cmd.zoomIn.enabled c && !Cmd.highlight.enabled c &&
+  Cmd.addNote.enabled c && !Cmd.deleteMark.enabled c
 #guard let c : Ctx :=
     { hasDoc := true, page := 2, pages := 3, hasSel := true, hasOutline := true, canBack := true }
   Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c && !Cmd.lastPage.enabled c &&
-  Cmd.copy.enabled c && Cmd.outline.enabled c && Cmd.back.enabled c && !Cmd.forward.enabled c
+  Cmd.copy.enabled c && Cmd.outline.enabled c && Cmd.back.enabled c && !Cmd.forward.enabled c &&
+  Cmd.highlight.enabled c
+#guard Cmd.deleteMark.enabled { hasDoc := true, pages := 1, hasMark := true }
 -- A one-page document: no paging either way.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c

@@ -6,20 +6,22 @@ import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Menu
 import SafePdf.Shell.App.Toolbar
 import SafePdf.Shell.App.Sidebar
+import SafePdf.Shell.App.Marks
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
 
 /-!
-# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.7; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.4, 9.7; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
 (File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
 `Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar and
 an outline sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
 `Toolbar.layout` and `Sidebar.rows`: sidebar toggle, page arrows, page field, zoom −/+ and
-drop-down, disabled annotation-tool placeholders, `»` overflow menu; the design reference is
+drop-down, the Highlight tool (task 9.4) and disabled placeholders for the other annotation
+tools, `»` overflow menu; the design reference is
 cited in `docs/viewer.md`, nothing of PDF.js is copied), a scrollable canvas showing the
 current page as a Tk photo image, and a status line.
 Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
@@ -80,6 +82,14 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   (page and scroll fractions) in a back/forward history (Alt+Left/Alt+Right, toolbar). Page
   labels (`Nav.labelTable`) appear in the title, toolbar and status line (`page iii (3/120)`);
   Ctrl+G opens a go-to bar accepting a label or a page number (`Links.gotoPage`).
+* **Marks** (task 9.4, pure model in `Marks`): highlights of the selection in PDF.js's five
+  colours (toolbar Highlight button, `h`, Edit menu, context-menu colour cascade) and notes
+  (Add note… on the selection or at the right-clicked point; a popup edits the text), kept in
+  memory per document in page space (`Marks.Store`, stable ids). Highlights are multiplied
+  into the shown page image (`Marks.composite`, PDF.js's `mix-blend-mode: multiply`); note
+  icons, note anchors and the selected-mark outline are canvas items (tag `mark`). A click on
+  a mark selects it (a note also opens its popup); Delete or Edit → Delete mark removes it,
+  a colour entry recolours it.
 * **Errors** (unreadable file, parse error, render error, Tcl error) are shown in the status
   line; the window stays usable. Every event handler catches its own exceptions.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
@@ -201,6 +211,14 @@ structure State where
   olOpen : Array Bool := #[]
   /-- Whether the sidebar toggle is shown (`none`: not applied yet). -/
   toggleShown : Option Bool := none
+  /-- The user's highlights and notes of the open document (task 9.4). -/
+  marks : Marks.Store := {}
+  /-- The selected mark (its id). -/
+  markSel : Option Nat := none
+  /-- The current highlight colour (`::safepdf::hlColor`). -/
+  hlColor : Marks.Color := .yellow
+  /-- The page image on screen before the highlights are multiplied in (`Marks.composite`). -/
+  shownImg : Option Clip.Image := none
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -704,7 +722,7 @@ menu .pop -tearoff 0
 .pop add command -label Copy -accelerator Ctrl+C -command {::safepdf::emit copy}
 .pop add command -label {Select all} -accelerator Ctrl+A -command {::safepdf::emit selectall}
 .pop add command -label {Find...} -accelerator Ctrl+F -command ::safepdf::showFind
-bind .c <Button-3> {tk_popup .pop %X %Y}
+bind .c <Button-3> {focus .c; ::safepdf::emit popup %x %y %X %Y}
 bind . <Control-c> {::safepdf::emit copy}
 bind . <Control-a> {::safepdf::emit selectall}
 # Search bar (hidden until Ctrl+F). The entry does not carry the toplevel's bind tag, so
@@ -804,6 +822,64 @@ clipboard.}
   return $::safepdf::uriAnswer
 }
 set ::safepdf::autoConfirm 0
+# Marks (9.4): current highlight colour, the right-clicked point, the toolbar's colour menu,
+# keys, the note icon and the note popup.
+set ::safepdf::hlColor yellow
+set ::safepdf::popX {}
+set ::safepdf::popY {}
+proc ::safepdf::postHl {} {
+  tk_popup .hlpop [winfo rootx .bar.highlight] [expr {[winfo rooty .bar.highlight] + [winfo height .bar.highlight] + 2}]
+}
+bind . <Key-h> {::safepdf::emit highlight}
+bind . <Key-Delete> {::safepdf::emit markDelete}
+# A note icon (a speech bubble, after the /Text annotation's Comment icon) in the box
+# x0 y0 x1 y1 of canvas c, filled with colour fill; selected: a blue ring.
+proc ::safepdf::noteIcon {c x0 y0 x1 y1 fill tags} {
+  set w [expr {$x1 - $x0}]; set h [expr {$y1 - $y0}]
+  set r [expr {max(1.0, $w / 8.0)}]
+  set by [expr {$y0 + $h * 0.75}]
+  ::safepdf::rrect $c $x0 $y0 $x1 $by $r -fill $fill -outline #3b3b44 -width 1 -tags $tags
+  $c create polygon [expr {$x0 + $w * 0.25}] [expr {$by - 0.5}] [expr {$x0 + $w * 0.25}] $y1 \
+    [expr {$x0 + $w * 0.5}] [expr {$by - 0.5}] -fill $fill -outline #3b3b44 -width 1 -tags $tags
+  $c create line [expr {$x0 + $w * 0.25}] [expr {$by - 0.5}] [expr {$x0 + $w * 0.5}] [expr {$by - 0.5}] \
+    -fill $fill -width 2 -tags $tags
+  foreach f {0.28 0.5} {
+    set y [expr {$y0 + $h * $f}]
+    $c create line [expr {$x0 + $w * 0.22}] $y [expr {$x1 - $w * 0.22}] $y -fill #3b3b44 \
+      -width [expr {max(1.0, $h / 16.0)}] -tags $tags
+  }
+}
+# Note popup: a small window with the note text (inserted by variable substitution, never
+# parsed as script); Save (Ctrl+Return) sends the text back as one word, Delete removes the
+# note, Cancel/Escape closes.
+proc ::safepdf::noteEdit {id text x y} {
+  set w .note
+  destroy $w
+  toplevel $w -background $::safepdf::col(panel)
+  wm title $w Note
+  wm transient $w .
+  wm geometry $w +$x+$y
+  text $w.t -wrap word -width 36 -height 6 -font ::safepdf::fOl -relief solid -borderwidth 1 \
+    -undo 1 -background #ffffe8 -foreground $::safepdf::col(text) -padx 6 -pady 4
+  $w.t insert end $text
+  ttk::frame $w.b
+  ttk::button $w.b.save -text Save -command [list ::safepdf::noteDone $id save]
+  ttk::button $w.b.del -text Delete -command [list ::safepdf::noteDone $id delete]
+  ttk::button $w.b.cancel -text Cancel -command [list destroy $w]
+  pack $w.b.cancel $w.b.save -side right -padx 4 -pady 4
+  pack $w.b.del -side left -padx 4 -pady 4
+  pack $w.b -side bottom -fill x
+  pack $w.t -side top -fill both -expand 1 -padx 6 -pady {6 0}
+  bind $w <Escape> [list destroy $w]
+  bind $w.t <Control-Return> [list ::safepdf::noteDone $id save]
+  focus $w.t
+}
+proc ::safepdf::noteDone {id what} {
+  if {![winfo exists .note]} return
+  set t [.note.t get 1.0 {end - 1 chars}]
+  destroy .note
+  if {$what eq {save}} { ::safepdf::emit noteSave $id $t } else { ::safepdf::emit noteDelete $id }
+}
 focus .c
 "
 
@@ -851,12 +927,38 @@ def pagePoint (st : IO.Ref State) (wx wy : Int) : IO (Option Pt) := do
   let (some cx, some cy) := (View.parseDecimal cx, View.parseDecimal cy) | return none
   return some (toPage s.shownZoom s.shownRot bx ⟨cx - (s.imgX : Rat), cy - (s.imgY : Rat)⟩)
 
-/-- Redraws the highlight rectangles of the shown page: all search hits (tag `hit`, the
-current one in orange) and the selection (tag `sel`). -/
+/-- Draws the canvas items of the shown page's marks (tag `mark`, task 9.4): note icons
+(`::safepdf::noteIcon`, tag `note` and `mID`), the dashed quads a note is anchored to, and the
+outline of the selected mark (tag `marksel`). Highlight fills are pixels (`showImage`). -/
+def drawMarks (s : State) (bx : Box) : IO Unit := do
+  for m in s.marks.onPage s.page do
+    let tags := s!"mark m{m.id}"
+    if m.isNote then
+      for q in m.quads do
+        let (x0, y0, x1, y1) := canvasRect s bx q
+        discard <| run [".c", "create", "rectangle", toString x0.floor, toString y0.floor,
+          toString x1.ceil, toString y1.ceil, "-outline", "#c99a00", "-dash", "4 2",
+          "-width", "1", "-tags", tags]
+      if let some ib := m.iconBox bx then
+        let (x0, y0, x1, y1) := canvasRect s bx ib
+        discard <| run ["::safepdf::noteIcon", ".c", toString x0.floor, toString y0.floor,
+          toString x1.ceil, toString y1.ceil, m.color.hex, s!"{tags} note"]
+    if s.markSel == some m.id then
+      let boxes := if m.isNote then (m.iconBox bx).toList else m.quads
+      for q in boxes do
+        let (x0, y0, x1, y1) := canvasRect s bx q
+        discard <| run [".c", "create", "rectangle", toString (x0.floor - 2),
+          toString (y0.floor - 2), toString (x1.ceil + 2), toString (y1.ceil + 2),
+          "-outline", "#0060df", "-width", "2", "-tags", s!"{tags} marksel"]
+
+/-- Redraws the overlays of the shown page: the marks' canvas items (`drawMarks`), all search
+hits (tag `hit`, the current one in orange) and the selection (tag `sel`), in that stacking
+order. -/
 def drawOverlay (st : IO.Ref State) : IO Unit := do
-  discard <| run [".c", "delete", "sel", "hit"]
+  discard <| run [".c", "delete", "sel", "hit", "mark"]
   let s ← st.get
   let some bx := shownBox s | return
+  drawMarks s bx
   let rect (b : Box) (color tag : String) : IO Unit := do
     let (x0, y0, x1, y1) := canvasRect s bx b
     let style := if s.stipple then ["-fill", color, "-stipple", "gray50", "-outline", ""]
@@ -953,7 +1055,9 @@ def refresh (st : IO.Ref State) : IO Unit := do
     let s ← st.get
     match res with
     | .ok img =>
-      Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32 img.data
+      st.modify ({ · with shownImg := some img })
+      Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32
+        (Marks.composite vp.zoom vp.rot vp.box img.w img.h img.data (s.marks.onPage s.page))
       -- Centre the page when it is smaller than the canvas; the scroll region is the page
       -- plus the margin (at least the canvas).
       let m := View.margin
@@ -981,17 +1085,26 @@ def refresh (st : IO.Ref State) : IO Unit := do
       if s.page + 1 < s.pageCount then
         discard <| run ["after", "100", "::safepdf::emit prefetch"]
     | .error e =>
-      st.modify ({ · with pending := none })
-      discard <| run [".c", "delete", "sel", "hit"]
+      st.modify ({ · with pending := none, shownImg := none })
+      discard <| run [".c", "delete", "sel", "hit", "mark"]
       discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
       discard <| run [photoName, "blank"]
       setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}: cannot render: {renderError e}"
   | _, _ =>
     discard <| run ["::safepdf::setPage", "", "", "0"]
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
-    discard <| run [".c", "delete", "sel", "hit"]
+    discard <| run [".c", "delete", "sel", "hit", "mark"]
     discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
     discard <| run [photoName, "blank"]
+
+/-- Shows the current page image again with the marks of the page multiplied in, and redraws
+the overlays (after a mark was added, removed or recoloured; task 9.4). -/
+def repaint (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if let (some img, some bx) := (s.shownImg, shownBox s) then
+    Shim.photoPut photoName img.w.toUInt32 img.h.toUInt32
+      (Marks.composite s.shownZoom s.shownRot bx img.w img.h img.data (s.marks.onPage s.page))
+  drawOverlay st
 
 /-- Renders the page after the current one into the cache when it is small enough
 (`prefetchPixels`) and not cached yet. -/
@@ -1072,7 +1185,8 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
-                              history := {} }
+                              history := {}, marks := {}, markSel := none, shownImg := none }
+  discard <| run ["destroy", ".note"]
   fillOutline st
   showOutline st false
   st.modify ({ · with toggleShown := none })
@@ -1112,7 +1226,7 @@ def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit :=
   let p := min p (s.pageCount - 1)
   if p != s.page then
     st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none,
-                        hover := none, wheel := {} })
+                        hover := none, wheel := {}, markSel := none })
     discard <| run [".c", "configure", "-cursor", ""]
     refresh st
 
@@ -1236,18 +1350,37 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
-                              hover := none, history := {}, toggleShown := none }
+                              hover := none, history := {}, toggleShown := none,
+                              marks := {}, markSel := none, shownImg := none }
   discard <| run ["pack", "forget", ".find", ".goto"]
+  discard <| run ["destroy", ".note"]
   fillOutline st
   showOutline st false
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
   setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
 
+/-- Tk image of the swatch of colour `c` (a 14 px square, task 9.4). -/
+def swatch (c : Marks.Color) : String := s!"::safepdf::sw::{c.name}"
+
+/-- Creates the colour menu `path` (task 9.4): one radio entry per `Marks.Color` with its
+swatch, on the shared variable `Menu.colorVar`, running `Menu.colorScript`. -/
+def colorMenu (path : String) : IO Unit := do
+  discard <| run ["menu", path, "-tearoff", "0"]
+  for c in Marks.Color.all do
+    discard <| run [path, "add", "radiobutton", "-label", c.label, "-image", swatch c,
+      "-compound", "left", "-variable", Menu.colorVar, "-value", c.name,
+      "-command", Menu.colorScript]
+
 /-- Builds the menubar `.menubar` from `Menu.menubar` (every word a literal through
 `Tcl.quote`; the `-command` scripts are the model's constants) and attaches it to the main
-window. -/
+window; then the mark entries of the context menu (`Menu.popupMarks`) and the toolbar's colour
+menu `.hlpop` (task 9.4). -/
 def buildMenus : IO Unit := do
+  for c in Marks.Color.all do
+    discard <| run ["image", "create", "photo", swatch c, "-width", "14", "-height", "14"]
+    discard <| run [swatch c, "put", "#8f8f9d", "-to", "0", "0", "14", "14"]
+    discard <| run [swatch c, "put", c.hex, "-to", "1", "1", "13", "13"]
   discard <| run ["menu", Menu.barPath, "-tearoff", "0"]
   for m in Menu.menubar do
     discard <| run ["menu", m.path, "-tearoff", "0"]
@@ -1256,6 +1389,9 @@ def buildMenus : IO Unit := do
     for e in m.entries do
       match e with
       | .sep => discard <| run [m.path, "add", "separator"]
+      | .colors path =>
+        colorMenu path
+        discard <| run [m.path, "add", "cascade", "-label", Menu.colorsLabel, "-menu", path]
       | .cmd c =>
         discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accel,
           "-underline", toString c.underline, "-command", c.script]
@@ -1264,6 +1400,19 @@ def buildMenus : IO Unit := do
           "-underline", toString c.underline, "-variable", var, "-onvalue", "1",
           "-offvalue", "0", "-command", c.script]
   discard <| run [".", "configure", "-menu", Menu.barPath]
+  -- After Copy, Select all, Find… (entries 0–2 of the setup script's `.pop`).
+  for (i, e) in (List.range Menu.popupMarks.length).zip Menu.popupMarks do
+    let ix := toString (Menu.popFirst + i)
+    match e with
+    | .sep => discard <| run [Menu.popPath, "insert", ix, "separator"]
+    | .colors path =>
+      colorMenu path
+      discard <| run [Menu.popPath, "insert", ix, "cascade", "-label", Menu.popColorsLabel,
+        "-menu", path]
+    | .cmd c | .check c _ =>
+      discard <| run [Menu.popPath, "insert", ix, "command", "-label", c.label,
+        "-accelerator", c.accel, "-command", c.popScript]
+  colorMenu ".hlpop"
 
 /-- Builds the toolbar from `Toolbar.layout` (task 9.7): icon buttons (`::safepdf::iconButton`
 with the model's constant icon name, tooltip and script), separators, the page field and the
@@ -1295,7 +1444,7 @@ def buildToolbar : IO Unit := do
 /-- The part of the state the enabled rules look at. -/
 def menuCtx (s : State) : Menu.Ctx :=
   { hasDoc := s.doc.isSome && s.pageCount > 0, page := s.page, pages := s.pageCount,
-    hasSel := s.sel.isSome, hasOutline := !s.outline.isEmpty,
+    hasSel := s.sel.isSome, hasMark := s.markSel.isSome, hasOutline := !s.outline.isEmpty,
     canBack := !s.history.back.isEmpty, canForward := !s.history.fwd.isEmpty }
 
 /-- Sets the `-state` of every menubar entry, overflow-menu entry and toolbar button whose
@@ -1450,10 +1599,161 @@ def pageEntry (st : IO.Ref State) (txt : String) : IO Unit := do
     showPageField s
     if !ok then setStatus s!"no page \"{txt}\" (enter a page number or label)"
 
-/-- Handles `tool NAME` (an annotation tool, Print or Save): not available yet. -/
+/-! ## Highlights and notes (task 9.4) -/
+
+/-- What the status line calls a mark. -/
+def markName (m : Marks.Mark) : String :=
+  if m.isNote then "note" else s!"{m.color.name} highlight"
+
+/-- Sets the current highlight colour (and the colour menus' radio variable). -/
+def setColor (st : IO.Ref State) (c : Marks.Color) : IO Unit := do
+  st.modify ({ · with hlColor := c })
+  discard <| run ["set", Menu.colorVar, c.name]
+
+/-- Handles `highlight [COLOR]` (toolbar, `h`, Edit → Highlight selection, a colour entry):
+with a selection, highlights it (its quads are the C3 glyph boxes of the selected line runs,
+`Select.rangeBoxes`) in `COLOR` or the current colour, selects the new mark and clears the
+text selection; else, with a selected mark and a colour, recolours that mark; else only
+makes `COLOR` the current colour. Hook for the selection bubble (task 9.8). -/
+def highlight (st : IO.Ref State) (color : Option String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone then return
+  let chosen := color.bind Marks.Color.ofName
+  let c := chosen.getD s.hlColor
+  setColor st c
+  match s.sel with
+  | some (p, a, b) =>
+    let .ok ix ← pageIndex st p | return
+    match s.marks.addHighlight p c (Select.rangeBoxes ix.cells a b) with
+    | some (marks, id) =>
+      st.modify ({ · with marks, markSel := some id, sel := none })
+      repaint st
+      setStatus s!"page {p + 1}: highlighted {(Select.rangeText ix.cells a b).length} \
+        characters in {c.name} (click it to select it; Delete removes it)"
+    | none => setStatus "nothing to highlight"
+  | none =>
+    match s.markSel, chosen with
+    | some id, some c =>
+      st.modify ({ · with marks := s.marks.recolor id c })
+      repaint st
+      setStatus s!"mark recoloured: {c.name}"
+    | _, some c => setStatus s!"highlight colour: {c.name} (select text, then Highlight)"
+    | _, none => setStatus "select text first (drag over it or double-click a word), then Highlight"
+
+/-- Opens the popup of note `id` next to its icon. -/
+def openNote (st : IO.Ref State) (id : Nat) : IO Unit := do
+  let s ← st.get
+  let some m := s.marks.find? id | return
+  let some bx := shownBox s | return
+  let some ib := m.iconBox bx | return
+  let (_, y0, x1, _) := canvasRect s bx ib
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return
+  let (some rx, some ry) := ((← run ["winfo", "rootx", ".c"]).toInt?,
+    (← run ["winfo", "rooty", ".c"]).toInt?) | return
+  let x := rx + (x1 - vx).ceil + 8
+  let y := ry + (y0 - vy).floor
+  discard <| run ["::safepdf::noteEdit", toString id, m.text, toString (max 0 x),
+    toString (max 0 y)]
+
+/-- Handles `note [X Y]` (Edit → Add note…, or the context menu at window position `(X, Y)`):
+adds a note anchored to the selection on the shown page, else to the page point under
+`(X, Y)`, else to the page point at the window centre; selects it and opens its popup. -/
+def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || (shownBox s).isNone then return
+  let mut anchor : Option Marks.Anchor := none
+  if let some (p, a, b) := s.sel then
+    if p == s.page then
+      if let .ok ix ← pageIndex st p then
+        let qs := Select.rangeBoxes ix.cells a b
+        if !qs.isEmpty then anchor := some (.quads qs)
+  if anchor.isNone then
+    let (wx, wy) := pos.getD (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
+    anchor := (← pagePoint st wx wy).map .point
+  let some anc := anchor | return
+  let (marks, id) := s.marks.addNote s.page .yellow "" anc
+  st.modify ({ · with marks, markSel := some id, sel := none })
+  repaint st
+  setStatus s!"page {s.page + 1}: note added (type its text, then Save)"
+  openNote st id
+
+/-- Handles `noteSave ID TEXT` from the note popup. -/
+def noteSave (st : IO.Ref State) (idS text : String) : IO Unit := do
+  let some id := idS.toNat? | return
+  let s ← st.get
+  if (s.marks.find? id).isNone then return
+  st.modify ({ · with marks := s.marks.setText id text })
+  drawOverlay st
+  setStatus s!"note saved ({text.length} characters)"
+
+/-- Removes mark `id` (Delete, Edit → Delete mark, the note popup's Delete). -/
+def deleteMark (st : IO.Ref State) (id : Nat) : IO Unit := do
+  let s ← st.get
+  let some m := s.marks.find? id | return
+  st.modify ({ · with marks := s.marks.remove id,
+                      markSel := if s.markSel == some id then none else s.markSel })
+  repaint st
+  setStatus s!"{markName m} deleted"
+
+/-- Handles `markDelete`: removes the selected mark. -/
+def markDelete (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  match s.markSel with
+  | some id => deleteMark st id
+  | none => if s.doc.isSome then setStatus "no mark selected (click a highlight or note)"
+
+/-- Selects the mark under page point `p` of the shown page, if any (a note also opens its
+popup when `openIt` is set). Returns whether there was one. -/
+def selectMarkAt (st : IO.Ref State) (p : Pt) (openIt : Bool) : IO Bool := do
+  let s ← st.get
+  let some bx := shownBox s | return false
+  match s.marks.hitAt bx s.page p with
+  | some id =>
+    st.modify ({ · with markSel := some id })
+    drawOverlay st
+    if let some m := s.marks.find? id then
+      setStatus s!"{markName m} selected (Delete removes it; a colour in the Highlight menu \
+        recolours it)"
+      if openIt && m.isNote then openNote st id
+    return true
+  | none => return false
+
+/-- Handles `popup X Y RX RY` (right button at window `(X, Y)`, screen `(RX, RY)`): remembers
+the point for Add note…, selects the mark under it (or deselects the selected one when there
+is none), sets the states of the mark entries and
+posts the context menu. -/
+def popup (st : IO.Ref State) (x y rx ry : String) : IO Unit := do
+  discard <| run ["set", "::safepdf::popX", x]
+  discard <| run ["set", "::safepdf::popY", y]
+  if let (some wx, some wy) := (x.toInt?, y.toInt?) then
+    if let some p ← pagePoint st wx wy then
+      if !(← selectMarkAt st p false) && (← st.get).markSel.isSome then
+        st.modify ({ · with markSel := none })
+        drawOverlay st
+  let s ← st.get
+  let on (b : Bool) : String := if b then "normal" else "disabled"
+  let doc := s.doc.isSome && s.shown.isSome
+  discard <| run [Menu.popPath, "entryconfigure", Menu.popColorsLabel, "-state", on doc]
+  discard <| run [Menu.popPath, "entryconfigure", Menu.Cmd.addNote.label, "-state", on doc]
+  discard <| run [Menu.popPath, "entryconfigure", Menu.Cmd.deleteMark.label, "-state",
+    on (doc && s.markSel.isSome)]
+  if s.smokeDir.isNone then discard <| run ["tk_popup", Menu.popPath, rx, ry]
+
+/-- The toolbar's Highlight button: with a selection, highlights it in the current colour;
+without one, opens the colour menu (`.hlpop`; PDF.js opens its colour pop-over). -/
+def toolHighlight (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if s.sel.isSome then highlight st none
+  else
+    if s.smokeDir.isNone then discard <| run ["::safepdf::postHl"]
+    setStatus "choose the highlight colour, then select text and press Highlight"
+
+/-- Handles `tool NAME` (an annotation tool, Print or Save): Highlight works (task 9.4); the
+others are not available yet. -/
 def tool (st : IO.Ref State) (name : String) : IO Unit := do
-  let _ ← st.get
   match Toolbar.toolOf name with
+  | some .highlight => toolHighlight st
   | some t => setStatus s!"{t.tip}: not available yet ({t.task})"
   | none => setStatus s!"internal: unknown tool {name}"
 
@@ -1470,7 +1770,7 @@ def selStatus (st : IO.Ref State) : IO Unit := do
 /-- Mouse press at window position `(wx, wy)`: clears the selection and remembers the page
 point where a drag starts. -/
 def press (st : IO.Ref State) (wx wy : Int) : IO Unit := do
-  st.modify ({ · with sel := none, pressPt := none })
+  st.modify ({ · with sel := none, pressPt := none, markSel := none })
   if let some p ← pagePoint st wx wy then st.modify ({ · with pressPt := some p })
   drawOverlay st
 
@@ -1483,7 +1783,9 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
   if final then st.modify ({ · with pressPt := none })
   let some p1 ← pagePoint st wx wy | return
   if final && p0 == p1 then
-    -- A click in place: activate the link under it (task 8.2d).
+    -- A click in place: select the mark under it (task 9.4; marks lie above links), else
+    -- activate the link under it (task 8.2d).
+    if ← selectMarkAt st p1 true then return
     if let some (_, l) := Links.linkAt (← linksOf st s.page) p1 then activate st l.action
     return
   match ← pageIndex st s.page with
@@ -1790,7 +2092,7 @@ def smokeToolbar (st : IO.Ref State) (dir : String) : IO Unit := do
     sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]
     sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
   let st0 ← run [".status", "cget", "-text"]
-  click ".bar.highlight"
+  click ".bar.comment"
   out := out.push s!"status-unchanged-after-tool: {st0 == (← run [".status", "cget", "-text"])}"
   -- Arrows (generated clicks on the canvas buttons).
   click ".bar.next"
@@ -2122,6 +2424,156 @@ def smokeMenu (st : IO.Ref State) (dir : String) : IO Unit := do
   -- File → Quit ends the run.
   invoke .quit
 
+/-- Smoke steps of the marks test (`SAFEPDF_VIEWER_SMOKE_MODE=marks`, task 9.4), on the text
+PDF of `smokeText` (page 1: `Hello safe world` with a black marker under `safe`; the
+non-embedded Helvetica is not painted, so the page is white except the marker): double-click
+`world` + the toolbar's Highlight → the pixels there turn PDF.js yellow; Edit → Highlight
+colour → Green recolours the selected highlight; `safe` + Edit → Highlight selection
+highlights in green while the black marker stays black (multiply); a click selects the
+`world` highlight and Delete removes it (white again); right-click at a blank point + Add
+note… creates a note, its popup's text is set and saved, the icon is drawn; a click on the
+icon reopens the popup with the text, which is edited; marks stay after zooming in,
+rotating, going to page 2 (no marks there) and back; the note is deleted through Edit →
+Delete mark. Results go into `marks.txt` as `key: value` lines. -/
+def smokeMarks (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let status : IO String := run [".status", "cget", "-text"]
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  -- The page image pixel at page point `p` ("R G B").
+  let px (p : Pt) : IO String := do
+    let s ← st.get
+    let some bx := shownBox s | return "<no page>"
+    let q := toScreen s.shownZoom s.shownRot bx p
+    try run [photoName, "get", toString q.x.floor, toString q.y.floor]
+    catch _ => pure "<outside>"
+  let clickAt (pos : String × String) : IO Unit := do
+    sendEvent ".c" "<ButtonPress-1>" ["-x", pos.1, "-y", pos.2]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", pos.1, "-y", pos.2]
+  let count : IO Nat := return (← st.get).marks.marks.size
+  let .ok ix ← pageIndex st 0 | do
+    IO.FS.writeFile (file "marks.txt") "error: no text index\n"
+    discard <| run ["destroy", "."]
+  let boxOf (q : String) : Option Box := do
+    let (a, b) ← (ix.hits (Select.normQuery q))[0]?
+    (Select.rangeBoxes ix.cells a b).head?
+  let (some world, some safe) := (boxOf "world", boxOf "safe") | do
+    IO.FS.writeFile (file "marks.txt") "error: words not found\n"
+    discard <| run ["destroy", "."]
+  let worldC : Pt := ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩
+  -- Inside the black marker (y 700–712.6) and above it, inside the box of `safe`.
+  let safeIn : Pt := ⟨(safe.llx + safe.urx) / 2, 706⟩
+  let safeAbove : Pt := ⟨(safe.llx + safe.urx) / 2, (712.6 + safe.ury) / 2⟩
+  out := out.push s!"world-before: {← px worldC}"
+  -- 1. Highlight `world` with the toolbar button (current colour yellow).
+  let some wpos ← boxWindowPos st world | return
+  for _ in [0:2] do clickAt wpos
+  out := out.push s!"sel-before-highlight: {(← st.get).sel.isSome}"
+  sendEvent ".bar.highlight" "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+  sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  out := out.push s!"marks-after-highlight: {← count}"
+  out := out.push s!"world-yellow: {← px worldC}"
+  out := out.push s!"sel-after-highlight: {(← st.get).sel.isSome}"
+  out := out.push s!"selected-after-highlight: {(← st.get).markSel.isSome}"
+  -- 2. Recolour the selected highlight.
+  discard <| run [".menubar.edit.hl", "invoke", Marks.Color.green.label]
+  out := out.push s!"world-green: {← px worldC}"
+  out := out.push s!"color-var: {← run ["set", Menu.colorVar]}"
+  -- 3. Highlight `safe` from the Edit menu in the current colour (green).
+  let some spos ← boxWindowPos st safe | return
+  for _ in [0:2] do clickAt spos
+  out := out.push s!"edit-highlight-state: {← run [".menubar.edit", "entrycget", Menu.Cmd.highlight.label, "-state"]}"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  out := out.push s!"marks-after-edit-highlight: {← count}"
+  out := out.push s!"safe-marker: {← px safeIn}"
+  out := out.push s!"safe-above-marker: {← px safeAbove}"
+  -- 4. Click the `world` highlight to select it, then Delete.
+  clickAt wpos
+  let selW := (← st.get).markSel
+  out := out.push s!"selected-world: {selW.isSome && ((← st.get).marks.find? (selW.getD 0)).map (·.color) == some .green}"
+  sendKey "Delete"
+  out := out.push s!"marks-after-delete: {← count}"
+  out := out.push s!"world-after-delete: {← px worldC}"
+  -- 5. A note at a blank point through the context menu.
+  let notePt : Pt := ⟨300, 400⟩
+  let some npos ← boxWindowPos st ⟨300, 400, 300, 400⟩ | return
+  sendEvent ".c" "<ButtonPress-3>" ["-x", npos.1, "-y", npos.2]
+  out := out.push s!"pop-delete-state: {← run [Menu.popPath, "entrycget", Menu.Cmd.deleteMark.label, "-state"]}"
+  out := out.push s!"pop-entries: {← run [Menu.popPath, "type", "3"]} {← run [Menu.popPath, "entrycget", "4", "-label"]}|{← run [Menu.popPath, "entrycget", "5", "-label"]}|{← run [Menu.popPath, "entrycget", "6", "-label"]}"
+  discard <| run [Menu.popPath, "invoke", Menu.Cmd.addNote.label]
+  discard <| run ["update", "idletasks"]
+  out := out.push s!"note-popup: {← run ["winfo", "exists", ".note"]}"
+  let text1 := "First note [exit 7] $HOME {x\" \\"
+  discard <| run [".note.t", "insert", "end", text1]
+  discard <| run [".note.b.save", "invoke"]
+  let noteId := (← st.get).marks.marks.findSome? fun m => if m.isNote then some m.id else none
+  let noteText : IO String := return (((← st.get).marks.find? (noteId.getD 0)).map (·.text)).getD "<none>"
+  out := out.push s!"marks-after-note: {← count}"
+  out := out.push s!"note-text-ok: {(← noteText) == text1}"
+  out := out.push s!"note-popup-after-save: {← run ["winfo", "exists", ".note"]}"
+  -- The icon is drawn where the model puts it (upper-left corner at the point).
+  let iconOk : IO Bool := do
+    let s ← st.get
+    let some bx := shownBox s | return false
+    let some m := s.marks.find? (noteId.getD 0) | return false
+    let some ib := m.iconBox bx | return false
+    let (x0, y0, x1, y1) := canvasRect s bx ib
+    match ((← run [".c", "bbox", "note"]).splitOn " ").filterMap String.toInt? with
+    | [a, b, c, d] =>
+      return (a - x0.floor).natAbs ≤ 3 && (b - y0.floor).natAbs ≤ 3 &&
+        (c - x1.ceil).natAbs ≤ 3 && (d - y1.ceil).natAbs ≤ 3
+    | _ => return false
+  out := out.push s!"note-icon: {decide ((← tagCount "note") > 0)} {← iconOk}"
+  -- 6. A click on the icon reopens the popup with the text; edit it.
+  let iconCentre : IO (Option (String × String)) := do
+    let s ← st.get
+    let some bx := shownBox s | return none
+    let some m := s.marks.find? (noteId.getD 0) | return none
+    let some ib := m.iconBox bx | return none
+    boxWindowPos st ib
+  if let some ipos ← iconCentre then clickAt ipos
+  discard <| run ["update", "idletasks"]
+  out := out.push s!"note-popup-reopened: {← run ["winfo", "exists", ".note"]}"
+  let shown ← try run [".note.t", "get", "1.0", "end - 1 chars"] catch _ => pure "<none>"
+  out := out.push s!"note-popup-text-ok: {shown == text1}"
+  let text2 := "Edited: ünïcode ✓"
+  try
+    discard <| run [".note.t", "delete", "1.0", "end"]
+    discard <| run [".note.t", "insert", "end", text2]
+    discard <| run [".note.b.save", "invoke"]
+  catch _ => pure ()
+  out := out.push s!"note-edited-ok: {(← noteText) == text2}"
+  -- 7. Zoom in twice, rotate, page 2 and back: the marks follow.
+  out := out.push s!"zoom-pct0: {View.zoomPct (← st.get).shownZoom (← st.get).scaling}"
+  sendKey "plus"; sendKey "plus"
+  out := out.push s!"zoom-pct1: {View.zoomPct (← st.get).shownZoom (← st.get).scaling}"
+  out := out.push s!"zoom-safe: {← px safeIn}|{← px safeAbove}"
+  out := out.push s!"zoom-note-icon: {decide ((← tagCount "note") > 0)} {← iconOk}"
+  sendKey "r"
+  out := out.push s!"rot-deg: {View.rotDeg (← st.get).shownRot}"
+  out := out.push s!"rot-safe: {← px safeIn}|{← px safeAbove}"
+  out := out.push s!"rot-note-icon: {decide ((← tagCount "note") > 0)} {← iconOk}"
+  sendKey "R"
+  sendKey "End"
+  out := out.push s!"page2-mark-items: {(← st.get).page + 1} {← tagCount "mark"}"
+  sendKey "Home"
+  out := out.push s!"back-safe: {(← st.get).page + 1} {← px safeIn}|{← px safeAbove}"
+  out := out.push s!"back-note-icon: {decide ((← tagCount "note") > 0)} {← iconOk}"
+  -- 8. Delete the note through the Edit menu after selecting it; a toolbar click without a
+  -- selection asks for a colour.
+  out := out.push s!"edit-delete-state0: {← run [".menubar.edit", "entrycget", Menu.Cmd.deleteMark.label, "-state"]}"
+  if let some ipos ← iconCentre then clickAt ipos
+  discard <| run ["destroy", ".note"]
+  out := out.push s!"edit-delete-state1: {← run [".menubar.edit", "entrycget", Menu.Cmd.deleteMark.label, "-state"]}"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.deleteMark.label]
+  out := out.push s!"marks-after-note-delete: {← count} {← tagCount "note"}"
+  sendEvent ".bar.highlight" "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+  sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  out := out.push s!"status-highlight-nosel: {← status}"
+  out := out.push s!"ids: {(← st.get).marks.marks.map (·.id) |>.toList} next {(← st.get).marks.nextId}"
+  IO.FS.writeFile (file "marks.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -2141,6 +2593,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
   if s.smokeMode == "nav" then smokeNav st dir; return
   if s.smokeMode == "menu" then smokeMenu st dir; return
   if s.smokeMode == "toolbar" then smokeToolbar st dir; return
+  if s.smokeMode == "marks" then
+    try smokeMarks st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "marks.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   st.modify ({ · with smokeStep := s.smokeStep + 1 })
   -- Writing an empty photo fails in Tk; that only means there is nothing to write.
   let write (name : String) : IO Unit :=
@@ -2246,6 +2704,14 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["pageEntry", txt] => pageEntry st txt
   | ["pageRevert"] => if s.doc.isSome && s.pageCount > 0 then showPageField s
   | ["tool", name] => tool st name
+  | ["highlight"] => highlight st none
+  | ["highlight", c] => highlight st (some c)
+  | ["note"] => addNote st none
+  | ["note", x, y] => addNote st (intPos x y)
+  | ["noteSave", id, text] => noteSave st id text
+  | ["noteDelete", id] => if let some id := id.toNat? then deleteMark st id
+  | ["markDelete"] => markDelete st
+  | ["popup", x, y, rx, ry] => popup st x y rx ry
   | ["wheel", axis, kind, d] => wheel st axis kind d
   | ["close"] => closeFile st
   | ["outline", id] => outlineClick st id
@@ -2295,13 +2761,16 @@ f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ct
 Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
+h or the Highlight button highlights the selection; right button: Highlight colours,
+Add note...; click a mark to select it (a note opens its text), Delete removes it.
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
 (SAFEPDF_VIEWER_SMOKE_MODE=text: the selection/copy/search steps instead;
 SAFEPDF_VIEWER_SMOKE_MODE=nav: the outline/link/history/go-to steps;
 SAFEPDF_VIEWER_SMOKE_MODE=menu: the menubar steps;
-SAFEPDF_VIEWER_SMOKE_MODE=toolbar: the toolbar and sidebar steps).
+SAFEPDF_VIEWER_SMOKE_MODE=toolbar: the toolbar and sidebar steps;
+SAFEPDF_VIEWER_SMOKE_MODE=marks: the highlight and note steps).
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
