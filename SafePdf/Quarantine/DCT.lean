@@ -122,8 +122,11 @@ structure Frame where
   mcusX : Nat
   /-- MCU rows, `⌈Y / (8 · Vmax)⌉`. -/
   mcusY : Nat
-  /-- Offset of each component's plane in the plane buffer. -/
+  /-- Offset of each component's plane in the plane buffer (also of its coefficients in the
+  coefficient buffer of a progressive frame: a block holds as many coefficients as samples). -/
   offs : Array Nat
+  /-- A progressive frame (`SOF2`). -/
+  prog : Bool := false
   deriving Inhabited
 
 /-- Width in samples of component `c`'s plane (whole MCUs). -/
@@ -160,6 +163,13 @@ structure St where
   done : Array Bool := #[]
   /-- Number of scans decoded. -/
   scans : Nat := 0
+  /-- Progressive frames: the quantised coefficients (16-bit values, natural order within a
+  block), laid out like the planes: block `(bx, by)` of component `c` starts at
+  `offs[c] + by · 8 · stride + bx · 64`. Empty for sequential frames. -/
+  coef : Array Int := #[]
+  /-- Progressive frames: each component's quantisation table, latched at its first scan
+  (libjpeg `latch_quant_tables`; `#[]`: not yet scanned). -/
+  qlat : Array (Array Int) := #[]
 
 /-- Malformed-JPEG error. -/
 def bad (off : Nat) (msg : String) : Error := .malformed off s!"DCT: {msg}"
@@ -207,7 +217,16 @@ structure BR where
   cnt : Nat := 0
   /-- A marker or the end of the data was reached. -/
   stop : Bool := false
+  /-- How many of the low bits of `acc` are padding zeros (after `stop`); only the lowest
+  `min pad cnt` of the `cnt` valid bits are padding. -/
+  pad : Nat := 0
+  /-- Padding bits were consumed (libjpeg's `insufficient_data`; used by progressive scans). -/
+  insuf : Bool := false
   deriving Inhabited
+
+/-- Have padding bits been consumed (libjpeg: `insufficient_data`, set when a read needs bits
+past the marker that ends the segment)? -/
+@[inline] def BR.short (br : BR) : Bool := br.insuf || br.cnt < br.pad
 
 /-- Skip a run of `FF` bytes from `i` (at most `fuel`): the first non-`FF` position. -/
 def skipFF (d : ByteArray) : (fuel i : Nat) → Nat
@@ -221,16 +240,19 @@ def fill (d : ByteArray) : (fuel : Nat) → BR → BR
   | 0, br => br
   | fuel + 1, br =>
     if 56 < br.cnt then br
-    else if br.stop then fill d fuel { br with acc := br.acc <<< 8, cnt := br.cnt + 8 }
+    else if br.stop then
+      fill d fuel { br with acc := br.acc <<< 8, cnt := br.cnt + 8, insuf := br.short,
+                            pad := min br.pad br.cnt + 8 }
     else if d.size ≤ br.pos then
-      fill d fuel { br with acc := br.acc <<< 8, cnt := br.cnt + 8, stop := true }
+      fill d fuel { br with acc := br.acc <<< 8, cnt := br.cnt + 8, stop := true, pad := 8 }
     else
       let b := rd d br.pos
       if b = 0xFF then
         let j := skipFF d d.size (br.pos + 1)
         if j < d.size ∧ rd d j = 0 then
           fill d fuel { br with pos := j + 1, acc := (br.acc <<< 8) ||| 0xFF, cnt := br.cnt + 8 }
-        else fill d fuel { br with pos := j - 1, acc := br.acc <<< 8, cnt := br.cnt + 8, stop := true }
+        else fill d fuel { br with pos := j - 1, acc := br.acc <<< 8, cnt := br.cnt + 8, stop := true,
+                                   pad := 8 }
       else fill d fuel { br with pos := br.pos + 1, acc := (br.acc <<< 8) ||| b.toUInt64, cnt := br.cnt + 8 }
 
 /-- Make at least 57 bits available (one Huffman code of ≤ 16 bits plus ≤ 15 extra bits fit). -/
@@ -478,6 +500,220 @@ def decodeScan (d : ByteArray) (cs : Array SComp) (mcusX mcusY ri pos : Nat) (bu
               (c.off + ((my * c.v + by_) * 8) * c.stride + (mx * c.h + bx) * 8) c.stride
   return (buf, br.pos)
 
+/-! ## 5b. Progressive scans (T.81 Annex G, libjpeg-turbo `jdphuff.c`)
+
+Coefficients are kept as libjpeg's `JCOEF` (16-bit two's complement): every store wraps
+(`wrap16`). A block's coefficients live at `base … base + 63` of the coefficient buffer, in
+natural order. -/
+
+/-- Wrap to a signed 16-bit value (C's `(JCOEF)` conversion). -/
+@[inline] def wrap16 (x : Int) : Int := (x + 32768) % 65536 - 32768
+
+/-- Bit `al` of the two's-complement value `x`. -/
+@[inline] def bitAt (x : Int) (al : Nat) : Bool := (x >>> al) % 2 == 1
+
+/-- Correction bit `b` for an already-nonzero coefficient `x` (G.1.2.3): when set and bit
+`al` of `x` is clear, the magnitude grows by `2^al`. -/
+@[inline] def correct (x : Int) (b : Nat) (al : Nat) : Int :=
+  if b = 1 ∧ !bitAt x al then wrap16 (if 0 ≤ x then x + (2 ^ al : Nat) else x - (2 ^ al : Nat))
+  else x
+
+/-- DC first scan, one block (`decode_mcu_DC_first`): the DC difference added to the
+prediction `pred`; the coefficient is the new prediction shifted left by `al`. Returns the
+reader, the new prediction and the coefficients. -/
+@[inline] def dcFirst (d : ByteArray) (lut : Array UInt32) (al : Nat) (br : BR) (pred : Int)
+    (coef : Array Int) (base : Nat) : BR × Int × Array Int :=
+  let br := refill d br
+  let (s, br) := decodeSym lut br
+  let (diff, br) := receiveExtend br s
+  let dc := pred + diff
+  (br, dc, coef.setIfInBounds base (wrap16 (dc * (2 ^ al : Nat))))
+
+/-- DC refinement scan, one block (`decode_mcu_DC_refine`): one bit, OR-ed in at bit `al`. -/
+@[inline] def dcRefine (d : ByteArray) (al : Nat) (br : BR) (coef : Array Int) (base : Nat) :
+    BR × Array Int :=
+  let br := refill d br
+  let (b, br) := getBits br 1
+  if b = 1 then
+    let x := g coef base
+    (br, if bitAt x al then coef else coef.setIfInBounds base (wrap16 (x + (2 ^ al : Nat))))
+  else (br, coef)
+
+/-- AC first scan, the codes of one block from zig-zag index `k` to `se` (at most `fuel`
+codes; each advances `k`): returns the reader, the new end-of-band run (`0` if the band
+ended without `EOBr`) and the coefficients. -/
+def acFirstLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
+    (fuel k : Nat) → BR → Array Int → BR × Nat × Array Int
+  | 0, _, br, coef => (br, 0, coef)
+  | fuel + 1, k, br, coef =>
+    if se < k then (br, 0, coef) else
+    let br := refill d br
+    let (rs, br) := decodeSym lut br
+    let r := rs / 16
+    let s := rs % 16
+    if s ≠ 0 then
+      let k := k + r
+      let (v, br) := receiveExtend br s
+      acFirstLoop d lut se al base fuel (k + 1) br
+        (coef.setIfInBounds (base + natural.getD k 63) (wrap16 (v * (2 ^ al : Nat))))
+    else if r = 15 then acFirstLoop d lut se al base fuel (k + 16) br coef
+    else
+      -- `EOBr`: this block and `2^r + bits − 1` more end here.
+      let (x, br) := if r = 0 then (0, br) else getBits br r
+      (br, 2 ^ r + x - 1, coef)
+
+/-- AC refinement: from zig-zag index `k` (≤ `se`), append a correction bit to each nonzero
+coefficient and skip `r` zero coefficients more; stop at the next zero coefficient
+(returned `k`) or after `se` (`k = se + 1`). The inner `do … while` of
+`decode_mcu_AC_refine`. -/
+def advance (d : ByteArray) (se al base : Nat) :
+    (fuel k r : Nat) → BR → Array Int → BR × Nat × Array Int
+  | 0, k, _, br, coef => (br, k, coef)
+  | fuel + 1, k, r, br, coef =>
+    let pos := base + natural.getD k 63
+    let x := g coef pos
+    if x ≠ 0 then
+      let br := refill d br
+      let (b, br) := getBits br 1
+      let coef := if b = 1 then coef.setIfInBounds pos (correct x b al) else coef
+      if se < k + 1 then (br, k + 1, coef) else advance d se al base fuel (k + 1) r br coef
+    else if r = 0 then (br, k, coef)
+    else if se < k + 1 then (br, k + 1, coef)
+    else advance d se al base fuel (k + 1) (r - 1) br coef
+
+/-- AC refinement, the codes of one block from `k` (at most `fuel` codes): returns the
+reader, the position where an `EOBr` code was read (or `se + 1`), the new end-of-band run
+(`0`: none) and the coefficients. -/
+def refLoop (d : ByteArray) (lut : Array UInt32) (se al base : Nat) :
+    (fuel k : Nat) → BR → Array Int → BR × Nat × Nat × Array Int
+  | 0, k, br, coef => (br, k, 0, coef)
+  | fuel + 1, k, br, coef =>
+    if se < k then (br, k, 0, coef) else
+    let br := refill d br
+    let (rs, br) := decodeSym lut br
+    let r := rs / 16
+    let s := rs % 16
+    if s = 0 ∧ r ≠ 15 then
+      let (x, br) := if r = 0 then (0, br) else getBits br r
+      (br, k, 2 ^ r + x, coef)
+    else
+      let (nv, br) : Int × BR :=
+        if s ≠ 0 then
+          let (b, br) := getBits br 1
+          (if b = 1 then ((2 ^ al : Nat) : Int) else -((2 ^ al : Nat) : Int), br)
+        else (0, br)
+      let ev := advance d se al base 64 k r br coef
+      let k := ev.2.1
+      let coef := if s ≠ 0 then ev.2.2.setIfInBounds (base + natural.getD k 63) nv else ev.2.2
+      refLoop d lut se al base fuel (k + 1) ev.1 coef
+
+/-- AC refinement after an end of band: a correction bit for each nonzero coefficient from
+`k` to `se`. -/
+def refTail (d : ByteArray) (se al base : Nat) : (fuel k : Nat) → BR → Array Int → BR × Array Int
+  | 0, _, br, coef => (br, coef)
+  | fuel + 1, k, br, coef =>
+    if se < k then (br, coef) else
+    let pos := base + natural.getD k 63
+    let x := g coef pos
+    if x ≠ 0 then
+      let br := refill d br
+      let (b, br) := getBits br 1
+      refTail d se al base fuel (k + 1) br (if b = 1 then coef.setIfInBounds pos (correct x b al) else coef)
+    else refTail d se al base fuel (k + 1) br coef
+
+/-- AC refinement scan, one block (`decode_mcu_AC_refine`) with the pending end-of-band run
+`eob`: returns the reader, the new run and the coefficients. -/
+def acRefine (d : ByteArray) (lut : Array UInt32) (ss se al eob base : Nat) (br : BR)
+    (coef : Array Int) : BR × Nat × Array Int :=
+  let (br, k, eob, coef) := if eob = 0 then refLoop d lut se al base 64 ss br coef
+    else (br, ss, eob, coef)
+  if 0 < eob then
+    let (br, coef) := refTail d se al base 64 k br coef
+    (br, eob - 1, coef)
+  else (br, 0, coef)
+
+/-- The four kinds of progressive scan. -/
+inductive PMode where
+  /-- DC, first scan (`Ah = 0`). -/
+  | dcFirst
+  /-- DC, refinement (`Ah ≠ 0`). -/
+  | dcRefine
+  /-- AC band, first scan. -/
+  | acFirst
+  /-- AC band, refinement. -/
+  | acRefine
+  deriving Inhabited, DecidableEq
+
+/-- **Decode a progressive scan** from byte `pos` into the coefficient buffer: `mcusX × mcusY`
+MCUs (AC scans and one-component DC scans: blocks), restart every `ri` MCUs (resetting the
+DC predictions and the end-of-band run). As in libjpeg, once a read needed bits past the end
+of the segment, the following MCUs of the restart interval are left unchanged. A DC value
+leaving the 32-bit range is an error (`JERR_BAD_DCT_COEF`). Returns the coefficients and the
+position where the reader stopped. -/
+def progScan (d : ByteArray) (cs : Array SComp) (mode : PMode) (ss se al mcusX mcusY ri pos : Nat)
+    (coef : Array Int) : Except Error (Array Int × Nat) := do
+  let mut br : BR := { pos }
+  let mut preds : Array Int := Array.replicate cs.size 0
+  let mut eob := 0
+  let mut coef := coef
+  let mut m := 0
+  for my in [0:mcusY] do
+    for mx in [0:mcusX] do
+      if 0 < ri ∧ 0 < m ∧ m % ri = 0 then
+        let ins := br.short
+        br := restart d br
+        if br.stop then br := { br with insuf := ins }
+        preds := Array.replicate cs.size 0
+        eob := 0
+      m := m + 1
+      if !br.short then
+        for ci in [0:cs.size] do
+          let c := cs.getD ci default
+          for by_ in [0:c.v] do
+            for bx in [0:c.h] do
+              let base := c.off + (my * c.v + by_) * 8 * c.stride + (mx * c.h + bx) * 64
+              match mode with
+              | .dcFirst =>
+                let r := dcFirst d c.dc al br (preds.getD ci 0) coef base
+                if r.2.1 < -2147483648 ∨ 2147483647 < r.2.1 then
+                  throw (bad r.1.pos "DC coefficient out of range")
+                br := r.1
+                preds := preds.setIfInBounds ci r.2.1
+                coef := r.2.2
+              | .dcRefine =>
+                let r := dcRefine d al br coef base
+                br := r.1
+                coef := r.2
+              | .acFirst =>
+                if 0 < eob then eob := eob - 1
+                else
+                  let r := acFirstLoop d c.ac se al base 64 ss br coef
+                  br := r.1
+                  eob := r.2.1
+                  coef := r.2.2
+              | .acRefine =>
+                let r := acRefine d c.ac ss se al eob base br coef
+                br := r.1
+                eob := r.2.1
+                coef := r.2.2
+  return (coef, br.pos)
+
+/-- Dequantise and inverse-transform every block of a progressive frame into the planes. -/
+def idctAll (f : Frame) (coef : Array Int) (qlat : Array (Array Int)) (buf : ByteArray) :
+    ByteArray := Id.run do
+  let mut buf := buf
+  for ci in [0:f.comps.size] do
+    let c := f.comps.getD ci default
+    let off := f.offs.getD ci 0
+    let st := f.stride c
+    let q := qlat.getD ci #[]
+    for by_ in [0:f.mcusY * c.v] do
+      for bx in [0:f.mcusX * c.h] do
+        let base := off + by_ * 8 * st + bx * 64
+        let blk := (Array.range 64).map fun i => g coef (base + i) * g q i
+        buf := idctStore blk buf (off + by_ * 8 * st + bx * 8) st
+  return buf
+
 /-! ## 6. Segments -/
 
 /-- Parse a `DQT` segment body `[a, e)` (several tables). -/
@@ -519,9 +755,24 @@ def parseDHT (d : ByteArray) (a e : Nat) (st : St) : Except Error St := do
     p := p + 17 + total
   return st
 
+/-- Bytes charged per coefficient of a progressive frame against
+`Limits.maxDecodedStreamBytes` (a boxed-scalar `Array Int` slot): a progressive frame keeps all
+its coefficients — as many as plane samples — so its planes may hold at most
+`maxDecodedStreamBytes / 8` samples (32 Mi with the defaults, e.g. a 4:2:0 image of about
+22 megapixels), against `maxDecodedStreamBytes` for a sequential frame. -/
+def coefBytes : Nat := 8
+
+/-- At most this many progressive scans are decoded per image (more: `Error.unsupported`).
+Every scan visits each block of its components once, so this bounds the decoding work by
+`maxScans` passes over the coefficients; encoders write about 10 (`cjpeg -progressive`: 10
+for colour, 6 for gray). -/
+def maxScans : Nat := 256
+
 /-- Parse a frame header body at `a` (length `len`), check it against the limits, and
-allocate the component planes (filled with 128, the level of an all-zero block). -/
-def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) : Except Error St := do
+allocate the component planes (filled with 128, the level of an all-zero block) and, for a
+progressive frame (`prog`), the coefficient buffer. -/
+def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) (prog : Bool := false) :
+    Except Error St := do
   if st.frame.isSome then throw (bad a "several frame headers")
   if len < 6 then throw (bad a "SOF segment too short")
   let prec := rd d a
@@ -554,10 +805,65 @@ def parseSOF (limits : Limits) (d : ByteArray) (a len : Nat) (st : St) : Except 
     offs := offs.push total
     total := total + mcusX * c.h * 8 * (mcusY * c.v * 8)
   if limits.maxDecodedStreamBytes < total then throw (.limitExceeded .decodedStreamBytes)
+  if prog ∧ limits.maxDecodedStreamBytes < coefBytes * total then
+    throw (.limitExceeded .decodedStreamBytes)
   return { st with
-    frame := some { w, h, comps, hmax, vmax, mcusX, mcusY, offs }
+    frame := some { w, h, comps, hmax, vmax, mcusX, mcusY, offs, prog }
     buf := ByteArray.mk (Array.replicate total 128)
-    done := Array.replicate nf false }
+    done := Array.replicate nf false
+    coef := if prog then Array.replicate total 0 else #[]
+    qlat := Array.replicate nf #[] }
+
+/-- Parse a progressive scan header body at `a` (length `len`, at most 4 components, then
+`Ss`, `Se`, `Ah`/`Al`), validate it like libjpeg (`start_pass_phuff_decoder`: a DC scan has
+`Se = 0`; an AC band has `Ss ≤ Se ≤ 63` and one component; a refinement has `Al = Ah − 1`;
+`Al ≤ 13`), latch the components' quantisation tables at their first scan, and decode the
+scan that follows the segment (at `e`) into the coefficient buffer. Inconsistent scan
+sequences (libjpeg warnings only) are decoded as they come. -/
+def parseSOSProg (d : ByteArray) (f : Frame) (a len e : Nat) (st : St) : Except Error (St × Nat) := do
+  let ns := rd d a
+  if ns = 0 ∨ 4 < ns ∨ len < 1 + 2 * ns + 3 then throw (bad a "bad scan header")
+  let p := a + 1 + 2 * ns
+  let ss := rd d p
+  let se := rd d (p + 1)
+  let ah := rd d (p + 2) / 16
+  let al := rd d (p + 2) % 16
+  let dcBand := ss = 0
+  if (dcBand ∧ se ≠ 0) ∨ (!dcBand ∧ (se < ss ∨ 63 < se ∨ ns ≠ 1)) ∨ (ah ≠ 0 ∧ al + 1 ≠ ah) ∨ 13 < al then
+    throw (bad p "bad progression parameters")
+  let mode : PMode := if dcBand then (if ah = 0 then .dcFirst else .dcRefine)
+    else if ah = 0 then .acFirst else .acRefine
+  let mut cs : Array SComp := #[]
+  let mut qlat := st.qlat
+  for i in [0:ns] do
+    let b := a + 1 + 2 * i
+    let cid := rd d b
+    let some idx := f.comps.findIdx? (·.id = cid) | throw (bad b "scan component not in frame")
+    if cs.any (·.idx = idx) then throw (bad b "component twice in a scan")
+    let c := f.comps.getD idx default
+    let dcT := st.dc.getD (rd d (b + 1) / 16) #[]
+    let acT := st.ac.getD (rd d (b + 1) % 16) #[]
+    if mode = .dcFirst ∧ dcT.size ≠ 65536 then throw (bad b "Huffman table not defined")
+    if !dcBand ∧ acT.size ≠ 65536 then throw (bad b "Huffman table not defined")
+    if (qlat.getD idx #[]).size ≠ 64 then
+      let q := st.qt.getD c.tq #[]
+      if q.size ≠ 64 then throw (bad b "quantisation table not defined")
+      qlat := qlat.setIfInBounds idx q
+    cs := cs.push { idx, off := f.offs.getD idx 0, stride := f.stride c,
+                    h := if ns = 1 then 1 else c.h, v := if ns = 1 then 1 else c.v,
+                    dc := dcT, ac := acT, q := #[] }
+  let (mx, my) : Nat × Nat :=
+    if ns = 1 then
+      let c := f.comps.getD ((cs.getD 0 default).idx) default
+      ((f.dw c + 7) / 8, (f.dh c + 7) / 8)
+    else (f.mcusX, f.mcusY)
+  if 1 < ns ∧ 10 < cs.foldl (fun n c => n + c.h * c.v) 0 then
+    throw (bad a "too many blocks in an MCU")
+  let coef := st.coef
+  let st := { st with coef := #[] }
+  let (coef, pos) ← progScan d cs mode ss se al mx my st.ri e coef
+  let done := cs.foldl (fun dn c => dn.setIfInBounds c.idx true) st.done
+  return ({ st with coef, qlat, done, scans := st.scans + 1 }, pos)
 
 /-- Parse a scan header body at `a` (length `len`) and decode the scan that follows the
 segment (at `e`); returns the new state and the position where decoding stopped. -/
@@ -592,8 +898,22 @@ def parseSOS (d : ByteArray) (a len e : Nat) (st : St) : Except Error (St × Nat
   let done := cs.foldl (fun dn c => dn.setIfInBounds c.idx true) st.done
   return ({ st with buf, done, scans := st.scans + 1 }, pos)
 
-/-- Is every frame component decoded? -/
-def St.complete (st : St) : Bool := st.frame.isSome && st.done.all id
+/-- Is every component of a sequential frame decoded? (A progressive frame is decoded up to
+`EOI` or the end of the data.) -/
+def St.complete (st : St) : Bool :=
+  match st.frame with
+  | some f => !f.prog && st.done.all id
+  | none => false
+
+/-- Decode the scan of an `SOS` segment: sequential or progressive (at most `maxScans`). -/
+def parseScan (d : ByteArray) (a len e : Nat) (st : St) : Except Error (St × Nat) :=
+  match st.frame with
+  | some f =>
+    if f.prog then
+      if maxScans ≤ st.scans then .error (.unsupported s!"DCT: more than {maxScans} scans")
+      else parseSOSProg d f a len e st
+    else parseSOS d a len e st
+  | none => .error (bad a "SOS before SOF")
 
 /-- **The marker loop** from byte `pos` (at most `fuel` segments): reads markers and
 segments until `EOI`, the end of the data, or every component has been decoded. -/
@@ -613,8 +933,8 @@ def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Exce
         else
           let a := p + 2
           let body := len - 2
-          if m = 0xC0 ∨ m = 0xC1 then
-            match parseSOF limits d a body st with
+          if m = 0xC0 ∨ m = 0xC1 ∨ m = 0xC2 then
+            match parseSOF limits d a body st (m = 0xC2) with
             | .ok st => segLoop limits d fuel e st
             | .error err => .error err
           else if m = 0xC4 then
@@ -629,11 +949,11 @@ def segLoop (limits : Limits) (d : ByteArray) : (fuel pos : Nat) → St → Exce
             if body < 2 then .error (bad p "short DRI") else
             segLoop limits d fuel e { st with ri := rd16 d a }
           else if m = 0xDA then
-            match parseSOS d a body e st with
+            match parseScan d a body e st with
             | .ok (st, q) => segLoop limits d fuel (max q e) st
             | .error err => .error err
-          else if 0xC2 ≤ m ∧ m ≤ 0xCF ∧ m ≠ 0xC4 ∧ m ≠ 0xC8 ∧ m ≠ 0xCC then
-            .error (.unsupported s!"DCT: SOF{m - 0xC0} (progressive, lossless or arithmetic)")
+          else if 0xC3 ≤ m ∧ m ≤ 0xCF ∧ m ≠ 0xC4 ∧ m ≠ 0xC8 ∧ m ≠ 0xCC then
+            .error (.unsupported s!"DCT: SOF{m - 0xC0} (lossless, differential or arithmetic)")
           else if m = 0xCC then .error (.unsupported "DCT: arithmetic coding")
           else if m = 0xE0 then
             let jfif := decide (14 ≤ body ∧ rd d a = 0x4A ∧ rd d (a + 1) = 0x46 ∧ rd d (a + 2) = 0x49 ∧
@@ -810,11 +1130,19 @@ def skipWs (d : ByteArray) : (fuel i : Nat) → Nat
     let c := rd d i
     if i < d.size ∧ (c = 10 ∨ c = 13 ∨ c = 32) then skipWs d fuel (i + 1) else i
 
+/-- After the marker loop: a progressive frame's coefficients are dequantised and
+inverse-transformed into the planes (libjpeg's output pass after the whole input is
+absorbed). -/
+def St.flush (st : St) : St :=
+  match st.frame with
+  | some f => if f.prog then { st with buf := idctAll f st.coef st.qlat st.buf, coef := #[] } else st
+  | none => st
+
 /-- Decode the planes of a JPEG stream: `SOI`, then the marker loop. -/
 def decodePlanes (limits : Limits) (d : ByteArray) : Except Error St :=
   let p := skipWs d d.size 0
   if rd d p ≠ 0xFF ∨ rd d (p + 1) ≠ 0xD8 then .error (bad p "no SOI marker")
-  else segLoop limits d d.size (p + 2) {}
+  else (segLoop limits d d.size (p + 2) {}).map St.flush
 
 /-- **Re-validate** the decoder's result: a frame with at least one decoded scan, at most
 `Limits.maxImagePixels` pixels, and an output of exactly `w · h · nc` bytes, `nc ≤ 4`. -/

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the baseline-JPEG fixtures of the DCT decoder (task 7.6a).
+"""Generate the JPEG fixtures of the DCT decoder (tasks 7.6a baseline, 7.6b progressive).
 
     python3 -I Tests/images/gen_jpegs.py [OUTDIR]      (default: Tests/images)
 
@@ -16,6 +16,13 @@ them) are assembled from four grayscale JPEGs: their tables go to slots 0-3, the
 data become four non-interleaved scans.  Their reference is computed here from the djpeg
 decodes of the four planes (full-size grayscale decoding is exact) with libjpeg's integer
 YCC->RGB tables (jdcolor.c); CMYK samples are not inverted (MuPDF, filter-dct.c).
+
+Progressive fixtures (7.6b, names starting with "p") come from `cjpeg -progressive`
+(libjpeg's standard scripts: spectral selection plus successive approximation of DC and AC),
+custom `-scans` scripts (refinement-heavy: up to three AC refinement passes, interleaved DC
+refinements, single-coefficient bands), restart intervals, odd sizes, quality 100, a smooth
+image (long end-of-band runs), and `jpegtran -progressive` of the CMYK fixture (a lossless
+transcode, so its reference is the CMYK one).
 
 The synthetic source images are deterministic (gradients, edges, a disc, LCG noise).
 """
@@ -51,6 +58,46 @@ def synth(w, h, nc, seed):
                 v = max(0, min(255, v + (next(rnd) % 21) - 10))
                 out.append(v)
     return bytes(out)
+
+
+def smooth(w, h, nc):
+    """A smooth image (few nonzero AC coefficients: long end-of-band runs)."""
+    out = bytearray()
+    for y in range(h):
+        for x in range(w):
+            for c in range(nc):
+                v = (x * (2 + c) + y * (3 - c)) // 2 + (40 if (x // 24 + y // 24) % 2 else 0)
+                out.append(max(0, min(255, v)))
+    return bytes(out)
+
+
+# Refinement-heavy progressive scan scripts (cjpeg -scans syntax).
+SCRIPT_COLOR = """0,1,2: 0-0, 0, 2;
+0: 1-5, 0, 3;
+2: 1-63, 0, 2;
+1: 1-63, 0, 1;
+0: 6-63, 0, 3;
+0,1,2: 0-0, 2, 1;
+0: 1-63, 3, 2;
+0,1,2: 0-0, 1, 0;
+0: 1-63, 2, 1;
+2: 1-63, 2, 1;
+1: 1-63, 1, 0;
+0: 1-63, 1, 0;
+2: 1-63, 1, 0;
+"""
+
+SCRIPT_GRAY = """0: 0-0, 0, 3;
+0: 1-1, 0, 2;
+0: 2-2, 0, 2;
+0: 3-9, 0, 2;
+0: 10-63, 0, 2;
+0: 0-0, 3, 2;
+0: 0-0, 2, 1;
+0: 1-63, 2, 1;
+0: 0-0, 1, 0;
+0: 1-63, 1, 0;
+"""
 
 
 def pnm(w, h, nc, data):
@@ -187,6 +234,32 @@ def main():
         w, h = 29, 21
         jpg = cjpeg(w, h, 3, synth(w, h, 3, 7), ["-sample", "2x2", "-scans", sp])
         fixtures.append(("scans", jpg, djpeg(jpg)))
+    # Progressive (7.6b).
+    prog = [
+        ("pgray", 33, 27, 1, ["-grayscale", "-quality", "80", "-progressive"]),
+        ("p444", 41, 23, 3, ["-sample", "1x1", "-quality", "80", "-progressive"]),
+        ("p422", 37, 29, 3, ["-sample", "2x1", "-quality", "80", "-progressive"]),
+        ("p420", 45, 31, 3, ["-sample", "2x2", "-quality", "75", "-progressive"]),
+        ("pnarrow", 3, 20, 3, ["-sample", "2x2", "-quality", "90", "-progressive"]),
+        ("prst", 47, 33, 3, ["-sample", "2x2", "-restart", "3B", "-quality", "70", "-progressive"]),
+        ("pq100", 24, 16, 3, ["-sample", "2x2", "-quality", "100", "-progressive"]),
+    ]
+    for name, w, h, nc, opts in prog:
+        jpg = cjpeg(w, h, nc, synth(w, h, nc, len(name) + 100), opts)
+        fixtures.append((name, jpg, djpeg(jpg)))
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, w, h, nc, script, extra in (
+                ("pscans", 43, 37, 3, SCRIPT_COLOR, ["-sample", "2x2", "-quality", "85"]),
+                ("pscanrst", 35, 26, 3, SCRIPT_COLOR, ["-sample", "2x1", "-quality", "90", "-restart", "2B"]),
+                ("pscangray", 29, 31, 1, SCRIPT_GRAY, ["-grayscale", "-quality", "95"])):
+            sp = os.path.join(tmp, name + ".txt")
+            with open(sp, "w") as f:
+                f.write(script)
+            jpg = cjpeg(w, h, nc, synth(w, h, nc, len(name) + 200), extra + ["-scans", sp])
+            fixtures.append((name, jpg, djpeg(jpg)))
+    w, h = 96, 72
+    jpg = cjpeg(w, h, 3, smooth(w, h, 3), ["-sample", "2x2", "-quality", "60", "-progressive"])
+    fixtures.append(("psmooth", jpg, djpeg(jpg)))
     # Four components with an Adobe marker.
     w, h = 19, 13
     for name, transform, seed in (("cmyk", 0, 11), ("ycck", 2, 12)):
@@ -201,6 +274,9 @@ def main():
             else:
                 ref += bytes(c)
         fixtures.append((name, jpg, (w, h, 4, bytes(ref))))
+        if name == "cmyk" and shutil.which("jpegtran"):
+            pj = run(["jpegtran", "-progressive"], jpg)
+            fixtures.append(("pcmyk", pj, (w, h, 4, bytes(ref))))
     total = 0
     for name, jpg, (w, h, nc, data) in fixtures:
         with open(os.path.join(outdir, name + ".jpg"), "wb") as f:
