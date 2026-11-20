@@ -1,5 +1,6 @@
 import SafePdf.Core.Raster.Transparency
 import SafePdf.Core.Content.Run
+import Tests.RasterGlyph
 
 /-!
 # Transparency suite (task 7.3c)
@@ -23,7 +24,10 @@ buffer sizes are theorems in `SafePdf.Core.Raster.Transparency`; this suite chec
   squares replaces the first in the overlap (blue at 50 % over white, not over black), also
   after an opaque square, and with the group at alpha 0.5; without `/K` the overlap darkens;
   `b` with `CA 0.5` through the runner: a knockout group, the stroke over the fill shows the
-  page, not the fill (an opaque stroke gets no group);
+  page, not the fill (an opaque stroke gets no group; stroke alpha 0 gets none and paints
+  nothing; an opaque `Multiply` stroke gets a group carrying the blend mode, with `Normal`
+  items, so it multiplies the page, not the fill); fill+stroke text (`2 Tr`, `CA 0.5`) never
+  shows the stroke over the fill;
 * layer nesting beyond `maxLayerDepth` keeps the buffer size;
 * end to end: a content stream with an ExtGState soft mask and a transparency-group form
   through `Content.runBytes` and the driver;
@@ -376,6 +380,57 @@ def run : IO Nat := do
   let items9f := runC [] res9 "1 0 0 rg 0 0 1 RG 4 w 6 6 14 14 re b"
   if items9f.toList.map DisplayItem.kind != ["fillPath", "strokePath"] then
     failures := failures + 1; report s!"b opaque: {items9f.toList.map DisplayItem.kind}"
+  -- stroke alpha 0: no group, the stroke paints nothing (the fill shows everywhere)
+  let items9g := runC [] "<< /ExtGState << /Z << /CA 0 /BM /Multiply >> >> >>"
+    "/Z gs 1 0 0 rg 0 0 1 RG 4 w 6 6 14 14 re b"
+  let k9g := renderS 20 20 items9g
+  if items9g.toList.map DisplayItem.kind != ["fillPath", "strokePath"] ||
+      (pxAt k9g 7 10, pxAt k9g 5 10) != ((255, 0, 0), (255, 255, 255)) then
+    failures := failures + 1
+    report s!"b with CA 0: {items9g.toList.map DisplayItem.kind} {(pxAt k9g 7 10, pxAt k9g 5 10)}"
+  -- opaque stroke with `Multiply` (MuPDF: the blend group around the knockout group): the
+  -- group carries the blend mode, the fill and stroke inside it are `Normal`; on a grey page
+  -- the cyan stroke over the yellow fill multiplies the page only (grey × cyan), not the fill
+  -- (grey × yellow × cyan = (0, 128, 0) without the group)
+  let items9h := runC [] "<< /ExtGState << /M << /BM /Multiply >> >> >>"
+    "0.5 g 0 0 20 20 re f /M gs 1 1 0 rg 0 1 1 RG 4 w 6 6 14 14 re b"
+  let ok9h := match items9h.toList with
+    | [.fillPath .., .groupBegin g, .fillPath _ _ f _, .strokePath _ k _, .groupEnd] =>
+      g.knockout && !g.isolated && g.blend == .multiply && f.blend == .normal &&
+        k.blend == .normal
+    | _ => false
+  let k9h := renderS 20 20 items9h
+  let v9h := (pxAt k9h 7 10, pxAt k9h 10 10, pxAt k9h 1 1)
+  let near1 (a b : Nat × Nat × Nat) : Bool :=
+    a.1 + 1 ≥ b.1 && b.1 + 1 ≥ a.1 && a.2.1 + 1 ≥ b.2.1 && b.2.1 + 1 ≥ a.2.1 &&
+      a.2.2 + 1 ≥ b.2.2 && b.2.2 + 1 ≥ a.2.2
+  if !ok9h || !near1 v9h.1 (0, 128, 128) || !near1 v9h.2.1 (128, 128, 0) ||
+      !near1 v9h.2.2 (128, 128, 128) then
+    failures := failures + 1
+    report s!"b with BM Multiply: {items9h.toList.map DisplayItem.kind} {v9h}"
+  -- fill+stroke text (`2 Tr`) with `CA 0.5` (one glyph run; the renderer gives it MuPDF's
+  -- knockout group, `Transparency.splitRun?`): no pixel shows the blue stroke over the red fill
+  -- ((127, 0, 128)); the stroke shows over the page ((127, 127, 255)) and the fill shows red.
+  let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
+  let textPdf (ca : String) := RasterGlyph.resPage
+    s!"<< /Font << /F1 5 0 R >> /ExtGState << /K << /CA {ca} >> >> >>"
+    "/K gs BT /F1 100 Tf 2 Tr 6 w 1 0 0 rg 0 0 1 RG 20 20 Td (A) Tj ET"
+    [ "<< /Type /Font /Subtype /TrueType /BaseFont /SafePdfTiny /FirstChar 65 /LastChar 65 /Widths [600] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>",
+      "<< /Type /FontDescriptor /FontName /SafePdfTiny /Flags 32 /FontFile2 7 0 R >>",
+      CFFText.strmObj "/Filter /ASCIIHexDecode" (CFFText.hex ttf) ]
+  let countPx (img : Image) (c : Nat × Nat × Nat) : Nat := Id.run do
+    let mut n := 0
+    for y in [0:img.h] do
+      for x in [0:img.w] do
+        if near1 (pxAt img x y) c then n := n + 1
+    return n
+  match RasterGlyph.render (textPdf "0.5"), RasterGlyph.render (textPdf "1") with
+  | some t5, some t1 =>
+    let c5 := (countPx t5 (127, 0, 128), countPx t5 (127, 127, 255), countPx t5 (255, 0, 0))
+    let c1 := (countPx t1 (127, 0, 128), countPx t1 (127, 127, 255), countPx t1 (0, 0, 255))
+    if c5.1 != 0 || c5.2.1 < 100 || c5.2.2 < 100 || c1.2.1 != 0 || c1.2.2 < 100 then
+      failures := failures + 1; report s!"text 2 Tr with CA 0.5 / 1: {c5} {c1}"
+  | _, _ => failures := failures + 1; report "text 2 Tr: render failed"
   -- 10. Timing: a group of 100 squares at alpha 0.5 on 612 × 792; a soft-masked full fill.
   let sq : Array DisplayItem := (Array.range 100).map fun k =>
     let x : Int := (k % 10 : Nat) * 60
