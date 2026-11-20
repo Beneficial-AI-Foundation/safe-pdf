@@ -30,7 +30,10 @@ text showing), §8.9.7 (inline images), §14.6 (marked content), §7.8.2 (`BX`/`
   without a current point are skipped (warning). A painting operator (`S s f F f* B B* b b*
   n`) emits `Paint.items` for a non-empty path (with the clip in force *before* it), then, if
   `W`/`W*` was pending, intersects the clip and emits a `clip` item; the path is then cleared.
-  So one operator can emit 3 items (`W … b`), but the `W` itself emitted none: the potential
+  Fill-and-stroke with a translucent or blended stroke is bracketed by a knockout group
+  (`Paint.items`, task 7.3i, as MuPDF `pdf_show_path`); glyph runs that fill and stroke stay one
+  item (the renderer splits them into its own knockout group, `Transparency.splitRun?`).
+  So one operator can emit 5 items (`W … b`), but the `W` itself emitted none: the potential
   `items + [clip pending]` grows by at most `Paint.maxItems` per operator, which gives
   `interp_items_le`.
 * **Colour**: `CS`/`cs` map `DeviceGray`/`G`, `DeviceRGB`/`RGB`, `DeviceCMYK`/`CMYK` and
