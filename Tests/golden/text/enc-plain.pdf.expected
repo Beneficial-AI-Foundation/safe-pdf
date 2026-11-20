@@ -1,0 +1,117 @@
+--- text
+file:       input
+open:       strict
+pages:      1
+--- page 1: 51 chars, 47 glyphs, 0 U+FFFD, 0 warnings
+Hello Å world
+Ωµ€
+A A
+Missing font’s text
+Form text
+--- glyphs page 1 (item seq x y width size text)
+0 0 72 720 8.664 12 "H"
+0 1 80.664 720 6.672 12 "e"
+0 2 87.336 720 2.664 12 "l"
+0 3 90 720 2.664 12 "l"
+0 4 92.664 720 6.672 12 "o"
+0 5 99.336 720 3.336 12 " "
+0 6 102.672 720 8.004 12 "Å"
+0 7 110.676 720 3.336 12 " "
+0 8 114.012 720 8.664 12 "w"
+0 9 122.676 720 6.672 12 "o"
+0 10 129.348 720 3.996 12 "r"
+0 11 133.344 720 2.664 12 "l"
+0 12 136.008 720 6.672 12 "d"
+1 0 72 700 8.4 12 "Ω"
+1 1 80.4 700 6.6 12 "µ"
+1 2 87 700 7.2 12 "€"
+2 0 72 680 7.2 12 "A"
+2 1 79.2 680 3 12 " "
+2 2 82.2 680 7.2 12 "A"
+3 0 72 660 10.668 12 "M"
+3 1 82.668 660 3.336 12 "i"
+3 2 86.004 660 4.668 12 "s"
+3 3 90.672 660 4.668 12 "s"
+3 4 95.34 660 3.336 12 "i"
+3 5 98.676 660 6 12 "n"
+3 6 104.676 660 6 12 "g"
+3 7 110.676 660 3 12 " "
+3 8 113.676 660 3.996 12 "f"
+3 9 117.672 660 6 12 "o"
+3 10 123.672 660 6 12 "n"
+3 11 129.672 660 3.336 12 "t"
+3 12 133.008 660 3.996 12 "’"
+3 13 137.004 660 4.668 12 "s"
+3 14 141.672 660 3 12 " "
+3 15 144.672 660 3.336 12 "t"
+3 16 148.008 660 5.328 12 "e"
+3 17 153.336 660 6 12 "x"
+3 18 159.336 660 3.336 12 "t"
+5 0 72 640 7.332 12 "F"
+5 1 79.332 640 6 12 "o"
+5 2 85.332 640 5.328 12 "r"
+5 3 90.66 640 9.996 12 "m"
+5 4 100.656 640 3 12 " "
+5 5 103.656 640 3.996 12 "t"
+5 6 107.652 640 5.328 12 "e"
+5 7 112.98 640 6 12 "x"
+5 8 118.98 640 3.996 12 "t"
+total:      1 page(s), 51 chars, 47 glyphs, 0 U+FFFD, 0 warnings, 0 page error(s)
+--- json
+{"page": 1, "chars": 51, "glyphs": 47, "replacement": 0, "warnings": 0, "error": null, "text": "Hello Å world\nΩµ€\nA A\nMissing font’s text\nForm text"}
+{"summary": {"path": "input", "open": "strict", "pages": 1, "extracted": 1, "chars": 51, "glyphs": 47, "replacement": 0, "warnings": 0, "errors": 0}}
+--- json page 1 glyphs
+{"page": 1, "chars": 51, "glyphs": 47, "replacement": 0, "warnings": 0, "error": null, "text": "Hello Å world\nΩµ€\nA A\nMissing font’s text\nForm text", "glyphList": [[0, 0, 72, 720, 8.664, 12, "H"], [0, 1, 80.664, 720, 6.672, 12, "e"], [0, 2, 87.336, 720, 2.664, 12, "l"], [0, 3, 90, 720, 2.664, 12, "l"], [0, 4, 92.664, 720, 6.672, 12, "o"], [0, 5, 99.336, 720, 3.336, 12, " "], [0, 6, 102.672, 720, 8.004, 12, "Å"], [0, 7, 110.676, 720, 3.336, 12, " "], [0, 8, 114.012, 720, 8.664, 12, "w"], [0, 9, 122.676, 720, 6.672, 12, "o"], [0, 10, 129.348, 720, 3.996, 12, "r"], [0, 11, 133.344, 720, 2.664, 12, "l"], [0, 12, 136.008, 720, 6.672, 12, "d"], [1, 0, 72, 700, 8.4, 12, "Ω"], [1, 1, 80.4, 700, 6.6, 12, "µ"], [1, 2, 87, 700, 7.2, 12, "€"], [2, 0, 72, 680, 7.2, 12, "A"], [2, 1, 79.2, 680, 3, 12, " "], [2, 2, 82.2, 680, 7.2, 12, "A"], [3, 0, 72, 660, 10.668, 12, "M"], [3, 1, 82.668, 660, 3.336, 12, "i"], [3, 2, 86.004, 660, 4.668, 12, "s"], [3, 3, 90.672, 660, 4.668, 12, "s"], [3, 4, 95.34, 660, 3.336, 12, "i"], [3, 5, 98.676, 660, 6, 12, "n"], [3, 6, 104.676, 660, 6, 12, "g"], [3, 7, 110.676, 660, 3, 12, " "], [3, 8, 113.676, 660, 3.996, 12, "f"], [3, 9, 117.672, 660, 6, 12, "o"], [3, 10, 123.672, 660, 6, 12, "n"], [3, 11, 129.672, 660, 3.336, 12, "t"], [3, 12, 133.008, 660, 3.996, 12, "’"], [3, 13, 137.004, 660, 4.668, 12, "s"], [3, 14, 141.672, 660, 3, 12, " "], [3, 15, 144.672, 660, 3.336, 12, "t"], [3, 16, 148.008, 660, 5.328, 12, "e"], [3, 17, 153.336, 660, 6, 12, "x"], [3, 18, 159.336, 660, 3.336, 12, "t"], [5, 0, 72, 640, 7.332, 12, "F"], [5, 1, 79.332, 640, 6, 12, "o"], [5, 2, 85.332, 640, 5.328, 12, "r"], [5, 3, 90.66, 640, 9.996, 12, "m"], [5, 4, 100.656, 640, 3, 12, " "], [5, 5, 103.656, 640, 3.996, 12, "t"], [5, 6, 107.652, 640, 5.328, 12, "e"], [5, 7, 112.98, 640, 6, 12, "x"], [5, 8, 118.98, 640, 3.996, 12, "t"]]}
+{"summary": {"path": "input", "open": "strict", "pages": 1, "extracted": 1, "chars": 51, "glyphs": 47, "replacement": 0, "warnings": 0, "errors": 0}}
+--- page out of range
+(none)
+--- svg overlay page 1
+<g data-overlay="text">
+<rect x="72" y="717.6" width="8.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="0" data-text="H"/>
+<rect x="80.664" y="717.6" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="1" data-text="e"/>
+<rect x="87.336" y="717.6" width="2.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="2" data-text="l"/>
+<rect x="90" y="717.6" width="2.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="3" data-text="l"/>
+<rect x="92.664" y="717.6" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="4" data-text="o"/>
+<rect x="99.336" y="717.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="5" data-text=" "/>
+<rect x="102.672" y="717.6" width="8.004" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="6" data-text="Å"/>
+<rect x="110.676" y="717.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="7" data-text=" "/>
+<rect x="114.012" y="717.6" width="8.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="8" data-text="w"/>
+<rect x="122.676" y="717.6" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="9" data-text="o"/>
+<rect x="129.348" y="717.6" width="3.996" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="10" data-text="r"/>
+<rect x="133.344" y="717.6" width="2.664" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="11" data-text="l"/>
+<rect x="136.008" y="717.6" width="6.672" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="0" data-seq="12" data-text="d"/>
+<rect x="72" y="697.6" width="8.4" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="0" data-text="Ω"/>
+<rect x="80.4" y="697.6" width="6.6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="1" data-text="µ"/>
+<rect x="87" y="697.6" width="7.2" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="1" data-seq="2" data-text="€"/>
+<rect x="72" y="677.6" width="7.2" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="0" data-text="A"/>
+<rect x="79.2" y="677.6" width="3" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="1" data-text=" "/>
+<rect x="82.2" y="677.6" width="7.2" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="2" data-seq="2" data-text="A"/>
+<rect x="72" y="657.6" width="10.668" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="0" data-text="M"/>
+<rect x="82.668" y="657.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="1" data-text="i"/>
+<rect x="86.004" y="657.6" width="4.668" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="2" data-text="s"/>
+<rect x="90.672" y="657.6" width="4.668" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="3" data-text="s"/>
+<rect x="95.34" y="657.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="4" data-text="i"/>
+<rect x="98.676" y="657.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="5" data-text="n"/>
+<rect x="104.676" y="657.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="6" data-text="g"/>
+<rect x="110.676" y="657.6" width="3" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="7" data-text=" "/>
+<rect x="113.676" y="657.6" width="3.996" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="8" data-text="f"/>
+<rect x="117.672" y="657.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="9" data-text="o"/>
+<rect x="123.672" y="657.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="10" data-text="n"/>
+<rect x="129.672" y="657.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="11" data-text="t"/>
+<rect x="133.008" y="657.6" width="3.996" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="12" data-text="’"/>
+<rect x="137.004" y="657.6" width="4.668" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="13" data-text="s"/>
+<rect x="141.672" y="657.6" width="3" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="14" data-text=" "/>
+<rect x="144.672" y="657.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="15" data-text="t"/>
+<rect x="148.008" y="657.6" width="5.328" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="16" data-text="e"/>
+<rect x="153.336" y="657.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="17" data-text="x"/>
+<rect x="159.336" y="657.6" width="3.336" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="3" data-seq="18" data-text="t"/>
+<rect x="72" y="637.6" width="7.332" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="0" data-text="F"/>
+<rect x="79.332" y="637.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="1" data-text="o"/>
+<rect x="85.332" y="637.6" width="5.328" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="2" data-text="r"/>
+<rect x="90.66" y="637.6" width="9.996" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="3" data-text="m"/>
+<rect x="100.656" y="637.6" width="3" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="4" data-text=" "/>
+<rect x="103.656" y="637.6" width="3.996" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="5" data-text="t"/>
+<rect x="107.652" y="637.6" width="5.328" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="6" data-text="e"/>
+<rect x="112.98" y="637.6" width="6" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="7" data-text="x"/>
+<rect x="118.98" y="637.6" width="3.996" height="12" fill="rgb(0%,0%,100%)" fill-opacity="0.15" stroke="rgb(100%,0%,0%)" stroke-width="0.2" stroke-opacity="0.6" data-item="5" data-seq="8" data-text="t"/>
+</g>
