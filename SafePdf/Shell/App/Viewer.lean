@@ -1,11 +1,13 @@
 import SafePdf.Shell.App.Shim
 import SafePdf.Shell.App.Tcl
 import SafePdf.Shell.App.View
+import SafePdf.Shell.App.Select
+import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 
 /-!
-# Native viewer (tasks 8.2a, 8.2b; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a, 8.2b, 8.2c; Plan.md §6 Phase 8, §8 native app, §10 `SafePdf/Shell/`)
 
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a toolbar
 (Open…, Prev, Next, zoom out/in, 100 %, fit page, fit width, rotate left/right, page k/n,
@@ -36,6 +38,21 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   the mouse (Ctrl+wheel) or at the window centre, maps it to page space with `Geom.toPage`;
   after the new image is shown it maps that page point back with `Geom.toScreen`
   (`View.reanchor`) and scrolls so it lies under the same window position.
+* **Selection and copy** (task 8.2c, pure logic in `Select`). A page's text is extracted on
+  first use (`Annot.extractDocPageAnnots`, fresh budget, as the text view) and cached per page
+  as a `Select.PageIndex` (glyph cells in reading order with page-space boxes, plus the
+  normalised search text). A mouse press/drag/release maps the window positions to page space
+  with `Geom.toPage` and selects the glyphs between the nearest glyphs in reading order;
+  double-click selects a word; Ctrl+A the page. The selection is drawn as stippled canvas
+  rectangles over the page image (tag `sel`; the image is not re-rendered). Ctrl+C or the
+  context menu (right button) copies `Select.rangeText` to the clipboard (`clipboard append`,
+  the text passed as one quoted word).
+* **Search** (Ctrl+F opens the find bar; Enter/F3 next, Shift+Enter/Shift+F3 previous, Escape
+  closes): case-insensitive, whitespace-normalised (`Select.normQuery`), page by page from the
+  current hit, wrapping around the document; pages are extracted lazily. All hits of the
+  current page are highlighted (tag `hit`, the current one in orange) and the current hit is
+  scrolled into view; the status line says `"q": hit k/n on page p` (k of the n hits of that
+  page) or `"q": not found`.
 * **Errors** (unreadable file, parse error, render error, Tcl error) are shown in the status
   line; the window stays usable. Every event handler catches its own exceptions.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
@@ -101,8 +118,27 @@ structure State where
   shownRot : SafePdf.Core.Doc.Rotation := .r0
   /-- Scroll to apply after the next image is shown. -/
   pending : Option ScrollTo := none
+  /-- Scroll region size of the shown page (pixels). -/
+  regionW : Nat := 1
+  /-- See `regionW`. -/
+  regionH : Nat := 1
+  /-- Text index per page of the open document (`none`: not extracted yet; an error message
+  when extraction failed). -/
+  texts : Array (Option (Except String Select.PageIndex)) := #[]
+  /-- The selection: page, first and last cell (reading order). -/
+  sel : Option (Nat × Nat × Nat) := none
+  /-- Page point of the mouse press that starts a drag selection. -/
+  pressPt : Option Pt := none
+  /-- The normalised search query (`Select.normQuery`; empty: no search). -/
+  query : Array Char := #[]
+  /-- The current search hit: page and index among that page's hits. -/
+  hit : Option (Nat × Nat) := none
+  /-- Highlights are stippled fills (`false` on Aqua, which has no stipples: outlines). -/
+  stipple : Bool := true
   /-- Smoke-test output directory (`SAFEPDF_VIEWER_SMOKE`). -/
   smokeDir : Option String := none
+  /-- Smoke-test variant: `text` runs the selection/search steps (`smokeText`). -/
+  smokeMode : String := ""
   /-- Smoke-test step counter. -/
   smokeStep : Nat := 0
 
@@ -190,7 +226,7 @@ in frame `.v`, the photo image `::safepdf::page` on canvas item tag `page`, stat
 `.status`. Key bindings on the toplevel's bind tag `.`; canvas resizes are debounced and
 reported as `emit resize W H`. -/
 def setupScript : String := "
-namespace eval ::safepdf { variable resizeId {} }
+namespace eval ::safepdf { variable resizeId {}; variable query {} }
 wm title . safe-pdf
 wm geometry . 860x1040
 wm minsize . 320 200
@@ -283,8 +319,115 @@ bind .c <Configure> {
   after cancel $::safepdf::resizeId
   set ::safepdf::resizeId [after 100 {::safepdf::emit resize [winfo width .c] [winfo height .c]}]
 }
+# Selection (8.2c): press/drag/release and double-click on the page, context menu.
+bind .c <ButtonPress-1> {focus .c; ::safepdf::emit press %x %y}
+bind .c <B1-Motion> {::safepdf::emit drag %x %y}
+bind .c <ButtonRelease-1> {::safepdf::emit release %x %y}
+bind .c <Double-Button-1> {focus .c; ::safepdf::emit word %x %y}
+menu .pop -tearoff 0
+.pop add command -label Copy -accelerator Ctrl+C -command {::safepdf::emit copy}
+.pop add command -label {Select all} -accelerator Ctrl+A -command {::safepdf::emit selectall}
+.pop add command -label {Find...} -accelerator Ctrl+F -command ::safepdf::showFind
+bind .c <Button-3> {tk_popup .pop %X %Y}
+bind . <Control-c> {::safepdf::emit copy}
+bind . <Control-a> {::safepdf::emit selectall}
+# Search bar (hidden until Ctrl+F). The entry does not carry the toplevel's bind tag, so
+# typing in it never triggers the viewer's single-key bindings.
+ttk::frame .find
+ttk::label .find.l -text {Find:}
+ttk::entry .find.e -textvariable ::safepdf::query -width 32
+ttk::button .find.prev -text {Previous} -command {::safepdf::emit find prev $::safepdf::query}
+ttk::button .find.next -text {Next} -command {::safepdf::emit find next $::safepdf::query}
+ttk::button .find.close -text {Close} -command ::safepdf::hideFind
+pack .find.l .find.e .find.prev .find.next .find.close -side left -padx 2 -pady 2
+bindtags .find.e [list .find.e TEntry all]
+proc ::safepdf::showFind {} {
+  if {![winfo ismapped .find]} { pack .find -side top -fill x -after .bar }
+  focus .find.e
+  .find.e selection range 0 end
+  .find.e icursor end
+}
+proc ::safepdf::hideFind {} { pack forget .find; focus .c; ::safepdf::emit find close }
+bind .find.e <Return> {::safepdf::emit find next $::safepdf::query; break}
+bind .find.e <KP_Enter> {::safepdf::emit find next $::safepdf::query; break}
+bind .find.e <Shift-Return> {::safepdf::emit find prev $::safepdf::query; break}
+bind .find.e <F3> {::safepdf::emit find next $::safepdf::query; break}
+bind .find.e <Shift-F3> {::safepdf::emit find prev $::safepdf::query; break}
+bind .find.e <Escape> {::safepdf::hideFind; break}
+bind .find.e <Control-q> {destroy .}
+bind . <Control-f> ::safepdf::showFind
+bind . <F3> {::safepdf::emit find next $::safepdf::query}
+bind . <Shift-F3> {::safepdf::emit find prev $::safepdf::query}
 focus .c
 "
+
+/-! ## Text index and highlights (task 8.2c) -/
+
+/-- The text index of page `p`: extracted on first use (`Annot.extractDocPageAnnots` with a
+fresh budget, as the text view and the renderer) and cached for the open document. -/
+def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex) := do
+  let s ← st.get
+  let some doc := s.doc | return .error "no document"
+  match s.texts[p]? with
+  | some (some r) => return r
+  | _ =>
+    let some page := doc.pages[p]? | return .error "page index out of range"
+    let r ← IO.lazyPure fun _ =>
+      match (SafePdf.Core.Annot.extractDocPageAnnots limits doc page
+          (SafePdf.Core.Filter.Budget.init limits)).1 with
+      | .ok pt => .ok (Select.PageIndex.ofText pt)
+      | .error e => .error (renderError e)
+    let gen := s.gen
+    st.modify fun s =>
+      if s.gen == gen then { s with texts := s.texts.modify p (fun _ => some r) } else s
+    return r
+
+/-- Box of the shown page (CropBox), when a page is shown. -/
+def shownBox (s : State) : Option Box := do
+  let doc ← s.doc
+  let page ← doc.pages[s.page]?
+  if s.shown.isNone || !(0 < s.shownZoom) then none
+  some (Box.ofRect page.cropBox)
+
+/-- Canvas rectangle `(x0, y0, x1, y1)` of a page-space box on the shown image. -/
+def canvasRect (s : State) (bx : Box) (b : Box) : Rat × Rat × Rat × Rat :=
+  let p0 := toScreen s.shownZoom s.shownRot bx ⟨b.llx, b.lly⟩
+  let p1 := toScreen s.shownZoom s.shownRot bx ⟨b.urx, b.ury⟩
+  (min p0.x p1.x + s.imgX, min p0.y p1.y + s.imgY, max p0.x p1.x + s.imgX,
+   max p0.y p1.y + s.imgY)
+
+/-- The page point under window position `(wx, wy)` of the canvas (`Geom.toPage`, C2). -/
+def pagePoint (st : IO.Ref State) (wx wy : Int) : IO (Option Pt) := do
+  let s ← st.get
+  let some bx := shownBox s | return none
+  let cx ← run [".c", "canvasx", toString wx]
+  let cy ← run [".c", "canvasy", toString wy]
+  let (some cx, some cy) := (View.parseDecimal cx, View.parseDecimal cy) | return none
+  return some (toPage s.shownZoom s.shownRot bx ⟨cx - (s.imgX : Rat), cy - (s.imgY : Rat)⟩)
+
+/-- Redraws the highlight rectangles of the shown page: all search hits (tag `hit`, the
+current one in orange) and the selection (tag `sel`). -/
+def drawOverlay (st : IO.Ref State) : IO Unit := do
+  discard <| run [".c", "delete", "sel", "hit"]
+  let s ← st.get
+  let some bx := shownBox s | return
+  let rect (b : Box) (color tag : String) : IO Unit := do
+    let (x0, y0, x1, y1) := canvasRect s bx b
+    let style := if s.stipple then ["-fill", color, "-stipple", "gray50", "-outline", ""]
+      else ["-fill", "", "-outline", color, "-width", "2"]
+    discard <| run ([".c", "create", "rectangle", toString x0.floor, toString y0.floor,
+      toString x1.ceil, toString y1.ceil] ++ style ++ ["-tags", tag])
+  if !s.query.isEmpty then
+    if let .ok ix ← pageIndex st s.page then
+      let hits := ix.hits s.query
+      for i in [0:hits.size] do
+        if let some (a, b) := hits[i]? then
+          let color := if s.hit == some (s.page, i) then "orange" else "yellow"
+          for b in Select.rangeBoxes ix.cells a b do rect b color "hit"
+  if let some (p, a, b) := s.sel then
+    if p == s.page then
+      if let .ok ix ← pageIndex st p then
+        for b in Select.rangeBoxes ix.cells a b do rect b "#3874f2" "sel"
 
 /-! ## Rendering -/
 
@@ -361,7 +504,8 @@ def refresh (st : IO.Ref State) : IO Unit := do
       discard <| run [".c", "configure", "-scrollregion", s!"0 0 {rw} {rh}"]
       applyScroll s vp ix iy rw rh
       st.modify ({ · with imgX := ix, imgY := iy, shownZoom := vp.zoom, shownRot := vp.rot,
-                          pending := none })
+                          pending := none, regionW := rw, regionH := rh })
+      drawOverlay st
       let how := match time with
         | some t => s!"rendered in {formatMs t} ms"
         | none => "from cache"
@@ -374,11 +518,13 @@ def refresh (st : IO.Ref State) : IO Unit := do
         discard <| run ["after", "100", "::safepdf::emit prefetch"]
     | .error e =>
       st.modify ({ · with pending := none })
+      discard <| run [".c", "delete", "sel", "hit"]
       discard <| run [photoName, "blank"]
       setStatus s!"{path}: page {s.page + 1}: cannot render: {renderError e}"
   | _, _ =>
     discard <| run [".bar.page", "configure", "-text", ""]
     discard <| run [".bar.zoom", "configure", "-text", ""]
+    discard <| run [".c", "delete", "sel", "hit"]
     discard <| run [photoName, "blank"]
 
 /-- Renders the page after the current one into the cache when it is small enough
@@ -398,7 +544,8 @@ def prefetch (st : IO.Ref State) : IO Unit := do
 ends up in the status line with an empty page. -/
 def openFile (st : IO.Ref State) (path : String) : IO Unit := do
   st.modify fun s => { s with path := some path, doc := none, page := 0, shown := none }
-  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top }
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
+                              texts := #[], sel := none, pressPt := none, hit := none }
   match ← Inspect.load {} path with
   | .error msg =>
     discard <| run [photoName, "blank"]
@@ -411,7 +558,7 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
       refresh st
       setStatus s!"{path}: cannot open: {renderError e}"
     | .ok doc =>
-      st.modify ({ · with doc := some doc })
+      st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none })
       if doc.pages.size == 0 then
         refresh st
         setStatus s!"{path}: the document has no pages"
@@ -423,7 +570,7 @@ def goTo (st : IO.Ref State) (p : Nat) (whereTo : ScrollTo := .top) : IO Unit :=
   if s.pageCount == 0 then return
   let p := min p (s.pageCount - 1)
   if p != s.page then
-    st.modify ({ · with page := p, pending := some whereTo })
+    st.modify ({ · with page := p, pending := some whereTo, sel := none, pressPt := none })
     refresh st
 
 /-- Remembers the page point at window position `(wx, wy)` of the canvas, so that the next
@@ -485,6 +632,156 @@ def openDialog (st : IO.Ref State) : IO Unit := do
     "{{PDF files} {.pdf .PDF}} {{All files} *}"]
   if !path.isEmpty then openFile st path
 
+/-! ## Selection, copy and search (task 8.2c) -/
+
+/-- Status line after a selection change. -/
+def selStatus (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let some (p, a, b) := s.sel | return
+  if let .ok ix ← pageIndex st p then
+    setStatus s!"page {p + 1}: selected {(Select.rangeText ix.cells a b).length} characters \
+      (Ctrl+C copies)"
+
+/-- Mouse press at window position `(wx, wy)`: clears the selection and remembers the page
+point where a drag starts. -/
+def press (st : IO.Ref State) (wx wy : Int) : IO Unit := do
+  st.modify ({ · with sel := none, pressPt := none })
+  if let some p ← pagePoint st wx wy then st.modify ({ · with pressPt := some p })
+  drawOverlay st
+
+/-- Mouse drag (`final`: release) to `(wx, wy)`: selects the glyphs from the one nearest to
+the press point to the one nearest to this point, in reading order. A release where the press
+was (a click) selects nothing. -/
+def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
+  let s ← st.get
+  let some p0 := s.pressPt | return
+  if final then st.modify ({ · with pressPt := none })
+  let some p1 ← pagePoint st wx wy | return
+  if final && p0 == p1 then return
+  match ← pageIndex st s.page with
+  | .ok ix =>
+    if let some (a, b) := Select.dragRange ix.cells p0 p1 then
+      st.modify ({ · with sel := some (s.page, a, b) })
+      drawOverlay st
+      if final then selStatus st
+  | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
+
+/-- Double click at `(wx, wy)`: selects the word of the nearest glyph (`Select.wordAt`). -/
+def selectWord (st : IO.Ref State) (wx wy : Int) : IO Unit := do
+  st.modify ({ · with pressPt := none })
+  let s ← st.get
+  let some p ← pagePoint st wx wy | return
+  match ← pageIndex st s.page with
+  | .ok ix =>
+    if let some i := Select.nearest ix.cells p then
+      let (a, b) := Select.wordAt ix.cells i
+      st.modify ({ · with sel := some (s.page, a, b) })
+      drawOverlay st
+      selStatus st
+  | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
+
+/-- Selects all the text of the current page (Ctrl+A). -/
+def selectAll (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone then return
+  match ← pageIndex st s.page with
+  | .ok ix =>
+    if ix.cells.size == 0 then setStatus s!"page {s.page + 1}: no text"
+    else
+      st.modify ({ · with sel := some (s.page, 0, ix.cells.size - 1) })
+      drawOverlay st
+      selStatus st
+  | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
+
+/-- Copies the selected text to the clipboard (Ctrl+C); the text is one quoted Tcl word. -/
+def copySel (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  match s.sel with
+  | some (p, a, b) =>
+    if let .ok ix ← pageIndex st p then
+      let t := Select.rangeText ix.cells a b
+      discard <| run ["clipboard", "clear"]
+      discard <| run ["clipboard", "append", "--", t]
+      setStatus s!"copied {t.length} characters"
+  | none => setStatus "nothing selected (drag over text, double-click a word, or Ctrl+A)"
+
+/-- Scrolls the current search hit into view (centred on an axis where it is not visible). -/
+def scrollToHit (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let some (p, k) := s.hit | return
+  if p != s.page then return
+  let some bx := shownBox s | return
+  let .ok ix ← pageIndex st p | return
+  let some (a, b) := (ix.hits s.query)[k]? | return
+  let some u := (Select.rangeBoxes ix.cells a b).foldl (fun acc b =>
+    some (match acc with | some u => Select.Box.union u b | none => b)) none | return
+  let (x0, y0, x1, y1) := canvasRect s bx u
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return
+  let cw : Rat := s.canvasW
+  let ch : Rat := s.canvasH
+  if x0 < vx || vx + cw < x1 then
+    discard <| run [".c", "xview", "moveto", fmtFrac (((x0 + x1) / 2 - cw / 2) / (s.regionW : Rat))]
+  if y0 < vy || vy + ch < y1 then
+    discard <| run [".c", "yview", "moveto", fmtFrac (((y0 + y1) / 2 - ch / 2) / (s.regionH : Rat))]
+
+/-- The next (`forward`) or previous search hit after the current one, as (page, index on
+the page, hits on the page, wrapped around). Searches the current page, then the following
+(preceding) pages, wrapping around to the current page. -/
+def nextHit (st : IO.Ref State) (forward : Bool) : IO (Option (Nat × Nat × Nat × Bool)) := do
+  let s ← st.get
+  let n := s.pageCount
+  let q := s.query
+  let cur := match s.hit with
+    | some (p, k) => if p == s.page then some k else none
+    | none => none
+  if let .ok ix ← pageIndex st s.page then
+    let c := (ix.hits q).size
+    let cand := if forward then some ((cur.map (· + 1)).getD 0)
+      else match cur with
+        | some k => if k > 0 then some (k - 1) else none
+        | none => if c > 0 then some (c - 1) else none
+    if let some k := cand then
+      if k < c then return some (s.page, k, c, false)
+  for i in [1:n + 1] do
+    let p := if forward then (s.page + i) % n else (s.page + n - i % n) % n
+    if let .ok ix ← pageIndex st p then
+      let c := (ix.hits q).size
+      if c > 0 then
+        let wrapped := if forward then p ≤ s.page else p ≥ s.page
+        return some (p, if forward then 0 else c - 1, c, wrapped)
+  return none
+
+/-- Handles `find next|prev QUERY` and `find close`. -/
+def find (st : IO.Ref State) (args : List String) : IO Unit := do
+  match args with
+  | ["close"] =>
+    st.modify ({ · with query := #[], hit := none })
+    drawOverlay st
+  | [dir, query] =>
+    let s ← st.get
+    if s.doc.isNone then return
+    let q := Select.normQuery query
+    let qs := String.ofList q.toList
+    if q.isEmpty then
+      st.modify ({ · with query := #[], hit := none })
+      drawOverlay st
+      setStatus "search: empty query"
+      return
+    if q != s.query then st.modify ({ · with query := q, hit := none })
+    match ← nextHit st (dir != "prev") with
+    | none =>
+      st.modify ({ · with hit := none })
+      drawOverlay st
+      setStatus s!"\"{qs}\": not found"
+    | some (p, k, c, wrapped) =>
+      st.modify ({ · with hit := some (p, k) })
+      if p != s.page then goTo st p
+      drawOverlay st
+      scrollToHit st
+      setStatus s!"\"{qs}\": hit {k + 1}/{c} on page {p + 1}{if wrapped then " (wrapped)" else ""}"
+  | _ => setStatus s!"internal: bad find {args}"
+
 /-! ## Smoke mode -/
 
 /-- Sends the key `k` to the canvas through Tk (as a user would type it). -/
@@ -493,6 +790,105 @@ def sendKey (k : String) : IO Unit := do
     discard <| run ["focus", "-force", ".c"]
     discard <| run ["event", "generate", ".c", s!"<Key-{k}>"]
   catch _ => pure ()
+
+/-- Generates the Tk event `pat` (with options `opts`) on window `w`, as a user would. -/
+def sendEvent (w pat : String) (opts : List String := []) : IO Unit := do
+  try
+    discard <| run ["focus", "-force", w]
+    discard <| run (["event", "generate", w, pat] ++ opts)
+  catch _ => pure ()
+
+/-- Window position of the centre of cell `i` of the shown page. -/
+def cellWindowPos (st : IO.Ref State) (ix : Select.PageIndex) (i : Nat) :
+    IO (Option (String × String)) := do
+  let s ← st.get
+  let some bx := shownBox s | return none
+  let some c := ix.cells[i]? | return none
+  let (x0, y0, x1, y1) := canvasRect s bx c.box
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return none
+  return some (toString ((x0 + x1) / 2 - vx).floor, toString ((y0 + y1) / 2 - vy).floor)
+
+/-- The clipboard's text (`<empty>` when it holds none). -/
+def clipGet : IO String := do
+  try run ["clipboard", "get"] catch _ => pure "<empty>"
+
+/-- Number of canvas items with tag `tag`. -/
+def tagCount (tag : String) : IO Nat := do
+  return ((← run [".c", "find", "withtag", tag]).splitOn " ").filter (!·.isEmpty) |>.length
+
+/-- Smoke steps of the selection/copy/search test (`SAFEPDF_VIEWER_SMOKE_MODE=text`, task
+8.2c), on a document whose page 1 contains the words `safe` and `world` and page 2 the
+phrase `zebra crossing`:
+* step 0: Ctrl+A, Ctrl+C → `clip-all.txt` (clipboard text); a double click on the first glyph
+  of `safe`, Ctrl+C → `word.txt`; a drag (press, motion with button 1, release) from the first
+  glyph of the page to the last glyph of `world`, Ctrl+C → `drag.txt`; `sel.txt` (highlight
+  rectangles after Ctrl+A, status);
+* step 1: Ctrl+F, query `ZEBRA  crossing`, Return → `find.txt` (page, status, highlight
+  count); F3 (wraps to the same hit), Shift+F3, an absent query, Escape (closes the search). -/
+def smokeText (st : IO.Ref State) (dir : String) : IO Unit := do
+  let s ← st.get
+  st.modify ({ · with smokeStep := s.smokeStep + 1 })
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let status : IO String := run [".status", "cget", "-text"]
+  let copy : IO String := do
+    sendEvent ".c" "<Control-Key-c>"
+    clipGet
+  let click (pos : String × String) (pat : String) (state : List String := []) : IO Unit :=
+    sendEvent ".c" pat (["-x", pos.1, "-y", pos.2] ++ state)
+  match s.smokeStep with
+  | 0 =>
+    sendEvent ".c" "<Control-Key-a>"
+    let selItems ← tagCount "sel"
+    let selStatus ← status
+    IO.FS.writeFile (file "clip-all.txt") (← copy)
+    let mut word := "<no index>"
+    let mut drag := "<no index>"
+    if let .ok ix ← pageIndex st 0 then
+      if let some (a, _) := (ix.hits (Select.normQuery "safe"))[0]? then
+        if let some pos ← cellWindowPos st ix a then
+          for _ in [0:2] do
+            click pos "<ButtonPress-1>"
+            click pos "<ButtonRelease-1>"
+          word ← copy
+          -- The word's highlight in image pixels, and the page image, for an ink check.
+          let s' ← st.get
+          IO.FS.writeFile (file "word-rect.txt")
+            s!"{← run [".c", "coords", "sel"]}\n{s'.imgX} {s'.imgY}\n"
+          try discard <| run [photoName, "write", file "text-page-1.ppm", "-format", "ppm"]
+          catch _ => pure ()
+      if let some (_, b) := (ix.hits (Select.normQuery "world"))[0]? then
+        if let (some p0, some p1) := (← cellWindowPos st ix 0, ← cellWindowPos st ix b) then
+          click p0 "<ButtonPress-1>"
+          click p1 "<Motion>" ["-state", "256"]
+          click p1 "<ButtonRelease-1>" ["-state", "256"]
+          drag ← copy
+    IO.FS.writeFile (file "word.txt") word
+    IO.FS.writeFile (file "drag.txt") drag
+    IO.FS.writeFile (file "sel.txt") s!"sel-items: {selItems}\nstatus: {selStatus}\n"
+    discard <| run ["after", "300", "::safepdf::emit smoke"]
+  | 1 =>
+    sendEvent ".c" "<Control-Key-f>"
+    discard <| run ["update", "idletasks"]
+    discard <| run ["set", "::safepdf::query", "ZEBRA  crossing"]
+    sendEvent ".find.e" "<Key-Return>"
+    let page1 := (← st.get).page + 1
+    let status1 ← status
+    let hits1 ← tagCount "hit"
+    sendEvent ".find.e" "<Key-F3>"
+    let status2 ← status
+    sendEvent ".find.e" "<Shift-Key-F3>"
+    let status3 ← status
+    discard <| run ["set", "::safepdf::query", "no such words"]
+    sendEvent ".find.e" "<Key-Return>"
+    let status4 ← status
+    sendEvent ".find.e" "<Key-Escape>"
+    let hits5 ← tagCount "hit"
+    IO.FS.writeFile (file "find.txt")
+      s!"page: {page1}\nstatus: {status1}\nhit-items: {hits1}\nstatus-f3: {status2}\n\
+        status-shift-f3: {status3}\nstatus-absent: {status4}\nhit-items-closed: {hits5}\n"
+    discard <| run ["destroy", "."]
+  | _ => discard <| run ["destroy", "."]
 
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
@@ -508,6 +904,7 @@ A document that failed to open ends after step 1. -/
 def smoke (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some dir := s.smokeDir | return
+  if s.smokeMode == "text" then smokeText st dir; return
   st.modify ({ · with smokeStep := s.smokeStep + 1 })
   -- Writing an empty photo fails in Tk; that only means there is nothing to write.
   let write (name : String) : IO Unit :=
@@ -571,6 +968,12 @@ def posOf : List String → Option (Nat × Nat)
     | _, _ => none
   | _ => none
 
+/-- Parses a window position `X Y` (integers, possibly negative while dragging outside). -/
+def intPos (x y : String) : Option (Int × Int) :=
+  match x.toInt?, y.toInt? with
+  | some x, some y => some (x, y)
+  | _, _ => none
+
 /-- Handles one `::safepdf::emit` call. -/
 def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   let s ← st.get
@@ -586,6 +989,13 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | "zoom" :: what :: pos => zoom st what (posOf pos)
   | ["rotate", "cw"] => rotate st true
   | ["rotate", "ccw"] => rotate st false
+  | ["press", x, y] => if let some (x, y) := intPos x y then press st x y
+  | ["drag", x, y] => if let some (x, y) := intPos x y then dragTo st x y false
+  | ["release", x, y] => if let some (x, y) := intPos x y then dragTo st x y true
+  | ["word", x, y] => if let some (x, y) := intPos x y then selectWord st x y
+  | ["selectall"] => selectAll st
+  | ["copy"] => copySel st
+  | "find" :: rest => find st rest
   | ["resize", w, h] =>
     match w.toNat?, h.toNat? with
     | some w, some h =>
@@ -613,7 +1023,10 @@ Opens FILE (or asks for one) in a window.
 Keys: Next/space, Prior/BackSpace scroll by a window (then next/previous page);
 Down/Up/Right/Left scroll; Home/End first/last page; + - zoom in/out; 0 actual size;
 f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+Q quit.
-SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit."
+Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
+Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
+SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
+(SAFEPDF_VIEWER_SMOKE_MODE=text: the selection/copy/search steps instead)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
 start (no display, missing Tk). -/
@@ -628,10 +1041,12 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln s!"viewer: cannot start Tk: {e}"
     return 3
   let smokeDir ← IO.getEnv "SAFEPDF_VIEWER_SMOKE"
-  let st ← IO.mkRef ({ smokeDir } : State)
+  let smokeMode := (← IO.getEnv "SAFEPDF_VIEWER_SMOKE_MODE").getD ""
+  let st ← IO.mkRef ({ smokeDir, smokeMode } : State)
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
+    if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
     if let some sc := View.parseDecimal (← Shim.eval "tk scaling") then
       st.modify ({ · with scaling := max (1 / 2) (min 8 sc) })
