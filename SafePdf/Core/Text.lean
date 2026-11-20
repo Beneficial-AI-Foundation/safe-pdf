@@ -688,14 +688,16 @@ def buildFontDict {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ)
     let (tt, s4) := if needTT then loadTT limits src s3 resolve fd else (none, s3)
     let progDesc := if t1.isSome then " FontFile" else if cff.isSome then " FontFile3"
       else if tt.isSome then " FontFile2" else ""
-    let width : Nat → Fixed := match cff, tt with
-      | some f, _ =>
-        let tbl := cffWidthTable sm hasWidths f
-        fun code => tbl.getD code Fixed.zero
-      | none, some f =>
-        let tbl := ttWidthTable sm hasWidths (isSymbolic resolve fd) f
-        fun code => tbl.getD code Fixed.zero
-      | none, none => simpleWidth sm t1
+    -- The 256-entry table is a data value, not a closure: with `let tbl := …; fun code => …`
+    -- inside a function-typed `match`, the compiler eta-expands `width` and recomputes the
+    -- whole table on every code (task 7.9: 256 cmap lookups per glyph).
+    let tbl : Option (Array Fixed) := match cff, tt with
+      | some f, _ => some (cffWidthTable sm hasWidths f)
+      | none, some f => some (ttWidthTable sm hasWidths (isSymbolic resolve fd) f)
+      | none, none => none
+    let width (code : Nat) : Fixed := match tbl with
+      | some t => t.getD code Fixed.zero
+      | none => simpleWidth sm t1 code
     (⟨.one, (fun c => match c with
         | [b] => width b.toNat
         | _ => Fixed.zero),

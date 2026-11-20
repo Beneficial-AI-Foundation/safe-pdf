@@ -169,11 +169,28 @@ display=1
 if [ -n "${DISPLAY:-}" ] && { command -v xdpyinfo >/dev/null 2>&1 && xdpyinfo >/dev/null 2>&1 \
     || [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; }; then
   :
-elif command -v xvfb-run >/dev/null 2>&1; then
-  wrap=(xvfb-run -a -s "-screen 0 1280x1024x24")
+elif command -v Xvfb >/dev/null 2>&1; then
+  # Start Xvfb directly, not through xvfb-run: xvfb-run reuses file descriptor 3 for its own
+  # diagnostics (`exec 3>&1`), which would replace the token pipe the viewer reads from fd 3.
+  xvfb_dpy=""
+  for n in $(seq 120 160); do
+    [ -e "/tmp/.X11-unix/X$n" ] || [ -e "/tmp/.X$n-lock" ] && continue
+    Xvfb ":$n" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &
+    xvfb_pid=$!
+    for _ in $(seq 1 50); do [ -S "/tmp/.X11-unix/X$n" ] && break; sleep 0.1; done
+    if [ -S "/tmp/.X11-unix/X$n" ]; then xvfb_dpy=":$n"; break; fi
+    kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null
+  done
+  if [ -n "$xvfb_dpy" ]; then
+    export DISPLAY="$xvfb_dpy"
+    trap 'kill "$xvfb_pid" 2>/dev/null; cleanup' EXIT
+  else
+    display=0
+    echo "skip - L25-L27 window checks (Xvfb did not start)"
+  fi
 else
   display=0
-  echo "skip - L25-L27 window checks (no X display and no xvfb-run)"
+  echo "skip - L25-L27 window checks (no X display and no Xvfb)"
 fi
 if [ "$display" = 1 ]; then
   mkdir -p "$work/smoke" "$work/tmp"
