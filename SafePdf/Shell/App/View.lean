@@ -3,7 +3,7 @@ import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Limits
 
 /-!
-# Viewer geometry, wheel and page cache (tasks 8.2b, 9.2; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
+# Viewer geometry, wheel, view modes and page cache (tasks 8.2b, 9.2, 9.3; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
 The pure, Tk-free part of the viewer's viewing logic (unverified shell code, but total and
 checked by `#guard`s): zoom modes and steps, the zoom cap, the C2 re-anchoring that keeps a
@@ -25,6 +25,13 @@ LRU cache of rendered pages bounded by total bytes.
   remainders accumulated, the page turned only after the view is at the edge and the user
   pushes on past it by `wheelThreshold`; trackpad momentum after a turn is swallowed until a
   pause (`wheelGapMs`).
+* **View modes** (task 9.3, Plan.md §6 Phase 9 "View modes"; PDF.js's scroll and spread
+  modes). `ScrollMode` (page, vertical) × `SpreadMode` (none, odd, even): `spreads` pairs the
+  pages (`mem_spreadPages`: every page lies in exactly one spread), `nextPage`/`prevPage` move
+  by a spread (`nextPage_spread`), `layoutRows` places the rows of pages in the scroll region
+  (`stack_pairwise`: stacked extents never overlap), `visiblePages`/`wantedPages` give the pages
+  in a view band (plus one each side, kept rendered), `pageAt` the page at a point,
+  `topFor`/`bottomFor` the scroll positions of a page, `fitBox` the box the fit zooms use.
 * **Cache.** `Cache` keyed by (document generation, page, zoom, rotation); `Cache.insert`
   evicts least-recently-used entries until the total image bytes are at most the budget
   (`cacheBytes`, 256 MiB) and there are at most `cacheEntries` entries.
@@ -389,6 +396,328 @@ def wheelRun (evs : List (Nat × Rat)) (precise : Bool) (top view region : Nat)
 #guard
   let (w, a) := wheelStep {} 0 30 true true 0 100 100 25
   a == .next && (wheelStep w 16 10 false true 0 100 100 10).2 == .next
+
+/-! ## View modes and page layout (task 9.3)
+
+PDF.js's *Scroll mode* (Page, Vertical; Wrapped and Horizontal are not offered) and *Spread
+mode* (None, Odd, Even). Single page = (page, none), continuous = (vertical, none), facing =
+(page, odd/even), continuous facing = (vertical, odd/even). A spread is the row of pages shown
+side by side; `layoutRows` places the rows of the scroll region. -/
+
+/-- How pages follow each other (PDF.js "Scroll mode"). -/
+inductive ScrollMode where
+  /-- One page (or spread) at a time; scrolling past its edge turns the page. -/
+  | page
+  /-- All pages (spreads) stacked vertically with gaps; the wheel scrolls the whole document. -/
+  | vertical
+  deriving DecidableEq, Repr, Inhabited
+
+/-- How pages are paired side by side (PDF.js "Spread mode"). -/
+inductive SpreadMode where
+  /-- No spreads: one page per row. -/
+  | none
+  /-- Odd spreads: pages 1|2, 3|4, … (1-based numbers). -/
+  | odd
+  /-- Even spreads: page 1 alone, then 2|3, 4|5, … -/
+  | even
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Name of a scroll mode (Tcl radio value). -/
+def ScrollMode.key : ScrollMode → String
+  | .page => "page"
+  | .vertical => "vertical"
+
+/-- The scroll mode named `s`. -/
+def ScrollMode.ofKey : String → Option ScrollMode
+  | "page" => some .page
+  | "vertical" => some .vertical
+  | _ => none
+
+/-- Name of a spread mode (Tcl radio value). -/
+def SpreadMode.key : SpreadMode → String
+  | .none => "none"
+  | .odd => "odd"
+  | .even => "even"
+
+/-- The spread mode named `s`. -/
+def SpreadMode.ofKey : String → Option SpreadMode
+  | "none" => some .none
+  | "odd" => some .odd
+  | "even" => some .even
+  | _ => none
+
+#guard [ScrollMode.page, .vertical].all fun m => ScrollMode.ofKey m.key == some m
+#guard [SpreadMode.none, .odd, .even].all fun m => SpreadMode.ofKey m.key == some m
+
+/-- The spread (0-based) holding page `p` (0-based). -/
+def spreadOf : SpreadMode → Nat → Nat
+  | .none, p => p
+  | .odd, p => p / 2
+  | .even, p => (p + 1) / 2
+
+/-- The first page of spread `k` (for `.even`, spread 0 is page 0 alone). -/
+def spreadFirst : SpreadMode → Nat → Nat
+  | .none, k => k
+  | .odd, k => 2 * k
+  | .even, k => 2 * k - 1
+
+/-- Whether spread `k` has room for two pages. -/
+def spreadTwo : SpreadMode → Nat → Bool
+  | .none, _ => false
+  | .odd, _ => true
+  | .even, k => k != 0
+
+/-- The pages of spread `k` of a document of `n` pages, left to right. -/
+def spreadPages (sp : SpreadMode) (n k : Nat) : List Nat :=
+  let q := spreadFirst sp k
+  (if spreadTwo sp k then [q, q + 1] else [q]).filter (· < n)
+
+/-- Number of spreads of a document of `n` pages. -/
+def spreadCount (sp : SpreadMode) (n : Nat) : Nat :=
+  if n = 0 then 0 else spreadOf sp (n - 1) + 1
+
+/-- All spreads of a document of `n` pages, in order. -/
+def spreads (sp : SpreadMode) (n : Nat) : List (List Nat) :=
+  (List.range (spreadCount sp n)).map (spreadPages sp n)
+
+/-- Page `p` is in spread `k` exactly when `k` is its spread: every page appears in exactly
+one spread. -/
+theorem mem_spreadPages {sp : SpreadMode} {n k p : Nat} :
+    p ∈ spreadPages sp n k ↔ p < n ∧ spreadOf sp p = k := by
+  cases sp with
+  | none => simp [spreadPages, spreadFirst, spreadTwo, spreadOf, List.mem_filter]; omega
+  | odd => simp [spreadPages, spreadFirst, spreadTwo, spreadOf, List.mem_filter]; omega
+  | even =>
+    by_cases hk : k = 0
+    · subst hk; simp [spreadPages, spreadFirst, spreadTwo, spreadOf, List.mem_filter]; omega
+    · simp [spreadPages, spreadFirst, spreadTwo, spreadOf, List.mem_filter, hk]; omega
+
+/-- The spread of a page of the document is one of its spreads. -/
+theorem spreadOf_lt_count {sp : SpreadMode} {n p : Nat} (h : p < n) :
+    spreadOf sp p < spreadCount sp n := by
+  unfold spreadCount
+  cases sp <;> simp only [spreadOf] <;> split <;> omega
+
+/-- The first page of spread `k` lies in spread `k`. -/
+theorem spreadOf_spreadFirst (sp : SpreadMode) (k : Nat) : spreadOf sp (spreadFirst sp k) = k := by
+  cases sp <;> simp only [spreadOf, spreadFirst] <;> omega
+
+#guard spreads .none 3 == [[0], [1], [2]]
+#guard spreads .odd 5 == [[0, 1], [2, 3], [4]]
+#guard spreads .even 5 == [[0], [1, 2], [3, 4]]
+#guard spreads .even 4 == [[0], [1, 2], [3]]
+#guard spreads .odd 0 == [] && spreads .even 1 == [[0]]
+-- Every page is in exactly one spread (the theorem, checked on examples).
+#guard [SpreadMode.none, .odd, .even].all fun sp =>
+  (List.range 9).all fun n => ((spreads sp n).flatten == List.range n)
+
+/-- The page "Next" goes to: the first page of the next spread (two pages on in the facing
+modes), or `p` itself at the end. -/
+def nextPage (sp : SpreadMode) (n p : Nat) : Nat :=
+  let q := spreadFirst sp (spreadOf sp p + 1)
+  if q < n then q else p
+
+/-- The page "Previous" goes to: the first page of the previous spread, or `p` itself in the
+first spread. -/
+def prevPage (sp : SpreadMode) (p : Nat) : Nat :=
+  match spreadOf sp p with
+  | 0 => p
+  | k + 1 => spreadFirst sp k
+
+/-- "Next" moves exactly one spread on (or stays at the end). -/
+theorem nextPage_spread (sp : SpreadMode) (n p : Nat) :
+    nextPage sp n p = p ∨ spreadOf sp (nextPage sp n p) = spreadOf sp p + 1 := by
+  simp only [nextPage]
+  split
+  · exact .inr (spreadOf_spreadFirst sp _)
+  · exact .inl rfl
+
+#guard (List.range 5).map (nextPage .none 5) == [1, 2, 3, 4, 4]
+#guard (List.range 5).map (nextPage .odd 5) == [2, 2, 4, 4, 4]
+#guard (List.range 5).map (nextPage .even 5) == [1, 3, 3, 3, 4]
+#guard (List.range 5).map (prevPage .odd) == [0, 1, 0, 0, 2]
+#guard (List.range 5).map (prevPage .even) == [0, 0, 0, 1, 1]
+
+/-- Gap in pixels between pages: between the rows of the vertical modes and between the two
+pages of a spread (PDF.js leaves a similar margin). -/
+def pageGap : Nat := 10
+
+/-- Places extents `ss` one after another from `pos`, `g` apart: `(start, extent)` each. -/
+def stack (pos g : Nat) : List Nat → List (Nat × Nat)
+  | [] => []
+  | s :: ss => (pos, s) :: stack (pos + s + g) g ss
+
+/-- Everything stacked from `pos` starts at or after `pos`. -/
+theorem stack_ge : ∀ {pos g : Nat} {ss : List Nat} {a : Nat × Nat}, a ∈ stack pos g ss → pos ≤ a.1
+  | _, _, [], _, h => by simp [stack] at h
+  | pos, g, s :: ss, a, h => by
+    simp only [stack, List.mem_cons] at h
+    rcases h with h | h
+    · subst h; exact Nat.le_refl _
+    · have := stack_ge h; omega
+
+/-- Stacked items never overlap: each ends at least `g` before every later one starts. -/
+theorem stack_pairwise : ∀ (pos g : Nat) (ss : List Nat),
+    (stack pos g ss).Pairwise (fun a b => a.1 + a.2 + g ≤ b.1)
+  | _, _, [] => List.Pairwise.nil
+  | pos, g, s :: ss => by
+    simp only [stack]
+    refine List.Pairwise.cons (fun b hb => ?_) (stack_pairwise _ g ss)
+    have := stack_ge hb
+    simp only at this ⊢
+    omega
+
+/-- Total extent of `ss` stacked `g` apart. -/
+def span (g : Nat) : List Nat → Nat
+  | [] => 0
+  | [s] => s
+  | s :: ss => s + g + span g ss
+
+#guard stack 8 10 [100, 50, 70] == [(8, 100), (118, 50), (178, 70)]
+#guard span 10 [100, 50, 70] == 240 && span 10 [] == 0 && span 10 [7] == 7
+
+/-- Where a page image lies in the scroll region (canvas pixels, top-left corner and size). -/
+structure Place where
+  /-- Page index (0-based). -/
+  page : Nat
+  /-- Left edge. -/
+  x : Nat
+  /-- Top edge. -/
+  y : Nat
+  /-- Width. -/
+  w : Nat
+  /-- Height. -/
+  h : Nat
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Places the rows `rows` (spreads: page lists, left to right) of pages of pixel sizes
+`sizes` (indexed by page) in a canvas of `cw × ch`: rows stacked `pageGap` apart from the top
+margin (or centred vertically when `centreY` and they fit, as the single-page view does), each
+row centred horizontally with its pages `pageGap` apart and centred vertically within the row
+(PDF.js's `vertical-align: middle`). Returns the places in page order and the scroll region's
+width and height (at least the canvas, at least the content plus `margin` on each side). -/
+def layoutRows (sizes : Array (Nat × Nat)) (rows : List (List Nat)) (cw ch : Nat)
+    (centreY : Bool) : Array Place × Nat × Nat :=
+  let sz (p : Nat) : Nat × Nat := sizes[p]?.getD (0, 0)
+  let rowW (r : List Nat) : Nat := span pageGap (r.map fun p => (sz p).1)
+  let rowH (r : List Nat) : Nat := (r.map fun p => (sz p).2).foldl max 0
+  let regionW := max cw ((rows.map rowW).foldl max 0 + 2 * margin)
+  let content := span pageGap (rows.map rowH)
+  let regionH := max ch (content + 2 * margin)
+  let y0 := if centreY then max margin ((ch - content) / 2) else margin
+  let places := ((stack y0 pageGap (rows.map rowH)).zip rows).flatMap fun ((ry, rh), r) =>
+    ((stack ((regionW - rowW r) / 2) pageGap (r.map fun p => (sz p).1)).zip r).map
+      fun ((x, w), p) => ({ page := p, x, y := ry + (rh - (sz p).2) / 2, w, h := (sz p).2 } : Place)
+  (places.toArray, regionW, regionH)
+
+/-- Two places overlap (their rectangles share an interior point). -/
+def Place.overlaps (a b : Place) : Bool :=
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+
+/-- No two places overlap. -/
+def disjoint (ps : Array Place) : Bool :=
+  (List.range ps.size).all fun i => (List.range ps.size).all fun j =>
+    i == j || match ps[i]?, ps[j]? with
+      | some a, some b => !a.overlaps b
+      | _, _ => true
+
+/-- Whether place `pl` shares rows of pixels with the band `[top, bot)`. -/
+def Place.meets (pl : Place) (top bot : Nat) : Bool :=
+  pl.y < bot && top < pl.y + pl.h
+
+/-- The pages whose places meet the view band `[top, bot)` (scroll region pixels). -/
+def visiblePages (ps : Array Place) (top bot : Nat) : List Nat :=
+  (ps.toList.filter (·.meets top bot)).map (·.page)
+
+/-- The pages to keep rendered for the view band `[top, bot)`: the visible ones and one more
+place before and after them (in page order), so the next page is ready before it scrolls in. -/
+def wantedPages (ps : Array Place) (top bot : Nat) : List Nat :=
+  let idx := (List.range ps.size).filter fun i => (ps[i]?.map (·.meets top bot)).getD false
+  match idx.head?, idx.getLast? with
+  | some lo, some hi =>
+    ((List.range ps.size).filter fun i => lo ≤ i + 1 && i ≤ hi + 1).filterMap
+      fun i => ps[i]?.map (·.page)
+  | _, _ => []
+
+/-- Distance from `a` to the interval `[lo, lo + len)` (0 inside). -/
+def gapTo (a lo len : Nat) : Nat :=
+  if a < lo then lo - a else if a < lo + len then 0 else a + 1 - (lo + len)
+
+/-- The page at scroll-region point `(x, y)`: the place containing it, else the nearest one
+(by the sum of the horizontal and vertical distances; the first in page order on a tie). -/
+def pageAt (ps : Array Place) (x y : Nat) : Option Nat :=
+  (ps.foldl (fun (best : Option (Nat × Nat)) pl =>
+    let d := gapTo x pl.x pl.w + gapTo y pl.y pl.h
+    match best with
+    | some (_, bd) => if d < bd then some (pl.page, d) else best
+    | none => some (pl.page, d)) none).map (·.1)
+
+/-- The place of page `p`. -/
+def placeOf (ps : Array Place) (p : Nat) : Option Place :=
+  ps.find? (·.page == p)
+
+/-- The scroll position (top of the view) that shows place `pl` from its top, with the margin
+above it. -/
+def topFor (pl : Place) : Nat := pl.y - margin
+
+/-- The scroll position that shows place `pl` down to its bottom, with the margin below it,
+in a view `view` pixels high. -/
+def bottomFor (pl : Place) (view : Nat) : Nat := pl.y + pl.h + margin - view
+
+-- One page in a large canvas is centred (the single-page view: same as before task 9.3).
+#guard layoutRows #[(100, 200)] [[0]] 300 400 true == (#[⟨0, 100, 100, 100, 200⟩], 300, 400)
+-- A page larger than the canvas: margins, scroll region grows.
+#guard layoutRows #[(500, 600)] [[0]] 300 400 true == (#[⟨0, 8, 8, 500, 600⟩], 516, 616)
+-- Vertical: three pages stacked 10 px apart from the top margin, centred horizontally.
+#guard layoutRows #[(100, 200), (100, 200), (120, 100)] [[0], [1], [2]] 300 300 false ==
+  (#[⟨0, 100, 8, 100, 200⟩, ⟨1, 100, 218, 100, 200⟩, ⟨2, 90, 428, 120, 100⟩], 300, 536)
+-- A spread: two pages side by side, the shorter one centred vertically in the row.
+#guard layoutRows #[(100, 200), (100, 100)] [[0, 1]] 300 300 true ==
+  (#[⟨0, 45, 50, 100, 200⟩, ⟨1, 155, 100, 100, 100⟩], 300, 300)
+-- Continuous facing (even spreads): page 1 alone, then 2|3; nothing overlaps.
+#guard
+  let (ps, _, _) := layoutRows #[(100, 200), (100, 200), (100, 200), (100, 200)]
+    (spreads .even 4) 300 300 false
+  disjoint ps && ps.map (·.page) == #[0, 1, 2, 3] && ps.map (·.y) == #[8, 218, 218, 428]
+#guard [SpreadMode.none, .odd, .even].all fun sp =>
+  let sizes := (Array.range 7).map fun i => (60 + 13 * i, 90 + 7 * (i % 3))
+  disjoint (layoutRows sizes (spreads sp 7) 200 150 false).1
+-- Visible pages, the pages kept rendered (one more on each side), the page at a point.
+#guard
+  let (ps, _, _) := layoutRows #[(100, 200), (100, 200), (100, 200), (100, 200)]
+    [[0], [1], [2], [3]] 300 300 false
+  visiblePages ps 0 300 == [0, 1] && wantedPages ps 0 300 == [0, 1, 2] &&
+  visiblePages ps 400 600 == [1, 2] && wantedPages ps 400 600 == [0, 1, 2, 3] &&
+  wantedPages ps 5000 5300 == [] &&
+  pageAt ps 150 150 == some 0 && pageAt ps 150 300 == some 1 && pageAt ps 150 210 == some 0 &&
+  pageAt ps 0 9999 == some 3 && pageAt #[] 0 0 == none &&
+  (placeOf ps 2).map topFor == some 420 && (placeOf ps 2).map (bottomFor · 300) == some 336
+
+/-- The view mode named by `SAFEPDF_VIEWER_VIEW`: `single`, `continuous`, `facing` (odd
+spreads, as a printed book's two-page view starting with page 1 on the left) or
+`continuous-facing`. -/
+def viewModeOf : String → Option (ScrollMode × SpreadMode)
+  | "single" => some (.page, .none)
+  | "continuous" => some (.vertical, .none)
+  | "facing" => some (.page, .odd)
+  | "continuous-facing" => some (.vertical, .odd)
+  | _ => none
+
+#guard viewModeOf "continuous" == some (.vertical, .none) && viewModeOf "x" == none
+
+/-- The page size (page units) that the fit zooms use in spread mode `sp`: a page alone, or
+twice its width in the facing modes, as PDF.js (`#pageWidthScaleFactor` 2), so that every
+spread of a document of equal pages shows at the same zoom. -/
+def fitBox (sp : SpreadMode) (pw ph : Rat) : Rat × Rat :=
+  if sp == .none then (pw, ph) else (2 * pw, ph)
+
+/-- The canvas width the fit zooms use in spread mode `sp`: less the gap between the two pages
+of a spread. -/
+def fitCanvasW (sp : SpreadMode) (cw : Nat) : Nat :=
+  if sp == .none then cw else cw - pageGap
+
+#guard fitBox .none 612 792 == (612, 792) && fitBox .odd 612 792 == (1224, 792)
+#guard fitZoom true (fitCanvasW .odd 1250) 900 1224 792 == fitZoom true 1240 900 1224 792
 
 /-! ## Page cache -/
 

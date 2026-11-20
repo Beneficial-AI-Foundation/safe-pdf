@@ -19,13 +19,15 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
   PDF.js (see *Toolbar and sidebar* below), a scrollable canvas (scroll bars) with the current
-  page, a status line (file, page, zoom, rotation, pixel size, render time or "from cache",
-  notes, or the error).
+  page — or, in the other view modes, all pages or two side by side (see *View modes* below;
+  `SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing` sets the initial one) —,
+  a status line (file, page, zoom, rotation, pixel size, render time or "from cache",
+  notes, the view mode when it is not the single page, or the error).
 * Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
@@ -43,13 +45,16 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   (16384) is cropped by the renderer ("cropped" in the status line).
 * **Rotation**: view rotation in 90° steps, combined with each page's `/Rotate`; the window
   centre's page point stays at the centre.
-* **Scrolling** is page-at-a-time: the canvas holds one page image. Scrolling past the bottom
-  (or right) edge with the keys moves to the top of the next page; past the top, to the bottom
-  of the previous page. The mouse wheel does the same (9.2, below).
+* **Scrolling** in the single-page view (and the facing view) is page-at-a-time: the canvas
+  holds one page (spread). Scrolling past the bottom (or right) edge with the keys moves to the
+  top of the next page; past the top, to the bottom of the previous page. The mouse wheel does
+  the same (9.2, below). In the continuous modes the canvas holds the whole document (9.3).
 * **Page cache** (`View.Cache`): render results keyed by (document, page, zoom, rotation), LRU,
   at most `View.cacheBytes` = 256 MiB of images and `View.cacheEntries` = 64 entries; results
-  above half the budget are not cached. 100 ms after a page is shown, the next page is
-  rendered into the cache when it is at most `Viewer.prefetchPixels` (2²² px); no threads.
+  above half the budget are not cached. 100 ms after a page is shown, the next page (in the
+  facing view: the next spread) is rendered into the cache when it is at most
+  `Viewer.prefetchPixels` (2²² px); no threads. Each page on the canvas has its own Tk photo
+  (`::safepdf::pgN`), kept only while the page is in view or next to it (9.3).
 * Errors never crash the viewer: unreadable files, parse errors (e.g. a `/Kids` cycle), render
   errors and Tcl errors go to the status line.
 
@@ -88,12 +93,13 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 |---|---|
 | File | Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Close (Ctrl+W), Quit (Ctrl+Q) |
 | Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Highlight tool (check, 9.8), Show all highlights (check, 9.8), Find… (Ctrl+F) |
-| View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`) |
+| View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`), then two radio groups (9.3): Page Scrolling / Vertical Scrolling, No Spreads / Odd Spreads / Even Spreads |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
 
 Disabled: everything but Open… and Quit without a document; Save without unsaved marks; Copy and Highlight selection
 without a selection; Delete mark without a selected mark;
-Outline when the document has none; Previous/First on the first page, Next/Last on the last;
+Outline when the document has none; Previous/First on the first page (spread), Next/Last on the
+last (spread);
 Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
 Outline command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
 when started without a file).
@@ -132,7 +138,9 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     placeholders** until their tasks land (Comment, Text, Draw 9.9; Print and Image after
     M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
-    buttons). Document properties are not available yet.
+    buttons), then, as in PDF.js's secondary toolbar, the scroll modes (Page Scrolling, Vertical
+    Scrolling) and the spread modes (No Spreads, Odd Spreads, Even Spreads) as radio entries on
+    the same variables as the View menu (9.3). Document properties are not available yet.
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
     16 px icons in `#3b3b44`, dimmed when disabled (PDF.js: opacity 0.5); a tooltip appears
     after 600 ms; separators are 1 px × 20 px.
@@ -179,6 +187,80 @@ The wheel continues into the next / previous page as the keys do. Pure logic in
 * Not tested here: real macOS trackpad deltas (the smoke test generates Tk 9 `<MouseWheel>`
   and `<Button-4/5>` events on X11; the `line` and `pixel` kinds are covered by the `#guard`s
   only).
+
+## View modes (9.3)
+
+PDF.js's *Scroll mode* and *Spread mode* (`web/pdf_viewer.js`, `ScrollMode`, `SpreadMode`), in
+the View menu and the `»` overflow menu as two radio groups. Pure layout logic in `View.lean`
+(`#guard` checks; theorems `mem_spreadPages` — page `p` is in spread `k` exactly when
+`spreadOf p = k`, so every page is in exactly one spread —, `spreadOf_lt_count`,
+`spreadOf_spreadFirst`, `nextPage_spread` — Next moves exactly one spread —, `stack_pairwise` —
+stacked rows and the pages of a row never overlap, each ends at least the gap before the next
+starts).
+
+| Mode | Scroll | Spread | Shows |
+|---|---|---|---|
+| single page (default) | Page Scrolling | No Spreads | one page at a time |
+| continuous | Vertical Scrolling | No Spreads | all pages stacked, 10 px apart (`View.pageGap`) |
+| facing | Page Scrolling | Odd / Even Spreads | one spread at a time: two pages side by side |
+| continuous facing | Vertical Scrolling | Odd / Even Spreads | all spreads stacked |
+
+* **Spreads** (`View.spreads`): Odd = pages 1|2, 3|4, …; Even = page 1 alone, then 2|3, 4|5, …
+  (the last spread may hold one page). The pages of a row are 10 px apart, centred together,
+  each centred vertically in the row (PDF.js `vertical-align: middle`).
+* **Layout** (`View.layoutRows`): the rows are stacked from the top margin (in the page scroll
+  mode the one row is centred when it fits, as the single page always was), each centred
+  horizontally; the scroll region is at least the window. Every page on the canvas has a white
+  frame with a 1 px border (the placeholder until its image arrives), its own photo
+  `::safepdf::pgN` and canvas image item (tags `pageframe fN`, `pimg pN`; a page that fails to
+  render shows the error as text in its frame, tag `perr eN`).
+* **Zoom**: one zoom for the layout, chosen for the current page. The fit modes (Automatic
+  Zoom, Page Fit, Page Width) use the page's size in the single and continuous modes and twice
+  its width (and the window less the 10 px gap) in the facing modes, as PDF.js does
+  (`View.fitBox`, `#pageWidthScaleFactor` 2), so every spread of a paper shows at the same zoom;
+  Automatic Zoom still asks whether the page itself is portrait. Each page is capped at
+  `View.maxViewPixels` separately. A new layout is computed when the document, mode, zoom,
+  rotation, window size or (page scroll mode) the spread shown changes — never by scrolling in
+  the continuous modes; there it keeps the view's place in the current page.
+* **Current page**: in the continuous modes the page under the window centre
+  (`View.pageAt`; the nearest page when the centre falls in a gap), updated as the view moves
+  (wheel, keys, scroll bar: the canvas's `-yscrollcommand` reports `viewChanged` once per idle
+  moment) — the page field, title and Previous/Next follow it. After a jump (Next/Previous,
+  Home/End, Ctrl+G, a link, the outline, a search hit) the page jumped to stays current while
+  the view stays where the jump put it, even if another page is under the centre.
+* **Paging**: Next/Previous (toolbar arrows, Go menu, PageDown/PageUp at the edge, wheel at the
+  edge in the facing view) move a whole spread (`View.nextPage`, `View.prevPage`): two pages in
+  the facing modes; Previous/First are disabled in the first spread, Next/Last in the last. In
+  the continuous modes a jump scrolls the page's top (with the 8 px margin) to the window top;
+  the keys PageDown/Space/arrows scroll the whole document, Home/End go to the first/last page.
+* **Wheel**: in the page scroll modes as in 9.2 (a spread turns after a push past the edge); in
+  the continuous modes the wheel simply scrolls the document (`View.wheelStep` without page
+  crossing).
+* **Rendering and memory**: the current page — in the facing view its whole spread — is
+  rendered at once, as before; the other pages in view and one more place before and after
+  them (`View.wantedPages`) are rendered one per event-loop turn (`after 1 … renderMore`,
+  nearest to the current page first), so scrolling never waits for a slow page: a page not
+  rendered yet shows as its white frame. Photos of pages that leave that set are deleted
+  (`image delete`), so Tk holds at most the pages in view plus two; the rendered images stay in
+  the LRU cache (256 MiB, 64 entries) at the current zoom. Rendering stays synchronous (no
+  threads): one slow page still blocks the event loop while it renders.
+* **Everything per page works in every mode**: positions are mapped through the slot of the
+  page under the pointer (`Viewer.pagePointAt`; a drag stays on the page where it started),
+  so selection, double click, links and their hover, highlights and notes (drawn on every page
+  on screen, marks multiplied into each page's photo), saved marks, the selection bubble and
+  the edit bubble, search hits (all pages on screen; the current hit is scrolled into view),
+  the outline, Ctrl+G, history (page and scroll fractions) and the page field work as in the
+  single-page view.
+* **Render time** (`SAFEPDF_VIEWER_SMOKE_MODE=scroll`, the 15-page `arxiv-1706.03762.pdf` at
+  Automatic Zoom 125 % in a 1900×940 window, outline open, Xvfb, scrolled top to bottom with
+  wheel notches, every page in view rendered before the next notch): continuous 15 renders,
+  3.88 s rendering (≈ 259 ms per page), 3.81 s wall time for 231 notches, at most 4 photos
+  alive, peak RSS 236 MiB; the single-page view over the same paper: 15 renders, 3.89 s, 119
+  notches, 1 photo, peak RSS 209 MiB. The per-page render cost does not change; the continuous
+  modes hold up to three more page photos (≈ 5.8 MB each at this size).
+
+Not done (PDF.js has them): Wrapped and Horizontal scrolling, the per-document memory of the
+mode, a spinner in pages being rendered, rendering in a background thread.
 
 ## Highlights and notes (9.4)
 
@@ -451,7 +533,7 @@ outline and name-tree cycles, every walk is bounded by the object count).
 
 Not done: launching a browser (the address can only be copied), remote destinations
 (`/GoToR`), the `/XYZ` zoom, link borders/highlighting (`/H`), keyboard focus traversal of
-links. Continuous scrolling (several pages on one canvas) is optional and not done.
+links. Continuous scrolling: see *View modes (9.3)*.
 
 ## Structure
 
@@ -460,7 +542,7 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `c/tk_shim.c` | Tcl interpreter, Tk init, `::safepdf::emit` → Lean callback, `Tk_PhotoPutBlock` from an RGBA `ByteArray`, event loop. Adapted from bib-lean's `c/tk_shim.c`. |
 | `SafePdf/Shell/App/Shim.lean` | `@[extern]` bindings and the exported dispatcher `safepdf_gui_dispatch`. Only the `viewer` executable may import it. |
 | `SafePdf/Shell/App/Tcl.lean`, `TclLemmas.lean` | Tcl scripts as data and the proof that `Tcl.quote` is injection-free (`parseWordStr_quote`, `parseScript_render`, …). Copied from bib-lean `BibLean/Gui/Tcl.lean` + `Tcl/Lemmas.lean`. Built by default (lib `SafePdfApp`). |
-| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), the LRU page cache. |
+| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), view modes (9.3: spreads, paging by spread, page layout, visible and wanted pages, page at a point, scroll positions, fit box; theorems `mem_spreadPages`, `nextPage_spread`, `stack_pairwise`), the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
 | `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
@@ -469,7 +551,7 @@ links. Continuous scrolling (several pages on one canvas) is optional and not do
 | `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js, placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
 | `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
-| `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), rendering, scrolling/zoom/rotation handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
+| `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
 **No data in script text.** Every Tcl command that carries data (file names, error text,
@@ -617,6 +699,22 @@ byte-for-byte prefix of the later file (`cmp -n`) and the original unchanged, th
 file has 5 revisions and each of its 5 mark annotations once, and that `mutool draw` shows the
 highlight (yellow pixels in the box of `world`). The `encrypted` run (RC4 fixture) saves a
 note: until 9.5f the status line shows the writer's refusal and nothing is written.
+
+The view modes (9.3) run in a variant `SAFEPDF_VIEWER_SMOKE_MODE=modes` (`Viewer.smokeModes`)
+on a generated three-page text PDF (substitute fonts off, so the pages are white): `Alpha` on
+page 1, `Bravo` on page 2, `zebra` on page 3; each mode is chosen by invoking its View menu
+entry. Continuous: three page frames, a scroll region over three pages; generated wheel notches
+scroll the document monotonically to its end while the page field shows 1, 2, 3 (no page
+turns), at most three photos alive; Home goes back to the top; Go → Next page shows page 2;
+`+` keeps the page point at the window centre (C2 on its slot); a double click on `Bravo`
+(page 2) selects on page 2 and `h` highlights it (the pixel of page 2's photo is `255 255 152`);
+Ctrl+F `zebra` from page 1 reports `hit 1/1 on page 3`, makes page 3 current and the hit lies
+in the view. Continuous facing (Odd Spreads): pages 1 and 2 in one row, page 3 below, the
+highlight still drawn. Facing (Page Scrolling): two frames (pages 1, 2), the highlight drawn;
+Next → page 3 alone (Next disabled), Previous → 1|2; at fit page one wheel notch down turns to
+page 3, one up back to 1|2. Even Spreads: page 1 alone, Next → 2|3 (Next disabled), the
+highlight drawn. No Spreads: back to one frame. `SAFEPDF_VIEWER_SMOKE_MODE=scroll` is the
+benchmark above (not run by the script).
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
