@@ -100,7 +100,7 @@ package «safe-pdf» where
 quoting is injection-free. A default target so that `scripts/axioms.lean` can audit its
 theorems after a plain `lake build`. -/
 @[default_target] lean_lib SafePdfApp where
-  roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas, `SafePdf.Shell.App.View, `SafePdf.Shell.App.Select, `SafePdf.Shell.App.Links, `SafePdf.Shell.App.Menu, `SafePdf.Shell.App.Toolbar, `SafePdf.Shell.App.Sidebar, `SafePdf.Shell.App.BibLean.Http, `SafePdf.Shell.App.BibLean.Launch, `SafePdf.Shell.App.Marks]
+  roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas, `SafePdf.Shell.App.View, `SafePdf.Shell.App.Select, `SafePdf.Shell.App.Links, `SafePdf.Shell.App.Menu, `SafePdf.Shell.App.Toolbar, `SafePdf.Shell.App.Sidebar, `SafePdf.Shell.App.BibLean.Http, `SafePdf.Shell.App.BibLean.Launch, `SafePdf.Shell.App.Marks, `SafePdf.Shell.App.Bubble]
 
 /-- `safe-pdf-core` (task 8.4, Plan.md §6 Phase 8): the public library API `SafePdf.Api` and
 the verified core it imports, without the shell (inspector, viewer). A separate target so

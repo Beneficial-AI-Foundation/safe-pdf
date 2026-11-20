@@ -14,6 +14,7 @@ import SafePdf
 import SafePdf.Shell.App.TclLemmas
 import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Marks
+import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 
@@ -1086,3 +1087,8 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Write.Annots.quadPoints_length
 #print axioms SafePdf.Core.Write.Annots.pageDicts_length
 #print axioms SafePdf.Core.Write.Annots.decRound_canonical
+-- Phase 9, task 9.8: bubble placement
+#print axioms SafePdf.Shell.App.Bubble.place_inside
+#print axioms SafePdf.Shell.App.Bubble.clampInto_lo
+#print axioms SafePdf.Shell.App.Bubble.clampInto_hi
+#print axioms SafePdf.Shell.App.Bubble.Ui.escape_closes
