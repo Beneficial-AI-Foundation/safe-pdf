@@ -49,11 +49,14 @@ paths only) as a premultiplied layer over the device box of `GBox` widened by on
 white and over black, coverage `α` recovered exactly). A **masked** glyph keeps only `α` and
 takes the run's fill colour (`Tiling.layerLoop` with the colour: the charproc's colour
 operators are ignored, image masks are painted as stencils of that colour). The layer is
-blitted (`Tiling.blit`) through the run's clip mask with the fill alpha. Render modes: 3 and
-7 paint nothing; every other mode paints the glyph once with the fill colour (MuPDF
-renders Type 3 glyphs as filled; stroke and clip effects of modes 1, 2, 4–6 are not
-applied — a documented gap, as are pattern fill colours on masked glyphs, which paint with
-the pattern's device placeholder colour).
+blitted (`Tiling.blit`) through the run's clip mask with the fill alpha. Render modes (task
+7.3l, `passes`, as MuPDF): 3 and 7 paint nothing; fill modes paint the glyph with the fill
+colour and alpha; stroke modes paint the glyph **filled** with the stroke colour and alpha
+(MuPDF's `fz_render_stroked_glyph` falls back to the filled glyph for non-FreeType fonts);
+modes 2 and 6 paint both, fill first. Gaps: the clip effect of modes 4–7; the knockout group
+MuPDF opens for mode 2/6 when the stroke alpha is neither 0 nor 1 (here the stroke pass is
+composited over the fill pass); pattern colours on masked glyphs paint with the pattern's
+device placeholder colour.
 
 **Image glyphs** (bitmap fonts: every item an inline image, `T3Glyph.images`) skip the layer:
 a stencil is scaled as MuPDF does (task 7.3k, `mupdfStencil`: power-of-two subsampling, then
@@ -1005,10 +1008,25 @@ truncates the same way (`Text.type3TruncWidth`, task 7.3l), so this is idempoten
 `FontInfo` of a Type 3 font and kept for fonts built elsewhere. -/
 def truncWidth (w : Fixed) : Fixed := Text.type3TruncWidth w
 
+/-- The paint passes of a Type 3 run (task 7.3l), as MuPDF's `pdf_flush_text` with a cacheable
+Type 3 font: fill modes paint the glyphs with the fill colour and alpha (`fz_fill_text`), stroke
+modes with the stroke colour and alpha (`fz_stroke_text`, whose `fz_render_stroked_glyph` renders
+a Type 3 glyph filled, not outlined); fill-and-stroke modes paint both, fill first. Modes 3 and 7
+paint nothing. -/
+def passes (r : GlyphRun) : List (Color × Comp) :=
+  let f := (r.fill.color, r.fill.alpha)
+  let k := (r.stroke.color, r.stroke.alpha)
+  match r.renderMode with
+  | .fill | .fillClip => [f]
+  | .stroke | .strokeClip => [k]
+  | .fillStroke | .fillStrokeClip => [f, k]
+  | .invisible | .clip => []
+
 /-- **Render a glyph run of a Type 3 font** (see the module doc) onto the page state `st`
 (`W × H`, page → device `m`), glyphs drawn by the cell painter `paint`, positions from the
-run's `FontInfo` `fi` (advances truncated as MuPDF's, `truncWidth`), image glyphs through the
-page's glyph cache `gc` (returned updated). Modes 3 and 7 paint nothing. -/
+run's `FontInfo` `fi` (advances truncated as MuPDF's, `truncWidth`), once per paint pass
+(`passes`: fill and/or stroke colour), image glyphs through the page's glyph cache `gc`
+(returned updated). -/
 def renderRun (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : Nat)
     (fi : FontInfo) (f : T3Font) (st : Clip.RState) (gc : GlyphCache) (r : GlyphRun)
     (clip : Content.Clip) : Clip.RState × GlyphCache :=
@@ -1018,9 +1036,25 @@ def renderRun (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : 
   let fi' : FontInfo := { fi with width := fun code => truncWidth (fi.width code) }
   let entries := Text.layoutParts fi' (Text.runTextState r) r.font.size Fixed.zero r.parts
   let rm := Aff.ofMatrix r.tm * Aff.ofMatrix r.ctm * m
-  let q := entries.foldl (glyphStep paint W H win c.1 (Clip.compByte r.fill.alpha)
-    (Clip.deviceRGB r.fill.color) f r rm) (st.buf, 0, gc)
+  let q := (passes r).foldl (fun (acc : ByteArray × Nat × GlyphCache) (pc : Color × Comp) =>
+    entries.foldl (glyphStep paint W H win c.1 (Clip.compByte pc.2) (Clip.deviceRGB pc.1) f r rm)
+      acc) (st.buf, 0, gc)
   ({ buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2.1 }, q.2.2)
+
+private theorem foldl_passes_size (paint : Tiling.CellPainter) (W H : Nat) (win : IRect)
+    (cm : Option Mask) (f : T3Font) (r : GlyphRun) (rm : Aff)
+    (entries : List (List UInt8 × Fixed × Fixed)) (ps : List (Color × Comp)) :
+    ∀ (acc : ByteArray × Nat × GlyphCache),
+      (ps.foldl (fun (acc : ByteArray × Nat × GlyphCache) (pc : Color × Comp) =>
+        entries.foldl (glyphStep paint W H win cm (Clip.compByte pc.2) (Clip.deviceRGB pc.1) f r rm)
+          acc) acc).1.size = acc.1.size := by
+  induction ps with
+  | nil => intro acc; rfl
+  | cons p rest ih =>
+    intro acc
+    simp only [List.foldl_cons]
+    rw [ih]
+    exact foldl_glyphStep_size _ _ _ _ _ _ _ _ _ _ _ _
 
 /-- **Rendering a Type 3 run preserves the buffer size.** -/
 theorem renderRun_size (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : Nat)
@@ -1030,7 +1064,7 @@ theorem renderRun_size (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff
   unfold renderRun
   split
   · rfl
-  · exact foldl_glyphStep_size _ _ _ _ _ _ _ _ _ _ _ _
+  · exact foldl_passes_size _ _ _ _ _ _ _ _ _ _ _
 
 /-! ## 5. Checks -/
 

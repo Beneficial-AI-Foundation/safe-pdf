@@ -211,6 +211,14 @@ def type3Cases : List (String × ByteArray × (Clip.Image → Bool)) :=
       fun img => redCount img == 0 && ink img == 0),
     ("t3-clip-mode", (type3Page "BT /F3 50 Tf 7 Tr 20 20 Td (AB) Tj ET"),
       fun img => ink img == 0),
+    -- Task 7.3l, stroke modes (MuPDF): the masked glyph filled with the stroke colour (red),
+    -- not the fill colour (green); mode 2 paints fill then stroke, so red shows; mode 5 as 1.
+    ("t3-stroke-mode", (type3Page "BT /F3 50 Tf 0 1 0 rg 1 0 0 RG 1 Tr 20 20 Td (C) Tj ET"),
+      fun img => near (redCount img) 1250 3 && greenCount img == 0),
+    ("t3-fill-stroke-mode", (type3Page "BT /F3 50 Tf 0 1 0 rg 1 0 0 RG 2 Tr 20 20 Td (B) Tj ET"),
+      fun img => near (redCount img) 1250 3 && greenCount img == 0),
+    ("t3-stroke-clip-mode", (type3Page "BT /F3 50 Tf 0 1 0 rg 1 0 0 RG 5 Tr 20 20 Td (C) Tj ET"),
+      fun img => near (redCount img) 1250 3 && greenCount img == 0),
     -- Clipped to the left half of the square.
     ("t3-clipped", (type3Page "0 0 45 200 re W n BT /F3 50 Tf 20 20 Td (A) Tj ET"),
       fun img => near (redCount img) 1250 3),
