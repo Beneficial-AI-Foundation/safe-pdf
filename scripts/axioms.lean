@@ -1049,3 +1049,7 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Raster.Type3.drawImageWith_size
 #print axioms SafePdf.Core.Raster.Type3.drawImagesC_size
 #print axioms SafePdf.Core.Raster.Type3.drawCached_size
+
+-- Phase 7, task 7.3l: page-wide Type 3 glyph cache
+#print axioms SafePdf.Core.Raster.Type3.GlyphCache.insert_count_le
+#print axioms SafePdf.Core.Raster.Type3.GlyphCache.insert_bytes_le
