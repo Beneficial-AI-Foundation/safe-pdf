@@ -53,7 +53,7 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   at most `View.cacheBytes` = 256 MiB of images and `View.cacheEntries` = 64 entries; results
   above half the budget are not cached. 100 ms after a page is shown, the next page (in the
   facing view: the next spread) is rendered into the cache when it is at most
-  `Viewer.prefetchPixels` (2²² px); no threads. Each page on the canvas has its own Tk photo
+  `Viewer.prefetchPixels` (2²² px), on a worker thread (8.8). Each page on the canvas has its own Tk photo
   (`::safepdf::pgN`), kept only while the page is in view or next to it (9.3).
 * Errors never crash the viewer: unreadable files, parse errors (e.g. a `/Kids` cycle), render
   errors and Tcl errors go to the status line.
@@ -237,13 +237,12 @@ starts).
   the continuous modes the wheel simply scrolls the document (`View.wheelStep` without page
   crossing).
 * **Rendering and memory**: the current page — in the facing view its whole spread — is
-  rendered at once, as before; the other pages in view and one more place before and after
-  them (`View.wantedPages`) are rendered one per event-loop turn (`after 1 … renderMore`,
-  nearest to the current page first), so scrolling never waits for a slow page: a page not
-  rendered yet shows as its white frame. Photos of pages that leave that set are deleted
-  (`image delete`), so Tk holds at most the pages in view plus two; the rendered images stay in
-  the LRU cache (256 MiB, 64 entries) at the current zoom. Rendering stays synchronous (no
-  threads): one slow page still blocks the event loop while it renders.
+  shown first; the other pages in view and one more place before and after them
+  (`View.wantedPages`) follow (`renderMore`, nearest to the current page first). Since 8.8 all
+  rendering runs on worker threads (next section), so no page blocks the window; a page not
+  rendered yet shows its white frame with "Rendering…". Photos of pages that leave that set
+  are deleted (`image delete`), so Tk holds at most the pages in view plus two; the rendered
+  images stay in the LRU cache (256 MiB, 64 entries) at the current zoom.
 * **Everything per page works in every mode**: positions are mapped through the slot of the
   page under the pointer (`Viewer.pagePointAt`; a drag stays on the page where it started),
   so selection, double click, links and their hover, highlights and notes (drawn on every page
@@ -260,7 +259,37 @@ starts).
   modes hold up to three more page photos (≈ 5.8 MB each at this size).
 
 Not done (PDF.js has them): Wrapped and Horizontal scrolling, the per-document memory of the
-mode, a spinner in pages being rendered, rendering in a background thread.
+mode, an animated spinner (the placeholder is a static "Rendering…").
+
+## Rendering on worker threads (8.8)
+
+* `Viewer.submit` starts a page render with `IO.asTask (prio := .dedicated)`: the task runs
+  only the pure renderer (`renderDocPage` on the document, or the 9.5g preview, with the
+  substitute fonts) and returns the image and its render time. **Tk stays on the main thread**:
+  the workers never call Tcl; a `poll` event (`after 15`, `Viewer.pollMs`, scheduled only while
+  renders run) takes finished renders (`IO.hasFinished`), puts them into the page cache and
+  shows them.
+* **Bounded**: at most `Viewer.maxJobs` = 4 renders at once; neighbours and the prefetch leave
+  one slot for the current page. A render of a key already running is not started twice (the
+  prefetch of the next page and the Next key share it).
+* **Short wait, then placeholder**: an event that must show the current page (open, page
+  keys, zoom, rotation, view mode, resize) waits for its render at most
+  `State.syncWaitMs` = 100 ms, so a typical page (median 64 ms) appears without a flash;
+  a slower one shows its white frame with a small grey "Rendering…" (canvas text, tag
+  `pwait wN`, after PDF.js's loading state) and the event returns. The status line says
+  `rendering...` until the page arrives, then `rendered in N ms`.
+* **Stale results**: a result is shown only when the open document (generation), the page's
+  zoom and rotation still match its cache key (`Viewer.keyOf`) and the page is still in view;
+  otherwise it is dropped (`State.staleDropped`; a result for the open document still goes
+  into the cache, e.g. a page that scrolled away). A pure render cannot be interrupted, so a
+  stale render keeps its slot until it ends; `Viewer.main` therefore exits the process as soon
+  as the window is closed instead of letting the runtime wait for it (the `--biblean` path
+  in `Main.lean` still returns normally after its flush).
+* Everything per page is unchanged: selection, highlights (multiplied in when the photo
+  arrives), search hits, links, bubbles and the overlays work on pages with a photo; the
+  overlays are redrawn whenever a page arrives.
+* Smoke mode waits for every render (`syncWaitMs = none`, `settle` waits for all running
+  renders), so its steps see the pages at once; the `async` case runs with no wait at all.
 
 ## Highlights and notes (9.4)
 
@@ -832,6 +861,14 @@ Screenshots for comparison with the reference can be taken under Xvfb at the ref
 e.g. `Xvfb :97 -screen 0 1900x940x24 &`, then
 `DISPLAY=:97 SAFEPDF_VIEWER_GEOMETRY=1900x940 .lake/build/bin/viewer FILE.pdf &` and
 `DISPLAY=:97 import -window root shot.png` (ImageMagick).
+
+The `async` case (8.8, `Viewer.smokeAsync`) opens `viewer-smoke-pdf.py --slow 3000` (page 1:
+3000 stroked curves, about 2 s per render at 125–150 %; page 2 light) with `syncWaitMs = 0`:
+page 1 shows the placeholder while it renders; a Tcl timer every 20 ms keeps firing; `+`,
+`End` and `Home` return within 250 ms (measured ~0–3 ms); after the zoom change two renders
+run (old and new zoom); `End` shows page 2 (page field 2) while page 1 still renders; at the
+end the old zoom's result was dropped (`stale ≥ 1`) and page 1's photo has the size of its
+slot at the new zoom.
 
 The `lockdown` case (8.7, `Viewer.smokeLockdown`) runs the viewer with `HOME` holding a
 hostile `~/.Xdefaults` (`*Entry.validateCommand`, `*TEntry.validateCommand`,

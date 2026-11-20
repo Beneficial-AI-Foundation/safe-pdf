@@ -43,8 +43,20 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   finds at start-up (task 7.7, `docs/raster.md`; `State.subst`).
 * **Page cache** (`View.Cache`): render results keyed by (document generation, page, zoom,
   rotation), LRU, at most `View.cacheBytes` (256 MiB) of images. After a page is shown the
-  next page is prefetched 100 ms later (same event loop, no threads) when it is at most
+  next page is prefetched 100 ms later (on a worker, below) when it is at most
   `prefetchPixels` pixels.
+* **Rendering on worker threads** (task 8.8). Every render runs on a dedicated thread
+  (`submit`: `IO.asTask` around the pure renderer; at most `maxJobs` at once, one kept free for
+  the current page); Tk is only touched on the main thread. An event that must show the
+  current page (its spread) waits for its render at most `State.syncWaitMs` (100 ms; smoke
+  mode: until done), so fast pages appear at once; otherwise the page shows its white frame
+  with a small "Rendering…" (`showWaiting`) and a `poll` event every `pollMs` while renders
+  run takes the finished ones (`finish`, into the cache) and shows those still wanted
+  (`place`): the same document, zoom and rotation (the cache key, which carries the document
+  generation), page in view. Results for an old zoom, rotation or document are dropped
+  (`staleDropped`); a render cannot be interrupted (the renderer is pure), so it keeps its
+  slot until it ends. `main` exits the process when the window closes instead of waiting for
+  a running render.
 * **Scrolling.** The canvas has scroll bars; its scroll region is the page image plus a margin.
   Keys (Tcl proc `::safepdf::step`): `Down`/`Up` and `Right`/`Left` scroll by a tenth of the window,
   `Next`/`space` and `Prior`/`BackSpace`/`Shift+space` by a window. Past the bottom (right) edge
@@ -57,9 +69,9 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   the scroll mode (Page / Vertical Scrolling) and the spread mode (No / Odd / Even Spreads):
   single page, continuous, facing, continuous facing. `computeLayout` places the pages
   (`View.layoutRows`) as `Slot`s; every page on the canvas has a white frame and its own photo
-  `::safepdf::pgN`; the current page (its spread in the facing view) is rendered at once, the
-  other pages in view and their neighbours one per event-loop turn (`viewChanged`,
-  `renderMore`), and photos of pages out of view are deleted. In the continuous modes the
+  `::safepdf::pgN`; the current page (its spread in the facing view) is shown first, the
+  other pages in view and their neighbours follow (`viewChanged`, `renderMore`, workers and
+  `poll`), and photos of pages out of view are deleted. In the continuous modes the
   current page is the page under the window centre, the wheel just scrolls, and paging moves by
   spreads. Pointer positions map through the slot of the page under them (`pagePointAt`), so
   selection, links, marks, bubbles and search work on every page shown.
@@ -243,6 +255,17 @@ structure Library where
   everything was sent (Close; `Main.lean` calls it again after the window closed). -/
   flush : IO Bool
 
+/-- A page render running on a worker thread (task 8.8): what it renders, when it was asked
+for (`IO.monoNanosNow`) and the task, which returns the result and the render time in
+nanoseconds. -/
+structure Job where
+  /-- Document generation, page, zoom and rotation rendered. -/
+  key : View.Key
+  /-- Submission time (ns). -/
+  start : Nat
+  /-- The render (`IO.asTask` on a dedicated thread). -/
+  task : Task (Except IO.Error (Except Error Clip.Image × Nat))
+
 /-- The viewer's state, kept in one `IO.Ref`. -/
 structure State where
   /-- Path of the open file, if any (`inMemory`: only a display name). -/
@@ -362,6 +385,17 @@ structure State where
   layoutKey : Option LayoutKey := none
   /-- A `renderMore` event is scheduled. -/
   renderQueued : Bool := false
+  /-- Renders running on worker threads (task 8.8), at most `maxJobs`. -/
+  jobs : Array Job := #[]
+  /-- A `poll` event is scheduled (`ensurePoll`). -/
+  pollQueued : Bool := false
+  /-- How long (ms) an event that must show pages now (`showNow`) waits for their renders
+  before it shows placeholders and leaves them to the workers; `none`: until they are done
+  (smoke mode, so its steps see the pages at once). -/
+  syncWaitMs : Option Nat := some 100
+  /-- Render results not shown because the document, zoom or rotation changed while they ran
+  (task 8.8; the smoke test checks it). -/
+  staleDropped : Nat := 0
   /-- The view top (scroll-region pixel) the viewer itself scrolled to (a jump, a page key):
   while the view stays there the current page is the one it went to, not the one under the
   window centre (vertical modes). -/
@@ -396,6 +430,16 @@ def photoOf (p : Nat) : String := s!"::safepdf::pg{p}"
 
 /-- Pages up to this many pixels are prefetched (2²² ≈ 4 Mpx, e.g. Letter at 250 %). -/
 def prefetchPixels : Nat := 1 <<< 22
+
+/-- Most renders running at once (task 8.8). The pages that must be shown now may use every
+slot; neighbours and the prefetch leave one free for them. A render cannot be interrupted
+(the renderer is pure), so renders whose page scrolled away or whose zoom changed keep their
+slot until they finish (their result goes to the cache when it is still for the open
+document). -/
+def maxJobs : Nat := 4
+
+/-- Interval (ms) of the `poll` event while renders are running. -/
+def pollMs : Nat := 15
 
 /-! ## Pure helpers -/
 
@@ -1488,24 +1532,51 @@ def renderPage (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotati
         (SafePdf.Core.Filter.Budget.init limits) (subst := subst)).1
   | none => return .error (.malformed 0 "page index out of range")
 
-/-- The render result for `key` from the cache, or rendered now and cached. Returns the
-result and the render time in nanoseconds (`none`: from the cache). -/
-def fetch (st : IO.Ref State) (doc : Doc) (key : View.Key) :
-    IO (Except Error Clip.Image × Option Nat) := do
+/-- The cache key of the page in slot `sl`. -/
+def keyOf (s : State) (sl : Slot) : View.Key :=
+  ⟨s.gen, sl.place.page, sl.vp.zoom, s.rot⟩
+
+/-- The cached render result for `key` (and marks it used). -/
+def cached (st : IO.Ref State) (key : View.Key) : IO (Option (Except Error Clip.Image)) := do
   let (hit, cache) := (← st.get).cache.find? key
   st.modify ({ · with cache })
-  match hit with
-  | some r => return (r, none)
-  | none =>
+  return hit
+
+/-- Starts rendering `key` on a dedicated worker thread (task 8.8), unless a render of it is
+already running. The task only runs the pure renderer on the document (`State.view`, else
+`doc`) and the substitute fonts; it never touches Tk or the state. -/
+def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
+  let s ← st.get
+  if s.jobs.any (·.key == key) then return
+  let d := s.view.getD doc
+  let subst := s.subst
+  let start ← IO.monoNanosNow
+  let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
-    let r ← renderPage ((← st.get).view.getD doc) key.page key.zoom key.rot (← st.get).subst
+    let r ← renderPage d key.page key.zoom key.rot subst
     let t1 ← IO.monoNanosNow
-    st.modify fun s => { s with cache := s.cache.insert key r, renderNs := s.renderNs + (t1 - t0),
+    return (r, t1 - t0)
+  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task⟩ }
+
+/-- Whether a render of `key` is running. -/
+def State.running (s : State) (key : View.Key) : Bool :=
+  s.jobs.any (·.key == key)
+
+/-- Takes the finished job `j` out of `jobs` and returns its result and render time; the
+result goes into the cache when it is for the open document. -/
+def finish (st : IO.Ref State) (j : Job) : IO (Except Error Clip.Image × Nat) := do
+  let (r, ns) : Except Error Clip.Image × Nat := match j.task.get with
+    | .ok v => v
+    | .error e => (.error (.malformed 0 s!"render failed: {e}"), 0)
+  st.modify fun s => { s with jobs := s.jobs.filter (·.key != j.key) }
+  if j.key.gen == (← st.get).gen then
+    st.modify fun s => { s with cache := s.cache.insert j.key r, renderNs := s.renderNs + ns,
                                 renders := s.renders + 1 }
-    return (r, some (t1 - t0))
+  return (r, ns)
 
 /-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view). -/
 def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
+  discard <| run [".c", "delete", s!"w{p}"]
   if (← st.get).hasPhoto p then
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
     discard <| run [".c", "delete", s!"p{p}", s!"e{p}"]
@@ -1515,7 +1586,7 @@ def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
 def clearPages (st : IO.Ref State) : IO Unit := do
   for (p, _) in (← st.get).photos do
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
-  discard <| run [".c", "delete", "pageframe", "pimg", "perr"]
+  discard <| run [".c", "delete", "pageframe", "pimg", "perr", "pwait"]
   st.modify ({ · with photos := #[] })
 
 /-- Draws the layout on the canvas (task 9.3): a white page frame with a 1 px grey border per
@@ -1536,6 +1607,7 @@ def buildCanvas (st : IO.Ref State) : IO Unit := do
 below the overlays; or the error, as text in the page frame (tag `perr eN`). -/
 def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : IO Unit := do
   let p := sl.place.page
+  discard <| run [".c", "delete", s!"w{p}"]
   let s ← st.get
   match res with
   | .ok img =>
@@ -1559,16 +1631,17 @@ def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : 
     discard <| run [".c", "lower", "pageframe"]
     st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .error (renderError e)) }
 
-/-- Renders page `p` (from the cache if it is there) into its photo, unless it has one or is
-not laid out. Returns the result and the render time (`none`: from the cache). -/
-def ensurePhoto (st : IO.Ref State) (p : Nat) : IO (Option (Except Error Clip.Image × Option Nat)) := do
-  let s ← st.get
-  let some doc := s.doc | return none
-  let some sl := slotOf s p | return none
-  if s.hasPhoto p then return none
-  let r ← fetch st doc ⟨s.gen, p, sl.vp.zoom, s.rot⟩
-  showPhoto st sl r.1
-  return some r
+/-- The placeholder of a page whose render is pending (task 8.8, after PDF.js's loading
+state): its white frame (`buildCanvas`) with a small grey "Rendering…" in the middle (tag
+`pwait wN`, removed by `showPhoto`). -/
+def showWaiting (sl : Slot) : IO Unit := do
+  let pl := sl.place
+  if (← run [".c", "find", "withtag", s!"w{pl.page}"]).isEmpty then
+    discard <| run [".c", "create", "text", toString (pl.x + pl.w / 2), toString (pl.y + pl.h / 2),
+      "-text", "Rendering…", "-fill", "#5b5b66", "-font", "::safepdf::fBar",
+      "-tags", s!"pwait w{pl.page}"]
+    discard <| run [".c", "lower", s!"w{pl.page}"]
+    discard <| run [".c", "lower", "pageframe"]
 
 /-- Makes `sl` the current page's slot: `shown` and the mirrored position, zoom and rotation
 (`imgX`, `imgY`, `shownZoom`, `shownRot`). -/
@@ -1640,6 +1713,93 @@ def missingPages (st : IO.Ref State) : IO (List Nat) := do
   let d (p : Nat) : Nat := if p ≥ s.page then p - s.page else s.page - p
   return miss.mergeSort fun a b => d a ≤ d b
 
+/-- The pages that may be shown now: every laid-out page in the page scroll mode, else the
+pages in view and their neighbours (`View.wantedPages`) and the current page. -/
+def wantedNow (st : IO.Ref State) : IO (List Nat) := do
+  let s ← st.get
+  if s.scroll == .page then return s.slots.toList.map (·.place.page)
+  let some (top, bot, _, _) ← viewBand s | return [s.page]
+  return s.page :: View.wantedPages s.places top bot
+
+/-- Shows the result of the finished job `j` (task 8.8) when it is still wanted: the open
+document, its page laid out with the same zoom and rotation (`keyOf`), in `want`, without a
+photo. Also records the time from the request to the display in the Tcl array
+`::safepdf::ttd` (ms; read by `scripts/viewer-corpus.sh`) and, for the current page, puts
+the render time into the status line. Results for another document, zoom or rotation count
+in `staleDropped`. Returns whether the page was shown. -/
+def place (st : IO.Ref State) (want : List Nat) (j : Job) (r : Except Error Clip.Image)
+    (ns : Nat) : IO Bool := do
+  let s ← st.get
+  let p := j.key.page
+  let stale := j.key.gen != s.gen || (match slotOf s p with
+    | some sl => keyOf s sl != j.key
+    | none => false)
+  if stale then
+    st.modify fun s => { s with staleDropped := s.staleDropped + 1 }
+    return false
+  let some sl := slotOf s p | return false
+  if s.doc.isNone || s.hasPhoto p || !want.contains p then return false
+  showPhoto st sl r
+  let t ← IO.monoNanosNow
+  discard <| run ["set", s!"::safepdf::ttd({p})", formatMs (t - j.start)]
+  if p == s.page then showStatus st s!"rendered in {formatMs ns} ms"
+  return true
+
+/-- Schedules a `poll` event while renders are running (task 8.8). -/
+def ensurePoll (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if !s.jobs.isEmpty && !s.pollQueued then
+    st.modify ({ · with pollQueued := true })
+    discard <| run ["after", toString pollMs, "::safepdf::emit poll"]
+
+/-- Shows pages that must be on screen now (task 8.8: the current page, in the page scroll
+mode its spread; the smoke tests' `settle`): from the cache at once, else rendered by
+workers (`submit`, within `maxJobs`). The event waits for those renders at most `wait` ms
+(`none`: until they are done, then also for any render that holds a slot they need); pages
+still missing get the placeholder (`showWaiting`) and arrive through `poll`. -/
+def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit := do
+  let some doc := (← st.get).doc | return
+  let t0 ← IO.monoNanosNow
+  for _ in [0:64] do
+    let mut keys : List View.Key := []
+    let mut blocked := false
+    for p in pages do
+      let s ← st.get
+      let some sl := slotOf s p | continue
+      if s.hasPhoto p then continue
+      let key := keyOf s sl
+      match ← cached st key with
+      | some r =>
+        showPhoto st sl r
+        if p == s.page then showStatus st "from cache"
+      | none =>
+        if !s.running key && s.jobs.size < maxJobs then submit st doc key
+        if (← st.get).running key then keys := key :: keys else blocked := true
+    -- Wait for the renders of these pages (or, without a time limit and with a page still
+    -- waiting for a slot, for every running render).
+    let wanted (j : Job) : Bool := keys.contains j.key || (wait.isNone && blocked)
+    for _ in [0:1000000] do
+      let js := (← st.get).jobs.filter wanted
+      if js.isEmpty then break
+      let fin ← js.filterM (IO.hasFinished ·.task)
+      for j in fin do
+        let (r, ns) ← finish st j
+        discard <| place st pages j r ns
+      if fin.size == js.size then break
+      match wait with
+      | none =>
+        if fin.isEmpty then
+          if let some j := js[0]? then discard <| IO.wait j.task
+      | some ms =>
+        if (← IO.monoNanosNow) - t0 ≥ ms * 1000000 then break
+        IO.sleep 1
+    if wait.isSome || !blocked then break
+  let s ← st.get
+  for p in pages do
+    if let some sl := slotOf s p then
+      if !s.hasPhoto p then showWaiting sl
+  ensurePoll st
+
 /-- After the view moved (task 9.3): in the vertical modes the current page becomes the page
 under the window centre (`View.pageAt`), unless the view is still where the viewer put it
 (`ownTop`); photos of pages no longer wanted (`View.wantedPages`) are deleted, which bounds the
@@ -1666,31 +1826,58 @@ def viewChanged (st : IO.Ref State) : IO Unit := do
     st.modify ({ · with renderQueued := true })
     discard <| run ["after", "1", "::safepdf::emit renderMore"]
 
-/-- Renders one missing page (`missingPages`, the nearest to the current page) and schedules
-itself again while pages are missing (task 9.3). -/
+/-- Shows the missing pages in view and their neighbours (`missingPages`, nearest to the
+current page first; task 9.3): cached ones at once, the others get a placeholder and a
+worker render while slots are free (task 8.8: the current page may use every slot of
+`maxJobs`, the others leave one free); `poll` shows them as they finish. -/
 def renderMore (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with renderQueued := false })
-  match ← missingPages st with
-  | [] => pure ()
-  | p :: rest =>
-    let r ← ensurePhoto st p
-    drawOverlay st
-    if p == (← st.get).page then
-      showStatus st (match r with
-        | some (_, some t) => s!"rendered in {formatMs t} ms"
-        | _ => "from cache")
-    if !rest.isEmpty then
-      st.modify ({ · with renderQueued := true })
-      discard <| run ["after", "1", "::safepdf::emit renderMore"]
+  let some doc := (← st.get).doc | return
+  let mut shown := false
+  for p in ← missingPages st do
+    let s ← st.get
+    let some sl := slotOf s p | continue
+    let key := keyOf s sl
+    match ← cached st key with
+    | some r =>
+      showPhoto st sl r
+      shown := true
+      if p == s.page then showStatus st "from cache"
+    | none =>
+      let slots := if p == s.page then maxJobs else maxJobs - 1
+      if !s.running key && s.jobs.size < slots then submit st doc key
+      showWaiting sl
+  if shown then drawOverlay st
+  ensurePoll st
 
-/-- Renders every missing page now (smoke tests and benchmarks). -/
+/-- Handles `poll` (task 8.8, every `pollMs` while renders run): takes the finished renders
+(`finish`, into the cache), shows those still wanted (`place`), starts more (`renderMore`). -/
+def poll (st : IO.Ref State) : IO Unit := do
+  st.modify ({ · with pollQueued := false })
+  let done ← (← st.get).jobs.filterM (IO.hasFinished ·.task)
+  if !done.isEmpty then
+    let want ← wantedNow st
+    let mut shown := false
+    for j in done do
+      let (r, ns) ← finish st j
+      if ← place st want j r ns then shown := true
+    if shown then drawOverlay st
+    if (← st.get).doc.isSome then renderMore st
+  ensurePoll st
+
+/-- Renders every missing page now and waits for every running render (smoke tests and
+benchmarks). -/
 def settle (st : IO.Ref State) : IO Unit := do
   viewChanged st
   for _ in [0:256] do
+    let want ← wantedNow st
+    for j in (← st.get).jobs do
+      discard <| IO.wait j.task
+      let (r, ns) ← finish st j
+      discard <| place st want j r ns
     match ← missingPages st with
     | [] => break
-    | p :: _ =>
-      discard <| ensurePhoto st p
+    | miss => showNow st miss none
   drawOverlay st
 
 /-- Applies the pending scroll (`State.pending`) to the current layout. In the page scroll mode
@@ -1772,15 +1959,18 @@ def refresh (st : IO.Ref State) : IO Unit := do
     let curKey : View.Key := ⟨s.gen, s.page, sl.vp.zoom, s.rot⟩
     if !relaid && s.shown == some curKey && s.pending.isNone then return
     setMirror st sl
-    let res ← ensurePhoto st s.page
-    if s.scroll == .page then
-      for sl' in s.slots do discard <| ensurePhoto st sl'.place.page
+    -- The current page (its spread in the page scroll mode) now, waiting for its render at
+    -- most `syncWaitMs` (task 8.8); the status line says how it came.
+    let had := s.hasPhoto s.page
+    let renders0 := s.renders
+    let now := if s.scroll == .page then s.slots.toList.map (·.place.page) else [s.page]
+    showNow st now s.syncWaitMs
     applyScroll st
     viewChanged st
     drawOverlay st
-    showStatus st (match res with
-      | some (_, some t) => s!"rendered in {formatMs t} ms"
-      | _ => "from cache")
+    let s ← st.get
+    if had || (s.hasPhoto s.page && s.renders == renders0) then showStatus st "from cache"
+    else if !s.hasPhoto s.page then showStatus st "rendering..."
     let s ← st.get
     if s.scroll == .page && View.nextPage s.spread s.pageCount s.page != s.page then
       discard <| run ["after", "100", "::safepdf::emit prefetch"]
@@ -1814,8 +2004,11 @@ def prefetch (st : IO.Ref State) : IO Unit := do
   let (slots, _, _) := computeLayout { s with page := q } doc
   for sl in slots do
     let key : View.Key := ⟨s.gen, sl.place.page, sl.vp.zoom, s.rot⟩
-    if !(← st.get).cache.contains key && sl.place.w * sl.place.h ≤ prefetchPixels then
-      discard <| fetch st doc key
+    let s ← st.get
+    if !s.cache.contains key && !s.running key && sl.place.w * sl.place.h ≤ prefetchPixels &&
+        s.jobs.size + 1 < maxJobs then
+      submit st doc key
+  ensurePoll st
 
 /-! ## Outline panel (task 8.2d) -/
 
@@ -4602,6 +4795,69 @@ def smokeScroll (st : IO.Ref State) (dir : String) : IO Unit := do
       canvas: {s.canvasW}x{s.canvasH}\nstatus: {← run [".status", "cget", "-text"]}\n"
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of non-blocking rendering (`SAFEPDF_VIEWER_SMOKE_MODE=async`, task 8.8; the
+viewer starts with `syncWaitMs := some 0`, so no event waits for a render) on a two-page PDF
+whose page 1 takes the renderer seconds (`scripts/viewer-smoke-pdf.py --slow`). Step 0 (page 1
+still rendering at the opening zoom Z0): records the placeholder, starts a Tcl timer that
+counts its runs every 20 ms, and zooms in (`+`, zoom Z1): the event must return at once with
+two renders running. Step 1 (400 ms later): the timer ran meanwhile, page 1 still has no photo,
+both renders still run; `End` goes to the light page 2 at once. Step 2: page 2 shown and the
+page field says 2 while page 1 still renders; `Home` goes back to page 1 (its Z1 render keeps
+running). Later steps wait until no render runs, then record the dropped stale result (Z0),
+page 1's photo size against its slot (Z1) and the status line, write `async.txt` and close. -/
+def smokeAsync (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file : System.FilePath := (dir : System.FilePath) / "async.txt"
+  let append (l : String) : IO Unit := do
+    let old ← try IO.FS.readFile file catch _ => pure ""
+    IO.FS.writeFile file (old ++ l ++ "\n")
+  let s ← st.get
+  st.modify ({ · with smokeStep := s.smokeStep + 1 })
+  let next (ms : Nat) : IO Unit := discard <| run ["after", toString ms, "::safepdf::emit smoke"]
+  let timed (act : IO Unit) : IO Nat := do
+    let t0 ← IO.monoNanosNow
+    act
+    return ((← IO.monoNanosNow) - t0) / 1000000
+  let running (p : Nat) (s : State) : Nat := (s.jobs.filter (·.key.page == p)).size
+  match s.smokeStep with
+  | 0 =>
+    append s!"start: page {s.page + 1} photo {s.hasPhoto 0} jobs {s.jobs.size} placeholders {← tagCount "w0"}"
+    append s!"status0: {← run [".status", "cget", "-text"]}"
+    discard <| run ["set", "::safepdf::smkTicks", "0"]
+    discard <| run ["proc", "::safepdf::smkTick", "",
+      "incr ::safepdf::smkTicks; after 20 ::safepdf::smkTick"]
+    discard <| run ["::safepdf::smkTick"]
+    let ms ← timed (sendKey "plus")
+    let s ← st.get
+    append s!"zoom-event-ms: {ms}"
+    append s!"after-zoom: jobs {running 0 s} photo {s.hasPhoto 0} placeholders {← tagCount "w0"}"
+    next 400
+  | 1 =>
+    append s!"ticks: {← run ["set", "::safepdf::smkTicks"]}"
+    append s!"during: jobs {running 0 s} photo {s.hasPhoto 0} placeholders {← tagCount "w0"}"
+    let ms ← timed (sendKey "End")
+    append s!"end-event-ms: {ms}"
+    next 400
+  | 2 =>
+    append s!"page2: page {s.page + 1} field {← run ["set", "::safepdf::pageText"]} photo {s.hasPhoto 1} slow-jobs {running 0 s}"
+    let ms ← timed (sendKey "Home")
+    let s ← st.get
+    append s!"home-event-ms: {ms}"
+    append s!"home: page {s.page + 1} photo {s.hasPhoto 0} placeholders {← tagCount "w0"}"
+    next 300
+  | k =>
+    if !s.jobs.isEmpty && k < 200 then next 300; return
+    let sz ← match s.photos.find? (·.1 == 0), slotOf s 0 with
+      | some (_, .ok img), some sl =>
+        pure s!"{img.w}x{img.h} slot {sl.place.w}x{sl.place.h}"
+      | _, _ => pure "none"
+    append s!"final: page {s.page + 1} jobs {s.jobs.size} stale {s.staleDropped} renders {s.renders}"
+    append s!"final-photo: {sz}"
+    append s!"render-ms: {formatMs (s.renderNs / max 1 s.renders)} avg"
+    append s!"status: {← run [".status", "cget", "-text"]}"
+    append s!"ticks-end: {← run ["set", "::safepdf::smkTicks"]}"
+    append "done"
+    discard <| run ["destroy", "."]
+
 /-- Smoke steps of the Tcl lockdown (`SAFEPDF_VIEWER_SMOKE_MODE=lockdown`, task 8.7), run by
 `scripts/viewer-smoke.sh` with `HOME` holding a hostile `~/.Xdefaults` (script-valued
 resources that would create the file `pwned`) and, on the same display, a second Tk
@@ -4753,6 +5009,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "async" then
+    try smokeAsync st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "async.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "lockdown" then
     try smokeLockdown st dir
     catch e =>
@@ -4854,6 +5116,7 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["prevEnd"] => goTo st (View.prevPage s.spread s.page) .bottom
   | ["viewChanged"] => viewChanged st
   | ["renderMore"] => renderMore st
+  | ["poll"] => poll st
   | ["viewMode", what, key] => setViewMode st what key
   | ["first"] => goTo st 0
   | ["last"] => goTo st (s.pageCount - 1)
@@ -4974,6 +5237,8 @@ library (task 10.1b);
 SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in
 the vertical mode and write timings (a benchmark).
 SAFEPDF_VIEWER_SMOKE_MODE=lockdown: Tk send and hostile X resources (task 8.7).
+SAFEPDF_VIEWER_SMOKE_MODE=async: rendering on worker threads, placeholders, stale results
+(task 8.8).
 SAFEPDF_VIEWER_DRIVE=1: test hook keeping Tk's send command (scripts/viewer-corpus.sh drives
 the viewer through it); without it other X clients cannot send Tcl to the viewer.
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).
@@ -5004,7 +5269,11 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   let smokeDir ← IO.getEnv "SAFEPDF_VIEWER_SMOKE"
   let smokeMode := (← IO.getEnv "SAFEPDF_VIEWER_SMOKE_MODE").getD ""
   let subst ← Fonts.loadSubstFonts limits
-  let st ← IO.mkRef ({ smokeDir, smokeMode, subst } : State)
+  -- Task 8.8: an event waits at most 100 ms for the renders of the pages it shows; in smoke
+  -- mode until they are done (the steps look at the pages at once), except in the `async` test.
+  let syncWaitMs := if smokeDir.isNone || smokeMode == "async" then
+    some (if smokeMode == "async" then 0 else 100) else none
+  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs } : State)
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
@@ -5045,8 +5314,10 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   return 0
 
 /-- Runs the viewer (`mainWith` without an `init`): opens the file named in `args`, else asks
-for one. -/
-def main (args : List String) : IO UInt32 :=
-  mainWith args fun _ => pure ()
+for one. Exits the process as soon as the window is closed (task 8.8): a page render still
+running on a worker thread cannot be interrupted, and the Lean runtime would wait for it. -/
+def main (args : List String) : IO UInt32 := do
+  let code ← mainWith args fun _ => pure ()
+  IO.Process.exit (if code > 255 then 1 else code.toUInt8)
 
 end SafePdf.Shell.App.Viewer
