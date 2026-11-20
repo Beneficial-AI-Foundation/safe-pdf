@@ -297,9 +297,17 @@ with `Normal` (it covers the fill exactly where it paints). -/
 def Paint.needsKnockout (g : GState) : Bool :=
   !(g.strokeAlpha == Comp.zero || (g.strokeAlpha == Comp.one && g.blendMode == .normal))
 
-/-- The group bracketing fill-and-stroke (task 7.3i): non-isolated, knockout, alpha 1,
-`Normal`, so the stroke composites over the backdrop of the fill, not over the fill. -/
-def Paint.knockoutGroup : GroupInfo := { isolated := false, knockout := true }
+/-- The group bracketing fill-and-stroke in state `g` (task 7.3i): non-isolated, knockout,
+alpha 1, so the stroke composites over the backdrop of the fill, not over the fill. As in MuPDF
+(`pdf_begin_group` around the knockout group) the state's blend mode and soft mask apply to the
+group as a whole, and the fill and the stroke inside it are painted with `Normal` and no mask
+(`Paint.inGroup`). -/
+def Paint.knockoutGroup (g : GState) : GroupInfo :=
+  { isolated := false, knockout := true, blend := g.blendMode, smask := g.softMask }
+
+/-- The state the fill and the stroke of a knockout group are painted in: `g` with blend mode
+`Normal` and no soft mask (both moved to `Paint.knockoutGroup`). -/
+def Paint.inGroup (g : GState) : GState := { g with blendMode := .normal, softMask := none }
 
 /-- The items a painting operator produces for `path` in state `g`; fill-and-stroke is a
 fill followed by a stroke (§8.5.3.1), bracketed by a knockout group when the stroke is
@@ -311,8 +319,8 @@ def Paint.items (p : Paint) (path : Path) (g : GState) : List DisplayItem :=
   | .stroke => [.strokePath path g.strokeStyle g.clip]
   | .fillStroke rule =>
     if Paint.needsKnockout g then
-      [.groupBegin Paint.knockoutGroup, .fillPath path rule g.fillStyle g.clip,
-        .strokePath path g.strokeStyle g.clip, .groupEnd]
+      [.groupBegin (Paint.knockoutGroup g), .fillPath path rule (Paint.inGroup g).fillStyle g.clip,
+        .strokePath path (Paint.inGroup g).strokeStyle g.clip, .groupEnd]
     else [.fillPath path rule g.fillStyle g.clip, .strokePath path g.strokeStyle g.clip]
 
 /-- One painting operator yields at most `Paint.maxItems` items. -/

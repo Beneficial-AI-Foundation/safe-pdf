@@ -212,9 +212,11 @@ def closeIf (close : Bool) (c : Core) : Core := if close then closeSubpath c els
 
 /-- Items of painting operator `p` for `path` in state `g` (§8.5.3.1): a fill, a stroke, or a
 fill followed by a stroke; the latter inside a non-isolated knockout group (`groupBegin` …
-`groupEnd`, so the stroke composites over the fill's backdrop, not over the fill) unless the
-stroke alpha is 0 (the stroke paints nothing) or 1 with blend mode `Normal` (it covers the fill
-where it paints) — MuPDF 1.25.1 `pdf-op-run.c` `pdf_show_path` (task 7.3i). -/
+`groupEnd`, so the stroke composites over the fill's backdrop, not over the fill; the group
+carries the state's blend mode and soft mask, the fill and stroke inside it are `Normal` and
+unmasked) unless the stroke alpha is 0 (the stroke paints nothing) or 1 with blend mode
+`Normal` (it covers the fill where it paints) — MuPDF 1.25.1 `pdf-op-run.c` `pdf_show_path` and
+`pdf_begin_group` (task 7.3i). -/
 def paintItems (p : Paint) (path : Path) (g : GState) : List DisplayItem :=
   match p with
   | .fill r => [.fillPath path r g.fillStyle g.clip]
@@ -223,8 +225,11 @@ def paintItems (p : Paint) (path : Path) (g : GState) : List DisplayItem :=
     if g.strokeAlpha = Comp.zero ∨ (g.strokeAlpha = Comp.one ∧ g.blendMode = .normal) then
       [.fillPath path r g.fillStyle g.clip, .strokePath path g.strokeStyle g.clip]
     else
-      [.groupBegin { isolated := false, knockout := true }, .fillPath path r g.fillStyle g.clip,
-        .strokePath path g.strokeStyle g.clip, .groupEnd]
+      let grp : GroupInfo :=
+        { isolated := false, knockout := true, blend := g.blendMode, smask := g.softMask }
+      let f : FillStyle := { g.fillStyle with blend := .normal, smask := none }
+      let k : StrokeStyle := { g.strokeStyle with blend := .normal, smask := none }
+      [.groupBegin grp, .fillPath path r f g.clip, .strokePath path k g.clip, .groupEnd]
 
 /-- Items of a painting operator for the current path of `c`: nothing for an empty path;
 otherwise the paint items (`none` = `n`) then the pending clip. -/
@@ -733,7 +738,8 @@ theorem paintItems_eq (p : Paint) (path : Path) (g : GState) :
   | fill r => rfl
   | stroke => rfl
   | fillStroke r =>
-    simp only [Paint.items, paintItems, Paint.needsKnockout, Paint.knockoutGroup]
+    simp only [Paint.items, paintItems, Paint.needsKnockout, Paint.knockoutGroup,
+      Paint.inGroup, GState.fillStyle, GState.strokeStyle]
     by_cases h0 : g.strokeAlpha = Comp.zero <;> by_cases h1 : g.strokeAlpha = Comp.one <;>
       by_cases h2 : g.blendMode = .normal <;> simp [h0, h1, h2]
 
