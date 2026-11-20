@@ -156,6 +156,10 @@ def mutool (pdf : System.FilePath) (i : Nat) : IO (Option Rgb) := do
 /-- `qpdf --check` exit code, if `qpdf` runs. -/
 def qpdfCheck (pdf : System.FilePath) : IO (Option UInt32) := do
   try
+    -- A missing command does not throw: the spawned child exits 255. Probe `--version` first
+    -- so a machine without qpdf (the CI `build` job) skips instead of failing.
+    let probe ← IO.Process.output { cmd := "qpdf", args := #["--version"] }
+    if probe.exitCode != 0 then return none
     let out ← IO.Process.output { cmd := "qpdf", args := #["--check", pdf.toString] }
     return some out.exitCode
   catch _ => return none

@@ -73,6 +73,7 @@ import SafePdf.Quarantine.DCT
 import SafePdf.Quarantine.CCITT
 import SafePdf.Core.Write.Serialize
 import SafePdf.Core.Write.Incremental
+import SafePdf.Core.Write.Encrypt
 import SafePdf.Core.Write.Annots
 import SafePdf.Spec.Write
 import SafePdf.Core.Annot

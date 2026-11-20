@@ -1094,3 +1094,29 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Shell.App.Bubble.Ui.escape_closes
 -- Phase 6, task 6.8f: text clipped by clip paths
 #print axioms SafePdf.Core.Text.unclipped_of_none
+-- Phase 9, task 9.5f: annotating encrypted documents (writer rule W10)
+#print axioms SafePdf.Spec.Write.writeAnnots_aux_plain
+#print axioms SafePdf.Spec.Write.writeAnnots_crypt
+#print axioms SafePdf.Spec.Write.sameCrypt_ok
+#print axioms SafePdf.Core.Write.Incremental.auxBody_none
+#print axioms SafePdf.Core.Write.Encrypt.pkcs7Pad_size
+#print axioms SafePdf.Core.Write.Encrypt.pkcs7Pad_mod
+#print axioms SafePdf.Core.Write.Encrypt.pkcs7Pad_gt
+#print axioms SafePdf.Core.Write.Encrypt.encLen_none
+-- Phase 7, task 7.9: render-time tail
+#print axioms SafePdf.Core.Raster.Stroke.arcCountGoI_eq
+#print axioms SafePdf.Core.Raster.Stroke.arcCount_eq
+#print axioms SafePdf.Core.Raster.Stroke.strokePathT_empty
+#print axioms SafePdf.Core.Raster.Transparency.restoreAll_size
+#print axioms SafePdf.Core.Raster.Transparency.materializeTop_sized
+#print axioms SafePdf.Core.Raster.Transparency.materializeS_inv
+#print axioms SafePdf.Core.Raster.Transparency.knockItemL_inv
+#print axioms SafePdf.Core.Raster.Transparency.paintKL_inv
+#print axioms SafePdf.Core.Raster.Transparency.paintKTL_inv
+#print axioms SafePdf.Core.Raster.Transparency.pushKnockL_size
+-- Phase 9, task 9.3: view-mode layout
+#print axioms SafePdf.Shell.App.View.mem_spreadPages
+#print axioms SafePdf.Shell.App.View.spreadOf_lt_count
+#print axioms SafePdf.Shell.App.View.spreadOf_spreadFirst
+#print axioms SafePdf.Shell.App.View.nextPage_spread
+#print axioms SafePdf.Shell.App.View.stack_pairwise
