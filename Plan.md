@@ -290,9 +290,33 @@ The biggest engineering item.
 ### Phase 9 — GUI enhancements (viewer UX + user annotations)
 Shell work (`Shell/App/`, unverified; Tk-free logic modules with `#guard`s and theorems, as
 established in 8.2). The verified core is untouched.
-- **Menu bar** (File / Edit / View / Go): a native Tk menubar; the *Outline*, *Back* and
-  *Forward* toolbar buttons move into it (View → Outline, Go → Back / Forward; the keys F9
-  and Alt+Left/Right stay), decluttering the toolbar.
+- **Look and feel: imitate PDF.js**, the viewer built into Firefox (Mozilla, Apache-2.0;
+  its `web/` sources — `viewer.html`, `viewer.css`, `toolbar.js`, `pdf_sidebar.js`,
+  `annotation_editor_layer` — are the reference for layout, spacing, icons and behaviour;
+  we re-create the look in Tk, no code or icon files are copied unless their licence and
+  attribution are recorded in Decisions). Concretely:
+  - *Sidebar*: the document outline opens in a left sidebar **only when the document has
+    an outline** (open on load in that case); the sidebar toggle button (far left of the
+    toolbar) is hidden when there is none. Nested entries collapse with disclosure
+    triangles; clicking an entry jumps.
+  - *Toolbar, left*: sidebar toggle, then small ∧ / ∨ previous/next-page arrow buttons
+    next to an editable page-number box and the label "of N" — typing a number and Enter
+    jumps there; an invalid entry reverts to the current page.
+  - *Toolbar, centre*: zoom out (−), zoom in (+) and a zoom drop-down (Automatic Zoom,
+    Actual Size, Page Fit, Page Width, 50 %–400 %) showing the current choice.
+  - *Toolbar, right*: annotation tools — Highlight (pop-over: colour swatches yellow,
+    green, blue, pink, red; thickness slider for free highlights; "Show all" toggle),
+    Add comment/note, Add text, Draw (ink), Add image (stamp) — then Print and Save, and a
+    `»` overflow menu (first/last page, rotate, scroll and spread modes, document
+    properties). Tools that need a PDF writer follow S8: **Save writes the XFDF sidecar,
+    never the PDF**; Print and image stamps may land after M9 (recorded in the ledger).
+  - *Selection bubble*: selecting text pops a small floating toolbar next to the
+    selection — highlight (colour swatch with a drop-down to change colour), comment,
+    and delete when an existing highlight is selected — as PDF.js does.
+- **Menu bar** (File / Edit / View / Go): a native Tk menubar duplicating the toolbar
+  commands (View → Outline, Go → Back / Forward; the keys F9 and Alt+Left/Right stay).
+  (Amended 2026-11-20: the outline toggle stays on the toolbar as PDF.js's sidebar button,
+  shown only when an outline exists.)
 - **Wheel scrolling across pages**: the mouse wheel (macOS trackpad deltas included)
   continues into the next / previous page as the keys already do, instead of stopping at
   the page edge.
@@ -313,7 +337,10 @@ established in 8.2). The verified core is untouched.
   into the PDF by incremental update (ISO 32000 §12.5), needs a file writer and is at most
   a later "export annotated copy" feature, never an in-place change.
 - **M9**: a paper reads end-to-end with the wheel in every view mode; a highlight and a
-  note survive close/reopen through the sidecar; the sidecar imports into Acrobat/Okular.
+  note survive close/reopen through the sidecar; the sidecar imports into Acrobat/Okular;
+  side-by-side screenshots of the same paper in our viewer and in Firefox's PDF.js show the
+  same toolbar layout (sidebar only with an outline, page box with arrows, centred zoom,
+  tools on the right) and the same selection bubble.
 
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,

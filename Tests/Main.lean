@@ -22,6 +22,7 @@ import Tests.TextUnicode
 import Tests.RasterGlyph
 import Tests.RasterGlyphSpec
 import Tests.RasterComposite
+import Tests.RasterSubst
 import Tests.RasterImage
 import Tests.RasterTransparency
 import Tests.RasterShading
@@ -71,6 +72,7 @@ def suites : List Suite :=
     { name := "raster-glyph", run := SafePdf.Tests.RasterGlyph.run },
     { name := "raster-glyph-spec", run := SafePdf.Tests.RasterGlyphSpec.run },
     { name := "raster-composite", run := SafePdf.Tests.RasterComposite.run },
+    { name := "raster-subst", run := SafePdf.Tests.RasterSubst.run },
     { name := "raster-image", run := SafePdf.Tests.RasterImage.run },
     { name := "raster-transparency", run := SafePdf.Tests.RasterTransparency.run },
     { name := "raster-shading", run := SafePdf.Tests.RasterShading.run },

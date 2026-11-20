@@ -1053,3 +1053,6 @@ import SafePdf.Shell.App.Links
 -- Phase 7, task 7.3l: page-wide Type 3 glyph cache
 #print axioms SafePdf.Core.Raster.Type3.GlyphCache.insert_count_le
 #print axioms SafePdf.Core.Raster.Type3.GlyphCache.insert_bytes_le
+-- Phase 7, task 7.7: substitute fonts
+#print axioms SafePdf.Core.Raster.Subst.widthTable_length_le
+#print axioms SafePdf.Core.Raster.Glyph.substCodes_size
