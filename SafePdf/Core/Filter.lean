@@ -59,6 +59,10 @@ the standard filters. This module parses that chain (`parseChain`) and runs it
 * F8. Structural streams. `decodeBytes` runs `decodeStream` for streams whose data the core
   itself reads (object streams, cross-reference streams; `Core.Xref.ObjStm`,
   `Core.Xref.Stream`): an image-codec result is an error chosen by the caller.
+* F9. Reservation (task 8.10). The stream's `/DL` (`declaredLength`) is the expected decoded
+  size; a `/FlateDecode` stage reserves its output buffer from it (`flateCap`, at most the
+  stage's limit) instead of growing it by doubling. It never changes a result
+  (`decodeOne_cap`, `applyStages_cap`, `applyStagesB_cap`, `decodeStream_eq`).
 
 `decodeStream` decodes one stream. The aggregate bound it gives is `produced_le`: the bytes
 allocated by all stages of one chain are at most `(number of stages) · maxDecodedStreamBytes`,
@@ -302,12 +306,24 @@ def cryptCheck (parms : Dict) : Except Error Unit :=
     else .error (.unsupported s!"/Crypt filter /{nameText n} (not applied by decryption)")
   | some _ => .error (.malformed 0 "/Crypt /DecodeParms /Name is not a name")
 
-/-- Decode one byte stage (F4). -/
+/-- The output capacity reserved for a `/FlateDecode` stage (task 8.10) from `cap`, the
+expected size of the stream's decoded data (`declaredLength`): `cap` plus one filter-type byte
+per row when a PNG predictor follows, at most the stage's limit and `2048` bytes per input
+byte (beyond any DEFLATE ratio) plus `4096`. Only a reservation: the result does not depend on
+it (`decodeOne_cap`), and it is never more than the stage may allocate anyway (B2). -/
+def flateCap (limits : Limits) (parms : Dict) (cap n : Nat) : Nat :=
+  let rows := match Predictor.Params.ofDict parms with
+    | .ok p => if 10 ≤ p.predictor then cap / max 1 (Predictor.rowBytes p) + 1 else 0
+    | .error _ => 0
+  min (min (cap + rows) limits.maxDecodedStreamBytes) (2048 * n + 4096)
+
+/-- Decode one byte stage (F4). `cap`: the expected decoded size, used only to reserve the
+output buffer of `/FlateDecode` (`flateCap`, task 8.10; not observable, `decodeOne_cap`). -/
 def decodeOne (limits : Limits) (strict : Bool) (f : ByteFilter) (parms : Dict)
-    (b : ByteArray) : Except Error ByteArray :=
+    (b : ByteArray) (cap : Nat := 0) : Except Error ByteArray :=
   match f with
   | .flate =>
-    match Flate.flateDecode limits b strict with
+    match Flate.flateDecode limits b strict (flateCap limits parms cap b.size) with
     | .error e => .error e
     | .ok o => predict parms o
   | .lzw =>
@@ -324,6 +340,12 @@ def decodeOne (limits : Limits) (strict : Bool) (f : ByteFilter) (parms : Dict)
     match cryptCheck parms with
     | .error e => .error e
     | .ok () => .ok b
+
+/-- The reserved capacity does not change a stage's result. -/
+theorem decodeOne_cap (limits : Limits) (strict : Bool) (f : ByteFilter) (parms : Dict)
+    (b : ByteArray) (cap : Nat) :
+    decodeOne limits strict f parms b cap = decodeOne limits strict f parms b := by
+  cases f <;> simp only [decodeOne, Flate.flateDecode_cap]
 
 /-- A predictor never grows its input. -/
 theorem predict_size_le {parms : Dict} {b out : ByteArray} (h : predict parms b = .ok out) :
@@ -377,26 +399,60 @@ theorem decodeOne_size_le {limits : Limits} {strict : Bool} {f : ByteFilter} {pa
 /-- The per-stream output limit error. -/
 def limitErr : Error := .limitExceeded .decodedStreamBytes
 
-/-- Run the stages in order (F5, F6). Structural on the list. -/
-def applyStages (limits : Limits) (strict : Bool) : List Stage → ByteArray →
-    Except Error Decoded
+/-- Run the stages in order (F5, F6). Structural on the list. `cap`: the expected decoded
+size, handed to every stage (`decodeOne`; a reservation only, `applyStages_cap`). -/
+def applyStages (limits : Limits) (strict : Bool) (stages : List Stage) (b : ByteArray)
+    (cap : Nat := 0) : Except Error Decoded :=
+  match stages, b with
   | [], b =>
     if b.size ≤ limits.maxDecodedStreamBytes then .ok (.data b) else .error limitErr
   | ⟨.image c, p⟩ :: [], b =>
     if b.size ≤ limits.maxDecodedStreamBytes then .ok (.image c p b) else .error limitErr
   | ⟨.image _, _⟩ :: _ :: _, _ => .error (.unsupported "a filter after an image codec")
   | ⟨.byte f, p⟩ :: rest, b =>
-    match decodeOne limits strict f p b with
+    match decodeOne limits strict f p b cap with
     | .error e => .error e
-    | .ok o => applyStages limits strict rest o
+    | .ok o => applyStages limits strict rest o cap
+
+/-- The reserved capacity does not change the result of a chain. -/
+theorem applyStages_cap (limits : Limits) (strict : Bool) :
+    (stages : List Stage) → (b : ByteArray) → (cap : Nat) →
+    applyStages limits strict stages b cap = applyStages limits strict stages b
+  | [], _, _ => rfl
+  | ⟨.image _, _⟩ :: [], _, _ => rfl
+  | ⟨.image _, _⟩ :: _ :: _, _, _ => rfl
+  | ⟨.byte f, p⟩ :: rest, b, cap => by
+    simp only [applyStages, decodeOne_cap]
+    split
+    · rfl
+    · exact applyStages_cap limits strict rest _ cap
+
+/-- The `/DL` entry of a stream dictionary (ISO 32000-2 §7.3.8.2, Table 5: the number of bytes
+of the decoded stream, "a hint"), `0` when absent or not a non-negative integer. Used only to
+reserve output buffers (task 8.10); a wrong value costs at most a reallocation or an unused
+reservation within the stage's limit. -/
+def declaredLength (d : Dict) : Nat :=
+  match d.get? (Name.ofString "DL") with
+  | some (.int i) => i.toNat
+  | _ => 0
 
 /-- **Entry point.** Decode a stream's data `raw` with the filter chain of its dictionary
-`d` (ISO 32000-2 §7.3.8, §7.4). Strict by default (F7). -/
+`d` (ISO 32000-2 §7.3.8, §7.4). Strict by default (F7). `/DL` (`declaredLength`) sizes the
+output buffers (task 8.10) and does not change the result (`decodeStream_eq`). -/
 def decodeStream (limits : Limits) (d : Dict) (raw : ByteArray) (strict : Bool := true) :
     Except Error Decoded :=
   match parseChain limits d with
   | .error e => .error e
-  | .ok stages => applyStages limits strict stages raw
+  | .ok stages => applyStages limits strict stages raw (declaredLength d)
+
+/-- `decodeStream` is the chain run without a reservation. -/
+theorem decodeStream_eq (limits : Limits) (d : Dict) (raw : ByteArray) (strict : Bool) :
+    decodeStream limits d raw strict =
+      match parseChain limits d with
+      | .error e => .error e
+      | .ok stages => applyStages limits strict stages raw := by
+  unfold decodeStream
+  split <;> simp only [applyStages_cap]
 
 /-- **Structural streams (F8).** Decode a stream whose data the core reads itself (an object
 stream or a cross-reference stream) with `decodeStream`; an image-codec result, meaningless
@@ -436,7 +492,7 @@ theorem applyStages_size_le (limits : Limits) (strict : Bool) :
 theorem decodeStream_size_le {limits : Limits} {d : Dict} {raw : ByteArray} {strict : Bool}
     {r : Decoded} (h : decodeStream limits d raw strict = .ok r) :
     r.bytes.size ≤ limits.maxDecodedStreamBytes := by
-  unfold decodeStream at h
+  rw [decodeStream_eq] at h
   split at h
   · cases h
   · exact applyStages_size_le limits strict _ raw r h
@@ -501,7 +557,8 @@ theorem decodeStream_image {limits : Limits} {d : Dict} {raw b : ByteArray} {str
     (hc : parseChain limits d = .ok (pre ++ [⟨.image c, p⟩]))
     (hp : applyStages limits strict pre raw = .ok (.data b)) :
     decodeStream limits d raw strict = .ok (.image c p b) := by
-  simp only [decodeStream, hc]
+  rw [decodeStream_eq]
+  simp only [hc]
   exact applyStages_image limits strict c p pre raw b hp
 
 /-- An unknown name anywhere in the list makes `kindsOf` fail with `unsupported`. -/
@@ -738,8 +795,9 @@ def hasByte (stages : List Stage) : Bool := stages.any Stage.isByte
 /-- `applyStages` with the budget `rem` threaded through (B1, B2): each byte stage runs
 under `capped limits rem` and is charged its output; a failing byte stage is charged
 `failCharge`. Returns the result and the remaining budget. Structural on the list. -/
-def applyStagesB (limits : Limits) (strict : Bool) : List Stage → Nat → ByteArray →
-    Except Error Decoded × Nat
+def applyStagesB (limits : Limits) (strict : Bool) (stages : List Stage) (rem : Nat)
+    (b : ByteArray) (cap : Nat := 0) : Except Error Decoded × Nat :=
+  match stages, rem, b with
   | [], rem, b =>
     (if b.size ≤ limits.maxDecodedStreamBytes then .ok (.data b) else .error limitErr, rem)
   | ⟨.image c, p⟩ :: [], rem, b =>
@@ -747,11 +805,26 @@ def applyStagesB (limits : Limits) (strict : Bool) : List Stage → Nat → Byte
       rem)
   | ⟨.image _, _⟩ :: _ :: _, rem, _ => (.error (.unsupported "a filter after an image codec"), rem)
   | ⟨.byte f, p⟩ :: rest, rem, b =>
-    match decodeOne (capped limits rem) strict f p b with
+    match decodeOne (capped limits rem) strict f p b cap with
     | .error e => (.error (budgetErr limits rem e), rem - failCharge limits rem f)
     | .ok o =>
-      if o.size ≤ rem then applyStagesB limits strict rest (rem - o.size) o
+      if o.size ≤ rem then applyStagesB limits strict rest (rem - o.size) o cap
       else (.error totalErr, rem)
+
+/-- The reserved capacity does not change the budgeted result of a chain. -/
+theorem applyStagesB_cap (limits : Limits) (strict : Bool) :
+    (stages : List Stage) → (rem : Nat) → (b : ByteArray) → (cap : Nat) →
+    applyStagesB limits strict stages rem b cap = applyStagesB limits strict stages rem b
+  | [], _, _, _ => rfl
+  | ⟨.image _, _⟩ :: [], _, _, _ => rfl
+  | ⟨.image _, _⟩ :: _ :: _, _, _, _ => rfl
+  | ⟨.byte f, p⟩ :: rest, rem, b, cap => by
+    simp only [applyStagesB, decodeOne_cap]
+    split
+    · rfl
+    · split
+      · exact applyStagesB_cap limits strict rest _ _ cap
+      · rfl
 
 /-- **Budgeted entry point** (task 3.10). Decode like `decodeStream`, charging the bytes
 produced against `budget` (rules B1–B5). Returns the result and the charged budget, also on
@@ -762,7 +835,7 @@ def decodeStreamB (limits : Limits) (budget : Budget) (d : Dict) (raw : ByteArra
   | .error e => (.error e, budget)
   | .ok stages =>
     if hasByte stages then
-      let p := applyStagesB limits strict stages budget.remaining raw
+      let p := applyStagesB limits strict stages budget.remaining raw (declaredLength d)
       (p.1, ⟨p.2⟩)
     else
       match applyStages limits strict stages raw with
@@ -864,7 +937,7 @@ theorem decodeStreamB_le (limits : Limits) (budget : Budget) (d : Dict) (raw : B
   split
   · exact Nat.le_refl _
   · split
-    · exact applyStagesB_le limits strict _ _ raw
+    · simp only [applyStagesB_cap]; exact applyStagesB_le limits strict _ _ raw
     · split
       · exact Nat.le_refl _
       · split
@@ -881,7 +954,7 @@ theorem decodeStreamB_charge {limits : Limits} {budget : Budget} {d : Dict} {raw
   | ok stages =>
     cases hb : hasByte stages with
     | true =>
-      simp only [decodeStreamB, hp, hb, ↓reduceIte] at h ⊢
+      simp only [decodeStreamB, hp, hb, ↓reduceIte, applyStagesB_cap] at h ⊢
       exact (applyStagesB_ok limits strict stages budget.remaining raw r h).2 hb
     | false =>
       cases hr : applyStages limits strict stages raw with
@@ -901,7 +974,7 @@ theorem decodeStreamB_size_le {limits : Limits} {budget : Budget} {d : Dict} {ra
   split at h
   · cases h
   · split at h
-    · exact (applyStagesB_ok limits strict _ _ raw r h).1
+    · simp only [applyStagesB_cap] at h; exact (applyStagesB_ok limits strict _ _ raw r h).1
     · split at h
       · cases h
       · rename_i r' hr
@@ -1032,6 +1105,17 @@ private def pngParms : PdfObject := .dict [(K "Predictor", .int 12), (K "Columns
 -- Flate without parameters: no predictor.
 #guard okData (decodeStream dl [(K "Filter", N "FlateDecode")] (storedZlib [9, 8]))
   [9, 8]
+-- `/DL` (task 8.10) only reserves the output: exact, too small, negative, huge, not an integer.
+#guard [.int 6, .int 1, .int (-5), .int (2 ^ 40), .null].all fun v =>
+  okData (decodeStream dl [(K "Filter", N "FlateDecode"), (K "DecodeParms", pngParms),
+    (K "DL", v)] (storedZlib pngRows)) [1, 2, 3, 2, 3, 4] &&
+  okData (decodeStreamB dl ⟨100⟩ [(K "Filter", N "FlateDecode"), (K "DL", v)]
+    (storedZlib [9, 8])).1 [9, 8]
+#guard declaredLength [(K "DL", .int 7)] == 7 && declaredLength [(K "DL", .int (-7))] == 0 &&
+  declaredLength [] == 0
+#guard flateCap dl [] 1000 3 == 1000 && flateCap dl [] (2 ^ 40) 3 == 2048 * 3 + 4096 &&
+  flateCap (tiny 10) [] 1000 100 == 10 && flateCap dl [(K "Predictor", .int 12),
+    (K "Columns", .int 3)] 6 100 == 6 + 6 / 3 + 1
 
 -- ASCIIHex → Flate chain, null params for the first filter.
 #guard okData (decodeStream dl [(K "Filter", .array [N "ASCIIHexDecode", N "FlateDecode"]),
