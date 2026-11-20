@@ -1,5 +1,6 @@
 import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Content.Run
+import SafePdf.Quarantine.DCT
 
 /-!
 # Images: decoding sample data and placing it on the page (tasks 7.3b, 7.3e)
@@ -24,7 +25,19 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    `Filter.parseChain` before decoding) yields the **placeholder**: a 1 × 1 mid-grey
    (`128`) opaque pixmap, i.e. a grey box over the image's unit square (its soft mask, if
    decodable, still applies). The codecs belong to the quarantine zone (Plan.md §6 Phase 3,
-   S7) and replace the placeholder later.
+   S7) and replace the placeholder one by one.
+   **`/DCTDecode`** (task 7.6a) is decoded by `SafePdf.Quarantine.DCT` (baseline JPEG, pure
+   Lean): a chain `pre ++ [/DCTDecode]` (`dctSplit`) is decoded up to the codec through the
+   source (the stream with `/Filter`/`/DecodeParms` cut before it, so the session budget is
+   charged), then `decodeDCT` decodes the JPEG (`/ColorTransform` from its parameters) and
+   **re-validates** it against the image dictionary: the JPEG's component count must equal
+   the colour space's (a missing `/ColorSpace` is taken from the JPEG: 1 gray, 3 RGB, 4 CMYK),
+   and its samples are read as an 8-bit `/Width × /Height` raster of the dictionary (short
+   data reads 0, extra data is ignored — MuPDF reads the decoded stream the same way), with
+   the dictionary's `/Decode` (Adobe-inverted CMYK JPEGs carry `/Decode [1 0 1 0 1 0 1 0]`).
+   Any decoder error (progressive, arithmetic, 12-bit, malformed, over a limit) or a
+   component mismatch yields the placeholder (S7); a DCT soft mask that fails is dropped.
+   DCT stencil masks (`/ImageMask true`) stay the placeholder.
 2. **Parameters** (`ImgDict`, entries resolved one level through the source): `/Width`,
    `/Height` (both `≥ 1`; `w · h ≤ Limits.maxImagePixels`, else
    `Error.limitExceeded .imagePixels`), `/BitsPerComponent` ∈ {1, 2, 4, 8, 16} (else
@@ -595,6 +608,66 @@ def hasCodec (limits : Limits) (d : Dict) : Bool :=
     | .byte _ => false
   | .error _ => false
 
+/-! ### `/DCTDecode` through the quarantine-zone decoder (task 7.6a) -/
+
+/-- A `/Filter` chain ending in `/DCTDecode` after byte filters only: the stream dictionary
+with that last stage removed from `/Filter` and `/DecodeParms` (a single filter: both keys
+removed), and the DCT stage's parameters. `none` for any other chain. -/
+def dctSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) :=
+  match Filter.parseChain limits d with
+  | .ok stages =>
+    match stages.reverse with
+    | ⟨.image .dct, parms⟩ :: pre =>
+      if pre.all (fun st => match st.kind with | .byte _ => true | .image _ => false) then
+        some (d.filterMap fun kv =>
+          if kv.1 = Content.Run.nm "Filter" ∨ kv.1 = Content.Run.nm "DecodeParms" then
+            match kv.2 with
+            | .array xs => if xs.length ≤ 1 then none else some (kv.1, .array xs.dropLast)
+            | _ => none
+          else some kv, parms)
+      else none
+    | _ => none
+  | .error _ => none
+
+/-- `/ColorTransform` of the DCT parameters (`none` when absent or not an integer). -/
+def colorTransformOf (parms : Dict) : Option Int :=
+  match Dict.get? parms (Content.Run.nm "ColorTransform") with
+  | some (.int i) => some i
+  | _ => none
+
+/-- The device colour space of a JPEG by its component count (for a missing `/ColorSpace`). -/
+def jpegSpace (nc : Nat) : Option CSInfo :=
+  if nc = 1 then some (.dev .gray (.gray Comp.zero))
+  else if nc = 3 then some (.dev .rgb (.gray Comp.zero))
+  else if nc = 4 then some (.dev .cmyk (.gray Comp.zero))
+  else none
+
+/-- **Decode DCT data and re-validate it against the image dictionary**: the JPEG's
+components must match the colour space (`info`, else `jpegSpace`); the samples become an
+8-bit raster of the dictionary's dimensions through `decodePixmap` (`/Decode`, colour-key
+masking, limits). Errors: the decoder's, a component mismatch, a stencil mask. -/
+def decodeDCT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (jpeg : ByteArray) : Except Error Pixmap :=
+  if p.mask then .error (.unsupported "DCT-encoded stencil mask") else
+  match Quarantine.DCT.decode limits (colorTransformOf parms) jpeg with
+  | .error e => .error e
+  | .ok img =>
+    let info := match info with
+      | some i => some i
+      | none => jpegSpace img.nc
+    match info.bind planOf with
+    | some (nc, _, _) =>
+      if nc = img.nc then decodePixmap limits { p with bpc := some 8 } info img.data
+      else .error (.malformed 0 s!"DCT: {img.nc} components for a {nc}-component colour space")
+    | none => .error (.unsupported "DCT image without a drawable colour space")
+
+/-- `decodeDCT`, with every error drawn as the placeholder (S7). -/
+def decodeDCTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (jpeg : ByteArray) : Pixmap :=
+  match decodeDCT limits p info parms jpeg with
+  | .ok pm => pm
+  | .error _ => placeholder
+
 /-- The colour space of an image: `Run.csInfo` (device names, arrays, references), else a
 resource name looked up in `named`. -/
 def csOf {σ : Type} (src : Source σ) (s : σ) (named : List (Name × CSInfo)) :
@@ -733,14 +806,16 @@ abbrev MaskImg := Pixmap × Option (List Fixed)
 decoded through the source like an image XObject — a soft mask as `DeviceGray` with its own
 `/Decode` (the mask value is channel 0; `/BitsPerComponent` required), an explicit mask as an
 `/ImageMask` stencil (`/Decode` honoured, coverage in channel 3: sample 0 paints) — plus a soft
-mask's `/Matte` components. `none` for anything else (not a stream, an image codec, a decode
-error): the image is then drawn unmasked. -/
+mask's `/Matte` components; a `/DCTDecode` mask goes through `decodeDCT`. `none` for anything
+else (not a stream, another image codec, a decode error): the image is then drawn
+unmasked. -/
 def loadMask {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (soft : Bool) :
     Option PdfObject → Option MaskImg × σ
   | some (.ref n g) =>
     match src.fetch s n g with
     | (.ok (.stream st), s) =>
-      if hasCodec limits st.dict then (none, s) else
+      let dct := dctSplit limits st.dict
+      if hasCodec limits st.dict ∧ dct.isNone then (none, s) else
       let (p, s) := imgDictOf src s st.dict
       let (mt, s) := entry src s st.dict "Matte"
       let matte : Option (List Fixed) := match mt with
@@ -748,9 +823,15 @@ def loadMask {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (soft : Bo
         | _ => none
       if soft ∧ p.bpc.isNone then (none, s) else
       let p := { p with mask := !soft, key := none }
-      match src.decode s n st with
+      let st' := match dct with
+        | some (d', _) => { st with dict := d' }
+        | none => st
+      match src.decode s n st' with
       | (.ok bytes, s) =>
-        match decodePixmap limits p (some grayInfo) bytes with
+        let r := match dct with
+          | some (_, parms) => decodeDCT limits p (some grayInfo) parms bytes
+          | none => decodePixmap limits p (some grayInfo) bytes
+        match r with
         | .ok pm => (some (pm, matte), s)
         | .error _ => (none, s)
       | (.error _, s) => (none, s)
@@ -774,7 +855,7 @@ def applyMasks (cap : Nat) (info : Option CSInfo) (sm mk : Option MaskImg) (pm :
   | none, none => pm
 
 /-- **Decode an image XObject** `num gen` through the source (its filters, the session
-budget); an image codec yields the placeholder. Its `/SMask` (else its `/Mask` stream) is
+budget); `/DCTDecode` through `decodeDCTOr`, any other image codec yields the placeholder. Its `/SMask` (else its `/Mask` stream) is
 loaded and applied (`applyMasks`); a soft mask disables colour-key masking (§8.9.6.4). -/
 def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named : List (Name × CSInfo))
     (num gen : Nat) : Except Error Pixmap × σ :=
@@ -788,6 +869,12 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
       else loadMask limits src s false (Dict.get? st.dict (Content.Run.nm "Mask"))
     let p := if sm.isSome then { p with key := none } else p
     let fin := applyMasks limits.maxImagePixels info sm mk
+    match dctSplit limits st.dict with
+    | some (d', parms) =>
+      match src.decode s num { st with dict := d' } with
+      | (.ok bytes, s) => (.ok (fin (decodeDCTOr limits p info parms bytes)), s)
+      | (.error e, s) => (.error e, s)
+    | none =>
     if hasCodec limits st.dict then (.ok (fin placeholder), s) else
     match src.decode s num st with
     | (.ok bytes, s) => ((decodePixmap limits p info bytes).map fin, s)
@@ -801,11 +888,12 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
 no references. -/
 def decodeInline (limits : Limits) (named : List (Name × CSInfo)) (params : Dict)
     (raw : ByteArray) : Except Error Pixmap :=
-  if hasCodec limits params then .ok placeholder else
+  if hasCodec limits params ∧ (dctSplit limits params).isNone then .ok placeholder else
   let p := (imgDictOf Source.empty () params).1
   let info := (csOf Source.empty () named p.cs).1
   match Filter.decodeStream limits params raw with
   | .ok (.data b) => decodePixmap limits p info b
+  | .ok (.image .dct parms b) => .ok (decodeDCTOr limits p info parms b)
   | .ok (.image ..) => .ok placeholder
   | .error e => .error e
 
