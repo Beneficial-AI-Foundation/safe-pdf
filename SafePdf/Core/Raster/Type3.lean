@@ -87,6 +87,40 @@ def maxGlyphLayerPixels : Nat := 1 <<< 22
 
 /-! ## 2. Glyphs and fonts -/
 
+/-- MuPDF's `fz_mul255(a, b)`: `x = a·b + 128; (x + (x >> 8)) >> 8` (arithmetic shifts). -/
+def mul255 (a b : Int) : Int :=
+  let x := a * b + 128
+  Int.fdiv (x + Int.fdiv x 256) 256
+
+/-- The largest power-of-two subsampling `l ≤ 6` with `W >> l ≥ w + 2` and `H >> l ≥ h + 2`
+(`fz_get_pixmap_from_image`; `0` when `w` or `h` is `0`). -/
+def l2factor (W H w h : Nat) : Nat :=
+  if w = 0 ∨ h = 0 then 0 else
+  (List.range 6).foldl (fun l _ =>
+    if w + 2 ≤ W >>> (l + 1) ∧ h + 2 ≤ H >>> (l + 1) then l + 1 else l) 0
+
+/-- **Subsampled stencil coverage** (`fz_decomp_image_from_stream` with `l2extra = l`): the
+`⌈W/2ˡ⌉ × ⌈H/2ˡ⌉` coverage bytes of stencil `pm` with `/Decode` kind `inv` (`[1 0]`). The raw
+sample is `a` (`[1 0]`) or `255 − a` (default) for the decoded coverage `a`. -/
+def subsampleStencil (pm : Image.Pixmap) (inv : Bool) (l : Nat) : Nat × Nat × ByteArray :=
+  let f := 1 <<< l
+  let sw := (pm.w + f - 1) / f
+  let sh := (pm.h + f - 1) / f
+  let raw := fun (i j : Nat) =>
+    let a := Clip.getB pm.data (4 * (j * pm.w + i) + 3)
+    if inv then a else 255 - a
+  let data := (List.range sh).foldl (fun (acc : ByteArray) by_ =>
+    let ys := min f (pm.h - by_ * f)
+    (List.range sw).foldl (fun (acc : ByteArray) bx =>
+      let xs := min f (pm.w - bx * f)
+      let s := (List.range ys).foldl (fun s yy =>
+        (List.range xs).foldl (fun s xx => s + raw (bx * f + xx) (by_ * f + yy)) s) 0
+      let v1 : Int := 255 - ((s / max 1 (xs * ys) : Nat) : Int)
+      let v2 : Int := if inv then max 0 (min 255 (255 + mul255 v1 (-255))) else v1
+      acc.push v2.toNat.toUInt8) acc) (ByteArray.mk (Array.mkEmpty (sw * sh)))
+  (sw, sh, data)
+
+
 /-- A glyph-space box: empty (nothing painted), a rectangle `(x0, y0, x1, y1)`, or unbounded
 (the window). -/
 inductive GBox where
@@ -113,6 +147,25 @@ def GBox.widen (r : Rat) : GBox → GBox
   | .box a b c d => .box (a - r) (b - r) (c + r) (d + r)
   | g => g
 
+/-- A stencil whose sample pipeline MuPDF's scaler reproduces (`mupdfStencil`): its `/Decode`
+kind (`stencilDecode`) and its subsampled coverage for each factor `l = 0 … 6`, computed lazily
+once per loaded font (a `Thunk`, so every run of the page shares it). -/
+structure StencilSrc where
+  /-- `/Decode [1 0]`. -/
+  inv : Bool
+  /-- `subsampleStencil pm inv l` for `l = 0 … 6`. -/
+  subs : Array (Thunk (Nat × Nat × ByteArray))
+
+/-- The stencil source of `pm` with `/Decode` kind `inv`. -/
+def StencilSrc.ofPixmap (pm : Image.Pixmap) (inv : Bool) : StencilSrc :=
+  ⟨inv, (Array.range 7).map fun l => Thunk.mk fun _ => subsampleStencil pm inv l⟩
+
+/-- The subsampled coverage for factor `l` (computed directly past the table). -/
+def StencilSrc.sub (s : StencilSrc) (pm : Image.Pixmap) (l : Nat) : Nat × Nat × ByteArray :=
+  match s.subs[l]? with
+  | some t => t.get
+  | none => subsampleStencil pm s.inv l
+
 /-- A charproc run into glyph space. -/
 structure T3Glyph where
   /-- The display items (glyph space). -/
@@ -123,9 +176,9 @@ structure T3Glyph where
   bbox : GBox
   /-- **Image glyphs** (bitmap fonts): when every item is an unclipped inline image (stencil
   masks, or any image in a coloured glyph), the decoded images with their CTMs (glyph space),
-  drawn directly (`drawImages`); empty otherwise. The third component is the stencil's
-  `/Decode` kind (`stencilDecode`). -/
-  images : Array (Image.Pixmap × Matrix × Option Bool) := #[]
+  drawn directly (`drawImages`); empty otherwise. The third component: the stencil's source for
+  MuPDF's scaler (`StencilSrc`), when its `/Decode` is standard. -/
+  images : Array (Image.Pixmap × Matrix × Option StencilSrc) := #[]
 
 /-- A loaded Type 3 font. -/
 structure T3Font where
@@ -161,13 +214,15 @@ def stencilDecode (params : Dict) : Option Bool :=
 /-- The decoded images of an image glyph (`T3Glyph.images`): every item an inline image
 without clip, decodable, a stencil mask unless the glyph is coloured; else `#[]`. -/
 def imageGlyph (limits : Limits) (colored : Bool) (items : DisplayList) :
-    Array (Image.Pixmap × Matrix × Option Bool) :=
-  let r := items.foldl (fun (acc : Option (Array (Image.Pixmap × Matrix × Option Bool))) it =>
+    Array (Image.Pixmap × Matrix × Option StencilSrc) :=
+  let r := items.foldl (fun (acc : Option (Array (Image.Pixmap × Matrix × Option StencilSrc))) it =>
     match acc, it with
     | some a, .image (.inline params data) ctm _ [] =>
       match Image.decodeInline limits [] params data with
       | .ok pm =>
-        if pm.stencil || colored then some (a.push (pm, ctm, stencilDecode params)) else none
+        if pm.stencil || colored then
+          some (a.push (pm, ctm, (stencilDecode params).map (StencilSrc.ofPixmap pm)))
+        else none
       | .error _ => none
     | _, _ => none) (some #[])
   match r with
@@ -464,39 +519,6 @@ by one (a documented deviation, as is the single-column case, where MuPDF reads 
 vertical weights sequentially). Other cases (rotated or skewed images, upscaling, unusual
 `/Decode` arrays) keep the exact area filter (`stencilMask`) or `placeNoFit`. -/
 
-/-- MuPDF's `fz_mul255(a, b)`: `x = a·b + 128; (x + (x >> 8)) >> 8` (arithmetic shifts). -/
-def mul255 (a b : Int) : Int :=
-  let x := a * b + 128
-  Int.fdiv (x + Int.fdiv x 256) 256
-
-/-- The largest power-of-two subsampling `l ≤ 6` with `W >> l ≥ w + 2` and `H >> l ≥ h + 2`
-(`fz_get_pixmap_from_image`; `0` when `w` or `h` is `0`). -/
-def l2factor (W H w h : Nat) : Nat :=
-  if w = 0 ∨ h = 0 then 0 else
-  (List.range 6).foldl (fun l _ =>
-    if w + 2 ≤ W >>> (l + 1) ∧ h + 2 ≤ H >>> (l + 1) then l + 1 else l) 0
-
-/-- **Subsampled stencil coverage** (`fz_decomp_image_from_stream` with `l2extra = l`): the
-`⌈W/2ˡ⌉ × ⌈H/2ˡ⌉` coverage bytes of stencil `pm` with `/Decode` kind `inv` (`[1 0]`). The raw
-sample is `a` (`[1 0]`) or `255 − a` (default) for the decoded coverage `a`. -/
-def subsampleStencil (pm : Image.Pixmap) (inv : Bool) (l : Nat) : Nat × Nat × ByteArray :=
-  let f := 1 <<< l
-  let sw := (pm.w + f - 1) / f
-  let sh := (pm.h + f - 1) / f
-  let raw := fun (i j : Nat) =>
-    let a := Clip.getB pm.data (4 * (j * pm.w + i) + 3)
-    if inv then a else 255 - a
-  let data := (List.range sh).foldl (fun (acc : ByteArray) by_ =>
-    let ys := min f (pm.h - by_ * f)
-    (List.range sw).foldl (fun (acc : ByteArray) bx =>
-      let xs := min f (pm.w - bx * f)
-      let s := (List.range ys).foldl (fun s yy =>
-        (List.range xs).foldl (fun s xx => s + raw (bx * f + xx) (by_ * f + yy)) s) 0
-      let v1 : Int := 255 - ((s / max 1 (xs * ys) : Nat) : Int)
-      let v2 : Int := if inv then max 0 (min 255 (255 + mul255 v1 (-255))) else v1
-      acc.push v2.toNat.toUInt8) acc) (ByteArray.mk (Array.mkEmpty (sw * sh)))
-  (sw, sh, data)
-
 /-- MuPDF's smoothstep scale filter `fz_scale_filter_simple`: `1 + (2x − 3)x²` below 1, else 0
 (`x ≥ 0`). -/
 def simpleFilter (x : Rat) : Rat := if 1 ≤ x then 0 else 1 + (2 * x - 3) * x * x
@@ -504,15 +526,21 @@ def simpleFilter (x : Rat) : Rat := if 1 ≤ x then 0 else 1 + (2 * x - 3) * x *
 /-- MuPDF's `check_weights`: the weights `ws` (source index, weight; increasing index) of
 destination pixel `j` of `w`, sub-pixel offset `x`, real width `wf`: the first largest weight
 absorbs `256 − Σ` for inner pixels, when `Σ > 256`, or for a fully covered edge pixel. -/
-def checkWeights (ws : List (Nat × Int)) (j w : Nat) (x wf : Rat) : List (Nat × Int) :=
+def checkWeightsB (ws : List (Nat × Int)) (j w : Nat) (xSmall wSmall : Bool) :
+    List (Nat × Int) :=
   let sum := ws.foldl (fun s p => s + p.2) 0
   -- index (in `ws`) of the first maximum
   let mx := (ws.foldl (fun (acc : Nat × Int × Nat) p =>
     let (k, best, at_) := acc
     if best < p.2 then (k + 1, p.2, k) else (k + 1, best, at_)) (0, -256, 0)).2.2
-  let adj := ((j ≠ 0 ∧ j + 1 ≠ w) ∨ 256 < sum) ∨ (j = 0 ∧ x < 1 / 10000 ∧ sum ≠ 256) ∨
-    (j + 1 = w ∧ (w : Rat) - wf < 1 / 10000 ∧ sum ≠ 256)
+  let adj := ((j ≠ 0 ∧ j + 1 ≠ w) ∨ 256 < sum) ∨ (j = 0 ∧ xSmall ∧ sum ≠ 256) ∨
+    (j + 1 = w ∧ wSmall ∧ sum ≠ 256)
   if adj then ws.modify mx (fun p => (p.1, p.2 + (256 - sum))) else ws
+
+/-- `checkWeightsB` with the edge tests `x < 0.0001` and `w − wf < 0.0001` (MuPDF's
+`check_weights`). -/
+def checkWeights (ws : List (Nat × Int)) (j w : Nat) (x wf : Rat) : List (Nat × Int) :=
+  checkWeightsB ws j w (decide (x < 1 / 10000)) (decide ((w : Rat) - wf < 1 / 10000))
 
 /-- MuPDF's `make_weights` for destination pixel `j` (one axis): `srcW` source samples scaled
 to the real width `dstW` (`dstWInt` whole pixels) at sub-pixel offset `x`. -/
@@ -534,6 +562,42 @@ def weightsAt (srcW : Nat) (x dstW : Rat) (dstWInt j : Nat) : List (Nat × Int) 
   let ws := if ws.isEmpty then
       [((max 0 (min (centre.floor) ((srcW : Int) - 1))).toNat, 1)] else ws
   checkWeights ws j dstWInt x dstW
+
+/-- Bits of the dyadic grid of `weightsAtI` (`2⁻²⁰` px, finer than MuPDF's `float` positions
+on a page). -/
+def wBits : Nat := 20
+
+/-- `q` on the grid `2⁻ʷᴮⁱᵗˢ`, rounded. -/
+def toDy (q : Rat) : Int := (q * ((1 <<< wBits : Nat) : Rat) + 1 / 2).floor
+
+/-- **`weightsAt` in integer arithmetic** for dyadic inputs `x = X / 2^wBits`,
+`dstW = N / 2^wBits` (`N > 0`): the same weights (`Tests/RasterGlyph.lean` checks equality),
+without rational normalisation in the per-tap loop. With `P = |((2j+1)·2ᵏ − 2X)·srcW −
+(2i+1)·N|` the filter distance is `P / Q` (`Q = 2·srcW·2ᵏ` when scaling down, `2N` up) and
+`simple(P/Q) · Q³ = Q³ + (2P − 3Q)·P²`. -/
+def weightsAtI (srcW : Nat) (X N : Int) (dstWInt j : Nat) : List (Nat × Int) :=
+  let K : Int := ((1 <<< wBits : Nat) : Int)
+  let sw : Int := srcW
+  let down := N < sw * K
+  let A := ((2 * (j : Int) + 1) * K - 2 * X) * sw
+  -- centre = (A − N) / 2N; window = sw·K / N (down) or 1
+  let win2 : Int := if down then 2 * sw * K else 2 * N
+  let l := -Int.fdiv (-(A - N - win2)) (2 * N)
+  let r := Int.fdiv (A - N + win2) (2 * N)
+  let Q : Int := if down then 2 * sw * K else 2 * N
+  let Q3 := Q * Q * Q
+  let D : Int := if down then K * sw * Q3 else Q3
+  let ws := (List.range (r - l + 1).toNat).filterMap fun (k : Nat) =>
+    let i : Int := l + (k : Int)
+    if i < 0 ∨ sw ≤ i then none else
+    let P := (A - (2 * i + 1) * N).natAbs
+    if Q ≤ (P : Int) then none else
+    let S : Int := Q3 + (2 * (P : Int) - 3 * Q) * (P : Int) * (P : Int)
+    let wt := Int.fdiv ((if down then 512 * N else 512) * S + D) (2 * D)
+    if wt = 0 then none else some (i.toNat, wt)
+  let ws := if ws.isEmpty then
+      [((max 0 (min (Int.fdiv (A - N) (2 * N)) (sw - 1))).toNat, 1)] else ws
+  checkWeightsB ws j dstWInt (X * 10000 < K) (((dstWInt : Int) * K - N) * 10000 < K)
 
 /-- `(v >> 8)` stored as an `unsigned char` (wraps modulo 256, as MuPDF's cast). -/
 def u8wrap (v : Int) : UInt8 := (Int.emod (Int.fdiv v 256) 256).toNat.toUInt8
@@ -557,9 +621,9 @@ def wsum (ws : List (Nat × Int)) (s : Nat → Nat) : UInt8 :=
   u8wrap (ws.foldl (fun acc p => acc + p.2 * (s p.1 : Int)) 128)
 
 /-- **MuPDF's scaled stencil mask** (see the section doc): `none` unless `pm` is a stencil
-with `/Decode` kind `inv`, `dev` (PDF image space → device) is axis-aligned and downscales on
+with the source `src0` (`StencilSrc`), `dev` (PDF image space → device) is axis-aligned and downscales on
 both axes, and the result is at most `maxStencilSide` pixels along each axis. -/
-def mupdfStencil (pm : Image.Pixmap) (inv : Bool) (dev : Aff) : Option Mask :=
+def mupdfStencil (pm : Image.Pixmap) (src0 : StencilSrc) (dev : Aff) : Option Mask :=
   if dev.b ≠ 0 ∨ dev.c ≠ 0 ∨ dev.a = 0 ∨ dev.d = 0 then none else
   -- fitz image space (row 0 at the top): `[1 0 0 −1 0 1] × dev`
   let ma := dev.a
@@ -571,7 +635,7 @@ def mupdfStencil (pm : Image.Pixmap) (inv : Bool) (dev : Aff) : Option Mask :=
   let dx := (absQ ma).floor.toNat
   let dy := (absQ md).floor.toNat
   let l := l2factor pm.w pm.h (min dx pm.w) (min dy pm.h)
-  let sub := subsampleStencil pm inv l
+  let sub := src0.sub pm l
   let sw := sub.1
   let sh := sub.2.1
   let src := sub.2.2
@@ -581,10 +645,14 @@ def mupdfStencil (pm : Image.Pixmap) (inv : Bool) (dev : Aff) : Option Mask :=
   let dwi := ax.2.2.1
   let dhi := ay.2.2.1
   if maxStencilSide < dwi ∨ maxStencilSide < dhi then none else
+  let xX := toDy ax.2.2.2.1
+  let xN := max 1 (toDy ax.2.2.2.2)
+  let yX := toDy ay.2.2.2.1
+  let yN := max 1 (toDy ay.2.2.2.2)
   let cols : Array (List (Nat × Int)) :=
-    (Array.range dwi).map fun j => weightsAt sw ax.2.2.2.1 ax.2.2.2.2 dwi j
+    (Array.range dwi).map fun j => weightsAtI sw xX xN dwi j
   let rows : Array (List (Nat × Int)) :=
-    (Array.range dhi).map fun j => weightsAt sh ay.2.2.2.1 ay.2.2.2.2 dhi j
+    (Array.range dhi).map fun j => weightsAtI sh yX yN dhi j
   let px := fun (i j : Nat) => Clip.getB src (j * sw + i)
   -- horizontally scaled logical rows (`flip_y`: fed bottom-up); one source column: copied
   let temp : ByteArray := (List.range sh).foldl (fun (acc : ByteArray) r =>
@@ -603,9 +671,9 @@ def mupdfStencil (pm : Image.Pixmap) (inv : Bool) (dev : Aff) : Option Mask :=
 /-- The coverage mask of a stencil image of a glyph, when one is computed directly: MuPDF's
 scaler (`mupdfStencil`) when it applies, else the exact area filter (`stencilMask`) for an
 axis-aligned matrix; `none` for non-stencils and other matrices. -/
-def stencilCoverage (pm : Image.Pixmap) (dec : Option Bool) (dev : Aff) : Option Mask :=
+def stencilCoverage (pm : Image.Pixmap) (dec : Option StencilSrc) (dev : Aff) : Option Mask :=
   if !pm.stencil then none else
-  match dec.bind (fun inv => mupdfStencil pm inv dev) with
+  match dec.bind (fun s => mupdfStencil pm s dev) with
   | some mk => some mk
   | none => stencilMask pm dev
 
@@ -633,20 +701,20 @@ theorem drawImageWith_size (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : N
 coverage mask (`stencilCoverage`: MuPDF's scaler, else the exact area filter), anything else
 by `placeNoFit` (`drawImageWith`). `dec`: the stencil's `/Decode` kind. -/
 def drawImage (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat)
-    (pm : Image.Pixmap) (dec : Option Bool) (dev : Aff) (b : ByteArray) : ByteArray × Nat :=
+    (pm : Image.Pixmap) (dec : Option StencilSrc) (dev : Aff) (b : ByteArray) : ByteArray × Nat :=
   let q := drawImageWith cap W H cm al uc pm dev (stencilCoverage pm dec dev) b
   (q.1, q.2 + pm.w * pm.h)
 
 /-- `drawImage` preserves the buffer size. -/
 theorem drawImage_size (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat)
-    (pm : Image.Pixmap) (dec : Option Bool) (dev : Aff) (b : ByteArray) :
+    (pm : Image.Pixmap) (dec : Option StencilSrc) (dev : Aff) (b : ByteArray) :
     (drawImage cap W H cm al uc pm dec dev b).1.size = b.size :=
   drawImageWith_size _ _ _ _ _ _ _ _ _ _
 
 /-- Draw the images of an image glyph (`T3Glyph.images`) through `T` (glyph → device):
 each by `drawImage` with its CTM × `T`, the clip mask `cm`, stencil colour `uc`, alpha `al`. -/
 def drawImages (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat) (T : Aff)
-    (imgs : List (Image.Pixmap × Matrix × Option Bool)) (acc : ByteArray × Nat) :
+    (imgs : List (Image.Pixmap × Matrix × Option StencilSrc)) (acc : ByteArray × Nat) :
     ByteArray × Nat :=
   imgs.foldl (fun acc (pm, ctm, dec) =>
     let q := drawImage cap W H cm al uc pm dec (Aff.ofMatrix ctm * T) acc.1
@@ -654,7 +722,7 @@ def drawImages (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat ×
 
 /-- `drawImages` preserves the buffer size. -/
 theorem drawImages_size (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat)
-    (T : Aff) (imgs : List (Image.Pixmap × Matrix × Option Bool)) :
+    (T : Aff) (imgs : List (Image.Pixmap × Matrix × Option StencilSrc)) :
     ∀ (acc : ByteArray × Nat), (drawImages cap W H cm al uc T imgs acc).1.size = acc.1.size := by
   induction imgs with
   | nil => intro acc; rfl
@@ -723,25 +791,117 @@ def subpixelAdjust (trm : Aff) : Aff :=
   let (vq, vr) := if trm.b = 0 ∧ trm.c = 0 then (qmin, rmin) else (q, r)
   { trm with e := quantAxis trm.e hq hr, f := quantAxis trm.f vq vr }
 
+/-! ### Glyph bitmap cache
+
+MuPDF caches rendered glyphs per (font, glyph, matrix, sub-pixel phase) (`fz_render_glyph`).
+Here the coverage masks of an image glyph's stencils (`stencilCoverage`) are cached for the
+duration of one glyph run: within a run the font and the linear part of the glyph matrix are
+fixed, so the key is the code and the fractional part of the (quantised) translation; an
+integer translation moves the masks by whole pixels (exactly: MuPDF's scaler places its output
+at `⌊x⌋` and depends on `x − ⌊x⌋` only). At most `maxGlyphCache` entries. -/
+
+/-- Most cached glyph instances per run (local cap). -/
+def maxGlyphCache : Nat := 1024
+
+/-- Cached stencil masks of image glyphs: per code, `(phase x, phase y, masks)` (one optional
+mask per image of the glyph, placed for the phase, i.e. translation `−⌊e⌋, −⌊f⌋`). -/
+structure GlyphCache where
+  /-- Entries by code (`0 … 255`). -/
+  slots : Array (List (Rat × Rat × Array (Option Mask)))
+  /-- Number of entries. -/
+  count : Nat
+
+/-- The empty cache. -/
+def GlyphCache.empty : GlyphCache := ⟨Array.replicate 256 [], 0⟩
+
+/-- The masks cached for code `c` at phase `(fe, ff)`. -/
+def GlyphCache.find? (gc : GlyphCache) (c : Nat) (fe ff : Rat) : Option (Array (Option Mask)) :=
+  (((gc.slots[c]?).getD []).find? (fun e => e.1 == fe && e.2.1 == ff)).map (·.2.2)
+
+/-- Add an entry (dropped when the cache is full). -/
+def GlyphCache.insert (gc : GlyphCache) (c : Nat) (fe ff : Rat) (m : Array (Option Mask)) :
+    GlyphCache :=
+  if maxGlyphCache ≤ gc.count then gc else
+  ⟨gc.slots.modify c (fun l => (fe, ff, m) :: l), gc.count + 1⟩
+
+/-- A mask moved by whole pixels. -/
+def shiftMask (mk : Mask) (dx dy : Int) : Mask := { mk with x0 := mk.x0 + dx, y0 := mk.y0 + dy }
+
+/-- Draw the images of an image glyph through `T` with their coverage masks `mks` (computed for
+`T` minus the integer translation `(ix, iy)`, so moved by it); an image without a mask is drawn
+by `placeNoFit` through its CTM × `T`. -/
+def drawImagesC (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat) (T : Aff)
+    (ix iy : Int) (imgs : List ((Image.Pixmap × Matrix × Option StencilSrc) × Option Mask))
+    (acc : ByteArray × Nat) : ByteArray × Nat :=
+  imgs.foldl (fun acc e =>
+    let q := drawImageWith cap W H cm al uc e.1.1 (Aff.ofMatrix e.1.2.1 * T)
+      (e.2.map (shiftMask · ix iy)) acc.1
+    (q.1, acc.2 + q.2)) acc
+
+/-- `drawImagesC` preserves the buffer size. -/
+theorem drawImagesC_size (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat)
+    (T : Aff) (ix iy : Int) (imgs : List ((Image.Pixmap × Matrix × Option StencilSrc) × Option Mask)) :
+    ∀ (acc : ByteArray × Nat),
+      (drawImagesC cap W H cm al uc T ix iy imgs acc).1.size = acc.1.size := by
+  induction imgs with
+  | nil => intro acc; rfl
+  | cons x rest ih =>
+    intro acc
+    simp only [drawImagesC, List.foldl_cons] at ih ⊢
+    rw [ih]; exact drawImageWith_size _ _ _ _ _ _ _ _ _ _
+
+/-- The coverage masks of an image glyph for glyph → device matrix `T0`, with the work done. -/
+def glyphMasks (g : T3Glyph) (T0 : Aff) : Array (Option Mask) × Nat :=
+  (g.images.map fun e => stencilCoverage e.1 e.2.2 (Aff.ofMatrix e.2.1 * T0),
+    g.images.foldl (fun s e => s + e.1.w * e.1.h) 0)
+
+/-- **Draw an image glyph** with glyph → device matrix `T` through the cache `gc` (code `c`):
+masks looked up by phase or computed and stored. -/
+def drawCached (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat) (T : Aff)
+    (c : Nat) (g : T3Glyph) (gc : GlyphCache) (b : ByteArray) : ByteArray × Nat × GlyphCache :=
+  let ix := T.e.floor
+  let iy := T.f.floor
+  let fe := T.e - ix
+  let ff := T.f - iy
+  let r : Array (Option Mask) × Nat × GlyphCache := match gc.find? c fe ff with
+    | some m => (m, 0, gc)
+    | none =>
+      let q := glyphMasks g { T with e := fe, f := ff }
+      (q.1, q.2, gc.insert c fe ff q.1)
+  let q := drawImagesC cap W H cm al uc T ix iy (g.images.toList.zip r.1.toList) (b, r.2.1)
+  (q.1, q.2, r.2.2)
+
+/-- `drawCached` preserves the buffer size. -/
+theorem drawCached_size (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat)
+    (T : Aff) (c : Nat) (g : T3Glyph) (gc : GlyphCache) (b : ByteArray) :
+    (drawCached cap W H cm al uc T c g gc b).1.size = b.size :=
+  drawImagesC_size _ _ _ _ _ _ _ _ _ _ _
+
 /-- One laid-out code of a run: its glyph (if any) drawn at its offset (the text rendering
-matrix quantised as MuPDF's, `subpixelAdjust`). -/
+matrix quantised as MuPDF's, `subpixelAdjust`); image glyphs through the run's glyph cache
+(`drawCached`), others by `drawGlyph`. The accumulator: buffer, work, cache. -/
 def glyphStep (paint : Tiling.CellPainter) (W H : Nat) (win : IRect) (cm : Option Mask) (al : Nat)
     (uc : Nat × Nat × Nat) (f : T3Font) (r : GlyphRun) (rm : Aff)
-    (acc : ByteArray × Nat) (e : List UInt8 × Fixed × Fixed) : ByteArray × Nat :=
+    (acc : ByteArray × Nat × GlyphCache) (e : List UInt8 × Fixed × Fixed) :
+    ByteArray × Nat × GlyphCache :=
   match e.1 with
   | [c] =>
     match f.glyphs[c.toNat]? with
     | some (some g) =>
-      let q := drawGlyph paint f.imageCap W H win cm al uc (f.matrix * subpixelAdjust (placement r e.2.1 * rm)) g
-        acc.1
-      (q.1, acc.2 + q.2)
+      let T := f.matrix * subpixelAdjust (placement r e.2.1 * rm)
+      if 0 < g.images.size ∧ T.det ≠ 0 ∧ 0 < g.items.size then
+        let q := drawCached f.imageCap W H cm al uc T c.toNat g acc.2.2 acc.1
+        (q.1, acc.2.1 + q.2.1, q.2.2)
+      else
+        let q := drawGlyph paint f.imageCap W H win cm al uc T g acc.1
+        (q.1, acc.2.1 + q.2, acc.2.2)
     | _ => acc
   | _ => acc
 
 private theorem foldl_glyphStep_size (paint : Tiling.CellPainter) (W H : Nat) (win : IRect)
     (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat) (f : T3Font) (r : GlyphRun) (rm : Aff)
     (l : List (List UInt8 × Fixed × Fixed)) :
-    ∀ (acc : ByteArray × Nat),
+    ∀ (acc : ByteArray × Nat × GlyphCache),
       (l.foldl (glyphStep paint W H win cm al uc f r rm) acc).1.size = acc.1.size := by
   induction l with
   | nil => intro acc; rfl
@@ -752,24 +912,34 @@ private theorem foldl_glyphStep_size (paint : Tiling.CellPainter) (W H : Nat) (w
     unfold glyphStep
     split
     · split
-      · exact drawGlyph_size _ _ _ _ _ _ _ _ _ _ _
+      · dsimp only
+        split
+        · exact drawCached_size _ _ _ _ _ _ _ _ _ _ _
+        · exact drawGlyph_size _ _ _ _ _ _ _ _ _ _ _
       · rfl
     · rfl
 
+/-- MuPDF's Type 3 advance: `pdf_load_type3_font` stores `/Widths` × `FontMatrix.a` × 1000 in
+its integer metrics table (`pdf_add_hmtx`), truncating the advance to a multiple of `1/1000`
+of the font size (toward zero). Positions of glyphs drawn here follow it. -/
+def truncWidth (w : Fixed) : Fixed := Fixed.clamp (Int.tdiv w.raw 1000 * 1000)
+
 /-- **Render a glyph run of a Type 3 font** (see the module doc) onto the page state `st`
 (`W × H`, page → device `m`), glyphs drawn by the cell painter `paint`, positions from the
-run's `FontInfo` `fi`. Modes 3 and 7 paint nothing. -/
+run's `FontInfo` `fi` (advances truncated as MuPDF's, `truncWidth`). Modes 3 and 7 paint
+nothing. -/
 def renderRun (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : Nat)
     (fi : FontInfo) (f : T3Font) (st : Clip.RState) (r : GlyphRun) (clip : Content.Clip) :
     Clip.RState :=
   if !r.renderMode.paints then st else
   let c := Clip.clipMaskC cfg m W H st.cache clip
   let win := Clip.itemWindow W H c.1
-  let entries := Text.layoutParts fi (Text.runTextState r) r.font.size Fixed.zero r.parts
+  let fi' : FontInfo := { fi with width := fun code => truncWidth (fi.width code) }
+  let entries := Text.layoutParts fi' (Text.runTextState r) r.font.size Fixed.zero r.parts
   let rm := Aff.ofMatrix r.tm * Aff.ofMatrix r.ctm * m
   let q := entries.foldl (glyphStep paint W H win c.1 (Clip.compByte r.fill.alpha)
-    (Clip.deviceRGB r.fill.color) f r rm) (st.buf, 0)
-  { buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2 }
+    (Clip.deviceRGB r.fill.color) f r rm) (st.buf, 0, GlyphCache.empty)
+  { buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2.1 }
 
 /-- **Rendering a Type 3 run preserves the buffer size.** -/
 theorem renderRun_size (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : Nat)
