@@ -7,7 +7,8 @@ toolbar, the context menu or a key; each has a label, the accelerator shown in m
 constant Tcl script that runs it (`::safepdf::emit …` back into Lean, or a constant UI proc),
 and an enabled rule over a small view of the viewer state (`Ctx`).
 
-* **Menubar** (`menubar`): File (Open…, Close, Quit), Edit (Copy, Select all, Highlight
+* **Menubar** (`menubar`): File (Open…, Save, Save As… — task 9.5c, Save only with unsaved
+  marks —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
   selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
   entries Highlight tool and Show all highlights: task 9.8; Find…), View
   (Outline, zoom in/out, actual size, fit page/width, rotate), Go (previous/next/first/last
@@ -18,7 +19,7 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   overflow menu reuse `Cmd` (label, script, rule) so that menubar, toolbar and keys stay one
   vocabulary.
 * **Keys stay**: the accelerators shown here are the key bindings of `Viewer.setupScript`
-  (Ctrl+O, Ctrl+W, Ctrl+Q, Ctrl+C, Ctrl+A, Ctrl+F, F9, `+`, `-`, `0`, `f`, `w`, `r`, `R`,
+  (Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+W, Ctrl+Q, Ctrl+C, Ctrl+A, Ctrl+F, F9, `+`, `-`, `0`, `f`, `w`, `r`, `R`,
   PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right, `h`, Delete); a menu accelerator is only a
   label in Tk.
 * **Context menu** (right button): Copy, Select all, Find…, then the mark entries
@@ -35,6 +36,10 @@ namespace SafePdf.Shell.App.Menu
 inductive Cmd where
   /-- Open a file (dialog). -/
   | openFile
+  /-- Save the unsaved marks into the PDF (task 9.5c: `FILE-annotated.pdf`). -/
+  | save
+  /-- Save the document with its marks to a chosen file (task 9.5c). -/
+  | saveAs
   /-- Close the document (the window stays). -/
   | close
   /-- Quit the viewer. -/
@@ -90,7 +95,7 @@ inductive Cmd where
 
 /-- Every command, in menubar order. -/
 def Cmd.all : List Cmd :=
-  [.openFile, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
+  [.openFile, .save, .saveAs, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
    .showAll, .find, .outline, .zoomIn, .zoomOut,
    .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .prevPage, .nextPage, .firstPage,
    .lastPage, .gotoPage, .back, .forward]
@@ -98,6 +103,8 @@ def Cmd.all : List Cmd :=
 /-- Menu label. -/
 def Cmd.label : Cmd → String
   | .openFile => "Open..."
+  | .save => "Save"
+  | .saveAs => "Save As..."
   | .close => "Close"
   | .quit => "Quit"
   | .copy => "Copy"
@@ -127,6 +134,8 @@ def Cmd.label : Cmd → String
 /-- Accelerator text shown in the menu (the key binding itself lives in the setup script). -/
 def Cmd.accel : Cmd → String
   | .openFile => "Ctrl+O"
+  | .save => "Ctrl+S"
+  | .saveAs => "Ctrl+Shift+S"
   | .close => "Ctrl+W"
   | .quit => "Ctrl+Q"
   | .copy => "Ctrl+C"
@@ -156,6 +165,8 @@ def Cmd.accel : Cmd → String
 /-- Index of the underlined (mnemonic) character of the label. -/
 def Cmd.underline : Cmd → Nat
   | .openFile => 0
+  | .save => 0
+  | .saveAs => 5
   | .close => 0
   | .quit => 0
   | .copy => 0
@@ -186,8 +197,10 @@ def Cmd.underline : Cmd → Nat
 menu's Previous page lands on the top of the page, as the toolbar button does). -/
 def Cmd.script : Cmd → String
   | .openFile => "::safepdf::emit open"
+  | .save => "::safepdf::emit save"
+  | .saveAs => "::safepdf::emit saveAs"
   | .close => "::safepdf::emit close"
-  | .quit => "destroy ."
+  | .quit => "::safepdf::emit quit"
   | .copy => "::safepdf::emit copy"
   | .selectAll => "::safepdf::emit selectall"
   | .find => "::safepdf::showFind"
@@ -230,6 +243,8 @@ structure Ctx where
   canBack : Bool := false
   /-- The forward stack is not empty. -/
   canForward : Bool := false
+  /-- There are marks not saved into the file yet (task 9.5c). -/
+  dirty : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
 /-- Whether the command can run in `c` (menu entries and toolbar buttons are disabled
@@ -238,12 +253,13 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .openFile | .quit => true
   | .copy | .highlight => c.hasDoc && c.hasSel
   | .deleteMark => c.hasDoc && c.hasMark
+  | .save => c.hasDoc && c.dirty
   | .outline => c.hasDoc && c.hasOutline
   | .prevPage | .firstPage => c.hasDoc && c.page > 0
   | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages
   | .back => c.hasDoc && c.canBack
   | .forward => c.hasDoc && c.canForward
-  | .close | .selectAll | .find | .addNote | .hlTool | .showAll | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
+  | .saveAs | .close | .selectAll | .find | .addNote | .hlTool | .showAll | .zoomIn | .zoomOut | .actualSize | .fitPage | .fitWidth
   | .rotateCw | .rotateCcw | .gotoPage => c.hasDoc
 
 /-- A menu entry. -/
@@ -289,7 +305,7 @@ def showAllVar : String := "::safepdf::showAll"
 
 /-- The menubar: File / Edit / View / Go. -/
 def menubar : List Menu :=
-  [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .close, .sep, .cmd .quit]⟩,
+  [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .save, .cmd .saveAs, .cmd .close, .sep, .cmd .quit]⟩,
     ⟨".menubar.edit", "Edit", 0,
       [.cmd .copy, .cmd .selectAll, .sep, .cmd .highlight, .colors ".menubar.edit.hl",
        .cmd .addNote, .cmd .deleteMark, .sep, .check .hlTool hlToolVar,
@@ -358,7 +374,8 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 #guard Cmd.all.all fun c => c.underline < c.label.length
 #guard menubar.map (·.label) == ["File", "Edit", "View", "Go"]
 -- Separators count in Tk indices.
-#guard locate .quit == some (".menubar.file", 3)
+#guard locate .quit == some (".menubar.file", 5)
+#guard locate .save == some (".menubar.file", 1) && locate .saveAs == some (".menubar.file", 2)
 #guard locate .back == some (".menubar.go", 7)
 #guard locate .zoomIn == some (".menubar.view", 2)
 #guard locate .highlight == some (".menubar.edit", 3)
@@ -381,6 +398,9 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
   Cmd.copy.enabled c && Cmd.outline.enabled c && Cmd.back.enabled c && !Cmd.forward.enabled c &&
   Cmd.highlight.enabled c
 #guard Cmd.deleteMark.enabled { hasDoc := true, pages := 1, hasMark := true }
+-- Save needs unsaved marks; Save As only a document.
+#guard !Cmd.save.enabled { hasDoc := true, pages := 1 } && Cmd.saveAs.enabled { hasDoc := true, pages := 1 } &&
+  Cmd.save.enabled { hasDoc := true, pages := 1, dirty := true } && !Cmd.saveAs.enabled {}
 -- A one-page document: no paging either way.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c
