@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written in the style of Foxit PDF Editor's "Comment > Export > XFDF": the ISO
+     19444-1 attribute names Acrobat uses, plain <contents> for comments, an opacity
+     attribute, lower-case hex colours, popups as children, squiggly/strikeout as other
+     markup types, <f href> first, tab indentation. Colours: the default #ffff00 and a
+     user-picked green and pink (mapped to PDF.js's green and pink).
+     Expected (Tests/Xfdf.lean): 4 marks (a two-line highlight with a comment -> highlight +
+     comment note; a highlight; a note), skipped 2 (squiggly, strikeout), ignored 0. -->
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+	<f href="C:\Users\reader\Documents\paper.pdf"/>
+	<annots>
+		<highlight page="0" color="#ffff00" opacity="1" flags="print" name="{5D4E3C2B-1A09-4F8E-9D7C-6B5A49382716}" date="D:20261120093000+08'00'" creationdate="D:20261120093000+08'00'" subject="Highlight" title="reader" rect="56.7,500.1,540.3,524.9" coords="56.7,524.9,540.3,524.9,56.7,513.2,540.3,513.2,56.7,511.8,300,511.8,56.7,500.1,300,500.1">
+			<contents>two lines, with a comment &amp; an ampersand</contents>
+			<popup page="0" flags="print,nozoom,norotate" open="no" rect="540,400,720,520"/>
+		</highlight>
+		<highlight page="2" color="#40ff90" opacity="0.5" flags="print" name="{00000000-0000-0000-0000-000000000002}" date="D:20261120093100+08'00'" rect="100,100,200,112" coords="100,112,200,112,100,100,200,100"/>
+		<text page="2" color="#ffc0cb" flags="print,nozoom,norotate" name="{00000000-0000-0000-0000-000000000003}" icon="Note" date="D:20261120093200+08'00'" rect="500,700,520,720">
+			<contents>Fußnote prüfen</contents>
+		</text>
+		<squiggly page="1" color="#ff0000" flags="print" name="sq" rect="10,10,20,20" coords="10,20,20,20,10,10,20,10"/>
+		<strikeout page="1" color="#ff0000" flags="print" name="so" rect="10,30,20,40" coords="10,40,20,40,10,30,20,30"/>
+	</annots>
+</xfdf>

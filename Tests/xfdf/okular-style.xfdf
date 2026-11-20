@@ -1,0 +1,22 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Okular-style variant (line ends CR LF in the file). Okular (poppler) has no XFDF exporter
+     we know of; this file transcribes the annotations Okular writes into a PDF (poppler's
+     AnnotTextMarkup with /QuadPoints, AnnotText with /Name /Note) into ISO 19444-1 XFDF,
+     using variations a tolerant reader must accept: single quotes, CR LF line ends, a
+     namespace prefix, lower-case colours, counter-clockwise quad order (LL, LR, UR, UL),
+     white space in coords, a CDATA comment, a <fields> element outside <annots>.
+     Expected (Tests/Xfdf.lean): 3 marks (blue highlight, its CDATA comment, a note at a
+     point with a two-line text), skipped 1 (ink), ignored 1 (fields). -->
+<x:xfdf xmlns:x='http://ns.adobe.com/xfdf/' xml:space='preserve'>
+  <x:annots>
+    <x:highlight page='4' color='#8ae9fc' name='okular-{1}' flags='print' rect='90,400,250,412' coords='90, 400, 250, 400, 250, 412, 90, 412'>
+      <x:contents><![CDATA[a <CDATA> comment & more]]></x:contents>
+    </x:highlight>
+    <x:text page='4' color='#ffff00' name='okular-{2}' flags='print' icon='Note' rect='300,300,324,324'>
+      <x:contents>line one
+line two</x:contents>
+    </x:text>
+    <x:ink page='4' color='#000000' name='okular-{3}' rect='0,0,10,10'><x:inklist><x:gesture>1,1;2,2</x:gesture></x:inklist></x:ink>
+  </x:annots>
+  <x:fields><x:field name='f1'><x:value>v</x:value></x:field></x:fields>
+</x:xfdf>
