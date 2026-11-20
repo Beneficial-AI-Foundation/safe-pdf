@@ -1,13 +1,14 @@
 import SafePdf.Shell.App.Viewer
 import SafePdf.Shell.App.BibLean.Launch
 import SafePdf.Shell.App.BibLean.Annots
+import SafePdf.Shell.App.BibLean.SelfTest
 
 /-!
-# Entry point of the `viewer` executable (tasks 8.2a, 10.1, 10.2, 10.3; Plan.md §6 Phases 8 and 10, §8, §10)
+# Entry point of the `viewer` executable (tasks 8.2a, 10.1, 10.2, 10.3, 10.4; Plan.md §6 Phases 8 and 10, §8, §10)
 
 The native viewer shell (unverified). See `SafePdf.Shell.App.Viewer` and `docs/viewer.md`.
 
-`viewer --biblean [--page N] [--probe [--annots echo|demo]]` is bib-lean's reader mode (Plan.md §6 Phase 10,
+`viewer --biblean [--page N] [--probe [--annots echo|demo] | --self-test]` is bib-lean's reader mode (Plan.md §6 Phase 10,
 `bib-lean/docs/READER-CONTRACT.md`): `BibLean.Launch.openFromBibLean` reads the token from
 file descriptor 3 and `BIBLEAN_SERVER` / `BIBLEAN_ATTACHMENT` / `BIBLEAN_PAGE` from the
 environment and fetches the PDF and its title over loopback HTTP. Exit codes (contract §5):
@@ -20,6 +21,11 @@ environment and fetches the PDF and its title over loopback HTTP. Exit codes (co
   `arxiv` (every distinct one found, with its one-based page), `detected`, `fulltext` (the
   outcomes) and exits 0 — also when those posts fail: they are optional (contract §3) and
   never make a launch fail. Used by `Tests/biblean/launch-test.sh` and `text-test.sh`.
+* `--self-test` (task 10.4, `BibLean.SelfTest.run`): headless; the contract's sequence (GET
+  the file, POST two annotations, POST a detection, PUT the re-saved file), one
+  `name: value` line per step and the verdict `viewer self-test: ok|FAILED (…)`; exit 0 when
+  every step passed, 1 otherwise (2 usage, 3 no token, as above). Not combinable with
+  `--probe`. Used by `scripts/biblean-contract.sh` and `Tests/biblean/selftest-test.sh`.
 * Otherwise the window. **Interim** until `Viewer.lean` has an entry point taking bytes (task
   10.1 report): the bytes go into a private temporary directory (`IO.FS.createTempDir`, mode
   0700; the file made 0600 before it is written), named after the title (`fileNameOf`, so
@@ -54,11 +60,14 @@ structure BibleanArgs where
   /-- `--annots echo|demo` (with `--probe`, task 10.2): post the loaded set back unchanged, or
   run the scripted change/save sequence `annotsDemo`. -/
   annots : Option String := none
+  /-- `--self-test` (task 10.4): the contract's sequence without a window. -/
+  selfTest : Bool := false
 
 /-- Parses the arguments after `--biblean`. -/
 def parseBibleanArgs : List String → BibleanArgs → Option BibleanArgs
   | [], a => some a
   | "--probe" :: rest, a => parseBibleanArgs rest { a with probe := true }
+  | "--self-test" :: rest, a => parseBibleanArgs rest { a with selfTest := true }
   | "--annots" :: m :: rest, a =>
     if m == "echo" || m == "demo" then parseBibleanArgs rest { a with annots := some m } else none
   | "--page" :: n :: rest, a =>
@@ -107,9 +116,12 @@ def annotsDemo (y : BibLean.Annots.Sync) (s : Marks.Store) : IO String := do
 
 /-- `viewer --biblean …` (see the module documentation). -/
 def bibleanMain (args : List String) : IO UInt32 := do
-  let some a := parseBibleanArgs args {}
-    | IO.eprintln "usage: viewer --biblean [--page N] [--probe [--annots echo|demo]]   (token: one line on fd 3)"
+  let usage := "usage: viewer --biblean [--page N] [--probe [--annots echo|demo] | --self-test]   \
+    (token: one line on fd 3)"
+  let some a := (parseBibleanArgs args {}).filter fun a => !(a.selfTest && (a.probe || a.annots.isSome))
+    | IO.eprintln usage
       return 2
+  if a.selfTest then return ← BibLean.SelfTest.run a.page
   match ← BibLean.Launch.openFromBibLean (argPage := a.page) with
   | .error f =>
     IO.eprintln s!"viewer --biblean: {f.message}"
