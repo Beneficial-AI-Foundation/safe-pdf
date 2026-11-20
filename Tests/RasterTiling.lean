@@ -18,7 +18,10 @@ streams from an in-memory source through `loadTilings` (the cell content runs th
 * the shared operator budget is charged by the cell's operators;
 * the tile-count cap: a 2-pixel cell over a 2100 × 2100 page exceeds `maxTiles` and is
   painted with the cell's mean colour;
-* timing of a full-page 612 × 792 fill with an 8 × 8 cell (printed).
+* timing of a full-page 612 × 792 fill with an 8 × 8 cell (printed);
+* task 7.3h2 (end to end): a stroke and a glyph with a tiling colour, a cell with text whose
+  font is only in the pattern's resources, a nested pattern, a cell with an image, a pattern
+  using itself (terminates at the depth cap).
 -/
 
 namespace SafePdf.Tests.RasterTiling
@@ -155,10 +158,41 @@ def patObj (paint : Nat) (bbox : String) (step : Nat) (content : String) (extra 
 /-- An 8 × 8 checker cell: red `[0,4]²`, blue `[4,8]²`, the rest transparent. -/
 def checkerObj : String := patObj 1 "0 0 8 8" 8 "1 0 0 rg 0 0 4 4 re f 0 0 1 rg 4 4 4 4 re f"
 
-/-- The end-to-end fixtures: name and PDF bytes. -/
-def docCases : List (String × ByteArray) :=
+/-- The `tiny.ttf` font (`A`: 1400 px at 100 pt) as objects `n`, `n + 1`, `n + 2`. -/
+def ttObjs (ttf : ByteArray) (n : Nat) : List String :=
+  [s!"<< /Type /Font /Subtype /TrueType /BaseFont /SafePdfTiny /FirstChar 65 /LastChar 65 /Widths [600] /Encoding /WinAnsiEncoding /FontDescriptor {n + 1} 0 R >>",
+   s!"<< /Type /FontDescriptor /FontName /SafePdfTiny /Flags 32 /FontFile2 {n + 2} 0 R >>",
+   SafePdf.Tests.CFFText.strmObj "/Filter /ASCIIHexDecode" (SafePdf.Tests.CFFText.hex ttf)]
+
+/-- The end-to-end fixtures: name and PDF bytes (`ttf`: `Tests/fonts/tiny.ttf`). -/
+def docCases (ttf : ByteArray) : List (String × ByteArray) :=
   let rp := RasterGlyph.resPage
-  [ -- hatching: blue diagonal lines in a 10-unit coloured cell, filling [20, 180]².
+  let fillAll := "/Pattern cs /P0 scn 0 0 200 200 re f"
+  [ -- task 7.3h2: an 8-unit-wide stroke with the checker (page y 96–104, x 20–180).
+    ("tiling-stroke", rp "<< /Pattern << /P0 5 0 R >> >>"
+      "/Pattern CS /P0 SCN 8 w 20 100 m 180 100 l S" [checkerObj]),
+    -- task 7.3h2: a glyph (`tiny.ttf` A at 100 pt) filled with the checker.
+    ("tiling-text", rp "<< /Font << /F1 6 0 R >> /Pattern << /P0 5 0 R >> >>"
+      "BT /F1 100 Tf /Pattern cs /P0 scn 20 20 Td (A) Tj ET" ([checkerObj] ++ ttObjs ttf 6)),
+    -- task 7.3h2: a cell with text, the font in the pattern's own resources only (100-unit
+    -- cell, a red A at 50 pt in each: 4 × 350 px).
+    ("tiling-cell-text", rp "<< /Pattern << /P0 5 0 R >> >>" fillAll
+      ([patObj 1 "0 0 100 100" 100 "BT /F1 50 Tf 1 0 0 rg 10 10 Td (A) Tj ET"
+        "/Resources << /Font << /F1 6 0 R >> >>"] ++ ttObjs ttf 6)),
+    -- task 7.3h2: a nested pattern: a 40-unit cell whose lower-left 20 × 20 is filled with a
+    -- 4-unit pattern of red 2 × 2 squares (25 per outer cell, 25 outer cells: 2500 px).
+    ("tiling-nested", rp "<< /Pattern << /P0 5 0 R >> >>" fillAll
+      [patObj 1 "0 0 40 40" 40 "/Pattern cs /P1 scn 0 0 20 20 re f"
+        "/Resources << /Pattern << /P1 6 0 R >> >>",
+       patObj 1 "0 0 4 4" 4 "1 0 0 rg 0 0 2 2 re f"]),
+    -- task 7.3h2: a cell with an image (1 × 1 blue, 20 × 20 units in each 40-unit cell).
+    ("tiling-cell-image", rp "<< /Pattern << /P0 5 0 R >> >>" fillAll
+      [patObj 1 "0 0 40 40" 40 "q 20 0 0 20 0 0 cm /Im Do Q"
+        "/Resources << /XObject << /Im 6 0 R >> >>",
+       SafePdf.Tests.CFFText.strmObj
+        "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode"
+        "0000ff>"]),
+    -- hatching: blue diagonal lines in a 10-unit coloured cell, filling [20, 180]².
     ("tiling-hatch", rp "<< /Pattern << /P0 5 0 R >> >>"
       "1 0 0 RG /Pattern cs /P0 scn 20 20 160 160 re f"
       [patObj 1 "0 0 10 10" 10 "0 0 1 RG 1 w 0 0 m 10 10 l S -5 5 m 5 15 l S 5 -5 m 15 5 l S"]),
@@ -196,7 +230,24 @@ def docChecks : List (String × (Clip.Image → Bool)) :=
   let wh : Nat × Nat × Nat := (255, 255, 255)
   let rd : Nat × Nat × Nat := (255, 0, 0)
   let bl : Nat × Nat × Nat := (0, 0, 255)
-  [ -- blue hatching only inside the rectangle (≈ √2 px² of line per 10 × 10 cell: ≈ 14% ink,
+  [ -- 160 × 8 px stroke, half red (page y 96–100), half blue (y 100–104), exactly.
+    ("tiling-stroke", fun img =>
+      classes img == (320, 320, 0) && px img 25 101 == rd && px img 21 97 == bl &&
+      px img 10 100 == wh),
+    -- the 1400-px glyph: ≈ ¼ red, ≈ ¼ blue (anti-aliased edges are "other").
+    ("tiling-text", fun img =>
+      let (r, b, _) := classes img
+      250 < r && r < 450 && 250 < b && b < 450),
+    -- four red A's from the cell's own font: ≈ 1400 red pixels.
+    ("tiling-cell-text", fun img =>
+      let (r, b, _) := classes img
+      RasterGlyph.near r 1400 15 && b == 0),
+    -- nested: exactly 2500 red pixels, nothing else (no mid-grey fallback).
+    ("tiling-nested", fun img =>
+      classes img == (2500, 0, 0) && px img 0 199 == rd && px img 2 199 == wh),
+    -- the image in each cell: 25 × 400 blue pixels.
+    ("tiling-cell-image", fun img => classes img == (0, 10000, 0) && px img 0 199 == bl),
+    -- blue hatching only inside the rectangle (≈ √2 px² of line per 10 × 10 cell: ≈ 14% ink,
     -- ≈ 3620 of 25600 px, `ink` in red-channel units), never red (the page `RG` is not the
     -- fill colour).
     ("tiling-hatch", fun img =>
@@ -223,7 +274,20 @@ def runDoc : IO Nat := do
   let mut failures := 0
   let update := (← IO.getEnv "SAFEPDF_GOLDEN_UPDATE").isSome
   let ppmDir ← IO.getEnv "SAFEPDF_PPM_DIR"
-  for (name, pdf) in docCases do
+  let ttf ← IO.FS.readBinFile "Tests/fonts/tiny.ttf"
+  -- A pattern whose cell uses itself (task 7.3h2): loaded once, painted to the depth cap,
+  -- terminates; its own blue square is in every cell (100 cells × 100 px).
+  let selfPdf := RasterGlyph.resPage "<< /Pattern << /P0 5 0 R >> >>"
+    "/Pattern cs /P0 scn 0 0 200 200 re f"
+    [patObj 1 "0 0 20 20" 20 "0 0 1 rg 0 0 10 10 re f /Pattern cs /P0 scn 10 10 10 10 re f"
+      "/Resources << /Pattern << /P0 5 0 R >> >>"]
+  match RasterGlyph.render selfPdf with
+  | some img =>
+    let (_, b, _) := classes img
+    if b != 10000 then
+      failures := failures + 1; IO.println s!"  FAIL tiling-self: blue {b}"
+  | none => failures := failures + 1; IO.println "  FAIL tiling-self: render failed"
+  for (name, pdf) in docCases ttf do
     let path := pdfDir / s!"{name}.pdf"
     if update then
       IO.FS.createDirAll pdfDir

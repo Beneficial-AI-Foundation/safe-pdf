@@ -90,8 +90,18 @@ A `fillPath` whose colour is a loaded tiling pattern is painted by `Tiling.rende
 (pattern matrix `Matrix.mul pat.matrix use.base`, PaintType 2 colour `use.under`, cells by the
 path-only `Tiling.pathPainter`); everything else as before. The fill's bound for the
 transparency driver (`Clip.itemBound`: path box ∩ clip) still holds, since the tiling paints
-only through the fill ∩ clip mask. Pattern strokes, pattern text and full cell painters
-(text/images in cells) are task 7.3h2.
+only through the fill ∩ clip mask.
+
+Task 7.3h2: strokes (`Tiling.renderTilingStroke`) and glyph masks (`paintAll` →
+`Tiling.paintTilingMask`, run masks not split into column groups) with a tiling colour are
+painted through the tiling. Items are painted by `renderItemWith … paint` with a cell painter
+`paint`; `cellPainterD d` paints a cell with the full renderer (`cellRender`: the
+transparency driver over `renderItemWith` on the cell buffer), its own tiling patterns at
+depth `d − 1`, depth 0 by the path-only painter; `renderItemG` uses depth
+`Tiling.maxTileDepth`. `renderDocPage` loads the patterns with `Tiling.loadTilingsWith`,
+adding the fonts and glyph sources of each pattern's resources (owner = pattern object) before
+its cell runs, and loads images and shadings over the page items and every cell's items.
+Buffer sizes: `renderItemWith_size` (any cell painter), `cellPainterD_size`.
 -/
 
 namespace SafePdf.Core.Raster.Glyph
@@ -792,8 +802,7 @@ structure PageFonts where
   images : Image.ImageTable := {}
   /-- Shadings and shading patterns of the page (task 7.3d). -/
   shadings : Shading.ShadingTable := {}
-  /-- Tiling patterns of the page (task 7.3h1; fills only, cells painted by
-  `Tiling.pathPainter`). -/
+  /-- Tiling patterns of the page and nested in its cells (tasks 7.3h1, 7.3h2). -/
   tilings : Tiling.TilingTable := {}
 
 /-- **Per-run hook**: the coverage masks of a glyph run inside the device window `win`, in
@@ -810,7 +819,8 @@ def runMasks (cfg : Fill.Config) (view : Aff) (win : IRect) (pf : PageFonts) (ca
     let fillM : List (Mask × Color × Comp × Nat) :=
       if TextRenderMode.fills r.renderMode then
         let groups :=
-          if (pf.shadings.patternOf r.fill.color r.fill.pattern).isNone then columnGroups dp
+          if (pf.shadings.patternOf r.fill.color r.fill.pattern).isNone &&
+              (pf.tilings.tileOf r.fill.color r.fill.pattern).isNone then columnGroups dp
           else #[dp]
         groups.toList.map fun g =>
           let f := fillEdgesCounted (flatten cfg win g) .nonzero win cfg
@@ -839,16 +849,23 @@ structure TState where
 /-- Paint a list of masks through one clip (cache and work of `clipMaskC` charged once). A
 mask whose colour is a pattern colour that `look` resolves to a loaded shading pattern (task
 7.3f: pattern-coloured text) is painted with the pattern through mask ∩ clip
-(`Shading.paintPattern`); every other mask with its flat colour. -/
+(`Shading.paintPattern`); one that `tl` resolves to a loaded tiling pattern (task 7.3h2) is
+painted with the tiling through mask ∩ clip (`Tiling.paintTilingMask`, cells by `paint`);
+every other mask with its flat colour. -/
 def paintAll (cfg : Fill.Config) (m : Aff) (W H : Nat)
-    (look : Color → Option (Shading.Pattern × Matrix)) (cm : Option Mask) (cc : Clip.ClipCache)
+    (look : Color → Option (Shading.Pattern × Matrix))
+    (tl : Color → Option (Tiling.Tiling × Aff × Color)) (paint : Tiling.CellPainter)
+    (cm : Option Mask) (cc : Clip.ClipCache)
     (s : Nat) (st : Clip.RState) : List (Mask × Color × Comp × Nat) → Clip.RState
   | [] => { st with cache := cc, steps := st.steps + s }
   | (mk, col, a, w) :: rest =>
     let st' := match look col with
       | some (pat, base) => Shading.paintPattern cfg m W H st pat base (Clip.combine mk cm) a cc (s + w)
-      | none => Clip.paintMask W H st cm mk col a cc (s + w)
-    paintAll cfg m W H look cm cc 0 st' rest
+      | none =>
+        match tl col with
+        | some (tp, pm, uc) => Tiling.paintTilingMask paint m W H st tp pm uc cm mk a cc (s + w)
+        | none => Clip.paintMask W H st cm mk col a cc (s + w)
+    paintAll cfg m W H look tl paint cm cc 0 st' rest
 
 /-- The shading pattern a glyph-run mask colour denotes: the fill's pattern use for the fill
 colour, else the stroke's. -/
@@ -856,97 +873,88 @@ def runPattern (tbl : Shading.ShadingTable) (r : GlyphRun) (c : Color) :
     Option (Shading.Pattern × Matrix) :=
   tbl.patternOf c (if c = r.fill.color then r.fill.pattern else r.stroke.pattern)
 
-/-- Render one display item: glyph runs here, images (7.3b), shadings and pattern fills and
-strokes (7.3d, 7.3f), everything else by `Clip.renderItem`. -/
-def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts)
-    (st : TState) : DisplayItem → TState
+/-- The tiling pattern a glyph-run mask colour denotes (task 7.3h2), as `runPattern`. -/
+def runTiling (tbl : Tiling.TilingTable) (r : GlyphRun) (c : Color) :
+    Option (Tiling.Tiling × Aff × Color) :=
+  tbl.tileOf c (if c = r.fill.color then r.fill.pattern else r.stroke.pattern)
+
+/-- Render one display item with the tiling cell painter `paint`: glyph runs here, images
+(7.3b), shadings and pattern fills and strokes (7.3d, 7.3f), tiling-pattern fills, strokes and
+text (7.3h1, 7.3h2), everything else by `Clip.renderItem`. -/
+def renderItemWith (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) (paint : Tiling.CellPainter) (st : TState) : DisplayItem → TState
   | .glyphRun r clip =>
     if !r.renderMode.paints then st else
     let c := Clip.clipMaskC cfg m W H st.rs.cache clip
     let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
-    { st with rs := paintAll cfg m W H (runPattern pf.shadings r) c.1 c.2.1 c.2.2 st.rs ms, cache }
+    let rs := paintAll cfg m W H (runPattern pf.shadings r) (runTiling pf.tilings r) paint
+      c.1 c.2.1 c.2.2 st.rs ms
+    { st with rs, cache }
   | .image src ctm fill clip => { st with rs := Image.renderImage cfg m W H pf.images st.rs src ctm fill clip }
   | .shading name r ctm fill clip =>
     { st with rs := Shading.renderShading cfg m W H pf.shadings st.rs r name ctm fill.alpha clip }
   | .fillPath p rule style clip =>
     match pf.tilings.tileOf style.color style.pattern with
     | some (pat, pm, uc) =>
-      let rs := Tiling.renderTilingFill cfg (Tiling.pathPainter cfg) m W H st.rs pat pm uc p rule
-        style.alpha clip
+      let rs := Tiling.renderTilingFill cfg paint m W H st.rs pat pm uc p rule style.alpha clip
       { st with rs }
     | none => { st with rs := Shading.renderFill cfg m W H pf.shadings st.rs p rule style clip }
   | .strokePath p style clip =>
-    { st with rs := Shading.renderStroke cfg m W H stroke pf.shadings st.rs p style clip }
+    match pf.tilings.tileOf style.color style.pattern with
+    | some (pat, pm, uc) =>
+      { st with rs := Tiling.renderTilingStroke cfg paint stroke m W H st.rs pat pm uc p style clip }
+    | none =>
+      { st with rs := Shading.renderStroke cfg m W H stroke pf.shadings st.rs p style clip }
   | it => { st with rs := Clip.renderItem cfg m W H stroke st.rs it }
 
 /-- `paintAll` preserves the buffer size. -/
 theorem paintAll_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
-    (look : Color → Option (Shading.Pattern × Matrix)) (cm : Option Mask) (cc : Clip.ClipCache) :
+    (look : Color → Option (Shading.Pattern × Matrix))
+    (tl : Color → Option (Tiling.Tiling × Aff × Color)) (paint : Tiling.CellPainter)
+    (cm : Option Mask) (cc : Clip.ClipCache) :
     ∀ (s : Nat) (st : Clip.RState) (l : List (Mask × Color × Comp × Nat)),
-      (paintAll cfg m W H look cm cc s st l).buf.size = st.buf.size
+      (paintAll cfg m W H look tl paint cm cc s st l).buf.size = st.buf.size
   | _, _, [] => rfl
   | s, st, (mk, col, a, w) :: rest => by
     simp only [paintAll]
-    rw [paintAll_size cfg m W H look cm cc 0 _ rest]
+    rw [paintAll_size cfg m W H look tl paint cm cc 0 _ rest]
     split
     · exact Shading.paintPattern_size _ _ _ _ _ _ _ _ _ _ _
-    · simp only [Clip.paintMask, Clip.composite_size]
+    · split
+      · exact Tiling.paintTilingMask_size _ _ _ _ _ _ _ _ _ _ _ _ _
+      · simp only [Clip.paintMask, Clip.composite_size]
 
-/-- One item preserves the buffer size. -/
-theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
-    (pf : PageFonts) (st : TState) (it : DisplayItem) :
-    (renderItemG cfg m W H stroke pf st it).rs.buf.size = st.rs.buf.size := by
+/-- One item preserves the buffer size, whatever the cell painter. -/
+theorem renderItemWith_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) (paint : Tiling.CellPainter) (st : TState) (it : DisplayItem) :
+    (renderItemWith cfg m W H stroke pf paint st it).rs.buf.size = st.rs.buf.size := by
   cases it with
   | glyphRun r clip =>
-    simp only [renderItemG]
+    simp only [renderItemWith]
     split
     · rfl
-    · exact paintAll_size _ _ _ _ _ _ _ _ _ _
-  | image src ctm fill clip => simp only [renderItemG]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
+    · exact paintAll_size _ _ _ _ _ _ _ _ _ _ _ _
+  | image src ctm fill clip =>
+    simp only [renderItemWith]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
   | shading name r ctm fill clip =>
-    simp only [renderItemG]; exact Shading.renderShading_size _ _ _ _ _ _ _ _ _ _ _
+    simp only [renderItemWith]; exact Shading.renderShading_size _ _ _ _ _ _ _ _ _ _ _
   | fillPath p rule style clip =>
-    simp only [renderItemG]
+    simp only [renderItemWith]
     split
     · exact Tiling.renderTilingFill_size _ _ _ _ _ _ _ _ _ _ _ _ _
     · exact Shading.renderFill_size _ _ _ _ _ _ _ _ _ _
   | strokePath p style clip =>
-    simp only [renderItemG]; exact Shading.renderStroke_size _ _ _ _ _ _ _ _ _ _
-  | _ => simp only [renderItemG]; exact Clip.renderItem_size _ _ _ _ _ _ _
+    simp only [renderItemWith]
+    split
+    · exact Tiling.renderTilingStroke_size _ _ _ _ _ _ _ _ _ _ _ _ _
+    · exact Shading.renderStroke_size _ _ _ _ _ _ _ _ _ _
+  | _ => simp only [renderItemWith]; exact Clip.renderItem_size _ _ _ _ _ _ _
 
-/-- `renderItemG` keeps the transparency state. -/
-theorem renderItemG_tx (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
-    (pf : PageFonts) (st : TState) (it : DisplayItem) :
-    (renderItemG cfg m W H stroke pf st it).tx = st.tx := by
-  cases it <;> simp only [renderItemG] <;> (try split) <;> rfl
-
-/-- The transparency driver's view of `TState` (task 7.3c). -/
-def painterG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts) :
-    Transparency.Painter TState where
-  buf := (·.rs.buf)
-  setBuf := fun st b => { st with rs := { st.rs with buf := b } }
-  tx := (·.tx)
-  setTx := fun st t => { st with tx := t }
-  paint := renderItemG cfg m W H stroke pf
-  bound := fun it => some (Clip.itemBound cfg m W H it)
-
-/-- `painterG` is lawful. -/
-theorem painterG_lawful (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
-    (pf : PageFonts) : (painterG cfg m W H stroke pf).Lawful where
-  buf_setBuf := fun _ _ => rfl
-  tx_setBuf := fun _ _ => rfl
-  buf_setTx := fun _ _ => rfl
-  tx_setTx := fun _ _ => rfl
-  paint_size := renderItemG_size cfg m W H stroke pf
-  paint_tx := renderItemG_tx cfg m W H stroke pf
-
-private theorem foldl_renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
-    (stroke : Clip.StrokeFn) (pf : PageFonts) (l : List DisplayItem) :
-    ∀ (st : TState), (l.foldl (renderItemG cfg m W H stroke pf) st).rs.buf.size =
-      st.rs.buf.size := by
-  induction l with
-  | nil => intro st; rfl
-  | cons it rest ih => intro st; simp only [List.foldl, ih, renderItemG_size]
+/-- `renderItemWith` keeps the transparency state. -/
+theorem renderItemWith_tx (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) (paint : Tiling.CellPainter) (st : TState) (it : DisplayItem) :
+    (renderItemWith cfg m W H stroke pf paint st it).tx = st.tx := by
+  cases it <;> simp only [renderItemWith] <;> (try split) <;> rfl
 
 /-- The items an `sh` item is painted as (task 7.3f): with `Normal` blending and no soft mask,
 itself; otherwise bracketed by a non-isolated, non-knockout transparency group of alpha 1
@@ -968,6 +976,88 @@ def liftSh : Nat → DisplayList → DisplayList
       match it with
       | .softMask id info inner => acc.push (.softMask id info (liftSh k inner))
       | it => Interp.pushAll acc (liftShItem it)) #[]
+
+/-- The transparency driver's view of `TState` for an item painter `paintItem` (task 7.3c;
+task 7.3h2: shared by the page and the tiling cells). -/
+def painterWith (cfg : Fill.Config) (m : Aff) (W H : Nat) (paintItem : TState → DisplayItem → TState) :
+    Transparency.Painter TState where
+  buf := (·.rs.buf)
+  setBuf := fun st b => { st with rs := { st.rs with buf := b } }
+  tx := (·.tx)
+  setTx := fun st t => { st with tx := t }
+  paint := paintItem
+  bound := fun it => some (Clip.itemBound cfg m W H it)
+
+/-- **A full cell painter** (task 7.3h2) from an item painter: the cell's items (shadings
+lifted, as on the page) through the transparency driver (`Transparency.renderTx`, a fresh
+`TState` on the given buffer, the cell's own `w × h` layers and soft masks), each item painted
+by `paintItem Tc w h`. Returns the buffer and the counted work. -/
+def cellRender (cfg : Fill.Config) (paintItem : Aff → Nat → Nat → TState → DisplayItem → TState) :
+    Tiling.CellPainter := fun Tc w h b items =>
+  let st := (liftSh Transparency.maxMaskDepth items).foldl
+    (Transparency.renderTx (painterWith cfg Tc w h (paintItem Tc w h)) w h Transparency.maxMaskDepth)
+    { rs := { buf := b } }
+  (st.rs.buf, st.rs.steps)
+
+/-- **The cell painter at tiling depth `d`** (task 7.3h2): at depth `k + 1`, the cell's items
+are painted with the full item painter (`renderItemWith`: paths, text, images, shadings,
+transparency), whose own tiling patterns are painted at depth `k`; at depth 0, paths only
+(`Tiling.pathPainter`: patterns there paint mid grey). Structural recursion on the depth. -/
+def cellPainterD (cfg : Fill.Config) (stroke : Clip.StrokeFn) (pf : PageFonts) :
+    Nat → Tiling.CellPainter
+  | 0 => Tiling.pathPainter cfg
+  | k + 1 => cellRender cfg fun Tc w h => renderItemWith cfg Tc w h stroke pf (cellPainterD cfg stroke pf k)
+
+/-- Render one display item (`renderItemWith`, tiling cells painted at depth
+`Tiling.maxTileDepth`). -/
+def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts)
+    (st : TState) (it : DisplayItem) : TState :=
+  renderItemWith cfg m W H stroke pf (cellPainterD cfg stroke pf Tiling.maxTileDepth) st it
+
+/-- One item preserves the buffer size. -/
+theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) (st : TState) (it : DisplayItem) :
+    (renderItemG cfg m W H stroke pf st it).rs.buf.size = st.rs.buf.size :=
+  renderItemWith_size _ _ _ _ _ _ _ _ _
+
+/-- `renderItemG` keeps the transparency state. -/
+theorem renderItemG_tx (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) (st : TState) (it : DisplayItem) :
+    (renderItemG cfg m W H stroke pf st it).tx = st.tx :=
+  renderItemWith_tx _ _ _ _ _ _ _ _ _
+
+/-- The transparency driver's view of `TState` (task 7.3c). -/
+def painterG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts) :
+    Transparency.Painter TState :=
+  painterWith cfg m W H (renderItemG cfg m W H stroke pf)
+
+/-- `painterG` is lawful. -/
+theorem painterG_lawful (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
+    (pf : PageFonts) : (painterG cfg m W H stroke pf).Lawful where
+  buf_setBuf := fun _ _ => rfl
+  tx_setBuf := fun _ _ => rfl
+  buf_setTx := fun _ _ => rfl
+  tx_setTx := fun _ _ => rfl
+  paint_size := renderItemG_size cfg m W H stroke pf
+  paint_tx := renderItemG_tx cfg m W H stroke pf
+
+/-- **A cell painter keeps the cell buffer's size** (task 7.3h2; `4 · w · h` in, `4 · w · h`
+out), at every depth. -/
+theorem cellPainterD_size (cfg : Fill.Config) (stroke : Clip.StrokeFn) (pf : PageFonts) (d : Nat)
+    (Tc : Aff) (w h : Nat) (b : ByteArray) (items : DisplayList) (hb : b.size = 4 * w * h) :
+    (cellPainterD cfg stroke pf d Tc w h b items).1.size = 4 * w * h := by
+  cases d with
+  | zero =>
+    simp only [cellPainterD, Tiling.pathPainter]
+    rw [← Array.foldl_toList, Clip.foldl_renderItem_size]; exact hb
+  | succ k =>
+    simp only [cellPainterD, cellRender]
+    exact Transparency.renderTx_items_size _
+      ({ buf_setBuf := fun _ _ => rfl, tx_setBuf := fun _ _ => rfl, buf_setTx := fun _ _ => rfl,
+         tx_setTx := fun _ _ => rfl, paint_size := renderItemWith_size cfg Tc w h stroke pf _,
+         paint_tx := renderItemWith_tx cfg Tc w h stroke pf _ } :
+        (painterWith cfg Tc w h (renderItemWith cfg Tc w h stroke pf (cellPainterD cfg stroke pf k))).Lawful)
+      _ _ _ _ _ (by simp [painterWith]; exact hb) rfl
 
 /-- Render a display list (paths and glyph runs) onto a white `W × H` page through `m`. -/
 def renderItems (cfg : Fill.Config) (m : Aff) (W H : Nat) (pf : PageFonts) (items : DisplayList)
@@ -993,7 +1083,7 @@ theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf 
         (renderPage page zoom rot pf items cfg stroke).h := by
   simp only [renderPage, renderItems]
   exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ (liftSh Transparency.maxMaskDepth items) _
-    (by simp [painterG, Clip.whiteBuf, ByteArray.size]) rfl
+    (by show (Clip.whiteBuf _ _).size = _; simp [Clip.whiteBuf, ByteArray.size]) rfl
 
 /-- **Render a page of an opened document**: decode its content, build the display list with
 the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
@@ -1011,15 +1101,27 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD [])
     let (srcs, b) := ap.roots.foldl (fun (acc : SourceTable × Filter.Budget) r =>
       let (t, b) := loadSources limits (Text.docSource limits doc) acc.2 r.2 r.1; (acc.1 ++ t, b)) (srcs, b)
-    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) items
-    let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) items
-    -- Tiling patterns (task 7.3h1): the cells of the patterns that fills name (page and
-    -- annotation items, inside soft masks too) are run under what the page content and the
-    -- annotations left of the page's op/form budget (task 8.3b shared budget).
-    let (tls, b, _) := Tiling.loadTilings (Text.textEnv limits (Text.docSource limits doc) ap.fonts) b ()
+    -- Tiling patterns (tasks 7.3h1, 7.3h2): the cells of the patterns that fills, strokes and
+    -- glyph runs name (page and annotation items, inside soft masks too, nested patterns for
+    -- `Tiling.maxTileDepth + 1` levels) are run under what the page content and the
+    -- annotations left of the page's op/form budget (task 8.3b shared budget). Before a cell
+    -- runs, the fonts of the pattern's resources are added (owner = the pattern's object
+    -- number, as the runner keys direct fonts), so its text has real advances and outlines.
+    let (tls, ft, b, _) := Tiling.loadTilingsWith
+      (fun (ft : FontTable × SourceTable) => Text.textEnv limits (Text.docSource limits doc) ft.1)
+      (fun ft b num res =>
+        let (fonts, b) := Annot.loadAnnotFonts limits (Text.docSource limits doc) b ft.1 [(num, res)]
+        let (t, b) := loadSources limits (Text.docSource limits doc) b res num
+        ((fonts, ft.2 ++ t), b))
+      (ap.fonts, srcs) b ()
       { ops := limits.maxOpsPerPage - pt.ops - ap.ops, forms := limits.maxFormsPerPage - pt.forms - ap.forms }
       (page.resources.getD []) items
-    (.ok (renderPage page zoom rot ⟨ap.fonts, srcs, imgs, shs, tls⟩ items cfg), b)
+    -- Images and shadings of the page and of every loaded cell (task 7.3h2).
+    let all := items ++ tls.cellItems
+    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all
+    let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
+    (.ok (renderPage page zoom rot
+      { fonts := ft.1, sources := ft.2, images := imgs, shadings := shs, tilings := tls } items cfg), b)
 
 /-! ## 6. Checks -/
 
