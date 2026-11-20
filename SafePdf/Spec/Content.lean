@@ -35,8 +35,10 @@ display items `is`. It has three constructors:
   second; `h` closes the current subpath (no-op without a current point); `re` appends the
   closed four-corner subpath `(x,y) (x+w,y) (x+w,y+h) (x,y+h)`.
 * **Painting** (`S s f F f* B B* b b* n`, `PaintKw`): `s b b*` first close the subpath; for a
-  non-empty path the items are `Paint.items` (fill then stroke for `B`; each with the clip in
-  force *before* the operator), followed by a `clip` item if `W`/`W*` was pending; the clip
+  non-empty path the items are `paintItems` (fill then stroke for `B`; each with the clip in
+  force *before* the operator; for fill-and-stroke bracketed by a non-isolated knockout group
+  unless the stroke alpha is 0, or 1 with `Normal`, as MuPDF 1.25.1 `pdf_show_path`, task
+  7.3i), followed by a `clip` item if `W`/`W*` was pending; the clip
   is intersected only after painting; the path, the current point and the pending clip are
   cleared. An empty path paints nothing and leaves the clip unchanged.
 * **`W`, `W*`**: mark the clip rule as pending until the next painting operator.
@@ -208,6 +210,27 @@ def closeSubpath (c : Core) : Core :=
 /-- Close the subpath first (`s`, `b`, `b*`) or not. -/
 def closeIf (close : Bool) (c : Core) : Core := if close then closeSubpath c else c
 
+/-- Items of painting operator `p` for `path` in state `g` (§8.5.3.1): a fill, a stroke, or a
+fill followed by a stroke; the latter inside a non-isolated knockout group (`groupBegin` …
+`groupEnd`, so the stroke composites over the fill's backdrop, not over the fill; the group
+carries the state's blend mode and soft mask, the fill and stroke inside it are `Normal` and
+unmasked) unless the stroke alpha is 0 (the stroke paints nothing) or 1 with blend mode
+`Normal` (it covers the fill where it paints) — MuPDF 1.25.1 `pdf-op-run.c` `pdf_show_path` and
+`pdf_begin_group` (task 7.3i). -/
+def paintItems (p : Paint) (path : Path) (g : GState) : List DisplayItem :=
+  match p with
+  | .fill r => [.fillPath path r g.fillStyle g.clip]
+  | .stroke => [.strokePath path g.strokeStyle g.clip]
+  | .fillStroke r =>
+    if g.strokeAlpha = Comp.zero ∨ (g.strokeAlpha = Comp.one ∧ g.blendMode = .normal) then
+      [.fillPath path r g.fillStyle g.clip, .strokePath path g.strokeStyle g.clip]
+    else
+      let grp : GroupInfo :=
+        { isolated := false, knockout := true, blend := g.blendMode, smask := g.softMask }
+      let f : FillStyle := { g.fillStyle with blend := .normal, smask := none }
+      let k : StrokeStyle := { g.strokeStyle with blend := .normal, smask := none }
+      [.groupBegin grp, .fillPath path r f g.clip, .strokePath path k g.clip, .groupEnd]
+
 /-- Items of a painting operator for the current path of `c`: nothing for an empty path;
 otherwise the paint items (`none` = `n`) then the pending clip. -/
 def paintOutput (pending : Option FillRule) (p : Option Paint) (c : Core) :
@@ -215,7 +238,7 @@ def paintOutput (pending : Option FillRule) (p : Option Paint) (c : Core) :
   if c.path.segs.isEmpty then []
   else
     (match p with
-      | some p => p.items c.path c.gs
+      | some p => paintItems p c.path c.gs
       | none => []) ++
     (match pending with
       | some r => [.clip c.path r]
@@ -708,6 +731,18 @@ theorem simple_cases (cfg : Config) (c : Core) (o : List PdfObject) (kw : List U
     | exact Or.inl ⟨_, _, .BX⟩
     | exact Or.inl ⟨_, _, .EX ‹_›⟩
 
+/-- The implementation's `Paint.items` is the spec's `paintItems` (task 7.3i). -/
+theorem paintItems_eq (p : Paint) (path : Path) (g : GState) :
+    p.items path g = paintItems p path g := by
+  cases p with
+  | fill r => rfl
+  | stroke => rfl
+  | fillStroke r =>
+    simp only [Paint.items, paintItems, Paint.needsKnockout, Paint.knockoutGroup,
+      Paint.inGroup, GState.fillStyle, GState.strokeStyle]
+    by_cases h0 : g.strokeAlpha = Comp.zero <;> by_cases h1 : g.strokeAlpha = Comp.one <;>
+      by_cases h2 : g.blendMode = .normal <;> simp [h0, h1, h2]
+
 /-- The painting step of the impl is `afterPaint` / `paintOutput`. -/
 theorem paintStep_eq (m : Machine) (p : Option Paint) (close : Bool) :
     Interp.paintStep m p close =
@@ -720,7 +755,7 @@ theorem paintStep_eq (m : Machine) (p : Option Paint) (close : Bool) :
   generalize closeIf close c0 = c
   obtain ⟨gs, tm, path, cur, start, it, bx⟩ := c
   cases pending <;> cases p <;> by_cases he : path.segs.isEmpty = true <;>
-    simp [he, afterPaint, paintOutput, Interp.paintItemsOf]
+    simp [he, afterPaint, paintOutput, Interp.paintItemsOf, paintItems_eq]
 
 /-- `exec` on a painting operator. -/
 theorem exec_paint_eq (cfg : Config) (m : Machine) (op : Op) (p : Option Paint) (close : Bool)

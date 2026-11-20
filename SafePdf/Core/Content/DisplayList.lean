@@ -18,7 +18,9 @@ displayed" (C6) becomes a property of this one structure.
   user space (the pen is the CTM image of a user-space disc).
 * **Fill-and-stroke is two items.** `B`/`B*`/`b`/`b*` produce `fillPath` then `strokePath`,
   which ISO 32000-2 §8.5.3.1 states is equivalent; `Paint.items` is the one place that does
-  it, so 5.2 and 5.3 share it.
+  it, so 5.2 and 5.3 share it. With a translucent or blended stroke the two are bracketed by a
+  non-isolated knockout group (task 7.3i, as MuPDF: the fill does not show through the
+  stroke), so one painting operator yields at most `Paint.maxItems` = 4 items.
 * **Clip items are informational.** `W`/`W*` emit a `clip` item at the point the clip takes
   effect (after the painting operator), but every painting item already carries its full
   clip, so a renderer may ignore `clip` items; text extraction uses the carried clip to tell
@@ -285,26 +287,56 @@ inductive Paint where
   | fillStroke (rule : FillRule)
   deriving DecidableEq, Repr, Inhabited
 
-/-- Maximum number of items one painting operator produces. -/
-def Paint.maxItems : Nat := 2
+/-- Maximum number of items one painting operator produces (task 7.3i: 4, a fill and a
+stroke inside a knockout group). -/
+def Paint.maxItems : Nat := 4
+
+/-- Whether fill-and-stroke in state `g` needs its knockout group (task 7.3i, MuPDF 1.25.1
+`pdf-op-run.c` `pdf_show_path`): not when the stroke's alpha is 0 (it paints nothing) or 1
+with `Normal` (it covers the fill exactly where it paints). -/
+def Paint.needsKnockout (g : GState) : Bool :=
+  !(g.strokeAlpha == Comp.zero || (g.strokeAlpha == Comp.one && g.blendMode == .normal))
+
+/-- The group bracketing fill-and-stroke in state `g` (task 7.3i): non-isolated, knockout,
+alpha 1, so the stroke composites over the backdrop of the fill, not over the fill. As in MuPDF
+(`pdf_begin_group` around the knockout group) the state's blend mode and soft mask apply to the
+group as a whole, and the fill and the stroke inside it are painted with `Normal` and no mask
+(`Paint.inGroup`). -/
+def Paint.knockoutGroup (g : GState) : GroupInfo :=
+  { isolated := false, knockout := true, blend := g.blendMode, smask := g.softMask }
+
+/-- The state the fill and the stroke of a knockout group are painted in: `g` with blend mode
+`Normal` and no soft mask (both moved to `Paint.knockoutGroup`). -/
+def Paint.inGroup (g : GState) : GState := { g with blendMode := .normal, softMask := none }
 
 /-- The items a painting operator produces for `path` in state `g`; fill-and-stroke is a
-fill followed by a stroke (§8.5.3.1). -/
+fill followed by a stroke (§8.5.3.1), bracketed by a knockout group when the stroke is
+translucent or blended (`needsKnockout`, ISO 32000-2 §11.7.4.4 note: the stroke must not
+show the fill through it). -/
 def Paint.items (p : Paint) (path : Path) (g : GState) : List DisplayItem :=
   match p with
   | .fill rule => [.fillPath path rule g.fillStyle g.clip]
   | .stroke => [.strokePath path g.strokeStyle g.clip]
   | .fillStroke rule =>
-    [.fillPath path rule g.fillStyle g.clip, .strokePath path g.strokeStyle g.clip]
+    if Paint.needsKnockout g then
+      [.groupBegin (Paint.knockoutGroup g), .fillPath path rule (Paint.inGroup g).fillStyle g.clip,
+        .strokePath path (Paint.inGroup g).strokeStyle g.clip, .groupEnd]
+    else [.fillPath path rule g.fillStyle g.clip, .strokePath path g.strokeStyle g.clip]
 
 /-- One painting operator yields at most `Paint.maxItems` items. -/
 theorem Paint.items_length_le (p : Paint) (path : Path) (g : GState) :
     (p.items path g).length ≤ Paint.maxItems := by
-  cases p <;> simp [items, maxItems]
+  cases p
+  · simp [items, maxItems]
+  · simp [items, maxItems]
+  · simp only [items]; split <;> simp [maxItems]
 
 /-- Painting never yields an empty list. -/
 theorem Paint.items_ne_nil (p : Paint) (path : Path) (g : GState) : p.items path g ≠ [] := by
-  cases p <;> simp [items]
+  cases p
+  · simp [items]
+  · simp [items]
+  · simp only [items]; split <;> simp
 
 /-- Constructor name of an item (for logs, coverage and tests). -/
 def DisplayItem.kind : DisplayItem → String
@@ -336,6 +368,14 @@ private def sampleRun : GlyphRun :=
 #guard ((Paint.fill .nonzero).items sampleSquare {}).map DisplayItem.kind == ["fillPath"]
 #guard (Paint.stroke.items sampleSquare {}).map DisplayItem.kind == ["strokePath"]
 #guard ((Paint.fillStroke .evenOdd).items sampleSquare {}).map DisplayItem.kind
+    == ["fillPath", "strokePath"]
+#guard ((Paint.fillStroke .nonzero).items sampleSquare
+    { strokeAlpha := Comp.ofFixed (Fixed.div (Fixed.ofInt 1) (Fixed.ofInt 2)) }).map DisplayItem.kind
+    == ["groupBegin", "fillPath", "strokePath", "groupEnd"]
+#guard ((Paint.fillStroke .nonzero).items sampleSquare { blendMode := .multiply }).map
+    DisplayItem.kind == ["groupBegin", "fillPath", "strokePath", "groupEnd"]
+#guard ((Paint.fillStroke .nonzero).items sampleSquare
+    { strokeAlpha := Comp.zero, blendMode := .multiply }).map DisplayItem.kind
     == ["fillPath", "strokePath"]
 #guard (DisplayItem.clip sampleSquare .evenOdd).kind == "clip"
 #guard (DisplayItem.glyphRun sampleRun []).kind == "glyphRun"
