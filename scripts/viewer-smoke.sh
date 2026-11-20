@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (task 8.2a; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a, 8.2b; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
 # (SAFEPDF_VIEWER_SMOKE=DIR) on
 #   1. a generated two-page PDF (scripts/viewer-smoke-pdf.py): page 1 must contain non-white
-#      pixels, the viewer must reach page 2 through a Tk key event, and page 2 (/Rotate 90)
-#      must come out landscape;
+#      pixels, the viewer must reach page 2 through a Tk key event (from the prefetch cache),
+#      and page 2 (/Rotate 90) must come out landscape; then, driven by key events: 100 %,
+#      zoom in (125 %), zoom out twice (75 %), rotate (sizes and non-white pixel counts must
+#      scale/swap accordingly); at 200 % the zoom must keep the window centre on the page
+#      centre (C2 anchoring), Down/Next must scroll within the page, repeated Next must reach
+#      page 2 and Prior at its top the bottom of page 1;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -84,8 +88,49 @@ if [ "$w2" -le "$h2" ]; then echo "FAIL: page 2 (/Rotate 90) is not landscape" >
 grep -q '^page: 2/2$' "$work/out/state.txt" || { echo "FAIL: Next key did not reach page 2" >&2; fail=1; }
 grep -q '^title: two.pdf - page 2/2 - safe-pdf$' "$work/out/state.txt" \
   || { echo "FAIL: unexpected window title" >&2; fail=1; }
+grep -q '^status: .*from cache' "$work/out/state.txt" \
+  || { echo "FAIL: page 2 was not prefetched into the cache" >&2; fail=1; }
 
-# 1b. A file name full of Tcl metacharacters reaches the title verbatim (no script injection:
+# 1a. Zoom and rotation (task 8.2b): image sizes and ink scale with the zoom; rotation swaps.
+read -r wa ha na < <(ppm_stats "$work/out/zoom-100.ppm")
+read -r wi hi ni < <(ppm_stats "$work/out/zoom-in.ppm")
+read -r wo ho no < <(ppm_stats "$work/out/zoom-out.ppm")
+read -r wr hr nr < <(ppm_stats "$work/out/rot.ppm")
+echo "100%: ${wa}x${ha} ($na); in: ${wi}x${hi} ($ni); out: ${wo}x${ho} ($no); rotated: ${wr}x${hr} ($nr)"
+# within LO HI NUM DEN: LO <= NUM/DEN <= HI
+within() { python3 -I -c 'import sys; lo, hi, n, d = map(float, sys.argv[1:]); sys.exit(0 if d > 0 and lo <= n / d <= hi else 1)' "$@"; }
+within 1.22 1.28 "$wi" "$wa" || { echo "FAIL: zoom in is not 125%" >&2; fail=1; }
+within 0.72 0.78 "$wo" "$wa" || { echo "FAIL: zoom out is not 75%" >&2; fail=1; }
+within 1.45 1.68 "$ni" "$na" || { echo "FAIL: ink does not grow with zoom in" >&2; fail=1; }
+within 0.50 0.62 "$no" "$na" || { echo "FAIL: ink does not shrink with zoom out" >&2; fail=1; }
+if [ "$wr" != "$ho" ] || [ "$hr" != "$wo" ]; then echo "FAIL: rotation did not swap the sides" >&2; fail=1; fi
+within 0.95 1.05 "$nr" "$no" || { echo "FAIL: rotated page has different ink" >&2; fail=1; }
+
+# 1b. Scrolling and C2 anchoring at 200% (view.txt from the viewer's smoke mode).
+cat "$work/out/view.txt"
+python3 -I -c '
+import sys
+v = {}
+for line in open(sys.argv[1]):
+    k, _, val = line.partition(": ")
+    v[k] = val.strip()
+f = lambda k: [float(x) for x in v[k].split()]
+errs = []
+for ax in ("x0", "y0"):
+    a, b = f(ax)
+    if abs((a + b) / 2 - 0.5) > 0.01: errs.append(ax + ": zoom did not keep the centre fixed")
+if not f("y-down")[0] > f("y0")[0]: errs.append("Down did not scroll")
+if v["page-after-pagedown"] != "1" or not f("y-pagedown")[0] > f("y-down")[0]:
+    errs.append("Next did not scroll within the page")
+if v["page-after-pagedowns"] != "2" or f("y-page2")[0] != 0.0:
+    errs.append("repeated Next did not reach the top of page 2")
+if v["page-after-prior"] != "1" or f("y-prior")[1] != 1.0:
+    errs.append("Prior at the top of page 2 did not reach the bottom of page 1")
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out/view.txt" || fail=1
+
+# 1c. A file name full of Tcl metacharacters reaches the title verbatim (no script injection:
 # every data word goes through the proved `Tcl.quote`).
 odd='odd [exit 7] $HOME {x" \.pdf'
 cp "$work/two.pdf" "$work/$odd"
