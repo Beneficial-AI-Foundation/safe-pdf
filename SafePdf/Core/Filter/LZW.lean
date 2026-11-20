@@ -519,18 +519,18 @@ private def pack (early : Bool) (codes : List Nat) : ByteArray :=
 #guard malformedAt (lzwDecode dl (pack true [256, 258, 257])) 1
 -- EarlyChange 0 vs 1: 254 literals define entries up to 510; the width change to 10 bits
 -- comes one code earlier with EarlyChange 1, so each packing decodes only with its own flag.
-private def wideCodes : List Nat := (List.range 254).map (· % 256) ++ [511 - 1, 65, 66, 257]
-private def wideOut : List UInt8 :=
+private def wideCodes (_ : Unit) : List Nat := (List.range 254).map (· % 256) ++ [511 - 1, 65, 66, 257]
+private def wideOut (_ : Unit) : List UInt8 :=
   ((List.range 254).map (fun i => (i % 256).toUInt8)) ++ [252, 253, 65, 66]
-#guard okBytes (lzwDecode dl (pack true wideCodes) (early := true)) wideOut
-#guard okBytes (lzwDecode dl (pack false wideCodes) (early := false)) wideOut
-#guard !okBytes (lzwDecode dl (pack false wideCodes) (early := true)) wideOut
-#guard !okBytes (lzwDecode dl (pack true wideCodes) (early := false)) wideOut
+#guard okBytes (lzwDecode dl (pack true (wideCodes ())) (early := true)) (wideOut ())
+#guard okBytes (lzwDecode dl (pack false (wideCodes ())) (early := false)) (wideOut ())
+#guard !okBytes (lzwDecode dl (pack false (wideCodes ())) (early := true)) (wideOut ())
+#guard !okBytes (lzwDecode dl (pack true (wideCodes ())) (early := false)) (wideOut ())
 -- Full table cycle round: 4000 literals then EOD, with and without EarlyChange.
-private def longCodes : List Nat := (List.range 4000).map (· % 256) ++ [257]
-private def longOut : List UInt8 := (List.range 4000).map (fun i => (i % 256).toUInt8)
-#guard okBytes (lzwDecode dl (pack true longCodes)) longOut
-#guard okBytes (lzwDecode dl (pack false longCodes) (early := false)) longOut
+private def longCodes (_ : Unit) : List Nat := (List.range 4000).map (· % 256) ++ [257]
+private def longOut (_ : Unit) : List UInt8 := (List.range 4000).map (fun i => (i % 256).toUInt8)
+#guard okBytes (lzwDecode dl (pack true (longCodes ()))) (longOut ())
+#guard okBytes (lzwDecode dl (pack false (longCodes ())) (early := false)) (longOut ())
 -- /EarlyChange parameter.
 #guard (match earlyOfDict [] with | .ok b => b | .error _ => false)
 #guard (match earlyOfDict [(Name.ofString "EarlyChange", .int 0)] with
@@ -540,9 +540,9 @@ private def longOut : List UInt8 := (List.range 4000).map (fun i => (i % 256).to
 -- Bomb: KwKwK chain 0, 258, 259, … emits 1 + 2 + 3 + … bytes (quadratic): 3800 codes
 -- (≈ 5 KiB) would give ≈ 7.2 MB; against a 100 000-byte cap it stops with limitExceeded,
 -- in strict and lenient mode.
-private def bomb : ByteArray := pack true (0 :: (List.range 3800).map (· + 258) ++ [257])
-#guard isLimit (lzwDecode (tiny 100000) bomb)
-#guard isLimit (lzwDecode (tiny 100000) bomb (strict := false))
+private def bomb (_ : Unit) : ByteArray := pack true (0 :: (List.range 3800).map (· + 258) ++ [257])
+#guard isLimit (lzwDecode (tiny 100000) (bomb ()))
+#guard isLimit (lzwDecode (tiny 100000) (bomb ()) (strict := false))
 -- A smaller chain fits exactly: 1 + 2 + … + 100 = 5050 bytes.
 #guard okBytes (lzwDecode (tiny 5050) (pack true (0 :: (List.range 99).map (· + 258) ++ [257])))
   (List.replicate 5050 0)
