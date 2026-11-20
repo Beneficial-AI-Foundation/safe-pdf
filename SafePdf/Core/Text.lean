@@ -97,8 +97,9 @@ Glyphs are taken in content-stream order (filtered to visible ones unless
 `Options.includeInvisible`, the default being to keep invisible text such as OCR layers, and
 leaving out glyphs whose box — advance × [−0.2, 0.8] of the size, `Glyph.bounds` — lies
 entirely outside `Options.pageBox`, the CropBox for document pages: MuPDF's `FZ_STEXT_CLIP`,
-task 6.8b; e.g. a mailing panel drawn above the CropBox of a cover page). A
-glyph joins the current line when its baseline is within `lineTol` (‰ of the font size) of the
+task 6.8b; e.g. a mailing panel drawn above the CropBox of a cover page; glyphs entirely
+outside the bounding box of their run's clip are already gone from `PageText.shown`,
+`unclipped`, task 6.8f). A glyph joins the current line when its baseline is within `lineTol` (‰ of the font size) of the
 line's, or when it is a **sub/superscript** of the line (`scriptJoin`, task 6.7c): a glyph of
 smaller size raised by at most `scriptRaise` ‰ of the line's size, or a larger glyph lying that
 far below a line of smaller glyphs (a footnote begun by its marker), provided it continues the
@@ -1346,6 +1347,67 @@ theorem shownItems_eq_extract (fonts : FontTable) (box : Option (Fixed × Fixed 
   obtain ⟨rfl, rfl⟩ := this
   simp [closeAll]
 
+/-! ## Clipping (task 6.8f; as MuPDF's `FZ_STEXT_CLIP`) -/
+
+/-- A page-space box `(x0, y0, x1, y1)`. -/
+abbrev Box := Fixed × Fixed × Fixed × Fixed
+
+/-- The bounding box of the points of a path, curve control points included (MuPDF's
+`fz_bound_path`); `none` for a path without points. -/
+def pathBox (p : Path) : Option Box :=
+  let grow (b : Option Box) (q : Point) : Option Box :=
+    match b with
+    | none => some (q.x, q.y, q.x, q.y)
+    | some (x0, y0, x1, y1) => some (fmin x0 q.x, fmin y0 q.y, fmax x1 q.x, fmax y1 q.y)
+  p.segs.foldl (fun b s => match s with
+    | .moveTo q | .lineTo q => grow b q
+    | .curveTo c1 c2 q => grow (grow (grow b c1) c2) q
+    | .closePath => b) none
+
+/-- The **scissor** of a clip: the intersection of the bounding boxes of its paths (MuPDF's
+device clip stack, `fz_device_current_scissor`); `none` when unclipped. An empty intersection
+(or a path without points) is a box with `x1 < x0`. -/
+def scissor (c : Clip) : Option Box :=
+  c.foldl (fun acc cp =>
+    let b := (pathBox cp.path).getD (Fixed.one, Fixed.one, Fixed.zero, Fixed.zero)
+    match acc with
+    | none => some b
+    | some (x0, y0, x1, y1) =>
+      some (fmax x0 b.1, fmax y0 b.2.1, fmin x1 b.2.2.1, fmin y1 b.2.2.2)) none
+
+/-- Whether glyph `g` is hidden by the scissor `s`: the box is empty, or the glyph's box
+(`Glyph.bounds`) lies entirely outside it (`Glyph.offPage`; MuPDF
+`fz_glyph_entirely_outside_box`). -/
+def hiddenBy (s : Option Box) (g : Glyph) : Bool :=
+  match s with
+  | none => false
+  | some b => b.2.2.1.raw < b.1.raw || b.2.2.2.raw < b.2.1.raw || g.offPage b
+
+/-- The scissor of every display item: that of its clip for a glyph run, `none` otherwise
+(computed once per run). -/
+def itemScissors (items : Array DisplayItem) : Array (Option Box) :=
+  items.map fun it => match it with
+    | .glyphRun _ c => scissor c
+    | _ => none
+
+/-- **Clipped text** (task 6.8f): the glyphs whose glyph run (`Glyph.item`, an index into
+`items`) was clipped so that the glyph lies entirely outside the scissor of the clip are left
+out, as MuPDF's text device does under `FZ_STEXT_CLIP` (which `mutool draw` sets): e.g. the
+labels of a matplotlib figure drawn outside its axes clip, invisible on the rendered page.
+Glyphs whose `item` is not a glyph run of `items` (an annotation's) are kept. -/
+def unclipped (items : Array DisplayItem) (gs : List Glyph) : List Glyph :=
+  let sc := itemScissors items
+  gs.filter fun g => !hiddenBy (sc[g.item]?.getD none) g
+
+/-- Without clips nothing is hidden. -/
+theorem unclipped_of_none (items : Array DisplayItem) (gs : List Glyph)
+    (h : ∀ g ∈ gs, (itemScissors items)[g.item]?.getD none = none) :
+    unclipped items gs = gs := by
+  unfold unclipped
+  rw [List.filter_eq_self]
+  intro g hg
+  simp [h g hg, hiddenBy]
+
 /-! ## Pages -/
 
 /-- The text of a page, with everything it was computed from. -/
@@ -1357,8 +1419,9 @@ structure PageText where
   /-- All glyphs, content order (`extractItems fonts items`). -/
   glyphs : List Glyph
   /-- The glyphs as shown (task 6.8d): `glyphs` with the `/ActualText` of marked content
-  applied (`shownItems`); equal to `glyphs` when the page has none
-  (`shownItems_eq_extract`). Lines and text are laid out from these. -/
+  applied (`shownItems`; equal to `glyphs` when the page has none, `shownItems_eq_extract`),
+  without the glyphs the clip hides (`unclipped`, task 6.8f; nothing is hidden on an
+  unclipped page, `unclipped_of_none`). Lines and text are laid out from these. -/
   shown : List Glyph
   /-- Lines in reading order. -/
   lines : Array Line
@@ -1384,7 +1447,7 @@ def extractPage {σ : Type} (limits : Limits) (src : Source σ) (res : Dict) (co
   let (fonts, s) := loadFonts limits src s res
   let st := runBytes (textEnv limits src fonts) res content s ()
   let gs := extractItems fonts st.items.toList
-  let sh := shownItems fonts o.pageBox st.items.toList
+  let sh := unclipped st.items (shownItems fonts o.pageBox st.items.toList)
   let (lines, text) := layout o sh
   ({ fonts := fonts, items := st.items, glyphs := gs, shown := sh, lines := lines, text := text,
      warnings := st.warnings, ops := st.ops, forms := st.forms }, st.s)
