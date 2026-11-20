@@ -37,6 +37,14 @@ displayed" (C6) becomes a property of this one structure.
   (data decoded later, through the quarantine for DCT/JPX); inline images carry their
   parameter dictionary and raw bytes (bounded by the content stream). Form XObjects are not
   items: the interpreter expands them in place, under fuel.
+* **Transparency (task 7.3c, ISO 32000-2 §11).** Constant alpha, the blend mode (`/BM`) and
+  the soft mask (`/SMask`) are part of every fill/stroke snapshot (`FillStyle`,
+  `StrokeStyle`: glyph runs and images carry them through their snapshots). A soft mask is
+  defined once, where the ExtGState sets it, by a nested `softMask id info items` item
+  (`id` is unique in the page's list; items reference it by `smask = some id`). A
+  transparency group form is bracketed by `groupBegin g` … `groupEnd` (flat, so extraction
+  sees the text inside groups). `sh` items carry no style yet: shadings are painted without
+  blend mode or soft mask (gap).
 * **Unknown operators** become `unsupported op`, logged for the coverage report (M5), never a
   failure.
 * **Length bound.** `DisplayList` is a plain `Array`; that its length is at most the number
@@ -53,6 +61,10 @@ structure FillStyle where
   color : Color
   /-- Non-stroking alpha. -/
   alpha : Comp
+  /-- Blend mode (task 7.3c). -/
+  blend : BlendMode := .normal
+  /-- Soft mask: identifier of a `DisplayItem.softMask` item (task 7.3c). -/
+  smask : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 /-- Snapshot for stroking: colour, alpha, line style (user space) and the CTM mapping user
@@ -66,14 +78,19 @@ structure StrokeStyle where
   line : LineStyle
   /-- CTM at painting time. -/
   ctm : Matrix
+  /-- Blend mode (task 7.3c). -/
+  blend : BlendMode := .normal
+  /-- Soft mask: identifier of a `DisplayItem.softMask` item (task 7.3c). -/
+  smask : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 /-- The fill snapshot of a graphics state. -/
-def GState.fillStyle (g : GState) : FillStyle := ⟨g.fillColor, g.fillAlpha⟩
+def GState.fillStyle (g : GState) : FillStyle :=
+  ⟨g.fillColor, g.fillAlpha, g.blendMode, g.softMask⟩
 
 /-- The stroke snapshot of a graphics state. -/
 def GState.strokeStyle (g : GState) : StrokeStyle :=
-  ⟨g.strokeColor, g.strokeAlpha, g.line, g.ctm⟩
+  ⟨g.strokeColor, g.strokeAlpha, g.line, g.ctm, g.blendMode, g.softMask⟩
 
 /-- One element of a text-showing operator: a string, or a `TJ` adjustment in thousandths of
 text space (positive moves left/down). `Tj` is a single `str`. -/
@@ -128,6 +145,45 @@ inductive ImageSource where
 
 instance : Inhabited ImageSource := ⟨.xobject ⟨[]⟩ 0 0⟩
 
+/-- How a soft mask is derived from its group (ISO 32000-2 §11.5.2, Table 142 `/S`). -/
+inductive SoftMaskKind where
+  /-- `/Luminosity`: the luminosity of the group composited over the backdrop `/BC`. -/
+  | luminosity
+  /-- `/Alpha`: the group's alpha (shape × opacity). -/
+  | alpha
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A soft-mask dictionary (§11.6.5.2), as far as rendering needs it. `/TR` (transfer
+function) is not recorded: the identity is used (documented gap). -/
+structure SoftMaskInfo where
+  /-- `/S`. -/
+  kind : SoftMaskKind
+  /-- `/BC` as a device colour (1, 3 or 4 components: gray, RGB, CMYK); black by default.
+  Only used by luminosity masks. -/
+  backdrop : Color := .gray Comp.zero
+  /-- The mask group's `/BBox` in page space (outside it the mask is the backdrop's
+  luminosity, or 0 for alpha masks). -/
+  bbox : Option Path := none
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A transparency group (a form XObject with `/Group << /S /Transparency >>`, §11.6.6,
+§8.10.3) as it is composited: the graphics state at the `Do` supplies alpha (`ca`), blend
+mode and soft mask; inside the group they are reset to their initial values. -/
+structure GroupInfo where
+  /-- The group's `/BBox` in page space. -/
+  bbox : Option Path := none
+  /-- `/I`. -/
+  isolated : Bool := false
+  /-- `/K`. -/
+  knockout : Bool := false
+  /-- Constant alpha the group is composited with (`ca` at the `Do`). -/
+  alpha : Comp := Comp.one
+  /-- Blend mode the group is composited with. -/
+  blend : BlendMode := .normal
+  /-- Soft mask (`DisplayItem.softMask` identifier) the group is composited through. -/
+  smask : Option Nat := none
+  deriving DecidableEq, Repr, Inhabited
+
 /-- A display item: one painting or clipping event, in content-stream order. -/
 inductive DisplayItem where
   /-- Fill a page-space path. -/
@@ -146,6 +202,18 @@ inductive DisplayItem where
   | shading (name : Name) (ctm : Matrix) (clip : Clip)
   /-- An operator the interpreter does not handle (bytes of the operator name). -/
   | unsupported (op : List UInt8)
+  /-- Start of a transparency group (task 7.3c): the items up to the matching `groupEnd` are
+  composited together, then onto the backdrop with the group's alpha, blend mode and soft
+  mask. Groups nest like brackets (the runner emits both ends around one form). -/
+  | groupBegin (g : GroupInfo)
+  /-- End of the innermost open transparency group. -/
+  | groupEnd
+  /-- Definition of soft mask `id` (task 7.3c), set by an ExtGState `/SMask`: `items` are the
+  mask group's (`/G`) items, in the coordinates in effect at the `gs`. They are **not**
+  painted on the page: painting items whose style carries `smask = some id` are composited
+  through the mask. Nested, so consumers that do not know masks (text extraction, SVG) skip the
+  mask's contents automatically. -/
+  | softMask (id : Nat) (info : SoftMaskInfo) (items : Array DisplayItem)
 
 instance : Inhabited DisplayItem := ⟨.unsupported []⟩
 
@@ -192,6 +260,9 @@ def DisplayItem.kind : DisplayItem → String
   | .image .. => "image"
   | .shading .. => "shading"
   | .unsupported _ => "unsupported"
+  | .groupBegin _ => "groupBegin"
+  | .groupEnd => "groupEnd"
+  | .softMask .. => "softMask"
 
 /-! ## Samples, one per constructor -/
 
@@ -223,5 +294,10 @@ private def sampleRun : GlyphRun :=
 #guard (DisplayItem.shading (Name.ofString "Sh0") Matrix.identity []).kind == "shading"
 #guard (DisplayItem.unsupported "BX".toUTF8.toList).kind == "unsupported"
 #guard (#[DisplayItem.unsupported []] : DisplayList).size == 1
+#guard (DisplayItem.groupBegin {}).kind == "groupBegin"
+#guard DisplayItem.groupEnd.kind == "groupEnd"
+#guard (DisplayItem.softMask 3 { kind := .luminosity } #[.groupEnd]).kind == "softMask"
+#guard ({ ({} : GState) with blendMode := .multiply, softMask := some 4 }).fillStyle.smask
+    == some 4
 
 end SafePdf.Core.Content

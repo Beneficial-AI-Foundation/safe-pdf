@@ -906,18 +906,18 @@ private def px (img : Image) (x y : Nat) : Nat × Nat × Nat :=
 -- Rectangle [2,18]² clipped by [5,10]²: exactly the 5×5 clip square is painted black.
 #guard
   let img := renderItems {} idm 20 20
-    #[.fillPath (rectP 2 2 18 18) .nonzero ⟨gray 0, Comp.one⟩ [⟨rectP 5 5 10 10, .nonzero⟩]]
+    #[.fillPath (rectP 2 2 18 18) .nonzero { color := gray 0, alpha := Comp.one } [⟨rectP 5 5 10 10, .nonzero⟩]]
   px img 5 5 == (0, 0, 0) && px img 9 9 == (0, 0, 0) && px img 4 5 == (255, 255, 255) &&
     px img 10 9 == (255, 255, 255) && px img 3 3 == (255, 255, 255) &&
     img.data.size == 4 * 20 * 20
 -- Gray 0.5 fill → 128.
-#guard px (renderItems {} idm 4 4 #[.fillPath (rectP 0 0 4 4) .nonzero ⟨gray 50, Comp.one⟩ []])
+#guard px (renderItems {} idm 4 4 #[.fillPath (rectP 0 0 4 4) .nonzero { color := gray 50, alpha := Comp.one } []])
     1 1 == (128, 128, 128)
 -- Mask intersection coverage ≤ operands, cache reuse on a shared clip; a zero-size cache
 -- (`Limits.clipCacheSize := 0`) never hits but renders the same image.
 #guard
   let c : Clip := [⟨rectP 1 1 6 6, .nonzero⟩]
-  let it := DisplayItem.fillPath (rectP 0 0 8 8) .nonzero ⟨gray 0, Comp.one⟩ c
+  let it := DisplayItem.fillPath (rectP 0 0 8 8) .nonzero { color := gray 0, alpha := Comp.one } c
   (renderItemsCounted {} idm 8 8 #[it, it, it]).cache.hits == 2 &&
     (renderItemsCounted (Config.ofLimits { clipCacheSize := 0 }) idm 8 8 #[it, it, it]).cache.hits
       == 0 &&

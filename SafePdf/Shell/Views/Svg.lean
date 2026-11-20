@@ -192,7 +192,7 @@ def Hist.sorted (h : Hist) : Array OpStat :=
   all.qsort fun a b => a.count > b.count || (a.count == b.count && opName a.op < opName b.op)
 
 /-- Number of display-item kinds. -/
-def nKinds : Nat := 7
+def nKinds : Nat := 10
 
 /-- Index of an item's kind. -/
 def kindIndex : DisplayItem → Nat
@@ -203,10 +203,14 @@ def kindIndex : DisplayItem → Nat
   | .image .. => 4
   | .shading .. => 5
   | .unsupported _ => 6
+  | .groupBegin _ => 7
+  | .groupEnd => 8
+  | .softMask .. => 9
 
 /-- Kind names, in index order (as `DisplayItem.kind`). -/
 def kindNames : List String :=
-  ["fillPath", "strokePath", "clip", "glyphRun", "image", "shading", "unsupported"]
+  ["fillPath", "strokePath", "clip", "glyphRun", "image", "shading", "unsupported",
+   "groupBegin", "groupEnd", "softMask"]
 
 /-- What the views know about one page's content. -/
 structure PageOps where
@@ -844,6 +848,8 @@ def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : P
     | .shading n _ _ =>
       out := out.push s!"<rect {cropRect} fill=\"rgb(70%,70%,70%)\" fill-opacity=\"0.5\" data-shading=\"{escAttr (nameText n)}\"/>"
     | .unsupported op => out := out.push s!"<!-- unsupported operator: {commentSafe (opName op)} -->"
+    -- transparency (7.3c) is not exported: groups paint their items plainly, masks are skipped
+    | .groupBegin _ | .groupEnd | .softMask .. => pure ()
   if cur.isSome then out := out.push "</g>"
   if !reg.defs.isEmpty then
     out := out.push "<defs>"
