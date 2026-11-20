@@ -1,5 +1,6 @@
 import SafePdf.Api
 import SafePdf.Shell.App.BibLean.Http
+import SafePdf.Shell.App.BibLean.Text
 
 /-!
 # `viewer --biblean`: launch as bib-lean's reader (task 10.1; Plan.md §6 Phase 10)
@@ -28,6 +29,17 @@ the environment. `openFromBibLean` does the whole launch without a window:
 6. The page: `BIBLEAN_PAGE` (one to six decimal digits; anything else is ignored, as the stock
    viewer does), else a `--page N` argument (an `exec` template's `{page}`); used only when it
    is below the page count (contract §2.1: a viewer MAY ignore it otherwise).
+
+After the open, `afterOpen` (task 10.3) sends the full text and the detected identifiers
+(`BibLean.Text`; contract §3, optional routes): pages 1–2 are extracted first, scanned for a
+DOI and an arXiv id, and those are `POST`ed to `/detected` — like the stock viewer, only for
+an attachment **without a parent item** (a standalone PDF whose metadata is still missing;
+an item that has a parent already has its metadata, and a proposal there would only be
+noise), unless `forceDetect` (the self-test of task 10.4); then the remaining pages are
+extracted and the whole text is `POST`ed to `/fulltext`. Both posts are best effort: a
+failure (connection refused, time limit, any non-2xx answer) is reported in the result and
+never turns into a failed launch. Between pages `afterOpen` checks `IO.checkCanceled`, so
+the window path (`Main.lean`) can stop it when the window closes.
 
 **Token hygiene.** The token is held only as `Http.Token` (no `ToString`/`Repr`), written
 only into the `Authorization` header of requests to the loopback origin, and never logged:
@@ -165,6 +177,8 @@ structure Opened where
   session : Session
   /-- The window title (`titleOf`). -/
   title : String
+  /-- The attachment's parent item (`item.parentItem`), when the item answer named one. -/
+  parent : Option String
   /-- The page asked for (`BIBLEAN_PAGE`, else `--page`), zero-based, before clamping. -/
   requested : Option Nat
   /-- The page to open at: `requested` when it is below the page count. -/
@@ -262,7 +276,76 @@ def openFromBibLean (env : String → IO (Option String) := fun n => IO.getEnv n
     | none => pure none
   let requested := (pageOf? (← env "BIBLEAN_PAGE")).orElse fun _ => argPage
   let page := requested.filter (· < document.pageCount)
-  return .ok { session := s, title := titleOf key att parent, requested, page,
+  return .ok { session := s, title := titleOf key att parent, parent := att.bind parentKey?,
+               requested, page,
                bytes := r.body, document }
+
+/-! ## Full text and detection (task 10.3) -/
+
+/-- Limits for the answers to the text posts: small JSON bodies, thirty seconds (a 32 MiB
+body over loopback takes well under a second). -/
+def postLimits : Http.Limits := { maxBodyBytes := 64 * 1024, timeoutMs := 30000 }
+
+/-- `POST /api/attachments/{key}/{route}` with `body`; a one-line outcome: `HTTP 200`, or
+`HTTP 422 (rejected)` with the error body's code, or `failed: …` (the exchange's error, which
+names only the method, the path and the port). Never throws. -/
+def postAttachment (s : Session) (route : String) (body : ByteArray) (ctype : String) :
+    IO (Bool × String) := do
+  try
+    let r ← Http.exchange s.origin s.token "POST" s!"/api/attachments/{s.key}/{route}"
+      (some (body, ctype)) postLimits
+    let code := (errorCode? r.body).map (s!" ({·})") |>.getD ""
+    return (200 ≤ r.status && r.status < 300, s!"HTTP {r.status}{code}")
+  catch e => return (false, s!"failed: {e}")
+
+/-- What `afterOpen` did. -/
+structure TextReport where
+  /-- Identifiers found on pages 1–2. -/
+  detection : Text.Detection := default
+  /-- The outcome of `POST …/detected`: `HTTP 202`, `skipped (…)`, `none found`, `failed: …`,
+  or `not run` when cancelled before. -/
+  detected : String := "not run"
+  /-- Pages extracted. -/
+  extracted : Nat := 0
+  /-- Pages in the full-text body. -/
+  fulltextPages : Nat := 0
+  /-- Bytes of the full-text body. -/
+  fulltextBytes : Nat := 0
+  /-- The outcome of `POST …/fulltext` (`HTTP 200`, `failed: …`, `not run`). -/
+  fulltext : String := "not run"
+  /-- Whether both posts that were due succeeded (a skipped detection counts as done). -/
+  ok : Bool := false
+
+/-- Extracts the text (`Text.pageTextOf`), detects identifiers on pages 1–2 and posts them
+to `/detected` (only for an attachment without a parent item, unless `forceDetect`), then
+posts the full text (`Text.fulltextBody`) to `/fulltext`. Stops early, returning what it
+did so far, when its task is cancelled (`IO.checkCanceled`, checked before each page). -/
+def afterOpen (o : Opened) (forceDetect : Bool := false) : IO TextReport := do
+  let d := o.document
+  let n := min d.pageCount Text.maxFulltextPages
+  let mut rep : TextReport := {}
+  let mut pages : Array String := #[]
+  for i in [0:min n Text.detectPages] do
+    if ← IO.checkCanceled then return rep
+    pages := pages.push (Text.pageTextOf d i)
+  let det := Text.detect pages.toList
+  rep := { rep with detection := det, extracted := pages.size }
+  let mut detOk := true
+  match Text.detectedBody det with
+  | none => rep := { rep with detected := "none found" }
+  | some body =>
+    if o.parent.isSome && !forceDetect then
+      rep := { rep with detected := "skipped (the attachment has a parent item)" }
+    else
+      let (okD, msg) ← postAttachment o.session "detected" body.toUTF8 "application/json"
+      detOk := okD
+      rep := { rep with detected := msg }
+  for i in [pages.size:n] do
+    if ← IO.checkCanceled then return { rep with extracted := pages.size }
+    pages := pages.push (Text.pageTextOf d i)
+  let (body, np) := Text.fulltextBody pages
+  let (okF, msg) ← postAttachment o.session "fulltext" body "text/plain; charset=utf-8"
+  return { rep with extracted := pages.size, fulltextPages := np, fulltextBytes := body.size,
+                    fulltext := msg, ok := detOk && okF }
 
 end SafePdf.Shell.App.BibLean.Launch
