@@ -1,0 +1,846 @@
+import SafePdf.Core.Raster.Geom
+
+/-!
+# Fill core: Bézier flattening, polygon edges, scanline coverage (task 7.2a)
+
+Plan.md §6 Phase 7 ("scanline fill (nonzero + even-odd), Bézier flattening with proven error
+bound, … anti-aliasing"; "Proven: totality, resource bounds (S3: work ≤ f(area,
+display-list size))"), §4 **S3**, §8 ("Rational-arithmetic geometric model as proof
+reference; float implementation tested" — here the implementation is exact integer
+arithmetic rather than floats). ISO 32000-2 §8.5.3.3 (fill rules), §8.5.2.2 (cubic Bézier
+curves).
+
+## Pipeline
+
+1. **Device path** (`DPath = Array DSeg`). `ofContentPath m p` maps a `Content.Path` (page
+   space, `Fixed`) through an exact `Geom.Aff` `m` (page → device pixels, e.g. a
+   `Geom.viewMatrix`) and rounds each point to **subpixel fixed point**: `Int` in units of
+   `1/256` px (`subUnit`), clamped to `±coordLimit` (≈ 4.2 million px). Rational arithmetic
+   happens once per path point, never per pixel. Glyph outlines (7.3) build a `DPath`
+   directly (a quadratic segment is the cubic with controls `p0 + 2/3(q − p0)`,
+   `p2 + 2/3(q − p2)`: degree elevation is exact).
+2. **Flattening** (`flatten`) turns the path into polygon edges (`Edge`, oriented
+   top-to-bottom with a winding sign; horizontal edges are dropped — they never cross a
+   sample row). A cubic is split into `n` uniform parameter steps, its points computed
+   exactly in `Int` (`bezNum`, `bezNum_eq`) and rounded once (`roundDivI_err`). `n` is the
+   least `n ≥ 1` with `3·M ≤ 4·tol·n²` (`segCount`, `segCount_spec`), where `M` is the
+   largest absolute second difference of the control polygon (both coordinates), capped at
+   `curveSegCap`. Curves whose control hull lies entirely on one side of the clip window
+   become their chord (exact for the coverage inside the window: the window is outside the
+   region between curve and chord).
+3. **Coverage** (`fillEdges`): a scanline rasterizer over the mask rectangle
+   (path bounding box ∩ clip window). Each pixel row is sampled at `S` sample rows
+   (`Config.vSamples`, clamped to `1 … 16`); at each, the crossings of the active edges are
+   sorted (`Array.mergeSort`) and swept with the nonzero or even-odd rule; inside spans are
+   added with **exact horizontal coverage** (subpixel resolution `1/256`) to a difference
+   accumulator, which a prefix sum turns into the pixel coverage of the row, written as a byte
+   `0 … 255` (`covByte`). So anti-aliasing is exact-area horizontally and `S`-level
+   supersampled vertically. An axis-aligned rectangle with integer corners gets exactly 255
+   inside and 0 outside (tested).
+
+## What is proven
+
+* **Flattening error bound over ℚ** (`flatten_err`, from `bez_sub_chord`): for control
+  values `p0 … p3` (one coordinate), `M` bounding both absolute second differences, `n > 0`,
+  `k < n` and `t ∈ [k/n, (k+1)/n]`, the curve point `B(t)` and the point of the chord from
+  `B(k/n)` to `B((k+1)/n)` at the same parameter differ by at most `3·M / (4·n²)`. Applied to
+  `x` and `y` this bounds the parametric (hence Hausdorff) distance between the curve and the
+  exact polyline per coordinate (L∞; the Euclidean distance is at most `√2` times it).
+  `segCount_spec` + `flatten_err_tol`: with the chosen `n` (unless capped), the bound is
+  `≤ tol`. The implementation's vertices are the exact `B(k/n)` (`bezNum_eq`) rounded to the
+  nearest subpixel unit (`roundDivI_err`: error ≤ 1/2 unit per coordinate), so the
+  implemented polyline is within `tol + 1/2` subpixel units of the curve per coordinate.
+* **Totality** by construction (structural recursion and `Array` folds; no `partial`).
+* **S3 work bound**: `flatten_size_le` — at most `curveSegCap · #segments + 1` edges;
+  `fillEdgesCounted_steps_le` — the counted row work (`S` × active edges + mask width + 1
+  per row; every active-edge list has at most `E` edges, `rowLoop_inv`) is
+  `≤ h · (S · E + w + 1)`, with `h`, `w` the mask height and width (at most the clip window's).
+  The per-sample-row `mergeSort` of the crossings (≤ `E` elements) is `O(E log E)` by its
+  algorithm; that factor is not part of the counted steps.
+* **Buffer shape**: `fillEdges_size` — the coverage buffer has exactly `w · h` bytes; every
+  write is a `ByteArray.push` or a bounds-checked `Array.modify` (no `!` indexing).
+
+## Tested (`#guard`s below, suite `Tests/RasterFill.lean`)
+
+Rectangle exactness, triangle and circle (4 cubics) areas within tolerance, nonzero vs
+even-odd on a self-overlapping star (and agreement on a simple polygon), empty path, path
+outside the window, huge clamped coordinates, coverage of every byte in `[0, 255]`.
+
+## Local constants (not in `SafePdf.Limits`, which this task does not own)
+
+`curveSegCap` (512 chords per cubic) and `coordLimit` (`2³⁰` subpixel units). Both make the
+work bound data-independent; neither raises an error: the cap only coarsens absurdly large
+curves, the clamp only moves points beyond ±4 million pixels.
+-/
+
+namespace SafePdf.Core.Raster.Fill
+
+open SafePdf.Core
+open SafePdf.Core.Raster.Geom
+open SafePdf.Core.Content (FillRule)
+
+/-! ## 1. The ℚ model of a cubic and the flattening bound -/
+
+/-- One coordinate of the cubic Bézier curve with control values `p0 … p3` at parameter `t`
+(Bernstein form, ISO 32000-2 §8.5.2.2). -/
+def bez (p0 p1 p2 p3 t : Rat) : Rat :=
+  (1 - t) * (1 - t) * (1 - t) * p0 + 3 * (1 - t) * (1 - t) * t * p1 +
+    3 * (1 - t) * t * t * p2 + t * t * t * p3
+
+/-- Second derivative of `bez` at `s`: `6·((1 − s)·Δ²₀ + s·Δ²₁)` with the control polygon's
+second differences `Δ²₀ = p0 − 2p1 + p2`, `Δ²₁ = p1 − 2p2 + p3`. -/
+def bezDD (p0 p1 p2 p3 s : Rat) : Rat :=
+  6 * ((1 - s) * (p0 - 2 * p1 + p2) + s * (p1 - 2 * p2 + p3))
+
+/-- Linear interpolation `u + r·(v − u)`. -/
+def lerp (u v r : Rat) : Rat := u + r * (v - u)
+
+/-- **Chord identity.** For a cubic `B` and `a ≠ b`, the deviation of `B(t)` from the chord
+through `B(a)`, `B(b)` at the same parameter is `(t − a)(t − b)/2 · B''((a + b + t)/3)`
+(the divided difference `B[a, b, t]` of a cubic is `B''` at the mean of its nodes over 2). -/
+theorem bez_sub_chord (p0 p1 p2 p3 a b t : Rat) (h : b - a ≠ 0) :
+    bez p0 p1 p2 p3 t - lerp (bez p0 p1 p2 p3 a) (bez p0 p1 p2 p3 b) ((t - a) / (b - a)) =
+      (t - a) * (t - b) / 2 * bezDD p0 p1 p2 p3 ((a + b + t) / 3) := by
+  simp only [bez, bezDD, lerp]
+  grind
+
+/-- On `[0, 1]`, `|B''| ≤ 6·M` when both second differences are bounded by `M`. -/
+theorem bezDD_bound (p0 p1 p2 p3 s M : Rat) (hs0 : 0 ≤ s) (hs1 : s ≤ 1)
+    (h1 : -M ≤ p0 - 2 * p1 + p2) (h1' : p0 - 2 * p1 + p2 ≤ M)
+    (h2 : -M ≤ p1 - 2 * p2 + p3) (h2' : p1 - 2 * p2 + p3 ≤ M) :
+    -(6 * M) ≤ bezDD p0 p1 p2 p3 s ∧ bezDD p0 p1 p2 p3 s ≤ 6 * M := by
+  have hs : 0 ≤ 1 - s := by grind
+  have a1 := Rat.mul_le_mul_of_nonneg_left h1 hs
+  have a2 := Rat.mul_le_mul_of_nonneg_left h1' hs
+  have b1 := Rat.mul_le_mul_of_nonneg_left h2 hs0
+  have b2 := Rat.mul_le_mul_of_nonneg_left h2' hs0
+  simp only [bezDD]; constructor <;> grind
+
+/-- Squares are non-negative. -/
+private theorem sq_nonneg' (x : Rat) : 0 ≤ x * x := by
+  rcases Rat.le_total (a := 0) (b := x) with h | h
+  · exact Rat.mul_nonneg h h
+  · have := Rat.mul_nonneg (a := -x) (b := -x) (by grind) (by grind)
+    grind
+
+/-- `0 ≤ (t − a)(b − t) ≤ (b − a)²/4` on `[a, b]`. -/
+private theorem quad_bound (a b t : Rat) (ha : a ≤ t) (hb : t ≤ b) :
+    0 ≤ (t - a) * (b - t) ∧ (t - a) * (b - t) ≤ (b - a) * (b - a) / 4 := by
+  have h0 := Rat.mul_nonneg (a := t - a) (b := b - t) (by grind) (by grind)
+  refine ⟨h0, ?_⟩
+  have := sq_nonneg' ((a + b) / 2 - t)
+  grind
+
+/-- `|u·v| ≤ U·V` from `0 ≤ u ≤ U`, `|v| ≤ V`. -/
+private theorem mul_abs_bound (u U v V : Rat) (hu : 0 ≤ u) (hU : u ≤ U) (hv : -V ≤ v)
+    (hv' : v ≤ V) : -(U * V) ≤ u * v ∧ u * v ≤ U * V := by
+  have hV : 0 ≤ V := by grind
+  have e1 := Rat.mul_le_mul_of_nonneg_left hv' hu
+  have e2 := Rat.mul_le_mul_of_nonneg_left hv hu
+  have e3 : u * V ≤ U * V := by
+    have := Rat.mul_le_mul_of_nonneg_left hU hV; grind
+  grind
+
+/-- **Chord error on one parameter interval.** For `0 ≤ a < b ≤ 1` and `t ∈ [a, b]`, the
+curve deviates from its chord over `[a, b]` by at most `3/4 · M · (b − a)²`. -/
+theorem chord_err (p0 p1 p2 p3 M a b t : Rat) (ha0 : 0 ≤ a) (hab : a < b) (hb1 : b ≤ 1)
+    (hat : a ≤ t) (htb : t ≤ b)
+    (h1 : -M ≤ p0 - 2 * p1 + p2) (h1' : p0 - 2 * p1 + p2 ≤ M)
+    (h2 : -M ≤ p1 - 2 * p2 + p3) (h2' : p1 - 2 * p2 + p3 ≤ M) :
+    -(3 / 4 * M * ((b - a) * (b - a))) ≤
+        bez p0 p1 p2 p3 t - lerp (bez p0 p1 p2 p3 a) (bez p0 p1 p2 p3 b) ((t - a) / (b - a)) ∧
+      bez p0 p1 p2 p3 t - lerp (bez p0 p1 p2 p3 a) (bez p0 p1 p2 p3 b) ((t - a) / (b - a)) ≤
+        3 / 4 * M * ((b - a) * (b - a)) := by
+  rw [bez_sub_chord _ _ _ _ _ _ _ (by grind)]
+  have hdd := bezDD_bound p0 p1 p2 p3 ((a + b + t) / 3) M (by grind) (by grind) h1 h1' h2 h2'
+  have hq := quad_bound a b t hat htb
+  have hm := mul_abs_bound _ _ _ _ hq.1 hq.2 hdd.1 hdd.2
+  have e : (t - a) * (t - b) / 2 * bezDD p0 p1 p2 p3 ((a + b + t) / 3) =
+      -((t - a) * (b - t) * bezDD p0 p1 p2 p3 ((a + b + t) / 3)) / 2 := by grind
+  rw [e]; constructor <;> grind
+
+/-- **Flattening error bound (uniform subdivision).** Split the parameter range into `n`
+equal steps; on step `k` (`k < n`), every curve point `B(t)`, `t ∈ [k/n, (k+1)/n]`, is within
+`3·M / (4·n²)` of the point of the chord `B(k/n) → B((k+1)/n)` at the same parameter, and
+vice versa (the correspondence is a bijection of the parameter), per coordinate. -/
+theorem flatten_err (p0 p1 p2 p3 M : Rat) (n k : Nat) (hk : k < n) (t : Rat)
+    (ht0 : (k : Rat) / n ≤ t) (ht1 : t ≤ ((k : Rat) + 1) / n)
+    (h1 : -M ≤ p0 - 2 * p1 + p2) (h1' : p0 - 2 * p1 + p2 ≤ M)
+    (h2 : -M ≤ p1 - 2 * p2 + p3) (h2' : p1 - 2 * p2 + p3 ≤ M) :
+    -(3 * M / (4 * ((n : Rat) * n))) ≤
+        bez p0 p1 p2 p3 t -
+          lerp (bez p0 p1 p2 p3 ((k : Rat) / n)) (bez p0 p1 p2 p3 (((k : Rat) + 1) / n))
+            (n * t - k) ∧
+      bez p0 p1 p2 p3 t -
+          lerp (bez p0 p1 p2 p3 ((k : Rat) / n)) (bez p0 p1 p2 p3 (((k : Rat) + 1) / n))
+            (n * t - k) ≤ 3 * M / (4 * ((n : Rat) * n)) := by
+  have hn : (0 : Rat) < n := by
+    have : ((0 : Nat) : Rat) < ((n : Nat) : Rat) := Rat.natCast_lt_natCast.mpr (by omega)
+    simpa using this
+  have hkn : ((k : Rat) + 1) ≤ n := by
+    have : ((k + 1 : Nat) : Rat) ≤ ((n : Nat) : Rat) := Rat.natCast_le_natCast.mpr (by omega)
+    simpa using this
+  have hk0 : (0 : Rat) ≤ k := by
+    have : ((0 : Nat) : Rat) ≤ ((k : Nat) : Rat) := Rat.natCast_le_natCast.mpr (by omega)
+    simpa using this
+  have hne : (n : Rat) ≠ 0 := by grind
+  have ha0 : (0 : Rat) ≤ (k : Rat) / n := by
+    rw [Rat.div_def]; exact Rat.mul_nonneg hk0 (Rat.le_of_lt (Rat.inv_pos.mpr hn))
+  have hab : (k : Rat) / n < ((k : Rat) + 1) / n := by
+    rw [Rat.lt_div_iff hn]; grind
+  have hb1 : ((k : Rat) + 1) / n ≤ 1 := by
+    apply Rat.not_lt.mp; rw [Rat.lt_div_iff hn]; grind
+  have h := chord_err p0 p1 p2 p3 M ((k : Rat) / n) (((k : Rat) + 1) / n) t ha0 hab hb1
+    ht0 ht1 h1 h1' h2 h2'
+  have e1 : (t - (k : Rat) / n) / (((k : Rat) + 1) / n - (k : Rat) / n) = n * t - k := by
+    grind
+  have e2 : 3 / 4 * M * ((((k : Rat) + 1) / n - (k : Rat) / n) *
+      (((k : Rat) + 1) / n - (k : Rat) / n)) = 3 * M / (4 * ((n : Rat) * n)) := by
+    grind
+  rw [e1, e2] at h; exact h
+
+/-- With `3·M ≤ 4·tol·n²` (the choice made by `segCount`), the flattening error bound of
+`flatten_err` is at most `tol`. -/
+theorem flatten_err_tol (M tol : Rat) (n : Nat) (hn : 0 < n)
+    (h : 3 * M ≤ 4 * tol * ((n : Rat) * n)) : 3 * M / (4 * ((n : Rat) * n)) ≤ tol := by
+  have hn' : (0 : Rat) < n := by
+    have : ((0 : Nat) : Rat) < ((n : Nat) : Rat) := Rat.natCast_lt_natCast.mpr hn
+    simpa using this
+  have hpos : (0 : Rat) < 4 * ((n : Rat) * n) := by
+    have := Rat.mul_pos hn' hn'; grind
+  apply Rat.not_lt.mp; rw [Rat.lt_div_iff hpos]; grind
+
+/-! ## 2. Exact integer evaluation of the subdivision points -/
+
+/-- `n³ · B(k/n)` as an integer: `(n−k)³p0 + 3(n−k)²k·p1 + 3(n−k)k²·p2 + k³p3`. -/
+def bezNum (n k : Nat) (p0 p1 p2 p3 : Int) : Int :=
+  let j : Int := (n : Int) - k
+  let k : Int := k
+  j * j * j * p0 + 3 * j * j * k * p1 + 3 * j * k * k * p2 + k * k * k * p3
+
+/-- `bezNum` is exact: divided by `n³` it is the ℚ curve point at `k/n`. -/
+theorem bezNum_eq (n k : Nat) (hn : 0 < n) (p0 p1 p2 p3 : Int) :
+    ((bezNum n k p0 p1 p2 p3 : Int) : Rat) / ((n : Rat) * n * n) =
+      bez p0 p1 p2 p3 ((k : Rat) / n) := by
+  have : (n : Rat) ≠ 0 := by
+    intro h
+    have h2 : ((n : Nat) : Rat) = ((0 : Nat) : Rat) := by simpa using h
+    have := Rat.natCast_inj.mp h2; omega
+  simp only [bezNum, bez, Rat.intCast_add, Rat.intCast_mul, Rat.intCast_sub,
+    Rat.intCast_natCast, Rat.intCast_ofNat]
+  grind
+
+/-- `a / d` rounded to the nearest integer (halves up), for `d > 0`. -/
+def roundDivI (a d : Int) : Int := (2 * a + d) / (2 * d)
+
+/-- Rounding error of `roundDivI`: `|q·d − a| ≤ d/2`. -/
+theorem roundDivI_err (a d : Int) (hd : 0 < d) :
+    -d < 2 * (roundDivI a d * d - a) ∧ 2 * (roundDivI a d * d - a) ≤ d := by
+  have h1 := Int.mul_ediv_add_emod (2 * a + d) (2 * d)
+  have h2 := Int.emod_nonneg (2 * a + d) (b := 2 * d) (by omega)
+  have h3 := Int.emod_lt_of_pos (2 * a + d) (b := 2 * d) (by omega)
+  simp only [roundDivI]
+  generalize (2 * a + d) / (2 * d) = q at *
+  generalize (2 * a + d) % (2 * d) = r at *
+  have : 2 * d * q = 2 * (q * d) := by grind
+  constructor <;> omega
+
+/-! ## 3. Device paths in subpixel fixed point -/
+
+/-- Subpixel units per pixel (8 fractional bits). -/
+def subUnit : Int := 256
+
+/-- Device coordinates are clamped to `±coordLimit` subpixel units (`2³⁰`, about
+4.2 million pixels): far beyond any window, small enough to keep the products in the
+crossing computation moderate. -/
+def coordLimit : Int := 1073741824
+
+/-- A device point, in `1/256` pixel units (y downward, as `Geom.toScreen`). -/
+structure FPt where
+  /-- Horizontal coordinate, subpixel units. -/
+  x : Int
+  /-- Vertical coordinate, subpixel units. -/
+  y : Int
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A device path segment (the `Content.Segment` shape, in subpixel units). -/
+inductive DSeg where
+  /-- Start a new subpath (implicitly closing the previous one, as filling does). -/
+  | moveTo (p : FPt)
+  /-- Straight line to `p`. -/
+  | lineTo (p : FPt)
+  /-- Cubic Bézier with controls `c1`, `c2`, ending at `p`. -/
+  | curveTo (c1 c2 p : FPt)
+  /-- Close the current subpath. -/
+  | closePath
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A device path. -/
+abbrev DPath := Array DSeg
+
+/-- Clamp to `[−coordLimit, coordLimit]`. -/
+def clampCoord (v : Int) : Int := max (-coordLimit) (min coordLimit v)
+
+/-- A rational pixel coordinate in subpixel units, rounded to nearest (halves up). -/
+def toSub (q : Rat) : Int := roundDivI (q.num * subUnit) (q.den : Int)
+
+/-- A device point (pixels, exact) in clamped subpixel units. -/
+def FPt.ofPt (p : Pt) : FPt := ⟨clampCoord (toSub p.x), clampCoord (toSub p.y)⟩
+
+/-- Map one content-stream segment (page space) through `m` (page → device pixels). -/
+def DSeg.ofSegment (m : Aff) : Content.Segment → DSeg
+  | .moveTo p => .moveTo (FPt.ofPt (m.apply (ptOfPoint p)))
+  | .lineTo p => .lineTo (FPt.ofPt (m.apply (ptOfPoint p)))
+  | .curveTo c1 c2 p =>
+    .curveTo (FPt.ofPt (m.apply (ptOfPoint c1))) (FPt.ofPt (m.apply (ptOfPoint c2)))
+      (FPt.ofPt (m.apply (ptOfPoint p)))
+  | .closePath => .closePath
+
+/-- A page-space path as a device path (affine maps commute with Bézier curves, so mapping
+the control points is exact before rounding). -/
+def ofContentPath (m : Aff) (p : Content.Path) : DPath := p.segs.map (DSeg.ofSegment m)
+
+/-- Device pixel rectangle `[x0, x1) × [y0, y1)` (the clip window / target area). -/
+structure IRect where
+  /-- Left pixel column (inclusive). -/
+  x0 : Int
+  /-- Top pixel row (inclusive). -/
+  y0 : Int
+  /-- Right pixel column (exclusive). -/
+  x1 : Int
+  /-- Bottom pixel row (exclusive). -/
+  y1 : Int
+  deriving DecidableEq, Repr, Inhabited
+
+/-! ## 4. Flattening to edges -/
+
+/-- A non-horizontal polygon edge, `y0 < y1` (subpixel units), with winding `+1` if the
+path runs downward (increasing `y`) along it, `−1` otherwise. -/
+structure Edge where
+  /-- Upper endpoint x. -/
+  x0 : Int
+  /-- Upper endpoint y. -/
+  y0 : Int
+  /-- Lower endpoint x. -/
+  x1 : Int
+  /-- Lower endpoint y (`> y0`). -/
+  y1 : Int
+  /-- Winding contribution, `±1`. -/
+  wind : Int
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Append the edge `a → b` (dropped when horizontal). -/
+def pushLine (es : Array Edge) (a b : FPt) : Array Edge :=
+  if a.y < b.y then es.push ⟨a.x, a.y, b.x, b.y, 1⟩
+  else if b.y < a.y then es.push ⟨b.x, b.y, a.x, a.y, -1⟩
+  else es
+
+/-- `pushLine` adds at most one edge. -/
+theorem pushLine_size (es : Array Edge) (a b : FPt) : (pushLine es a b).size ≤ es.size + 1 := by
+  unfold pushLine; split
+  · simp
+  · split <;> simp
+
+/-- The closed polygon through `pts` as edges (for stroking, 7.2b). -/
+def polygonEdges (pts : Array FPt) : Array Edge :=
+  match pts[0]? with
+  | none => #[]
+  | some p0 =>
+    let r := pts.foldl (fun (acc : Array Edge × FPt) q => (pushLine acc.1 acc.2 q, q)) (#[], p0)
+    pushLine r.1 r.2 p0
+
+/-- Upper bound on the chords per cubic (local constant; see the module doc). -/
+def curveSegCap : Nat := 512
+
+/-- Flattening configuration and anti-aliasing quality. -/
+structure Config where
+  /-- Flattening tolerance per coordinate, in subpixel units (default 26 ≈ 0.1 px: chords lie
+  inside convex arcs, so a coarser tolerance visibly thins small glyphs — 0.2 px loses 4.5% of
+  the area of a radius-5 disc, 0.1 px 1.6%). -/
+  tol : Nat := 26
+  /-- Sample rows per pixel row (vertical anti-aliasing levels), clamped to `1 … 16`. -/
+  vSamples : Nat := 4
+  deriving Repr, Inhabited
+
+/-- Search for the least `n ∈ [n₀, n₀ + fuel]` with `3·m ≤ 4·tol·n²` (else `n₀ + fuel`). -/
+def segCountGo (m tol : Nat) : Nat → Nat → Nat
+  | n, 0 => n
+  | n, fuel + 1 => if 3 * m ≤ 4 * tol * (n * n) then n else segCountGo m tol (n + 1) fuel
+
+/-- Number of chords for a cubic whose second differences are bounded by `m`: the least
+`n ≥ 1` with `3·m ≤ 4·tol·n²`, capped at `curveSegCap`. -/
+def segCount (m tol : Nat) : Nat := segCountGo m tol 1 (curveSegCap - 1)
+
+private theorem segCountGo_spec (m tol : Nat) : ∀ fuel n,
+    n ≤ segCountGo m tol n fuel ∧ segCountGo m tol n fuel ≤ n + fuel ∧
+      (3 * m ≤ 4 * tol * (segCountGo m tol n fuel * segCountGo m tol n fuel) ∨
+        segCountGo m tol n fuel = n + fuel)
+  | 0, n => by simp [segCountGo]
+  | fuel + 1, n => by
+    simp only [segCountGo]
+    split
+    · rename_i h; exact ⟨Nat.le_refl _, by omega, Or.inl h⟩
+    · have ih := segCountGo_spec m tol fuel (n + 1)
+      refine ⟨by omega, by omega, ?_⟩
+      rcases ih.2.2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+
+/-- **Chord count.** `1 ≤ n ≤ curveSegCap`, and either the flattening bound
+`3·m ≤ 4·tol·n²` holds (so the error is `≤ tol`, `flatten_err_tol`) or the cap was hit. -/
+theorem segCount_spec (m tol : Nat) :
+    1 ≤ segCount m tol ∧ segCount m tol ≤ curveSegCap ∧
+      (3 * m ≤ 4 * tol * (segCount m tol * segCount m tol) ∨ segCount m tol = curveSegCap) := by
+  have h := segCountGo_spec m tol (curveSegCap - 1) 1
+  simp only [segCount]
+  have hc : 1 + (curveSegCap - 1) = curveSegCap := by decide
+  rw [hc] at h
+  exact ⟨h.1, h.2.1, h.2.2⟩
+
+/-- Absolute second difference `|a − 2b + c|`. -/
+def dd2 (a b c : Int) : Nat := (a - 2 * b + c).natAbs
+
+/-- The flatness measure `M` of a cubic: the largest absolute second difference of its
+control polygon over both coordinates. -/
+def flatness (p0 p1 p2 p3 : FPt) : Nat :=
+  max (max (dd2 p0.x p1.x p2.x) (dd2 p1.x p2.x p3.x))
+    (max (dd2 p0.y p1.y p2.y) (dd2 p1.y p2.y p3.y))
+
+/-- The `k`-th of `n` uniform subdivision points, rounded to subpixel units. -/
+def bezAt (n k : Nat) (p0 p1 p2 p3 : FPt) : FPt :=
+  let d : Int := (n : Int) * n * n
+  ⟨roundDivI (bezNum n k p0.x p1.x p2.x p3.x) d, roundDivI (bezNum n k p0.y p1.y p2.y p3.y) d⟩
+
+/-- Emit the chords `B((k−1)/n) → B(k/n)` for the remaining `fuel` steps; the last point is
+`p3` exactly. -/
+def cubicLoop (n : Nat) (p0 p1 p2 p3 : FPt) : (fuel k : Nat) → FPt → Array Edge → Array Edge
+  | 0, _, _, es => es
+  | fuel + 1, k, prev, es =>
+    let q := if k = n then p3 else bezAt n k p0 p1 p2 p3
+    cubicLoop n p0 p1 p2 p3 fuel (k + 1) q (pushLine es prev q)
+
+private theorem cubicLoop_size (n : Nat) (p0 p1 p2 p3 : FPt) : ∀ fuel k prev es,
+    (cubicLoop n p0 p1 p2 p3 fuel k prev es).size ≤ es.size + fuel
+  | 0, _, _, _ => by simp [cubicLoop]
+  | fuel + 1, k, prev, es => by
+    simp only [cubicLoop]
+    have := cubicLoop_size n p0 p1 p2 p3 fuel (k + 1)
+      (if k = n then p3 else bezAt n k p0 p1 p2 p3)
+      (pushLine es prev (if k = n then p3 else bezAt n k p0 p1 p2 p3))
+    have := pushLine_size es prev (if k = n then p3 else bezAt n k p0 p1 p2 p3)
+    omega
+
+/-- The control hull of the cubic lies entirely on one side of the window (in subpixel
+units `[cx0, cx1) × [cy0, cy1)`): then the chord replaces the curve exactly as far as
+coverage inside the window is concerned. -/
+def hullOutside (cx0 cy0 cx1 cy1 : Int) (p0 p1 p2 p3 : FPt) : Bool :=
+  (p0.x ≤ cx0 && p1.x ≤ cx0 && p2.x ≤ cx0 && p3.x ≤ cx0) ||
+  (cx1 ≤ p0.x && cx1 ≤ p1.x && cx1 ≤ p2.x && cx1 ≤ p3.x) ||
+  (p0.y ≤ cy0 && p1.y ≤ cy0 && p2.y ≤ cy0 && p3.y ≤ cy0) ||
+  (cy1 ≤ p0.y && cy1 ≤ p1.y && cy1 ≤ p2.y && cy1 ≤ p3.y)
+
+/-- Flatten one cubic into at most `curveSegCap` edges. -/
+def flattenCubic (cfg : Config) (clip : IRect) (es : Array Edge) (p0 p1 p2 p3 : FPt) :
+    Array Edge :=
+  if hullOutside (clip.x0 * subUnit) (clip.y0 * subUnit) (clip.x1 * subUnit)
+      (clip.y1 * subUnit) p0 p1 p2 p3 then
+    pushLine es p0 p3
+  else
+    let n := segCount (flatness p0 p1 p2 p3) cfg.tol
+    cubicLoop n p0 p1 p2 p3 n 1 p0 es
+
+/-- A cubic adds at most `curveSegCap` edges. -/
+theorem flattenCubic_size (cfg : Config) (clip : IRect) (es : Array Edge) (p0 p1 p2 p3 : FPt) :
+    (flattenCubic cfg clip es p0 p1 p2 p3).size ≤ es.size + curveSegCap := by
+  unfold flattenCubic; split
+  · have := pushLine_size es p0 p3
+    have : 1 ≤ curveSegCap := by decide
+    omega
+  · dsimp only
+    have h1 := cubicLoop_size (segCount (flatness p0 p1 p2 p3) cfg.tol) p0 p1 p2 p3
+      (segCount (flatness p0 p1 p2 p3) cfg.tol) 1 p0 es
+    have h2 := (segCount_spec (flatness p0 p1 p2 p3) cfg.tol).2.1
+    omega
+
+/-- Flattening state: edges so far, subpath start, current point. -/
+structure FState where
+  /-- Edges emitted so far. -/
+  edges : Array Edge := #[]
+  /-- Start of the current subpath. -/
+  start : FPt := ⟨0, 0⟩
+  /-- Current point. -/
+  cur : FPt := ⟨0, 0⟩
+  deriving Inhabited
+
+/-- Flatten one segment. Every subpath is closed for filling (ISO 32000-2 §8.5.3.1). -/
+def flattenSeg (cfg : Config) (clip : IRect) (st : FState) : DSeg → FState
+  | .moveTo p => { edges := pushLine st.edges st.cur st.start, start := p, cur := p }
+  | .lineTo p => { st with edges := pushLine st.edges st.cur p, cur := p }
+  | .curveTo c1 c2 p => { st with edges := flattenCubic cfg clip st.edges st.cur c1 c2 p, cur := p }
+  | .closePath => { st with edges := pushLine st.edges st.cur st.start, cur := st.start }
+
+private theorem flattenSeg_size (cfg : Config) (clip : IRect) (st : FState) (s : DSeg) :
+    (flattenSeg cfg clip st s).edges.size ≤ st.edges.size + curveSegCap := by
+  have : 1 ≤ curveSegCap := by decide
+  cases s with
+  | moveTo p => have := pushLine_size st.edges st.cur st.start; simp only [flattenSeg]; omega
+  | lineTo p => have := pushLine_size st.edges st.cur p; simp only [flattenSeg]; omega
+  | curveTo c1 c2 p => exact flattenCubic_size cfg clip st.edges st.cur c1 c2 p
+  | closePath => have := pushLine_size st.edges st.cur st.start; simp only [flattenSeg]; omega
+
+/-- **Flattening.** The polygon edges of a device path (all subpaths closed). The window
+`clip` only lets curves outside it be replaced by their chords. -/
+def flatten (cfg : Config) (clip : IRect) (p : DPath) : Array Edge :=
+  let st := p.foldl (flattenSeg cfg clip) {}
+  pushLine st.edges st.cur st.start
+
+private theorem foldl_flattenSeg_size (cfg : Config) (clip : IRect) :
+    ∀ (l : List DSeg) (st : FState),
+      (l.foldl (flattenSeg cfg clip) st).edges.size ≤ st.edges.size + curveSegCap * l.length
+  | [], st => by simp
+  | s :: l, st => by
+    simp only [List.foldl_cons, List.length_cons]
+    have h1 := foldl_flattenSeg_size cfg clip l (flattenSeg cfg clip st s)
+    have h2 := flattenSeg_size cfg clip st s
+    rw [Nat.mul_succ]; omega
+
+/-- **S3, edge count.** A path of `s` segments flattens to at most `curveSegCap · s + 1`
+edges. -/
+theorem flatten_size_le (cfg : Config) (clip : IRect) (p : DPath) :
+    (flatten cfg clip p).size ≤ curveSegCap * p.size + 1 := by
+  simp only [flatten]
+  rw [← Array.foldl_toList]
+  have h1 := foldl_flattenSeg_size cfg clip p.toList {}
+  have h2 := pushLine_size (p.toList.foldl (flattenSeg cfg clip) {}).edges
+    (p.toList.foldl (flattenSeg cfg clip) {}).cur (p.toList.foldl (flattenSeg cfg clip) {}).start
+  simp only [Array.length_toList] at h1
+  have : ({} : FState).edges.size = 0 := rfl
+  rw [this] at h1
+  omega
+
+/-! ## 5. Scanline coverage -/
+
+/-- A coverage mask: `w × h` bytes (row-major, `0 … 255`) for the device pixels
+`[x0, x0 + w) × [y0, y0 + h)`. Pixels outside the rectangle have coverage 0. -/
+structure Mask where
+  /-- Left pixel column. -/
+  x0 : Int := 0
+  /-- Top pixel row. -/
+  y0 : Int := 0
+  /-- Width in pixels. -/
+  w : Nat := 0
+  /-- Height in pixels. -/
+  h : Nat := 0
+  /-- Coverage bytes, row-major (`fillEdges_size`: exactly `w · h` of them). -/
+  data : ByteArray := ByteArray.empty
+  deriving Inhabited
+
+/-- Coverage of device pixel `(x, y)` (0 outside the mask). -/
+def Mask.get (m : Mask) (x y : Int) : UInt8 :=
+  if m.x0 ≤ x ∧ x < m.x0 + m.w ∧ m.y0 ≤ y ∧ y < m.y0 + m.h then
+    (m.data[((y - m.y0) * m.w + (x - m.x0)).toNat]?).getD 0
+  else 0
+
+/-- Sum of all coverage bytes (`255` per fully covered pixel). -/
+def Mask.total (m : Mask) : Nat := m.data.foldl (fun s b => s + b.toNat) 0
+
+/-- Is winding number `wn` inside under `rule`? -/
+def inside (rule : FillRule) (wn : Int) : Bool :=
+  match rule with
+  | .nonzero => wn != 0
+  | .evenOdd => wn % 2 != 0
+
+/-- Effective sample rows per pixel, `1 … 16`. -/
+def Config.samples (cfg : Config) : Nat := min 16 (max 1 cfg.vSamples)
+
+/-- Add the span `[xa, xb)` (subpixel units, relative to the mask's left edge, clamped to
+`[0, 256·w]`) to the difference accumulator `acc` (size `w + 2`): after a prefix sum, pixel
+`i` receives the length of `[xa, xb) ∩ [256·i, 256·(i+1))`. -/
+def addSpan (acc : Array Int) (w : Nat) (xa xb : Int) : Array Int :=
+  let lim : Int := (w : Int) * subUnit
+  let a := max 0 (min lim xa)
+  let b := max 0 (min lim xb)
+  if a < b then
+    let ia := (a / subUnit).toNat
+    let fa := a % subUnit
+    let ib := (b / subUnit).toNat
+    let fb := b % subUnit
+    if ia = ib then
+      (acc.modify ia (· + (b - a))).modify (ia + 1) (· - (b - a))
+    else
+      (((acc.modify ia (· + (subUnit - fa))).modify (ia + 1) (· + fa)).modify ib
+        (· + (fb - subUnit))).modify (ib + 1) (· - fb)
+  else acc
+
+/-- `x` of the edge at height `ys` (`y0 ≤ ys < y1`), rounded down. -/
+def Edge.xAt (e : Edge) (ys : Int) : Int := e.x0 + (ys - e.y0) * (e.x1 - e.x0) / (e.y1 - e.y0)
+
+/-- Crossings `(x, winding)` of the active edges with the sample row `ys`, sorted by `x`. -/
+def crossings (act : Array Edge) (ys : Int) : Array (Int × Int) :=
+  let cs := act.foldl (fun (cs : Array (Int × Int)) e =>
+    if e.y0 ≤ ys ∧ ys < e.y1 then cs.push (e.xAt ys, e.wind) else cs) #[]
+  cs.mergeSort (fun a b => a.1 ≤ b.1)
+
+/-- Sweep sorted crossings left to right, adding the inside spans to `acc`. `bx` is the
+mask's left edge in subpixel units. -/
+def sweep (rule : FillRule) (w : Nat) (bx : Int) (cs : Array (Int × Int)) (acc : Array Int) :
+    Array Int :=
+  let r := cs.foldl (fun (st : Int × Int × Array Int) c =>
+    let (wn, px, acc) := st
+    let acc := if inside rule wn then addSpan acc w (px - bx) (c.1 - bx) else acc
+    (wn + c.2, c.1, acc)) (0, 0, acc)
+  r.2.2
+
+/-- Accumulate the `fuel` sample rows `j, j+1, …` of the pixel row starting at `top`. -/
+def sampleLoop (rule : FillRule) (S w : Nat) (bx top : Int) (act : Array Edge) :
+    (fuel j : Nat) → Array Int → Array Int
+  | 0, _, acc => acc
+  | fuel + 1, j, acc =>
+    let ys := top + ((2 * (j : Int) + 1) * (subUnit / 2)) / (S : Int)
+    sampleLoop rule S w bx top act fuel (j + 1) (sweep rule w bx (crossings act ys) acc)
+
+/-- Accumulated coverage (`0 … 256·S`) as a byte: `round(255 · c / (256·S))`, clamped. -/
+def covByte (S : Nat) (c : Int) : UInt8 :=
+  let full : Nat := 256 * S
+  (min 255 ((c.toNat * 255 + full / 2) / full)).toUInt8
+
+/-- A full pixel (accumulated `256·S`, `S ≥ 1`) has coverage exactly 255. -/
+theorem covByte_full (S : Nat) (hS : 1 ≤ S) : covByte S ((256 * S : Nat) : Int) = 255 := by
+  simp only [covByte, Int.toNat_natCast]
+  have : ((256 * S) * 255 + 256 * S / 2) / (256 * S) = 255 :=
+    Nat.div_eq_of_lt_le (by omega) (by omega)
+  rw [this]; rfl
+
+/-- An empty pixel (accumulated `0`, `S ≥ 1`) has coverage 0. -/
+theorem covByte_zero (S : Nat) (hS : 1 ≤ S) : covByte S 0 = 0 := by
+  simp only [covByte]
+  have : (Int.toNat 0 * 255 + 256 * S / 2) / (256 * S) = 0 := Nat.div_eq_of_lt (by simp; omega)
+  rw [this]; rfl
+
+/-- Prefix-sum the accumulator into `fuel` coverage bytes appended to `out`. -/
+def pushRow (acc : Array Int) (S : Nat) : (fuel i : Nat) → Int → ByteArray → ByteArray
+  | 0, _, _, out => out
+  | fuel + 1, i, cum, out =>
+    let c := cum + acc.getD i 0
+    pushRow acc S fuel (i + 1) c (out.push (covByte S c))
+
+private theorem pushRow_size (acc : Array Int) (S : Nat) : ∀ fuel i cum out,
+    (pushRow acc S fuel i cum out).size = out.size + fuel
+  | 0, _, _, _ => by simp [pushRow]
+  | fuel + 1, i, cum, out => by
+    simp only [pushRow]
+    rw [pushRow_size acc S fuel, ByteArray.size_push]; omega
+
+/-- Move the edges starting above `bot` (sorted by `y0`) from `es[idx …]` to `act`. -/
+def activate (es : Array Edge) (bot : Int) : (fuel idx : Nat) → Array Edge → Nat × Array Edge
+  | 0, idx, act => (idx, act)
+  | fuel + 1, idx, act =>
+    match es[idx]? with
+    | some e => if e.y0 < bot then activate es bot fuel (idx + 1) (act.push e) else (idx, act)
+    | none => (idx, act)
+
+private theorem activate_inv (es : Array Edge) (bot : Int) : ∀ fuel idx act,
+    act.size ≤ idx → idx ≤ es.size →
+      (activate es bot fuel idx act).2.size ≤ (activate es bot fuel idx act).1 ∧
+        (activate es bot fuel idx act).1 ≤ es.size
+  | 0, idx, act, h1, h2 => by simp [activate]; omega
+  | fuel + 1, idx, act, h1, h2 => by
+    simp only [activate]
+    split
+    · rename_i e he
+      have hlt : idx < es.size := by
+        rcases Nat.lt_or_ge idx es.size with h | h
+        · exact h
+        · rw [Array.getElem?_eq_none h] at he; cases he
+      split
+      · exact activate_inv es bot fuel (idx + 1) (act.push e) (by simp; omega) (by omega)
+      · exact ⟨h1, h2⟩
+    · exact ⟨h1, h2⟩
+
+/-- Rasterizer state across pixel rows. -/
+structure RState where
+  /-- Next edge (in `y0` order) not yet activated. -/
+  idx : Nat := 0
+  /-- Active edges. -/
+  active : Array Edge := #[]
+  /-- Coverage bytes so far. -/
+  out : ByteArray := ByteArray.empty
+  /-- Counted work (S3 cost model: `S · |active| + w + 1` per row). -/
+  steps : Nat := 0
+  deriving Inhabited
+
+/-- Rasterize one pixel row `r` (absolute device row). -/
+def rowStep (rule : FillRule) (es : Array Edge) (S w : Nat) (bx : Int) (r : Int) (st : RState) :
+    RState :=
+  let top := r * subUnit
+  let ev := activate es (top + subUnit) es.size st.idx st.active
+  let act := ev.2.filter (fun e => top < e.y1)
+  let acc := sampleLoop rule S w bx top act S 0 (Array.replicate (w + 2) 0)
+  { idx := ev.1, active := act, out := pushRow acc S w 0 0 st.out,
+    steps := st.steps + (S * act.size + w + 1) }
+
+/-- Rasterize `fuel` pixel rows starting at row `r`. -/
+def rowLoop (rule : FillRule) (es : Array Edge) (S w : Nat) (bx : Int) :
+    (fuel : Nat) → Int → RState → RState
+  | 0, _, st => st
+  | fuel + 1, r, st => rowLoop rule es S w bx fuel (r + 1) (rowStep rule es S w bx r st)
+
+private theorem rowStep_inv (rule : FillRule) (es : Array Edge) (S w : Nat) (bx r : Int)
+    (st : RState) (h1 : st.active.size ≤ st.idx) (h2 : st.idx ≤ es.size) :
+    (rowStep rule es S w bx r st).active.size ≤ (rowStep rule es S w bx r st).idx ∧
+      (rowStep rule es S w bx r st).idx ≤ es.size ∧
+      (rowStep rule es S w bx r st).out.size = st.out.size + w ∧
+      (rowStep rule es S w bx r st).steps ≤ st.steps + (S * es.size + w + 1) := by
+  have ha := activate_inv es (r * subUnit + subUnit) es.size st.idx st.active h1 h2
+  simp only [rowStep]
+  generalize activate es (r * subUnit + subUnit) es.size st.idx st.active = ev at ha
+  have hf := Array.size_filter_le (p := fun e => decide (r * subUnit < e.y1)) (xs := ev.2)
+  refine ⟨by omega, ha.2, pushRow_size _ _ _ _ _ _, ?_⟩
+  have : S * (ev.2.filter (fun e => decide (r * subUnit < e.y1))).size ≤ S * es.size :=
+    Nat.mul_le_mul_left _ (by omega)
+  omega
+
+/-- **Row-loop invariant and S3 work bound.** Starting from a state whose active list is no
+longer than the number of edges consumed, after `fuel` rows: the active list stays within the
+`E = es.size` edges, the output grew by exactly `fuel · w` bytes, and the counted work grew
+by at most `fuel · (S · E + w + 1)`. -/
+theorem rowLoop_inv (rule : FillRule) (es : Array Edge) (S w : Nat) (bx : Int) :
+    ∀ (fuel : Nat) (r : Int) (st : RState), st.active.size ≤ st.idx → st.idx ≤ es.size →
+      (rowLoop rule es S w bx fuel r st).active.size ≤ es.size ∧
+      (rowLoop rule es S w bx fuel r st).out.size = st.out.size + fuel * w ∧
+      (rowLoop rule es S w bx fuel r st).steps ≤ st.steps + fuel * (S * es.size + w + 1)
+  | 0, _, st, h1, h2 => by simp [rowLoop]; omega
+  | fuel + 1, r, st, h1, h2 => by
+    simp only [rowLoop]
+    have hs := rowStep_inv rule es S w bx r st h1 h2
+    have ih := rowLoop_inv rule es S w bx fuel (r + 1) (rowStep rule es S w bx r st) hs.1 hs.2.1
+    refine ⟨ih.1, ?_, ?_⟩
+    · rw [ih.2.1, hs.2.2.1, Nat.succ_mul]; omega
+    · have := ih.2.2; rw [Nat.succ_mul]; omega
+
+/-- `⌊a / 256⌋`. -/
+def floorSub (a : Int) : Int := a / subUnit
+
+/-- `⌈a / 256⌉`. -/
+def ceilSub (a : Int) : Int := (a + subUnit - 1) / subUnit
+
+/-- Bounding box of the edges in subpixel units `(minx, miny, maxx, maxy)`. -/
+def edgeBBox (es : Array Edge) : Int × Int × Int × Int :=
+  es.foldl (fun (b : Int × Int × Int × Int) e =>
+    (min b.1 (min e.x0 e.x1), min b.2.1 e.y0, max b.2.2.1 (max e.x0 e.x1), max b.2.2.2 e.y1))
+    (coordLimit, coordLimit, -coordLimit, -coordLimit)
+
+/-- The mask rectangle: bounding box of the edges (in whole pixels) ∩ `clip`, as
+`(x0, y0, w, h)`. -/
+def maskRect (es : Array Edge) (clip : IRect) : Int × Int × Nat × Nat :=
+  let (minx, miny, maxx, maxy) := edgeBBox es
+  let px0 := max clip.x0 (floorSub minx)
+  let py0 := max clip.y0 (floorSub miny)
+  let px1 := min clip.x1 (ceilSub maxx)
+  let py1 := min clip.y1 (ceilSub maxy)
+  (px0, py0, (px1 - px0).toNat, (py1 - py0).toNat)
+
+/-- **Coverage rasterizer** with its counted work: fill the polygon `edges` with `rule` into a
+coverage mask over (bounding box ∩ `clip`). -/
+def fillEdgesCounted (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
+    Mask × Nat :=
+  let es := edges.mergeSort (fun a b => a.y0 ≤ b.y0)
+  let S := cfg.samples
+  let rc := maskRect es clip
+  let st := rowLoop rule es S rc.2.2.1 (rc.1 * subUnit) rc.2.2.2 rc.2.1 {}
+  ({ x0 := rc.1, y0 := rc.2.1, w := rc.2.2.1, h := rc.2.2.2, data := st.out }, st.steps)
+
+/-- **Coverage rasterizer**: fill the polygon `edges` with `rule` into a coverage mask over
+(bounding box of the edges ∩ `clip`). -/
+def fillEdges (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
+    Mask :=
+  (fillEdgesCounted edges rule clip cfg).1
+
+/-- The mask is never wider or taller than the clip window. -/
+theorem maskRect_le (es : Array Edge) (clip : IRect) :
+    ((maskRect es clip).2.2.1 : Int) ≤ max 0 (clip.x1 - clip.x0) ∧
+      ((maskRect es clip).2.2.2 : Int) ≤ max 0 (clip.y1 - clip.y0) := by
+  simp only [maskRect]
+  constructor <;> omega
+
+/-- **Buffer shape.** The coverage buffer has exactly `w · h` bytes. -/
+theorem fillEdges_size (edges : Array Edge) (rule : FillRule) (clip : IRect) (cfg : Config) :
+    (fillEdges edges rule clip cfg).data.size =
+      (fillEdges edges rule clip cfg).w * (fillEdges edges rule clip cfg).h := by
+  simp only [fillEdges, fillEdgesCounted]
+  have := (rowLoop_inv rule (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) cfg.samples
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.1
+    ((maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).1 * subUnit)
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.2
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.1 {}
+    (by simp) (by simp)).2.1
+  rw [this, Nat.mul_comm]; exact Nat.zero_add _
+
+/-- **S3 work bound for the rasterizer.** The counted work is at most
+`h · (S · E + w + 1)` for `E` edges, mask height `h`, width `w`, `S` sample rows per pixel. -/
+theorem fillEdgesCounted_steps_le (edges : Array Edge) (rule : FillRule) (clip : IRect)
+    (cfg : Config) :
+    (fillEdgesCounted edges rule clip cfg).2 ≤
+      (fillEdgesCounted edges rule clip cfg).1.h *
+        (cfg.samples * edges.size + (fillEdgesCounted edges rule clip cfg).1.w + 1) := by
+  simp only [fillEdgesCounted]
+  have := (rowLoop_inv rule (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) cfg.samples
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.1
+    ((maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).1 * subUnit)
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.2.2
+    (maskRect (edges.mergeSort (fun a b => a.y0 ≤ b.y0)) clip).2.1 {}
+    (by simp) (by simp)).2.2
+  rw [Array.size_mergeSort] at this
+  simpa using this
+
+/-- **Fill a device path**: flatten then rasterize. -/
+def fillDPath (p : DPath) (rule : FillRule) (clip : IRect) (cfg : Config := {}) : Mask :=
+  fillEdges (flatten cfg clip p) rule clip cfg
+
+/-- **Fill a page-space path** through the page → device matrix `m`
+(e.g. `Geom.viewMatrix zoom rot box`). -/
+def fillPath (m : Aff) (p : Content.Path) (rule : FillRule) (clip : IRect) (cfg : Config := {}) :
+    Mask :=
+  fillDPath (ofContentPath m p) rule clip cfg
+
+/-! ## 6. Checks -/
+
+/-- Device path from pixel-unit integer points (test helper). -/
+private def px (x y : Int) : FPt := ⟨x * 256, y * 256⟩
+
+/-- A closed polygon through pixel points. -/
+private def poly (pts : List (Int × Int)) : DPath :=
+  match pts with
+  | [] => #[]
+  | (x, y) :: rest =>
+    (#[DSeg.moveTo (px x y)] ++ (rest.map fun (a, b) => DSeg.lineTo (px a b)).toArray).push
+      .closePath
+
+private def win : IRect := ⟨0, 0, 20, 20⟩
+
+-- Rectangle with integer corners [3,8)×[5,9): exactly 255 inside, 0 outside, area 20 px.
+#guard
+  let m := fillDPath (poly [(3, 5), (8, 5), (8, 9), (3, 9)]) .nonzero win
+  m.x0 == 3 && m.y0 == 5 && m.w == 5 && m.h == 4 && m.total == 20 * 255 &&
+    m.data.toList.all (· == 255) && m.get 2 5 == 0 && m.get 8 6 == 0 && m.get 3 5 == 255
+-- Even-odd agrees with nonzero on the simple rectangle.
+#guard (fillDPath (poly [(3, 5), (8, 5), (8, 9), (3, 9)]) .evenOdd win).total == 20 * 255
+-- Opposite orientation gives the same coverage.
+#guard (fillDPath (poly [(3, 5), (3, 9), (8, 9), (8, 5)]) .nonzero win).total == 20 * 255
+-- Triangle (0,0),(10,0),(0,10): area 50 px² (within 1%).
+#guard
+  let t := (fillDPath (poly [(0, 0), (10, 0), (0, 10)]) .nonzero win).total
+  50 * 255 * 99 ≤ t * 100 && t * 100 ≤ 50 * 255 * 101
+-- Empty path, path outside the window: empty masks.
+#guard (fillDPath #[] .nonzero win).w * (fillDPath #[] .nonzero win).h == 0
+#guard (fillDPath (poly [(30, 30), (40, 30), (40, 40)]) .nonzero win).total == 0
+-- Huge (clamped) coordinates: the whole 20×20 window is covered.
+#guard
+  let big := coordLimit / 256 + 1000000
+  let m := fillDPath (poly [(-big, -big), (big, -big), (big, big), (-big, big)]) .nonzero win
+  m.w == 20 && m.h == 20 && m.total == 400 * 255
+-- Exact subdivision points: B(1/2) of (0, 0, 256, 256) is (0 + 0 + 768 + 256)/8 = 128.
+#guard bezNum 2 1 0 0 256 256 == 1024 && (bezAt 2 1 ⟨0, 0⟩ ⟨0, 0⟩ ⟨256, 256⟩ ⟨256, 256⟩).x == 128
+#guard segCount 0 51 == 1 && segCount 1000000 51 ≤ curveSegCap
+
+end SafePdf.Core.Raster.Fill

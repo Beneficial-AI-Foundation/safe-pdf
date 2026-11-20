@@ -757,3 +757,18 @@ import SafePdf
 #print axioms SafePdf.Core.Font.CFF.evalList_size
 #print axioms SafePdf.Core.Font.CFF.CFFFont.advance_eq
 #print axioms SafePdf.Core.Font.CFF.CFFFont.numGlyphs_le_max
+
+-- Phase 7, task 7.2a: fill core (SafePdf/Core/Raster/Fill.lean)
+#print axioms SafePdf.Core.Raster.Fill.bez_sub_chord
+#print axioms SafePdf.Core.Raster.Fill.chord_err
+#print axioms SafePdf.Core.Raster.Fill.flatten_err
+#print axioms SafePdf.Core.Raster.Fill.flatten_err_tol
+#print axioms SafePdf.Core.Raster.Fill.bezNum_eq
+#print axioms SafePdf.Core.Raster.Fill.roundDivI_err
+#print axioms SafePdf.Core.Raster.Fill.segCount_spec
+#print axioms SafePdf.Core.Raster.Fill.flatten_size_le
+#print axioms SafePdf.Core.Raster.Fill.rowLoop_inv
+#print axioms SafePdf.Core.Raster.Fill.fillEdges_size
+#print axioms SafePdf.Core.Raster.Fill.fillEdgesCounted_steps_le
+#print axioms SafePdf.Core.Raster.Fill.maskRect_le
+#print axioms SafePdf.Core.Raster.Fill.covByte_full
