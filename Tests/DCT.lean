@@ -14,7 +14,9 @@ Plan.md §3 (quarantine zone, revalidation), §6 Phase 7. Checks `SafePdf.Quaran
   gray / 4:4:4 / 4:2:2 / 4:2:0, a 3-pixel-wide image, restart intervals, quality 100,
   refinement-heavy `-scans` scripts (colour, colour with restarts, gray with single-coefficient
   bands), a smooth image (long end-of-band runs) and `jpegtran -progressive` of the CMYK
-  file) against `Tests/images/*.ref` — the decode of
+  file; 7.6c: files without `DHT` (standard tables), truncated baseline files (grey tail),
+  truncated and DC-only progressive files (block smoothing), files cut inside a `DHT`
+  between scans) against `Tests/images/*.ref` — the decode of
   `djpeg -dct int`, i.e. libjpeg-turbo with MuPDF's settings (islow IDCT, fancy upsampling).
   Expected: **bit-exact** (the count of differing samples and the largest difference are
   printed on failure);
@@ -45,7 +47,9 @@ open SafePdf.Quarantine
 def fixtures : List String :=
   ["gray", "s444", "s422", "s420", "s440", "s411", "narrow", "rst", "rgb", "q100", "scans",
    "cmyk", "ycck", "pgray", "p444", "p422", "p420", "pnarrow", "prst", "pq100", "pscans",
-   "pscanrst", "pscangray", "psmooth", "pcmyk"]
+   "pscanrst", "pscangray", "psmooth", "pcmyk", "nodht", "nodhtgray", "ts420", "trst", "tgray",
+   "tp420", "tp420b", "tp444", "tpgray", "tprst", "tpscans", "tpscanrst", "tpscangray", "tpsmooth",
+   "tpnarrow", "tdhtp", "tdhts", "dcp420", "dcpgray"]
 
 /-- Parse a reference file: header line `W H NC`, then the samples. -/
 def parseRef (b : ByteArray) : Option (Nat × Nat × Nat × ByteArray) := do
@@ -146,10 +150,11 @@ def BW.flush (w : BW) : BW := if w.n % 8 = 0 then w else w.put (2 ^ (8 - w.n % 8
 
 /-- The progressive twin of `synth420 mx my` (same coefficients, so the same samples):
 `SOF2`; an interleaved DC first scan (the DC codes of `synth420`); for each component an AC
-first scan of band 1–1 at `Al = 1` (all zero: one end-of-band run over the component) and
+first scan of band 1–63 at `Al = 1` (all zero: one end-of-band run over the component) and
 an AC refinement `Ah = 1, Al = 0` making coefficient 1 equal to 1 in every block of even
-`synth420` index (a newly nonzero coefficient; other blocks: `EOB`). AC table: `EOB0`,
-`0x01`, `EOB1 … EOB14`, 5-bit codes `0, 1, 2, …`. -/
+`synth420` index (a newly nonzero coefficient, then `EOB`; other blocks: `EOB`). Full
+bands: every coefficient ends at full precision, so libjpeg applies no block smoothing.
+AC table: `EOB0`, `0x01`, `EOB1 … EOB14`, 5-bit codes `0, 1, 2, …`. -/
 def synthProg (mx my : Nat) : ByteArray := Id.run do
   let seg := fun (m : Nat) (body : List Nat) =>
     [0xFF, m, (body.length + 2) / 256, (body.length + 2) % 256] ++ body
@@ -176,13 +181,13 @@ def synthProg (mx my : Nat) : ByteArray := Id.run do
   for c in [0:3] do
     let (bw2, bh2) := if c = 0 then (2 * mx, 2 * my) else (mx, my)
     let n := bw2 * bh2
-    -- AC first, band 1-1, Al = 1: one end-of-band run of n blocks.
-    out := out ++ (body.toList.map (·.toNat)) ++ seg 0xDA [1, c + 1, 0x00, 1, 1, 0x01]
+    -- AC first, band 1-63, Al = 1: one end-of-band run of n blocks.
+    out := out ++ (body.toList.map (·.toNat)) ++ seg 0xDA [1, c + 1, 0x00, 1, 63, 0x01]
     let r := Nat.log2 n
     bw := {}
     bw := bw.put (if r = 0 then 0 else r + 1) 5
     if 0 < r then bw := bw.put (n - 2 ^ r) r
-    out := out ++ (bw.flush.out.toList.map (·.toNat)) ++ seg 0xDA [1, c + 1, 0x00, 1, 1, 0x10]
+    out := out ++ (bw.flush.out.toList.map (·.toNat)) ++ seg 0xDA [1, c + 1, 0x00, 1, 63, 0x10]
     -- AC refinement, Ah = 1, Al = 0.
     bw := {}
     for by_ in [0:bh2] do
@@ -192,6 +197,7 @@ def synthProg (mx my : Nat) : ByteArray := Id.run do
         if kk % 2 = 0 then
           bw := bw.put 1 5
           bw := bw.put 1 1
+          bw := bw.put 0 5
         else bw := bw.put 0 5
     body := bw.flush.out
   out := out ++ (body.toList.map (·.toNat)) ++ [0xFF, 0xD9]
@@ -204,6 +210,26 @@ def extraScans (base : ByteArray) (n : Nat) : ByteArray := Id.run do
   for _ in [0:n] do
     b := b ++ ByteArray.mk #[0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 0, 0x10, 0]
   return b ++ ByteArray.mk #[0xFF, 0xD9]
+
+/-- `b` without the `DHT` segments before its first `SOS` (at most 64 segments). -/
+def stripDHT (b : ByteArray) : ByteArray := Id.run do
+  let mut out := b.extract 0 2
+  let mut i := 2
+  for _ in [0:64] do
+    if b.size ≤ i + 3 || b.get! (i + 1) == 0xDA then break
+    let e := i + 2 + (b.get! (i + 2)).toNat * 256 + (b.get! (i + 3)).toNat
+    if b.get! (i + 1) != 0xC4 then out := out ++ b.extract i e
+    i := e
+  return out ++ b.extract i b.size
+
+/-- A baseline JPEG claiming `w × h` pixels (the `SOF0` of `b` patched) whose data stops early:
+libjpeg leaves the rest grey, and the decoder must not decode it block by block. -/
+def hugeCut (b : ByteArray) (w h : Nat) : ByteArray :=
+  let sof := (findMarker b 0xC0).getD 0
+  let b := patch (patch (patch (patch b (sof + 5) (h / 256)) (sof + 6) (h % 256)) (sof + 7) (w / 256))
+    (sof + 8) (w % 256)
+  let sos := (findMarker b 0xDA).getD 0
+  b.extract 0 (sos + 200)
 
 /-- Run the suite. -/
 def run : IO Nat := do
@@ -259,13 +285,29 @@ def run : IO Nat := do
       ("too many scans", extraScans pgray 260,
         fun r => match r with | .error (.unsupported _) => true | _ => false),
       ("many scans", extraScans pgray 250, fun r => !isErr r && lawOk r),
-      ("cut progressive", p420.extract 0 (p420.size / 2), fun r => !isErr r && lawOk r) ]
+      ("cut progressive", p420.extract 0 (p420.size / 2), fun r => !isErr r && lawOk r),
+      -- libjpeg-turbo supplies standard tables to sequential frames only (`jdhuff.c`).
+      ("progressive without DHT", stripDHT p420, isErr),
+      ("sequential without DHT", stripDHT s420, fun r => !isErr r && lawOk r),
+      -- A frame header cut by the end of the data stays an error.
+      ("cut in SOF", s420.extract 0 (sof + 8), isErr) ]
   for (what, b, ok) in bad do
     if !ok (DCT.decode {} none b) then
       failures := failures + 1; report s!"malformed: {what}"
   match DCT.decode { maxImagePixels := 100 } none s420 with
   | .error (.limitExceeded .imagePixels) => pure ()
   | _ => failures := failures + 1; report "maxImagePixels limit"
+  -- 2b. Time bound: a truncated baseline JPEG claiming 4096 × 4096 pixels.
+  let gray ← IO.FS.readBinFile (dir / "gray.jpg")
+  let huge := hugeCut gray 4096 4096
+  let t0 ← IO.monoNanosNow
+  match DCT.decode {} none huge with
+  | .ok img =>
+    let t1 ← IO.monoNanosNow
+    IO.println s!"  dct: truncated {img.w}x{img.h} gray ({huge.size} bytes) decoded in {(t1 - t0) / 1000000} ms"
+    if img.w != 4096 || img.h != 4096 || img.data.get! (img.data.size - 1) != 128 then
+      failures := failures + 1; report "truncated huge JPEG: size or grey tail"
+  | .error e => failures := failures + 1; report s!"truncated huge JPEG: {repr e}"
   -- 3. Corruptions and truncations keep the size law.
   let mut seed := 12345
   let mut viol := 0
