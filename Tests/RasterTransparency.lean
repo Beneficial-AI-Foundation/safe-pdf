@@ -22,6 +22,8 @@ buffer sizes are theorems in `SafePdf.Core.Raster.Transparency`; this suite chec
 * knockout groups (task 7.3i): in a `/K true` group the second of two overlapping translucent
   squares replaces the first in the overlap (blue at 50 % over white, not over black), also
   after an opaque square, and with the group at alpha 0.5; without `/K` the overlap darkens;
+  `b` with `CA 0.5` through the runner: a knockout group, the stroke over the fill shows the
+  page, not the fill (an opaque stroke gets no group);
 * layer nesting beyond `maxLayerDepth` keeps the buffer size;
 * end to end: a content stream with an ExtGState soft mask and a transparency-group form
   through `Content.runBytes` and the driver;
@@ -137,6 +139,12 @@ theorem painter_lawful (W H : Nat) : (painter W H).Lawful where
 def render (W H : Nat) (items : Array DisplayItem) : Image :=
   ⟨W, H, (items.foldl (renderTx (painter W H) W H maxMaskDepth)
     { rs := { buf := whiteBuf W H } }).rs.buf⟩
+
+/-- `render`, with strokes painted (`Clip.defaultStroke`). -/
+def renderS (W H : Nat) (items : Array DisplayItem) : Image :=
+  let P : Painter TS := { painter W H with
+    paint := fun s it => { s with rs := renderItem {} Aff.id W H defaultStroke s.rs it } }
+  ⟨W, H, (items.foldl (renderTx P W H maxMaskDepth) { rs := { buf := whiteBuf W H } }).rs.buf⟩
 
 /-- RGB of pixel `(x, y)`. -/
 def pxAt (img : Image) (x y : Nat) : Nat × Nat × Nat :=
@@ -354,6 +362,20 @@ def run : IO Nat := do
     fillI (rectP 8 8 18 18) (rgbC 0 0 100) half, .groupEnd]
   if pxAt k9d 10 10 != (63, 63, 191) then
     failures := failures + 1; report s!"non-knockout group: {pxAt k9d 10 10}"
+  -- `b` with a translucent stroke (`CA 0.5`, task 7.3i): a knockout group around the fill and
+  -- the stroke, so inside the fill the stroke shows the page (white), not the red fill.
+  let res9 := "<< /ExtGState << /K << /CA 0.5 >> >> >>"
+  let items9e := runC [] res9 "/K gs 1 0 0 rg 0 0 1 RG 4 w 6 6 14 14 re b"
+  let kinds9e := items9e.toList.map DisplayItem.kind
+  let k9e := renderS 20 20 items9e
+  let v9e := (pxAt k9e 7 10, pxAt k9e 5 10, pxAt k9e 10 10, pxAt k9e 1 1)
+  if kinds9e != ["groupBegin", "fillPath", "strokePath", "groupEnd"] ||
+      v9e != ((127, 127, 255), (127, 127, 255), (255, 0, 0), (255, 255, 255)) then
+    failures := failures + 1; report s!"b with CA 0.5: {kinds9e} {v9e}"
+  -- an opaque Normal stroke needs no group
+  let items9f := runC [] res9 "1 0 0 rg 0 0 1 RG 4 w 6 6 14 14 re b"
+  if items9f.toList.map DisplayItem.kind != ["fillPath", "strokePath"] then
+    failures := failures + 1; report s!"b opaque: {items9f.toList.map DisplayItem.kind}"
   -- 10. Timing: a group of 100 squares at alpha 0.5 on 612 × 792; a soft-masked full fill.
   let sq : Array DisplayItem := (Array.range 100).map fun k =>
     let x : Int := (k % 10 : Nat) * 60
