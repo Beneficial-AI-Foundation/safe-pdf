@@ -109,7 +109,7 @@ theorem decodeStreamB_cost (limits : Limits) (budget : Budget) (d : Dict) (raw :
       Nat.mul_le_mul_right _ (by omega)
     cases hbyte : hasByte stages with
     | true =>
-      simp only [decodeStreamB, hp, hbyte, ↓reduceIte]
+      simp only [decodeStreamB, hp, hbyte, ↓reduceIte, applyStagesB_cap]
       have := applyStagesB_cost limits strict stages budget.remaining raw
         (limits.maxDecodedStreamBytes + raw.size) hb hM
       omega
@@ -173,15 +173,16 @@ theorem decodeStreamB_eq {limits : Limits} {budget : Budget} {d : Dict} {raw : B
       Nat.mul_le_mul_right _ (by omega)
     cases hbyte : hasByte stages with
     | true =>
-      simp only [decodeStreamB, decodeStream, hp, hbyte, ↓reduceIte]
+      simp only [decodeStreamB, decodeStream, hp, hbyte, ↓reduceIte, applyStagesB_cap,
+        applyStages_cap]
       exact applyStagesB_eq limits strict stages budget.remaining raw _ hb hM (by omega)
     | false =>
       cases hr : applyStages limits strict stages raw with
-      | error e => simp [decodeStreamB, decodeStream, hp, hbyte, hr]
+      | error e => simp [decodeStreamB, decodeStream, hp, hbyte, hr, applyStages_cap]
       | ok r =>
         have hrs := applyStages_size_le limits strict stages raw r hr
         have hs : r.bytes.size ≤ budget.remaining := by omega
-        simp [decodeStreamB, decodeStream, hp, hbyte, hr, hs]
+        simp [decodeStreamB, decodeStream, hp, hbyte, hr, hs, applyStages_cap]
 
 /-! ## Structural streams -/
 

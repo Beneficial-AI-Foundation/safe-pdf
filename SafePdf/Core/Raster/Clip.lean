@@ -861,8 +861,78 @@ def itemBound (cfg : Config) (m : Aff) (W H : Nat) : DisplayItem → IRect
   | .shading _ _ _ _ clip => clipBound cfg m W H clip
   | _ => emptyRect
 
-/-- An opaque white RGBA buffer of `W · H` pixels. -/
-def whiteBuf (W H : Nat) : ByteArray := ByteArray.mk (Array.replicate (4 * W * H) 255)
+/-! ### Filled buffers (task 8.10)
+
+`ByteArray.mk (Array.replicate n v)` first builds an `Array UInt8` of boxed elements (8 bytes
+per byte) and then copies it: a transient 9× peak for a page buffer. `filledBuf` pushes one row
+into a buffer of its size and appends copies of it into a buffer reserved at the full size
+(no reallocation, one `memcpy` per row); `filledBuf_eq` states it has the same bytes. -/
+
+/-- `n` bytes `v` pushed onto `b`. -/
+def fillBytes (v : UInt8) : Nat → ByteArray → ByteArray
+  | 0, b => b
+  | n + 1, b => fillBytes v n (b.push v)
+
+/-- `fillBytes` appends `n` copies of `v`. -/
+theorem fillBytes_data (v : UInt8) (n : Nat) (b : ByteArray) :
+    (fillBytes v n b).data = b.data ++ Array.replicate n v := by
+  induction n generalizing b with
+  | zero => simp [fillBytes]
+  | succ n ih =>
+    rw [fillBytes, ih, ByteArray.data_push, Array.push_eq_append, Array.append_assoc,
+      Array.replicate_succ']
+
+/-- `n` copies of `row` appended to `b`. -/
+def appendCopies (row : ByteArray) : Nat → ByteArray → ByteArray
+  | 0, b => b
+  | n + 1, b => appendCopies row n (b ++ row)
+
+/-- `appendCopies` of a row of `k` bytes `v` appends `n · k` bytes `v`. -/
+theorem appendCopies_data (row : ByteArray) (k : Nat) (v : UInt8)
+    (h : row.data = Array.replicate k v) (n : Nat) (b : ByteArray) :
+    (appendCopies row n b).data = b.data ++ Array.replicate (n * k) v := by
+  induction n generalizing b with
+  | zero => simp [appendCopies]
+  | succ n ih =>
+    rw [appendCopies, ih, ByteArray.data_append, h, Array.append_assoc,
+      Array.replicate_append_replicate, Nat.succ_mul, Nat.add_comm k]
+
+/-- `h` rows of `w` bytes `v`: one row pushed, then `h` row copies into a buffer reserved at
+`w · h` bytes. -/
+def filledBuf (w h : Nat) (v : UInt8) : ByteArray :=
+  appendCopies (fillBytes v w (ByteArray.emptyWithCapacity w)) h
+    (ByteArray.emptyWithCapacity (w * h))
+
+/-- **Same bytes** as `ByteArray.mk (Array.replicate (w · h) v)`. -/
+theorem filledBuf_eq (w h : Nat) (v : UInt8) :
+    filledBuf w h v = ByteArray.mk (Array.replicate (w * h) v) := by
+  have hr : (fillBytes v w (ByteArray.emptyWithCapacity w)).data = Array.replicate w v := by
+    rw [fillBytes_data]; exact Array.empty_append
+  have := appendCopies_data _ w v hr h (ByteArray.emptyWithCapacity (w * h))
+  rw [Nat.mul_comm h w] at this
+  cases hb : filledBuf w h v with
+  | mk d =>
+    unfold filledBuf at hb
+    rw [hb] at this
+    simp only at this
+    rw [this]; exact congrArg ByteArray.mk Array.empty_append
+
+/-- `filledBuf` has `w · h` bytes. -/
+theorem filledBuf_size (w h : Nat) (v : UInt8) : (filledBuf w h v).size = w * h := by
+  rw [filledBuf_eq]; simp [ByteArray.size]
+
+/-- An opaque white RGBA buffer of `W · H` pixels (`filledBuf`, task 8.10). -/
+def whiteBuf (W H : Nat) : ByteArray := filledBuf (4 * W) H 255
+
+/-- `whiteBuf` is `4 · W · H` bytes 255 (its definition before task 8.10). -/
+theorem whiteBuf_eq (W H : Nat) : whiteBuf W H = ByteArray.mk (Array.replicate (4 * W * H) 255) :=
+  filledBuf_eq _ _ _
+
+/-- `whiteBuf` has `4 · W · H` bytes. -/
+theorem whiteBuf_size (W H : Nat) : (whiteBuf W H).size = 4 * W * H := filledBuf_size _ _ _
+
+#guard filledBuf 3 2 7 == ⟨#[7, 7, 7, 7, 7, 7]⟩ && filledBuf 0 5 1 == .empty &&
+  filledBuf 4 0 1 == .empty && whiteBuf 2 3 == ⟨Array.replicate 24 255⟩
 
 /-- Render path items onto a white `W × H` page through `m`, with the final state. -/
 def renderItemsCounted (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
@@ -894,7 +964,7 @@ theorem renderItems_size (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayLi
       4 * (renderItems cfg m W H items stroke).w * (renderItems cfg m W H items stroke).h := by
   simp only [renderItems, renderItemsCounted]
   rw [← Array.foldl_toList, foldl_renderItem_size]
-  simp [whiteBuf, ByteArray.size]
+  exact whiteBuf_size W H
 
 /-- Cost bound of one item on a `W × H` page: its clip, its path (fills), and the compositing
 (`≤ W · H`) of a stroke (the stroker's own work is 7.2b's bound). -/

@@ -398,7 +398,7 @@ def placement (r : GlyphRun) (tx : Fixed) : Aff :=
 /-- A full-coverage mask over `r`. -/
 def fullMask (r : IRect) : Mask :=
   { x0 := r.x0, y0 := r.y0, w := r.width, h := r.height,
-    data := ByteArray.mk (Array.replicate (r.width * r.height) 255) }
+    data := Clip.filledBuf r.width r.height 255 }
 
 /-- The device rectangle of a glyph box through `T`, widened by one pixel, inside `win`
 (`none`: nothing to paint). -/

@@ -814,7 +814,7 @@ def Cache.insert (c : Cache) (k : Key) (r : Except Error Raster.Clip.Image) : Ca
     c.trim c.entries.size
 
 private def img (n : Nat) : Except Error Raster.Clip.Image :=
-  .ok ⟨n, 1, ByteArray.mk (Array.replicate (4 * n) 255)⟩
+  .ok ⟨n, 1, Raster.Clip.filledBuf (4 * n) 1 255⟩
 
 private def key (p : Nat) : Key := ⟨0, p, 1, .r0⟩
 
