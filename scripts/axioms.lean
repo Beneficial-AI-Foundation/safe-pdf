@@ -1044,3 +1044,8 @@ import SafePdf.Shell.App.Links
 -- Phase 7, task 7.6a: baseline JPEG (SafePdf/Quarantine/DCT.lean)
 #print axioms SafePdf.Quarantine.DCT.decode_pixels
 #print axioms SafePdf.Quarantine.DCT.finalize_pixels
+
+-- Phase 7, task 7.3k: MuPDF stencil scaler for Type 3 glyphs
+#print axioms SafePdf.Core.Raster.Type3.drawImageWith_size
+#print axioms SafePdf.Core.Raster.Type3.drawImagesC_size
+#print axioms SafePdf.Core.Raster.Type3.drawCached_size
