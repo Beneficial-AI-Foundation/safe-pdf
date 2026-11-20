@@ -12,9 +12,9 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   page, Go to page…, Back, Forward). The viewer builds the Tk menus from this list
   (`Viewer.buildMenus`) and keeps every entry's `-state` in step with `Cmd.enabled`
   (`entryStates`, applied only where it changed).
-* **Toolbar** (`toolbarCmds`): the toolbar buttons whose enabled state follows the same rule.
-  Task 9.7 rebuilds the toolbar after PDF.js; it reuses `Cmd` (label, script, rule) so that
-  menubar, toolbar and keys stay one vocabulary.
+* **Toolbar** (`Toolbar.layout`, task 9.7, rebuilt after PDF.js): its buttons and its
+  overflow menu reuse `Cmd` (label, script, rule) so that menubar, toolbar and keys stay one
+  vocabulary.
 * **Keys stay**: the accelerators shown here are the key bindings of `Viewer.setupScript`
   (Ctrl+O, Ctrl+W, Ctrl+Q, Ctrl+C, Ctrl+A, Ctrl+F, F9, `+`, `-`, `0`, `f`, `w`, `r`, `R`,
   PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right); a menu accelerator is only a label in Tk.
@@ -249,12 +249,6 @@ def menubar : List Menu :=
       [.cmd .prevPage, .cmd .nextPage, .cmd .firstPage, .cmd .lastPage, .sep, .cmd .gotoPage,
        .sep, .cmd .back, .cmd .forward]⟩ ]
 
-/-- Toolbar buttons whose enabled state follows `Cmd.enabled` (task 9.7 rebuilds the toolbar
-and extends this list). -/
-def toolbarCmds : List (String × Cmd) :=
-  [(".bar.prev", .prevPage), (".bar.next", .nextPage), (".bar.back", .back),
-   (".bar.fwd", .forward), (".bar.outline", .outline)]
-
 /-- Every command entry of the menubar as (menu path, entry index, command); the index counts
 separators, as Tk's menu indices do (menus have no tear-off entry). -/
 def entryList : List (String × Nat × Cmd) :=
@@ -262,9 +256,10 @@ def entryList : List (String × Nat × Cmd) :=
     (List.range m.entries.length).zip m.entries |>.filterMap fun (i, e) =>
       e.cmd?.map fun c => (m.path, i, c)
 
-/-- The enabled state of every menubar entry (`entryList` order) and toolbar button, in `c`. -/
+/-- The enabled state of every menubar entry (`entryList` order) in `c` (the toolbar adds its
+buttons and the overflow menu: `Toolbar.states`). -/
 def entryStates (c : Ctx) : List Bool :=
-  entryList.map (fun (_, _, k) => k.enabled c) ++ toolbarCmds.map (fun (_, k) => k.enabled c)
+  entryList.map (fun (_, _, k) => k.enabled c)
 
 /-- Where `cmd` sits in the menubar: menu path and entry index. -/
 def locate (cmd : Cmd) : Option (String × Nat) :=
@@ -295,6 +290,6 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 -- A one-page document: no paging either way.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !Cmd.prevPage.enabled c && !Cmd.nextPage.enabled c
-#guard (entryStates {}).length == entryList.length + toolbarCmds.length
+#guard (entryStates {}).length == entryList.length
 
 end SafePdf.Shell.App.Menu

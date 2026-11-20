@@ -4,19 +4,24 @@ import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Menu
+import SafePdf.Shell.App.Toolbar
+import SafePdf.Shell.App.Sidebar
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
 
 /-!
-# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
+# Native viewer (tasks 8.2a–8.2d, 9.1, 9.2, 9.7; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
 
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
 (File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
-`Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar
-(Open…, Prev, Next, zoom out/in, 100 %, fit page, fit width, rotate left/right, page k/n,
-zoom %), a scrollable canvas showing the current page as a Tk photo image, and a status line.
+`Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar and
+an outline sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
+`Toolbar.layout` and `Sidebar.rows`: sidebar toggle, page arrows, page field, zoom −/+ and
+drop-down, disabled annotation-tool placeholders, `»` overflow menu; the design reference is
+cited in `docs/viewer.md`, nothing of PDF.js is copied), a scrollable canvas showing the
+current page as a Tk photo image, and a status line.
 Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
 
 * **Opening.** A file named on the command line, else `tk_getOpenFile` (also Ctrl+O and the
@@ -63,7 +68,7 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   scrolled into view; the status line says `"q": hit k/n on page p` (k of the n hits of that
   page) or `"q": not found`.
 * **Navigation** (task 8.2d, pure logic in `Links`). The outline (`Nav.outline`) fills a
-  `ttk::treeview` in the left pane of a paned window (shown when the document has an outline;
+  tree (a text widget, task 9.7) in the left pane of a paned window (shown when the document has an outline;
   F9, the Outline button or the context menu toggle it); clicking an item jumps to its
   destination page, scrolled to the destination's position (`/XYZ`, `/FitH`, `/FitR`, … left/top
   mapped with `Geom.toScreen`, C2). Links (`Links.pageLinks`, read per page on first use):
@@ -124,8 +129,8 @@ structure State where
   canvasW : Nat := 800
   /-- Canvas height in pixels (last `<Configure>`). -/
   canvasH : Nat := 1000
-  /-- Zoom mode. -/
-  mode : View.Mode := .fitPage
+  /-- Zoom choice (task 9.7: the zoom drop-down's value; Automatic Zoom by default, as PDF.js). -/
+  zoomSel : Toolbar.ZoomChoice := .auto
   /-- User rotation (added to each page's `/Rotate`). -/
   rot : SafePdf.Core.Doc.Rotation := .r0
   /-- Screen scale: pixels per point (`tk scaling`). -/
@@ -173,7 +178,7 @@ structure State where
   smokeStep : Nat := 0
   /-- Page labels of the open document as text (task 8.2d). -/
   labels : Array String := #[]
-  /-- Outline entries of the open document (treeview item `oK` is entry `K`). -/
+  /-- Outline entries of the open document (outline row `oK` is entry `K`). -/
   outline : Array Links.Entry := #[]
   /-- Whether the outline panel is shown. -/
   outlineShown : Bool := false
@@ -190,6 +195,12 @@ structure State where
   menuStates : List Bool := []
   /-- Wheel state: sub-pixel remainder and push past the page edge (task 9.2). -/
   wheel : View.Wheel := {}
+  /-- Rows of the outline tree (task 9.7, `Sidebar.rows`). -/
+  olRows : List Sidebar.Row := []
+  /-- Which outline rows are open (`Sidebar.toggle`). -/
+  olOpen : Array Bool := #[]
+  /-- Whether the sidebar toggle is shown (`none`: not applied yet). -/
+  toggleShown : Option Bool := none
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -228,7 +239,7 @@ def viewParams (s : State) (doc : Doc) (p : Nat) : Option ViewParams :=
     let r := rotAdd page.rotate s.rot
     let bx := Box.ofRect page.cropBox
     let (pw, ph) := View.boxSize r bx
-    let z0 := View.modeZoom s.mode s.canvasW s.canvasH s.scaling pw ph
+    let z0 := s.zoomSel.zoom s.canvasW s.canvasH s.scaling pw ph
     let (z, capped) := View.capZoom View.maxViewPixels z0 r bx
     ⟨z, r, bx, capped, View.cropped limits.maxPageSide z r bx⟩
 
@@ -253,11 +264,8 @@ def fmtFrac (r : Rat) : String :=
 #guard fmtFrac 2 = "1.000000"
 #guard fmtFrac (-1) = "0.000000"
 
-/-- Name of a zoom mode for the status line. -/
-def modeName : View.Mode → String
-  | .fitPage => "fit page"
-  | .fitWidth => "fit width"
-  | .scale _ => "fixed"
+/-- Name of a zoom choice for the status line. -/
+def modeName (c : Toolbar.ZoomChoice) : String := c.statusName
 
 /-! ## Tcl -/
 
@@ -269,60 +277,329 @@ def run (words : List String) : IO String :=
 def setStatus (msg : String) : IO Unit := do
   discard <| run [".status", "configure", "-text", msg]
 
-/-- The constant UI setup script (no data in it). Widgets: toolbar `.bar` (buttons, page
-label `.bar.page`, zoom label `.bar.zoom`), canvas `.c` with scroll bars `.xs`/`.ys` gridded
-in frame `.v`, the photo image `::safepdf::page` on canvas item tag `page`, status line
-`.status`. Key bindings on the toplevel's bind tag `.`; canvas resizes are debounced and
-reported as `emit resize W H`. -/
+/-- The constant UI setup script (no data in it). Widgets: the toolbar `.bar` after PDF.js
+(task 9.7: groups `.bar.l`, `.bar.m` (centred), `.bar.r`, filled from `Toolbar.layout` by
+`buildToolbar` with the procs defined here: canvas icon buttons `::safepdf::iconButton`, the
+page field `.bar.pg` + `.bar.of`, the zoom drop-down `.bar.zoom` + menu `.zoommenu`, the
+overflow menu `.more`), the outline sidebar `.ol` (a text widget `.ol.t` drawn as a tree),
+canvas `.c` with scroll bars `.xs`/`.ys` gridded in frame `.v`, the photo image
+`::safepdf::page` on canvas item tag `page`, status line `.status`. Key bindings on the
+toplevel's bind tag `.`; canvas resizes are debounced and reported as `emit resize W H`.
+Colours and sizes follow PDF.js's light theme (`web/viewer.css`: toolbar `#f9f9fa`, 40 px
+high with 32 px round buttons and 16 px icons, separators, field and drop-down borders). -/
 def setupScript : String := "
 namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0 }
+namespace eval ::safepdf::icon {}
 wm title . safe-pdf
-wm geometry . 860x1040
-wm minsize . 320 200
-ttk::frame .bar
-ttk::button .bar.open -text {Open...} -command {::safepdf::emit open}
-ttk::button .bar.prev -text {< Prev} -command {::safepdf::emit prev}
-ttk::button .bar.next -text {Next >} -command {::safepdf::emit next}
-ttk::button .bar.zout -text {-} -width 2 -command {::safepdf::emit zoom out}
-ttk::button .bar.zin -text {+} -width 2 -command {::safepdf::emit zoom in}
-ttk::button .bar.actual -text {100%} -command {::safepdf::emit zoom actual}
-ttk::button .bar.fitp -text {Fit page} -command {::safepdf::emit zoom fitpage}
-ttk::button .bar.fitw -text {Fit width} -command {::safepdf::emit zoom fitwidth}
-ttk::button .bar.rccw -text {Rotate left} -command {::safepdf::emit rotate ccw}
-ttk::button .bar.rcw -text {Rotate right} -command {::safepdf::emit rotate cw}
-ttk::button .bar.outline -text {Outline} -command {::safepdf::emit outlineToggle}
-ttk::button .bar.back -text {Back} -command {::safepdf::emit back}
-ttk::button .bar.fwd -text {Forward} -command {::safepdf::emit forward}
-ttk::button .bar.goto -text {Go to...} -command ::safepdf::showGoto
-ttk::label .bar.page -text {} -anchor w
-ttk::label .bar.zoom -text {} -anchor w
-pack .bar.open .bar.outline .bar.back .bar.fwd .bar.prev .bar.next .bar.goto .bar.zout \\
-  .bar.zin .bar.actual .bar.fitp .bar.fitw .bar.rccw .bar.rcw -side left -padx 2 -pady 2
-pack .bar.page .bar.zoom -side left -padx 8
-# Outline panel (8.2d): a treeview in the left pane of .pw (shown/hidden by F9).
+wm geometry . 1200x960
+wm minsize . 480 240
+array set ::safepdf::col {
+  bar #f9f9fa line #d7d7db ink #3b3b44 inkOff #b6b6bd hover #e4e4e9 press #d2d2d9
+  toggled #dddde3 sep #d0d0d7 field #ffffff fieldLine #8f8f9d focus #0a84ff text #15141a
+  body #f0f0f4 panel #ffffff tri #5b5b66 olHover #ededf1 olCur #e0e0e6 dim #5b5b66
+}
+set ::safepdf::family [font actual TkDefaultFont -family]
+font create ::safepdf::fBar -family $::safepdf::family -size -13
+font create ::safepdf::fZoom -family $::safepdf::family -size -14 -weight bold
+font create ::safepdf::fOl -family $::safepdf::family -size -13
+font create ::safepdf::fOlHead -family $::safepdf::family -size -15
+font create ::safepdf::fTri -family $::safepdf::family -size -9
+# A rounded rectangle (a smoothed polygon with doubled corner points).
+proc ::safepdf::rrect {c x0 y0 x1 y1 r args} {
+  set a [expr {$x0 + $r}]; set b [expr {$x1 - $r}]; set u [expr {$y0 + $r}]; set v [expr {$y1 - $r}]
+  $c create polygon $a $y0 $a $y0 $b $y0 $b $y0 $x1 $y0 $x1 $u $x1 $u $x1 $v $x1 $v $x1 $y1 \\
+    $b $y1 $b $y1 $a $y1 $a $y1 $x0 $y1 $x0 $v $x0 $v $x0 $u $x0 $u $x0 $y0 -smooth 1 {*}$args
+}
+# Icons (16 px, centred on a 32 px button; PDF.js's icons re-drawn, not copied). Items tagged
+# inkf are coloured through -fill, inko through -outline.
+proc ::safepdf::icon::sidebar {c} {
+  ::safepdf::rrect $c 8 9 24 23 2 -fill {} -outline black -width 1.5 -tags inko
+  $c create line 13 9 13 23 -width 1.5 -tags inkf
+}
+proc ::safepdf::icon::up {c} {
+  $c create line 10 19 16 13 22 19 -width 1.8 -capstyle round -joinstyle round -tags inkf
+}
+proc ::safepdf::icon::down {c} {
+  $c create line 10 13 16 19 22 13 -width 1.8 -capstyle round -joinstyle round -tags inkf
+}
+proc ::safepdf::icon::minus {c} { $c create line 10 16 22 16 -width 1.8 -capstyle round -tags inkf }
+proc ::safepdf::icon::plus {c} {
+  $c create line 10 16 22 16 -width 1.8 -capstyle round -tags inkf
+  $c create line 16 10 16 22 -width 1.8 -capstyle round -tags inkf
+}
+proc ::safepdf::icon::highlight {c} {
+  $c create polygon 19 8 24 13 15 22 10 17 -fill {} -outline black -width 1.5 -joinstyle round -tags inko
+  $c create polygon 10 17 15 22 12 24 8 24 8 20 -fill black -outline {} -tags inkf
+}
+proc ::safepdf::icon::comment {c} {
+  ::safepdf::rrect $c 8 8 24 20 3 -fill {} -outline black -width 1.5 -tags inko
+  $c create line 12 20 12 25 17 20 -width 1.5 -joinstyle round -tags inkf
+  $c create line 12 12 20 12 -width 1.2 -tags inkf
+  $c create line 12 15.5 18 15.5 -width 1.2 -tags inkf
+}
+proc ::safepdf::icon::text {c} {
+  $c create line 9 10 23 10 -width 2 -capstyle round -tags inkf
+  $c create line 16 10 16 23 -width 2 -capstyle round -tags inkf
+}
+proc ::safepdf::icon::draw {c} {
+  $c create polygon 20 8 24 12 13 23 9 23 9 19 -fill {} -outline black -width 1.5 -joinstyle round -tags inko
+  $c create line 18 10 22 14 -width 1.5 -tags inkf
+}
+proc ::safepdf::icon::image {c} {
+  ::safepdf::rrect $c 8 9 24 23 2 -fill {} -outline black -width 1.5 -tags inko
+  $c create line 9 21 14 15 18 19 20 17 23 20 -width 1.5 -joinstyle round -tags inkf
+  $c create oval 18 11.5 21 14.5 -fill black -outline {} -tags inkf
+}
+proc ::safepdf::icon::print {c} {
+  $c create rectangle 11 8 21 13 -outline black -width 1.5 -tags inko
+  ::safepdf::rrect $c 8 13 24 21 2 -fill {} -outline black -width 1.5 -tags inko
+  $c create rectangle 11 18 21 24 -fill $::safepdf::col(bar) -outline black -width 1.5 -tags {inko paper}
+}
+proc ::safepdf::icon::save {c} {
+  $c create line 16 8 16 19 -width 1.6 -capstyle round -tags inkf
+  $c create line 11.5 14.5 16 19 20.5 14.5 -width 1.6 -capstyle round -joinstyle round -tags inkf
+  $c create line 9 19 9 24 23 24 23 19 -width 1.6 -joinstyle round -tags inkf
+}
+proc ::safepdf::icon::more {c} {
+  $c create line 10 11 15 16 10 21 -width 1.6 -capstyle round -joinstyle round -tags inkf
+  $c create line 17 11 22 16 17 21 -width 1.6 -capstyle round -joinstyle round -tags inkf
+}
+# Toolbar buttons: a 32 px canvas with a round background (hover, pressed, toggled as in
+# PDF.js) and an icon; disabled buttons draw the icon dimmed and ignore clicks. State in
+# ::safepdf::btn(KEY,PATH).
+set ::safepdf::tipId {}
+proc ::safepdf::iconButton {w icon tip cmd} {
+  canvas $w -width 32 -height 32 -background $::safepdf::col(bar) -highlightthickness 0 \\
+    -borderwidth 0 -takefocus 0
+  $w create oval 1 1 31 31 -fill $::safepdf::col(bar) -outline {} -tags bg
+  ::safepdf::icon::$icon $w
+  foreach {k v} [list st normal tog 0 in 0 down 0 cmd $cmd tip $tip] { set ::safepdf::btn($k,$w) $v }
+  bind $w <Enter> {::safepdf::btnEnter %W}
+  bind $w <Leave> {::safepdf::btnLeave %W}
+  bind $w <ButtonPress-1> {set ::safepdf::btn(down,%W) 1; ::safepdf::btnPaint %W}
+  bind $w <ButtonRelease-1> {::safepdf::btnRelease %W %x %y}
+  ::safepdf::btnPaint $w
+}
+proc ::safepdf::btnPaint {w} {
+  upvar #0 ::safepdf::btn b ::safepdf::col c
+  set on [expr {$b(st,$w) eq {normal}}]
+  if {$on && $b(down,$w) && $b(in,$w)} { set bg $c(press) } elseif {$on && $b(in,$w)} {
+    set bg $c(hover) } elseif {$b(tog,$w)} { set bg $c(toggled) } else { set bg $c(bar) }
+  $w itemconfigure bg -fill $bg
+  $w itemconfigure paper -fill $bg
+  set ink [expr {$on ? $c(ink) : $c(inkOff)}]
+  $w itemconfigure inkf -fill $ink
+  $w itemconfigure inko -outline $ink
+}
+proc ::safepdf::btnEnter {w} {
+  set ::safepdf::btn(in,$w) 1
+  ::safepdf::btnPaint $w
+  after cancel $::safepdf::tipId
+  set ::safepdf::tipId [after 600 [list ::safepdf::tipShow $w]]
+}
+proc ::safepdf::btnLeave {w} {
+  set ::safepdf::btn(in,$w) 0
+  ::safepdf::btnPaint $w
+  after cancel $::safepdf::tipId
+  destroy .tip
+}
+proc ::safepdf::btnRelease {w x y} {
+  set was $::safepdf::btn(down,$w)
+  set ::safepdf::btn(down,$w) 0
+  ::safepdf::btnPaint $w
+  if {$was && $x >= 0 && $y >= 0 && $x < [winfo width $w] && $y < [winfo height $w]} {
+    ::safepdf::btnInvoke $w
+  }
+}
+proc ::safepdf::btnInvoke {w} {
+  if {$::safepdf::btn(st,$w) eq {normal}} { uplevel #0 $::safepdf::btn(cmd,$w) }
+}
+proc ::safepdf::btnState {w {s {}}} {
+  if {$s ne {}} { set ::safepdf::btn(st,$w) $s; ::safepdf::btnPaint $w }
+  return $::safepdf::btn(st,$w)
+}
+proc ::safepdf::btnToggled {w on} { set ::safepdf::btn(tog,$w) $on; ::safepdf::btnPaint $w }
+proc ::safepdf::tipShow {w} {
+  if {![winfo exists $w] || !$::safepdf::btn(in,$w)} return
+  destroy .tip
+  toplevel .tip -background $::safepdf::col(fieldLine) -borderwidth 0
+  wm overrideredirect .tip 1
+  label .tip.l -text $::safepdf::btn(tip,$w) -font ::safepdf::fBar -background white \\
+    -foreground $::safepdf::col(text) -padx 6 -pady 3
+  pack .tip.l -padx 1 -pady 1
+  wm geometry .tip +[winfo rootx $w]+[expr {[winfo rooty $w] + [winfo height $w] + 6}]
+}
+proc ::safepdf::vsep {w} {
+  frame $w -width 1 -height 20 -background $::safepdf::col(sep)
+}
+# Packs toolbar widget w into group frame g (w is a child of .bar, so raise it above g).
+proc ::safepdf::barPack {w g args} {
+  pack $w -in $g -side left {*}$args
+  raise $w
+}
+frame .bar -background $::safepdf::col(bar) -height 40
+pack propagate .bar 0
+foreach g {.bar.l .bar.m .bar.r} { frame $g -background $::safepdf::col(bar) }
+pack .bar.l -side left -padx 4
+pack .bar.r -side right -padx 4
+place .bar.m -relx 0.5 -rely 0.5 -anchor center
+frame .barline -height 1 -background $::safepdf::col(line)
+# Page field (PDF.js #pageNumber + #numPages): Enter jumps, Escape or leaving reverts.
+proc ::safepdf::pageField {} {
+  upvar #0 ::safepdf::col c
+  canvas .bar.pg -width 56 -height 28 -background $c(bar) -highlightthickness 0 -borderwidth 0
+  ::safepdf::rrect .bar.pg 1 1 55 27 4 -fill $c(field) -outline $c(fieldLine) -tags frame
+  entry .bar.pg.e -textvariable ::safepdf::pageText -width 4 -justify right -borderwidth 0 \\
+    -relief flat -highlightthickness 0 -background $c(field) -foreground $c(text) \\
+    -disabledbackground $c(field) -font ::safepdf::fBar -insertwidth 1
+  .bar.pg create window 49 14 -anchor e -window .bar.pg.e -width 42 -height 20
+  label .bar.of -text {} -background $c(bar) -foreground $c(text) -font ::safepdf::fBar
+  ::safepdf::barPack .bar.pg .bar.l -padx {6 0}
+  ::safepdf::barPack .bar.of .bar.l -padx {6 4}
+  bindtags .bar.pg.e [list .bar.pg.e Entry all]
+  bind .bar.pg.e <Return> {::safepdf::emit pageEntry $::safepdf::pageText; break}
+  bind .bar.pg.e <KP_Enter> {::safepdf::emit pageEntry $::safepdf::pageText; break}
+  bind .bar.pg.e <Escape> {focus .c; ::safepdf::emit pageRevert; break}
+  bind .bar.pg.e <FocusIn> {.bar.pg itemconfigure frame -outline $::safepdf::col(focus); %W selection range 0 end}
+  bind .bar.pg.e <FocusOut> {.bar.pg itemconfigure frame -outline $::safepdf::col(fieldLine); ::safepdf::emit pageRevert}
+  bind .bar.pg.e <Control-q> {destroy .}
+}
+proc ::safepdf::setPage {text of on} {
+  set ::safepdf::pageText $text
+  .bar.of configure -text $of
+  .bar.pg.e configure -state [expr {$on ? {normal} : {disabled}}]
+}
+# Zoom drop-down (PDF.js #scaleSelect): a rounded button showing the current choice; the
+# menu .zoommenu holds the choices (radio entries on ::safepdf::zoomSel).
+set ::safepdf::zoomSel auto
+set ::safepdf::zoomOn 0
+proc ::safepdf::zoomBox {} {
+  upvar #0 ::safepdf::col c
+  canvas .bar.zoom -width 192 -height 32 -background $c(bar) -highlightthickness 0 \\
+    -borderwidth 0 -takefocus 0
+  ::safepdf::rrect .bar.zoom 1 1 191 31 15 -fill $c(field) -outline $c(fieldLine) -tags frame
+  .bar.zoom create text 16 16 -anchor w -text {} -font ::safepdf::fZoom -fill $c(text) -tags label
+  .bar.zoom create line 164 13.5 169 18.5 174 13.5 -width 1.6 -fill $c(ink) -capstyle round \\
+    -joinstyle round -tags chev
+  ::safepdf::barPack .bar.zoom .bar.m -padx {8 0}
+  bind .bar.zoom <Enter> {if {$::safepdf::zoomOn} {.bar.zoom itemconfigure frame -fill $::safepdf::col(hover)}}
+  bind .bar.zoom <Leave> {.bar.zoom itemconfigure frame -fill $::safepdf::col(field)}
+  bind .bar.zoom <ButtonPress-1> ::safepdf::postZoom
+  menu .zoommenu -tearoff 0 -background white -activebackground $c(hover) \\
+    -activeforeground $c(text) -foreground $c(text) -font ::safepdf::fBar -relief solid \\
+    -borderwidth 1 -activeborderwidth 0 -selectcolor $c(ink)
+}
+proc ::safepdf::postZoom {} {
+  if {!$::safepdf::zoomOn} return
+  tk_popup .zoommenu [winfo rootx .bar.zoom] [expr {[winfo rooty .bar.zoom] + [winfo height .bar.zoom] + 2}]
+}
+proc ::safepdf::zoomShow {label sel on} {
+  set ::safepdf::zoomOn $on
+  set ::safepdf::zoomSel $sel
+  .bar.zoom itemconfigure label -text $label \\
+    -fill [expr {$on ? $::safepdf::col(text) : $::safepdf::col(inkOff)}]
+  .bar.zoom itemconfigure chev -fill [expr {$on ? $::safepdf::col(ink) : $::safepdf::col(inkOff)}]
+}
+# Overflow menu (PDF.js's secondary toolbar), posted under the right edge of the » button.
+menu .more -tearoff 0 -background white -activebackground $::safepdf::col(hover) \\
+  -activeforeground $::safepdf::col(text) -foreground $::safepdf::col(text) \\
+  -font ::safepdf::fBar -relief solid -borderwidth 1 -activeborderwidth 0
+proc ::safepdf::postMore {} {
+  set x [expr {[winfo rootx .bar.more] + [winfo width .bar.more] - [winfo reqwidth .more]}]
+  tk_popup .more $x [expr {[winfo rooty .bar.more] + [winfo height .bar.more] + 2}]
+}
+# The sidebar toggle is shown only when the document has an outline.
+proc ::safepdf::showToggle {on} {
+  if {$on} {
+    if {![winfo ismapped .bar.sidebar]} {
+      pack .bar.sidebar .bar.s0 -in .bar.l -side left -padx 2 -before .bar.prev
+      raise .bar.sidebar; raise .bar.s0
+    }
+  } else { pack forget .bar.sidebar .bar.s0 }
+}
+# Outline sidebar (8.2d, restyled after PDF.js in 9.7): a panel titled Document outline with
+# a text widget drawn as a tree; row K has tag oK (title), tK (disclosure triangle), the
+# margin tag dN/lN of its depth and uA for every ancestor A (a closed ancestor elides it).
 ttk::panedwindow .pw -orient horizontal
-ttk::frame .ol
-ttk::treeview .ol.t -show tree -selectmode browse -yscrollcommand {.ol.s set}
-.ol.t column #0 -width 240
+frame .ol -background $::safepdf::col(body) -padx 6 -pady 6
+frame .ol.p -background $::safepdf::col(panel) -highlightthickness 1 \\
+  -highlightbackground $::safepdf::col(line) -highlightcolor $::safepdf::col(line)
+label .ol.h -text {Document outline} -font ::safepdf::fOlHead -background $::safepdf::col(panel) \\
+  -foreground $::safepdf::col(text) -anchor w -padx 10 -pady 8
+text .ol.t -wrap word -width 30 -height 10 -borderwidth 0 -highlightthickness 0 \\
+  -background $::safepdf::col(panel) -foreground $::safepdf::col(text) -font ::safepdf::fOl \\
+  -cursor arrow -padx 4 -pady 2 -spacing1 4 -spacing3 4 -state disabled -takefocus 0 \\
+  -insertwidth 0 -yscrollcommand ::safepdf::olScroll -selectbackground $::safepdf::col(panel) \\
+  -inactiveselectbackground {} -exportselection 0
 ttk::scrollbar .ol.s -orient vertical -command {.ol.t yview}
-grid .ol.t -row 0 -column 0 -sticky nsew
-grid .ol.s -row 0 -column 1 -sticky ns
-grid rowconfigure .ol 0 -weight 1
-grid columnconfigure .ol 0 -weight 1
-bindtags .ol.t [list .ol.t Treeview all]
+pack .ol.p -in .ol -fill both -expand 1
+grid .ol.h -in .ol.p -row 0 -column 0 -columnspan 2 -sticky ew
+grid .ol.t -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.s -in .ol.p -row 1 -column 1 -sticky ns
+grid rowconfigure .ol.p 1 -weight 1
+grid columnconfigure .ol.p 0 -weight 1
+raise .ol.h; raise .ol.t; raise .ol.s
+.ol.t tag configure tri -foreground $::safepdf::col(tri) -font ::safepdf::fTri -offset 1
+# The sidebar scroll bar shows only when the tree does not fit (PDF.js has overlay bars).
+proc ::safepdf::olScroll {a b} {
+  .ol.s set $a $b
+  if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.s } else { grid .ol.s }
+}
+.ol.t tag configure hover -background $::safepdf::col(olHover)
+.ol.t tag configure cur -background $::safepdf::col(olCur)
+bindtags .ol.t [list .ol.t . all]
+proc ::safepdf::olRowAt {x y} {
+  set i [.ol.t index @$x,$y]
+  set d [.ol.t dlineinfo $i]
+  if {$d eq {} || $y > [lindex $d 1] + [lindex $d 3]} return
+  foreach t [.ol.t tag names $i] {
+    if {[regexp {^([ot])([0-9]+)$} $t -> k n]} { return [list $k $n] }
+  }
+}
 proc ::safepdf::olClick {x y} {
-  if {[string match *indicator* [.ol.t identify element $x $y]]} return
-  set id [.ol.t identify item $x $y]
-  if {$id ne {}} { ::safepdf::emit outline $id }
+  lassign [::safepdf::olRowAt $x $y] k n
+  if {$k eq {t}} { ::safepdf::emit olToggle $n } elseif {$k eq {o}} { ::safepdf::emit outline o$n }
+}
+proc ::safepdf::olHover {x y} {
+  .ol.t tag remove hover 1.0 end
+  lassign [::safepdf::olRowAt $x $y] k n
+  if {$k ne {}} {
+    set i [.ol.t index @$x,$y]
+    .ol.t tag add hover \"$i linestart\" \"$i lineend + 1c\"
+  }
+}
+proc ::safepdf::olMark {n} {
+  .ol.t tag remove cur 1.0 end
+  set r [.ol.t tag ranges o$n]
+  if {$r ne {}} {
+    .ol.t tag add cur \"[lindex $r 0] linestart\" \"[lindex $r 0] lineend + 1c\"
+    .ol.t see [lindex $r 0]
+  }
+}
+proc ::safepdf::olSetTri {n tri} {
+  lassign [.ol.t tag ranges t$n] a b
+  if {$a eq {}} return
+  set tags [.ol.t tag names $a]
+  .ol.t configure -state normal
+  .ol.t delete $a $b
+  .ol.t insert $a $tri $tags
+  .ol.t configure -state disabled
+}
+proc ::safepdf::olClear {} {
+  .ol.t configure -state normal
+  .ol.t delete 1.0 end
+  foreach t [.ol.t tag names] {
+    if {$t ni {sel tri hover cur}} { .ol.t tag delete $t }
+  }
 }
 bind .ol.t <ButtonRelease-1> {::safepdf::olClick %x %y}
-bind .ol.t <Key-Return> {::safepdf::emit outline [.ol.t focus]}
-bind .ol.t <F9> {::safepdf::emit outlineToggle}
-bind .ol.t <Alt-Key-Left> {::safepdf::emit back}
-bind .ol.t <Alt-Key-Right> {::safepdf::emit forward}
-bind .ol.t <Control-q> {destroy .}
+bind .ol.t <Motion> {::safepdf::olHover %x %y}
+bind .ol.t <Leave> {.ol.t tag remove hover 1.0 end}
+bind .ol.t <MouseWheel> {.ol.t yview scroll [expr {%D > 0 ? -2 : 2}] units; break}
+bind .ol.t <Button-4> {.ol.t yview scroll -2 units; break}
+bind .ol.t <Button-5> {.ol.t yview scroll 2 units; break}
 ttk::frame .v
-canvas .c -background gray60 -highlightthickness 0 -takefocus 1 -confine 1 \\
+canvas .c -background $::safepdf::col(body) -highlightthickness 0 -takefocus 1 -confine 1 \\
   -xscrollcommand {.xs set} -yscrollcommand {.ys set}
 ttk::scrollbar .ys -orient vertical -command {.c yview}
 ttk::scrollbar .xs -orient horizontal -command {.c xview}
@@ -332,10 +609,15 @@ grid .xs -in .v -row 1 -column 0 -sticky ew
 grid rowconfigure .v 0 -weight 1
 grid columnconfigure .v 0 -weight 1
 image create photo ::safepdf::page
+.c create rectangle 0 0 0 0 -outline #c8c8d0 -width 1 -state hidden -tags pageframe
 .c create image 8 8 -anchor nw -image ::safepdf::page -tags page
-ttk::label .status -text {} -anchor w -relief sunken -padding {4 2}
+label .status -text {} -anchor w -background $::safepdf::col(bar) \\
+  -foreground $::safepdf::col(dim) -font ::safepdf::fBar -padx 6 -pady 2 -borderwidth 0
+frame .statusline -height 1 -background $::safepdf::col(line)
 pack .bar -side top -fill x
+pack .barline -side top -fill x
 pack .status -side bottom -fill x
+pack .statusline -side bottom -fill x
 .pw add .v -weight 1
 pack .pw -side top -fill both -expand 1
 # Scroll along axis (x or y) by dir (1 or -1) units or pages; past the end of the page,
@@ -436,7 +718,7 @@ ttk::button .find.close -text {Close} -command ::safepdf::hideFind
 pack .find.l .find.e .find.prev .find.next .find.close -side left -padx 2 -pady 2
 bindtags .find.e [list .find.e TEntry all]
 proc ::safepdf::showFind {} {
-  if {![winfo ismapped .find]} { pack .find -side top -fill x -after .bar }
+  if {![winfo ismapped .find]} { pack .find -side top -fill x -after .barline }
   focus .find.e
   .find.e selection range 0 end
   .find.e icursor end
@@ -472,7 +754,7 @@ ttk::button .goto.close -text {Close} -command ::safepdf::hideGoto
 pack .goto.l .goto.e .goto.go .goto.close -side left -padx 2 -pady 2
 bindtags .goto.e [list .goto.e TEntry all]
 proc ::safepdf::showGoto {} {
-  if {![winfo ismapped .goto]} { pack .goto -side top -fill x -after .bar }
+  if {![winfo ismapped .goto]} { pack .goto -side top -fill x -after .barline }
   focus .goto.e
   .goto.e selection range 0 end
   .goto.e icursor end
@@ -645,6 +927,12 @@ def applyScroll (s : State) (vp : ViewParams) (ix iy rw rh : Nat) : IO Unit := d
     discard <| run [".c", "yview", "moveto", fmtFrac y]
   | none => pure ()
 
+/-- Shows the current page in the toolbar's page field (`Toolbar.entryText`: the number, or
+the label when the document has labels) and the "of N" label next to it (task 9.7). -/
+def showPageField (s : State) : IO Unit := do
+  discard <| run ["::safepdf::setPage", Toolbar.entryText s.labels s.page,
+    Toolbar.ofText s.labels s.page s.pageCount, "1"]
+
 /-- Updates title, labels and (when the page, document, zoom or rotation changed, or a scroll
 is pending) the page image. -/
 def refresh (st : IO.Ref State) : IO Unit := do
@@ -652,12 +940,12 @@ def refresh (st : IO.Ref State) : IO Unit := do
   discard <| run ["wm", "title", ".", s.title]
   match s.path, s.doc with
   | some path, some doc =>
-    discard <| run [".bar.page", "configure", "-text", Links.pageText s.labels s.page s.pageCount]
+    showPageField s
+    discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "1"]
     let some vp := viewParams s doc s.page | return
-    let pct := match s.mode with
-      | .scale p => if vp.capped then View.zoomPct vp.zoom s.scaling else p
+    let pct := match s.zoomSel.mode with
+      | some (.scale p) => if vp.capped then View.zoomPct vp.zoom s.scaling else p
       | _ => View.zoomPct vp.zoom s.scaling
-    discard <| run [".bar.zoom", "configure", "-text", s!"{pct}%"]
     let key : View.Key := ⟨s.gen, s.page, vp.zoom, s.rot⟩
     if s.shown == some key && s.pending.isNone then return
     st.modify ({ · with shown := some key })
@@ -674,6 +962,9 @@ def refresh (st : IO.Ref State) : IO Unit := do
       let rw := max s.canvasW (img.w + 2 * m)
       let rh := max s.canvasH (img.h + 2 * m)
       discard <| run [".c", "coords", "page", toString ix, toString iy]
+      discard <| run [".c", "coords", "pageframe", toString (ix - 1), toString (iy - 1),
+        toString (ix + img.w), toString (iy + img.h)]
+      discard <| run [".c", "itemconfigure", "pageframe", "-state", "normal"]
       discard <| run [".c", "configure", "-scrollregion", s!"0 0 {rw} {rh}"]
       applyScroll s vp ix iy rw rh
       st.modify ({ · with imgX := ix, imgY := iy, shownZoom := vp.zoom, shownRot := vp.rot,
@@ -685,19 +976,21 @@ def refresh (st : IO.Ref State) : IO Unit := do
       let notes := (if vp.capped then
           s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
         (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
-      setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}, {pct}% ({modeName s.mode}), \
+      setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}, {pct}% ({modeName s.zoomSel}), \
         rotation {View.rotDeg s.rot}, {img.w}x{img.h} px, {how}{notes}"
       if s.page + 1 < s.pageCount then
         discard <| run ["after", "100", "::safepdf::emit prefetch"]
     | .error e =>
       st.modify ({ · with pending := none })
       discard <| run [".c", "delete", "sel", "hit"]
+      discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
       discard <| run [photoName, "blank"]
       setStatus s!"{path}: {Links.pageText s.labels s.page s.pageCount}: cannot render: {renderError e}"
   | _, _ =>
-    discard <| run [".bar.page", "configure", "-text", ""]
-    discard <| run [".bar.zoom", "configure", "-text", ""]
+    discard <| run ["::safepdf::setPage", "", "", "0"]
+    discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
     discard <| run [".c", "delete", "sel", "hit"]
+    discard <| run [".c", "itemconfigure", "pageframe", "-state", "hidden"]
     discard <| run [photoName, "blank"]
 
 /-- Renders the page after the current one into the cache when it is small enough
@@ -715,7 +1008,8 @@ def prefetch (st : IO.Ref State) : IO Unit := do
 
 /-! ## Outline panel (task 8.2d) -/
 
-/-- Shows or hides the outline panel (the left pane of `.pw`). -/
+/-- Shows or hides the outline sidebar (the left pane of `.pw`); the sidebar toggle button
+looks pressed while it is shown (PDF.js's `toggled`). -/
 def showOutline (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
   -- The View → Outline check entry toggles its variable before it runs the command; set it
@@ -725,19 +1019,51 @@ def showOutline (st : IO.Ref State) (on : Bool) : IO Unit := do
   if on then discard <| run [".pw", "insert", "0", ".ol", "-weight", "0"]
   else discard <| run [".pw", "forget", ".ol"]
   discard <| run ["set", Menu.outlineVar, if on then "1" else "0"]
+  discard <| run ["::safepdf::btnToggled", ".bar.sidebar", if on then "1" else "0"]
   st.modify ({ · with outlineShown := on })
 
-/-- Fills the outline treeview from `State.outline` (item `oK` for entry `K`, under its
-parent `Links.parents`); every title is one quoted word. -/
+/-- Fills the outline tree `.ol.t` from `State.outline` (task 9.7, model `Sidebar.rows`): one
+line per entry — the disclosure triangle (tag `tK`, only for entries with children) and the
+title (tag `oK`, one quoted word) — indented by depth (margin tags `dN` for rows with a
+triangle, `lN` for leaves, aligned with their siblings' titles) and tagged `uA` for each
+ancestor `A`, so that closing `A` elides the whole subtree. -/
 def fillOutline (st : IO.Ref State) : IO Unit := do
-  let kids ← run [".ol.t", "children", ""]
-  discard <| run [".ol.t", "delete", kids]
   let es := (← st.get).outline.toList
-  let ps := Links.parents es
-  for (i, e, p) in (List.range es.length).zip (es.zip ps) do
-    let parent := match p with | some k => s!"o{k}" | none => ""
-    discard <| run [".ol.t", "insert", parent, "end", "-id", s!"o{i}", "-text", e.title,
-      "-open", if e.isOpen then "1" else "0"]
+  let rs := Sidebar.rows es
+  let isOpen := Sidebar.initialOpen es
+  st.modify ({ · with olRows := rs, olOpen := isOpen })
+  discard <| run ["::safepdf::olClear"]
+  let triW := ((← run ["font", "measure", "::safepdf::fTri", Sidebar.triangle true false]).toNat?).getD 14
+  let mut depths : List Nat := []
+  for (r, e) in rs.zip es do
+    if !depths.contains r.depth then depths := r.depth :: depths
+    let base := [if r.hasKids then s!"d{r.depth}" else s!"l{r.depth}"] ++ r.ancestors.map (s!"u{·}")
+    let tri := Sidebar.triangle r.hasKids (isOpen.getD r.index false)
+    discard <| run [".ol.t", "insert", "end",
+      tri, " ".intercalate (base ++ ["tri", s!"t{r.index}"]),
+      e.title ++ "\n", " ".intercalate (base ++ [s!"o{r.index}"])]
+  for d in depths do
+    let ind := Sidebar.indentPx d
+    discard <| run [".ol.t", "tag", "configure", s!"d{d}", "-lmargin1", toString ind,
+      "-lmargin2", toString (ind + triW)]
+    discard <| run [".ol.t", "tag", "configure", s!"l{d}", "-lmargin1", toString (ind + triW),
+      "-lmargin2", toString (ind + triW)]
+  for r in rs do
+    if r.hasKids && !isOpen.getD r.index false then
+      discard <| run [".ol.t", "tag", "configure", s!"u{r.index}", "-elide", "1"]
+  discard <| run [".ol.t", "configure", "-state", "disabled"]
+  discard <| run [".ol.t", "yview", "moveto", "0"]
+
+/-- Handles `olToggle K`: opens or closes outline row `K` (its disclosure triangle). -/
+def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
+  let some i := k.toNat? | return
+  let s ← st.get
+  let o := Sidebar.toggle s.olRows s.olOpen i
+  if o == s.olOpen then return
+  st.modify ({ · with olOpen := o })
+  let on := o.getD i false
+  discard <| run [".ol.t", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
+  discard <| run ["::safepdf::olSetTri", toString i, Sidebar.triangle true on]
 
 /-- Opens `path`: reads and parses it, builds the page tree, shows page 1. Every failure
 ends up in the status line with an empty page. -/
@@ -749,6 +1075,7 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
                               history := {} }
   fillOutline st
   showOutline st false
+  st.modify ({ · with toggleShown := none })
   match ← Inspect.load {} path with
   | .error msg =>
     discard <| run [photoName, "blank"]
@@ -766,7 +1093,7 @@ def openFile (st : IO.Ref State) (path : String) : IO Unit := do
         (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
       st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
       fillOutline st
-      showOutline st (!outline.isEmpty)
+      showOutline st (Sidebar.shownOnLoad (!outline.isEmpty))
       -- Lay the window out again so that the first render uses the canvas size beside the
       -- outline panel.
       discard <| run ["update", "idletasks"]
@@ -809,28 +1136,37 @@ def anchorPos (s : State) (pos : Option (Nat × Nat)) : Nat × Nat :=
 
 /-- Changes the zoom mode, keeping the page point at `pos` (default: the window centre)
 in place. -/
-def setMode (st : IO.Ref State) (mode : View.Mode) (pos : Option (Nat × Nat)) : IO Unit := do
+def setMode (st : IO.Ref State) (zoomSel : Toolbar.ZoomChoice) (pos : Option (Nat × Nat)) :
+    IO Unit := do
   let s ← st.get
   if s.doc.isNone then return
   let (wx, wy) := anchorPos s pos
   anchorAt st wx wy
-  st.modify ({ · with mode })
+  st.modify ({ · with zoomSel })
   refresh st
 
-/-- Handles `zoom in|out|actual|fitpage|fitwidth ?X Y?`. -/
+/-- Handles `zoom in|out|actual|fitpage|fitwidth|auto ?X Y?` and `zoom choose KEY` (the zoom
+drop-down, `Toolbar.ZoomChoice.ofKey`). -/
 def zoom (st : IO.Ref State) (what : String) (pos : Option (Nat × Nat)) : IO Unit := do
   let s ← st.get
   -- The current percentage: the fixed one, or the one a fit mode came out at (rounded).
-  let cur := match s.mode with
-    | .scale p => p
+  let cur := match s.zoomSel.mode with
+    | some (.scale p) => p
     | _ => View.zoomPct s.shownZoom s.scaling
   match what with
-  | "in" => setMode st (.scale (View.stepIn cur)) pos
-  | "out" => setMode st (.scale (View.stepOut cur)) pos
-  | "actual" => setMode st (.scale 100) pos
-  | "fitpage" => setMode st .fitPage pos
-  | "fitwidth" => setMode st .fitWidth pos
+  | "in" => setMode st (.pct (View.stepIn cur)) pos
+  | "out" => setMode st (.pct (View.stepOut cur)) pos
+  | "actual" => setMode st .actual pos
+  | "fitpage" => setMode st .pageFit pos
+  | "fitwidth" => setMode st .pageWidth pos
+  | "auto" => setMode st .auto pos
   | _ => setStatus s!"internal: unknown zoom {what}"
+
+/-- Handles `zoom choose KEY` from the zoom drop-down. -/
+def zoomChoose (st : IO.Ref State) (key : String) : IO Unit := do
+  match Toolbar.ZoomChoice.ofKey key with
+  | some c => setMode st c none
+  | none => setStatus s!"internal: unknown zoom choice {key}"
 
 /-- The two numbers of an `xview`/`yview` result. -/
 def viewFracs (s : String) : Option (Rat × Rat) :=
@@ -900,7 +1236,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
-                              hover := none, history := {} }
+                              hover := none, history := {}, toggleShown := none }
   discard <| run ["pack", "forget", ".find", ".goto"]
   fillOutline st
   showOutline st false
@@ -929,27 +1265,57 @@ def buildMenus : IO Unit := do
           "-offvalue", "0", "-command", c.script]
   discard <| run [".", "configure", "-menu", Menu.barPath]
 
+/-- Builds the toolbar from `Toolbar.layout` (task 9.7): icon buttons (`::safepdf::iconButton`
+with the model's constant icon name, tooltip and script), separators, the page field and the
+zoom drop-down (its menu `.zoommenu` lists `ZoomChoice.presets` as radio entries on
+`::safepdf::zoomSel`), and the overflow menu `.more` (`Toolbar.overflow`). -/
+def buildToolbar : IO Unit := do
+  for (g, items) in Toolbar.layout do
+    for it in items do
+      match it with
+      | .button b =>
+        discard <| run ["::safepdf::iconButton", b.path, b.icon, b.tip, b.script]
+        discard <| run ["::safepdf::barPack", b.path, g, "-padx", "2", "-pady", "4"]
+      | .sep w =>
+        discard <| run ["::safepdf::vsep", w]
+        discard <| run ["::safepdf::barPack", w, g, "-padx", "2"]
+      | .pageField => discard <| run ["::safepdf::pageField"]
+      | .zoomBox => discard <| run ["::safepdf::zoomBox"]
+  for c in Toolbar.ZoomChoice.presets do
+    discard <| run [".zoommenu", "add", "radiobutton", "-label", c.label, "-value", c.key,
+      "-variable", "::safepdf::zoomSel",
+      "-command", "::safepdf::emit zoom choose $::safepdf::zoomSel"]
+  for e in Toolbar.overflow do
+    match e with
+    | none => discard <| run [Toolbar.morePath, "add", "separator"]
+    | some c =>
+      discard <| run [Toolbar.morePath, "add", "command", "-label", c.label, "-accelerator",
+        c.accel, "-command", c.script]
+
 /-- The part of the state the enabled rules look at. -/
 def menuCtx (s : State) : Menu.Ctx :=
   { hasDoc := s.doc.isSome && s.pageCount > 0, page := s.page, pages := s.pageCount,
     hasSel := s.sel.isSome, hasOutline := !s.outline.isEmpty,
     canBack := !s.history.back.isEmpty, canForward := !s.history.fwd.isEmpty }
 
-/-- Sets the `-state` of every menubar entry and toolbar button whose enabled state
-(`Menu.entryStates`) changed since the last call. Runs after every event. -/
+/-- Sets the `-state` of every menubar entry, overflow-menu entry and toolbar button whose
+enabled state (`Toolbar.states`) changed since the last call, and shows or hides the sidebar
+toggle (`Sidebar.toggleVisible`). Runs after every event. -/
 def syncMenus (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  let now := Menu.entryStates (menuCtx s)
+  let c := menuCtx s
+  let now := Toolbar.states c
   let old := if s.menuStates.length == now.length then s.menuStates else now.map (!·)
-  let targets : List (Sum (String × Nat) String) :=
-    Menu.entryList.map (fun (p, i, _) => .inl (p, i)) ++ Menu.toolbarCmds.map (fun (w, _) => .inr w)
-  for ((t, on), was) in (targets.zip now).zip old do
+  for ((t, on), was) in (Toolbar.targets.zip now).zip old do
     if on != was then
       match t with
-      | .inl (p, i) =>
+      | .entry p i =>
         discard <| run [p, "entryconfigure", toString i, "-state", if on then "normal" else "disabled"]
-      | .inr w => discard <| run [w, "state", if on then "!disabled" else "disabled"]
-  st.modify ({ · with menuStates := now })
+      | .button w => discard <| run ["::safepdf::btnState", w, if on then "normal" else "disabled"]
+  let vis := Sidebar.toggleVisible (c.hasDoc && c.hasOutline)
+  if s.toggleShown != some vis then
+    discard <| run ["::safepdf::showToggle", if vis then "1" else "0"]
+  st.modify ({ · with menuStates := now, toggleShown := some vis })
 
 /-! ## Links, jumps, history, go to page (task 8.2d) -/
 
@@ -1053,12 +1419,13 @@ def hover (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
     discard <| run [".c", "configure", "-cursor", ""]
     setStatus (← st.get).savedStatus
 
-/-- Handles `outline ID`: activates the outline entry of treeview item `oK`. -/
+/-- Handles `outline ID`: activates the outline entry of outline row `oK`. -/
 def outlineClick (st : IO.Ref State) (id : String) : IO Unit := do
   let s ← st.get
   let some k := (id.drop 1).toString.toNat? | return
   if !id.startsWith "o" then return
   let some e := s.outline[k]? | return
+  discard <| run ["::safepdf::olMark", toString k]
   activate st e.action
 
 /-- Handles `goto TEXT` (Ctrl+G): a page label or number (`Links.gotoPage`). -/
@@ -1070,6 +1437,25 @@ def gotoText (st : IO.Ref State) (txt : String) : IO Unit := do
     discard <| run ["::safepdf::hideGoto"]
     jumpTo st ⟨p, none, none⟩
   | none => setStatus s!"no page with label or number \"{txt}\""
+
+/-- Handles `pageEntry TEXT` (Enter in the toolbar's page field, task 9.7): jumps to the page
+it names (`Toolbar.pageEntry`: label, number, label ignoring case; recorded in the history as
+PDF.js does); an invalid entry reverts the field to the current page. -/
+def pageEntry (st : IO.Ref State) (txt : String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || s.pageCount == 0 then return
+  let (p, ok) := Toolbar.pageEntry s.labels s.pageCount s.page txt
+  if ok && p != s.page then jumpTo st ⟨p, none, none⟩
+  else
+    showPageField s
+    if !ok then setStatus s!"no page \"{txt}\" (enter a page number or label)"
+
+/-- Handles `tool NAME` (an annotation tool, Print or Save): not available yet. -/
+def tool (st : IO.Ref State) (name : String) : IO Unit := do
+  let _ ← st.get
+  match Toolbar.toolOf name with
+  | some t => setStatus s!"{t.tip}: not available yet ({t.task})"
+  | none => setStatus s!"internal: unknown tool {name}"
 
 /-! ## Selection, copy and search (task 8.2c) -/
 
@@ -1341,6 +1727,155 @@ def boxWindowPos (st : IO.Ref State) (b : Box) : IO (Option (String × String)) 
     View.parseDecimal (← run [".c", "canvasy", "0"])) | return none
   return some (toString ((x0 + x1) / 2 - vx).floor, toString ((y0 + y1) / 2 - vy).floor)
 
+/-- Window position (in `.ol.t`) of the first character of outline row `id` (`oK`); `none`
+when the row is hidden (elided under a closed parent) or scrolled away. -/
+def olItemPos (id : String) : IO (Option (String × String)) := do
+  let r ← run [".ol.t", "tag", "ranges", id]
+  let some i := (r.splitOn " ").head? | return none
+  if i.isEmpty then return none
+  match ((← run [".ol.t", "bbox", i]).splitOn " ").filterMap String.toNat? with
+  | [x, y, w, h] => return some (toString (x + w / 2), toString (y + h / 2))
+  | _ => return none
+
+/-- Smoke steps of the toolbar test (`SAFEPDF_VIEWER_SMOKE_MODE=toolbar`, task 9.7), on any
+document of at least two pages: the toolbar layout, the sidebar (shown with its toggle only
+when the document has an outline; collapsing/expanding a row with children through its
+disclosure triangle; the toggle button), the arrows (generated clicks), the page field
+(Enter on a valid page, on an out-of-range number and on text: reverts), paging keys
+updating the field, the zoom drop-down (choices, labels, custom percentages after − / +), the
+overflow menu and the disabled tool buttons. Results go into `toolbar.txt` as `key: value`
+lines. -/
+def smokeToolbar (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let page : IO Nat := return (← st.get).page + 1
+  let field : IO String := run ["set", "::safepdf::pageText"]
+  let ofl : IO String := run [".bar.of", "cget", "-text"]
+  let zlabel : IO String := run [".bar.zoom", "itemcget", "label", "-text"]
+  let zsel : IO String := run ["set", "::safepdf::zoomSel"]
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let s ← st.get
+  let n := s.pageCount
+  out := out.push s!"pages: {n}"
+  out := out.push s!"has-outline: {!s.outline.isEmpty}"
+  out := out.push s!"sidebar-shown: {s.outlineShown}"
+  out := out.push s!"panes: {← run [".pw", "panes"]}"
+  out := out.push s!"toggle-mapped: {← run ["winfo", "ismapped", ".bar.sidebar"]}"
+  let mut packed : Array String := #[]
+  for g in [".bar.l", ".bar.m", ".bar.r"] do
+    packed := packed.push s!"{g}={",".intercalate ((← run ["pack", "slaves", g]).splitOn " ")}"
+  out := out.push s!"layout: {" ".intercalate packed.toList}"
+  out := out.push s!"field0: {← field}"
+  out := out.push s!"of0: {← ofl}"
+  out := out.push s!"zoom-label0: {← zlabel}"
+  out := out.push s!"zoom-sel0: {← zsel}"
+  let mut zl : Array String := #[]
+  let zn := (← run [".zoommenu", "index", "end"]).toNat?.getD 0
+  for i in [0:zn + 1] do zl := zl.push (← run [".zoommenu", "entrycget", toString i, "-label"])
+  out := out.push s!"zoom-menu: {"|".intercalate zl.toList}"
+  let mut ml : Array String := #[]
+  let mn := (← run [Toolbar.morePath, "index", "end"]).toNat?.getD 0
+  for i in [0:mn + 1] do
+    if (← run [Toolbar.morePath, "type", toString i]) != "separator" then
+      ml := ml.push (← run [Toolbar.morePath, "entrycget", toString i, "-label"])
+  out := out.push s!"more-menu: {"|".intercalate ml.toList}"
+  let btnStates (ws : List String) : IO String := do
+    let mut v : Array String := #[]
+    for w in ws do v := v.push s!"{w}={← run ["::safepdf::btnState", w]}"
+    return ",".intercalate v.toList
+  out := out.push s!"states0: {← btnStates [".bar.prev", ".bar.next", ".bar.zout", ".bar.zin", ".bar.more"]}"
+  out := out.push s!"tools: {← btnStates [".bar.highlight", ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]}"
+  -- A disabled tool ignores clicks.
+  let click (w : String) : IO Unit := do
+    sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+    sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  let st0 ← run [".status", "cget", "-text"]
+  click ".bar.highlight"
+  out := out.push s!"status-unchanged-after-tool: {st0 == (← run [".status", "cget", "-text"])}"
+  -- Arrows (generated clicks on the canvas buttons).
+  click ".bar.next"
+  out := out.push s!"after-next: {← page} {← field} {← ofl}"
+  click ".bar.next"
+  click ".bar.prev"
+  out := out.push s!"after-next-prev: {← page} {← field}"
+  click ".bar.prev"
+  click ".bar.prev"
+  out := out.push s!"after-prev-at-start: {← page} {← field}"
+  -- The page field: a valid number, an out-of-range number, text (both revert).
+  let enter (txt : String) : IO Unit := do
+    sendEvent ".bar.pg.e" "<FocusIn>"
+    discard <| run ["set", "::safepdf::pageText", txt]
+    sendEvent ".bar.pg.e" "<Key-Return>"
+  enter (toString n)
+  out := out.push s!"entry-last: {← page} {← field}"
+  enter "999"
+  out := out.push s!"entry-999: {← page} {← field}"
+  enter "abc"
+  out := out.push s!"entry-abc: {← page} {← field}"
+  enter (Toolbar.entryText s.labels 0)
+  out := out.push s!"entry-first: {← page} {← field}"
+  out := out.push s!"history-after-entry: {(← st.get).history.back.length}"
+  -- Typing and leaving the field without Enter reverts it.
+  discard <| run ["set", "::safepdf::pageText", "2"]
+  discard <| run ["::safepdf::emit", "pageRevert"]
+  out := out.push s!"entry-revert: {← page} {← field}"
+  -- Paging keys update the field.
+  sendKey "End"
+  out := out.push s!"key-end: {← page} {← field}"
+  sendKey "Home"
+  out := out.push s!"key-home: {← page} {← field}"
+  -- Zoom drop-down and buttons.
+  let choose (lbl : String) : IO Unit := do
+    discard <| run [".zoommenu", "invoke", lbl]
+    discard <| run ["update", "idletasks"]
+  let zoomNow : IO String := do
+    let s ← st.get
+    return s!"{← zlabel}|{← zsel}|{View.zoomPct s.shownZoom s.scaling}"
+  choose "Page Width"
+  out := out.push s!"zoom-page-width: {← zoomNow}"
+  choose "Page Fit"
+  out := out.push s!"zoom-page-fit: {← zoomNow}"
+  choose "Actual Size"
+  out := out.push s!"zoom-actual: {← zoomNow}"
+  choose "150%"
+  out := out.push s!"zoom-150: {← zoomNow}"
+  click ".bar.zin"
+  out := out.push s!"zoom-in-200: {← zoomNow}"
+  click ".bar.zout"
+  click ".bar.zout"
+  out := out.push s!"zoom-out-125: {← zoomNow}"
+  choose "50%"
+  click ".bar.zout"
+  out := out.push s!"zoom-custom-33: {← zoomNow}"
+  choose "Automatic Zoom"
+  out := out.push s!"zoom-auto: {← zoomNow}"
+  -- Overflow menu.
+  discard <| run [Toolbar.morePath, "invoke", "Last page"]
+  out := out.push s!"more-last: {← page} {← field}"
+  discard <| run [Toolbar.morePath, "invoke", "First page"]
+  out := out.push s!"more-first: {← page} {← field}"
+  -- Sidebar: disclosure triangles and the toggle button.
+  let s ← st.get
+  if let some r := s.olRows.find? (·.hasKids) then
+    if let some k := s.olRows.find? (·.parent == some r.index) then
+      discard <| run ["update"]
+      out := out.push s!"child-visible: {(← olItemPos s!"o{k.index}").isSome}"
+      if let some pos ← olItemPos s!"t{r.index}" then
+        sendEvent ".ol.t" "<ButtonRelease-1>" ["-x", pos.1, "-y", pos.2]
+        discard <| run ["update"]
+        out := out.push s!"child-visible-after-collapse: {(← olItemPos s!"o{k.index}").isSome}"
+        sendEvent ".ol.t" "<ButtonRelease-1>" ["-x", pos.1, "-y", pos.2]
+        discard <| run ["update"]
+        out := out.push s!"child-visible-after-expand: {(← olItemPos s!"o{k.index}").isSome}"
+  if (← run ["winfo", "ismapped", ".bar.sidebar"]) == "1" then
+    out := out.push s!"toggle-pressed0: {← run ["set", "::safepdf::btn(tog,.bar.sidebar)"]}"
+    click ".bar.sidebar"
+    out := out.push s!"after-toggle: {(← st.get).outlineShown} {← run [".pw", "panes"]} {← run ["set", "::safepdf::btn(tog,.bar.sidebar)"]}"
+    click ".bar.sidebar"
+    out := out.push s!"after-toggle2: {(← st.get).outlineShown} {← run [".pw", "panes"]}"
+  IO.FS.writeFile (file "toolbar.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of the navigation test (`SAFEPDF_VIEWER_SMOKE_MODE=nav`, task 8.2d), on a
 three-page document labelled `i`, `ii`, `1` whose page 1 has an internal link (to page 3) and
 a URI link, and whose outline is `Intro` (page 1), `Chapter` (page 3, `/XYZ 0 400`) with child
@@ -1395,10 +1930,7 @@ def smokeNav (st : IO.Ref State) (dir : String) : IO Unit := do
       IO.FS.writeFile (file "uri-clip.txt") (← clipGet)
   -- Outline: click `Section` (o2), then `Chapter` (o1) at 200 %.
   discard <| run ["update"]
-  let itemPos (id : String) : IO (Option (String × String)) := do
-    match ((← run [".ol.t", "bbox", id]).splitOn " ").filterMap String.toNat? with
-    | [x, y, w, h] => return some (toString (x + w / 2), toString (y + h / 2))
-    | _ => return none
+  let itemPos (id : String) : IO (Option (String × String)) := olItemPos id
   if let some pos ← itemPos "o2" then
     at' pos ".ol.t" "<ButtonRelease-1>"
   out := out.push s!"page-after-outline-section: {← page}"
@@ -1466,7 +1998,7 @@ def smokeMenu (st : IO.Ref State) (dir : String) : IO Unit := do
     return ",".intercalate v.toList
   let goCmds : List Menu.Cmd := [.prevPage, .nextPage, .firstPage, .lastPage, .back, .forward]
   out := out.push s!"states-page1: {← statesOf (goCmds ++ [.copy, .outline])}"
-  out := out.push s!"toolbar-prev-page1: {← run [".bar.prev", "state"]}"
+  out := out.push s!"toolbar-prev-page1: {← run ["::safepdf::btnState", ".bar.prev"]}"
   invoke .nextPage
   out := out.push s!"page-after-next: {← page}"
   invoke .lastPage
@@ -1498,18 +2030,18 @@ def smokeMenu (st : IO.Ref State) (dir : String) : IO Unit := do
   invoke .actualSize
   -- The mode's percentage (the shown zoom is quantised to 1/64 and may print as 99 %).
   let pct : IO String := do
-    match (← st.get).mode with
-    | .scale p => return toString p
-    | m => return modeName m
+    match (← st.get).zoomSel.mode with
+    | some (.scale p) => return toString p
+    | _ => return modeName (← st.get).zoomSel
   out := out.push s!"zoom-actual: {← pct}"
   invoke .zoomIn
   out := out.push s!"zoom-in: {← pct}"
   invoke .zoomOut
   out := out.push s!"zoom-out: {← pct}"
   invoke .fitWidth
-  out := out.push s!"mode-fit-width: {modeName (← st.get).mode}"
+  out := out.push s!"mode-fit-width: {modeName (← st.get).zoomSel}"
   invoke .fitPage
-  out := out.push s!"mode-fit-page: {modeName (← st.get).mode}"
+  out := out.push s!"mode-fit-page: {modeName (← st.get).zoomSel}"
   invoke .rotateCw
   out := out.push s!"rot-after-right: {View.rotDeg (← st.get).rot}"
   invoke .rotateCcw
@@ -1592,21 +2124,23 @@ def smokeMenu (st : IO.Ref State) (dir : String) : IO Unit := do
 
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
-* step 0: `page-1.ppm` (fit page), then `Next`;
-* step 1: `page-2.ppm`, `state.txt` (title, status, page; the status says whether page 2
+* step 0: `f` (fit page; the viewer opens in Automatic Zoom);
+* step 1: `page-1.ppm` (fit page), then `Next`;
+* step 2: `page-2.ppm`, `state.txt` (title, status, page; the status says whether page 2
   came from the prefetched cache); then `Home`, `0` (100 %);
-* step 2: `zoom-100.ppm`, then `+`; step 3: `zoom-in.ppm` (125 %), then `-` `-`;
-* step 4: `zoom-out.ppm` (75 %), then `r`; step 5: `rot.ppm` (75 %, 90°), then `R` and
+* step 3: `zoom-100.ppm`, then `+`; step 4: `zoom-in.ppm` (125 %), then `-` `-`;
+* step 5: `zoom-out.ppm` (75 %), then `r`; step 6: `rot.ppm` (75 %, 90°), then `R` and
   `+` ×4 (200 %), and the scroll test: `Down`, `Next` must scroll within page 1; `Next`
   repeated must reach page 2; `Prior` at the top of page 2 must reach the bottom of page 1;
   results in `view.txt`.
-A document that failed to open ends after step 1. -/
+A document that failed to open ends after step 2. -/
 def smoke (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some dir := s.smokeDir | return
   if s.smokeMode == "text" then smokeText st dir; return
   if s.smokeMode == "nav" then smokeNav st dir; return
   if s.smokeMode == "menu" then smokeMenu st dir; return
+  if s.smokeMode == "toolbar" then smokeToolbar st dir; return
   st.modify ({ · with smokeStep := s.smokeStep + 1 })
   -- Writing an empty photo fails in Tk; that only means there is nothing to write.
   let write (name : String) : IO Unit :=
@@ -1617,10 +2151,15 @@ def smoke (st : IO.Ref State) : IO Unit := do
   let yview : IO String := run [".c", "yview"]
   match s.smokeStep with
   | 0 =>
+    -- Fit page first (the default is Automatic Zoom, task 9.7), so that Next turns the page
+    -- and the prefetch of page 2 happens before step 1 looks at it.
+    sendKey "f"
+    next
+  | 1 =>
     write "page-1.ppm"
     if s.pageCount ≥ 2 then sendKey "Next"
     next
-  | 1 =>
+  | 2 =>
     if s.pageCount ≥ 2 then write "page-2.ppm"
     let title ← run ["wm", "title", "."]
     let status ← run [".status", "cget", "-text"]
@@ -1629,10 +2168,10 @@ def smoke (st : IO.Ref State) : IO Unit := do
     if s.pageCount ≥ 2 then
       sendKey "Home"; sendKey "0"; next
     else discard <| run ["destroy", "."]
-  | 2 => write "zoom-100.ppm"; sendKey "plus"; next
-  | 3 => write "zoom-in.ppm"; sendKey "minus"; sendKey "minus"; next
-  | 4 => write "zoom-out.ppm"; sendKey "r"; next
-  | 5 =>
+  | 3 => write "zoom-100.ppm"; sendKey "plus"; next
+  | 4 => write "zoom-in.ppm"; sendKey "minus"; sendKey "minus"; next
+  | 5 => write "zoom-out.ppm"; sendKey "r"; next
+  | 6 =>
     write "rot.ppm"
     sendKey "R"
     for _ in [0:4] do sendKey "plus"
@@ -1688,6 +2227,7 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["open"] => openDialog st
   | ["smoke"] => smoke st
   | ["prefetch"] => prefetch st
+  | ["zoom", "choose", key] => zoomChoose st key
   | "zoom" :: what :: pos => zoom st what (posOf pos)
   | ["rotate", "cw"] => rotate st true
   | ["rotate", "ccw"] => rotate st false
@@ -1701,7 +2241,11 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["hover", x, y] => hover st (intPos x y)
   | ["back"] => histMove st true
   | ["forward"] => histMove st false
-  | ["outlineToggle"] => showOutline st (!s.outlineShown)
+  | ["outlineToggle"] => showOutline st (Sidebar.afterToggle s.outlineShown (!s.outline.isEmpty))
+  | ["olToggle", k] => olToggle st k
+  | ["pageEntry", txt] => pageEntry st txt
+  | ["pageRevert"] => if s.doc.isSome && s.pageCount > 0 then showPageField s
+  | ["tool", name] => tool st name
   | ["wheel", axis, kind, d] => wheel st axis kind d
   | ["close"] => closeFile st
   | ["outline", id] => outlineClick st id
@@ -1728,6 +2272,19 @@ def safeHandle (st : IO.Ref State) (args : Array String) : IO Unit := do
   guarded (handle st args)
   guarded (syncMenus st)
 
+/-- Parses a window size `WxH` (`SAFEPDF_VIEWER_GEOMETRY`), each side 200–10000 pixels. -/
+def parseGeometry (g : String) : Option (Nat × Nat) :=
+  match g.splitOn "x" with
+  | [w, h] => do
+    let w ← w.toNat?
+    let h ← h.toNat?
+    if 200 ≤ w ∧ w ≤ 10000 ∧ 200 ≤ h ∧ h ≤ 10000 then some (w, h) else none
+  | _ => none
+
+#guard parseGeometry "1900x940" == some (1900, 940)
+#guard parseGeometry "1900x" == none && parseGeometry "10x10" == none &&
+  parseGeometry "1x2x3" == none
+
 /-- Usage text. -/
 def usage : String :=
   "usage: viewer [FILE.pdf]
@@ -1743,7 +2300,9 @@ confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number 
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
 (SAFEPDF_VIEWER_SMOKE_MODE=text: the selection/copy/search steps instead;
 SAFEPDF_VIEWER_SMOKE_MODE=nav: the outline/link/history/go-to steps;
-SAFEPDF_VIEWER_SMOKE_MODE=menu: the menubar steps)."
+SAFEPDF_VIEWER_SMOKE_MODE=menu: the menubar steps;
+SAFEPDF_VIEWER_SMOKE_MODE=toolbar: the toolbar and sidebar steps).
+SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960)."
 
 /-- Runs the viewer. Exit codes: 0 after the window closes; 2 usage error; 3 Tk failed to
 start (no display, missing Tk). -/
@@ -1765,6 +2324,10 @@ def main (args : List String) : IO UInt32 := do
   try
     discard <| Shim.eval setupScript
     buildMenus
+    buildToolbar
+    if let some g ← IO.getEnv "SAFEPDF_VIEWER_GEOMETRY" then
+      if let some (w, h) := parseGeometry g then
+        discard <| run ["wm", "geometry", ".", s!"{w}x{h}"]
     if smokeDir.isSome then discard <| run ["set", "::safepdf::autoConfirm", "1"]
     if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
