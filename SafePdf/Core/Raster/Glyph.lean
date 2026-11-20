@@ -1344,13 +1344,14 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- Images and shadings of the page, of every loaded cell (task 7.3h2) and of every Type 3
     -- glyph (task 7.3j).
     let all := items ++ tls.cellItems ++ type3Items srcs
-    -- Task 7.10: JPEGs drawn much smaller than their size are decoded at a reduced size, as
-    -- MuPDF does (`Image.imageExtents`: page and annotation uses at this zoom).
-    let exts := Image.imageExtents limits.maxXObjectDepth zoom items
+    -- Tasks 7.10, 8.6: images drawn smaller than their size are decoded at their drawn size
+    -- (`Image.imageExtents`: page and annotation uses through the page → device matrix; JPEGs
+    -- at MuPDF's reduced scale, every image box-filtered to its placement target).
+    let view := viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)
+    let exts := Image.imageExtents limits.maxXObjectDepth view items
       (tls.cellItems ++ type3Items srcs)
     let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all exts
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
-    let view := viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)
     (.ok (renderPage page zoom rot
       { fonts := tabulateWidths ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls
         fallback := hailMarySource subst } items cfg (Clip.tableStroke (pageGeoTable cfg view items))), b)
