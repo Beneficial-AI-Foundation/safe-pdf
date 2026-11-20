@@ -1,0 +1,52 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 3 0 R 5 0 R ] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 300 200 ] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+4 0 obj
+<<  /Length 146 >>
+stream
+BT /F1 18 Tf 0 g 40 120 Td (Highlight me please) Tj ET
+0 g 190 116 16 16 re f
+BT /F1 12 Tf 0 g 40 60 Td (A second line of text for a note.) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 300 200 ] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> /Annots [ 8 0 R ] >>
+endobj
+6 0 obj
+<<  /Length 49 >>
+stream
+BT /F1 14 Tf 0 g 30 150 Td (Page two text) Tj ET
+
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+8 0 obj
+<< /Type /Annot /Subtype /Square /Rect [ 200 20 260 80 ] /C [ 0 0 1 ] >>
+endobj
+xref
+0 9
+0000000000 65535 f
+0000000015 00000 n
+0000000064 00000 n
+0000000129 00000 n
+0000000257 00000 n
+0000000455 00000 n
+0000000601 00000 n
+0000000701 00000 n
+0000000798 00000 n
+trailer
+<< /Size 9 /Root 1 0 R /ID [<0123456789ABCDEF0123456789ABCDEF> <0123456789ABCDEF0123456789ABCDEF>] >>
+startxref
+886
+%%EOF
