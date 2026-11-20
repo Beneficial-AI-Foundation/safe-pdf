@@ -18,6 +18,10 @@ compares them on pseudo-random inputs (fixed seed):
   partial, off-path, empty and inverted);
 * **raw edges** (1000 cases): edge arrays built directly, with windings in `−2 … 2` and some
   degenerate (`y0 ≥ y1`) edges;
+* **glyph runs** (1500 cases, task 7.2j): 1–30 tiny closed contours (radius 1–12 px:
+  circles, rectangles, star polygons, sometimes a dense comb with ~180 crossings per sample
+  row), both orientations, filled as one path or one fill per contour (as `Glyph.columnGroups`
+  does); a guard requires that both fast routes (bucketed crossings, active edges) are taken;
 * **point mapping** (3000 cases): view matrices (zooms 1, 3/2, 2, 1/3, 4/3, 25/18; all four
   rotations; integer and fractional boxes) and random matrices with small and large
   denominators, points with raw `Fixed` values up to `±10¹⁸`, several coordinate limits.
@@ -168,6 +172,107 @@ def edgeCase (s : UInt64) : Option String × Bool × UInt64 := Id.run do
   let (res, painted) := compare es rule win cfg
   return (res, painted, s3)
 
+/-- Which filler `fillEdgesCounted` takes on these inputs (recomputing the guards of
+`fillRows`): 0 = reference fallback, 1 = active-edge fast path, 2 = bucketed fast path. -/
+def route (edges : Array Edge) (win : IRect) (cfg : Config) : Nat :=
+  let rc := maskRect edges win
+  let S := cfg.samples
+  if !fastOK edges rc then 0
+  else if !bucketShape S rc then 1
+  else
+    let sc := scanB rc.2.2.2 S.toInt64 rc.2.2.2.toInt64 rc.2.1.toInt64 edges edges.size 0
+      (Array.replicate (rc.2.2.2 * S + 1) 0) 0 0
+    if sc.n ≤ 1048576 && (prefB (rc.2.2.2 * S) 0 0 0 0 sc.cur).2 ≤ 64 then 2 else 1
+
+/-- A glyph-like closed contour at `(cx, cy)` (subpixel units) of radius about `r`: a circle
+of 4 cubics, a rectangle, a random star polygon (self-intersecting), or (`k = 3`) a dense comb
+of `teeth` thin spikes (many crossings per sample row); `rev` reverses the orientation. -/
+def contour (s : UInt64) (cx cy r : Int) (teeth : Nat) : DPath × UInt64 := Id.run do
+  let (k, s) := rand s 4
+  let (rv, s) := rand s 2
+  let mut s := s
+  let rev := rv = 1
+  if k = 0 then
+      let c := r * 5523 / 10000
+      return (#[.moveTo ⟨cx + r, cy⟩,
+        .curveTo ⟨cx + r, cy + (if rev then -c else c)⟩ ⟨cx + c, cy + (if rev then -r else r)⟩
+          ⟨cx, cy + (if rev then -r else r)⟩,
+        .curveTo ⟨cx - c, cy + (if rev then -r else r)⟩ ⟨cx - r, cy + (if rev then -c else c)⟩
+          ⟨cx - r, cy⟩,
+        .curveTo ⟨cx - r, cy - (if rev then -c else c)⟩ ⟨cx - c, cy - (if rev then -r else r)⟩
+          ⟨cx, cy - (if rev then -r else r)⟩,
+        .curveTo ⟨cx + c, cy - (if rev then -r else r)⟩ ⟨cx + r, cy - (if rev then -c else c)⟩
+          ⟨cx + r, cy⟩, .closePath], s)
+  let pts : Array FPt ← if k = 1 then
+      let (w, s1) := randI s (r / 4) r
+      s := s1
+      pure #[⟨cx - w, cy - r⟩, ⟨cx + w, cy - r⟩, ⟨cx + w, cy + r⟩, ⟨cx - w, cy + r⟩]
+    else if k = 2 then
+      let (m, s1) := rand s 7
+      s := s1
+      let mut ps : Array FPt := #[]
+      for _ in [0:m + 3] do
+        let (x, s1) := randI s (cx - r) (cx + r)
+        let (y, s2) := randI s1 (cy - r) (cy + r)
+        s := s2
+        ps := ps.push ⟨x, y⟩
+      pure ps
+    else
+      -- comb: `teeth` spikes of width ~r/teeth along the x axis
+      let step := max 2 (2 * r / (teeth : Int))
+      let mut ps : Array FPt := #[⟨cx - r, cy + r⟩]
+      for t in [0:teeth] do
+        let x := cx - r + (t : Int) * step
+        ps := (ps.push ⟨x, cy - r⟩).push ⟨x + step / 2, cy + r / 2⟩
+      pure (ps.push ⟨cx - r + (teeth : Int) * step, cy + r⟩)
+  let pts := if rev then pts.reverse else pts
+  match pts[0]? with
+  | none => return (#[], s)
+  | some p0 =>
+    return ((#[DSeg.moveTo p0] ++ (pts.extract 1 pts.size).map DSeg.lineTo).push .closePath, s)
+
+/-- One glyph-like case (task 7.2j): a "text run" of 1–30 small closed contours (radius 1–12
+px, random subpixel positions, overlapping sometimes, both orientations, occasionally a dense
+comb that forces the active-edge path), filled in one call or as one call per contour. -/
+def glyphCase (s : UInt64) : Option String × Bool × Nat × UInt64 := Id.run do
+  let (n, s) := randI s 1 30
+  let (dense, s) := rand s 8
+  let mut s := s
+  let mut whole : DPath := #[]
+  let mut x : Int := 0
+  let mut out : Option String := none
+  let mut painted := false
+  let mut kind := 0
+  let (cfg, s1) := randCfg s
+  let (win, s2) := randWin s1
+  let (r, s3) := rand s2 2
+  let (sep, s4) := rand s3 2
+  s := s4
+  let rule : Content.FillRule := if r = 0 then .nonzero else .evenOdd
+  let win : IRect := if win.x1 ≤ win.x0 then win else ⟨win.x0 - 10, win.y0 - 10, win.x1 + 200, win.y1 + 40⟩
+  for _ in [0:n.toNat] do
+    let (rad, s1) := randI s 256 (12 * 256)
+    let (dx, s2) := randI s1 0 (16 * 256)
+    let (cy, s3) := randI s2 (-256) (30 * 256)
+    s := s3
+    x := x + dx
+    let (c, s4) := contour s x cy rad (if dense = 0 then 90 else 6)
+    s := s4
+    if sep = 1 then
+      let es := flatten cfg win c
+      kind := max kind (route es win cfg)
+      let (res, p) := compare es rule win cfg
+      if p then painted := true
+      if out.isNone then out := res
+    else whole := whole ++ c
+  if sep = 0 then
+    let es := flatten cfg win whole
+    kind := route es win cfg
+    let (res, p) := compare es rule win cfg
+    out := res
+    painted := p
+  return (out, painted, kind, s)
+
 /-- A random rational with a small or (rarely) a large denominator. -/
 def randRat (s : UInt64) (big : Bool) (mag : Int) : Rat × UInt64 :=
   let (n, s) := randI s (-mag) mag
@@ -253,6 +358,22 @@ def run : IO Nat := do
     if let some msg := res then
       failures := failures + 1
       if failures ≤ 5 then IO.println s!"  FAIL raster-fill-spec (edges): {msg}"
+  -- Glyph-like runs (task 7.2j): many tiny closed contours; count the filler routes taken.
+  let nGlyph := 1500
+  let mut routes : Array Nat := #[0, 0, 0]
+  let mut gPainted := 0
+  for _ in [0:nGlyph] do
+    let (res, p, kind, s') := glyphCase s
+    s := s'
+    routes := routes.modify kind (· + 1)
+    if p then gPainted := gPainted + 1
+    if let some msg := res then
+      failures := failures + 1
+      if failures ≤ 5 then IO.println s!"  FAIL raster-fill-spec (glyph run): {msg}"
+  if 2 * gPainted < nGlyph || 10 * routes.getD 1 0 < nGlyph / 10 || 2 * routes.getD 2 0 < nGlyph then
+    failures := failures + 1
+    IO.println s!"  FAIL raster-fill-spec: glyph runs paint {gPainted}/{nGlyph}, routes {routes}"
+  IO.println s!"  raster-fill-spec: {nGlyph} glyph runs ({gPainted} painting; routes reference/active/bucketed {routes})"
   let mut mapFast := 0
   for _ in [0:nMap] do
     if (IAff.ofAff? (randAff s).1).isSome then mapFast := mapFast + 1
