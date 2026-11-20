@@ -33,6 +33,16 @@ spec. This file proves, for every successful `Core.Write.Incremental.writeAnnots
 5a. **Auxiliary streams** (`writeAnnots_aux`, rule W9, task 9.5b): the appearance streams
    passed with the annotations are numbered from the old `/Size` plus the annotation count,
    in order, and each fetches back exactly (dictionary with `/Length`, raw data).
+5b. **Encrypted documents** (task 9.5f, rule W10): no statement is weakened. `getObject`
+   of the re-opened result decrypts, so facts 4 and 5 say that every written object
+   *decrypts* back to exactly the planned plaintext; `writeAnnots_crypt` adds that the result
+   has the original's decryption state (file key, methods, `/Encrypt` object). Only the
+   auxiliary streams' `/Length` differs (the written, encrypted length, `auxBody`);
+   `writeAnnots_aux_plain` restates 9.5b's form for unencrypted documents. That the
+   encryption itself (`Core.Write.Encrypt`, RC4 / AES-CBC with a deterministic IV) is the
+   inverse of `Crypt.decryptBody` is not proved — the primitives are vector-tested, not
+   verified (Plan.md §6 Phase 4) — it is *checked* on every write by the self-check, and
+   tested on the encrypted fixtures and corpus files.
 6. `serialize_roundtrip`: the serializer is the Phase 1 printer, whose round trip
    `parseObject (serialize o) = o` is M1's `Spec.RoundTripCore.parseObject_print`.
 
@@ -83,7 +93,7 @@ theorem writeAnnots_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : 
     (h : writeAnnots limits doc marks aux = .ok out) :
     ∃ p, plan limits doc marks aux = .ok p ∧ out = result doc.file.bytes p ∧
       checkChain limits doc.file.bytes out p.start p.keys = true ∧
-      checkObjects limits out p.objects p.aux = true := by
+      checkObjects limits out p.objects p.auxExpected p.crypt = true := by
   unfold writeAnnots at h
   split at h
   · cases h
@@ -182,41 +192,68 @@ theorem bodyIs_eq {r : Except Error IndirectBody} {o : PdfObject} (h : bodyIs r 
     rw [h]
   · cases h
 
-/-- `auxIs` succeeds only on exactly that stream (rule W9). -/
-theorem auxIs_eq {r : Except Error IndirectBody} {a : AuxStream} (h : auxIs r a = true) :
-    r = .ok a.body := by
+/-- `auxIs` succeeds only on exactly that body (rule W9). -/
+theorem auxIs_eq {r : Except Error IndirectBody} {b : IndirectBody} (h : auxIs r b = true) :
+    r = .ok b := by
   unfold auxIs at h
   split at h
   · simp only [decide_eq_true_eq] at h
     rw [h]
   · cases h
 
+/-- What `sameCrypt` guarantees (rule W10): both states absent, or both present with the
+same file key bytes, string and stream methods and encryption-dictionary object. -/
+def SameCrypt (a b : Option Crypt.State) : Prop :=
+  (a = none ∧ b = none) ∨
+  ∃ x y, a = some x ∧ b = some y ∧ x.fileKey.data = y.fileKey.data ∧
+    x.handler.strF = y.handler.strF ∧ x.handler.stmF = y.handler.stmF ∧ x.encRef = y.encRef
+
+/-- `sameCrypt` decides `SameCrypt`. -/
+theorem sameCrypt_ok {a b : Option Crypt.State} (h : sameCrypt a b = true) : SameCrypt a b := by
+  unfold SameCrypt
+  cases a with
+  | none =>
+    cases b with
+    | none => exact Or.inl ⟨rfl, rfl⟩
+    | some y => simp [sameCrypt] at h
+  | some x =>
+    cases b with
+    | none => simp [sameCrypt] at h
+    | some y =>
+      simp only [sameCrypt, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at h
+      exact Or.inr ⟨x, y, rfl, rfl, h.1.1.1, h.1.1.2, h.1.2, h.2⟩
+
 /-- What `checkObjects` guarantees. -/
 theorem checkObjects_ok {limits : Limits} {out : ByteArray}
-    {objs : List (Nat × Nat × PdfObject)} {aux : List (Nat × AuxStream)}
-    (h : checkObjects limits out objs aux = true) :
+    {objs : List (Nat × Nat × PdfObject)} {aux : List (Nat × IndirectBody)}
+    {crypt : Option Crypt.State}
+    (h : checkObjects limits out objs aux crypt = true) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.repaired = false ∧
       (∀ o ∈ objs, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2)) ∧
-      ∀ a ∈ aux, d'.getObject limits a.1 0 = .ok a.2.body := by
+      (∀ a ∈ aux, d'.getObject limits a.1 0 = .ok a.2) ∧ SameCrypt d'.crypt crypt := by
   unfold checkObjects at h
   split at h
   · rename_i d' hd
     simp only [Bool.and_eq_true, Bool.not_eq_true', List.all_eq_true] at h
-    exact ⟨d', hd, h.1.1, fun o ho => bodyIs_eq (h.1.2 o ho), fun a ha => auxIs_eq (h.2 a ha)⟩
+    exact ⟨d', hd, h.1.1.1, fun o ho => bodyIs_eq (h.1.1.2 o ho),
+      fun a ha => auxIs_eq (h.1.2 a ha), sameCrypt_ok h.2⟩
   · cases h
 
 /-- **C7 (4), strict re-open.** The result opens strictly and every written object fetches
-exactly as planned. -/
+exactly as planned — for an encrypted document, after decryption by the reader (rule W10);
+the result's decryption state agrees with the plan's (the original's, `plan_ok`). -/
 theorem writeAnnots_open {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
     (h : writeAnnots limits doc marks aux = .ok out) :
     ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
       (∀ o ∈ p.objects, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2)) ∧
-      ∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok a.2.body := by
+      (∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok (auxBody p.crypt a.2)) ∧
+      SameCrypt d'.crypt p.crypt := by
   obtain ⟨p, hp, _, _, hc⟩ := writeAnnots_ok h
-  obtain ⟨d', hd, hr, hobj, haux⟩ := checkObjects_ok hc
-  exact ⟨p, d', hp, hd, hr, hobj, haux⟩
+  obtain ⟨d', hd, hr, hobj, haux, hcr⟩ := checkObjects_ok hc
+  refine ⟨p, d', hp, hd, hr, hobj, fun a ha => ?_, hcr⟩
+  exact haux (a.1, auxBody p.crypt a.2) (List.mem_map.mpr ⟨a, ha, rfl⟩)
 
 /-! ## The plan -/
 
@@ -301,11 +338,11 @@ theorem planPages_ok {limits : Limits} {doc : Doc.Doc} :
               have := hq'.fresh a ha
               omega⟩
 
-/-- What a successful plan says about its input (rules W1–W3, W9). -/
+/-- What a successful plan says about its input (rules W1–W3, W9, W10). -/
 theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {p : Plan}
     (h : plan limits doc marks aux = .ok p) :
-    doc.file.repaired = false ∧ doc.file.trailer.encrypted = false ∧ doc.file.crypt = none ∧
+    doc.file.repaired = false ∧ p.crypt = doc.file.crypt ∧
       p.size = doc.file.trailer.size ∧
       planPages limits doc doc.file.trailer.size marks = .ok p.pages ∧
       p.aux = numberAux (doc.file.trailer.size + (p.pages.map fun pp => pp.annots.length).sum)
@@ -329,18 +366,19 @@ theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List Au
             · rename_i pps hpps
               split at h
               · cases h
-              · cases h
-                simp only [Bool.not_eq_true] at hrep
-                simp only [Bool.or_eq_true, not_or, Bool.not_eq_true,
-                  Option.isSome_eq_false_iff, Option.isNone_iff_eq_none] at henc
-                exact ⟨hrep, henc.1, henc.2, rfl, hpps, rfl⟩
+              · split at h
+                · cases h
+                  simp only [Bool.not_eq_true] at hrep
+                  exact ⟨hrep, rfl, rfl, hpps, rfl⟩
+                · cases h
+                · cases h
 
 /-- **The plan covers exactly `marks`**: page indices and annotation dictionaries, in order. -/
 theorem plan_marks {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {p : Plan}
     (h : plan limits doc marks aux = .ok p) :
     p.pages.map (fun pp => (pp.index, pp.annots.map Prod.snd)) = marks :=
-  (planPages_ok (plan_ok h).2.2.2.2.1).1
+  (planPages_ok (plan_ok h).2.2.2.1).1
 
 /-- **Each planned page is the page at its index**, read from the original document; the
 new annotation numbers are fresh (at or above the original `/Size`). -/
@@ -348,7 +386,7 @@ theorem plan_page {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List 
     {p : Plan}
     (h : plan limits doc marks aux = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
     PageOk limits doc doc.file.trailer.size pp :=
-  (planPages_ok (plan_ok h).2.2.2.2.1).2 pp hpp
+  (planPages_ok (plan_ok h).2.2.2.1).2 pp hpp
 
 /-! ## Page dictionaries -/
 
@@ -388,7 +426,7 @@ theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {au
         (∀ a ∈ pp.annots, d'.getObject limits a.1 0 = .ok (.obj (.dict a.2)) ∧
           doc.file.trailer.size ≤ a.1) ∧
         d'.getObject limits pp.num pp.gen = .ok (.obj (.dict pp.newDict)) := by
-  obtain ⟨p, d', hp, hd, hr, hobj, _⟩ := writeAnnots_open h
+  obtain ⟨p, d', hp, hd, hr, hobj, _, _⟩ := writeAnnots_open h
   refine ⟨p, d', hp, hd, hr, plan_marks hp, fun pp hpp => ?_⟩
   have hok := plan_page hp hpp
   have hpage : d'.getObject limits pp.num pp.gen = .ok (.obj (.dict pp.newDict)) :=
@@ -420,20 +458,48 @@ theorem numberAux_fst (n : Nat) (as : List AuxStream) :
     simp only [Function.comp, Nat.succ_eq_add_one]
     omega
 
-/-- **Auxiliary streams (rule W9).** For a successful write with auxiliary streams `aux`
-(task 9.5b: appearance streams), the plan numbers them consecutively from the original
+/-- **Auxiliary streams (rules W9, W10).** For a successful write with auxiliary streams
+`aux` (task 9.5b: appearance streams), the plan numbers them consecutively from the original
 `/Size` plus the number of new annotations, in order, and each fetches from the strictly
-re-opened result as exactly that stream (`/Length` set to its data length). -/
+re-opened result as exactly that stream with `/Length` set to the length of its written
+data (`auxBody`: the data length for an unencrypted document, see `writeAnnots_aux_plain`;
+the encrypted length `Encrypt.encLen` for an encrypted one, whose data the reader decrypts
+back to exactly the given bytes). -/
 theorem writeAnnots_aux {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
     ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
       p.aux.map Prod.snd = aux ∧
       p.aux.map Prod.fst = (List.range aux.length).map
         (doc.file.trailer.size + (p.pages.map fun pp => pp.annots.length).sum + ·) ∧
+      ∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok (auxBody doc.file.crypt a.2) := by
+  obtain ⟨p, d', hp, hd, _, _, haux, _⟩ := writeAnnots_open h
+  have hn := (plan_ok hp).2.2.2.2
+  have hc := (plan_ok hp).2.1
+  exact ⟨p, d', hp, hd, by rw [hn, numberAux_snd], by rw [hn, numberAux_fst],
+    fun a ha => hc ▸ haux a ha⟩
+
+/-- **Auxiliary streams of an unencrypted document** (rule W9, the 9.5b statement): each
+fetches back as exactly `a.body` (`/Length` = its data length). -/
+theorem writeAnnots_aux_plain {limits : Limits} {doc : Doc.Doc} {marks : Marks}
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    (hplain : doc.file.crypt = none) :
+    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      p.aux.map Prod.snd = aux ∧
       ∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok a.2.body := by
-  obtain ⟨p, d', hp, hd, _, _, haux⟩ := writeAnnots_open h
-  have hn := (plan_ok hp).2.2.2.2.2
-  exact ⟨p, d', hp, hd, by rw [hn, numberAux_snd], by rw [hn, numberAux_fst], haux⟩
+  obtain ⟨p, d', hp, hd, hs, _, haux⟩ := writeAnnots_aux h
+  refine ⟨p, d', hp, hd, hs, fun a ha => ?_⟩
+  rw [haux a ha, hplain, auxBody_none]
+
+/-- **The result keeps the original's encryption** (rule W10, task 9.5f): it re-opens with a
+decryption state exactly when the original has one, with the same file key, string and
+stream methods and encryption-dictionary object — the new objects are encrypted for the
+same readers as the old ones, never written in the clear into an encrypted file without
+the reader noticing (the self-check decrypts them back, `writeAnnots_open`). -/
+theorem writeAnnots_crypt {limits : Limits} {doc : Doc.Doc} {marks : Marks}
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ d', Open.openFile limits out = .ok d' ∧ SameCrypt d'.crypt doc.file.crypt := by
+  obtain ⟨p, d', hp, hd, _, _, _, hcr⟩ := writeAnnots_open h
+  exact ⟨d', hd, (plan_ok hp).2.1 ▸ hcr⟩
 
 /-! ## C7 -/
 
