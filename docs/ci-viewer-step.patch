@@ -1,0 +1,77 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -30,9 +30,9 @@
+           path: |
+             ~/.elan
+             .lake
+-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
++          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+           restore-keys: |
+-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
++            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+             lean-${{ runner.os }}-
+ 
+       - name: Install elan and the pinned toolchain
+@@ -68,6 +68,50 @@
+       - name: Fuzz smoke
+         run: scripts/fuzz.sh
+ 
++  # Task 8.2a: the native viewer (Tcl/Tk shim, `lake build viewer`) builds and
++  # passes its headless smoke test (scripts/viewer-smoke.sh under xvfb-run).
++  # Separate job: the `build` job's default targets do not need Tk.
++  # ubuntu-24.04's tk-dev is Tk 8.6 (the shim builds against 8.6 and 9.0).
++  viewer:
++    runs-on: ubuntu-24.04
++    timeout-minutes: 45
++    env:
++      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
++      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
++    steps:
++      # actions/checkout v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
++
++      # actions/cache v4.2.0
++      - name: Cache elan toolchains and Lake build
++        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
++        with:
++          path: |
++            ~/.elan
++            .lake
++          key: viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
++          restore-keys: |
++            viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
++            viewer-${{ runner.os }}-
++
++      - name: Install elan and the pinned toolchain
++        run: |
++          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
++          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
++          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
++          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
++
++      - name: Install Tk and Xvfb
++        run: |
++          sudo apt-get update
++          sudo apt-get install -y --no-install-recommends tk-dev xvfb xauth
++
++      - name: Build viewer
++        run: lake build viewer
++
++      - name: Viewer smoke test (Xvfb)
++        run: env -u DISPLAY scripts/viewer-smoke.sh --no-build
++
+   # Phase 1 exit M1 clause 3: object-level differential test against
+   # `qpdf --json=2` over the corpus (Tests/differential/objects.py).
+   # Fails on disagreements or comparator errors, and if fewer than
+@@ -113,9 +157,9 @@
+           path: |
+             ~/.elan
+             .lake
+-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
++          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+           restore-keys: |
+-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
++            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+             lean-${{ runner.os }}-
+ 
+       - name: Install elan and the pinned toolchain
