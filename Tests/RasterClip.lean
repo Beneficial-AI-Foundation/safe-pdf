@@ -51,7 +51,7 @@ def comp (n : Nat) : Comp :=
 /-- Opaque fill item. -/
 def fillI (p : Path) (c : Color) (clip : Clip := []) (rule : FillRule := .nonzero) :
     DisplayItem :=
-  .fillPath p rule ⟨c, Comp.one⟩ clip
+  .fillPath p rule { color := c, alpha := Comp.one } clip
 
 /-- Black. -/
 def black : Color := .gray Comp.zero
@@ -122,7 +122,7 @@ def run : IO Nat := do
     failures := failures + 1; report s!"nested clips: {inked i3} inked"
   -- 4. Colours.
   let col := fun (c : Color) (a : Comp) =>
-    px (renderItems {} idm 2 2 #[.fillPath (rectP 0 0 2 2) .nonzero ⟨c, a⟩ []]) 1 1
+    px (renderItems {} idm 2 2 #[.fillPath (rectP 0 0 2 2) .nonzero { color := c, alpha := a } []]) 1 1
   let g := col (.gray (comp 50)) Comp.one
   if g.1 < 127 || g.1 > 129 || g.1 != g.2.1 || g.1 != g.2.2 then
     failures := failures + 1; report s!"gray 0.5 → {g}"

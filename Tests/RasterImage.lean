@@ -55,7 +55,7 @@ def mat (a b c d e f : Int) : Matrix :=
   ⟨Fixed.ofInt a, Fixed.ofInt b, Fixed.ofInt c, Fixed.ofInt d, Fixed.ofInt e, Fixed.ofInt f⟩
 
 /-- Opaque black fill style. -/
-def blackFill : FillStyle := ⟨.gray Comp.zero, Comp.one⟩
+def blackFill : FillStyle := { color := .gray Comp.zero, alpha := Comp.one }
 
 /-- A component `n / 100`. -/
 def comp (n : Nat) : Comp :=
@@ -167,7 +167,7 @@ def run : IO Nat := do
     failures := failures + 1; report s!"indexed: {px i5 0 0} {px i5 1 0}"
   -- 6. Stencil mask in red: sample 0 paints, 1 does not; /Decode [1 0] swaps.
   let maskP : Dict := [(nm "Width", .int 2), (nm "Height", .int 1), (nm "ImageMask", .bool true)]
-  let red : FillStyle := ⟨.rgb Comp.one Comp.zero Comp.zero, Comp.one⟩
+  let red : FillStyle := { color := .rgb Comp.one Comp.zero Comp.zero, alpha := Comp.one }
   let i6 := renderImgs 2 1 {} [inlineItem maskP (bytes [0b01000000]) (mat 2 0 0 1 0 0) red]
   let i6d := renderImgs 2 1 {} [inlineItem (maskP ++ [(nm "Decode", .array [.int 1, .int 0])])
     (bytes [0b01000000]) (mat 2 0 0 1 0 0) red]
@@ -210,7 +210,7 @@ def run : IO Nat := do
     failures := failures + 1; report s!"clipped: {grays i10}"
   -- 11. Constant alpha 0.5: black over white → 128 ± 1.
   let i11 := renderImgs 1 1 {} [inlineItem (imgParams 1 1 8 G) (bytes [0]) (mat 1 0 0 1 0 0)
-    ⟨.gray Comp.zero, comp 50⟩]
+    { color := .gray Comp.zero, alpha := comp 50 }]
   if (px i11 0 0).1 < 127 || (px i11 0 0).1 > 129 then
     failures := failures + 1; report s!"alpha: {px i11 0 0}"
   -- 12. A /DCTDecode XObject → mid-grey placeholder; a Flate-free gray XObject decodes.
