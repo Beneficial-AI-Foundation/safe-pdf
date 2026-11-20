@@ -115,8 +115,9 @@ def adversarialFailures : IO Nat := do
     if !ok then
       IO.println s!"  FAIL text view: {encDir / name}: unexpected text"
       n := n + 1
-  if files.size != 12 then
-    IO.println s!"  FAIL text view: {files.size} encryption fixtures, expected 12"
+  -- 12 fixtures of tasks 4.3b/4.6, 3 direct-`/Encrypt` classic-xref fixtures of task 9.5e2
+  if files.size != 15 then
+    IO.println s!"  FAIL text view: {files.size} encryption fixtures, expected 15"
     n := n + 1
   return n
 
