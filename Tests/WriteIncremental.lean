@@ -90,7 +90,7 @@ def checkWrite (ctx : String) (bytes : ByteArray) (marks : Marks) :
   match Doc.openDoc lim bytes with
   | .error e => return (← check ctx "openDoc (original)" false (errS e), none)
   | .ok doc =>
-  match writeAnnots lim doc marks, plan lim doc marks with
+  match writeAnnots lim doc marks, plan lim doc marks [] with
   | .error e, _ => return (← check ctx "writeAnnots" false (errS e), none)
   | _, .error e => return (← check ctx "plan" false (errS e), none)
   | .ok out, .ok p =>

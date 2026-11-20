@@ -13,6 +13,7 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
 * the new annotation objects, numbered from the old trailer's `/Size` upwards (W3);
 * each affected page dictionary, rewritten under its own object number and generation with
   `/Annots` extended (W4);
+* auxiliary stream objects passed by the caller, e.g. appearance streams (W9, task 9.5b);
 * a cross-reference section for exactly these objects and a trailer with `/Prev` = the old
   `startxref` offset, `/Size` grown, the other entries carried over (W5–W7);
 * the `startxref` / `%%EOF` tail.
@@ -55,6 +56,14 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
   and the second becomes the MD5 of `b` followed by the bytes of the new objects (a
   deterministic stand-in for "a new value when the file is updated"; no clock or randomness
   in the core). `/Info` is carried over unchanged (no `/ModDate` update).
+* W9. **Auxiliary streams** (task 9.5b): besides the annotation dictionaries the caller may
+  pass stream objects (`AuxStream`: a dictionary and raw data), e.g. the annotations'
+  appearance streams (`/AP /N`). Stream `j` gets object number `size + annotCount + j`,
+  generation 0 (after all annotations, before an xref stream), so the caller, which knows
+  `size` (the trailer's `/Size`) and how many annotations it passes, can reference it from
+  its annotation dictionaries. The writer sets the stream's `/Length` (`setKey`); the
+  dictionary must satisfy the W2 conditions. They are written as stream objects (S1), listed
+  in the section, and checked by the self-check (W8) to fetch back exactly.
 * W8. **Self-check.** The writer re-parses its own result before returning it, with the same
   strict parser the viewer uses: the chain of `bytes ++ update` must load as the new section
   followed by the old chain (`checkChain`: `startxref` at or after the old end of file, the
@@ -153,6 +162,26 @@ def annotsOf (d : OpenDoc) (limits : Limits) (num gen : Nat) : Except Error (Lis
 /-- Annotations to add: per page index, the annotation dictionaries, in order. -/
 abbrev Marks := List (Nat × List Dict)
 
+/-- An auxiliary stream object written with the annotations (rule W9): its dictionary
+(`/Length` is set by the writer) and its raw data. -/
+structure AuxStream where
+  /-- The stream dictionary (without `/Length`, or with any value: it is overwritten). -/
+  dict : Dict
+  /-- The raw stream data (no filter is applied). -/
+  data : List UInt8
+  deriving Repr, Inhabited, DecidableEq
+
+/-- The dictionary written for an auxiliary stream: `/Length` set to the data length. -/
+def AuxStream.fullDict (a : AuxStream) : Dict := setKey a.dict nameLength (.int a.data.length)
+
+/-- The body the strict parser must return for an auxiliary stream. -/
+def AuxStream.body (a : AuxStream) : IndirectBody := .stream ⟨a.fullDict, ⟨a.data.toArray⟩⟩
+
+/-- Number auxiliary streams consecutively from `n` (rule W9). -/
+def numberAux : Nat → List AuxStream → List (Nat × AuxStream)
+  | _, [] => []
+  | n, a :: as => (n, a) :: numberAux (n + 1) as
+
 /-- Number dictionaries consecutively from `n`. -/
 def numberFrom : Nat → List Dict → List (Nat × Dict)
   | _, [] => []
@@ -229,6 +258,8 @@ structure Plan where
   pages : List PagePlan
   /-- The original trailer dictionary. -/
   trailer : Dict
+  /-- The auxiliary streams with their object numbers (rule W9). -/
+  aux : List (Nat × AuxStream) := []
 
 /-- The objects of the update, in write order. -/
 def Plan.objects (p : Plan) : List (Nat × Nat × PdfObject) := p.pages.flatMap PagePlan.objects
@@ -237,19 +268,22 @@ def Plan.objects (p : Plan) : List (Nat × Nat × PdfObject) := p.pages.flatMap 
 def Plan.annotCount (p : Plan) : Nat := (p.pages.map fun pp => pp.annots.length).sum
 
 /-- The object number of the update's xref stream (rule W5; unused for a classic section). -/
-def Plan.xrefNum (p : Plan) : Nat := p.size + p.annotCount
+def Plan.xrefNum (p : Plan) : Nat := p.size + p.annotCount + p.aux.length
 
 /-- The new `/Size`. -/
 def Plan.newSize (p : Plan) : Nat := p.xrefNum + (if p.stream then 1 else 0)
 
-/-- **Planning** (rules W1–W3): checks the input and reads the pages. -/
-def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) : Except Error Plan :=
+/-- **Planning** (rules W1–W3, W9): checks the input and reads the pages. -/
+def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
+    Except Error Plan :=
   let d := doc.file
   if d.repaired then .error (.unsupported "incremental update of a repaired document")
   else if d.trailer.encrypted || d.crypt.isSome then
     .error (.unsupported "incremental update of an encrypted document")
   else if !(marks.map Prod.fst).Nodup then
     .error (.malformed 0 "a page index occurs twice in the marks")
+  else if !aux.all (fun a => markOk limits a.fullDict) then
+    .error (.malformed 0 "auxiliary stream dictionary is not canonical or nests too deep")
   else
     match Xref.findStartxref d.bytes with
     | .error e => .error e
@@ -257,8 +291,9 @@ def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) : Except Error Plan :
       match planPages limits doc d.trailer.size marks with
       | .error e => .error e
       | .ok pps =>
+        let n0 := d.trailer.size + (pps.map fun pp => pp.annots.length).sum
         let p : Plan := ⟨start, !Xref.matchAt d.bytes start Xref.kwXref, d.trailer.size, pps,
-          d.trailer.dict⟩
+          d.trailer.dict, numberAux n0 aux⟩
         if limits.maxObjects + 1 < p.newSize then .error (.limitExceeded .objects)
         else .ok p
 
@@ -272,6 +307,14 @@ def emit (pos : Nat) : List (Nat × Nat × PdfObject) → List (Nat × Nat × Na
     let b := indirect n g o
     let r := emit (pos + b.length) rest
     ((n, pos, g) :: r.1, b ++ r.2)
+
+/-- Write the auxiliary streams starting at byte offset `pos` (rule W9). -/
+def emitAux (pos : Nat) : List (Nat × AuxStream) → List (Nat × Nat × Nat) × List UInt8
+  | [] => ([], [])
+  | (n, a) :: rest =>
+    let b := streamObj n 0 a.fullDict a.data
+    let r := emitAux (pos + b.length) rest
+    ((n, pos, 0) :: r.1, b ++ r.2)
 
 /-- Sort entries by object number. -/
 def sortEntries (es : List (Nat × Nat × Nat)) : List (Nat × Nat × Nat) :=
@@ -294,13 +337,15 @@ def carriedStream (d : Dict) : Dict :=
 
 /-- The object numbers of the update's section, ascending. -/
 def Plan.keys (p : Plan) : List Nat :=
-  (p.objects.map (·.1) ++ (if p.stream then [p.xrefNum] else [])).mergeSort
+  (p.objects.map (·.1) ++ p.aux.map (·.1) ++ (if p.stream then [p.xrefNum] else [])).mergeSort
     fun a b => decide (a ≤ b)
 
 /-- **The update bytes** for an original of `base` bytes. -/
 def update (base : Nat) (p : Plan) : List UInt8 :=
   let objStart := base + 1
-  let r := emit objStart p.objects
+  let r0 := emit objStart p.objects
+  let ra := emitAux (objStart + r0.2.length) p.aux
+  let r := (r0.1 ++ ra.1, r0.2 ++ ra.2)
   let xoff := objStart + r.2.length
   if p.stream then
     let es := sortEntries ((p.xrefNum, xoff, 0) :: r.1)
@@ -341,11 +386,19 @@ def bodyIs (r : Except Error IndirectBody) (o : PdfObject) : Bool :=
   | .ok b => decide (b = .obj o)
   | .error _ => false
 
-/-- The object check: the result opens strictly and returns every written object. -/
-def checkObjects (limits : Limits) (out : ByteArray) (objs : List (Nat × Nat × PdfObject)) :
-    Bool :=
+/-- Whether a fetch returned exactly the auxiliary stream `a` (rule W9). -/
+def auxIs (r : Except Error IndirectBody) (a : AuxStream) : Bool :=
+  match r with
+  | .ok b => decide (b = a.body)
+  | .error _ => false
+
+/-- The object check: the result opens strictly and returns every written object and every
+auxiliary stream. -/
+def checkObjects (limits : Limits) (out : ByteArray) (objs : List (Nat × Nat × PdfObject))
+    (aux : List (Nat × AuxStream) := []) : Bool :=
   match Open.openFile limits out with
-  | .ok d' => !d'.repaired && objs.all fun o => bodyIs (d'.getObject limits o.1 o.2.1) o.2.2
+  | .ok d' => !d'.repaired && objs.all (fun o => bodyIs (d'.getObject limits o.1 o.2.1) o.2.2) &&
+      aux.all fun a => auxIs (d'.getObject limits a.1 0) a.2
   | .error _ => false
 
 /-! ## Entry point -/
@@ -355,13 +408,16 @@ def result (bytes : ByteArray) (p : Plan) : ByteArray :=
   bytes ++ ⟨(update bytes.size p).toArray⟩
 
 /-- **Entry point** (Plan.md C7). Append `marks` to the opened document `doc` as an
-incremental update: `doc.file.bytes ++ update`, self-checked by the strict parser (rule W8). -/
-def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) : Except Error ByteArray :=
-  match plan limits doc marks with
+incremental update: `doc.file.bytes ++ update`, self-checked by the strict parser (rule W8).
+`aux` are extra stream objects (rule W9; appearance streams, task 9.5b). -/
+def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
+    Except Error ByteArray :=
+  match plan limits doc marks aux with
   | .error e => .error e
   | .ok p =>
     let out := result doc.file.bytes p
-    if checkChain limits doc.file.bytes out p.start p.keys && checkObjects limits out p.objects
+    if checkChain limits doc.file.bytes out p.start p.keys &&
+      checkObjects limits out p.objects p.aux
     then .ok out
     else .error (.malformed doc.file.bytes.size
       "incremental update failed its strict re-parse (internal writer error)")

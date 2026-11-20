@@ -15,7 +15,8 @@ spec. This file proves, for every successful `Core.Write.Incremental.writeAnnots
 2. **Revision structure** (`writeAnnots_chain`): the result's cross-reference chain is the
    original chain with exactly one new section in front, whose `/Prev` is the original
    `startxref` and whose object numbers are exactly `Plan.keys` (the rewritten pages, the
-   new annotations, and for an xref-stream update the stream itself).
+   new annotations, the auxiliary streams of rule W9, and for an xref-stream update the
+   stream itself).
 3. **Every other object resolves as before** (`writeAnnots_untouched`): for an object number
    not in `Plan.keys`, `Spec.Unambiguous.resolveEntry` on the result equals that on the
    original — the same cross-reference entry (in-use offset and generation, or object-stream
@@ -29,6 +30,9 @@ spec. This file proves, for every successful `Core.Write.Incremental.writeAnnots
    dictionary other than `/Annots` is unchanged (`newDict_lookup_ne`); the plan covers
    exactly `marks` (`plan_marks`) and each planned page is the page at that index
    (`plan_page`).
+5a. **Auxiliary streams** (`writeAnnots_aux`, rule W9, task 9.5b): the appearance streams
+   passed with the annotations are numbered from the old `/Size` plus the annotation count,
+   in order, and each fetches back exactly (dictionary with `/Length`, raw data).
 6. `serialize_roundtrip`: the serializer is the Phase 1 printer, whose round trip
    `parseObject (serialize o) = o` is M1's `Spec.RoundTripCore.parseObject_print`.
 
@@ -74,11 +78,12 @@ theorem serialize_roundtrip (limits : Limits) (o : PdfObject) (hc : o.Canonical)
 /-! ## Unfolding the writer -/
 
 /-- A successful write comes from a plan whose result passed both self-checks. -/
-theorem writeAnnots_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) :
-    ∃ p, plan limits doc marks = .ok p ∧ out = result doc.file.bytes p ∧
+theorem writeAnnots_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ p, plan limits doc marks aux = .ok p ∧ out = result doc.file.bytes p ∧
       checkChain limits doc.file.bytes out p.start p.keys = true ∧
-      checkObjects limits out p.objects = true := by
+      checkObjects limits out p.objects p.aux = true := by
   unfold writeAnnots at h
   split at h
   · cases h
@@ -92,14 +97,16 @@ theorem writeAnnots_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : 
     · cases h
 
 /-- **C7 (1), prefix.** The original bytes are a prefix of the result (S8). -/
-theorem writeAnnots_prefix {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) : ∃ u, out = doc.file.bytes ++ u := by
+theorem writeAnnots_prefix {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) : ∃ u, out = doc.file.bytes ++ u := by
   obtain ⟨p, _, rfl, _, _⟩ := writeAnnots_ok h
   exact ⟨_, rfl⟩
 
 /-- The result extends the original (`PrefixStable.Extends`). -/
-theorem writeAnnots_extends {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) : PrefixStable.Extends doc.file.bytes out := by
+theorem writeAnnots_extends {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) : PrefixStable.Extends doc.file.bytes out := by
   obtain ⟨u, rfl⟩ := writeAnnots_prefix h
   exact PrefixStable.Extends.append _ _
 
@@ -131,9 +138,10 @@ theorem checkChain_ok {limits : Limits} {bytes out : ByteArray} {start : Nat} {k
 /-- **C7 (2), revision structure.** The result's chain is the original chain with one new
 section in front: its `/Prev` is the original `startxref`, its object numbers are exactly
 the plan's keys. -/
-theorem writeAnnots_chain {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) :
-    ∃ p revs sec' tr' off', plan limits doc marks = .ok p ∧
+theorem writeAnnots_chain {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ p revs sec' tr' off', plan limits doc marks aux = .ok p ∧
       loadChain limits doc.file.bytes = .ok revs ∧
       loadChain limits out = .ok ((sec', tr', off') :: revs) ∧
       doc.file.bytes.size ≤ off' ∧ tr'.prev? = some p.start ∧
@@ -149,8 +157,9 @@ theorem writeAnnots_chain {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out
 /-- **C7 (3), untouched objects.** An object number that the update does not write resolves
 to the same cross-reference entry in the result as in the original. -/
 theorem writeAnnots_untouched {limits : Limits} {doc : Doc.Doc} {marks : Marks}
-    {out : ByteArray} {p : Plan} (h : writeAnnots limits doc marks = .ok out)
-    (hp : plan limits doc marks = .ok p) {n : Nat} (hn : n ∉ p.keys) :
+    {aux : List AuxStream}
+    {out : ByteArray} {p : Plan} (h : writeAnnots limits doc marks aux = .ok out)
+    (hp : plan limits doc marks aux = .ok p) {n : Nat} (hn : n ∉ p.keys) :
     resolveEntry limits out n = resolveEntry limits doc.file.bytes n := by
   obtain ⟨p', revs, sec', tr', off', hp', h2, hnew, _, _, _, hkeys⟩ := writeAnnots_chain h
   rw [hp] at hp'
@@ -173,28 +182,41 @@ theorem bodyIs_eq {r : Except Error IndirectBody} {o : PdfObject} (h : bodyIs r 
     rw [h]
   · cases h
 
+/-- `auxIs` succeeds only on exactly that stream (rule W9). -/
+theorem auxIs_eq {r : Except Error IndirectBody} {a : AuxStream} (h : auxIs r a = true) :
+    r = .ok a.body := by
+  unfold auxIs at h
+  split at h
+  · simp only [decide_eq_true_eq] at h
+    rw [h]
+  · cases h
+
 /-- What `checkObjects` guarantees. -/
 theorem checkObjects_ok {limits : Limits} {out : ByteArray}
-    {objs : List (Nat × Nat × PdfObject)} (h : checkObjects limits out objs = true) :
+    {objs : List (Nat × Nat × PdfObject)} {aux : List (Nat × AuxStream)}
+    (h : checkObjects limits out objs aux = true) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.repaired = false ∧
-      ∀ o ∈ objs, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2) := by
+      (∀ o ∈ objs, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2)) ∧
+      ∀ a ∈ aux, d'.getObject limits a.1 0 = .ok a.2.body := by
   unfold checkObjects at h
   split at h
   · rename_i d' hd
     simp only [Bool.and_eq_true, Bool.not_eq_true', List.all_eq_true] at h
-    exact ⟨d', hd, h.1, fun o ho => bodyIs_eq (h.2 o ho)⟩
+    exact ⟨d', hd, h.1.1, fun o ho => bodyIs_eq (h.1.2 o ho), fun a ha => auxIs_eq (h.2 a ha)⟩
   · cases h
 
 /-- **C7 (4), strict re-open.** The result opens strictly and every written object fetches
 exactly as planned. -/
-theorem writeAnnots_open {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) :
-    ∃ p d', plan limits doc marks = .ok p ∧ Open.openFile limits out = .ok d' ∧
+theorem writeAnnots_open {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
-      ∀ o ∈ p.objects, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2) := by
+      (∀ o ∈ p.objects, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2)) ∧
+      ∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok a.2.body := by
   obtain ⟨p, hp, _, _, hc⟩ := writeAnnots_ok h
-  obtain ⟨d', hd, hr, hobj⟩ := checkObjects_ok hc
-  exact ⟨p, d', hp, hd, hr, hobj⟩
+  obtain ⟨d', hd, hr, hobj, haux⟩ := checkObjects_ok hc
+  exact ⟨p, d', hp, hd, hr, hobj, haux⟩
 
 /-! ## The plan -/
 
@@ -279,12 +301,15 @@ theorem planPages_ok {limits : Limits} {doc : Doc.Doc} :
               have := hq'.fresh a ha
               omega⟩
 
-/-- What a successful plan says about its input (rules W1–W3). -/
-theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {p : Plan}
-    (h : plan limits doc marks = .ok p) :
+/-- What a successful plan says about its input (rules W1–W3, W9). -/
+theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {p : Plan}
+    (h : plan limits doc marks aux = .ok p) :
     doc.file.repaired = false ∧ doc.file.trailer.encrypted = false ∧ doc.file.crypt = none ∧
       p.size = doc.file.trailer.size ∧
-      planPages limits doc doc.file.trailer.size marks = .ok p.pages := by
+      planPages limits doc doc.file.trailer.size marks = .ok p.pages ∧
+      p.aux = numberAux (doc.file.trailer.size + (p.pages.map fun pp => pp.annots.length).sum)
+        aux := by
   unfold plan at h
   simp only at h
   split at h
@@ -299,27 +324,31 @@ theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {p : Plan}
         · cases h
         · split at h
           · cases h
-          · rename_i pps hpps
-            split at h
+          · split at h
             · cases h
-            · cases h
-              simp only [Bool.not_eq_true] at hrep
-              simp only [Bool.or_eq_true, not_or, Bool.not_eq_true,
-                Option.isSome_eq_false_iff, Option.isNone_iff_eq_none] at henc
-              exact ⟨hrep, henc.1, henc.2, rfl, hpps⟩
+            · rename_i pps hpps
+              split at h
+              · cases h
+              · cases h
+                simp only [Bool.not_eq_true] at hrep
+                simp only [Bool.or_eq_true, not_or, Bool.not_eq_true,
+                  Option.isSome_eq_false_iff, Option.isNone_iff_eq_none] at henc
+                exact ⟨hrep, henc.1, henc.2, rfl, hpps, rfl⟩
 
 /-- **The plan covers exactly `marks`**: page indices and annotation dictionaries, in order. -/
-theorem plan_marks {limits : Limits} {doc : Doc.Doc} {marks : Marks} {p : Plan}
-    (h : plan limits doc marks = .ok p) :
+theorem plan_marks {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {p : Plan}
+    (h : plan limits doc marks aux = .ok p) :
     p.pages.map (fun pp => (pp.index, pp.annots.map Prod.snd)) = marks :=
-  (planPages_ok (plan_ok h).2.2.2.2).1
+  (planPages_ok (plan_ok h).2.2.2.2.1).1
 
 /-- **Each planned page is the page at its index**, read from the original document; the
 new annotation numbers are fresh (at or above the original `/Size`). -/
-theorem plan_page {limits : Limits} {doc : Doc.Doc} {marks : Marks} {p : Plan}
-    (h : plan limits doc marks = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
+theorem plan_page {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {p : Plan}
+    (h : plan limits doc marks aux = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
     PageOk limits doc doc.file.trailer.size pp :=
-  (planPages_ok (plan_ok h).2.2.2.2).2 pp hpp
+  (planPages_ok (plan_ok h).2.2.2.2.1).2 pp hpp
 
 /-! ## Page dictionaries -/
 
@@ -346,9 +375,10 @@ theorem mem_objects {p : Plan} {pp : PagePlan} (hpp : pp ∈ p.pages) {o : Nat �
 /-- **C7 (5), annotations.** For every page of the plan: the original annotation list is
 `pp.old`; on the result it is `pp.old` followed by `pp.refs`; each new reference fetches
 exactly its annotation dictionary; the new numbers are fresh. -/
-theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) :
-    ∃ p d', plan limits doc marks = .ok p ∧ Open.openFile limits out = .ok d' ∧
+theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
       p.pages.map (fun pp => (pp.index, pp.annots.map Prod.snd)) = marks ∧
       ∀ pp ∈ p.pages,
@@ -358,7 +388,7 @@ theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {ou
         (∀ a ∈ pp.annots, d'.getObject limits a.1 0 = .ok (.obj (.dict a.2)) ∧
           doc.file.trailer.size ≤ a.1) ∧
         d'.getObject limits pp.num pp.gen = .ok (.obj (.dict pp.newDict)) := by
-  obtain ⟨p, d', hp, hd, hr, hobj⟩ := writeAnnots_open h
+  obtain ⟨p, d', hp, hd, hr, hobj, _⟩ := writeAnnots_open h
   refine ⟨p, d', hp, hd, hr, plan_marks hp, fun pp hpp => ?_⟩
   have hok := plan_page hp hpp
   have hpage : d'.getObject limits pp.num pp.gen = .ok (.obj (.dict pp.newDict)) :=
@@ -370,10 +400,45 @@ theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {ou
       simp only [PagePlan.objects, List.mem_append, List.mem_map, List.mem_singleton]
       exact Or.inl ⟨a, ha, rfl⟩))
 
+/-- `numberAux` keeps the streams. -/
+theorem numberAux_snd (n : Nat) (as : List AuxStream) : (numberAux n as).map Prod.snd = as := by
+  induction as generalizing n with
+  | nil => rfl
+  | cons a as ih => simp [numberAux, ih]
+
+/-- `numberAux n` numbers consecutively from `n`: stream `j` gets `n + j`. -/
+theorem numberAux_fst (n : Nat) (as : List AuxStream) :
+    (numberAux n as).map Prod.fst = (List.range as.length).map (n + ·) := by
+  induction as generalizing n with
+  | nil => rfl
+  | cons a as ih =>
+    simp only [numberAux, List.map_cons, List.length_cons, List.range_succ_eq_map, ih,
+      List.map_map, Nat.add_zero]
+    congr 1
+    apply List.map_congr_left
+    intro j _
+    simp only [Function.comp, Nat.succ_eq_add_one]
+    omega
+
+/-- **Auxiliary streams (rule W9).** For a successful write with auxiliary streams `aux`
+(task 9.5b: appearance streams), the plan numbers them consecutively from the original
+`/Size` plus the number of new annotations, in order, and each fetches from the strictly
+re-opened result as exactly that stream (`/Length` set to its data length). -/
+theorem writeAnnots_aux {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
+    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+      p.aux.map Prod.snd = aux ∧
+      p.aux.map Prod.fst = (List.range aux.length).map
+        (doc.file.trailer.size + (p.pages.map fun pp => pp.annots.length).sum + ·) ∧
+      ∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok a.2.body := by
+  obtain ⟨p, d', hp, hd, _, _, haux⟩ := writeAnnots_open h
+  have hn := (plan_ok hp).2.2.2.2.2
+  exact ⟨p, d', hp, hd, by rw [hn, numberAux_snd], by rw [hn, numberAux_fst], haux⟩
+
 /-! ## C7 -/
 
 /-- **C7 (Plan.md §4): the incremental update is conservative.** For every successful
-`writeAnnots limits doc marks = .ok out`:
+`writeAnnots limits doc marks aux = .ok out`:
 
 * the original bytes are a prefix of `out` (S8);
 * `out`'s chain is the original chain with one new section (`/Prev` = old `startxref`)
@@ -383,11 +448,12 @@ theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {ou
   list followed by fresh references that fetch exactly the given annotation dictionaries.
 
 (The object-value form of "every other object unchanged" is tested, see the module doc.) -/
-theorem c7 {limits : Limits} {doc : Doc.Doc} {marks : Marks} {out : ByteArray}
-    (h : writeAnnots limits doc marks = .ok out) :
+theorem c7 {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
+    {out : ByteArray}
+    (h : writeAnnots limits doc marks aux = .ok out) :
     (∃ u, out = doc.file.bytes ++ u) ∧
     ∃ p revs sec' tr' off' d',
-      plan limits doc marks = .ok p ∧
+      plan limits doc marks aux = .ok p ∧
       loadChain limits out = .ok ((sec', tr', off') :: revs) ∧
       loadChain limits doc.file.bytes = .ok revs ∧
       tr'.prev? = some p.start ∧ Xref.findStartxref doc.file.bytes = .ok p.start ∧
