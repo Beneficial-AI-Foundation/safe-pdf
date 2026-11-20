@@ -211,6 +211,14 @@ def type3Cases : List (String × ByteArray × (Clip.Image → Bool)) :=
       fun img => redCount img == 0 && ink img == 0),
     ("t3-clip-mode", (type3Page "BT /F3 50 Tf 7 Tr 20 20 Td (AB) Tj ET"),
       fun img => ink img == 0),
+    -- Task 7.3l, stroke modes (MuPDF): the masked glyph filled with the stroke colour (red),
+    -- not the fill colour (green); mode 2 paints fill then stroke, so red shows; mode 5 as 1.
+    ("t3-stroke-mode", (type3Page "BT /F3 50 Tf 0 1 0 rg 1 0 0 RG 1 Tr 20 20 Td (C) Tj ET"),
+      fun img => near (redCount img) 1250 3 && greenCount img == 0),
+    ("t3-fill-stroke-mode", (type3Page "BT /F3 50 Tf 0 1 0 rg 1 0 0 RG 2 Tr 20 20 Td (B) Tj ET"),
+      fun img => near (redCount img) 1250 3 && greenCount img == 0),
+    ("t3-stroke-clip-mode", (type3Page "BT /F3 50 Tf 0 1 0 rg 1 0 0 RG 5 Tr 20 20 Td (C) Tj ET"),
+      fun img => near (redCount img) 1250 3 && greenCount img == 0),
     -- Clipped to the left half of the square.
     ("t3-clipped", (type3Page "0 0 45 200 re W n BT /F3 50 Tf 20 20 Td (A) Tj ET"),
       fun img => near (redCount img) 1250 3),
@@ -319,10 +327,21 @@ def scalerChecks : List String := Id.run do
             errs := s!"weights sum sw {sw} X {xs} N {nn} j {j}" :: errs
   if bad * 1000 > tot then errs := s!"fixed-point weights differ in {bad} of {tot}" :: errs
   -- the glyph cache stays bounded
+  let key (font : Nat) (fe : Rat) : Type3.CacheKey :=
+    { font, a := 1, b := 0, c := 0, d := 1, fe, ff := 0 }
   let gc := (List.range (Type3.maxGlyphCache + 10)).foldl
-    (fun (gc : Type3.GlyphCache) k => gc.insert (k % 256) (k : Rat) 0 #[]) Type3.GlyphCache.empty
+    (fun (gc : Type3.GlyphCache) (k : Nat) => gc.insert (k % 256) (key 0 (k : Rat)) #[]) Type3.GlyphCache.empty
   if gc.count != Type3.maxGlyphCache then errs := s!"cache count {gc.count}" :: errs
-  if (gc.find? 3 3 0).isNone then errs := "cache lookup" :: errs
+  if (gc.find? 3 (key 0 3)).isNone then errs := "cache lookup" :: errs
+  -- the key separates fonts and scales
+  if (gc.find? 3 (key 1 3)).isSome then errs := "cache lookup: other font" :: errs
+  if (gc.find? 3 { key 0 3 with a := 2 }).isSome then errs := "cache lookup: other scale" :: errs
+  -- the byte cap: a 1 MiB mask is stored at most 16 times
+  let big : Array (Option Fill.Mask) := #[some ⟨0, 0, 1024, 1024, ByteArray.mk (Array.replicate (1 <<< 20) 0)⟩]
+  let gb := (List.range 40).foldl
+    (fun (gc : Type3.GlyphCache) (k : Nat) => gc.insert 7 (key 0 (k : Rat)) big) Type3.GlyphCache.empty
+  if gb.count != 16 || gb.bytes > Type3.maxGlyphCacheBytes then
+    errs := s!"cache bytes {gb.count} {gb.bytes}" :: errs
   return errs
 
 /-- Run the checks; the number of failures. -/

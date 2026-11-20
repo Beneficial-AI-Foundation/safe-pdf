@@ -87,7 +87,9 @@ interpreter itself. Extraction recomputes the same sums inside each run: the gly
 offset `tx` has its origin at `(tx, Ts)` mapped by `Tm × CTM` (equal to `(0, 0)` mapped by the
 text rendering matrix of §9.4.4), its width is the page-space extent of its advance along its baseline direction, and its
 page-space font size is `|Tfs| · max(|M.c|, |M.d|)` for `M = Tm × CTM` (times an em estimate
-for Type 3 fonts, whose glyph space has no em: `type3SizeScale`).
+for Type 3 fonts, whose glyph space has no em: `type3SizeScale`). Type 3 advances are
+truncated to multiples of `1/1000` em as MuPDF's integer metrics table (`type3TruncWidth`,
+task 7.3l).
 
 ## Reading order (`layout`; heuristic, tested not proven, Plan.md §6)
 
@@ -551,6 +553,11 @@ def type3SizeScale (sm : SimpleMetrics) (scale : Fixed) : Fixed :=
   | [] => fabs scale
   | _ => fabs (Fixed.mul (Fixed.clamp (2 * ws.foldl (· + ·) 0 / ws.length)) scale)
 
+/-- MuPDF's Type 3 advance (task 7.3l): `pdf_load_type3_font` stores `/Widths` × `FontMatrix.a`
+× 1000 in its integer metrics table (`pdf_add_hmtx`), so an advance (in em, `Fixed`) is
+truncated toward zero to a multiple of `1/1000`. -/
+def type3TruncWidth (w : Fixed) : Fixed := Fixed.clamp (Int.tdiv w.raw 1000 * 1000)
+
 /-- Whether a string contains `pat`. -/
 def hasInfix (s pat : String) : Bool := (s.splitOn pat).length > 1
 
@@ -613,7 +620,7 @@ def buildFontDict {σ : Type} (limits : Limits) (src : Source σ) (s0 : σ)
       | _ => Fixed.div Fixed.one (Fixed.ofInt 1000)
     let scale := Fixed.mul a (Fixed.ofInt 1000)
     (⟨.one, (fun c => match c with
-        | [b] => Fixed.mul (sm.width b.toNat).1 scale
+        | [b] => type3TruncWidth (Fixed.mul (sm.width b.toNat).1 scale)
         | _ => Fixed.zero),
       simpleUnicode (sm.std14 == some .zapfDingbats) true tu sm.encoding, s!"Type3{tuDesc}", type3SizeScale sm scale⟩, s1)
   else
@@ -1306,6 +1313,9 @@ private def ligPdf : ByteArray := page "/F3 5 0 R" "BT /F3 10 Tf 72 700 Td (\\00
 
 -- C3 bytes, on a run: glyph codes concatenate to the shown bytes
 #guard ((ext hello).map fun t => (t.glyphs.map Glyph.code).flatten) == some "Hello World".toUTF8.toList
+-- Type 3 advances truncate toward zero to 1/1000 em (MuPDF's integer metrics)
+#guard (type3TruncWidth (Fixed.clamp 556999)).raw == 556000
+#guard (type3TruncWidth (Fixed.clamp (-556999))).raw == -556000
 
 end Tests
 

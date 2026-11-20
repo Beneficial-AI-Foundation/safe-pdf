@@ -49,28 +49,29 @@ paths only) as a premultiplied layer over the device box of `GBox` widened by on
 white and over black, coverage `α` recovered exactly). A **masked** glyph keeps only `α` and
 takes the run's fill colour (`Tiling.layerLoop` with the colour: the charproc's colour
 operators are ignored, image masks are painted as stencils of that colour). The layer is
-blitted (`Tiling.blit`) through the run's clip mask with the fill alpha. Render modes: 3 and
-7 paint nothing; every other mode paints the glyph once with the fill colour (MuPDF
-renders Type 3 glyphs as filled; stroke and clip effects of modes 1, 2, 4–6 are not
-applied — a documented gap, as are pattern fill colours on masked glyphs, which paint with
-the pattern's device placeholder colour).
+blitted (`Tiling.blit`) through the run's clip mask with the fill alpha. Render modes (task
+7.3l, `passes`, as MuPDF): 3 and 7 paint nothing; fill modes paint the glyph with the fill
+colour and alpha; stroke modes paint the glyph **filled** with the stroke colour and alpha
+(MuPDF's `fz_render_stroked_glyph` falls back to the filled glyph for non-FreeType fonts);
+modes 2 and 6 paint both, fill first. Gaps: the clip effect of modes 4–7; the knockout group
+MuPDF opens for mode 2/6 when the stroke alpha is neither 0 nor 1 (here the stroke pass is
+composited over the fill pass); pattern colours on masked glyphs paint with the pattern's
+device placeholder colour.
 
 **Image glyphs** (bitmap fonts: every item an inline image, `T3Glyph.images`) skip the layer:
 a stencil is scaled as MuPDF does (task 7.3k, `mupdfStencil`: power-of-two subsampling, then
 `fz_scale_pixmap`'s smoothstep weights) and composited directly; the masks are cached per run
-by (code, sub-pixel phase) (`GlyphCache`), the subsampled bitmaps per loaded font
-(`StencilSrc`, lazily).
+for the page by (font, code, scale, sub-pixel phase) (`GlyphCache`, task 7.3l, held in
+`Glyph.TState`), the subsampled bitmaps per loaded font (`StencilSrc`, lazily).
 
 Layers larger than `maxGlyphLayerPixels` are not drawn (degradation, never an error).
 `renderRun_size`: the page buffer keeps its size.
 
 ## Gaps
 
-* The glyph bitmap cache holds image glyphs only and lives for one glyph run (a page-wide
-  cache needs a field in `Glyph`'s render state); other glyphs are rendered per instance (two
-  small renders); charproc display lists are cached per font.
-* Text extraction (`Text`) keeps the untruncated Type 3 advances (`truncWidth` applies to
-  rendering only).
+* The glyph bitmap cache holds image glyphs only (page-wide; tiling cells start their own);
+  other glyphs are rendered per instance (two small renders); charproc display lists are
+  cached per font.
 * Fonts used by text inside charprocs are not loaded (such text is positioned with the
   runner's environment fonts); tiling patterns used inside charprocs are not loaded.
 -/
@@ -198,6 +199,9 @@ structure T3Font where
   glyphs : Array (Option T3Glyph)
   /-- Downscale cap for images (`Limits.maxImagePixels`). -/
   imageCap : Nat := 0
+  /-- The font's number among the page's loaded Type 3 fonts (`Glyph.loadType3`): its identity
+  in the page-wide glyph cache. -/
+  uid : Nat := 0
 
 /-- An exact number (`int` or `real`). -/
 def ratOf : PdfObject → Option Rat
@@ -817,35 +821,89 @@ def subpixelAdjust (trm : Aff) : Aff :=
 /-! ### Glyph bitmap cache
 
 MuPDF caches rendered glyphs per (font, glyph, matrix, sub-pixel phase) (`fz_render_glyph`).
-Here the coverage masks of an image glyph's stencils (`stencilCoverage`) are cached for the
-duration of one glyph run: within a run the font and the linear part of the glyph matrix are
-fixed, so the key is the code and the fractional part of the (quantised) translation; an
-integer translation moves the masks by whole pixels (exactly: MuPDF's scaler places its output
-at `⌊x⌋` and depends on `x − ⌊x⌋` only). At most `maxGlyphCache` entries. -/
+Here the coverage masks of an image glyph's stencils (`stencilCoverage`) are cached **for the
+whole page** (task 7.3l; the cache lives in `Glyph.TState`): the key is the loaded font
+(`T3Font.uid`), the code, the linear part `a b c d` of the glyph → device matrix and the
+fractional part of its (quantised) translation; an integer translation moves the masks by whole
+pixels (exactly: MuPDF's scaler places its output at `⌊x⌋` and depends on `x − ⌊x⌋` only).
+Bounded: at most `maxGlyphCache` entries and `maxGlyphCacheBytes` mask bytes (further entries
+are not stored). -/
 
-/-- Most cached glyph instances per run (local cap). -/
-def maxGlyphCache : Nat := 1024
+/-- Most cached glyph instances per page (local cap). -/
+def maxGlyphCache : Nat := 4096
 
-/-- Cached stencil masks of image glyphs: per code, `(phase x, phase y, masks)` (one optional
-mask per image of the glyph, placed for the phase, i.e. translation `−⌊e⌋, −⌊f⌋`). -/
+/-- Most mask bytes held by the glyph cache per page (local cap, 16 MiB). -/
+def maxGlyphCacheBytes : Nat := 1 <<< 24
+
+/-- The key of a cached glyph instance (besides its code): the font's `T3Font.uid`, the linear
+part of the glyph → device matrix and the sub-pixel phase of its translation. -/
+structure CacheKey where
+  /-- `T3Font.uid` of the font. -/
+  font : Nat
+  /-- Linear part of the glyph → device matrix. -/
+  a : Rat
+  /-- Linear part of the glyph → device matrix. -/
+  b : Rat
+  /-- Linear part of the glyph → device matrix. -/
+  c : Rat
+  /-- Linear part of the glyph → device matrix. -/
+  d : Rat
+  /-- Sub-pixel phase `e − ⌊e⌋`. -/
+  fe : Rat
+  /-- Sub-pixel phase `f − ⌊f⌋`. -/
+  ff : Rat
+  deriving BEq
+
+/-- Cached stencil masks of image glyphs: per code, `(key, masks)` (one optional mask per image
+of the glyph, placed for the phase, i.e. translation `−⌊e⌋, −⌊f⌋`). -/
 structure GlyphCache where
   /-- Entries by code (`0 … 255`). -/
-  slots : Array (List (Rat × Rat × Array (Option Mask)))
+  slots : Array (List (CacheKey × Array (Option Mask)))
   /-- Number of entries. -/
   count : Nat
+  /-- Mask bytes held. -/
+  bytes : Nat
 
 /-- The empty cache. -/
-def GlyphCache.empty : GlyphCache := ⟨Array.replicate 256 [], 0⟩
+def GlyphCache.empty : GlyphCache := ⟨Array.replicate 256 [], 0, 0⟩
 
-/-- The masks cached for code `c` at phase `(fe, ff)`. -/
-def GlyphCache.find? (gc : GlyphCache) (c : Nat) (fe ff : Rat) : Option (Array (Option Mask)) :=
-  (((gc.slots[c]?).getD []).find? (fun e => e.1 == fe && e.2.1 == ff)).map (·.2.2)
+instance : Inhabited GlyphCache := ⟨GlyphCache.empty⟩
 
-/-- Add an entry (dropped when the cache is full). -/
-def GlyphCache.insert (gc : GlyphCache) (c : Nat) (fe ff : Rat) (m : Array (Option Mask)) :
+/-- The masks cached for code `c` under key `k`. -/
+def GlyphCache.find? (gc : GlyphCache) (c : Nat) (k : CacheKey) : Option (Array (Option Mask)) :=
+  (((gc.slots[c]?).getD []).find? (fun e => e.1 == k)).map (·.2)
+
+/-- Bytes of a list of optional masks. -/
+def masksBytes (m : Array (Option Mask)) : Nat :=
+  m.foldl (fun s o => s + match o with | some mk => mk.data.size | none => 0) 0
+
+/-- Add an entry (dropped when the cache is full: `maxGlyphCache` entries or
+`maxGlyphCacheBytes` bytes). -/
+def GlyphCache.insert (gc : GlyphCache) (c : Nat) (k : CacheKey) (m : Array (Option Mask)) :
     GlyphCache :=
-  if maxGlyphCache ≤ gc.count then gc else
-  ⟨gc.slots.modify c (fun l => (fe, ff, m) :: l), gc.count + 1⟩
+  let nb := masksBytes m
+  if maxGlyphCache ≤ gc.count ∨ maxGlyphCacheBytes < gc.bytes + nb then gc else
+  ⟨gc.slots.modify c (fun l => (k, m) :: l), gc.count + 1, gc.bytes + nb⟩
+
+/-- The cache never holds more than `maxGlyphCache` entries. -/
+theorem GlyphCache.insert_count_le (gc : GlyphCache) (c : Nat) (k : CacheKey)
+    (m : Array (Option Mask)) (h : gc.count ≤ maxGlyphCache) :
+    (gc.insert c k m).count ≤ maxGlyphCache := by
+  unfold GlyphCache.insert
+  dsimp only
+  split
+  · exact h
+  · next hn => dsimp only; omega
+
+/-- The cache never holds more than `maxGlyphCacheBytes` mask bytes. -/
+theorem GlyphCache.insert_bytes_le (gc : GlyphCache) (c : Nat) (k : CacheKey)
+    (m : Array (Option Mask)) (h : gc.bytes ≤ maxGlyphCacheBytes) :
+    (gc.insert c k m).bytes ≤ maxGlyphCacheBytes := by
+  unfold GlyphCache.insert
+  dsimp only
+  split
+  · exact h
+  · next hn => dsimp only; omega
 
 /-- A mask moved by whole pixels. -/
 def shiftMask (mk : Mask) (dx dy : Int) : Mask := { mk with x0 := mk.x0 + dx, y0 := mk.y0 + dy }
@@ -878,31 +936,32 @@ def glyphMasks (g : T3Glyph) (T0 : Aff) : Array (Option Mask) × Nat :=
   (g.images.map fun e => stencilCoverage e.1 e.2.2 (Aff.ofMatrix e.2.1 * T0),
     g.images.foldl (fun s e => s + e.1.w * e.1.h) 0)
 
-/-- **Draw an image glyph** with glyph → device matrix `T` through the cache `gc` (code `c`):
-masks looked up by phase or computed and stored. -/
+/-- **Draw an image glyph** with glyph → device matrix `T` through the cache `gc` (font
+`uid`, code `c`): masks looked up by (font, code, linear part, phase) or computed and stored. -/
 def drawCached (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat) (T : Aff)
-    (c : Nat) (g : T3Glyph) (gc : GlyphCache) (b : ByteArray) : ByteArray × Nat × GlyphCache :=
+    (uid c : Nat) (g : T3Glyph) (gc : GlyphCache) (b : ByteArray) : ByteArray × Nat × GlyphCache :=
   let ix := T.e.floor
   let iy := T.f.floor
   let fe := T.e - ix
   let ff := T.f - iy
-  let r : Array (Option Mask) × Nat × GlyphCache := match gc.find? c fe ff with
+  let k : CacheKey := { font := uid, a := T.a, b := T.b, c := T.c, d := T.d, fe, ff }
+  let r : Array (Option Mask) × Nat × GlyphCache := match gc.find? c k with
     | some m => (m, 0, gc)
     | none =>
       let q := glyphMasks g { T with e := fe, f := ff }
-      (q.1, q.2, gc.insert c fe ff q.1)
+      (q.1, q.2, gc.insert c k q.1)
   let q := drawImagesC cap W H cm al uc T ix iy (g.images.toList.zip r.1.toList) (b, r.2.1)
   (q.1, q.2, r.2.2)
 
 /-- `drawCached` preserves the buffer size. -/
 theorem drawCached_size (cap W H : Nat) (cm : Option Mask) (al : Nat) (uc : Nat × Nat × Nat)
-    (T : Aff) (c : Nat) (g : T3Glyph) (gc : GlyphCache) (b : ByteArray) :
-    (drawCached cap W H cm al uc T c g gc b).1.size = b.size :=
+    (T : Aff) (uid c : Nat) (g : T3Glyph) (gc : GlyphCache) (b : ByteArray) :
+    (drawCached cap W H cm al uc T uid c g gc b).1.size = b.size :=
   drawImagesC_size _ _ _ _ _ _ _ _ _ _ _
 
 /-- One laid-out code of a run: its glyph (if any) drawn at its offset (the text rendering
 matrix quantised as MuPDF's, `subpixelAdjust`); image glyphs through the run's glyph cache
-(`drawCached`), others by `drawGlyph`. The accumulator: buffer, work, cache. -/
+(`drawCached`, the page's cache), others by `drawGlyph`. The accumulator: buffer, work, cache. -/
 def glyphStep (paint : Tiling.CellPainter) (W H : Nat) (win : IRect) (cm : Option Mask) (al : Nat)
     (uc : Nat × Nat × Nat) (f : T3Font) (r : GlyphRun) (rm : Aff)
     (acc : ByteArray × Nat × GlyphCache) (e : List UInt8 × Fixed × Fixed) :
@@ -913,7 +972,7 @@ def glyphStep (paint : Tiling.CellPainter) (W H : Nat) (win : IRect) (cm : Optio
     | some (some g) =>
       let T := f.matrix * subpixelAdjust (placement r e.2.1 * rm)
       if 0 < g.images.size ∧ T.det ≠ 0 ∧ 0 < g.items.size then
-        let q := drawCached f.imageCap W H cm al uc T c.toNat g acc.2.2 acc.1
+        let q := drawCached f.imageCap W H cm al uc T f.uid c.toNat g acc.2.2 acc.1
         (q.1, acc.2.1 + q.2.1, q.2.2)
       else
         let q := drawGlyph paint f.imageCap W H win cm al uc T g acc.1
@@ -937,41 +996,75 @@ private theorem foldl_glyphStep_size (paint : Tiling.CellPainter) (W H : Nat) (w
     · split
       · dsimp only
         split
-        · exact drawCached_size _ _ _ _ _ _ _ _ _ _ _
+        · exact drawCached_size _ _ _ _ _ _ _ _ _ _ _ _
         · exact drawGlyph_size _ _ _ _ _ _ _ _ _ _ _
       · rfl
     · rfl
 
 /-- MuPDF's Type 3 advance: `pdf_load_type3_font` stores `/Widths` × `FontMatrix.a` × 1000 in
 its integer metrics table (`pdf_add_hmtx`), truncating the advance to a multiple of `1/1000`
-of the font size (toward zero). Positions of glyphs drawn here follow it. -/
-def truncWidth (w : Fixed) : Fixed := Fixed.clamp (Int.tdiv w.raw 1000 * 1000)
+of the font size (toward zero). Positions of glyphs drawn here follow it; text extraction
+truncates the same way (`Text.type3TruncWidth`, task 7.3l), so this is idempotent on the
+`FontInfo` of a Type 3 font and kept for fonts built elsewhere. -/
+def truncWidth (w : Fixed) : Fixed := Text.type3TruncWidth w
+
+/-- The paint passes of a Type 3 run (task 7.3l), as MuPDF's `pdf_flush_text` with a cacheable
+Type 3 font: fill modes paint the glyphs with the fill colour and alpha (`fz_fill_text`), stroke
+modes with the stroke colour and alpha (`fz_stroke_text`, whose `fz_render_stroked_glyph` renders
+a Type 3 glyph filled, not outlined); fill-and-stroke modes paint both, fill first. Modes 3 and 7
+paint nothing. -/
+def passes (r : GlyphRun) : List (Color × Comp) :=
+  let f := (r.fill.color, r.fill.alpha)
+  let k := (r.stroke.color, r.stroke.alpha)
+  match r.renderMode with
+  | .fill | .fillClip => [f]
+  | .stroke | .strokeClip => [k]
+  | .fillStroke | .fillStrokeClip => [f, k]
+  | .invisible | .clip => []
 
 /-- **Render a glyph run of a Type 3 font** (see the module doc) onto the page state `st`
 (`W × H`, page → device `m`), glyphs drawn by the cell painter `paint`, positions from the
-run's `FontInfo` `fi` (advances truncated as MuPDF's, `truncWidth`). Modes 3 and 7 paint
-nothing. -/
+run's `FontInfo` `fi` (advances truncated as MuPDF's, `truncWidth`), once per paint pass
+(`passes`: fill and/or stroke colour), image glyphs through the page's glyph cache `gc`
+(returned updated). -/
 def renderRun (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : Nat)
-    (fi : FontInfo) (f : T3Font) (st : Clip.RState) (r : GlyphRun) (clip : Content.Clip) :
-    Clip.RState :=
-  if !r.renderMode.paints then st else
+    (fi : FontInfo) (f : T3Font) (st : Clip.RState) (gc : GlyphCache) (r : GlyphRun)
+    (clip : Content.Clip) : Clip.RState × GlyphCache :=
+  if !r.renderMode.paints then (st, gc) else
   let c := Clip.clipMaskC cfg m W H st.cache clip
   let win := Clip.itemWindow W H c.1
   let fi' : FontInfo := { fi with width := fun code => truncWidth (fi.width code) }
   let entries := Text.layoutParts fi' (Text.runTextState r) r.font.size Fixed.zero r.parts
   let rm := Aff.ofMatrix r.tm * Aff.ofMatrix r.ctm * m
-  let q := entries.foldl (glyphStep paint W H win c.1 (Clip.compByte r.fill.alpha)
-    (Clip.deviceRGB r.fill.color) f r rm) (st.buf, 0, GlyphCache.empty)
-  { buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2.1 }
+  let q := (passes r).foldl (fun (acc : ByteArray × Nat × GlyphCache) (pc : Color × Comp) =>
+    entries.foldl (glyphStep paint W H win c.1 (Clip.compByte pc.2) (Clip.deviceRGB pc.1) f r rm)
+      acc) (st.buf, 0, gc)
+  ({ buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2.1 }, q.2.2)
+
+private theorem foldl_passes_size (paint : Tiling.CellPainter) (W H : Nat) (win : IRect)
+    (cm : Option Mask) (f : T3Font) (r : GlyphRun) (rm : Aff)
+    (entries : List (List UInt8 × Fixed × Fixed)) (ps : List (Color × Comp)) :
+    ∀ (acc : ByteArray × Nat × GlyphCache),
+      (ps.foldl (fun (acc : ByteArray × Nat × GlyphCache) (pc : Color × Comp) =>
+        entries.foldl (glyphStep paint W H win cm (Clip.compByte pc.2) (Clip.deviceRGB pc.1) f r rm)
+          acc) acc).1.size = acc.1.size := by
+  induction ps with
+  | nil => intro acc; rfl
+  | cons p rest ih =>
+    intro acc
+    simp only [List.foldl_cons]
+    rw [ih]
+    exact foldl_glyphStep_size _ _ _ _ _ _ _ _ _ _ _ _
 
 /-- **Rendering a Type 3 run preserves the buffer size.** -/
 theorem renderRun_size (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : Nat)
-    (fi : FontInfo) (f : T3Font) (st : Clip.RState) (r : GlyphRun) (clip : Content.Clip) :
-    (renderRun cfg paint m W H fi f st r clip).buf.size = st.buf.size := by
+    (fi : FontInfo) (f : T3Font) (st : Clip.RState) (gc : GlyphCache) (r : GlyphRun)
+    (clip : Content.Clip) :
+    (renderRun cfg paint m W H fi f st gc r clip).1.buf.size = st.buf.size := by
   unfold renderRun
   split
   · rfl
-  · exact foldl_glyphStep_size _ _ _ _ _ _ _ _ _ _ _ _
+  · exact foldl_passes_size _ _ _ _ _ _ _ _ _ _ _
 
 /-! ## 5. Checks -/
 
