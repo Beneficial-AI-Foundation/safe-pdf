@@ -577,6 +577,66 @@ structure TextState where
   rise : Fixed := Fixed.zero
   deriving DecidableEq, Repr, Inhabited
 
+/-! ## Blend modes (§11.3.5, task 7.3c) -/
+
+/-- The PDF blend modes (ISO 32000-2 §11.3.5, Tables 134–135): twelve separable modes and
+four non-separable ones. `/Compatible` (PDF 1.x) means `Normal`. -/
+inductive BlendMode where
+  /-- `Normal` (also `Compatible`). -/
+  | normal
+  /-- `Multiply`. -/
+  | multiply
+  /-- `Screen`. -/
+  | screen
+  /-- `Overlay`. -/
+  | overlay
+  /-- `Darken`. -/
+  | darken
+  /-- `Lighten`. -/
+  | lighten
+  /-- `ColorDodge`. -/
+  | colorDodge
+  /-- `ColorBurn`. -/
+  | colorBurn
+  /-- `HardLight`. -/
+  | hardLight
+  /-- `SoftLight`. -/
+  | softLight
+  /-- `Difference`. -/
+  | difference
+  /-- `Exclusion`. -/
+  | exclusion
+  /-- `Hue` (non-separable). -/
+  | hue
+  /-- `Saturation` (non-separable). -/
+  | saturation
+  /-- `Color` (non-separable). -/
+  | color
+  /-- `Luminosity` (non-separable). -/
+  | luminosity
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Blend modes by their PDF names. -/
+def BlendMode.table : List (String × BlendMode) :=
+  [("Normal", .normal), ("Compatible", .normal), ("Multiply", .multiply), ("Screen", .screen),
+   ("Overlay", .overlay), ("Darken", .darken), ("Lighten", .lighten),
+   ("ColorDodge", .colorDodge), ("ColorBurn", .colorBurn), ("HardLight", .hardLight),
+   ("SoftLight", .softLight), ("Difference", .difference), ("Exclusion", .exclusion),
+   ("Hue", .hue), ("Saturation", .saturation), ("Color", .color), ("Luminosity", .luminosity)]
+
+/-- The blend mode a PDF name denotes, if any. -/
+def BlendMode.ofName? (n : Name) : Option BlendMode :=
+  (BlendMode.table.find? fun e => Name.ofString e.1 = n).map (·.2)
+
+/-- Whether a mode is separable (computed channel by channel). -/
+def BlendMode.separable : BlendMode → Bool
+  | .hue | .saturation | .color | .luminosity => false
+  | _ => true
+
+#guard BlendMode.ofName? (Name.ofString "Multiply") == some .multiply
+#guard BlendMode.ofName? (Name.ofString "Compatible") == some .normal
+#guard BlendMode.ofName? (Name.ofString "Plus") == none
+
 /-! ## Graphics state -/
 
 /-- The graphics state (ISO 32000-2 §8.4.1 Tables 51–52) — the parameters the display list
@@ -606,6 +666,12 @@ structure GState where
   renderingIntent : Name := Name.ofString "RelativeColorimetric"
   /-- Flatness tolerance (`i`); initial 1.0. -/
   flatness : Fixed := Fixed.one
+  /-- Blend mode (`/BM` in an ExtGState, task 7.3c); initial `Normal`. -/
+  blendMode : BlendMode := .normal
+  /-- Soft mask (`/SMask` in an ExtGState, task 7.3c): the identifier of the
+  `DisplayItem.softMask` item, emitted earlier in the same display list, that defines it;
+  `none` (initial) for no mask. Set only by the content runner (`Core.Content.Run`). -/
+  softMask : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 /-! ## Save/restore stack -/

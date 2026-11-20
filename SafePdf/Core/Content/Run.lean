@@ -33,8 +33,14 @@ never an error (M5: the interpreter never fails).
   source (charged to its budget), tokenized with `Ops.tokenize`, and run nested as
   `q`, `/Matrix cm`, clip to `/BBox` (in form space; one informational `clip` item), the
   form's operators, `Q`: the invoking machine is restored *as a whole* afterwards, so nothing a
-  form does (unbalanced `q`, open text object, pending `W`) leaks out. Transparency groups,
-  `/OC` and `/Ref` are ignored.
+  form does (unbalanced `q`, open text object, pending `W`) leaks out. `/OC` and `/Ref` are
+  ignored.
+* **Transparency groups** (task 7.3c, §11.6.6, §8.10.3): a form with `/Group << /S /Transparency
+  >>` is bracketed by `groupBegin g` … `groupEnd` instead of the informational `clip` item
+  (`g` records `/I`, `/K`, the page-space `/BBox`, and the `ca`, blend mode and soft mask
+  at the `Do`); inside it alpha, blend mode and soft mask restart from their initial values
+  (`resetTx`). `/CS` of the group is ignored. A form adds at most two items of its own
+  (`FormJob.pre_post_le`), as before.
 * **Termination**: nesting is bounded by **fuel** `Limits.maxXObjectDepth` (structural
   recursion on it: `runOps`), and a form whose object number is on the current nesting path
   (`Frame.visited`) is **not** re-entered (self-reference or mutual recursion): one warning,
@@ -63,7 +69,15 @@ never an error (M5: the interpreter never fails).
 * **`gs`** (§8.4.5, Table 57): `/LW`, `/LC`, `/LJ`, `/ML`, `/D`, `/RI`, `/CA`, `/ca` are
   applied to the graphics state (what the display list carries); `/Font [ref size]` sets the
   font (`FontId.ref`, empty resource name) and size (a direct font dictionary there is skipped
-  with a warning). Ignored, documented: `/SMask`, `/BM`, `/AIS`, `/TK`, `/OP`, `/op`, `/OPM`, `/BG`,
+  with a warning). `/BM` (task 7.3c): a name or an array of names, the first recognised one
+  wins, unknown means `Normal`. `/SMask` (task 7.3c, §11.6.5): `/None` clears the soft mask; a
+  dictionary `<< /S /Luminosity|/Alpha /G form /BC [...] >>` has its group `/G` run like a
+  form (same nesting fuel, visited path and form budget; in the coordinates at the `gs`;
+  `resetTx` state) into a separate list, wrapped as one `softMask id info items` item (`id` =
+  the operator count at the `gs`, unique per page) and the state's `softMask` becomes
+  `some id` (`gsR`; `gsR_good`: the wrapper counts as the `gs`'s one item, the group's items
+  are counted by its nested run, so every item bound below still holds). A mask that cannot be
+  expanded is a warning and clears the mask. `/TR` is ignored. Ignored, documented: `/AIS`, `/TK`, `/OP`, `/op`, `/OPM`, `/BG`,
   `/BG2`, `/UCR`, `/UCR2`, `/TR`, `/TR2`, `/HT`, `/FL`, `/SM`, `/SA`, `/UseBlackPtComp`,
   `/HTO`, `/Type`. A malformed value of an applied key is skipped with a warning; a missing
   ExtGState is a warning.
@@ -250,6 +264,15 @@ def formResources {σ : Type} (src : Source σ) (s : σ) (d : Dict) (parent : Di
 
 /-! ## ExtGState (§8.4.5) -/
 
+/-- A `/BM` value (§11.6.3): a name, or an array of names of which the first recognised one
+is used; an unknown name, or an array with none recognised, means `Normal`. -/
+def blendOf : PdfObject → Option BlendMode
+  | .name n => some ((BlendMode.ofName? n).getD .normal)
+  | .array xs => some ((xs.findSome? fun o => match o with
+      | .name n => BlendMode.ofName? n
+      | _ => none).getD .normal)
+  | _ => none
+
 /-- Apply one ExtGState entry (value resolved): new state and warnings. -/
 def gsEntry (g : GState) (k : Name) (v : PdfObject) : GState × Nat :=
   if k = nm "LW" then
@@ -296,10 +319,21 @@ def gsEntry (g : GState) (k : Name) (v : PdfObject) : GState × Nat :=
           0)
       | none => (g, 1)
     | _ => (g, 1)
+  else if k = nm "BM" then
+    match blendOf v with
+    | some b => ({ g with blendMode := b }, 0)
+    | none => (g, 1)
+  else if k = nm "SMask" then
+    -- `/None` clears the mask; a dictionary clears it too here: `stepR` sets the new mask
+    -- after expanding its group (`gsR`).
+    match v with
+    | .name _ | .dict _ => ({ g with softMask := none }, 0)
+    | _ => ({ g with softMask := none }, 1)
   else (g, 0)
 
 /-- Keys `gsEntry` applies (others are ignored without resolving their values). -/
-def gsKeys : List String := ["LW", "LC", "LJ", "ML", "D", "RI", "CA", "ca", "Font"]
+def gsKeys : List String :=
+  ["LW", "LC", "LJ", "ML", "D", "RI", "CA", "ca", "Font", "BM", "SMask"]
 
 /-- Apply an ExtGState dictionary: new state, warnings, source state. -/
 def applyExtGState {σ : Type} (src : Source σ) (s : σ) (d : Dict) (g : GState) :
@@ -670,6 +704,54 @@ structure FormJob where
   clip : Option Path
   /-- Warnings (a missing or malformed `/BBox`). -/
   w : Nat
+  /-- The transparency group the form is, if any (task 7.3c). -/
+  group : Option GroupInfo := none
+
+/-- Items emitted before the form's own items: `groupBegin` for a transparency group, else the
+informational `/BBox` `clip` item. -/
+def FormJob.pre (j : FormJob) : List DisplayItem :=
+  match j.group with
+  | some g => [.groupBegin g]
+  | none => j.clip.toList.map (.clip · .nonzero)
+
+/-- Items emitted after the form's own items: `groupEnd` for a transparency group. -/
+def FormJob.post (j : FormJob) : List DisplayItem :=
+  match j.group with
+  | some _ => [.groupEnd]
+  | none => []
+
+/-- A form adds at most two items of its own (`Paint.maxItems`, charged to its `Do`). -/
+theorem FormJob.pre_post_le (j : FormJob) : j.pre.length + j.post.length ≤ 2 := by
+  unfold FormJob.pre FormJob.post
+  cases j.group <;> cases j.clip <;> simp
+
+/-- The graphics state inside a transparency group or soft-mask group: alpha, blend mode and
+soft mask reset to their initial values (§11.6.6; they apply to the group as a whole). -/
+def resetTx (g : GState) : GState :=
+  { g with fillAlpha := Comp.one, strokeAlpha := Comp.one, blendMode := BlendMode.normal,
+           softMask := Option.none }
+
+/-- A boolean entry (`false` when absent or malformed). -/
+def boolEntry (d : Dict) (k : String) : Bool :=
+  match Dict.get? d (nm k) with
+  | some (.bool b) => b
+  | _ => false
+
+/-- The transparency group of a form dictionary `d` (`/Group` with `/S /Transparency`),
+composited with the alpha, blend mode and soft mask of `gs`; `bbox` in page space. -/
+def groupOf {σ : Type} (src : Source σ) (s : σ) (d : Dict) (gs : GState) (bbox : Option Path) :
+    Option GroupInfo × σ :=
+  match Dict.get? d (nm "Group") with
+  | none => (none, s)
+  | some o =>
+    let (g, s) := dictOf src s o
+    match Dict.get? g (nm "S") with
+    | some (.name t) =>
+      if t = nm "Transparency" then
+        (some { bbox := bbox, isolated := boolEntry g "I", knockout := boolEntry g "K",
+                alpha := gs.fillAlpha, blend := gs.blendMode, smask := gs.softMask }, s)
+      else (none, s)
+    | _ => (none, s)
 
 /-- What `Do` does, before any nesting. -/
 inductive DoOut (σ : Type) where
@@ -686,19 +768,21 @@ def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n : Nat
   let r := formResources env.src s d fr.res fr.owner n
   let gs := m.core.gs
   let ctm := Matrix.mul (formMatrix d) gs.ctm
-  match bboxOf d with
-  | some (x0, y0, x1, y1) =>
-    let path := rectPath ctm x0 y0 x1 y1
-    .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2,
-      { gs with ctm, clip := ⟨path, .nonzero⟩ :: gs.clip }, some path, 0⟩ r.2
-  | none => .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2, { gs with ctm }, none, 1⟩ r.2
+  let path := (bboxOf d).map fun (x0, y0, x1, y1) => rectPath ctm x0 y0 x1 y1
+  let grp := groupOf env.src r.2 d gs path
+  let gs1 := if grp.1.isSome then resetTx gs else gs
+  let gs2 := match path with
+    | some p => { gs1 with ctm, clip := ⟨p, .nonzero⟩ :: gs1.clip }
+    | none => { gs1 with ctm }
+  .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2, gs2, path, if path.isSome then 0 else 1, grp.1⟩
+    grp.2
 
 /-- `formJob` prepares form `n`. -/
 theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n : Nat}
     {d : Dict} {bytes : ByteArray} {s : σ} {job : FormJob} {s' : σ}
     (h : formJob env fr m n d bytes s = .form job s') : job.num = n := by
   unfold formJob at h
-  split at h <;> (cases h; rfl)
+  cases h; rfl
 
 /-- `Do /Name` (`nest`: fuel is left for a form). -/
 def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Machine) (s : σ)
@@ -723,6 +807,101 @@ def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mach
 /-- The machine a form runs in: the given graphics state, everything else fresh. -/
 def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none⟩
 
+/-! ## Soft masks (§11.6.5, task 7.3c) -/
+
+/-- What an ExtGState's `/SMask` asks for. -/
+inductive MaskOut (σ : Type) where
+  /-- No soft-mask dictionary (absent, `/None`, or no ExtGState). -/
+  | none (s : σ)
+  /-- A soft-mask dictionary that cannot be expanded (malformed, missing group, on the
+  nesting path, no fuel or form budget left): one warning, the mask is cleared. -/
+  | bad (s : σ)
+  /-- Expand the mask group `job`. -/
+  | form (info : SoftMaskInfo) (job : FormJob) (s : σ)
+
+/-- The ExtGState dictionary `gs` names, if any. -/
+def gsDict? {σ : Type} (src : Source σ) (fr : Frame) (s : σ) (op : Op) : Option Dict × σ :=
+  match lastName? op.operands with
+  | none => (none, s)
+  | some n =>
+    match resEntry src s fr.res "ExtGState" n with
+    | (some o, s) =>
+      match resolve src s o with
+      | (.dict d, s) => (some d, s)
+      | (_, s) => (none, s)
+    | (none, s) => (none, s)
+
+/-- A device colour from 1, 3 or 4 components (`/BC`); black otherwise. -/
+def colorOfNums : List Fixed → Color
+  | [g] => .gray (Comp.ofFixed g)
+  | [r, g, b] => .rgb (Comp.ofFixed r) (Comp.ofFixed g) (Comp.ofFixed b)
+  | [c, m, y, k] => .cmyk (Comp.ofFixed c) (Comp.ofFixed m) (Comp.ofFixed y) (Comp.ofFixed k)
+  | _ => .gray Comp.zero
+
+/-- The `/S` of a soft-mask dictionary. -/
+def maskKind? (sm : Dict) : Option SoftMaskKind :=
+  match Dict.get? sm (nm "S") with
+  | some (.name k) =>
+    if k = nm "Luminosity" then some .luminosity
+    else if k = nm "Alpha" then some .alpha
+    else none
+  | _ => none
+
+/-- Prepare the soft mask of `gs` (`nest`: fuel and form budget are left). The mask group
+`/G` is run like a form in the state at the `gs` (its coordinate system, §11.6.5.2) with
+alpha, blend mode and soft mask reset (`resetTx`). `/TR` is ignored. -/
+def maskJob {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Machine) (s : σ)
+    (op : Op) : MaskOut σ :=
+  match gsDict? env.src fr s op with
+  | (none, s) => .none s
+  | (some d, s) =>
+    match Dict.get? d (nm "SMask") with
+    | none => .none s
+    | some o =>
+      match resolve env.src s o with
+      | (.name _, s) => .none s
+      | (.dict sm, s) =>
+        let bc := ((Dict.get? sm (nm "BC")).bind numsOf).map colorOfNums
+        match maskKind? sm, Dict.get? sm (nm "G") with
+        | some kind, some (.ref n g) =>
+          if fr.visited.contains n || !nest then .bad s else
+          match env.src.fetch s n g with
+          | (.ok (.stream st), s) =>
+            match env.src.decode s n st with
+            | (.ok bytes, s) =>
+              match formJob env fr (withGs m (resetTx m.core.gs)) n st.dict bytes s with
+              | .form job s =>
+                .form { kind, backdrop := bc.getD (.gray Comp.zero), bbox := job.clip } job s
+              | .done _ _ s => .bad s
+            | (.error _, s) => .bad s
+          | (_, s) => .bad s
+        | _, _ => .bad s
+      | (_, s) => .bad s
+
+/-- **`gs` in the runner**: `gsStep` applies the ExtGState; a soft-mask dictionary's group
+is then run by `inner` into a fresh item list, wrapped into one
+`softMask id info items` item (`id` = the operator count `ops` at this `gs`, unique in the
+page), and the graphics state's `softMask` is set to `some id`. -/
+def gsR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω → Array Op → St σ ω))
+    (fr : Frame) (m : Machine) (items : DisplayList) (warnings unsupported ops forms : Nat)
+    (truncated : Bool) (s : σ) (obs : ω) (op : Op) : St σ ω :=
+  match gsStep env.src fr m s op with
+  | (m1, _, w, _, s1) =>
+    let obs1 := env.observe obs op w 0
+    match maskJob env (inner.isSome && decide (forms < env.maxForms)) fr m1 s1 op with
+    | .none s2 => ⟨m1, items, warnings + w, unsupported, ops + 1, forms, truncated, s2, obs1⟩
+    | .bad s2 => ⟨m1, items, warnings + w + 1, unsupported, ops + 1, forms, truncated, s2, obs1⟩
+    | .form info job s2 =>
+      match inner with
+      | none => ⟨m1, items, warnings + w + 1, unsupported, ops + 1, forms, truncated, s2, obs1⟩
+      | some run =>
+        match run ⟨job.res, job.num :: fr.visited, job.owner⟩
+            ⟨formMachine job.gs, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+              forms + 1, truncated, s2, obs1⟩ job.ops with
+        | ⟨_, items2, w2, u2, ops2, forms2, tr2, s3, obs3⟩ =>
+          ⟨withGs m1 { m1.core.gs with softMask := some ops },
+            items.push (.softMask ops info items2), w2, u2, ops2, forms2, tr2, s3, obs3⟩
+
 /-- **One runner step.** At the operator cap nothing is executed (the first time, one
 warning). `Do` of a form runs `inner` (the runner with one less fuel) from `formMachine`, then
 restores the invoking machine; every other operator is a `localStep`. -/
@@ -743,14 +922,16 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
         | some run =>
           let w := job.w + job.tokW
           match run ⟨job.res, job.num :: fr.visited, job.owner⟩
-              ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
+              ⟨formMachine job.gs, pushAll items job.pre,
                 warnings + w, unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op w 0⟩ job.ops with
           | ⟨_, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩ =>
-            ⟨m, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩
+            ⟨m, pushAll items2 job.post, w2, u2, ops2, forms2, tr2, s2, obs2⟩
         | none =>
           ⟨m, items, warnings + 1, unsupported, ops + 1, forms, truncated, s',
             env.observe obs op 1 0⟩
+    else if op.op = [103, 115] then -- gs
+      gsR env inner fr m items warnings unsupported ops forms truncated s obs op
     else
       match localStep env fr m s op with
       | (m', its, w, u, s') =>
@@ -878,6 +1059,64 @@ most `Paint.maxItems` per executed operator; and at most `maxOpsPerPage` operato
 def Good {σ ω : Type} (lim : Limits) (k : Nat) (st : St σ ω) : Prop :=
   st.items.size + pendBit st.m + k ≤ Paint.maxItems * st.ops ∧ st.ops ≤ lim.maxOpsPerPage
 
+/-- `gsStep` keeps the pending clip. -/
+theorem gsStep_pend {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    pendBit (gsStep src fr m s op).1 = pendBit m := by
+  unfold gsStep
+  split
+  · rfl
+  · split
+    · split
+      · rfl
+      · rfl
+    · rfl
+
+/-- **`gs` keeps `Good`**: the soft-mask item counts as the `gs` operator's one item, the
+mask group's own items are counted by the nested run. -/
+theorem gsR_good {σ ω : Type} (env : Env σ ω)
+    (inner : Option (Frame → St σ ω → Array Op → St σ ω))
+    (hin : ∀ run, inner = some run → ∀ k fr st ops,
+      Good env.cfg.limits k st → Good env.cfg.limits k (run fr st ops))
+    (fr : Frame) (k : Nat) (m : Machine) (items : DisplayList)
+    (warnings unsupported ops forms : Nat) (truncated : Bool) (s : σ) (obs : ω) (op : Op)
+    (hcap : ops < env.cfg.limits.maxOpsPerPage)
+    (h : items.size + pendBit m + k ≤ Paint.maxItems * ops) :
+    Good env.cfg.limits k (gsR env inner fr m items warnings unsupported ops forms truncated s obs op) := by
+  have hp := gsStep_pend env.src fr m s op
+  unfold gsR
+  revert hp
+  rcases gsStep env.src fr m s op with ⟨m1, its, w, u, s1⟩
+  intro hp
+  simp only at hp ⊢
+  have hbase : items.size + pendBit m1 + k ≤ Paint.maxItems * (ops + 1) ∧
+      ops + 1 ≤ env.cfg.limits.maxOpsPerPage := by
+    simp only [Paint.maxItems] at h ⊢; omega
+  split
+  · exact hbase
+  · exact hbase
+  · rename_i info job s2 _
+    split
+    · exact hbase
+    · rename_i run _
+      have h1 : Good env.cfg.limits (items.size + 1 + pendBit m + k)
+          ⟨formMachine job.gs, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+            forms + 1, truncated, s2, env.observe obs op w 0⟩ := by
+        unfold Good
+        simp only [formMachine, pendBit, Option.isSome_none, Bool.false_eq_true, ↓reduceIte,
+          Paint.maxItems, List.size_toArray, List.length_nil] at h ⊢
+        omega
+      have h2 := hin run rfl _ ⟨job.res, job.num :: fr.visited, job.owner⟩ _ job.ops h1
+      revert h2
+      rcases run ⟨job.res, job.num :: fr.visited, job.owner⟩
+          ⟨formMachine job.gs, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+            forms + 1, truncated, s2, env.observe obs op w 0⟩ job.ops with
+        ⟨m2, items2, w2, u2, ops2, forms2, tr2, s3, obs3⟩
+      intro h2
+      unfold Good at h2 ⊢
+      have hw : pendBit (withGs m1 { m1.core.gs with softMask := some ops }) = pendBit m1 := rfl
+      simp only [Array.size_push, hw] at h2 ⊢
+      omega
+
 /-- **One step keeps `Good`**, given that the nested runner keeps it for every slack. -/
 theorem stepR_good {σ ω : Type} (env : Env σ ω)
     (inner : Option (Frame → St σ ω → Array Op → St σ ω))
@@ -905,34 +1144,38 @@ theorem stepR_good {σ ω : Type} (env : Env σ ω)
           omega
         · have hrun : inner = some run := hi
           simp only
-          have hcl : (job.clip.toList.map (DisplayItem.clip · FillRule.nonzero)).length ≤ 1 := by
-            cases job.clip <;> simp
-          have h1 : Good env.cfg.limits (pendBit m + k)
-              ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
+          have hcl := FormJob.pre_post_le job
+          have h1 : Good env.cfg.limits (pendBit m + k + job.post.length)
+              ⟨formMachine job.gs, pushAll items job.pre,
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ := by
             unfold Good
             simp only [size_pushAll, formMachine, pendBit, Option.isSome_none,
               Bool.false_eq_true, ↓reduceIte, Paint.maxItems] at h hcl ⊢
             omega
-          have h2 := hin run hrun (pendBit m + k) ⟨job.res, job.num :: fr.visited, job.owner⟩ _ job.ops h1
+          have h2 := hin run hrun (pendBit m + k + job.post.length)
+            ⟨job.res, job.num :: fr.visited, job.owner⟩ _ job.ops h1
           revert h2
           rcases run ⟨job.res, job.num :: fr.visited, job.owner⟩
-              ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
+              ⟨formMachine job.gs, pushAll items job.pre,
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ job.ops with
             ⟨m2, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩
           intro h2
           unfold Good at h2
-          simp only at h2 ⊢
+          simp only [size_pushAll] at h2 ⊢
           omega
-    · -- every other operator
-      have hb := localStep_bound env fr m s op
-      revert hb
-      rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
-      intro hb
-      simp only [size_pushAll, Paint.maxItems] at h hb ⊢
-      omega
+    · split
+      · -- gs
+        exact gsR_good env inner hin fr k m items warnings unsupported ops forms truncated s obs op
+          (by omega) h.1
+      · -- every other operator
+        have hb := localStep_bound env fr m s op
+        revert hb
+        rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
+        intro hb
+        simp only [size_pushAll, Paint.maxItems] at h hb ⊢
+        omega
 
 /-- Folding steps keeps `Good`. -/
 theorem foldl_good {σ ω : Type} (env : Env σ ω)
@@ -1147,6 +1390,49 @@ private def gsRes : String :=
   some (Comp.ofFixed (Fixed.ofDecimal ⟨25, 2⟩))
 #guard (run [] gsRes "/GS0 gs").warnings == 0
 #guard (run [] gsRes "/GS9 gs").warnings == 1
+-- transparency (7.3c): blend modes, transparency groups, soft masks
+#guard ((run [] gsRes "/GS0 gs 0 0 1 1 re f").items[0]?.bind fillOf).map (·.blend) ==
+  some .multiply
+#guard ((run [] "<< /ExtGState << /G << /BM [/Foo /Screen] >> >> >>" "/G gs 0 0 1 1 re S").items[0]?.bind
+  strokeOf).map (·.blend) == some .screen
+private def grpDoc : List (Nat × IndirectBody) :=
+  [(6, strm "<< /Subtype /Form /BBox [0 0 10 10] /Group << /S /Transparency /I true >> >>"
+     "0 0 10 10 re f 5 5 10 10 re f"),
+   (7, strm "<< /Subtype /Form /BBox [0 0 4 4] /Group << /S /Transparency >> >>" "0 0 4 4 re f")]
+private def grpRes : String :=
+  "<< /XObject << /Fm1 6 0 R >> /ExtGState << /H << /ca 0.5 /BM /Multiply >> " ++
+  "/M << /SMask << /S /Luminosity /G 7 0 R /BC [1] >> >> /N << /SMask /None >> " ++
+  "/B << /SMask << /S /Luminosity /G 9 0 R >> >> >> >>"
+#guard kinds (run grpDoc grpRes "/H gs /Fm1 Do 0 0 1 1 re f") ==
+  ["groupBegin", "fillPath", "fillPath", "groupEnd", "fillPath"]
+#guard (match (run grpDoc grpRes "/H gs /Fm1 Do").items[0]? with
+  | some (DisplayItem.groupBegin g) => g.isolated && !g.knockout && g.blend == .multiply &&
+      g.alpha == Comp.ofFixed (Fixed.ofDecimal ⟨5, 1⟩) && g.bbox.isSome
+  | _ => false)
+-- inside the group alpha and blend mode are reset; after it they are back
+#guard ((run grpDoc grpRes "/H gs /Fm1 Do").items[1]?.bind fillOf).map (fun f => (f.alpha, f.blend))
+  == some (Comp.one, .normal)
+#guard ((run grpDoc grpRes "/H gs /Fm1 Do 0 0 1 1 re f").items[4]?.bind fillOf).map (·.blend)
+  == some .multiply
+#guard (run grpDoc grpRes "/H gs /Fm1 Do").warnings == 0
+-- a soft mask: one nested item (its group's items), referenced by later painting
+#guard kinds (run grpDoc grpRes "/M gs 0 0 1 1 re f") == ["softMask", "fillPath"]
+#guard (match (run grpDoc grpRes "q /M gs 0 0 1 1 re f").items[0]? with
+  | some (DisplayItem.softMask 1 info its) => info.kind == .luminosity &&
+      info.backdrop == .gray Comp.one && its.toList.map DisplayItem.kind == ["fillPath"]
+  | _ => false)
+#guard ((run grpDoc grpRes "q /M gs 0 0 1 1 re f").items[1]?.bind fillOf).map (·.smask)
+  == some (some 1)
+#guard ((run grpDoc grpRes "q /M gs Q 0 0 1 1 re f").items[1]?.bind fillOf).map (·.smask)
+  == some none
+#guard ((run grpDoc grpRes "/M gs /N gs 0 0 1 1 re f").items[1]?.bind fillOf).map (·.smask)
+  == some none
+#guard (run grpDoc grpRes "/M gs").warnings == 0
+#guard (run grpDoc grpRes "/M gs").forms == 1
+-- a mask group that cannot be expanded: one warning, no mask
+#guard kinds (run grpDoc grpRes "/B gs 0 0 1 1 re f") == ["fillPath"]
+#guard (run grpDoc grpRes "/B gs").warnings == 1
+#guard (run grpDoc grpRes "/M gs" { maxXObjectDepth := 0 }).warnings == 1
 -- font identity (6.7a): `Tf` resolved in the current frame; ExtGState `/Font`
 private def fontOf : DisplayItem → Option FontRef
   | .glyphRun r _ => some r.font
