@@ -1,0 +1,686 @@
+import SafePdf.Core.Write.Incremental
+import SafePdf.Core.Annot
+
+/-!
+# Annotation dictionaries for user marks (Plan.md §4 S8/C7, §6 Phase 9 "Persistence — annotations inside the PDF"; task 9.5b)
+
+Turns the reader's marks (highlights and notes, task 9.4) into standard PDF annotation
+dictionaries (ISO 32000-2 §12.5) with generated appearance streams, ready for the
+incremental-update writer `Core.Write.Incremental.writeAnnots` (task 9.5a). Pure and total;
+Core does not import the shell, so the shell converts its `Shell.App.Marks.Mark`s into the
+small record `Mark` below (task 9.5c). Core has no clock: the caller supplies the date.
+
+## The mark record (`Mark`)
+
+Page index, kind (`highlight` | `note`), quads in PDF page space (`Quad`: upper-left,
+upper-right, lower-left, lower-right), a rectangle (a note's icon box; a highlight's
+fallback), an RGB colour in `[0, 1]`, an opacity, the comment text, the stable id (`/NM` is
+`safepdf-mark-ID`, `nmOf`, the prefix of `Shell.App.Marks.nmPrefix`), the PDF date string
+(`D:YYYYMMDDHHmmSSOHH'mm`) and an optional author.
+
+## What is written (rules A1–A9)
+
+* A1. **Highlight** (§12.5.6.10): `/Type /Annot /Subtype /Highlight /Rect /NM`, then
+  `/QuadPoints` (per quad `x1 y1 x2 y2 x3 y3 x4 y4` = upper-left, upper-right, lower-left,
+  lower-right: the order Acrobat and pdf.js write and read, and `Core.Annot.quadsOf`
+  reads), `/C [r g b]`, `/CA` only when the opacity is below 1, `/F 4` (Print), `/Border
+  [0 0 0]` (as pdf.js), `/M` and `/CreationDate` (the caller's date), `/T` when an author is
+  given, `/Contents` when the comment is not empty, `/Popup` (see A3), `/P` (the page) and
+  `/AP << /N … >>`. `/Rect` is the union of the quads, rounded outwards (A7), so it
+  contains every rounded quad point.
+* A2. **Note** (§12.5.6.4, `/Subtype /Text`): `/Rect` = the icon box, `/Contents` (always,
+  possibly empty), `/Name /Comment`, `/C`, `/F 4`, `/M`, `/CreationDate`, `/T`, `/Open
+  false`, `/P`, `/AP`. **Anchor**: a note attached to a text selection keeps its quads in
+  `/QuadPoints`. That key is not defined for `/Text` (Table 172); readers ignore it (§7.3.7:
+  unknown keys are ignored), task 9.5c reads it back to restore the anchor.
+* A3. **"Highlight with comment"** follows what pdf.js writes (`src/core/annotation.js`,
+  `MarkupAnnotation.createNewAnnotation` and `PopupAnnotation.createNewDict`, fetched
+  2026-11-20): a highlight whose comment is not empty carries `/Contents` and `/Popup R`, and
+  a second annotation `/Type /Annot /Subtype /Popup /Open false /Rect … /Parent R` (the
+  highlight) follows it in `/Annots`; pdf.js uses neither a separate `/Text` nor `/IRT` for
+  it. Our popup also gets `/NM safepdf-mark-ID-popup` (so every dictionary we write has an
+  `/NM`; `Shell.App.Marks.idOfNm` returns `none` for it) and `/F 4`. `/Popup` annotations
+  have no appearance and are never drawn (`Core.Annot.collect`, MuPDF).
+* A4. **Highlight appearance** (as pdf.js `HighlightAnnotation.createNewAppearanceStream`):
+  a form XObject `/Type /XObject /Subtype /Form /FormType 1 /BBox` = `/Rect`, `/Matrix` the
+  identity (so the §12.5.5 matrix A is the identity), `/Resources << /ExtGState << /R0
+  << /Type /ExtGState /BM /Multiply >> >> >>` (plus `/CA`, `/ca` when the opacity is below
+  1); content `r g b rg /R0 gs`, then per quad `ul m ur l lr l ll l h`, then `f`.
+  Multiply keeps black text black and tints the white paper.
+* A5. **Note appearance**: a speech bubble filled with the colour and stroked in black with
+  three dark text lines (`noteIcon`), drawn in `/BBox [0 0 20 20]` with the identity
+  `/Matrix`; §12.5.5 maps that box onto `/Rect`.
+* A6. **Text strings** (§7.9.2.2; `textBytes`): bytes of the string when every character is
+  printable ASCII, TAB, LF or CR (the same bytes in PDFDocEncoding), else `FE FF` and
+  UTF-16BE (`utf16be`, surrogate pairs above U+FFFF), as pdf.js `stringToAsciiOrUTF16BE`.
+  `utf16_utf16be` proves that `Font.CMap.utf16` (the text-string decoder of
+  `Core.Annot.textOf`) reads the UTF-16 form back exactly.
+* A7. **Numbers** are written as decimals: coordinates rounded to 1/1000 (`/Rect` floor for
+  the lower-left, ceiling for the upper-right corner), colours and opacities clamped to
+  `[0, 1]` and rounded to 1/10000; always canonical (`decRound_canonical`).
+* A8. **Object numbers** (`build`): marks are grouped by page in order of first occurrence;
+  the annotations of all pages are numbered from the document's `/Size` in that order (a
+  highlight with comment takes two: highlight, popup), exactly as `writeAnnots` numbers
+  them (rule W3); the appearance streams follow in the same mark order (rule W9). `/P` is
+  the page's own object reference from `Doc.pages`.
+* A9. **Validation**: a page index out of range is `Error.malformed`; a highlight without
+  quads is `Error.malformed`. The writer then checks every dictionary (canonical, references
+  in range) and re-parses the result strictly (rules W2, W8).
+-/
+
+namespace SafePdf.Core.Write.Annots
+
+open SafePdf SafePdf.Core
+open SafePdf.Core.Write.Incremental (Marks AuxStream)
+
+/-! ## Names -/
+
+/-- A name from a string. -/
+def nm (s : String) : Name := Name.ofString s
+
+/-- `/Type` (spelled as bytes so that key inequalities are decidable by `decide`). -/
+def kType : Name := ⟨[84, 121, 112, 101]⟩
+/-- `/Subtype`. -/
+def kSubtype : Name := ⟨[83, 117, 98, 116, 121, 112, 101]⟩
+/-- `/Rect`. -/
+def kRect : Name := ⟨[82, 101, 99, 116]⟩
+/-- `/NM`. -/
+def kNM : Name := ⟨[78, 77]⟩
+
+#guard kType == nm "Type" && kSubtype == nm "Subtype" && kRect == nm "Rect" && kNM == nm "NM"
+/-- `/QuadPoints`. -/
+def kQuadPoints : Name := nm "QuadPoints"
+/-- `/C`. -/
+def kC : Name := nm "C"
+/-- `/Contents`. -/
+def kContents : Name := nm "Contents"
+/-- `/AP`. -/
+def kAP : Name := nm "AP"
+/-- `/Annot`. -/
+def vAnnot : Name := nm "Annot"
+
+/-! ## Text strings (rule A6) -/
+
+/-- The UTF-16BE code units of a character, as bytes (a surrogate pair above U+FFFF). -/
+def unit16 (c : Char) : List UInt8 :=
+  let u := c.toNat
+  if u < 65536 then [UInt8.ofNat (u / 256), UInt8.ofNat (u % 256)]
+  else
+    let v := u - 65536
+    let hi := 55296 + v / 1024
+    let lo := 56320 + v % 1024
+    [UInt8.ofNat (hi / 256), UInt8.ofNat (hi % 256), UInt8.ofNat (lo / 256),
+      UInt8.ofNat (lo % 256)]
+
+/-- UTF-16BE of a list of characters (no byte-order mark). -/
+def utf16be : List Char → List UInt8
+  | [] => []
+  | c :: cs => unit16 c ++ utf16be cs
+
+/-- Whether a character is written as itself (printable ASCII, TAB, LF, CR). -/
+def plainChar (c : Char) : Bool :=
+  (32 ≤ c.toNat && c.toNat ≤ 126) || c.toNat == 9 || c.toNat == 10 || c.toNat == 13
+
+/-- **A text string** (rule A6): ASCII bytes, or `FE FF` and UTF-16BE. -/
+def textBytes (s : String) : List UInt8 :=
+  if s.toList.all plainChar then s.toList.map fun c => UInt8.ofNat c.toNat
+  else [0xFE, 0xFF] ++ utf16be s.toList
+
+/-- A character's code is a Unicode scalar value. -/
+theorem char_valid (c : Char) : c.toNat < 55296 ∨ (57343 < c.toNat ∧ c.toNat < 1114112) := by
+  have h := c.valid
+  unfold UInt32.isValidChar at h
+  exact h
+
+/-- `UInt8.ofNat` keeps the low byte. -/
+theorem uint8_ofNat_toNat (n : Nat) : (UInt8.ofNat n).toNat = n % 256 := by
+  simp [UInt8.toNat_ofNat']
+
+/-- Selecting the true branch of an `if`. -/
+theorem ite_pos' {α : Type} {p : Prop} [Decidable p] (h : p) (a b : α) :
+    (if p then a else b) = a := by simp [h]
+
+/-- Two bytes of a 16-bit value put back together. -/
+theorem split16 {w : Nat} (h : w < 65536) : w / 256 % 256 * 256 + w % 256 % 256 = w := by
+  omega
+
+/-- The decoder reads one encoded character back. -/
+theorem utf16_unit16 (c : Char) (rest : List UInt8) :
+    Font.CMap.utf16 (unit16 c ++ rest) = c :: Font.CMap.utf16 rest := by
+  have hv := char_valid c
+  unfold unit16
+  dsimp only
+  split
+  · rename_i hlt
+    rw [Font.CMap.utf16.eq_def]
+    simp only [List.cons_append, List.nil_append, uint8_ofNat_toNat]
+    rw [split16 hlt]
+    have h1 : ¬ (55296 ≤ c.toNat ∧ c.toNat ≤ 56319) := by omega
+    have h2 : ¬ (56320 ≤ c.toNat ∧ c.toNat ≤ 57343) := by omega
+    simp only [h1, h2, ↓reduceIte, Char.ofNat_toNat]
+  · rename_i hge
+    rw [Font.CMap.utf16.eq_def]
+    simp only [List.cons_append, List.nil_append, uint8_ofNat_toNat]
+    have e1 : (55296 + (c.toNat - 65536) / 1024) / 256 % 256 * 256 +
+        (55296 + (c.toNat - 65536) / 1024) % 256 % 256 = 55296 + (c.toNat - 65536) / 1024 :=
+      split16 (by omega)
+    have e2 : (56320 + (c.toNat - 65536) % 1024) / 256 % 256 * 256 +
+        (56320 + (c.toNat - 65536) % 1024) % 256 % 256 = 56320 + (c.toNat - 65536) % 1024 :=
+      split16 (Nat.add_lt_of_lt_sub' (Nat.lt_of_lt_of_le (Nat.mod_lt _ (by decide)) (by decide)))
+    have h1 : 55296 ≤ 55296 + (c.toNat - 65536) / 1024 ∧
+        55296 + (c.toNat - 65536) / 1024 ≤ 56319 := by omega
+    have h2 : 56320 ≤ 56320 + (c.toNat - 65536) % 1024 ∧
+        56320 + (c.toNat - 65536) % 1024 ≤ 57343 := by omega
+    have e3 : 65536 + (55296 + (c.toNat - 65536) / 1024 - 55296) * 1024 +
+        (56320 + (c.toNat - 65536) % 1024 - 56320) = c.toNat := by omega
+    rw [e1, e2, ite_pos' h1, ite_pos' h2, e3, Char.ofNat_toNat]
+
+/-- **UTF-16 round trip**: the text-string decoder reads `utf16be` back exactly. -/
+theorem utf16_utf16be (cs : List Char) : Font.CMap.utf16 (utf16be cs) = cs := by
+  induction cs with
+  | nil => simp [utf16be, Font.CMap.utf16]
+  | cons c cs ih => rw [utf16be, utf16_unit16, ih]
+
+/-- **Text-string round trip, UTF-16 form**: a string with a character outside the plain
+ASCII set is written as `FE FF` + UTF-16BE, and `Core.Annot.textOf` (MuPDF's
+`pdf_to_text_string`) reads it back exactly. -/
+theorem textOf_textBytes_utf16 (s : String) (h : s.toList.all plainChar = false) :
+    Annot.textOf (textBytes s) = s.toList := by
+  simp only [textBytes, h, Bool.false_eq_true, ↓reduceIte, List.cons_append, List.nil_append]
+  simp only [Annot.textOf, utf16_utf16be]
+
+/-! ## Numbers (rule A7) -/
+
+/-- `q` rounded half up to `places` decimals, canonical. -/
+def decRound (places : Nat) (q : Rat) : Decimal :=
+  Decimal.normalize ⟨(q * (10 ^ places : Nat) + 1 / 2).floor, places⟩
+
+/-- `q` rounded down to `places` decimals. -/
+def decFloor (places : Nat) (q : Rat) : Decimal :=
+  Decimal.normalize ⟨(q * (10 ^ places : Nat)).floor, places⟩
+
+/-- `q` rounded up to `places` decimals. -/
+def decCeil (places : Nat) (q : Rat) : Decimal :=
+  Decimal.normalize ⟨(q * (10 ^ places : Nat)).ceil, places⟩
+
+/-- Every number we write is canonical (the printer's round-trip hypothesis). -/
+theorem decRound_canonical (p : Nat) (q : Rat) : (decRound p q).IsCanonical :=
+  Decimal.normalize_isCanonical _
+
+/-- A coordinate (1/1000). -/
+def coord (q : Rat) : PdfObject := .real (decRound 3 q)
+
+/-- A value clamped into `[0, 1]`. -/
+def unitClamp (q : Rat) : Rat := max 0 (min 1 q)
+
+/-- A colour component or opacity (1/10000, clamped to `[0, 1]`). -/
+def unitNum (q : Rat) : PdfObject := .real (decRound 4 (unitClamp q))
+
+/-! ## The mark record -/
+
+/-- A quadrilateral in page space: upper-left, upper-right, lower-left, lower-right. -/
+structure Quad where
+  /-- Upper-left corner. -/
+  ul : Rat × Rat
+  /-- Upper-right corner. -/
+  ur : Rat × Rat
+  /-- Lower-left corner. -/
+  ll : Rat × Rat
+  /-- Lower-right corner. -/
+  lr : Rat × Rat
+  deriving Repr, Inhabited, DecidableEq
+
+/-- The quad of an axis-aligned box `[x0, x1] × [y0, y1]`. -/
+def Quad.ofBox (x0 y0 x1 y1 : Rat) : Quad := ⟨(x0, y1), (x1, y1), (x0, y0), (x1, y0)⟩
+
+/-- The eight `/QuadPoints` numbers of a quad, in the A1 order. -/
+def Quad.points (q : Quad) : List Rat :=
+  [q.ul.1, q.ul.2, q.ur.1, q.ur.2, q.ll.1, q.ll.2, q.lr.1, q.lr.2]
+
+/-- A quad as `Core.Annot` reads it. -/
+def Quad.toAnnot (q : Quad) : Annot.Quad := (q.ul, q.ur, q.ll, q.lr)
+
+/-- A rectangle in page space. -/
+structure Rect where
+  /-- Left. -/
+  x0 : Rat
+  /-- Bottom. -/
+  y0 : Rat
+  /-- Right. -/
+  x1 : Rat
+  /-- Top. -/
+  y1 : Rat
+  deriving Repr, Inhabited, DecidableEq
+
+/-- The kind of a mark. -/
+inductive Kind where
+  /-- A highlight over the quads. -/
+  | highlight
+  /-- A note (`/Text` icon at `Mark.rect`), anchored to the quads when there are any. -/
+  | note
+  deriving Repr, Inhabited, DecidableEq
+
+/-- **A user mark** as Core sees it (the shell converts its marks into these, task 9.5c). -/
+structure Mark where
+  /-- Page index (0-based). -/
+  page : Nat
+  /-- Highlight or note. -/
+  kind : Kind
+  /-- Quads in page space (a highlight's area; a note's anchor, possibly none). -/
+  quads : List Quad
+  /-- A note's icon box (page space); a highlight's `/Rect` when it has no quads. -/
+  rect : Rect
+  /-- Colour, components in `[0, 1]`. -/
+  color : Rat × Rat × Rat
+  /-- Opacity in `[0, 1]` (`/CA` written only below 1). -/
+  opacity : Rat := 1
+  /-- Comment text (a note's text; a highlight's comment, empty for none). -/
+  contents : String := ""
+  /-- Stable id (`/NM` = `safepdf-mark-ID`). -/
+  id : Nat
+  /-- PDF date string (`D:YYYYMMDDHHmmSSOHH'mm`), supplied by the caller. -/
+  date : String
+  /-- Author (`/T`), empty for none. -/
+  author : String := ""
+  deriving Repr, Inhabited
+
+/-- Prefix of our `/NM` names (equal to `Shell.App.Marks.nmPrefix`). -/
+def nmPrefix : String := "safepdf-mark-"
+
+/-- The `/NM` of mark id `id`. -/
+def nmOf (id : Nat) : String := nmPrefix ++ toString id
+
+/-- Whether the mark gets a `/Popup` (rule A3: a highlight with a comment). -/
+def Mark.hasPopup (m : Mark) : Bool := m.kind == .highlight && !m.contents.isEmpty
+
+/-- How many annotation dictionaries the mark yields (1, or 2 with a popup). -/
+def Mark.slots (m : Mark) : Nat := if m.hasPopup then 2 else 1
+
+/-- The union of the quads' corners (`none` without quads). -/
+def quadsBox : List Quad → Option Rect
+  | [] => none
+  | q :: qs =>
+    let r := quadsBox qs
+    let xs := [q.ul.1, q.ur.1, q.ll.1, q.lr.1]
+    let ys := [q.ul.2, q.ur.2, q.ll.2, q.lr.2]
+    let x0 := xs.foldl min q.ul.1
+    let x1 := xs.foldl max q.ul.1
+    let y0 := ys.foldl min q.ul.2
+    let y1 := ys.foldl max q.ul.2
+    match r with
+    | none => some ⟨x0, y0, x1, y1⟩
+    | some b => some ⟨min x0 b.x0, min y0 b.y0, max x1 b.x1, max y1 b.y1⟩
+
+/-- The annotation rectangle (rule A1: a highlight's quads; else `rect`). -/
+def Mark.annotRect (m : Mark) : Rect :=
+  match m.kind with
+  | .highlight => (quadsBox m.quads).getD m.rect
+  | .note => m.rect
+
+/-- `/Rect`, rounded outwards (rule A7). -/
+def rectObj (r : Rect) : PdfObject :=
+  .array [.real (decFloor 3 (min r.x0 r.x1)), .real (decFloor 3 (min r.y0 r.y1)),
+    .real (decCeil 3 (max r.x0 r.x1)), .real (decCeil 3 (max r.y0 r.y1))]
+
+/-- The `/QuadPoints` numbers of the quads. -/
+def quadPoints (qs : List Quad) : List Rat := qs.flatMap Quad.points
+
+/-- `/QuadPoints`: eight coordinates per quad. -/
+def quadPointsObj (qs : List Quad) : PdfObject := .array ((quadPoints qs).map coord)
+
+/-- `/C`. -/
+def colorObj (c : Rat × Rat × Rat) : PdfObject :=
+  .array [unitNum c.1, unitNum c.2.1, unitNum c.2.2]
+
+/-- A string object of ASCII text. -/
+def asciiStr (s : String) : PdfObject := .string s.toUTF8.toList
+
+/-! ## Annotation dictionaries (rules A1–A3) -/
+
+/-- **Every annotation dictionary starts with** `/Type /Annot /Subtype s /Rect r /NM n`. -/
+def mkAnnot (sub : String) (rect : PdfObject) (nmStr : String) (rest : Dict) : Dict :=
+  (kType, .name vAnnot) :: (kSubtype, .name (nm sub)) :: (kRect, rect) ::
+    (kNM, .string (textBytes nmStr)) :: rest
+
+/-- What every dictionary we emit looks like (the head of `mkAnnot`). -/
+def IsAnnot (d : Dict) : Prop :=
+  ∃ sub rect n rest, d = (kType, .name vAnnot) :: (kSubtype, .name sub) :: (kRect, rect) ::
+    (kNM, .string n) :: rest
+
+/-- `mkAnnot` gives an `IsAnnot`. -/
+theorem mkAnnot_isAnnot (sub : String) (rect : PdfObject) (n : String) (rest : Dict) :
+    IsAnnot (mkAnnot sub rect n rest) := ⟨_, _, _, _, rfl⟩
+
+/-- An optional entry. -/
+def opt (b : Bool) (k : String) (v : PdfObject) : Dict := if b then [(nm k, v)] else []
+
+/-- The entries common to highlights and notes (`/C`, `/CA`, `/F`, dates, author). -/
+def common (m : Mark) : Dict :=
+  [(kC, colorObj m.color)] ++ opt (decide (m.opacity < 1)) "CA" (unitNum m.opacity) ++
+    [(nm "F", .int 4)] ++
+    [(nm "M", asciiStr m.date), (nm "CreationDate", asciiStr m.date)] ++
+    opt (!m.author.isEmpty) "T" (.string (textBytes m.author))
+
+/-- The highlight dictionary (rule A1); `num` its own number, `ap` its appearance stream's,
+`page` the page reference. -/
+def highlightDict (m : Mark) (num ap : Nat) (page : PdfObject) : Dict :=
+  mkAnnot "Highlight" (rectObj m.annotRect) (nmOf m.id) <|
+    [(kQuadPoints, quadPointsObj m.quads)] ++ common m ++
+    [(nm "Border", .array [.int 0, .int 0, .int 0])] ++
+    opt m.hasPopup "Contents" (.string (textBytes m.contents)) ++
+    opt m.hasPopup "Popup" (.ref (num + 1) 0) ++
+    [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])]
+
+/-- The popup of a highlight with comment (rule A3); `parent` the highlight's number. -/
+def popupDict (m : Mark) (parent : Nat) (page : PdfObject) : Dict :=
+  mkAnnot "Popup" (rectObj m.annotRect) (nmOf m.id ++ "-popup")
+    [(nm "Parent", .ref parent 0), (nm "Open", .bool false), (nm "F", .int 4),
+      (nm "M", asciiStr m.date), (nm "P", page)]
+
+/-- The note dictionary (rule A2). -/
+def noteDict (m : Mark) (ap : Nat) (page : PdfObject) : Dict :=
+  mkAnnot "Text" (rectObj m.annotRect) (nmOf m.id) <|
+    [(kContents, .string (textBytes m.contents)), (nm "Name", .name (nm "Comment"))] ++
+    common m ++ [(nm "Open", .bool false)] ++
+    opt (!m.quads.isEmpty) "QuadPoints" (quadPointsObj m.quads) ++
+    [(nm "P", page), (kAP, .dict [(nm "N", .ref ap 0)])]
+
+/-- The annotation dictionaries of one mark (`num` its first number). -/
+def annotDicts (m : Mark) (num ap : Nat) (page : PdfObject) : List Dict :=
+  match m.kind with
+  | .highlight =>
+    if m.hasPopup then [highlightDict m num ap page, popupDict m num page]
+    else [highlightDict m num ap page]
+  | .note => [noteDict m ap page]
+
+/-- A mark yields `slots` dictionaries (the numbering of rule A8 relies on it). -/
+theorem annotDicts_length (m : Mark) (num ap : Nat) (page : PdfObject) :
+    (annotDicts m num ap page).length = m.slots := by
+  unfold annotDicts Mark.slots Mark.hasPopup
+  cases hk : m.kind <;> simp <;> split <;> rfl
+
+/-- **Every annotation dictionary we emit starts with `/Type /Annot`, `/Subtype`, `/Rect`,
+`/NM`.** -/
+theorem annotDicts_isAnnot (m : Mark) (num ap : Nat) (page : PdfObject) :
+    ∀ d ∈ annotDicts m num ap page, IsAnnot d := by
+  intro d hd
+  unfold annotDicts at hd
+  split at hd
+  · split at hd
+    · simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
+      rcases hd with rfl | rfl
+      · exact mkAnnot_isAnnot _ _ _ _
+      · exact mkAnnot_isAnnot _ _ _ _
+    · simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
+      subst hd
+      exact mkAnnot_isAnnot _ _ _ _
+  · simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
+    subst hd
+    exact mkAnnot_isAnnot _ _ _ _
+
+/-- Looking up a key in an `IsAnnot` dictionary's head. -/
+theorem IsAnnot.lookup {d : Dict} (h : IsAnnot d) :
+    (Dict.lookup d kType = some (.name vAnnot)) ∧
+    (∃ s, Dict.lookup d kSubtype = some (.name s)) ∧
+    (∃ r, Dict.lookup d kRect = some r) ∧
+    (∃ n, Dict.lookup d kNM = some (.string n)) := by
+  obtain ⟨sub, rect, n, rest, rfl⟩ := h
+  have h1 : kType ≠ kSubtype := by decide
+  have h2 : kType ≠ kRect := by decide
+  have h3 : kSubtype ≠ kRect := by decide
+  have h4 : kType ≠ kNM := by decide
+  have h5 : kSubtype ≠ kNM := by decide
+  have h6 : kRect ≠ kNM := by decide
+  refine ⟨by simp [Dict.lookup], ⟨sub, ?_⟩, ⟨rect, ?_⟩, ⟨n, ?_⟩⟩ <;>
+    simp [Dict.lookup, h1, h2, h3, h4, h5, h6]
+
+/-! ## Appearance streams (rules A4, A5) -/
+
+/-- ASCII bytes. -/
+def ascii (s : String) : List UInt8 := s.toUTF8.toList
+
+/-- A content-stream operation: the operands (printed by `Print.printObj`), then the
+operator, then LF. -/
+def op (args : List PdfObject) (o : String) : List UInt8 :=
+  args.flatMap (fun a => Print.printObj a ++ [32]) ++ ascii o ++ [10]
+
+/-- The fill colour operation. -/
+def fillColor (c : Rat × Rat × Rat) : List UInt8 :=
+  op [unitNum c.1, unitNum c.2.1, unitNum c.2.2] "rg"
+
+/-- A point's two coordinates. -/
+def pt (p : Rat × Rat) : List PdfObject := [coord p.1, coord p.2]
+
+/-- One quad as a closed path: ul → ur → lr → ll. -/
+def quadPath (q : Quad) : List UInt8 :=
+  op (pt q.ul) "m" ++ op (pt q.ur) "l" ++ op (pt q.lr) "l" ++ op (pt q.ll) "l" ++ op [] "h"
+
+/-- The highlight content stream (rule A4). -/
+def highlightContent (m : Mark) : List UInt8 :=
+  fillColor m.color ++ op [.name (nm "R0")] "gs" ++ m.quads.flatMap quadPath ++ op [] "f"
+
+/-- The identity matrix. -/
+def identity : PdfObject := .array [.int 1, .int 0, .int 0, .int 1, .int 0, .int 0]
+
+/-- A form XObject dictionary. -/
+def formDict (bbox : PdfObject) (res : Dict) : Dict :=
+  [(kType, .name (nm "XObject")), (kSubtype, .name (nm "Form")), (nm "FormType", .int 1),
+    (nm "BBox", bbox), (nm "Matrix", identity), (nm "Resources", .dict res)]
+
+/-- The highlight appearance stream (rule A4). -/
+def highlightAp (m : Mark) : AuxStream :=
+  let gs : Dict := [(kType, .name (nm "ExtGState")), (nm "BM", .name (nm "Multiply"))] ++
+    (if m.opacity < 1 then [(nm "CA", unitNum m.opacity), (nm "ca", unitNum m.opacity)]
+     else [])
+  ⟨formDict (rectObj m.annotRect) [(nm "ExtGState", .dict [(nm "R0", .dict gs)])],
+    highlightContent m⟩
+
+/-- The speech-bubble icon in a 20 × 20 box (rule A5): a bubble with a tail, filled with the
+mark's colour and outlined in black, and three dark lines of "text". -/
+def noteIcon (c : Rat × Rat × Rat) : List UInt8 :=
+  fillColor c ++ ascii
+    ("0 G\n1 w\n1 j\n" ++
+     "1.5 6 m\n1.5 18.5 l\n18.5 18.5 l\n18.5 6 l\n10 6 l\n4.5 1.5 l\n6 6 l\nh\nB\n" ++
+     "0.2 G\n1.5 w\n0 J\n4.5 15 m\n15.5 15 l\n4.5 12 m\n15.5 12 l\n4.5 9 m\n11.5 9 l\nS\n")
+
+/-- The note appearance stream (rule A5). -/
+def noteAp (m : Mark) : AuxStream :=
+  ⟨formDict (.array [.int 0, .int 0, .int 20, .int 20]) [], noteIcon m.color⟩
+
+/-- The appearance stream of a mark. -/
+def apOf (m : Mark) : AuxStream :=
+  match m.kind with
+  | .highlight => highlightAp m
+  | .note => noteAp m
+
+/-! ## Building the writer's input (rules A8, A9) -/
+
+/-- Page indices in order of first occurrence. -/
+def pageOrder : List Mark → List Nat
+  | [] => []
+  | m :: ms => let r := pageOrder ms; m.page :: r.filter (· != m.page)
+
+/-- The marks grouped by page (rule A8). -/
+def grouped (ms : List Mark) : List (Nat × List Mark) :=
+  (pageOrder ms).map fun p => (p, ms.filter (·.page == p))
+
+/-- The page reference of page index `i`. -/
+def pageRef (doc : Doc.Doc) (i : Nat) : Except Error PdfObject :=
+  match doc.pages[i]? with
+  | some p => .ok (.ref p.num p.gen)
+  | none => .error (.malformed 0 s!"mark on page index {i}, out of range")
+
+/-- The dictionaries of a page's marks, numbered from `num`, appearance streams from `ap`. -/
+def pageDicts (page : PdfObject) : Nat → Nat → List Mark → List Dict
+  | _, _, [] => []
+  | num, ap, m :: ms => annotDicts m num ap page ++ pageDicts page (num + m.slots) (ap + 1) ms
+
+/-- Total number of annotation dictionaries of some marks. -/
+def slotCount (ms : List Mark) : Nat := (ms.map Mark.slots).sum
+
+/-- Build every page's list from `num` / `ap` on. -/
+def buildPages (doc : Doc.Doc) : Nat → Nat → List (Nat × List Mark) →
+    Except Error (List (Nat × List Dict))
+  | _, _, [] => .ok []
+  | num, ap, (p, ms) :: rest =>
+    match pageRef doc p with
+    | .error e => .error e
+    | .ok r =>
+      match buildPages doc (num + slotCount ms) (ap + ms.length) rest with
+      | .error e => .error e
+      | .ok xs => .ok ((p, pageDicts r num ap ms) :: xs)
+
+/-- **The writer's input for `marks`** (rules A1–A9): per page the annotation dictionaries,
+and the appearance streams, numbered as `writeAnnots` will number them for `doc`. -/
+def build (doc : Doc.Doc) (marks : List Mark) : Except Error (Marks × List AuxStream) :=
+  if marks.any (fun m => m.kind == .highlight && m.quads.isEmpty) then
+    .error (.malformed 0 "highlight without quads")
+  else
+    let gs := grouped marks
+    let base := doc.file.trailer.size
+    let flat := gs.flatMap Prod.snd
+    match buildPages doc base (base + slotCount flat) gs with
+    | .error e => .error e
+    | .ok pages => .ok (pages, flat.map apOf)
+
+/-- **Write `marks` into `doc`** as an incremental update (tasks 9.5a + 9.5b). -/
+def writeMarks (limits : Limits) (doc : Doc.Doc) (marks : List Mark) :
+    Except Error ByteArray :=
+  match build doc marks with
+  | .error e => .error e
+  | .ok (ms, aux) => Incremental.writeAnnots limits doc ms aux
+
+/-! ## Properties -/
+
+/-- Every page's dictionaries are annotation dictionaries (`IsAnnot`). -/
+theorem pageDicts_isAnnot (page : PdfObject) :
+    ∀ (num ap : Nat) (ms : List Mark), ∀ d ∈ pageDicts page num ap ms, IsAnnot d
+  | _, _, [] => by simp [pageDicts]
+  | num, ap, m :: ms => by
+    intro d hd
+    simp only [pageDicts, List.mem_append] at hd
+    rcases hd with hd | hd
+    · exact annotDicts_isAnnot m num ap page d hd
+    · exact pageDicts_isAnnot page _ _ ms d hd
+
+/-- A page's dictionary count is its marks' slot count. -/
+theorem pageDicts_length (page : PdfObject) :
+    ∀ (num ap : Nat) (ms : List Mark), (pageDicts page num ap ms).length = slotCount ms
+  | _, _, [] => by simp [pageDicts, slotCount]
+  | num, ap, m :: ms => by
+    simp only [pageDicts, List.length_append, annotDicts_length, pageDicts_length page _ _ ms,
+      slotCount, List.map_cons, List.sum_cons]
+
+/-- `buildPages` keeps the page indices and gives `IsAnnot` dictionaries. -/
+theorem buildPages_ok (doc : Doc.Doc) :
+    ∀ (num ap : Nat) (gs : List (Nat × List Mark)) (xs : List (Nat × List Dict)),
+      buildPages doc num ap gs = .ok xs →
+      xs.map Prod.fst = gs.map Prod.fst ∧ ∀ x ∈ xs, ∀ d ∈ x.2, IsAnnot d
+  | _, _, [], xs, h => by
+    simp only [buildPages, Except.ok.injEq] at h
+    subst h
+    simp
+  | num, ap, (p, ms) :: rest, xs, h => by
+    simp only [buildPages] at h
+    split at h
+    · cases h
+    · rename_i r _
+      split at h
+      · cases h
+      · rename_i ys hys
+        cases h
+        obtain ⟨h1, h2⟩ := buildPages_ok doc _ _ rest ys hys
+        refine ⟨by simp [h1], ?_⟩
+        intro x hx d hd
+        simp only [List.mem_cons] at hx
+        rcases hx with rfl | hx
+        · exact pageDicts_isAnnot r _ _ ms d hd
+        · exact h2 x hx d hd
+
+/-- **Every dictionary `build` emits is an annotation dictionary** with `/Type /Annot`,
+`/Subtype`, `/Rect` and `/NM` (`IsAnnot`, `IsAnnot.lookup`); the pages are those of the
+marks, in order of first occurrence, each once; there is one appearance stream per mark. -/
+theorem build_ok {doc : Doc.Doc} {marks : List Mark} {ms : Marks} {aux : List AuxStream}
+    (h : build doc marks = .ok (ms, aux)) :
+    ms.map Prod.fst = pageOrder marks ∧ (∀ x ∈ ms, ∀ d ∈ x.2, IsAnnot d) ∧
+      aux = ((grouped marks).flatMap Prod.snd).map apOf := by
+  unfold build at h
+  split at h
+  · cases h
+  · dsimp only at h
+    split at h
+    · cases h
+    · rename_i pages hp
+      cases h
+      obtain ⟨h1, h2⟩ := buildPages_ok doc _ _ _ _ hp
+      refine ⟨?_, h2, rfl⟩
+      rw [h1]
+      simp [grouped, Function.comp_def]
+
+/-- **Quads map 1:1 (count)**: eight `/QuadPoints` numbers per quad. -/
+theorem quadPoints_length (qs : List Quad) : (quadPoints qs).length = 8 * qs.length := by
+  induction qs with
+  | nil => rfl
+  | cons q qs ih =>
+    simp only [quadPoints, List.flatMap_cons, List.length_append, Quad.points] at ih ⊢
+    simp only [List.length_cons, List.length_nil, ih]
+    omega
+
+/-- Reading one quad's eight numbers in front of others. -/
+theorem quadsOf_cons (q : Quad) (rest : List Rat) :
+    Annot.quadsOf (q.points ++ rest) = q.toAnnot :: Annot.quadsOf rest := by
+  unfold Annot.quadsOf
+  have hl : ((q.points ++ rest).length + 7) / 8 = (rest.length + 7) / 8 + 1 := by
+    simp [Quad.points]; omega
+  rw [hl, List.range_succ_eq_map]
+  simp only [List.map_cons, List.map_map]
+  congr 1
+
+/-- **Quads map 1:1 (read back)**: `Core.Annot.quadsOf`, the `/QuadPoints` reader of our
+annotation renderer, reads exactly the given quads from `quadPoints`. -/
+theorem quadsOf_quadPoints (qs : List Quad) :
+    Annot.quadsOf (quadPoints qs) = qs.map Quad.toAnnot := by
+  induction qs with
+  | nil => rfl
+  | cons q qs ih =>
+    simp only [quadPoints, List.flatMap_cons] at ih ⊢
+    rw [quadsOf_cons, ih, List.map_cons]
+
+/-- Printing a string object round-trips through the strict parser (M1's
+`Spec.RoundTripCore.parseObject_print`, via `Spec.Write.serialize_roundtrip`'s hypotheses):
+strings are always canonical, so every text string we write is read back exactly. -/
+theorem string_canonical (bs : List UInt8) : (PdfObject.string bs).Canonical := rfl
+
+/-- Every coordinate and colour number we write is canonical. -/
+theorem coord_canonical (q : Rat) : (coord q).Canonical := decRound_canonical 3 q
+
+/-! ## Compile-time checks -/
+
+section Tests
+
+#guard textBytes "Hi there\n" == ascii "Hi there\n"
+#guard textBytes "é" == [0xFE, 0xFF, 0x00, 0xE9]
+#guard textBytes "a😀" == [0xFE, 0xFF, 0x00, 0x61, 0xD8, 0x3D, 0xDE, 0x00]
+#guard Annot.textOf (textBytes "Grüße 😀 €") == "Grüße 😀 €".toList
+-- every plain character reads back as itself (PDFDocEncoding = ASCII there)
+#guard (List.range 128).all fun n =>
+  !plainChar (Char.ofNat n) || Annot.textOf [UInt8.ofNat n] == [Char.ofNat n]
+#guard decRound 3 (1 / 3) == ⟨333, 3⟩
+#guard decRound 4 (152 / 255) == ⟨5961, 4⟩
+#guard decRound 3 100 == ⟨100, 0⟩
+#guard decFloor 3 (-1 / 3) == ⟨-334, 3⟩ && decCeil 3 (1 / 3) == ⟨334, 3⟩
+#guard (Quad.ofBox 1 2 3 4).points == [1, 4, 3, 4, 1, 2, 3, 2]
+#guard Annot.quadsOf (Quad.ofBox 1 2 3 4).points == [(Quad.ofBox 1 2 3 4).toAnnot]
+/-- A test note on page `p`. -/
+private def tnote (p i : Nat) : Mark :=
+  { page := p, kind := .note, quads := [], rect := ⟨0, 0, 1, 1⟩, color := (1, 1, 0), id := i,
+    date := "" }
+
+#guard pageOrder [tnote 2 1, tnote 0 2, tnote 2 3] == [2, 0]
+#guard (grouped [tnote 2 1, tnote 0 2, tnote 2 3]).map (fun g => (g.1, g.2.map (·.id))) ==
+  [(2, [1, 3]), (0, [2])]
+#guard op [coord 1.5, coord 2] "m" == ascii "1.5 2. m\n"
+
+end Tests
+
+end SafePdf.Core.Write.Annots
