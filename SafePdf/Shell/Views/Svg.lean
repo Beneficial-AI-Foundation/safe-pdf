@@ -763,7 +763,7 @@ def frame (crop : Rect) (rot : Rotation) : Fixed × Fixed × Matrix :=
 
 /-- The clip carried by an item (`none` for items that draw nothing). -/
 def itemClip : DisplayItem → Option Clip
-  | .fillPath _ _ _ c | .strokePath _ _ c | .glyphRun _ c | .image _ _ _ c | .shading _ _ c =>
+  | .fillPath _ _ _ c | .strokePath _ _ c | .glyphRun _ c | .image _ _ _ c | .shading _ _ _ _ c =>
     some c
   | _ => none
 
@@ -845,7 +845,7 @@ def renderPage (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (po : P
     | .glyphRun r _ => out := out.push (textElem r)
     | .image src ctm fill _ =>
       out := out.push (imageElem limits (streamDict limits doc) src ctm fill)
-    | .shading n _ _ =>
+    | .shading n _ _ _ _ =>
       out := out.push s!"<rect {cropRect} fill=\"rgb(70%,70%,70%)\" fill-opacity=\"0.5\" data-shading=\"{escAttr (nameText n)}\"/>"
     | .unsupported op => out := out.push s!"<!-- unsupported operator: {commentSafe (opName op)} -->"
     -- transparency (7.3c) is not exported: groups paint their items plainly, masks are skipped

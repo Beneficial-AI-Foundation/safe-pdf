@@ -19,6 +19,8 @@ behaviour by evaluation:
 * meshes: a type 4 triangle (Gouraud), a type 5 lattice, a type 6 Coons patch (corner
   colours), a type 1 function shading (PostScript `{ add 2 div }`);
 * a shading pattern fill with `/Background` through `loadShadings` and `renderFill`;
+* task 7.3f: `sh` with `ca` 0.5; a form with its own (direct) shading resource, a shading
+  pattern in a form scaled ×2 (fill and stroke), run through `Content.runBytes`;
 * timing of a full-page 612 × 792 axial and radial shading (printed).
 
 Set `SAFEPDF_PPM_DIR=<dir>` to also write the rendered test pages as PPM files there.
@@ -79,8 +81,9 @@ def radialDict (cs : String) (coords : List Int) (fn : PdfObject) (ext : Bool ×
 def render (W H : Nat) (tbl : ShadingTable) (items : List DisplayItem) : Clip.Image :=
   let st := items.foldl (fun st it =>
     match it with
-    | .shading n c cl => renderShading {} (view W H) W H tbl st n c cl
+    | .shading n r c f cl => renderShading {} (view W H) W H tbl st r n c f.alpha cl
     | .fillPath p r s cl => renderFill {} (view W H) W H tbl st p r s cl
+    | .strokePath p s cl => renderStroke {} (view W H) W H Clip.defaultStroke tbl st p s cl
     | _ => st) ({ buf := Clip.whiteBuf W H } : Clip.RState)
   ⟨W, H, st.buf⟩
 
@@ -91,7 +94,8 @@ def renderRes (W H : Nat) (objs : List (Nat × IndirectBody)) (res : Dict)
   (render W H tbl items, tbl)
 
 /-- One `sh` item of shading `Sh` (identity CTM). -/
-def shItem (clip : Clip := []) : DisplayItem := .shading (nm "Sh") Matrix.identity clip
+def shItem (clip : Clip := []) (alpha : Comp := Comp.one) : DisplayItem :=
+  .shading (nm "Sh") .page Matrix.identity { color := .gray Comp.zero, alpha } clip
 
 /-- Resources with one shading `Sh` = object 1. -/
 def shRes : Dict := [(nm "Shading", .dict [(nm "Sh", .ref 1 0)])]
@@ -145,6 +149,19 @@ def writePpm (path : System.FilePath) (img : Clip.Image) : IO Unit := do
     rgb := rgb.push (UInt8.ofNat (Clip.getB img.data (4 * i + 1)))
     rgb := rgb.push (UInt8.ofNat (Clip.getB img.data (4 * i + 2)))
   IO.FS.writeBinFile path (s!"P6\n{img.w} {img.h}\n255\n".toUTF8 ++ rgb)
+
+/-- A form XObject stream with the given extra dictionary entries and content. -/
+def formObj (extra : Dict) (content : String) : IndirectBody :=
+  .stream ⟨[(nm "Subtype", .name (nm "Form")), (nm "BBox", nums [0, 0, 100, 100])] ++ extra,
+    content.toUTF8⟩
+
+/-- Run page content through the resource runner (5.2b) and render it with the loaded
+shadings (task 7.3f: items annotated with where their resources live). -/
+def renderContent (W H : Nat) (objs : List (Nat × IndirectBody)) (res : Dict) (content : String) :
+    Clip.Image × ShadingTable :=
+  let env : Content.Env Unit Unit := { cfg := {}, src := memSource objs, observe := fun _ _ _ _ => () }
+  let items := (Content.runBytes env res content.toUTF8 () ()).items
+  renderRes W H objs res items.toList
 
 /-- Run the suite; returns the number of failures. -/
 def run : IO Nat := do
@@ -307,9 +324,42 @@ def run : IO Nat := do
     failures := failures + 1; report s!"separation tint: {px sp 0 0} {px sp 15 0}"
   -- 10. Unknown and malformed shadings paint nothing.
   let un := (renderRes 4 1 [(1, .obj (.dict [(nm "ShadingType", I 2)]))] shRes [shItem,
-    .shading (nm "Nope") Matrix.identity []]).1
+    .shading (nm "Nope") .page Matrix.identity { color := .gray Comp.zero, alpha := Comp.one } []]).1
   if px un 0 0 != (255, 255, 255) then
     failures := failures + 1; report "malformed shading painted"
+  -- 10b. Task 7.3f. `sh` with ca 0.5: a constant black shading over white → 127/128.
+  let blackSh : IndirectBody := .obj (axialDict "DeviceGray" [0, 0, 10, 0] (expFn [0] [0] (I 1))
+    (true, true))
+  let ha := (renderRes 4 1 [(1, blackSh)] shRes [shItem [] (Comp.ofFixed (Fixed.ofDecimal ⟨5, 1⟩))]).1
+  if !near (px ha 2 0).1 128 1 then
+    failures := failures + 1; report s!"sh with ca 0.5: {px ha 2 0}"
+  -- A form with its own (direct) shading resource: the page has none.
+  let fSh := formObj [(nm "Resources", .dict [(nm "Shading", .dict [(nm "S1",
+    axialDict "DeviceGray" [0, 0, 10, 0] (expFn [0] [0] (I 1)) (true, true))])])] "/S1 sh"
+  let (fs, fstbl) := renderContent 4 4 [(7, fSh)] [(nm "XObject", .dict [(nm "Fm", .ref 7 0)])]
+    "/Fm Do"
+  if px fs 2 2 != (0, 0, 0) || fstbl.shadings.map (·.1.1) != [.form 7 0] then
+    failures := failures + 1; report s!"form-own shading: {px fs 2 2} {fstbl.shadings.length}"
+  -- A shading pattern used in a form scaled ×2: the pattern matrix maps to the form's space,
+  -- so the gradient [0, 10] (form) covers page x ∈ [0, 20]; the form's own /Pattern resource.
+  let pat5 : IndirectBody := .obj (.dict [(nm "PatternType", I 2),
+    (nm "Shading", axialDict "DeviceGray" [0, 0, 10, 0] (expFn [0] [1] (I 1)))])
+  let scaled := fun (content : String) => formObj [(nm "Matrix", nums [2, 0, 0, 2, 0, 0]),
+    (nm "Resources", .dict [(nm "Pattern", .dict [(nm "P0", .ref 5 0)])])] content
+  let pageRes : Dict := [(nm "XObject", .dict [(nm "Fm", .ref 6 0)])]
+  let (pfm, _) := renderContent 24 4 [(5, pat5), (6, scaled "/Pattern cs /P0 scn 0 0 10 2 re f")]
+    pageRes "/Fm Do"
+  -- page x 15.5 → form 7.75 → s = 0.775 → 198; page x 21.5 is outside the path.
+  if !near (px pfm 15 2).1 198 2 || px pfm 21 2 != (255, 255, 255) then
+    failures := failures + 1; report s!"pattern in scaled form: {px pfm 15 2} {px pfm 21 2}"
+  -- The same pattern on a stroke (width 2 in form space = 4 px, around page y = 2).
+  let (psk, _) := renderContent 24 4
+    [(5, pat5), (6, scaled "/Pattern CS /P0 SCN 2 w 0 1 m 10 1 l S")] pageRes "/Fm Do"
+  -- page x 10.5 → form 5.25 → s = 0.525 → 134.
+  if !near (px psk 10 2).1 134 2 || px psk 22 2 != (255, 255, 255) then
+    failures := failures + 1; report s!"pattern stroke: {px psk 10 2} {px psk 22 2}"
+  dumps := dumps.push ("pattern-scaled-form", pfm)
+  dumps := dumps.push ("pattern-stroke", psk)
   -- 11. Timing: full-page 612 × 792 axial and radial.
   let W := 612
   let H := 792

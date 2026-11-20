@@ -69,6 +69,12 @@ The fill and stroke work of a run is then 7.2a/7.2b's bound for a path of at mos
 `renderPage` is a complete page renderer: path items through `Clip.renderItem`, glyph runs
 here, in display-list order. `renderDocPage` runs it on a page of an opened document. To paint
 text from `Clip.renderPaths` instead, see `runMasks` (a stateless per-run hook).
+
+Task 7.3f: a glyph mask whose colour is a shading-pattern colour is painted with the pattern
+(`paintAll`, `Shading.paintPattern`, the run's recorded `PatternUse`); `strokePath` items go
+through `Shading.renderStroke` (pattern strokes); `sh` items are painted with their `ca`, and
+those with a blend mode or soft mask are bracketed by a one-item transparency group before
+the transparency driver sees them (`liftSh`; nested soft masks included).
 -/
 
 namespace SafePdf.Core.Raster.Glyph
@@ -443,35 +449,55 @@ structure TState where
   /-- Transparency layers and soft masks (task 7.3c). -/
   tx : Transparency.TxState := {}
 
-/-- Paint a list of masks through one clip (cache and work of `clipMaskC` charged once). -/
-def paintAll (W H : Nat) (cm : Option Mask) (cc : Clip.ClipCache) (s : Nat) (st : Clip.RState) :
-    List (Mask × Color × Comp × Nat) → Clip.RState
+/-- Paint a list of masks through one clip (cache and work of `clipMaskC` charged once). A
+mask whose colour is a pattern colour that `look` resolves to a loaded shading pattern (task
+7.3f: pattern-coloured text) is painted with the pattern through mask ∩ clip
+(`Shading.paintPattern`); every other mask with its flat colour. -/
+def paintAll (cfg : Fill.Config) (m : Aff) (W H : Nat)
+    (look : Color → Option (Shading.Pattern × Matrix)) (cm : Option Mask) (cc : Clip.ClipCache)
+    (s : Nat) (st : Clip.RState) : List (Mask × Color × Comp × Nat) → Clip.RState
   | [] => { st with cache := cc, steps := st.steps + s }
-  | (m, col, a, w) :: rest =>
-    paintAll W H cm cc 0 (Clip.paintMask W H st cm m col a cc (s + w)) rest
+  | (mk, col, a, w) :: rest =>
+    let st' := match look col with
+      | some (pat, base) => Shading.paintPattern cfg m W H st pat base (Clip.combine mk cm) a cc (s + w)
+      | none => Clip.paintMask W H st cm mk col a cc (s + w)
+    paintAll cfg m W H look cm cc 0 st' rest
 
-/-- Render one display item: glyph runs here, everything else by `Clip.renderItem`. -/
+/-- The shading pattern a glyph-run mask colour denotes: the fill's pattern use for the fill
+colour, else the stroke's. -/
+def runPattern (tbl : Shading.ShadingTable) (r : GlyphRun) (c : Color) :
+    Option (Shading.Pattern × Matrix) :=
+  tbl.patternOf c (if c = r.fill.color then r.fill.pattern else r.stroke.pattern)
+
+/-- Render one display item: glyph runs here, images (7.3b), shadings and pattern fills and
+strokes (7.3d, 7.3f), everything else by `Clip.renderItem`. -/
 def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts)
     (st : TState) : DisplayItem → TState
   | .glyphRun r clip =>
     if !r.renderMode.paints then st else
     let c := Clip.clipMaskC cfg m W H st.rs.cache clip
     let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
-    { st with rs := paintAll W H c.1 c.2.1 c.2.2 st.rs ms, cache }
+    { st with rs := paintAll cfg m W H (runPattern pf.shadings r) c.1 c.2.1 c.2.2 st.rs ms, cache }
   | .image src ctm fill clip => { st with rs := Image.renderImage cfg m W H pf.images st.rs src ctm fill clip }
-  | .shading name ctm clip => { st with rs := Shading.renderShading cfg m W H pf.shadings st.rs name ctm clip }
+  | .shading name r ctm fill clip =>
+    { st with rs := Shading.renderShading cfg m W H pf.shadings st.rs r name ctm fill.alpha clip }
   | .fillPath p rule style clip => { st with rs := Shading.renderFill cfg m W H pf.shadings st.rs p rule style clip }
+  | .strokePath p style clip =>
+    { st with rs := Shading.renderStroke cfg m W H stroke pf.shadings st.rs p style clip }
   | it => { st with rs := Clip.renderItem cfg m W H stroke st.rs it }
 
 /-- `paintAll` preserves the buffer size. -/
-theorem paintAll_size (W H : Nat) (cm : Option Mask) (cc : Clip.ClipCache) :
+theorem paintAll_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
+    (look : Color → Option (Shading.Pattern × Matrix)) (cm : Option Mask) (cc : Clip.ClipCache) :
     ∀ (s : Nat) (st : Clip.RState) (l : List (Mask × Color × Comp × Nat)),
-      (paintAll W H cm cc s st l).buf.size = st.buf.size
+      (paintAll cfg m W H look cm cc s st l).buf.size = st.buf.size
   | _, _, [] => rfl
-  | s, st, (m, col, a, w) :: rest => by
+  | s, st, (mk, col, a, w) :: rest => by
     simp only [paintAll]
-    rw [paintAll_size W H cm cc 0 _ rest]
-    simp only [Clip.paintMask, Clip.composite_size]
+    rw [paintAll_size cfg m W H look cm cc 0 _ rest]
+    split
+    · exact Shading.paintPattern_size _ _ _ _ _ _ _ _ _ _ _
+    · simp only [Clip.paintMask, Clip.composite_size]
 
 /-- One item preserves the buffer size. -/
 theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
@@ -482,10 +508,13 @@ theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Cli
     simp only [renderItemG]
     split
     · rfl
-    · exact paintAll_size _ _ _ _ _ _ _
+    · exact paintAll_size _ _ _ _ _ _ _ _ _ _
   | image src ctm fill clip => simp only [renderItemG]; exact Image.renderImage_size _ _ _ _ _ _ _ _ _ _
-  | shading name ctm clip => simp only [renderItemG]; exact Shading.renderShading_size _ _ _ _ _ _ _ _ _
+  | shading name r ctm fill clip =>
+    simp only [renderItemG]; exact Shading.renderShading_size _ _ _ _ _ _ _ _ _ _ _
   | fillPath p rule style clip => simp only [renderItemG]; exact Shading.renderFill_size _ _ _ _ _ _ _ _ _ _
+  | strokePath p style clip =>
+    simp only [renderItemG]; exact Shading.renderStroke_size _ _ _ _ _ _ _ _ _ _
   | _ => simp only [renderItemG]; exact Clip.renderItem_size _ _ _ _ _ _ _
 
 /-- `renderItemG` keeps the transparency state. -/
@@ -521,10 +550,31 @@ private theorem foldl_renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat)
   | nil => intro st; rfl
   | cons it rest ih => intro st; simp only [List.foldl, ih, renderItemG_size]
 
+/-- The items an `sh` item is painted as (task 7.3f): with `Normal` blending and no soft mask,
+itself; otherwise bracketed by a non-isolated, non-knockout transparency group of alpha 1
+carrying the item's blend mode and soft mask, the item inside painted plainly with its `ca`.
+The transparency driver composites that group exactly as it composites a fill with that
+blend mode and soft mask (`Transparency.beginGroup` and `itemFx` both open one layer with the
+same effect), since `Transparency.itemFx` does not look at `sh` items. -/
+def liftShItem : DisplayItem → List DisplayItem
+  | .shading n r ctm f clip =>
+    if f.blend = .normal ∧ f.smask.isNone then [.shading n r ctm f clip]
+    else [.groupBegin { blend := f.blend, smask := f.smask },
+          .shading n r ctm { f with blend := .normal, smask := none } clip, .groupEnd]
+  | it => [it]
+
+/-- Apply `liftShItem` to a display list and, up to `fuel` levels, inside soft masks. -/
+def liftSh : Nat → DisplayList → DisplayList
+  | 0, items => items.foldl (fun acc it => Interp.pushAll acc (liftShItem it)) #[]
+  | k + 1, items => items.foldl (fun acc it =>
+      match it with
+      | .softMask id info inner => acc.push (.softMask id info (liftSh k inner))
+      | it => Interp.pushAll acc (liftShItem it)) #[]
+
 /-- Render a display list (paths and glyph runs) onto a white `W × H` page through `m`. -/
 def renderItems (cfg : Fill.Config) (m : Aff) (W H : Nat) (pf : PageFonts) (items : DisplayList)
     (stroke : Clip.StrokeFn := Clip.defaultStroke) : TState :=
-  items.foldl (Transparency.renderTx (painterG cfg m W H stroke pf) W H Transparency.maxMaskDepth)
+  (liftSh Transparency.maxMaskDepth items).foldl (Transparency.renderTx (painterG cfg m W H stroke pf) W H Transparency.maxMaskDepth)
     { rs := { buf := Clip.whiteBuf W H } }
 
 /-- **Render a page** (paths and text) at zoom `zoom` and user rotation `rot`, onto its
@@ -544,7 +594,7 @@ theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf 
       4 * (renderPage page zoom rot pf items cfg stroke).w *
         (renderPage page zoom rot pf items cfg stroke).h := by
   simp only [renderPage, renderItems]
-  exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ items _
+  exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ (liftSh Transparency.maxMaskDepth items) _
     (by simp [painterG, Clip.whiteBuf, ByteArray.size]) rfl
 
 /-- **Render a page of an opened document**: decode its content, build the display list with
@@ -584,4 +634,13 @@ private def pt (x y : Int) : Point := ⟨Fixed.ofInt x, Fixed.ofInt y⟩
 #guard TextRenderMode.fills .fillStrokeClip && !TextRenderMode.fills .stroke &&
   TextRenderMode.strokes .fillStroke && !TextRenderMode.strokes .invisible
 
+private def shStyled (b : BlendMode) : DisplayItem :=
+  .shading (Name.ofString "S") .page Matrix.identity
+    { color := .gray Comp.zero, alpha := Comp.one, blend := b } []
+#guard (liftSh 1 #[shStyled .multiply]).toList.map DisplayItem.kind ==
+  ["groupBegin", "shading", "groupEnd"]
+#guard (liftSh 1 #[shStyled .normal]).toList.map DisplayItem.kind == ["shading"]
+#guard (match (liftSh 1 #[.softMask 0 { kind := .alpha } #[shStyled .screen]]).toList with
+  | [.softMask _ _ inner] => inner.size == 3
+  | _ => false)
 end SafePdf.Core.Raster.Glyph
