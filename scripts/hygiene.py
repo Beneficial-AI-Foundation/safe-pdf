@@ -98,7 +98,7 @@ def lean_files(path):
 
 
 def scan(root):
-    strict_targets = [os.path.join(root, p) for p in ("SafePdf/Core", "SafePdf/Spec", "SafePdf/Repair.lean", "SafePdf/Api.lean")]
+    strict_targets = [os.path.join(root, p) for p in ("SafePdf/Core", "SafePdf/Spec", "SafePdf/Repair.lean", "SafePdf/Api.lean", "SafePdf/Quarantine")]
     strict = set()
     for t in strict_targets:
         if os.path.exists(t):

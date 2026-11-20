@@ -1033,3 +1033,14 @@ import SafePdf.Shell.App.Links
 
 -- Phase 7, task 7.3i1: knockout group emission (spec)
 #print axioms SafePdf.Spec.Content.paintItems_eq
+
+-- Phase 7, task 7.3j: Type 3 fonts (SafePdf/Core/Raster/Type3.lean)
+#print axioms SafePdf.Core.Raster.Type3.renderRun_size
+#print axioms SafePdf.Core.Raster.Type3.drawGlyph_size
+#print axioms SafePdf.Core.Raster.Type3.drawImages_size
+#print axioms SafePdf.Core.Raster.Type3.drawImage_size
+#print axioms SafePdf.Core.Raster.Type3.placeNoFit_size
+
+-- Phase 7, task 7.6a: baseline JPEG (SafePdf/Quarantine/DCT.lean)
+#print axioms SafePdf.Quarantine.DCT.decode_pixels
+#print axioms SafePdf.Quarantine.DCT.finalize_pixels

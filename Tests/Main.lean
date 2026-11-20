@@ -28,6 +28,7 @@ import Tests.RasterShading
 import Tests.RasterTiling
 import Tests.RasterTxFast
 import Tests.Annot
+import Tests.DCT
 
 /-!
 # Test runner
@@ -75,7 +76,8 @@ def suites : List Suite :=
     { name := "raster-shading", run := SafePdf.Tests.RasterShading.run },
     { name := "raster-tiling", run := SafePdf.Tests.RasterTiling.run },
     { name := "raster-tx-fast", run := SafePdf.Tests.RasterTxFast.run },
-    { name := "annot", run := SafePdf.Tests.Annot.run } ]
+    { name := "annot", run := SafePdf.Tests.Annot.run },
+    { name := "dct", run := SafePdf.Tests.DCT.run } ]
 
 end SafePdf.Tests
 
