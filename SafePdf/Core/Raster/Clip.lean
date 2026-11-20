@@ -282,13 +282,13 @@ def _root_.SafePdf.Core.Raster.Fill.Mask.area (m : Mask) : Nat := m.w * m.h
 /-- The mask of `fillEdgesCounted` is no wider than its window. -/
 theorem fillEdgesCounted_w_le (es : Array Edge) (rule : FillRule) (win : IRect) (cfg : Config) :
     (fillEdgesCounted es rule win cfg).1.w ≤ win.width := by
-  have := (maskRect_le (es.mergeSort (fun a b => a.y0 ≤ b.y0)) win).1
+  have := (maskRect_le es win).1
   simp only [fillEdgesCounted, IRect.width]; omega
 
 /-- The mask of `fillEdgesCounted` is no taller than its window. -/
 theorem fillEdgesCounted_h_le (es : Array Edge) (rule : FillRule) (win : IRect) (cfg : Config) :
     (fillEdgesCounted es rule win cfg).1.h ≤ win.height := by
-  have := (maskRect_le (es.mergeSort (fun a b => a.y0 ≤ b.y0)) win).2
+  have := (maskRect_le es win).2
   simp only [fillEdgesCounted, IRect.height]; omega
 
 /-- Fill a page-space path through `m` over `win`, with the counted rasterizer work. -/
