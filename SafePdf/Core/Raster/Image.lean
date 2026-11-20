@@ -1,6 +1,7 @@
 import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Content.Run
 import SafePdf.Quarantine.DCT
+import SafePdf.Quarantine.CCITT
 
 /-!
 # Images: decoding sample data and placing it on the page (tasks 7.3b, 7.3e)
@@ -38,6 +39,13 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    Any decoder error (progressive, arithmetic, 12-bit, malformed, over a limit) or a
    component mismatch yields the placeholder (S7); a DCT soft mask that fails is dropped.
    DCT stencil masks (`/ImageMask true`) stay the placeholder.
+   **`/CCITTFaxDecode`** (task 7.8) is decoded by `SafePdf.Quarantine.CCITT` (MuPDF's
+   `filter-fax.c` ported): a chain `pre ++ [/CCITTFaxDecode]` (`ccittSplit`) is decoded up to
+   the codec, then `decodeCCITT` decodes at most `/Height` rows with the parameters of its
+   `/DecodeParms` (`ccittParams`, MuPDF's defaults; references resolved through the source for
+   XObjects) and the rows are read as ordinary sample data (`decodePixmap`: `/Decode`,
+   stencil masks, short data padded with zeros as MuPDF pads). Errors yield the placeholder.
+   dvips + Ghostscript Type 3 bitmap fonts draw every glyph as an inline CCITT stencil mask.
 2. **Parameters** (`ImgDict`, entries resolved one level through the source): `/Width`,
    `/Height` (both `≥ 1`; `w · h ≤ Limits.maxImagePixels`, else
    `Error.limitExceeded .imagePixels`), `/BitsPerComponent` ∈ {1, 2, 4, 8, 16} (else
@@ -610,15 +618,15 @@ def hasCodec (limits : Limits) (d : Dict) : Bool :=
 
 /-! ### `/DCTDecode` through the quarantine-zone decoder (task 7.6a) -/
 
-/-- A `/Filter` chain ending in `/DCTDecode` after byte filters only: the stream dictionary
-with that last stage removed from `/Filter` and `/DecodeParms` (a single filter: both keys
-removed), and the DCT stage's parameters. `none` for any other chain. -/
-def dctSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) :=
+/-- A `/Filter` chain ending in the image codec `c` after byte filters only: the stream
+dictionary with that last stage removed from `/Filter` and `/DecodeParms` (a single filter:
+both keys removed), and the codec stage's parameters. `none` for any other chain. -/
+def codecSplit (c : Filter.ImageCodec) (limits : Limits) (d : Dict) : Option (Dict × Dict) :=
   match Filter.parseChain limits d with
   | .ok stages =>
     match stages.reverse with
-    | ⟨.image .dct, parms⟩ :: pre =>
-      if pre.all (fun st => match st.kind with | .byte _ => true | .image _ => false) then
+    | ⟨.image c', parms⟩ :: pre =>
+      if c' = c ∧ pre.all (fun st => match st.kind with | .byte _ => true | .image _ => false) then
         some (d.filterMap fun kv =>
           if kv.1 = Content.Run.nm "Filter" ∨ kv.1 = Content.Run.nm "DecodeParms" then
             match kv.2 with
@@ -628,6 +636,12 @@ def dctSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) :=
       else none
     | _ => none
   | .error _ => none
+
+/-- `codecSplit` for `/DCTDecode`. -/
+def dctSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) := codecSplit .dct limits d
+
+/-- `codecSplit` for `/CCITTFaxDecode`. -/
+def ccittSplit (limits : Limits) (d : Dict) : Option (Dict × Dict) := codecSplit .ccitt limits d
 
 /-- `/ColorTransform` of the DCT parameters (`none` when absent or not an integer). -/
 def colorTransformOf (parms : Dict) : Option Int :=
@@ -665,6 +679,55 @@ def decodeDCT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Di
 def decodeDCTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
     (jpeg : ByteArray) : Pixmap :=
   match decodeDCT limits p info parms jpeg with
+  | .ok pm => pm
+  | .error _ => placeholder
+
+/-! ### `/CCITTFaxDecode` through the quarantine-zone decoder (task 7.8) -/
+
+/-- Resolve every value of a dictionary one level through the source. -/
+def resolveDict {σ : Type} (src : Source σ) (s : σ) (d : Dict) : Dict × σ :=
+  let (acc, s) := d.foldl (fun (acc : Dict × σ) kv =>
+    let (o, s) := Content.Run.resolve src acc.2 kv.2
+    ((kv.1, o) :: acc.1, s)) ([], s)
+  (acc.reverse, s)
+
+/-- The `/CCITTFaxDecode` parameters of a `/DecodeParms` dictionary with MuPDF's defaults
+(`pdf_dict_get_int_default`/`_bool_default`: a value of the wrong type is the default; a real
+is truncated toward zero). -/
+def ccittParams (parms : Dict) : Quarantine.CCITT.Params :=
+  let int (k : String) (dflt : Int) : Int :=
+    match Dict.get? parms (Content.Run.nm k) with
+    | some (.int i) => i
+    | some (.real r) => r.mantissa.tdiv (10 ^ r.scale)
+    | _ => dflt
+  let bool (k : String) (dflt : Bool) : Bool :=
+    match Dict.get? parms (Content.Run.nm k) with
+    | some (.bool b) => b
+    | _ => dflt
+  { k := int "K" 0, endOfLine := bool "EndOfLine" false,
+    byteAlign := bool "EncodedByteAlign" false,
+    columns := (int "Columns" 1728).toNat, rows := (int "Rows" 0).toNat,
+    endOfBlock := bool "EndOfBlock" true, blackIs1 := bool "BlackIs1" false }
+
+/-- **Decode CCITT fax data and read it as the image's samples**: at most `/Height` rows
+(`Quarantine.CCITT.decode`), then `decodePixmap` (dimensions, `/Decode`, stencil masks,
+limits). A negative `/Columns` (MuPDF: an error) is an error. -/
+def decodeCCITT (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (fax : ByteArray) : Except Error Pixmap :=
+  match Dict.get? parms (Content.Run.nm "Columns") with
+  | some (.int i) => if i < 0 then .error (.malformed 0 "CCITTFax: negative /Columns") else go
+  | _ => go
+where
+  /-- The decoding proper. -/
+  go : Except Error Pixmap :=
+    match Quarantine.CCITT.decode limits (ccittParams parms) p.h fax with
+    | .ok rows => decodePixmap limits p info rows
+    | .error e => .error e
+
+/-- `decodeCCITT`, with every error drawn as the placeholder (S7). -/
+def decodeCCITTOr (limits : Limits) (p : ImgDict) (info : Option CSInfo) (parms : Dict)
+    (fax : ByteArray) : Pixmap :=
+  match decodeCCITT limits p info parms fax with
   | .ok pm => pm
   | .error _ => placeholder
 
@@ -855,7 +918,7 @@ def applyMasks (cap : Nat) (info : Option CSInfo) (sm mk : Option MaskImg) (pm :
   | none, none => pm
 
 /-- **Decode an image XObject** `num gen` through the source (its filters, the session
-budget); `/DCTDecode` through `decodeDCTOr`, any other image codec yields the placeholder. Its `/SMask` (else its `/Mask` stream) is
+budget); `/DCTDecode` through `decodeDCTOr`, `/CCITTFaxDecode` through `decodeCCITTOr`, any other image codec yields the placeholder. Its `/SMask` (else its `/Mask` stream) is
 loaded and applied (`applyMasks`); a soft mask disables colour-key masking (§8.9.6.4). -/
 def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named : List (Name × CSInfo))
     (num gen : Nat) : Except Error Pixmap × σ :=
@@ -875,6 +938,13 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
       | (.ok bytes, s) => (.ok (fin (decodeDCTOr limits p info parms bytes)), s)
       | (.error e, s) => (.error e, s)
     | none =>
+    match ccittSplit limits st.dict with
+    | some (d', parms) =>
+      let (parms, s) := resolveDict src s parms
+      match src.decode s num { st with dict := d' } with
+      | (.ok bytes, s) => (.ok (fin (decodeCCITTOr limits p info parms bytes)), s)
+      | (.error e, s) => (.error e, s)
+    | none =>
     if hasCodec limits st.dict then (.ok (fin placeholder), s) else
     match src.decode s num st with
     | (.ok bytes, s) => ((decodePixmap limits p info bytes).map fin, s)
@@ -888,12 +958,14 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
 no references. -/
 def decodeInline (limits : Limits) (named : List (Name × CSInfo)) (params : Dict)
     (raw : ByteArray) : Except Error Pixmap :=
-  if hasCodec limits params ∧ (dctSplit limits params).isNone then .ok placeholder else
+  if hasCodec limits params ∧ (dctSplit limits params).isNone ∧ (ccittSplit limits params).isNone
+  then .ok placeholder else
   let p := (imgDictOf Source.empty () params).1
   let info := (csOf Source.empty () named p.cs).1
   match Filter.decodeStream limits params raw with
   | .ok (.data b) => decodePixmap limits p info b
   | .ok (.image .dct parms b) => .ok (decodeDCTOr limits p info parms b)
+  | .ok (.image .ccitt parms b) => .ok (decodeCCITTOr limits p info parms b)
   | .ok (.image ..) => .ok placeholder
   | .error e => .error e
 
