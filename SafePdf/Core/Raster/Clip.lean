@@ -45,6 +45,13 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
   `Indexed`/`Separation`/`DeviceN`/`Lab` spaces already arrive as their alternate's device
   colour (`Content.GState` module doc). Components are rounded to bytes with
   `round(raw · 255 / 10⁶)` (`compByte`: gray 0.5 → 128).
+* **Compositing speed (task 7.2e).** `composite` is a row-by-row loop over the paintable
+  rectangle (`paintRect`: item rectangle ∩ mask ∩ clip ∩ page) with incremental byte offsets,
+  `UInt32` arithmetic, zero-coverage pixels skipped and opaque pixels written directly; the
+  7.2c per-pixel loop (`compositeSpec`, coverage closure `covAt`, `Int` coordinates and a
+  division per pixel, ≈ 150 ns/px compiled) is kept as its specification. They agree byte
+  for byte (tested on 5000 pseudo-random cases, `Tests/RasterComposite.lean`; not proved).
+  `scripts/bench-raster.sh`: full-page fill 69 → 6 ms.
 * **The page.** `renderPaths page zoom rot items` uses the CropBox and the rotation
   `Geom.rotAdd page.rotate rot` (page `/Rotate` + user rotation), the view matrix
   `Geom.viewMatrix` (C2, task 7.1; y flipped, origin top-left) and a pixel size of
@@ -67,7 +74,8 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
   clip mask has `w · h` bytes and its coverage is pointwise `≤` both operands.
 * `covAt_le_mask`, `covAt_le_clip`, `covAt_le_255`: clipped coverage `≤` unclipped coverage,
   `≤` clip coverage, `≤ 255`.
-* `renderItems_size`, `renderPaths_size`: the output buffer has exactly `4 · w · h` bytes.
+* `renderItems_size`, `renderPaths_size`: the output buffer has exactly `4 · w · h` bytes
+  (`composite_size`, `compositeSpec_size`: compositing preserves the buffer size).
 * **S3**: `clipMaskC_steps_le` (a clip list costs at most `Σ pathCost` over its paths, cache
   hits cost 0), `renderItemsCounted_steps_le` (the counted work of a page is at most
   `Σ itemCost` over the items, where
@@ -488,33 +496,157 @@ theorem covAt_le_clip (m c : Mask) (x y : Int) : covAt m (some c) x y ≤ (c.get
 theorem covAt_le_255 (m : Mask) (c : Option Mask) (x y : Int) : covAt m c x y ≤ 255 :=
   Nat.le_trans (covAt_le_mask m c x y) (toNat_le_255 _)
 
-/-- Composite over the pixels `i, i+1, …` (`fuel` of them) of rectangle `r` (row-major, width
+/-- **Reference compositor** (the 7.2c definition, kept as the specification of `composite`):
+composite over the pixels `i, i+1, …` (`fuel` of them) of rectangle `r` (row-major, width
 `w`), with coverage `cov`, colour `rgb` and constant alpha `alpha`. -/
-def compLoop (W : Nat) (cov : Int → Int → Nat) (r : IRect) (w : Nat) (rgb : Nat × Nat × Nat)
+def compLoopSpec (W : Nat) (cov : Int → Int → Nat) (r : IRect) (w : Nat) (rgb : Nat × Nat × Nat)
     (alpha : Nat) : (fuel i : Nat) → ByteArray → ByteArray
   | 0, _, b => b
   | fuel + 1, i, b =>
     let x := r.x0 + ((i % w : Nat) : Int)
     let y := r.y0 + ((i / w : Nat) : Int)
-    compLoop W cov r w rgb alpha fuel (i + 1) (blendPx b W x y rgb (mul255 (cov x y) alpha))
+    compLoopSpec W cov r w rgb alpha fuel (i + 1) (blendPx b W x y rgb (mul255 (cov x y) alpha))
 
-/-- Compositing preserves the buffer size. -/
-theorem compLoop_size (W : Nat) (cov : Int → Int → Nat) (r : IRect) (w : Nat)
+/-- The reference compositor preserves the buffer size. -/
+theorem compLoopSpec_size (W : Nat) (cov : Int → Int → Nat) (r : IRect) (w : Nat)
     (rgb : Nat × Nat × Nat) (alpha : Nat) (fuel i : Nat) (b : ByteArray) :
-    (compLoop W cov r w rgb alpha fuel i b).size = b.size := by
+    (compLoopSpec W cov r w rgb alpha fuel i b).size = b.size := by
   induction fuel generalizing i b with
   | zero => rfl
-  | succ n ih => simp only [compLoop, ih, blendPx_size]
+  | succ n ih => simp only [compLoopSpec, ih, blendPx_size]
 
-/-- Composite the coverage `cov` over the rectangle `r` (one step per pixel). -/
-def composite (b : ByteArray) (W : Nat) (cov : Int → Int → Nat) (r : IRect)
+/-- **Reference compositor**: the coverage `cov` over the rectangle `r`, one pixel at a time
+(the specification `composite` is tested against, `Tests/RasterComposite.lean`). -/
+def compositeSpec (b : ByteArray) (W : Nat) (cov : Int → Int → Nat) (r : IRect)
     (rgb : Nat × Nat × Nat) (alpha : Nat) : ByteArray :=
-  compLoop W cov r r.width rgb alpha (r.width * r.height) 0 b
+  compLoopSpec W cov r r.width rgb alpha (r.width * r.height) 0 b
+
+/-- The reference compositor preserves the buffer size. -/
+theorem compositeSpec_size (b : ByteArray) (W : Nat) (cov : Int → Int → Nat) (r : IRect)
+    (rgb : Nat × Nat × Nat) (alpha : Nat) : (compositeSpec b W cov r rgb alpha).size = b.size :=
+  compLoopSpec_size _ _ _ _ _ _ _ _ _
+
+/-! ### Fast compositor (task 7.2e)
+
+Same result as `compositeSpec … (covAt fm cm) …`, computed row by row over the rectangle
+`r ∩ fm.rect ∩ cm.rect ∩ ([0, W) × [0, ∞))` (outside it the reference compositor's coverage
+is 0, or `blendPx` skips the pixel), with the mask/clip/page byte offsets advanced
+incrementally (no division, no `Int` per pixel, no coverage closure), `UInt32` arithmetic
+(every intermediate `≤ 255 · 255 + 127`), zero-coverage pixels skipped after one byte read,
+and opaque pixels (`a = 255`, where `blend s d 255 = s`) written without reading the page.
+Each channel is read and written through `getB`/`setB` exactly as `blendPx` does, so even an
+odd-sized buffer gives the same bytes. Inputs outside the byte range (`alpha` or a colour
+component `> 255`, never produced by `paintMask`) fall back to `compositeSpec`. -/
+
+/-- A byte of `b` as `UInt32` (`0` out of range). -/
+@[inline] def getU (b : ByteArray) (i : Nat) : UInt32 :=
+  if h : i < b.size then (b.get i h).toUInt32 else 0
+
+/-- `mul255` on `UInt32` (arguments `≤ 255`). -/
+@[inline] def mul255U (a b : UInt32) : UInt32 := (a * b + 127) / 255
+
+/-- Composite one pixel at byte offset `i` with colour `(sr, sg, sb)` and opacity `a`
+(`UInt32`s `≤ 255`), as `blendPx` does inside the page. -/
+@[inline] def pxU (b : ByteArray) (i : Nat) (sr sg sb a : UInt32) : ByteArray :=
+  if a == 0 then b
+  else if a == 255 then
+    let b := setB b i sr.toUInt8
+    let b := setB b (i + 1) sg.toUInt8
+    setB b (i + 2) sb.toUInt8
+  else
+    let ia := 255 - a
+    let b := setB b i ((sr * a + getU b i * ia + 127) / 255).toUInt8
+    let b := setB b (i + 1) ((sg * a + getU b (i + 1) * ia + 127) / 255).toUInt8
+    setB b (i + 2) ((sb * a + getU b (i + 2) * ia + 127) / 255).toUInt8
+
+/-- `pxU` preserves the buffer size. -/
+theorem pxU_size (b : ByteArray) (i : Nat) (sr sg sb a : UInt32) :
+    (pxU b i sr sg sb a).size = b.size := by
+  unfold pxU; split
+  · rfl
+  · split <;> simp only [setB_size]
+
+/-- One row, unclipped: `n` pixels, mask bytes from `mi`, page bytes from `bi`. -/
+def rowM (md : ByteArray) (sr sg sb al : UInt32) : (n mi bi : Nat) → ByteArray → ByteArray
+  | 0, _, _, b => b
+  | n + 1, mi, bi, b =>
+    let c := getU md mi
+    let b := if c == 0 then b else pxU b bi sr sg sb (mul255U c al)
+    rowM md sr sg sb al n (mi + 1) (bi + 4) b
+
+/-- One row, clipped: as `rowM` with the clip bytes from `ci` multiplied in. -/
+def rowC (md cd : ByteArray) (sr sg sb al : UInt32) :
+    (n mi ci bi : Nat) → ByteArray → ByteArray
+  | 0, _, _, _, b => b
+  | n + 1, mi, ci, bi, b =>
+    let c := getU md mi
+    let b := if c == 0 then b else pxU b bi sr sg sb (mul255U (mul255U c (getU cd ci)) al)
+    rowC md cd sr sg sb al n (mi + 1) (ci + 1) (bi + 4) b
+
+/-- `rowM` preserves the buffer size. -/
+theorem rowM_size (md : ByteArray) (sr sg sb al : UInt32) (n mi bi : Nat) (b : ByteArray) :
+    (rowM md sr sg sb al n mi bi b).size = b.size := by
+  induction n generalizing mi bi b with
+  | zero => rfl
+  | succ n ih => simp only [rowM, ih]; split <;> simp only [pxU_size]
+
+/-- `rowC` preserves the buffer size. -/
+theorem rowC_size (md cd : ByteArray) (sr sg sb al : UInt32) (n mi ci bi : Nat)
+    (b : ByteArray) : (rowC md cd sr sg sb al n mi ci bi b).size = b.size := by
+  induction n generalizing mi ci bi b with
+  | zero => rfl
+  | succ n ih => simp only [rowC, ih]; split <;> simp only [pxU_size]
+
+/-- Byte offset of pixel `(x, y)` in a row-major byte grid of width `w` with origin
+`(x0, y0)` (arguments inside the grid). -/
+@[inline] def offs (x0 y0 : Int) (w : Nat) (x y : Int) : Nat := ((y - y0) * w + (x - x0)).toNat
+
+/-- Rows `y, y+1, …` (`n` of them) of columns `[x, x + cw)`; `clip` is the clip mask, if any. -/
+def rows (W : Nat) (fm : Mask) (cm : Option Mask) (sr sg sb al : UInt32) (x : Int) (cw : Nat) :
+    (n : Nat) → (y : Int) → ByteArray → ByteArray
+  | 0, _, b => b
+  | n + 1, y, b =>
+    let mi := offs fm.x0 fm.y0 fm.w x y
+    let bi := 4 * (y.toNat * W + x.toNat)
+    let b := match cm with
+      | none => rowM fm.data sr sg sb al cw mi bi b
+      | some c => rowC fm.data c.data sr sg sb al cw mi (offs c.x0 c.y0 c.w x y) bi b
+    rows W fm cm sr sg sb al x cw n (y + 1) b
+
+/-- `rows` preserves the buffer size. -/
+theorem rows_size (W : Nat) (fm : Mask) (cm : Option Mask) (sr sg sb al : UInt32) (x : Int)
+    (cw : Nat) (n : Nat) (y : Int) (b : ByteArray) :
+    (rows W fm cm sr sg sb al x cw n y b).size = b.size := by
+  induction n generalizing y b with
+  | zero => rfl
+  | succ n ih =>
+    simp only [rows, ih]; split <;> simp only [rowM_size, rowC_size]
+
+/-- The rectangle a mask can paint on a page of width `W` within `r`: `r ∩ fm.rect ∩ clip
+rect ∩ ([0, W) × [0, ∞))`. -/
+def paintRect (W : Nat) (fm : Mask) (cm : Option Mask) (r : IRect) : IRect :=
+  let r := (r.inter fm.rect).inter ⟨0, 0, W, max r.y1 0⟩
+  match cm with
+  | none => r
+  | some c => r.inter c.rect
+
+/-- **Composite** the mask `fm`, clipped by `cm`, over the rectangle `r` of a page of width
+`W`, with colour `rgb` and constant alpha `alpha` (bytes). Equal to
+`compositeSpec b W (covAt fm cm) r rgb alpha` (tested in `Tests/RasterComposite.lean`). -/
+def composite (b : ByteArray) (W : Nat) (fm : Mask) (cm : Option Mask) (r : IRect)
+    (rgb : Nat × Nat × Nat) (alpha : Nat) : ByteArray :=
+  if alpha ≤ 255 ∧ rgb.1 ≤ 255 ∧ rgb.2.1 ≤ 255 ∧ rgb.2.2 ≤ 255 then
+    let p := paintRect W fm cm r
+    rows W fm cm (UInt32.ofNat rgb.1) (UInt32.ofNat rgb.2.1) (UInt32.ofNat rgb.2.2)
+      (UInt32.ofNat alpha) p.x0 p.width p.height p.y0 b
+  else compositeSpec b W (covAt fm cm) r rgb alpha
 
 /-- Compositing preserves the buffer size. -/
-theorem composite_size (b : ByteArray) (W : Nat) (cov : Int → Int → Nat) (r : IRect)
-    (rgb : Nat × Nat × Nat) (alpha : Nat) : (composite b W cov r rgb alpha).size = b.size :=
-  compLoop_size _ _ _ _ _ _ _ _ _
+theorem composite_size (b : ByteArray) (W : Nat) (fm : Mask) (cm : Option Mask) (r : IRect)
+    (rgb : Nat × Nat × Nat) (alpha : Nat) : (composite b W fm cm r rgb alpha).size = b.size := by
+  unfold composite; split
+  · exact rows_size _ _ _ _ _ _ _ _ _ _ _ _
+  · exact compositeSpec_size _ _ _ _ _ _
 
 /-! ## 6. Strokes (parameter) -/
 
@@ -585,7 +717,7 @@ def itemWindow (W H : Nat) (c : Option Mask) : IRect := clipWindow W H c
 def paintMask (W H : Nat) (st : RState) (cm : Option Mask) (fm : Mask) (color : Color)
     (alpha : Comp) (cc : ClipCache) (s : Nat) : RState :=
   let r := fm.rect.inter (itemWindow W H cm)
-  { buf := composite st.buf W (covAt fm cm) r (deviceRGB color) (compByte alpha),
+  { buf := composite st.buf W fm cm r (deviceRGB color) (compByte alpha),
     cache := cc, steps := st.steps + s + r.width * r.height }
 
 /-- Render one display item (fills and strokes; everything else is skipped). -/
