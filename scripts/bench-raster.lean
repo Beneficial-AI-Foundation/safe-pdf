@@ -13,6 +13,10 @@ i.e. allocating the white RGBA buffer and summing it):
 * `grid-119`: one stroked path of 119 lines (60 horizontal, 59 vertical), width 0.5 pt;
 * `clipped-rects-1000`: 1000 filled 10 × 10 pt rectangles under one circular clip.
 
+Then hotspot splits (no compositing): the full-page fill's coverage mask, the grid's stroke
+edges and stroke mask (`Stroke.strokeEdges` / `Stroke.strokePath`), and the 1000 circle fill
+masks (task 7.2e: after the compositor rewrite, these dominate the scene times).
+
 Run it compiled, not interpreted (the interpreter is far slower):
 
     scripts/bench-raster.sh [--reps N]
@@ -103,6 +107,47 @@ def view : Aff := viewMatrix 1 .r0 ⟨0, 0, 612, 792⟩
   let t1 ← IO.monoNanosNow
   pure (sum, t1 - t0)
 
+/-- The grid scene's stroke: its path and style. -/
+def gridStroke : Path × Content.StrokeStyle :=
+  match (grid[0]? : Option DisplayItem) with
+  | some (.strokePath p s _) => (p, s)
+  | _ => ({}, ⟨.gray Comp.zero, Comp.one, {}, Content.Matrix.identity⟩)
+
+/-- Hotspot split for `grid-119`: the stroke's edges alone (`Stroke.strokeEdges`). -/
+@[noinline] def timeStrokeEdges (u : Unit) : IO (Nat × Nat) := do
+  let t0 ← IO.monoNanosNow
+  let es := Raster.Stroke.strokeEdges view gridStroke.1 gridStroke.2 {}
+  let n := es.size + (if u == () then 0 else 1)
+  let t1 ← IO.monoNanosNow
+  pure (n, t1 - t0)
+
+/-- Hotspot split for `grid-119`: the stroke's coverage mask (`Stroke.strokePath` = edges +
+scanline fill, no compositing). -/
+@[noinline] def timeStrokeMask (u : Unit) : IO (Nat × Nat) := do
+  let t0 ← IO.monoNanosNow
+  let m := Raster.Stroke.strokePath view gridStroke.1 gridStroke.2 ⟨0, 0, 612, 792⟩ {}
+  let n := m.total + (if u == () then 0 else 1)
+  let t1 ← IO.monoNanosNow
+  pure (n, t1 - t0)
+
+/-- Hotspot split for `circles-1000`: the 1000 fill masks alone (`fillCounted` over the page,
+no compositing; returns the summed coverage). -/
+@[noinline] def timeCircleMasks (items : DisplayList) : IO (Nat × Nat) := do
+  let t0 ← IO.monoNanosNow
+  let n := items.foldl (fun acc it => match it with
+    | .fillPath p rule _ _ => acc + (fillCounted {} view p rule ⟨0, 0, 612, 792⟩).1.total
+    | _ => acc) 0
+  let t1 ← IO.monoNanosNow
+  pure (n, t1 - t0)
+
+/-- Best time of `reps` runs of `act`. -/
+def bestOf (reps : Nat) (act : Unit → IO (Nat × Nat)) : IO Nat := do
+  let mut best := 0
+  for i in [0:reps] do
+    let r ← act ()
+    if i == 0 || r.2 < best then best := r.2
+  pure best
+
 /-- Best of `reps` runs. -/
 def bench (reps : Nat) (items : DisplayList) : IO (Nat × Nat) := do
   let mut best : Nat × Nat := (0, 0)
@@ -128,4 +173,10 @@ def main (args : List String) : IO UInt32 := do
     let r ← timeMask (rectP 0 0 612 792)
     if i == 0 || r.2 < best then best := r.2
   IO.println s!"full-fill, coverage mask only: {best.toFloat / 1.0e6} ms (best of {reps})"
+  let e ← bestOf reps timeStrokeEdges
+  IO.println s!"grid-119, stroke edges only: {e.toFloat / 1.0e6} ms (best of {reps})"
+  let sm ← bestOf reps timeStrokeMask
+  IO.println s!"grid-119, stroke mask only (edges + scanline): {sm.toFloat / 1.0e6} ms (best of {reps})"
+  let cm ← bestOf reps (fun _ => timeCircleMasks circles)
+  IO.println s!"circles-1000, fill masks only: {cm.toFloat / 1.0e6} ms (best of {reps})"
   pure 0
