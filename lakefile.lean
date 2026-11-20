@@ -102,6 +102,19 @@ theorems after a plain `lake build`. -/
 @[default_target] lean_lib SafePdfApp where
   roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas, `SafePdf.Shell.App.View, `SafePdf.Shell.App.Select]
 
+/-- `safe-pdf-core` (task 8.4, Plan.md §6 Phase 8): the public library API `SafePdf.Api` and
+the verified core it imports, without the shell (inspector, viewer). A separate target so
+that `lake build SafePdfCore` builds exactly what a client needs; clients import
+`SafePdf.Api` (`docs/api.md`). -/
+@[default_target] lean_lib SafePdfCore where
+  roots := #[`SafePdf.Api]
+
+/-- Example client of the library API: `lake exe extract [--render] FILE [PAGE]`
+(`examples/Extract.lean`, `docs/api.md`). -/
+@[default_target] lean_exe extract where
+  srcDir := "examples"
+  root := `Extract
+
 /-- Test suites: every module under `Tests/` (TOML `globs = ["Tests.+"]`). -/
 lean_lib Tests where
   globs := #[.submodules `Tests]
