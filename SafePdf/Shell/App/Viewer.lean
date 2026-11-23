@@ -1480,26 +1480,38 @@ proc ::safepdf::noteIcon {c x0 y0 x1 y1 fill tags} {
 }
 # Note popup: a small window with the note text (inserted by variable substitution, never
 # parsed as script); Save (Ctrl+Return) sends the text back as one word, Delete removes the
-# note, Cancel/Escape closes.
+# note. Closing it without Save — Escape (bound on the toplevel, so it works in the text
+# widget), Cancel or the window's close button — sends the text as `noteClose` and Lean
+# decides (Marks.Store.onUnsavedClose, 9.r12): a note with a stored text keeps it (the edits
+# are discarded); a new note (stored text empty) gets the typed text, or is deleted when the
+# popup is empty or white space only. Opening another note's popup first closes this one
+# the same way; reopening the same note's popup keeps it and its edits.
+set ::safepdf::noteId {}
 proc ::safepdf::noteEdit {id text x y} {
   set w .note
+  if {[winfo exists $w]} {
+    if {$::safepdf::noteId eq $id} { raise $w; focus $w.t; return }
+    ::safepdf::noteDone $::safepdf::noteId close
+  }
   destroy $w
+  set ::safepdf::noteId $id
   toplevel $w -background $::safepdf::col(panel)
   wm title $w Note
   wm transient $w .
   wm geometry $w +$x+$y
+  wm protocol $w WM_DELETE_WINDOW [list ::safepdf::noteDone $id close]
   text $w.t -wrap word -width 36 -height 6 -font ::safepdf::fOl -relief solid -borderwidth 1 \
     -undo 1 -background #ffffe8 -foreground $::safepdf::col(text) -padx 6 -pady 4
   $w.t insert end $text
   ttk::frame $w.b
   ttk::button $w.b.save -text Save -command [list ::safepdf::noteDone $id save]
   ttk::button $w.b.del -text Delete -command [list ::safepdf::noteDone $id delete]
-  ttk::button $w.b.cancel -text Cancel -command [list destroy $w]
+  ttk::button $w.b.cancel -text Cancel -command [list ::safepdf::noteDone $id close]
   pack $w.b.cancel $w.b.save -side right -padx 4 -pady 4
   pack $w.b.del -side left -padx 4 -pady 4
   pack $w.b -side bottom -fill x
   pack $w.t -side top -fill both -expand 1 -padx 6 -pady {6 0}
-  bind $w <Escape> [list destroy $w]
+  bind $w <Escape> [list ::safepdf::noteDone $id close]
   # break: the popup is gone after noteDone, so the Text class binding must not run.
   ::safepdf::primaryBind $w.t Return \"[list ::safepdf::noteDone $id save]; break\"
   focus $w.t
@@ -1508,7 +1520,17 @@ proc ::safepdf::noteDone {id what} {
   if {![winfo exists .note]} return
   set t [.note.t get 1.0 {end - 1 chars}]
   destroy .note
-  if {$what eq {save}} { ::safepdf::emit noteSave $id $t } else { ::safepdf::emit noteDelete $id }
+  set ::safepdf::noteId {}
+  switch -- $what {
+    save { ::safepdf::emit noteSave $id $t }
+    delete { ::safepdf::emit noteDelete $id }
+    default { ::safepdf::emit noteClose $id $t }
+  }
+}
+# Note id was deleted elsewhere (Delete key, Edit → Delete mark, its highlight deleted): its
+# open popup goes too (called by Lean's deleteMark).
+proc ::safepdf::noteGone {id} {
+  if {[winfo exists .note] && $::safepdf::noteId eq $id} { destroy .note; set ::safepdf::noteId {} }
 }
 # Selection bubble, colour picker and Highlight pop-over (9.8), after PDF.js's editToolbar,
 # colorPicker and #editorHighlightParamsToolbar; positions come from Bubble.lean. Colours
@@ -3897,7 +3919,23 @@ def deleteMark (st : IO.Ref State) (id : Nat) : IO Unit := do
                       markSel := if s.markSel == some id then none else s.markSel })
   marksChanged st
   if !(← updatePreview st) then repaint st
+  -- An open popup of a note that is gone now (the note, or a deleted highlight's comment).
+  if let some nid := (← run ["set", "::safepdf::noteId"]).toNat? then
+    if ((← st.get).marks.find? nid).isNone then discard <| run ["::safepdf::noteGone", toString nid]
   setStatus s!"{markName m} deleted"
+
+/-- Handles `noteClose ID TEXT`: the note popup closed without Save (Escape, Cancel, the
+window's close button; task 9.r12) showing `TEXT`; `Marks.Store.onUnsavedClose` decides
+between keeping the stored text, saving the typed text of a new note, and deleting an empty
+note (the Delete path: a highlight's comment goes, the highlight stays). -/
+def noteClose (st : IO.Ref State) (idS text : String) : IO Unit := do
+  let some id := idS.toNat? | return
+  match (← st.get).marks.onUnsavedClose id text with
+  | .keep => if ((← st.get).marks.find? id).isSome then setStatus "note edits discarded"
+  | .save t => noteSave st idS t
+  | .delete =>
+    deleteMark st id
+    setStatus "empty note removed"
 
 /-- Handles `markDelete`: removes the selected mark. -/
 def markDelete (st : IO.Ref State) : IO Unit := do
@@ -7269,6 +7307,157 @@ def smokeM9Shot (st : IO.Ref State) (dir : String) : IO Unit := do
       zoom: {← run [".bar.zoom", "itemcget", "label", "-text"]}\nsidebar: {s.outlineShown}\n"
   discard <| run ["after", "20000", "destroy ."]
 
+/-- Smoke steps of closing a note popup without Save (`SAFEPDF_VIEWER_SMOKE_MODE=noteclose`,
+task 9.r12, script case 1t) on the text PDF of `smokeText`. Each line of `noteclose.txt` gives
+the notes left (`notes=`), whether a note icon is on the canvas (`icons=`), whether the popup
+is open (`popup=`) and the case's note text or state:
+`menu-esc` (Edit → Add note…, Escape in the text widget: removed, no icon),
+`typed-esc` (context menu, typed text, Escape: kept with the text), `saved-clear-esc` (that
+note made saved, reopened by a click on its icon, cleared, Escape: kept, still saved),
+`saved-empty-esc` (an empty saved note, reopened by a click: removed, the title gets `*`),
+`comment-esc` (Edit → Add note… on a selected highlight, Escape: the comment goes, the
+highlight stays), `selection-blank-esc` (a note on the selection with white space only:
+removed), `cancel-empty` / `cancel-typed` (the Cancel button), `wm-empty` / `wm-typed` (the
+window's close button, its `WM_DELETE_WINDOW` script), `switch` (Add note… while an empty
+note's popup is open removes that note), `deleted-open` (the note deleted while its popup is
+open: the popup goes; a stale `noteClose` is ignored). -/
+def smokeNoteClose (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let notes : IO (List Marks.Mark) := return (← st.get).marks.marks.toList.filter (·.isNote)
+  let popup : IO String := run ["winfo", "exists", ".note"]
+  let state (what : String) : IO String := do
+    discard <| run ["update"]
+    let ns ← notes
+    return s!"notes={ns.length} icons={decide ((← tagCount "note") > 0)} popup={← popup} {what}"
+  let esc : IO Unit := do
+    sendEvent ".note.t" "<Key-Escape>"
+    discard <| run ["update"]
+  let typeText (t : String) : IO Unit := do
+    discard <| run [".note.t", "insert", "end", t]
+  let menuNote : IO Unit := do
+    discard <| run [".menubar.edit", "invoke", Menu.Cmd.addNote.label]
+    discard <| run ["update", "idletasks"]
+  let ctxNote (x y : Rat) : IO Unit := do
+    let some npos ← boxWindowPos st ⟨x, y, x, y⟩ | return
+    sendEvent ".c" "<ButtonPress-3>" ["-x", npos.1, "-y", npos.2]
+    discard <| run [Menu.popPath, "invoke", Menu.Cmd.addNote.label]
+    discard <| run ["update", "idletasks"]
+  let clickNote (id : Nat) : IO Unit := do
+    let s ← st.get
+    let some bx := shownBox s | return
+    let some m := s.marks.find? id | return
+    let some ib := m.iconBox bx | return
+    let some pos ← boxWindowPos st ib | return
+    k.clickAt pos
+    discard <| run ["update", "idletasks"]
+  let markSaved : IO Unit := do
+    st.modify fun s => { s with marks := Marks.Store.load s.marks.marks.toList }
+    repaint st
+    syncMenus st
+  let dragSel (q : String) : IO Unit := do
+    let some (wa, wb) := (ix.hits (Select.normQuery q))[0]? | return
+    let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix (wb - 1)) | return
+    sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+    sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    discard <| run ["update"]
+  let textOf (id : Option Nat) : IO String := do
+    return (((← st.get).marks.find? (id.getD 0)).map (·.text)).getD "<gone>"
+  let newest : IO (Option Nat) := return ((← notes).getLast?.map (·.id))
+  -- 1. A new note (Edit → Add note…, nothing selected) + Escape in the text widget.
+  menuNote
+  out := out.push s!"menu-open: {← state ""} focus={← run ["focus"]}"
+  esc
+  out := out.push s!"menu-esc: {← state ""}"
+  -- 2. A new note (context menu) with typed text + Escape: the text is saved.
+  ctxNote 300 400
+  typeText "typed text"
+  esc
+  let typed ← newest
+  out := out.push s!"typed-esc: {← state (← textOf typed)}"
+  -- 3. That note saved in the file; reopened by a click on its icon, cleared, Escape.
+  markSaved
+  clickNote (typed.getD 0)
+  let shown ← try run [".note.t", "get", "1.0", "end - 1 chars"] catch _ => pure "<none>"
+  discard <| run [".note.t", "delete", "1.0", "end"]
+  esc
+  out := out.push s!"saved-clear-esc: {← state (← textOf typed)} shown={shown} dirty={(← st.get).marks.dirty} star={← k.star}"
+  -- 4. An empty saved note (Save with no text, then saved in the file), reopened, Escape.
+  ctxNote 100 100
+  discard <| run [".note.b.save", "invoke"]
+  let empty ← newest
+  markSaved
+  out := out.push s!"saved-empty-before: {← state (← textOf empty)} star={← k.star}"
+  clickNote (empty.getD 0)
+  out := out.push s!"saved-empty-open: {← popup}"
+  esc
+  out := out.push s!"saved-empty-esc: {← state (← textOf empty)} dirty={(← st.get).marks.dirty} star={← k.star}"
+  -- 5. The comment of a highlight: highlight `world`, Add note… on it, Escape.
+  dragSel "world"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  let hl := (← st.get).markSel
+  menuNote
+  let cmt ← newest
+  let anchored := ((← st.get).marks.find? (cmt.getD 0)).map (·.quads) ==
+    ((← st.get).marks.find? (hl.getD 0)).map (·.quads)
+  out := out.push s!"comment-open: {← popup} anchored={anchored}"
+  esc
+  out := out.push s!"comment-esc: {← state (← textOf cmt)} highlight={((← st.get).marks.find? (hl.getD 0)).isSome}"
+  -- 6. A note on the selection (as the bubble's Add comment) with white space only.
+  dragSel "safe"
+  menuNote
+  let onSel ← newest
+  typeText "  \n\t "
+  esc
+  out := out.push s!"selection-blank-esc: {← state (← textOf onSel)}"
+  -- 7. The Cancel button.
+  menuNote
+  let c1 ← newest
+  discard <| run [".note.b.cancel", "invoke"]
+  out := out.push s!"cancel-empty: {← state (← textOf c1)}"
+  menuNote
+  let c2 ← newest
+  typeText "via cancel"
+  discard <| run [".note.b.cancel", "invoke"]
+  out := out.push s!"cancel-typed: {← state (← textOf c2)}"
+  -- 8. The window's close button.
+  let wmClose : IO Unit := do
+    discard <| run ["uplevel", "#0", ← run ["wm", "protocol", ".note", "WM_DELETE_WINDOW"]]
+    discard <| run ["update"]
+  menuNote
+  let w1 ← newest
+  wmClose
+  out := out.push s!"wm-empty: {← state (← textOf w1)}"
+  menuNote
+  let w2 ← newest
+  typeText "via close"
+  wmClose
+  out := out.push s!"wm-typed: {← state (← textOf w2)}"
+  -- 9. Add note… while an empty note's popup is open: the first note goes.
+  ctxNote 200 200
+  let a ← newest
+  menuNote
+  let b ← newest
+  out := out.push s!"switch: {← state (← textOf a)} other={a != b} for={(← run ["set", "::safepdf::noteId"]) == toString (b.getD 0)}"
+  esc
+  out := out.push s!"switch-esc: {← state (← textOf b)}"
+  -- 10. The note deleted while its popup is open; then a stale close.
+  menuNote
+  let d ← newest
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.deleteMark.label]
+  out := out.push s!"deleted-open: {← state (← textOf d)}"
+  discard <| run ["::safepdf::emit", "noteClose", toString (d.getD 0), ""]
+  discard <| run ["::safepdf::emit", "noteClose", "999", "x"]
+  out := out.push s!"stale-close: {← state ""}"
+  out := out.push s!"texts: {(← notes).map (·.text)}"
+  out := out.push "done"
+  IO.FS.writeFile (file "noteclose.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -7348,6 +7537,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeOpenSettings st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "opensettings.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "noteclose" then
+    try smokeNoteClose st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "noteclose.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "savedlg" then
@@ -7506,6 +7701,7 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["note", x, y] => addNote st (intPos x y)
   | ["noteSave", id, text] => noteSave st id text
   | ["noteDelete", id] => if let some id := id.toNat? then deleteMark st id
+  | ["noteClose", id, text] => noteClose st id text
   | ["markDelete"] => markDelete st
   | ["hlTool"] => hlToolToggle st
   | ["showAll"] => toggleShowAll st

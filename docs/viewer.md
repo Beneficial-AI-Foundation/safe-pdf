@@ -449,12 +449,24 @@ back from a file with its own id).
   canvas items (tag `mark`) drawn below the selection and search highlights.
 * **Notes**: Add note… (Edit menu: on the selection, else at the window centre; context
   menu: on the selection, else at the right-clicked point) adds a yellow note and opens its
-  popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape). A note shows as a
+  popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape; closing it is
+  described below). A note shows as a
   speech-bubble icon of 20 × 20 page units (the size of a `/Text` annotation icon; it scales
   with the zoom as in PDF.js), its upper-left corner at the point, or right of the first
   quad for a note on text (whose quads get a dashed outline); the icon is kept inside the page.
   The text enters Tk by variable substitution and comes back as one event word, never parsed
   as script.
+* **Closing a note popup without Save** (9.r12) — Escape (also while the cursor is in the
+  text), Cancel or the window's close button — follows one rule (`Marks.Store.onUnsavedClose`):
+  a note that already has a text keeps it and the popup's edits are discarded, even when the
+  popup was cleared; a note without a stored text (new, or saved empty) gets the popup's text
+  when that has more than white space (as Save), and is otherwise **deleted**, through the
+  same path as the popup's Delete: a saved note's removal is an unsaved change (`*` in the
+  title), an empty highlight comment goes and its highlight stays, no icon is left. The same
+  holds for every way the popup opens (Edit → Add note…, the context menu, the bubble's Add
+  comment, a click on a note). Opening another note's popup closes the open one by this rule
+  (reopening the same note keeps its popup and edits); deleting a note (or its highlight)
+  while its popup is open closes the popup.
 * **Selecting, recolouring, deleting**: a click (press and release in place) on a mark selects
   it (icons before highlights, the newest first, except that a highlight wins over its comment
   on its quads (9.8); marks before links) and a note's click
@@ -1248,6 +1260,17 @@ scroll bars gone, title from `/Info /Title`; Escape brings them back), TwoPageLe
 Escape leaves full screen and opens it), FitWindow + CenterWindow at zoom 0.5 (window
 resized and centred), and last a file without settings: Vertical Scrolling, Automatic Zoom,
 page 1, outline, toolbar, its file name as title.
+
+The `noteclose` case (9.r12, `Viewer.smokeNoteClose`, case 1t) runs on the text PDF and
+closes note popups without Save: a new note + Escape generated on the text widget (which has
+the focus) leaves no note and no canvas icon; typed text + Escape keeps the note with that
+text; the same note made saved, reopened by a click, cleared + Escape keeps its text and the
+document clean; an empty saved note reopened + Escape is removed and the title gets `* `; an
+empty comment on a highlight (Edit → Add note… with the highlight selected) is removed, the
+highlight stays; white space only on a selection is removed; the Cancel button and the
+`WM_DELETE_WINDOW` script behave as Escape (empty → removed, typed → saved); Add note… while
+an empty note's popup is open removes that note; Edit → Delete mark with the popup open
+closes it and a stale `noteClose` is ignored.
 
 The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
 alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real
