@@ -1,0 +1,21 @@
+# Pinned corpus subset for the slow CI jobs (task 12.6): pixel and glyph-position
+# comparisons and the viewer corpus run. One manifest id per line (corpus/manifest.json
+# holds the URL, size and SHA-256 of each); '#' starts a comment.
+# Chosen to cover every producer family of the manifest at a small download (about 15 MB),
+# plus the files the viewer scripts name (viewer-smoke.sh paper, viewer-corpus.sh session).
+arxiv-0704.0001             # dvips + Ghostscript, 2007
+arxiv-0712.3572             # pdfTeX 1.40, 2007
+arxiv-1105.2345             # Ghostscript, 2011
+arxiv-1409.0003             # unknown producer
+arxiv-1505.00001            # Word, 2015
+arxiv-1602.03837            # Acrobat, 2016
+arxiv-1706.03762            # pdfTeX 2017; scripts/viewer-smoke.sh default paper
+arxiv-2201.11903            # pdfTeX 2022, outline; viewer-corpus.sh session
+arxiv-2303.08774            # pdfTeX 2023, long; viewer-corpus.sh session
+arxiv-2304.00001            # Word, 2023
+arxiv-2508.00001            # other producer, 2025
+arxiv-2512.00001            # Chrome/Skia, 2025
+arxiv-cond-mat_0410550      # Acrobat, 2004
+arxiv-quant-ph_9508027      # Ghostscript, 1995
+www.ntsb.gov-AIR2201        # encrypted NTSB report; viewer-corpus.sh session
+www.uscis.gov-g-1145        # government form

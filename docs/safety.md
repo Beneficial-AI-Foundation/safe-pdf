@@ -185,6 +185,24 @@ security review; those items protect the user even if every current theorem is c
     (FORCEDENTRY-class JBIG2, shadow-attack suites, polyglots) — all should die on the
     excluded-feature or limit paths; document each.
 
+**What exists now (task 12.6).** The rig for items 5, 6 and 10 is in `scripts/`; its CI jobs
+wait in `docs/ci-pending.patch` (workflow pushes need a token with `workflow` scope), so
+none of it runs in CI until a maintainer applies that patch.
+* Item 5: `scripts/lean4lean-check.sh` fetches lean4lean at a pinned commit (its `master`
+  targets our v4.36.0), SHA-256-verified, builds it from a fresh directory and re-checks every
+  `SafePdf.*` module from its `.olean`. lean4lean is derived from the C++ kernel, so this is a
+  second implementation, not an independent theory. Local run (2026-11-23): all 114
+  modules re-check, after raising lean4lean's fuel limits; its multi-module mode crashes
+  intermittently (SIGSEGV), so the script checks one module per process.
+* Item 6: `scripts/compiled-vs-interpreted.sh` runs the suites compiled (`lake exe tests`) and
+  in the IR interpreter (`scripts/interp-suites.lean`) and diffs them suite by suite.
+  Locally the 21 suites of its default set agree (~7 min interpreted); the raster property
+  suites are too slow interpreted for CI so far, and `adversarial` asserts wall-clock bounds.
+* Pinned corpus: `scripts/corpus/pinned.txt` (16 manifest ids, every producer family, ~15 MB)
+  feeds the pixel and glyph-position comparators and the viewer smoke and corpus runs.
+* Item 10: `docs/oss-fuzz.md` is the onboarding plan (targets, harness, `build.sh`,
+  `project.yaml` draft, blockers); nothing is fuzzed under libFuzzer yet.
+
 ### Guard the growth edges
 12. **The write path is the newest surface**: keep every new annotation kind behind C7
     restatements (done so far: W9–W15 rules each re-prove it); never add an in-place write;
