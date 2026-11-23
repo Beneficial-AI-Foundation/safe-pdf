@@ -10,7 +10,7 @@ constant Tcl script that runs it (`::safepdf::emit …` back into Lean, or a con
 and an enabled rule over a small view of the viewer state (`Ctx`).
 
 * **Menubar** (`menubar`): File (Open…, Save, Save As… — task 9.5c, Save only with unsaved
-  marks —, Import annotations… / Export annotations… — XFDF, task 9.11 —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
+  marks —, Import annotations… / Export annotations… — XFDF, task 9.11 —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Undo, Redo — mark edits, task 10.7 —, Copy, Select all, Highlight
   selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
   entries Highlight tool and Show all highlights: task 9.8; Find…), View
   (Sidebar, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
@@ -23,7 +23,7 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   vocabulary.
 * **Keys stay**: the accelerators shown here are the key bindings of `Viewer.setupScript`
   (Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+W, Ctrl+Q, Ctrl+C, Ctrl+A, Ctrl+F, F9, `+`, `-`, `0`, `f`, `w`, `r`, `R`,
-  PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right, `h`, Delete); a menu accelerator is only a
+  PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right, `h`, Delete, Ctrl+Z, Ctrl+Shift+Z); a menu accelerator is only a
   label in Tk.
 * **Platform keys** (task 9.r3, `Platform`, `Key`, `platformScript`): on macOS every Ctrl
   binding gets its Command twin and the labels read `Command-S` (drawn ⌘S); on X11/Windows
@@ -55,6 +55,10 @@ inductive Cmd where
   | close
   /-- Quit the viewer. -/
   | quit
+  /-- Undo the last mark edit (task 10.7). -/
+  | undo
+  /-- Redo the last undone mark edit (task 10.7). -/
+  | redo
   /-- Copy the selection to the clipboard. -/
   | copy
   /-- Select all text of the page. -/
@@ -117,7 +121,7 @@ inductive Cmd where
 
 /-- Every command, in menubar order. -/
 def Cmd.all : List Cmd :=
-  [.openFile, .save, .saveAs, .importXfdf, .exportXfdf, .close, .quit, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
+  [.openFile, .save, .saveAs, .importXfdf, .exportXfdf, .close, .quit, .undo, .redo, .copy, .selectAll, .highlight, .addNote, .deleteMark, .hlTool,
    .showAll, .find, .outline, .zoomIn, .zoomOut,
    .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .scrollPage, .scrollVertical,
    .spreadNone, .spreadOdd, .spreadEven, .prevPage, .nextPage, .firstPage,
@@ -132,6 +136,8 @@ def Cmd.label : Cmd → String
   | .exportXfdf => "Export annotations..."
   | .close => "Close"
   | .quit => "Quit"
+  | .undo => "Undo"
+  | .redo => "Redo"
   | .copy => "Copy"
   | .selectAll => "Select all"
   | .find => "Find..."
@@ -251,6 +257,8 @@ def Cmd.key : Cmd → Option Key
   | .saveAs => some (primaryKey "s" "S" (shift := true))
   | .close => some (primaryKey "w" "W")
   | .quit => some (primaryKey "q" "Q")
+  | .undo => some (primaryKey "z" "Z")
+  | .redo => some (primaryKey "z" "Z" (shift := true))
   | .copy => some (primaryKey "c" "C")
   | .selectAll => some (primaryKey "a" "A")
   | .find => some (primaryKey "f" "F")
@@ -321,6 +329,8 @@ def Cmd.underline : Cmd → Nat
   | .exportXfdf => 0
   | .close => 0
   | .quit => 0
+  | .undo => 0
+  | .redo => 0
   | .copy => 0
   | .selectAll => 7
   | .find => 0
@@ -360,6 +370,8 @@ def Cmd.script : Cmd → String
   | .exportXfdf => "::safepdf::emit exportXfdf"
   | .close => "::safepdf::emit close"
   | .quit => "::safepdf::emit quit"
+  | .undo => "::safepdf::emit undo"
+  | .redo => "::safepdf::emit redo"
   | .copy => "::safepdf::emit copy"
   | .selectAll => "::safepdf::emit selectall"
   | .find => "::safepdf::showFind"
@@ -409,6 +421,10 @@ structure Ctx where
   canForward : Bool := false
   /-- There are marks not saved into the file yet (task 9.5c). -/
   dirty : Bool := false
+  /-- There is a mark edit to undo (task 10.7). -/
+  canUndo : Bool := false
+  /-- There is an undone mark edit to redo (task 10.7). -/
+  canRedo : Bool := false
   /-- The current page is in the first spread (task 9.3: Previous has nowhere to go in the
   facing modes even when `page > 0`). -/
   onFirst : Bool := false
@@ -422,6 +438,8 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .openFile | .quit => true
   | .copy | .highlight => c.hasDoc && c.hasSel
   | .deleteMark => c.hasDoc && c.hasMark
+  | .undo => c.hasDoc && c.canUndo
+  | .redo => c.hasDoc && c.canRedo
   | .save => c.hasDoc && c.dirty
   | .outline => c.hasDoc
   | .prevPage | .firstPage => c.hasDoc && c.page > 0 && !c.onFirst
@@ -495,7 +513,7 @@ def menubar : List Menu :=
   [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .save, .cmd .saveAs, .sep, .cmd .importXfdf,
       .cmd .exportXfdf, .sep, .cmd .close, .sep, .cmd .quit]⟩,
     ⟨".menubar.edit", "Edit", 0,
-      [.cmd .copy, .cmd .selectAll, .sep, .cmd .highlight, .colors ".menubar.edit.hl",
+      [.cmd .undo, .cmd .redo, .sep, .cmd .copy, .cmd .selectAll, .sep, .cmd .highlight, .colors ".menubar.edit.hl",
        .cmd .addNote, .cmd .deleteMark, .sep, .check .hlTool hlToolVar,
        .check .showAll showAllVar, .sep, .cmd .find]⟩,
     ⟨".menubar.view", "View", 0,
@@ -601,11 +619,12 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard locate .save == some (".menubar.file", 1) && locate .saveAs == some (".menubar.file", 2)
 #guard locate .back == some (".menubar.go", 7)
 #guard locate .zoomIn == some (".menubar.view", 2)
-#guard locate .highlight == some (".menubar.edit", 3)
-#guard locate .deleteMark == some (".menubar.edit", 6)
-#guard locate .hlTool == some (".menubar.edit", 8)
-#guard locate .showAll == some (".menubar.edit", 9)
-#guard locate .find == some (".menubar.edit", 11)
+#guard locate .highlight == some (".menubar.edit", 6)
+#guard locate .deleteMark == some (".menubar.edit", 9)
+#guard locate .hlTool == some (".menubar.edit", 11)
+#guard locate .showAll == some (".menubar.edit", 12)
+#guard locate .find == some (".menubar.edit", 14)
+#guard locate .undo == some (".menubar.edit", 0) && locate .redo == some (".menubar.edit", 1)
 #guard Cmd.addNote.popScript != Cmd.addNote.script && Cmd.copy.popScript == Cmd.copy.script
 -- Enabled rules.
 #guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit]
@@ -621,6 +640,18 @@ def Platform.keyText (p : Platform) (s : String) : String :=
   Cmd.copy.enabled c && Cmd.outline.enabled c && Cmd.back.enabled c && !Cmd.forward.enabled c &&
   Cmd.highlight.enabled c
 #guard Cmd.deleteMark.enabled { hasDoc := true, pages := 1, hasMark := true }
+-- Undo / Redo (task 10.7) need a document and a step in their direction.
+#guard !Cmd.undo.enabled { hasDoc := true, pages := 1 } && !Cmd.redo.enabled { hasDoc := true, pages := 1 } &&
+  Cmd.undo.enabled { hasDoc := true, pages := 1, canUndo := true } &&
+  Cmd.redo.enabled { hasDoc := true, pages := 1, canRedo := true } && !Cmd.undo.enabled { canUndo := true }
+-- Their keys: Ctrl+Z / Ctrl+Shift+Z; on aqua also Command+Z / Command+Shift+Z (Command
+-- bindings only on aqua: X11 reads Command as Meta).
+#guard Cmd.undo.primaryKeys.flatMap (Key.sequences .other) == ["<Control-Key-z>"] &&
+  Cmd.redo.primaryKeys.flatMap (Key.sequences .other) == ["<Control-Key-Z>"]
+#guard Cmd.undo.primaryKeys.flatMap (Key.sequences .aqua) == ["<Control-Key-z>", "<Command-Key-z>"] &&
+  Cmd.redo.primaryKeys.flatMap (Key.sequences .aqua) ==
+    ["<Control-Key-Z>", "<Command-Key-Z>", "<Shift-Command-Key-z>"]
+#guard Cmd.undo.accelOn .aqua == "Command-Z" && Cmd.redo.accelOn .aqua == "Command-Shift-Z"
 -- Save needs unsaved marks; Save As only a document.
 #guard !Cmd.save.enabled { hasDoc := true, pages := 1 } && Cmd.saveAs.enabled { hasDoc := true, pages := 1 } &&
   Cmd.save.enabled { hasDoc := true, pages := 1, dirty := true } && !Cmd.saveAs.enabled {}
@@ -643,7 +674,7 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 
 -- Keys per platform (task 9.r3). The X11/Windows labels are the ones before 9.r3.
 #guard Cmd.all.map Cmd.accel ==
-  ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "", "", "Ctrl+W", "Ctrl+Q", "Ctrl+C", "Ctrl+A", "H", "",
+  ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "", "", "Ctrl+W", "Ctrl+Q", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+C", "Ctrl+A", "H", "",
    "Delete", "", "", "Ctrl+F", "F9", "+", "-", "0", "F", "W", "R", "Shift+R", "", "", "", "",
    "", "PageUp", "PageDown", "Home", "End", "Ctrl+G", "Alt+Left", "Alt+Right"]
 -- aqua: Command labels (Tk draws them as ⌘S, ⇧⌘S, ⌥←).
@@ -661,7 +692,7 @@ def Platform.keyText (p : Platform) (s : String) : String :=
   !((c.accelOn .other).startsWith "Command")
 -- Exactly the commands with Control bindings on `.` in `Viewer.setupScript`.
 #guard (Cmd.all.filter (!·.primaryKeys.isEmpty)) ==
-  [.openFile, .save, .saveAs, .close, .quit, .copy, .selectAll, .find, .zoomIn, .zoomOut,
+  [.openFile, .save, .saveAs, .close, .quit, .undo, .redo, .copy, .selectAll, .find, .zoomIn, .zoomOut,
    .actualSize, .gotoPage]
 #guard Cmd.all.all fun c => c.primaryKeys.all (·.primary)
 -- Every Control binding stays on aqua and gets a Command twin; none elsewhere.
