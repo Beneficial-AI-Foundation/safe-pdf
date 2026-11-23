@@ -2260,5 +2260,51 @@ for f in "$work/garbage.pdf" "Tests/adversarial/pages-kids-cycle.pdf" "$work/mis
   fi
 done
 
+# 10.6. Escape and click-away dismiss every transient (task 10.6, SAFEPDF_VIEWER_SMOKE_MODE=dismiss,
+#     `Viewer.smokeDismiss`, rule in `Toolbar.Transient`) on the text PDF: the find bar closes
+#     on a drag on the page (which still selects) and on Escape; Ctrl+F closes the go-to bar;
+#     a press inside the go-to bar keeps it, one on the status line closes it; the Highlight
+#     and Add text pop-overs stay on presses inside them and on the page, close on a press
+#     elsewhere and on Escape (tool / mode stay on); the colour picker closes on a press off
+#     the page; a note popup closes on a press on the page keeping its typed text (9.r12) and,
+#     empty, on Escape in the main window (the note goes).
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=dismiss run_viewer "$work/out-dismiss" "$work/text.pdf" || true
+cat "$work/out-dismiss/dismiss.txt" 2>/dev/null | cut -c1-160 || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: dismiss: no dismiss.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "find-open": "1 focus=.find.e",
+    "find-drag": "0 sel=true focus=.c",
+    "find-esc": "0",
+    "goto-open": "1",
+    "goto-rival": "goto=0 find=1",
+    "goto-inside": "1",
+    "goto-away": "0",
+    "hl-open": "1 tool=true",
+    "hl-inside": "1",
+    "hl-page": "1",
+    "hl-away": "0 tool=true",
+    "hl-reopen": "1 tool=true",
+    "hl-esc": "0 tool=true",
+    "hl-off": "false",
+    "ed-open": "1 text=true",
+    "ed-away": "0 text=true",
+    "ed-esc": "0 text=true",
+    "picker-open": "true",
+    "picker-away": "false false",
+    "note-inside": "1",
+    "note-away": "popup=0 notes=1 text=kept by a click away",
+    "note-open": "popup=1 notes=2",
+    "note-esc": "popup=0 notes=1",
+}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: dismiss: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-dismiss/dismiss.txt" || fail=1
+
 if [ "$fail" = 0 ]; then echo "viewer-smoke: OK"; else echo "viewer-smoke: FAILED" >&2; fi
 exit $fail
