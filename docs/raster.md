@@ -518,3 +518,34 @@ unchanged within noise.
    CIDFonts always), DCT
    images are placeholders, shared `/Kids` are a cycle, page numbering differs from MuPDF
    after a dangling kid.
+
+## Error bounds (task 12.8)
+
+Plan.md §6 Phase 12 "Proof gaps". **There is no IEEE `Float` in `SafePdf/Core`, `Spec` or
+`Repair`** (grep: the only hit is the `Object.lean` doc saying reals are never `Float`), so
+Lean's lack of a `Float` semantics is not an obstacle: every "float surface" is a rounding
+fixed-point or integer approximation of an exact `Rat` quantity. Theorems in
+`SafePdf/Spec/RasterError.lean`; all bounds two-sided (`Near x y ε := −ε ≤ x − y ≤ ε`), no
+saturation/clamping assumed where stated.
+
+| Surface | Representation | ℚ model | Bound |
+|---|---|---|---|
+| Operand `Decimal → Fixed` (`Fixed.ofDecimal`) | `raw·10⁻⁶`, half up | `decimalToRat` | **proved** `ofDecimal_err`: `≤ δ = ½·10⁻⁶` |
+| One `cm` product (`Content.Matrix.mul`) | `Fixed`, exact at 10¹², rounded once | `Geom.Aff.mul` | **proved** `mul_err`: every entry `≤ δ` |
+| CTM after `k` `cm`s (not associative) | chain of rounded products | exact product chain | **proved** `ctm_err`: `δ·Σⱼ rowNorm(Pⱼ)`; `ctm_err_linear`: `≤ k·K·δ` if every later partial product `Pⱼ` has `rowNorm ≤ K` |
+| Point through the CTM (`Content.Matrix.apply`) | `Fixed`, rounded once | `Aff.apply` | 7.1: `Matrix.apply_{x,y}_err` `≤ δ`; **new** `apply_err`/`ctm_apply_err`: `δ + (|x|+|y|+1)·k·K·δ` end to end |
+| Page → device map (`Fill.ofContentPath`) | exact `Rat` (or exact `Int64` `IAff`, tested equal) | `Aff.apply` | exact; then `toSub` rounding **proved** `toSub_err`: `≤ ½` subpixel (`ofPt_near` without clamping) |
+| Curve flattening (`segCount`, `bezAt`, `cubicLoop`) | integer vertices `roundDivI(bezNum, n³)` | `Fill.bez` | 7.2a: `flatten_err` (exact chords `3M/(4n²)`), `segCount_tol_of_cap`; **new** `vertex_err` (`½`), `polyline_err` (`3M/(4n²)+½`), `polyline_tol` (`tol+½` under the cap condition), `bez_near`, `device_curve_err`: exact device curve vs implemented polyline `≤ tol + 1` subpixel units per coordinate |
+| Forward-difference flattener (`cubicFD`) | integer additions | `cubicLoop` | 7.2f: equal (`cubicFD_eq`), so the bounds above carry over |
+| Shading/function arithmetic (`Shading.qd`, `Fn.eval`) | `Rat` rounded to `2⁻²⁴`, saturated `±2⁴⁰` | exact `Rat` ops | **proved** one step `qd_err`: `≤ 2⁻²⁵`; whole evaluations, `log2Q`/`exp2Q` (30-bit, ≈2⁻²⁵ relative, measured), 256-entry LUTs: **open** |
+| Axial/radial shading per pixel | `Int64` fixed point `2²⁴`/`2¹⁶`, integer Newton `isqrtFrom` | exact start per row | **open** (row start exact; per-pixel step drift not bounded) |
+| Stroke frame (`gridQ`, `circleTableI`, `isqrtW`, dash centres) | multiples of `2⁻¹⁶`, 64-bit roots | `Rat` reference stroker | 7.2i: `gridQ_err` (`½` grid unit), `isqrtW_eq`, `circleTableI` = `Rat` table (`#guard`, `m ≤ 64`); outline-vs-exact-offset-curve distance **open** |
+| Arc segment count (`arcCount`) | integer search | `Rat` (`arcCount_eq`) | exact equality; chord error of the pen polygon **open** |
+| Image resampling (`resample`, `boxDown`, bilinear 12-bit weights, 32-bit fixed-point stepping) | `Int64` fixed point | exact device→image map per row start | **open** (tested only) |
+| Type 3 / glyph bitmap weights (`weightsAtI`) | `2⁻²⁰` grid, `2⁻²⁴` filter | `weightsAt` (exact `Rat`) | **open**: differs by ≤ 1 only near ties (measured, `Tests/RasterGlyph.lean`) |
+| Glyph matrices fixed point (`Glyph` §3b, 7.2h) | `2ᴷ`-scaled `Int64` | `Rat` path | tested equal (suite `raster-fill-spec`); no bound needed where equal |
+| Fill coverage, compositing | integers | — | exact by construction (`Fill`, `Clip`) |
+
+The chain bound needs a magnitude hypothesis: an error made at step `j` is carried to the
+end by the exact product of the matrices concatenated after it, so a large later scale
+magnifies it. `PartialNormLe K` states that hypothesis; no unconditional linear bound exists.
