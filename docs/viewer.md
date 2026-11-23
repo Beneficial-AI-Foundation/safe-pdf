@@ -375,6 +375,27 @@ cannot disappear on macOS); full screen on aqua uses the native full-screen spac
 window manager (Xvfb) `wm attributes . -fullscreen` reads back 0, so the smoke test checks the
 viewer's state only.
 
+## Honest UI for hidden content (12.5)
+
+* **Trusted identity line.** While a document has the window in full screen (`/PageMode
+  /FullScreen`) or hides parts of it (`/HideToolbar`, `/HideMenubar`, `/HideWindowUI`), a dark
+  strip `.ident` above the status line, outside the page canvas, reads `SafePDF is showing
+  NAME (PATH) - this line is drawn by SafePDF, never by the document` (`identityLine`: file
+  name and path with controls and bidi overrides blanked, never the document's `/Title`; a
+  bib-lean document says "opened from the library"). It is packed before the window enters
+  full screen and removed when Escape leaves it / shows the chrome (`syncIdentity`); the
+  10.13 rule (the full-screen note is stored before entering full screen) is unchanged.
+* **Invisible text in copies.** Copy keeps text drawn with text rendering mode 3/7 (an OCR
+  layer is the page's text) but says so: `copied N characters; the copied text includes K
+  characters that are not visible on the page (invisible text, e.g. an OCR layer)`
+  (`copyStatus`, `Select.PageIndex.hiddenChars`, from `Core.Text`'s per-glyph `visible`).
+  Text outside the CropBox and text the clip hides is never in the selection. The inspector's
+  `text` view lists hidden runs (`"hidden": [{…, "invisible": true, …}]`, `reason`
+  `render-mode` or `outside-cropbox`). White-on-white and transparent text are not detected.
+* **Revision-retention notice.** A Save that deletes saved marks appends `; note: the N
+  deleted mark(s) are still in the file's earlier revision (Save only appends an update) and
+  can be recovered from it` to its status (`retentionNote`; Save, Save As…, the library).
+
 ## Attachments panel (9.r10)
 
 Files embedded in the PDF (ISO 32000-2 §7.11.4) are listed in a sidebar panel after PDF.js's

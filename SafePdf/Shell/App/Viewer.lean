@@ -1534,6 +1534,10 @@ grid columnconfigure .v 0 -weight 1
 label .status -text {} -anchor w -background $::safepdf::col(bar) \\
   -foreground $::safepdf::col(dim) -font ::safepdf::fBar -padx 6 -pady 2 -borderwidth 0
 frame .statusline -height 1 -background $::safepdf::col(line)
+# Task 12.5: the trusted identity line (`syncIdentity`), packed above the status line while
+# the document has the window in full screen or hides parts of it.
+label .ident -text {} -anchor w -background $::safepdf::col(text) -foreground #ffffff \\
+  -font ::safepdf::fBar -padx 6 -pady 3 -borderwidth 0
 pack .bar -side top -fill x
 pack .barline -side top -fill x
 pack .status -side bottom -fill x
@@ -3376,9 +3380,55 @@ def syncViewVars (s : State) : IO Unit := do
   discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
   showViewChoice s s.doc.isSome
 
+/-- A file name or path as shown in the identity line: controls and bidi overrides
+(`Links.unsafeChar`, which could reorder or hide the surrounding text) become spaces. -/
+def identityClean (t : String) : String :=
+  t.map fun c => if Links.unsafeChar c then ' ' else c
+
+/-- **The trusted identity line** (task 12.5, Plan.md §6 Phase 12 "Honest UI for
+degraded/hidden content"): which application shows which file — the file name and its path
+(for a document opened from memory, bib-lean's, only its name), never anything the document
+says about itself (no `/Title`). -/
+def identityLine (path : Option String) (inMemory : Bool) : String :=
+  match path with
+  | none => s!"{Menu.appName}: no document"
+  | some p =>
+    let src := if inMemory then "opened from the library, not from a file" else identityClean p
+    s!"{Menu.appName} is showing {identityClean (baseName p)} ({src}) - this line is drawn by \
+      {Menu.appName}, never by the document"
+
+#guard identityLine none false == "SafePDF: no document"
+#guard identityLine (some "/a/b.pdf") false == "SafePDF is showing b.pdf (/a/b.pdf) - this line \
+  is drawn by SafePDF, never by the document"
+#guard identityLine (some "x\u202Eftp.pdf") true == "SafePDF is showing x ftp.pdf (opened from the \
+  library, not from a file) - this line is drawn by SafePDF, never by the document"
+
+/-- Whether the identity line is shown: a document is open and has the window in full screen
+or hides parts of it (toolbar, menubar or scroll bars), where it could imitate another
+application or a system dialog over the whole window. -/
+def State.showsIdentity (s : State) : Bool :=
+  s.doc.isSome && (s.fullScreen || s.hidden != (false, false, false))
+
+#guard !({} : State).showsIdentity && !({ fullScreen := true } : State).showsIdentity
+
+/-- Task 12.5: shows (with the current file) or hides the identity line `.ident`, a strip of
+the viewer's own window above the status line, outside the page canvas, so nothing the
+document draws can cover or imitate it in place (`identityLine`, `State.showsIdentity`).
+`setFullScreen` calls it before the window enters full screen, `applyChrome` after hiding. -/
+def syncIdentity (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let packed := (← run ["winfo", "manager", ".ident"]) == "pack"
+  if s.showsIdentity then
+    discard <| run [".ident", "configure", "-text", identityLine s.path s.inMemory]
+    if !packed then
+      discard <| run ["pack", ".ident", "-side", "bottom", "-fill", "x", "-after", ".statusline"]
+  else if packed then
+    discard <| run ["pack", "forget", ".ident"]
+
 /-- Shows or hides the toolbar, the menubar and the scroll bars (task 9.r8,
 `/ViewerPreferences /HideToolbar`, `/HideMenubar`, `/HideWindowUI`; `(false, false, false)`
-shows them all). On aqua the menubar cannot be removed (Tk keeps a default one there). -/
+shows them all). On aqua the menubar cannot be removed (Tk keeps a default one there). Task
+12.5: the identity line follows (`syncIdentity`). -/
 def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit := do
   let (tb, mb, ui) := hidden
   let old := (← st.get).hidden
@@ -3393,16 +3443,20 @@ def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit :=
     else discard <| run ["grid", ".ys", ".xs"]
   discard <| run ["::safepdf::resizeSoon"]
   st.modify ({ · with hidden })
+  syncIdentity st
 
 /-- Enters or leaves full screen (task 9.r8, `/PageMode /FullScreen`): `wm attributes .
 -fullscreen`. Leaving applies the document's `/NonFullScreenPageMode` to the sidebar (task
-9.r9: UseThumbs opens the thumbnails). -/
+9.r9: UseThumbs opens the thumbnails). Task 12.5: the identity line is shown before the window
+enters full screen and hidden after it leaves (`syncIdentity`). -/
 def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
   if on == s.fullScreen then return
   discard <| run ["::safepdf::resizeSoon"]
-  discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
   st.modify ({ · with fullScreen := on })
+  if on then syncIdentity st
+  discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
+  if !on then syncIdentity st
   if !on && s.doc.isSome then
     showSidebar st (Sidebar.onLoad (some s.afterFullScreen) (contentOf s))
 
@@ -3874,10 +3928,26 @@ def keepPermissions (target : String) (tmp : System.FilePath) : IO Unit := do
   let mode ← run ["file", "attributes", target, "-permissions"]
   discard <| run ["file", "attributes", tmp.toString, "-permissions", mode]
 
+/-- **Revision-retention notice** (task 12.5): appended to the status of a Save that deleted
+`n` saved marks. The update is incremental — the original bytes stay a prefix of the file
+(C7) — so the earlier revision, with the deleted annotations, is still inside the written
+file and can be recovered from it; a user deleting a mark to remove what it says must know.
+Empty when nothing saved was deleted. -/
+def retentionNote (n : Nat) : String :=
+  if n == 0 then ""
+  else s!"; note: the {n} deleted mark(s) are still in the file's earlier revision (Save only \
+    appends an update) and can be recovered from it"
+
+#guard retentionNote 0 == ""
+#guard retentionNote 2 == "; note: the 2 deleted mark(s) are still in the file's earlier \
+  revision (Save only appends an update) and can be recovered from it"
+
 /-- After a save wrote `o.path`: remembers it as written by this session (a further Save into
 it asks nothing), reopens it on page `page` (the viewer goes on with the new bytes, so a second
-Save works) and reports. -/
+Save works) and reports — with the revision-retention notice (`retentionNote`, task 12.5) when
+saved marks were deleted. -/
 def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := do
+  let deleted := (← st.get).marks.deletedSaved.length
   let own := (← st.get).ownFiles
   st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
   -- Task 9.r8: the reopen keeps the user's view (the document's open settings are not
@@ -3888,7 +3958,7 @@ def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := 
     else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
       ({o.appended} bytes appended)"
   setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
-    unchanged at its start{Save.notesText o.notes}"
+    unchanged at its start{Save.notesText o.notes}{retentionNote deleted}"
 
 /-- Writes the document with its unsaved marks to another file `target` (Save As…;
 `Save.write`: the incremental update, checked by a strict reopen before anything is written,
@@ -3987,7 +4057,8 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
     marksChanged st
     let appended := bytes.size - doc.file.bytes.size
     setStatus s!"saved {n} new, changed or deleted mark(s) to the library ({appended} bytes \
-      appended; {got.length} marks in its file){Save.notesText (Save.notesFor limits doc n)}"
+      appended; {got.length} marks in its file){Save.notesText (Save.notesFor limits doc n)}\
+      {retentionNote s.marks.deletedSaved.length}"
     return true
 
 /-- The directory of `path` for a file dialog (`.` when it has none). -/
@@ -4071,7 +4142,7 @@ def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
       return some false
     | .ok o =>
       setStatus s!"saved a local copy with {o.total} mark(s) to {o.path}; the library's file \
-        is unchanged (Save to library sends the marks there)"
+        is unchanged (Save to library sends the marks there){retentionNote s.marks.deletedSaved.length}"
       return some true
   if !s.inMemory && (← samePath chosen path) then
     if !(← isOwn st chosen) then
@@ -5568,7 +5639,22 @@ def selectAll (st : IO.Ref State) : IO Unit := do
       selStatus st
   | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
 
-/-- Copies the selected text to the clipboard (Ctrl+C); the text is one quoted Tcl word. -/
+/-- The status after a copy of `n` characters, `hidden` of them from glyphs the page does not
+paint (task 12.5): the copy keeps invisible text — an OCR layer over a scan is the text of the
+page — but says how much of it the page does not show, so text hidden from the reader (a
+prompt or a payload) never reaches the clipboard unannounced. -/
+def copyStatus (n hidden : Nat) : String :=
+  if hidden == 0 then s!"copied {n} characters"
+  else s!"copied {n} characters; the copied text includes {hidden} characters that are not \
+    visible on the page (invisible text, e.g. an OCR layer)"
+
+#guard copyStatus 5 0 == "copied 5 characters"
+#guard copyStatus 11 3 == "copied 11 characters; the copied text includes 3 characters that are \
+  not visible on the page (invisible text, e.g. an OCR layer)"
+
+/-- Copies the selected text to the clipboard (Ctrl+C); the text is one quoted Tcl word.
+Invisible text (`Tr 3`/`Tr 7`) is copied and counted in the status (`copyStatus`, task 12.5);
+text outside the CropBox or clipped away is never in the selection. -/
 def copySel (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   match s.sel with
@@ -5577,7 +5663,7 @@ def copySel (st : IO.Ref State) : IO Unit := do
       let t := Select.rangeText ix.cells a b
       discard <| run ["clipboard", "clear"]
       discard <| run ["clipboard", "append", "--", t]
-      setStatus s!"copied {t.length} characters"
+      setStatus (copyStatus t.length (ix.hiddenChars a b))
   | none => setStatus (← keyText "nothing selected (drag over text, double-click a word, or Ctrl+A)")
 
 /-- Scrolls the current search hit into view (centred on an axis where it is not visible). -/
@@ -9568,6 +9654,65 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "tint.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- The smoke test of task 12.5 (`SAFEPDF_VIEWER_SMOKE_MODE=honest`, honest UI for hidden
+content). The viewer opens `ocr.pdf` (a visible line and a `Tr 3` line); `full.pdf`
+(`/PageMode /FullScreen`) and `prefs.pdf` (`/HideToolbar`) lie next to it. Writes `honest.txt`:
+* `copy`: select all + copy: the status (it counts the invisible characters) and whether the
+  clipboard holds the invisible text;
+* `full` / `full-escape`, `prefs` / `prefs-escape`, `plain`: whether the identity line `.ident`
+  is packed, its text, and the status (the full-screen note stays, task 10.13);
+* `save1`: a highlight saved into `ocr.pdf` (no deleted mark: no notice); `save2`: that saved
+  highlight deleted and saved again: the revision-retention notice. -/
+def smokeHonest (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let status : IO String := run [".status", "cget", "-text"]
+  let ident : IO String := do
+    discard <| run ["update"]
+    return s!"ident={← run ["winfo", "manager", ".ident"]} full={(← st.get).fullScreen} \
+      text={← run [".ident", "cget", "-text"]}"
+  settle st
+  -- 1. Copy with invisible text.
+  selectAll st
+  copySel st
+  let clip ← try run ["clipboard", "get"] catch _ => pure "<empty>"
+  out := out.push s!"copy: hidden-in-clipboard={decide ((clip.splitOn "hidden words").length > 1)} \
+    status={← status}"
+  out := out.push s!"plain: {← ident}"
+  -- 2. The identity line in document full screen and with hidden chrome.
+  let ocr := (← st.get).path.getD ""
+  for f in ["full", "prefs"] do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push s!"{f}: {← ident} status={← status}"
+    if f == "full" && (← isAqua) then
+      discard <| run ["after", "1000"]
+      discard <| run ["update"]
+    discard <| escapeWindow st
+    settle st
+    out := out.push s!"{f}-escape: {← ident}"
+  -- 3. Delete a saved mark, save: the revision-retention notice.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  openFile st ocr
+  settle st
+  selectAll st
+  highlight st none
+  discard <| save st (confirmed := true)
+  out := out.push s!"save1: marks={(← st.get).marks.marks.size} saved={(← st.get).marks.saved.length} \
+    status={← status}"
+  match (← st.get).marks.marks[0]? with
+  | some m =>
+    st.modify fun s => { s with marks := s.marks.remove m.id }
+    marksChanged st
+  | none => pure ()
+  out := out.push s!"deleted: dirty={(← st.get).marks.dirty} \
+    deletedSaved={(← st.get).marks.deletedSaved.length}"
+  discard <| save st (confirmed := true)
+  out := out.push s!"save2: marks={(← st.get).marks.marks.size} status={← status}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "honest.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -9647,6 +9792,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeR4 st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "r4.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "honest" then
+    try smokeHonest st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "honest.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "opensettings" then
