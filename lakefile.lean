@@ -150,3 +150,18 @@ lean_exe viewer where
   root := `SafePdf.Shell.App.Main
   moreLinkObjs := #[tkShim]
   moreLinkArgs := tkLinkArgs
+
+/-! ## macOS AppKit spike (task 11.1; not a default target) -/
+
+/-- The first C ABI over the core (`SafePdf.Shell.Ffi`, `macos/README.md`). Not a default
+target: `lake build macosFfi` builds it. -/
+lean_lib SafePdfFfi where
+  roots := #[`SafePdf.Shell.Ffi]
+
+/-- `libsafepdfffi.a`: the object files of `SafePdf.Shell.Ffi` and of every module it imports
+(the closure Lake would link into an executable), for `macos/build.sh` to link with Lean's
+runtime libraries. -/
+target macosFfi pkg : FilePath := do
+  let some mod ← findModule? `SafePdf.Shell.Ffi | error "module SafePdf.Shell.Ffi not found"
+  let info ← mod.linkInfoNoExport.fetch
+  info.bindM fun i => buildStaticLib (pkg.staticLibDir / "libsafepdfffi.a") (i.objs.map pure)
