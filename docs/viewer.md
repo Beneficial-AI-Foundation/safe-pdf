@@ -64,34 +64,71 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 
 ### Keys
 
-| Key | Action |
-|---|---|
-| `Next` (PageDown), `space` | scroll down a window; at the bottom: next page (top) |
-| `Prior` (PageUp), `BackSpace`, `Shift+space` | scroll up a window; at the top: previous page (bottom) |
-| `Down` / `Up` | scroll a tenth of the window; past the edge: next / previous page |
-| `Right` / `Left` | scroll horizontally; past the edge: next / previous page (top) |
-| `Home` / `End` | first / last page |
-| `+` (`=`, keypad `+`, also with Ctrl) | zoom in one step (about the window centre) |
-| `-` (keypad `-`, also with Ctrl) | zoom out one step |
-| `0`, `Ctrl+0` | actual size (100 %) |
-| `f` / `w` | fit page / fit width |
-| `r` / `R` | rotate the view 90° clockwise / counter-clockwise |
-| mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) |
-| `Shift`+wheel | scroll horizontally (stops at the edge) |
-| `Ctrl`+wheel | zoom in/out about the mouse pointer |
-| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks Save / Don't Save / Cancel about unsaved marks, 9.r2) |
-| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into the opened file (asks before the first overwrite, 9.r2) / into a new file (9.5c) |
+One row per action; the Linux/X11 column is also Windows. On macOS (aqua) **every X11 key
+keeps working** (the Ctrl bindings stay); the macOS column lists the keys added there and the
+one the menus show (first). Where macOS has its own convention (Preview, the HIG) it is used
+instead of a plain Command twin of the Ctrl key (task 10.9). "10.7" marks keys owned by task
+10.7 (undo/redo, deleting marks), listed here but not bound by 10.9.
 
-**macOS (9.r3): Command instead of Ctrl.** On aqua (`tk windowingsystem` = `aqua`) every Ctrl
-key in this document also works with **⌘** — ⌘O, ⌘S, ⌘⇧S, ⌘W, ⌘Q, ⌘C, ⌘A, ⌘F, ⌘G, ⌘+ / ⌘= /
-⌘−, ⌘0, ⌘+wheel zoom, ⌘Return in the note popup, ⌘Q in the page field, find/go-to bars and
-the text-box editor — and the menus show the macOS accelerators (⌘S, ⇧⌘S, ⌥← for Back; Tk
-draws the `Command-S` labels as glyphs), as do the Save tooltip and the status hints. The
-Ctrl bindings stay. The application menu's Quit (and a quit from the Dock or at logout,
-`::tk::mac::Quit`) runs File → Quit's command. On X11/Windows nothing changes. The mapping
-(key → per-platform Tk sequences and label) is pure Lean in `Menu.lean` (`Menu.Platform`,
-`Menu.Key`, `Cmd.accelOn`, `Menu.platformScript`, checked by `#guard`s for both platforms);
-the viewer installs it right after building the window.
+| Action | Linux / X11 | macOS (aqua) |
+|---|---|---|
+| scroll down a window; at the bottom: next page (top) | `Next` (PageDown), `space` | same (fn+↓ is PageDown) |
+| scroll up a window; at the top: previous page (bottom) | `Prior` (PageUp), `BackSpace`, `Shift+space` | same (fn+↑) |
+| scroll a tenth of the window; past the edge: next / previous page | `Down` / `Up` | same |
+| scroll horizontally; past the edge: next / previous page (top) | `Right` / `Left` | same |
+| first / last page | `Home` / `End` | **⌘↑ / ⌘↓**; `Home` / `End` (fn+← / fn+→) |
+| zoom in one step (about the window centre) | `+`, `=`, keypad `+`, each also with Ctrl | **⌘+**, ⌘=, ⌘ keypad `+`; the plain keys |
+| zoom out one step | `-`, keypad `-`, each also with Ctrl | **⌘−**, ⌘ keypad `-`; the plain keys |
+| actual size (100 %) | `0`, `Ctrl+0` | **⌘0**, `0` |
+| fit page / fit width | `f` / `w` | **⌘9** (Preview's Zoom to Fit), `f` / `w` |
+| rotate the view 90° clockwise / counter-clockwise | `r` / `R` | **⌘R / ⌘L** (Preview); `r` / `R` |
+| mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) | same; trackpad two-finger scroll in both axes |
+| horizontal wheel | `Shift`+wheel | same |
+| zoom about the pointer | `Ctrl`+wheel | **⌘**+wheel, `Ctrl`+wheel |
+| open a PDF | `Ctrl+O` | **⌘O** |
+| close the document / quit (asks Save / Don't Save / Cancel about unsaved marks, 9.r2) | `Ctrl+W` / `Ctrl+Q` (Ctrl+Q also in the page field, find and go-to bars, text-box editor) | **⌘W** / **⌘Q** (also there; the application menu's Quit and a quit from the Dock run the same command, `::tk::mac::Quit`) |
+| save the marks into the opened file (asks before the first overwrite, 9.r2) / into a new file (9.5c) | `Ctrl+S` / `Ctrl+Shift+S` | **⌘S** / **⇧⌘S** |
+| copy the selection / select all text of the page | `Ctrl+C` / `Ctrl+A` | **⌘C** / **⌘A** |
+| open the find bar | `Ctrl+F` | **⌘F** |
+| find next / previous | `F3` / `Shift+F3`; in the find bar also `Return` / `Shift+Return` | **⌘G / ⇧⌘G** (also in the find bar); `F3` / `Shift+F3`, `Return` / `Shift+Return` |
+| close the find bar, go-to bar, page field (reverts) | `Escape` | same |
+| go to page (number or label) | `Ctrl+G` | **⌥⌘G** (Preview; ⌘G is Find next); `Ctrl+G` |
+| back / forward in the jump history | `Alt+Left` / `Alt+Right` | **⌘[ / ⌘]** (Preview, Safari); `Option+←` / `Option+→` |
+| show / hide the sidebar | `F9` | **⌃⌘S** (the HIG's Show Sidebar); `F9` (fn+F9) |
+| sidebar thumbnails: previous / next / go | `Up` / `Down` / `Return` (focused thumbnails) | same |
+| highlight the selection | `h` | **⌃⌘H** (Preview); `h` |
+| delete the selected mark | `Delete`; more keys: 10.7 | `Delete` (fn+⌫); ⌫: 10.7 |
+| undo / redo a mark change | 10.7: `Ctrl+Z` / `Ctrl+Shift+Z` | 10.7: ⌘Z / ⇧⌘Z |
+| save / cancel the note popup | `Ctrl+Return` / `Escape` | **⌘Return** / `Escape`, **⌘.** |
+| finish the text-box editor | `Escape` (or a click elsewhere) | same |
+| dialogs (external link, Save / Don't Save / Cancel): press the focused button / cancel | `Return` / `Escape` | `Return` / `Escape`, **⌘.** |
+| selection bubble, Highlight pop-over, tools | mouse; `Escape` (its rules: task 10.6) | same |
+| text fields (find, go-to, page field): select all, copy, paste, cut | Tk's entry keys (`Ctrl+/`, `Ctrl+C`, `Ctrl+V`, `Ctrl+X`) | Tk's aqua entry keys (⌘A, ⌘C, ⌘V, ⌘X) |
+
+**How it is built.** The X11 keys are bound by `Viewer.setupScript` (plain keys) and
+`Menu.platformScript` (Ctrl keys); on aqua (`tk windowingsystem` = `aqua`) `platformScript`
+adds the macOS keys and sets the menus' accelerators to the macOS form (`Command-S`,
+`Command-Option-G`, `Control-Command-S`, `Command-[`, which Tk's aqua menus draw as ⌘S, ⌥⌘G,
+⌃⌘S, ⌘[); the Save tooltip, the sidebar tooltip and the status hints follow
+(`Menu.Platform.keyText`: `Ctrl+S` → ⌘S, `F9` → ⌃⌘S). The table is pure Lean in `Menu.lean`:
+`Menu.Key` (with the macOS-only `ctrl` modifier), `Cmd.key` / `Cmd.primaryKeys` (X11),
+`Cmd.macKeys` (macOS; by default the Command twins of the Ctrl keys), `Menu.Action` (find
+next / previous, not menu commands), `Menu.keyTable` (every sequence bound on the main window
+with its script, per platform). Its `#guard`s check that every command with a Ctrl key has
+Command keys on macOS, that every command with a key on X11 shows one on macOS, that the
+macOS table extends the X11 one only by Command sequences, that no sequence runs two
+different scripts on either platform (Tk picks the binding with the most modifiers, so ⌃⌘S
+and ⌘S, ⌥⌘G and ⌘G do not overlap), and that no Command binding reaches X11 (where Tk reads
+`Command` as Meta). ⌘. is bound by `::safepdf::cancelBind W SCRIPT`, which the dialogs and
+the note popup call beside their Escape binding (a no-op off aqua).
+
+Deliberate differences: on X11 `Ctrl+G` stays Go to page and find next is `F3` (as in Okular
+and Firefox); on macOS ⌘G is Find next as everywhere on the Mac, so Go to
+page moves to ⌥⌘G. Back / Forward and first / last page take the Mac's document keys (⌘[ ⌘],
+⌘↑ ⌘↓) because PageUp/Home/End need fn on Mac keyboards. ⌘H is the system's Hide, so
+Highlight is ⌃⌘H as in Preview; ⌘, (Preferences) and ⌘? (Help) are not bound — the viewer
+has neither. Not verified on a real Mac: whether Tk 9 reports the keysym `g` for ⌥⌘G (with
+Option held some layouts change the character; `Ctrl+G` still works there).
 
 **Icon (9.r3).** The application/window icon is the logo's document mark
 (`docs/branding/icon-{16,32,64,128,256,512}.png`, generated once from
@@ -1366,10 +1403,16 @@ The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: 
 binding, no `::tk::mac::Quit`, Save tooltip `Save (Ctrl+S)`, Ctrl+A selects) and with
 `SAFEPDF_VIEWER_PLATFORM=aqua` (honoured only in smoke mode; it installs the macOS mapping
 on X11, where Tk's `Command` modifier is Meta): `Command-O`/`Command-S`/`Command-Shift-S`/
-`Command-Q`/`Command-+`/`Option-Left` labels, `<Command-Key-s>`, `<Command-Key-S>` and
+`Command-Q`/`Command-+`/`Command-[` labels (`Option-Left` before 10.9), `<Command-Key-s>`, `<Command-Key-S>` and
 `<Shift-Command-Key-s>` bound to Save / Save As, `<Command-Key-q>` on `.` and in the find bar,
 `::tk::mac::Quit` = `::safepdf::emit quit`, tooltip `Save (⌘S)`, and a generated
-`<Command-Key-a>` selects all (status `… (⌘C copies)`). Both runs check the six icon images
+`<Command-Key-a>` selects all (status `… (⌘C copies)`); task 10.9 adds the labels
+`Command-Option-G` (Go to page), `Command-Up`, `Command-]`, `Control-Command-S`, `Command-L`, the
+bindings `<Command-Key-g>` / `<Command-Key-G>` (find next / previous, also in the find bar),
+`<Option-Command-Key-g>` and `<Control-Key-g>` (Go to page), `<Command-Key-bracketleft>`,
+`<Command-Key-Up>`, `<Control-Command-Key-s>`, `<Command-Key-l>`, `<Command-Key-9>` and the
+⌘. body of `::safepdf::cancelBind` — and on X11 their absence, `Ctrl+G`/`Home`/`Alt+Right`/
+`F9`/`Shift+R` labels and an empty `cancelBind`. Both runs check the six icon images
 (16–512 px) and, when `xprop`/`xwininfo` are installed, that the toplevel's wrapper carries
 `_NET_WM_ICON` starting with `512, 512`.
 

@@ -1536,7 +1536,9 @@ done
 #     with SAFEPDF_VIEWER_PLATFORM=aqua (the macOS mapping on X11, where Tk's Command is
 #     Meta): Command-S labels, Command twins of every Ctrl binding (Save, Save As both ways,
 #     Quit also in the find bar), ::tk::mac::Quit = File -> Quit, the Save tooltip as ⌘S,
-#     Command+A selects all. Both: the six embedded icons load at their sizes and, when xprop
+#     Command+A selects all; 10.9: the macOS conventions (⌘G/⇧⌘G find, ⌥⌘G go to page,
+#     ⌘[ back, ⌘↑ first page, ⌃⌘S sidebar, ⌘L rotate left, ⌘9 fit page, ⌘. in dialogs) and
+#     their labels, none of them on X11. Both: the six embedded icons load at their sizes and, when xprop
 #     is installed, the window carries _NET_WM_ICON starting with the 512 px image.
 for kp in x11 aqua; do
   if [ "$kp" = aqua ]; then
@@ -1565,7 +1567,7 @@ if "net-wm-icon" in v and not v["net-wm-icon"].startswith("_NET_WM_ICON(CARDINAL
 if kp == "aqua":
     want("accel-open", "Command-O"); want("accel-save", "Command-S")
     want("accel-saveas", "Command-Shift-S"); want("accel-quit", "Command-Q")
-    want("accel-zoomin", "Command-+"); want("accel-back", "Option-Left")
+    want("accel-zoomin", "Command-+"); want("accel-back", "Command-[")  # 10.9: was Option-Left
     want("accel-pop-copy", "Command-C"); want("accel-pop-delete", "Delete")
     want("bind <Control-Key-s>", "[::safepdf::emit save]")
     want("bind <Command-Key-s>", "[::safepdf::emit save]")
@@ -1577,6 +1579,21 @@ if kp == "aqua":
     want("mac-quit", "[::tk::mac::Quit] [::safepdf::emit quit]")
     want("save-tip", "Save (⌘S)")
     if "⌘C copies" not in v.get("status-selectall", ""): errs.append("Command+A: %r" % v.get("status-selectall"))
+    # 10.9: macOS conventions (Preview, HIG).
+    want("accel-goto", "Command-Option-G"); want("accel-first", "Command-Up")
+    want("accel-forward", "Command-]"); want("accel-outline", "Control-Command-S")
+    want("accel-rotccw", "Command-L")
+    want("bind <Command-Key-g>", "[::safepdf::emit find next $::safepdf::query]")
+    want("bind <Command-Key-G>", "[::safepdf::emit find prev $::safepdf::query]")
+    want("bind <Option-Command-Key-g>", "[::safepdf::showGoto]")
+    want("bind <Control-Key-g>", "[::safepdf::showGoto]")
+    want("bind <Command-Key-bracketleft>", "[::safepdf::emit back]")
+    want("bind <Command-Key-Up>", "[::safepdf::emit first]")
+    want("bind <Control-Command-Key-s>", "[::safepdf::emit outlineToggle]")
+    want("bind <Command-Key-l>", "[::safepdf::emit rotate ccw]")
+    want("bind <Command-Key-9>", "[::safepdf::emit zoom fitpage]")
+    want("bind-find-next", "[::safepdf::emit find next $::safepdf::query; break]")
+    want("cancelBind", "[bind $w <Command-Key-period> $script]")
 else:
     want("accel-open", "Ctrl+O"); want("accel-save", "Ctrl+S")
     want("accel-saveas", "Ctrl+Shift+S"); want("accel-quit", "Ctrl+Q")
@@ -1589,6 +1606,14 @@ else:
     want("mac-quit", "[] []")
     want("save-tip", "Save (Ctrl+S)")
     if "Ctrl+C copies" not in v.get("status-selectall", ""): errs.append("Ctrl+A: %r" % v.get("status-selectall"))
+    # 10.9: X11 keeps Ctrl+G = Go to page, Alt+Left, Home, F9, Shift+R; no Command binding.
+    want("accel-goto", "Ctrl+G"); want("accel-first", "Home"); want("accel-forward", "Alt+Right")
+    want("accel-outline", "F9"); want("accel-rotccw", "Shift+R")
+    want("bind <Control-Key-g>", "[::safepdf::showGoto]")
+    for s in ("<Command-Key-g>", "<Command-Key-G>", "<Option-Command-Key-g>", "<Command-Key-bracketleft>",
+              "<Command-Key-Up>", "<Control-Command-Key-s>", "<Command-Key-l>", "<Command-Key-9>"):
+        want("bind " + s, "[]")
+    want("bind-find-next", "[]"); want("cancelBind", "[]")
 for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
