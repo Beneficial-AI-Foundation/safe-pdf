@@ -707,7 +707,7 @@ def modeNote (s : State) : String :=
 def baseName (path : String) : String :=
   (System.FilePath.mk path).fileName.getD path
 
-/-- Window title: `safe-pdf`, or `NAME - page k/n - safe-pdf`, with `* ` in front while there
+/-- Window title: `SafePDF`, or `NAME - page k/n - SafePDF`, with `* ` in front while there
 are unsaved marks (task 9.5c); `NAME` is `titleOverride` when set (task 10.1b), else the
 file name, or the document's `/Title` when its `/DisplayDocTitle` asks for it (task 9.r8,
 `docTitle`). -/
@@ -715,9 +715,12 @@ def State.title (s : State) : String :=
   match s.path, s.doc with
   | some p, some _ =>
     let star := if s.marks.dirty then "* " else ""
-    s!"{star}{s.titleOverride.getD (s.docTitle.getD (baseName p))} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
-  | some p, none => s!"{s.titleOverride.getD (baseName p)} - safe-pdf"
-  | none, _ => "safe-pdf"
+    s!"{star}{s.titleOverride.getD (s.docTitle.getD (baseName p))} - {Links.pageText s.labels s.page s.pageCount} - {Menu.appName}"
+  | some p, none => s!"{s.titleOverride.getD (baseName p)} - {Menu.appName}"
+  | none, _ => Menu.appName
+
+#guard ({} : State).title == "SafePDF"
+#guard ({ path := some "/a/b.pdf" } : State).title == "b.pdf - SafePDF"
 
 /-- A fraction in `[0, 1]` as a decimal with six digits (for `xview`/`yview moveto`). -/
 def fmtFrac (r : Rat) : String :=
@@ -825,7 +828,7 @@ def setupScript : String := "
 namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0; variable panel outline }
 namespace eval ::safepdf::icon {}
 " ++ resourceGuardScript ++ "
-wm title . safe-pdf
+wm title . SafePDF
 wm geometry . 1200x960
 wm minsize . 480 240
 array set ::safepdf::col {
@@ -1708,7 +1711,7 @@ proc ::safepdf::askUri {uri} {
   wm title $w {External link}
   wm transient $w .
   ttk::label $w.msg -justify left -wraplength 460 -text {This link points outside the \\
-document, to the address below. safe-pdf never opens it; it can copy the address to the \\
+document, to the address below. SafePDF never opens it; it can copy the address to the \\
 clipboard.}
   text $w.t -wrap char -width 60 -height 4 -relief sunken -borderwidth 1
   $w.t insert end $uri

@@ -43,6 +43,13 @@ one `Tcl.quote`d word of `-command` and evaluated by Tk when the entry is invoke
 
 namespace SafePdf.Shell.App.Menu
 
+/-- The name the running app presents under (window title, About; task 10.5). The executable
+and the modules keep the name `viewer` / `safe-pdf`. -/
+def appName : String := "SafePDF"
+
+/-- The About box's detail line (task 10.5). -/
+def aboutDetail : String := "A PDF viewer built in Lean 4 with a formally verified core."
+
 /-- A user command of the viewer. -/
 inductive Cmd where
   /-- Open a file (dialog). -/
@@ -122,6 +129,8 @@ inductive Cmd where
   | back
   /-- Forward in the jump history. -/
   | forward
+  /-- Help → About SafePDF (task 10.5): a message box with the app name and a line about it. -/
+  | about
   deriving DecidableEq, Repr, Inhabited
 
 /-- Every command, in menubar order. -/
@@ -130,7 +139,7 @@ def Cmd.all : List Cmd :=
    .showAll, .find, .outline, .zoomIn, .zoomOut,
    .actualSize, .fitPage, .fitWidth, .rotateCw, .rotateCcw, .scrollPage, .scrollVertical,
    .spreadNone, .spreadOdd, .spreadEven, .prevPage, .nextPage, .firstPage,
-   .lastPage, .gotoPage, .back, .forward]
+   .lastPage, .gotoPage, .back, .forward, .about]
 
 /-- Menu label. -/
 def Cmd.label : Cmd → String
@@ -171,6 +180,7 @@ def Cmd.label : Cmd → String
   | .gotoPage => "Go to page..."
   | .back => "Back"
   | .forward => "Forward"
+  | .about => s!"About {appName}"
 
 /-! ## Keys per platform (task 9.r3)
 
@@ -306,7 +316,7 @@ def Cmd.key : Cmd → Option Key
   | .lastPage => some (plainKey "End" "End")
   | .back => some { alt := true, sym := "Left", shown := "Left" }
   | .forward => some { alt := true, sym := "Right", shown := "Right" }
-  | .importXfdf | .exportXfdf | .addNote | .hlTool | .showAll | .scrollPage
+  | .importXfdf | .exportXfdf | .addNote | .hlTool | .showAll | .scrollPage | .about
   | .scrollVertical | .spreadNone | .spreadOdd | .spreadEven => none
 
 /-- Every primary-modifier key that runs the command from the main window (bound on the
@@ -439,6 +449,7 @@ def Cmd.underline : Cmd → Nat
   | .gotoPage => 0
   | .back => 0
   | .forward => 0
+  | .about => 0
 
 /-- The constant Tcl script that runs the command. `next`/`prev` move a whole page (the
 menu's Previous page lands on the top of the page, as the toolbar button does). -/
@@ -480,6 +491,7 @@ def Cmd.script : Cmd → String
   | .gotoPage => "::safepdf::showGoto"
   | .back => "::safepdf::emit back"
   | .forward => "::safepdf::emit forward"
+  | .about => "::safepdf::about"
 
 /-- What the enabled rules look at. -/
 structure Ctx where
@@ -515,7 +527,7 @@ structure Ctx where
 /-- Whether the command can run in `c` (menu entries and toolbar buttons are disabled
 otherwise; the handlers check again, so a key on a disabled command does nothing). -/
 def Cmd.enabled (c : Ctx) : Cmd → Bool
-  | .openFile | .quit => true
+  | .openFile | .quit | .about => true
   | .copy | .highlight => c.hasDoc && c.hasSel
   | .deleteMark => c.hasDoc && c.hasMark
   | .undo => c.hasDoc && c.canUndo
@@ -588,7 +600,7 @@ def hlToolVar : String := "::safepdf::hlTool"
 /-- Tcl variable that mirrors "Show all" (Edit → Show all highlights, the pop-over switch). -/
 def showAllVar : String := "::safepdf::showAll"
 
-/-- The menubar: File / Edit / View / Go. -/
+/-- The menubar: File / Edit / View / Go / Help. -/
 def menubar : List Menu :=
   [ ⟨".menubar.file", "File", 0, [.cmd .openFile, .cmd .save, .cmd .saveAs, .sep, .cmd .importXfdf,
       .cmd .exportXfdf, .sep, .cmd .close, .sep, .cmd .quit]⟩,
@@ -603,7 +615,8 @@ def menubar : List Menu :=
        .cmd .spreadEven]⟩,
     ⟨".menubar.go", "Go", 0,
       [.cmd .prevPage, .cmd .nextPage, .cmd .firstPage, .cmd .lastPage, .sep, .cmd .gotoPage,
-       .sep, .cmd .back, .cmd .forward]⟩ ]
+       .sep, .cmd .back, .cmd .forward]⟩,
+    ⟨".menubar.help", "Help", 0, [.cmd .about]⟩ ]
 
 /-- Label of the highlight-colour cascades (Edit menu, context menu). -/
 def colorsLabel : String := "Highlight colour"
@@ -699,8 +712,13 @@ def platformScript (p : Platform) : String :=
     | .aqua =>
       [["bind", ".c", "<Command-MouseWheel>", "::safepdf::wheelZoom %D %x %y; break"],
        ["namespace", "eval", "::tk::mac", ""],
-       ["proc", "::tk::mac::Quit", "", Cmd.quit.script]]
+       ["proc", "::tk::mac::Quit", "", Cmd.quit.script],
+       ["proc", "tkAboutDialog", "", Cmd.about.script]]
     | .other => []
+  -- About (task 10.5): Help -> About SafePDF everywhere; on aqua also the application menu's.
+  let about := ["proc", "::safepdf::about", "",
+    "tk_messageBox -parent . -icon info -type ok -title " ++ Tcl.quote s!"About {appName}" ++
+      " -message " ++ Tcl.quote appName ++ " -detail " ++ Tcl.quote aboutDetail]
   let proc := ["proc", "::safepdf::primaryBind", "w key script",
     "foreach m " ++ Tcl.quote (Tcl.Word.renderList (p.primaryMods.map .lit)) ++
       " { bind $w <$m-Key-$key> $script }"]
@@ -709,7 +727,7 @@ def platformScript (p : Platform) : String :=
   let cancel := ["proc", "::safepdf::cancelBind", "w script", match p with
     | .aqua => "bind $w <Command-Key-period> $script"
     | .other => ""]
-  Tcl.Script.render (Tcl.Script.ofStrings (cmds ++ macs ++ quits ++ pops ++ aqua ++ [proc, cancel]))
+  Tcl.Script.render (Tcl.Script.ofStrings (cmds ++ macs ++ quits ++ pops ++ aqua ++ [about, proc, cancel]))
 
 /-- A display text naming keys the X11 way (status messages, tooltips: `Ctrl+O`) in the
 platform's form: on aqua the macOS glyphs (`⌘O`, `⇧⌘S`, `⌥`). -/
@@ -726,7 +744,8 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard (Cmd.all.map Cmd.label).eraseDups.length == Cmd.all.length
 -- Mnemonics point into the label.
 #guard Cmd.all.all fun c => c.underline < c.label.length
-#guard menubar.map (·.label) == ["File", "Edit", "View", "Go"]
+#guard appName == "SafePDF" && Cmd.about.label == "About SafePDF"
+#guard menubar.map (·.label) == ["File", "Edit", "View", "Go", "Help"]
 -- Separators count in Tk indices.
 #guard locate .quit == some (".menubar.file", 9)
 #guard locate .importXfdf == some (".menubar.file", 4) && locate .exportXfdf == some (".menubar.file", 5)
@@ -741,7 +760,7 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard locate .undo == some (".menubar.edit", 0) && locate .redo == some (".menubar.edit", 1)
 #guard Cmd.addNote.popScript != Cmd.addNote.script && Cmd.copy.popScript == Cmd.copy.script
 -- Enabled rules.
-#guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit]
+#guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit, .about]
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3 }
   !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c &&
   Cmd.lastPage.enabled c && !Cmd.copy.enabled c && Cmd.outline.enabled c &&
@@ -790,7 +809,7 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard Cmd.all.map Cmd.accel ==
   ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "", "", "Ctrl+W", "Ctrl+Q", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+C", "Ctrl+A", "H", "",
    "Delete", "", "", "Ctrl+F", "F9", "+", "-", "0", "F", "W", "R", "Shift+R", "", "", "", "",
-   "", "PageUp", "PageDown", "Home", "End", "Ctrl+G", "Alt+Left", "Alt+Right"]
+   "", "PageUp", "PageDown", "Home", "End", "Ctrl+G", "Alt+Left", "Alt+Right", ""]
 -- aqua: Command labels (Tk draws them as ⌘S, ⇧⌘S, ⌥←).
 #guard Cmd.save.accelOn .aqua == "Command-S" && Cmd.saveAs.accelOn .aqua == "Command-Shift-S" &&
   Cmd.openFile.accelOn .aqua == "Command-O" && Cmd.find.accelOn .aqua == "Command-F" &&
