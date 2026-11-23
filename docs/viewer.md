@@ -1683,8 +1683,9 @@ second render). **1s opensettings** — a `/PageMode /FullScreen` file's status 
 "full screen (Escape leaves)" until the next status update.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
-builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
-cache keys at `lakefile.lean`).
+builds `viewer` and runs the smoke test is in `docs/ci-pending.patch` (task 12.6 merged the
+earlier `ci-viewer-step.patch` into it; it also points the cache keys at `lakefile.lean` and
+runs the viewer on the pinned corpus subset).
 
 ## M9 evidence (9.6, 9.10)
 

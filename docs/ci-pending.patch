@@ -1,0 +1,265 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -30,9 +30,9 @@
+           path: |
+             ~/.elan
+             .lake
+-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
++          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+           restore-keys: |
+-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
++            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+             lean-${{ runner.os }}-
+ 
+       - name: Install elan and the pinned toolchain
+@@ -67,7 +67,186 @@
+ 
+       - name: Fuzz smoke
+         run: scripts/fuzz.sh
++
++  # Task 8.2a: the native viewer (Tcl/Tk shim, `lake build viewer`) builds and
++  # passes its headless smoke test (scripts/viewer-smoke.sh under xvfb-run).
++  # Separate job: the `build` job's default targets do not need Tk.
++  # ubuntu-24.04's tk-dev is Tk 8.6 (the shim builds against 8.6 and 9.0).
++  viewer:
++    runs-on: ubuntu-24.04
++    timeout-minutes: 45
++    env:
++      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
++      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
++    steps:
++      # actions/checkout v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
++
++      # actions/cache v4.2.0
++      - name: Cache elan toolchains and Lake build
++        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
++        with:
++          path: |
++            ~/.elan
++            .lake
++          key: viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
++          restore-keys: |
++            viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
++            viewer-${{ runner.os }}-
++
++      - name: Install elan and the pinned toolchain
++        run: |
++          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
++          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
++          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
++          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
++
++      # tk provides wish (the viewer-corpus driver); qpdf and mutool are optional checks of
++      # saved files in both scripts.
++      - name: Install Tk, Xvfb, qpdf and mutool
++        run: |
++          sudo apt-get update
++          sudo apt-get install -y --no-install-recommends tk-dev tk xvfb xauth qpdf mupdf-tools
++
++      - name: Build viewer
++        run: lake build viewer
++
++      # Task 12.6: the viewer runs on the pinned corpus subset (scripts/corpus/pinned.txt,
++      # each file pinned by SHA-256 in corpus/manifest.json). actions/cache v4.2.0.
++      - name: Cache pinned corpus files
++        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
++        with:
++          path: corpus/files
++          key: corpus-pinned-${{ hashFiles('corpus/manifest.json', 'scripts/corpus/pinned.txt') }}
++
++      - name: Fetch and verify the pinned corpus subset
++        run: python3 -I scripts/corpus/pinned.py --fetch
++
++      # With corpus/files/arxiv-1706.03762.pdf present (pinned), the M9 / wheel-flow parts
++      # also run on that real paper (viewer-smoke.sh SAFEPDF_SMOKE_PAPERS default).
++      - name: Viewer smoke test (Xvfb)
++        run: env -u DISPLAY scripts/viewer-smoke.sh --no-build
++
++      # Task 12.6 / M8 on the pinned subset: every page of every pinned file through the
++      # viewer, plus the three-paper session (scripts/viewer-corpus.sh, docs/viewer-corpus.md).
++      # Report only for now: its timing thresholds were measured on macOS, not on a shared
++      # runner under Xvfb; the JSON is uploaded for comparison.
++      - name: Viewer corpus run on the pinned subset (Xvfb)
++        continue-on-error: true
++        run: |
++          set -o pipefail
++          mapfile -t pinned < <(python3 -I scripts/corpus/pinned.py --paths)
++          env -u DISPLAY scripts/viewer-corpus.sh --no-build --timeout 600 \
++            --json viewer-corpus.json "${pinned[@]}" 2>&1 | tee viewer-corpus.log
++
++      # actions/upload-artifact v4.6.2
++      - name: Upload viewer corpus results
++        if: always()
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: viewer-corpus
++          path: |
++            viewer-corpus.json
++            viewer-corpus.log
++          if-no-files-found: warn
++          retention-days: 30
++
++  # Task 12.6 (docs/safety.md §5 item 6): the test suites run natively compiled
++  # (`lake exe tests`) and in Lean's IR interpreter (scripts/interp-suites.lean); their
++  # outputs must agree suite by suite, wall-clock figures aside. Probes the Lean -> C code
++  # generator and the C compiler on our hot paths.
++  compiled-vs-interpreted:
++    runs-on: ubuntu-latest
++    timeout-minutes: 75
++    env:
++      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
++      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
++    steps:
++      # actions/checkout v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
++
++      # actions/cache v4.2.0
++      - name: Cache elan toolchains and Lake build
++        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
++        with:
++          path: |
++            ~/.elan
++            .lake
++          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
++          restore-keys: |
++            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
++            lean-${{ runner.os }}-
++
++      - name: Install elan and the pinned toolchain
++        run: |
++          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
++          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
++          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
++          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+ 
++      - name: Build library and test executable
++        run: |
++          lake build
++          lake build tests
++
++      # Default: the 21 deterministic suites that finish interpreted in ~7 min locally
++      # (DEFAULT_SUITES in the script). `--suites all` (every suite; wall-clock-bounded
++      # suites reported, not failed) did not finish within 14 min locally: a candidate for
++      # a scheduled job once its cost on a runner is known.
++      - name: Compiled vs interpreted test suites
++        run: scripts/compiled-vs-interpreted.sh --no-build --out compiled-vs-interpreted
++
++      # actions/upload-artifact v4.6.2
++      - name: Upload both outputs and the diff
++        if: always()
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: compiled-vs-interpreted
++          path: compiled-vs-interpreted/
++          if-no-files-found: warn
++          retention-days: 30
++
++  # Task 12.6 (docs/safety.md §5 item 5): re-check every SafePdf.* declaration from the
++  # .olean files with lean4lean, a second kernel implementation written in Lean. The
++  # checker is fetched at a pinned commit, SHA-256-verified and built from a fresh directory
++  # by scripts/lean4lean-check.sh (no Lake dependency of this project). The script skips with
++  # a message when lean-toolchain moves past the pinned lean4lean's toolchain; --strict turns
++  # that skip into a failure so a toolchain bump cannot silently drop the re-check.
++  lean4lean:
++    runs-on: ubuntu-latest
++    timeout-minutes: 60
++    env:
++      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
++      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
++    steps:
++      # actions/checkout v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
++
++      # actions/cache v4.2.0
++      - name: Cache elan toolchains and Lake build
++        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
++        with:
++          path: |
++            ~/.elan
++            .lake
++          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
++          restore-keys: |
++            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
++            lean-${{ runner.os }}-
++
++      - name: Install elan and the pinned toolchain
++        run: |
++          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
++          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
++          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
++          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
++
++      - name: Build library
++        run: lake build
++
++      - name: lean4lean re-check of SafePdf.*
++        run: scripts/lean4lean-check.sh --strict --work "$RUNNER_TEMP/lean4lean" SafePdf
++
+   # Phase 1 exit M1 clause 3: object-level differential test against
+   # `qpdf --json=2` over the corpus (Tests/differential/objects.py).
+   # Fails on disagreements or comparator errors, and if fewer than
+@@ -113,9 +292,9 @@
+           path: |
+             ~/.elan
+             .lake
+-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
++          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+           restore-keys: |
+-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
++            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+             lean-${{ runner.os }}-
+ 
+       - name: Install elan and the pinned toolchain
+@@ -202,6 +381,41 @@
+             --json differential-text.json \
+             2>&1 | tee differential-text.log
+ 
++      # Task 12.6: the slow comparators (positions, pixels) run on the pinned corpus
++      # subset (scripts/corpus/pinned.txt), staged as symlinks so one glob selects it.
++      - name: Stage the pinned corpus subset
++        if: always()
++        run: python3 -I scripts/corpus/pinned.py --stage "$RUNNER_TEMP/pinned"
++
++      # Task 6.10 / M6 "all glyph positions within tolerance": per-glyph origins
++      # (SAFEPDF_TEXT_GLYPHS=1) vs MuPDF `mutool draw -F stext` char origins
++      # (Tests/differential/positions.py). Offline self-test on the fixtures, then
++      # the pinned subset. Report only: no --min-within threshold yet.
++      - name: Glyph-position comparison on the pinned subset
++        if: always()
++        run: |
++          set -o pipefail
++          python3 -I Tests/differential/positions.py --selftest
++          python3 -I Tests/differential/run.py --comparator positions \
++            --files "$RUNNER_TEMP/pinned/*.pdf" \
++            --json differential-positions.json \
++            2>&1 | tee differential-positions.log
++
++      # Task 7.4 / M7 ">= 95% of corpus pages within perceptual threshold; median
++      # page < 100 ms compiled": rendered pages (inspect --view raster, 72 dpi) vs
++      # MuPDF `mutool draw -F pnm` (Tests/differential/pixels.py; metric in
++      # docs/raster.md). Offline self-test on the fixtures, then the pinned subset.
++      # Report only: no --min-within threshold yet.
++      - name: Pixel comparison on the pinned subset
++        if: always()
++        run: |
++          set -o pipefail
++          python3 -I Tests/differential/pixels.py --selftest
++          python3 -I Tests/differential/run.py --comparator pixels \
++            --files "$RUNNER_TEMP/pinned/*.pdf" \
++            --json differential-pixels.json \
++            2>&1 | tee differential-pixels.log
++
+       # actions/upload-artifact v4.6.2
+       - name: Upload comparison results
+         if: always()
+@@ -217,5 +431,9 @@
+             differential-pages.log
+             differential-text.json
+             differential-text.log
++            differential-positions.json
++            differential-positions.log
++            differential-pixels.json
++            differential-pixels.log
+           if-no-files-found: warn
+           retention-days: 30
