@@ -454,6 +454,9 @@ structure State where
   hover : Option (Nat × Nat) := none
   /-- The status line text from before the pointer entered a link (restored on leaving). -/
   savedStatus : String := ""
+  /-- The last pointer position over the page canvas (window coordinates; `none` after it
+  left), to update the cursor when the tool changes (task 10.8). -/
+  pointer : Option (Int × Int) := none
   /-- Back/forward history of jumps. -/
   history : Links.History := {}
   /-- Enabled states last applied to the menubar entries and toolbar buttons
@@ -883,6 +886,12 @@ proc ::safepdf::icon::minus {c} { $c create line 10 16 22 16 -width 1.8 -capstyl
 proc ::safepdf::icon::plus {c} {
   $c create line 10 16 22 16 -width 1.8 -capstyle round -tags inkf
   $c create line 16 10 16 22 -width 1.8 -capstyle round -tags inkf
+}
+proc ::safepdf::icon::select {c} {
+  $c create line 12.5 8.5 14.5 8.5 16 10 17.5 8.5 19.5 8.5 -width 1.5 -capstyle round -joinstyle round -tags inkf
+  $c create line 12.5 23.5 14.5 23.5 16 22 17.5 23.5 19.5 23.5 -width 1.5 -capstyle round -joinstyle round -tags inkf
+  $c create line 16 10 16 22 -width 1.5 -tags inkf
+  $c create line 13.5 16 18.5 16 -width 1.2 -capstyle round -tags inkf
 }
 proc ::safepdf::icon::highlight {c} {
   $c create polygon 19 8 24 13 15 22 10 17 -fill {} -outline black -width 1.5 -joinstyle round -tags inko
@@ -4266,6 +4275,8 @@ def closeFile (st : IO.Ref State) : IO Unit := do
   discard <| run ["destroy", ".note"]
   discard <| run ["::safepdf::popHide"]
   discard <| run ["::safepdf::btnToggled", ".bar.highlight", "0"]
+  discard <| run ["::safepdf::btnToggled", ".bar.select",
+    if Toolbar.Mode.of (← st.get).ui == .select then "1" else "0"]
   discard <| run ["set", Menu.hlToolVar, "0"]
   fillOutline st
   showOutline st false
@@ -4367,6 +4378,8 @@ def buildToolbar : IO Unit := do
       | .pageField => discard <| run ["::safepdf::pageField"]
       | .zoomBox => discard <| run ["::safepdf::zoomBox"]
       | .viewBox => discard <| run ["::safepdf::viewBox"]
+  -- Select text is the default tool (task 10.8, `Toolbar.Mode.of_default`).
+  discard <| run ["::safepdf::btnToggled", ".bar.select", "1"]
   -- The sidebar's view buttons (task 9.r9, `Sidebar.panels`; packed per document by
   -- `syncPanelButtons`).
   for i in Sidebar.panels do
@@ -4535,14 +4548,50 @@ def linkUnder (st : IO.Ref State) (wx wy : Int) : IO (Option ((Nat × Nat) × Li
   let some (pg, p) ← pagePointAt st wx wy | return none
   return (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
 
-/-- Pointer motion: over a link the cursor becomes a hand and the status line shows the
-target (the full address of a URI); leaving it restores the status line. -/
+/-- What lies under window position `pos` of the page canvas for the cursor (task 10.8,
+`Toolbar.hitOf`: a mark, else a link, else a glyph box of the page text) and the link there.
+The text index is consulted only when the cursor depends on it (Select text and Highlight,
+nothing above the text); it is the per-page cached index of the selection. -/
+def pointerHit (st : IO.Ref State) (pos : Option (Int × Int)) :
+    IO (Toolbar.Hit × Option ((Nat × Nat) × Links.Link)) := do
+  let some (x, y) := pos | return (.empty, none)
+  let some (pg, p) ← pagePointAt st x y | return (.empty, none)
+  let s ← st.get
+  let l := (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
+  let store := if s.ui.showAll then s.marks
+    else { s.marks with marks := s.marks.marks.filter (!·.isHighlight) }
+  let mark := match slotOf s pg with
+    | some sl => (store.hitAt sl.vp.box pg p).isSome
+    | none => false
+  let mode := Toolbar.Mode.of s.ui
+  let text ← if mark || l.isSome || mode == .draw || mode == .text then pure false else
+    match ← pageIndex st pg with
+    | .ok ix => pure (ix.cells.any fun c => Links.Box.contains c.box p)
+    | .error _ => pure false
+  return (Toolbar.hitOf mark l.isSome text, l)
+
+/-- Sets the page canvas cursor to `c`, calling Tk only when it changes. -/
+def setCursor (c : String) : IO Unit := do
+  if (← run [".c", "cget", "-cursor"]) != c then
+    discard <| run [".c", "configure", "-cursor", c]
+
+/-- Brings the page canvas cursor in step with the active tool at the last pointer position
+(task 10.8; after a tool change without pointer motion). -/
+def refreshCursor (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let (h, _) ← pointerHit st s.pointer
+  setCursor (Toolbar.cursorFor (Toolbar.Mode.of s.ui) h)
+
+/-- Pointer motion: the cursor telegraphs what a press does there (task 10.8,
+`Toolbar.cursorFor`: I-beam over text, hand over links and marks, crosshair in Draw); over a
+link the status line shows the target (the full address of a URI); leaving it restores the
+status line. -/
 def hover (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let s ← st.get
   if s.pressPt.isSome then return
-  let l ← match pos with
-    | some (x, y) => linkUnder st x y
-    | none => pure none
+  st.modify ({ · with pointer := pos })
+  let (h, l) ← pointerHit st pos
+  setCursor (Toolbar.cursorFor (Toolbar.Mode.of s.ui) h)
   let idx := l.map (·.1)
   if idx == s.hover then return
   if s.hover.isNone then
@@ -4550,12 +4599,8 @@ def hover (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
     st.modify ({ · with savedStatus := cur })
   st.modify ({ · with hover := idx })
   match l with
-  | some (_, k) =>
-    discard <| run [".c", "configure", "-cursor", "hand2"]
-    setStatus (Links.describe s.labels s.pageCount k.action)
-  | none =>
-    discard <| run [".c", "configure", "-cursor", ""]
-    setStatus (← st.get).savedStatus
+  | some (_, k) => setStatus (Links.describe s.labels s.pageCount k.action)
+  | none => setStatus (← st.get).savedStatus
 
 /-- Handles `outline ID`: activates the outline entry of outline row `oK`. -/
 def outlineClick (st : IO.Ref State) (id : String) : IO Unit := do
@@ -4715,6 +4760,7 @@ def syncTool (st : IO.Ref State) : IO Unit := do
   let b (v : Bool) : String := if v then "1" else "0"
   discard <| run ["set", Menu.hlToolVar, b s.ui.tool]
   discard <| run ["set", Menu.showAllVar, b s.ui.showAll]
+  discard <| run ["::safepdf::btnToggled", ".bar.select", b (Toolbar.pressed s.ui .select)]
   discard <| run ["::safepdf::btnToggled", ".bar.highlight", b s.ui.tool]
   if s.ui.popover && s.doc.isSome then
     drawPopover s
@@ -4725,6 +4771,7 @@ def syncTool (st : IO.Ref State) : IO Unit := do
     discard <| run ["::safepdf::popShow", toString (Bubble.Popover.left bx bw ww).floor]
   else discard <| run ["::safepdf::popHide"]
   syncEditor st
+  refreshCursor st
 
 /-- Sets the current highlight colour (and the colour menus' radio variable; the pop-over's
 ring follows). -/
@@ -5344,10 +5391,22 @@ def editorAt (s : State) (pg : Nat) (p : Pt) : Option Marks.Mark := do
   let id ← s.marks.hitAt sl.vp.box pg p
   (s.marks.find? id).filter (·.isEditor)
 
-/-- Handles `tool NAME` (an annotation tool, Print or Save): Highlight (task 9.4), Add comment
+/-- The Select text button (task 10.8, `Toolbar.selectTool`): turns Highlight, Add text and
+Draw off with their pop-overs (an open text box is committed, a drawing session ends); Select
+text is then the active tool. Pressing it while it is active changes nothing. -/
+def selectToolOn (st : IO.Ref State) : IO Unit := do
+  if (← st.get).doc.isNone then return
+  discard <| commitFt st
+  st.modify fun s => { s with ui := Toolbar.selectTool s.ui, inkSession := none }
+  syncTool st
+  setStatus "Select text: drag over the text to select it; click a link to follow it, a mark \
+    to select it"
+
+/-- Handles `tool NAME` (an annotation tool, Print or Save): Select text (task 10.8), Highlight (task 9.4), Add comment
 (a note, `addNote`), Add text and Draw (task 9.9); Add image and Print are not available yet. -/
 def tool (st : IO.Ref State) (name : String) : IO Unit := do
   match Toolbar.toolOf name with
+  | some .select => selectToolOn st
   | some .highlight => toolHighlight st
   | some .comment => addNote st none
   | some .text => toggleEditor st .text
@@ -8634,6 +8693,80 @@ def smokeDismiss (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "dismiss.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the select-text tool and the cursor (task 10.8,
+`SAFEPDF_VIEWER_SMOKE_MODE=tools`) on a page with the text `Hello safe world` and a link
+annotation over blank paper: Select text is active and pressed at start; the canvas cursor
+over the word `safe`, the link and blank paper (`Toolbar.cursorFor`); Draw takes over (Select
+text unpressed, crosshair at once and over the text) and its button again gives Select text
+back; Highlight takes over, Escape keeps it (task 10.6), the Select text button ends it; Add
+text shows the I-beam over the link. Clicks are spaced 2.5 s apart in event time (Aqua counts
+closer ones as double clicks). -/
+def smokeTools (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let upd : IO Unit := discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let some (wa, _) := (ix.hits (Select.normQuery "safe"))[0]? | throw (IO.userError "no safe")
+  let some onText ← cellWindowPos st ix (wa + 1) | throw (IO.userError "page not shown")
+  let some l := (← linksOf st 0)[0]? | throw (IO.userError "no link")
+  let some onLink ← boxWindowPos st l.box | throw (IO.userError "link not shown")
+  let some blank ← boxWindowPos st ⟨40, 760, 40, 760⟩ | throw (IO.userError "page not shown")
+  let t ← IO.mkRef ((← IO.monoMsNow) % 1000000000)
+  let btn (w : String) : IO Unit := do
+    t.modify (· + 2500)
+    let tm := toString (← t.get)
+    sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16", "-time", tm]
+    sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16", "-time", tm]
+    upd
+  let moveTo (pos : String × String) : IO Unit := do
+    sendEvent ".c" "<Motion>" ["-x", pos.1, "-y", pos.2]
+    upd
+  let cursor : IO String := return s!"[{← run [".c", "cget", "-cursor"]}]"
+  let modeName : Toolbar.Mode → String
+    | .select => "select" | .highlight => "highlight" | .text => "text" | .draw => "draw"
+  let tog (w : String) : IO String := run ["set", s!"::safepdf::btn(tog,{w})"]
+  let tools : IO String := do
+    return s!"{modeName (Toolbar.Mode.of (← st.get).ui)} select={← tog ".bar.select"} \
+      highlight={← tog ".bar.highlight"} text={← tog ".bar.text"} draw={← tog ".bar.draw"}"
+  out := out.push s!"tool0: {← tools}"
+  out := out.push s!"select-state: {← run ["::safepdf::btnState", ".bar.select"]}"
+  moveTo onText
+  out := out.push s!"cursor-text: {← cursor}"
+  moveTo onLink
+  out := out.push s!"cursor-link: {← cursor}"
+  moveTo blank
+  out := out.push s!"cursor-empty: {← cursor}"
+  -- Draw: crosshair at once (no motion) and over the text; its button again gives Select back.
+  btn ".bar.draw"
+  out := out.push s!"draw-on: {← tools}"
+  out := out.push s!"cursor-draw-still: {← cursor}"
+  moveTo onText
+  out := out.push s!"cursor-draw-text: {← cursor}"
+  btn ".bar.draw"
+  out := out.push s!"draw-off: {← tools}"
+  out := out.push s!"cursor-after-draw: {← cursor}"
+  -- Highlight: Escape keeps the tool, Select text ends it.
+  btn ".bar.highlight"
+  out := out.push s!"hl-on: {← tools} popover={(← st.get).ui.popover}"
+  sendKey "Escape"
+  upd
+  out := out.push s!"hl-esc: {← tools} popover={(← st.get).ui.popover}"
+  btn ".bar.select"
+  out := out.push s!"select-btn: {← tools} popover={(← st.get).ui.popover}"
+  btn ".bar.select"
+  out := out.push s!"select-again: {← tools}"
+  -- Add text: the I-beam also over the link (a click places a text box there).
+  btn ".bar.text"
+  moveTo onLink
+  out := out.push s!"text-on: {← tools}"
+  out := out.push s!"cursor-text-link: {← cursor}"
+  btn ".bar.select"
+  out := out.push s!"cursor-select-link: {← cursor}"
+  out := out.push "done"
+  IO.FS.writeFile (file "tools.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Waits until the thumbnails panel has rendered every thumbnail it wants (task 9.r9 smoke
 tests): processes Tk events, starts renders (`thumbView`), waits for them (`thumbPoll`). -/
 def thumbSettle (st : IO.Ref State) : IO Unit := do
@@ -9472,6 +9605,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeDismiss st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "dismiss.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "tools" then
+    try smokeTools st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "tools.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "savedlg" then

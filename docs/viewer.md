@@ -211,7 +211,8 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     300 %, 400 % (`Toolbar.ZoomChoice.presets`, radio entries). A zoom reached with − / +, the
     keys or Ctrl+wheel that is not in the list (33 %, 67 %, 600 %, …) shows as its percentage
     with no entry checked (PDF.js's custom option).
-  * *right*: Highlight (works since 9.4: highlights the selection in the current colour;
+  * *right*: **Select text** (10.8, an I-beam icon; the default tool, see *Select-text tool
+    and cursors* below), Highlight (works since 9.4: highlights the selection in the current colour;
     without a selection it turns the Highlight tool on and opens its pop-over, or off (9.8);
     see *Selection bubble and Highlight pop-over*), Add comment (9.9: Add note… on the
     selection, else at the window centre), Add text and Draw (9.9, see *Add text and Draw*),
@@ -225,6 +226,37 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
     16 px icons in `#3b3b44`, dimmed when disabled (PDF.js: opacity 0.5); a tooltip appears
     after 600 ms; separators are 1 px × 20 px.
+* **Select-text tool and cursors** (10.8, Plan.md §6 Phase 10; `Toolbar.Mode`,
+  `Toolbar.cursorFor`). Exactly one of Select text, Highlight, Add text, Draw is the active
+  tool, and its button shows toggled (`Toolbar.pressed_unique`). The active tool is read off
+  the tool state (`Bubble.Ui`), never stored apart: Add text / Draw when that mode is on, else
+  Highlight when its tool is on, else Select text — the default at start-up and after a
+  document closes (`Mode.of_default`). PDF.js has no Select button: its editor-mode buttons
+  toggle and "no editor" is the default; here that state has a button. Picking another tool
+  unpresses Select text; turning that tool off with its own button gives it back
+  (`Mode.of_selectEditor_twice`, `Mode.of_toolClick_twice`); the Select text button turns the
+  others off with their pop-overs (`Toolbar.selectTool`, `Mode.of_selectTool`; an open text
+  box is committed). Escape still only closes a pop-over and keeps the tool (10.6). The page
+  canvas cursor telegraphs what a press does there, from what lies under the pointer
+  (`Toolbar.hitOf`, in the click's order: a mark, else a link, else a glyph box of the page
+  text `Select.Cell.box`, else nothing):
+
+  | tool | text | link | mark | elsewhere |
+  |---|---|---|---|---|
+  | Select text, Highlight | `xterm` (I-beam) | `hand2` | `hand2` | default arrow |
+  | Add text | `xterm` | `xterm` | `hand2` | `xterm` |
+  | Draw | `crosshair` | `crosshair` | `crosshair` | `crosshair` |
+
+  Tk's portable names, which Tk Aqua maps to the native I-beam, pointing hand and crosshair.
+  Choices: a mark shows the hand because a click selects it (as a link click follows the link;
+  a drag from a highlight still selects the text under it); Add text shows the I-beam
+  everywhere, as PDF.js (`--editorFreeText-editing-cursor: text`), since a click places a
+  text box even over a link; Draw shows a crosshair where PDF.js shows a pen. PDF.js's free
+  highlight (drawing a highlight over non-text in Highlight mode) is not implemented, so
+  Highlight keeps the arrow off the text. The cursor is updated on `<Motion>` (`Viewer.hover`:
+  `Links.linkAt` and `Marks.Store.hitAt`, and the per-page cached text index only for Select
+  text / Highlight over nothing else) and after every tool change at the last pointer position
+  (`Viewer.refreshCursor`); Tk is called only when the cursor changes.
 * **Opening and closing the sidebar** (9.r4): the canvas changes width with it. Window
   resizes are reported to Lean 100 ms after the last `<Configure>` (a window drag sends many),
   so before 9.r4 the canvas showed the old layout in the new width for that time — the page,
