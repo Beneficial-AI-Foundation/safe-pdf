@@ -973,9 +973,23 @@ page copies exactly the page text of the text view.
   pointer, in reading order, are selected (`Select.dragRange`). A click without moving clears
   the selection. **Double-click** selects a word (letters, digits, non-ASCII characters
   without a separator in between, `Select.wordAt`). **Ctrl+A** selects the page.
-* The selection is drawn as canvas rectangles over the page image (one per line run,
-  `Select.rangeBoxes`, mapped back with `Geom.toScreen`), stippled 50 % blue; the page is not
-  re-rendered. On macOS (Aqua has no stipples) highlights are outlines instead.
+* The selection is drawn over the page image (one box per line run, `Select.rangeBoxes`,
+  mapped back with `Geom.toScreen`); the page is not re-rendered. **Highlight rendering**
+  (task 10.10): on X11 the selection and the search hits are canvas rectangles stippled 50 %
+  (`-stipple gray50`; blue `#3874f2`, hits yellow, the current hit orange). Tk Aqua has no
+  stipples (they used to be outlines there), so on macOS each box is a canvas **image item
+  showing a translucent photo** (`::safepdf::tint`): the colour at alpha 35 % for the
+  selection (`#3874f2`, over white ≈ `#b9cefa`) and 50 % for hits (`#ffff00`, current
+  `#ffa500`), `Viewer.Tint`. Tk composites the photo's alpha over the page image, so glyph ink
+  stays visible and paper is tinted. One photo per colour, alpha and pixel size is shared by
+  every box of that size (smoke case 10.10 allows at most 12 photos for 561 hits of one word); after each overlay
+  redraw `::safepdf::tintGc` deletes the photos no item shows (`image inuse`). A single
+  page-sized overlay image composited in Lean was rejected: it costs O(page pixels) per redraw
+  (≈ 150 ns/px for Lean compositing, ~130 ms on a 612 × 792 pt page at 133 %, on every drag
+  motion), the per-box photos O(boxes). X11 keeps the stipples (unverified there: Tk's X11 alpha
+  blending reads the window back per redraw); switching it is the `State.stipple` flag. User
+  highlight marks are not affected (multiplied into the page image, below); unsaved drawings
+  with an opacity below 88 % are stippled on X11 and opaque on Aqua.
 * **Ctrl+C** (or the right-button menu: Copy, Select all, Find…) copies the selected text
   (`Select.rangeText`) with `clipboard clear; clipboard append -- TEXT`, the text one word
   quoted by `Tcl.quote`. The selection is per page and cleared when the page changes.

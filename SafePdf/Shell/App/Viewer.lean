@@ -91,8 +91,9 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   as a `Select.PageIndex` (glyph cells in reading order with page-space boxes, plus the
   normalised search text). A mouse press/drag/release maps the window positions to page space
   with `Geom.toPage` and selects the glyphs between the nearest glyphs in reading order;
-  double-click selects a word; Ctrl+A the page. The selection is drawn as stippled canvas
-  rectangles over the page image (tag `sel`; the image is not re-rendered). Ctrl+C or the
+  double-click selects a word; Ctrl+A the page. The selection is drawn over the page image
+  (tag `sel`; the image is not re-rendered) as stippled canvas rectangles on X11 and as
+  translucent photo image items on Aqua (task 10.10, `Tint`, `::safepdf::tint`). Ctrl+C or the
   context menu (right button) copies `Select.rangeText` to the clipboard (`clipboard append`,
   the text passed as one quoted word).
 * **Search** (Ctrl+F opens the find bar; Enter/F3 next, Shift+Enter/Shift+F3 previous, Escape
@@ -405,7 +406,8 @@ structure State where
   query : Array Char := #[]
   /-- The current search hit: page and index among that page's hits. -/
   hit : Option (Nat × Nat) := none
-  /-- Highlights are stippled fills (`false` on Aqua, which has no stipples: outlines). -/
+  /-- Selection and search hits are stippled fills (X11); `false` on Aqua, which has no
+  stipples: translucent photo fills (`::safepdf::tint`, task 10.10). -/
   stipple : Bool := true
   /-- Smoke-test output directory (`SAFEPDF_VIEWER_SMOKE`). -/
   smokeDir : Option String := none
@@ -842,6 +844,25 @@ proc ::safepdf::rrect {c x0 y0 x1 y1 r args} {
   set a [expr {$x0 + $r}]; set b [expr {$x1 - $r}]; set u [expr {$y0 + $r}]; set v [expr {$y1 - $r}]
   $c create polygon $a $y0 $a $y0 $b $y0 $b $y0 $x1 $y0 $x1 $u $x1 $u $x1 $v $x1 $v $x1 $y1 \\
     $b $y1 $b $y1 $a $y1 $a $y1 $x0 $y1 $x0 $v $x0 $v $x0 $u $x0 $u $x0 $y0 -smooth 1 {*}$args
+}
+# Translucent highlight fills (task 10.10; Tk Aqua has no stipples): a canvas image item showing
+# a photo filled with colour rgb (6 hex digits) at alpha a (2 hex digits), one photo per colour,
+# alpha and size, shared by every item of that size (search hits of one word, full lines).
+proc ::safepdf::tint {c x0 y0 x1 y1 rgb a tags} {
+  set w [expr {$x1 - $x0}]; set h [expr {$y1 - $y0}]
+  if {$w < 1 || $h < 1} return
+  set img ::safepdf::tint_${rgb}_${a}_${w}_$h
+  if {[catch {image type $img}]} {
+    image create photo $img -width $w -height $h
+    $img put [list [list #$rgb$a]] -to 0 0 $w $h
+  }
+  $c create image $x0 $y0 -anchor nw -image $img -tags $tags
+}
+# Deletes the tint photos no canvas item shows any more (after a redraw of the overlays).
+proc ::safepdf::tintGc {} {
+  foreach img [image names] {
+    if {[string match ::safepdf::tint_* $img] && ![image inuse $img]} { image delete $img }
+  }
 }
 # Icons (16 px, centred on a 32 px button; PDF.js's icons re-drawn, not copied). Items tagged
 # inkf are coloured through -fill, inko through -outline.
@@ -2283,13 +2304,52 @@ def drawBubble (st : IO.Ref State) : IO Unit := do
       discard <| run ["::safepdf::swatch", ".c", num x, num y, num Bubble.swatch, c.hex,
         if cur then "1" else "0", s!"bub picker c:{c.name}"]
 
+/-- How the overlays of one kind are filled (task 10.10): the colour as six hex digits, the
+alpha (0–255) of the translucent fill on Aqua and the X11 stipple fill's colour. -/
+structure Tint where
+  /-- Colour, six hex digits (no `#`). -/
+  rgb : String
+  /-- Opacity of the Aqua fill, 0–255. -/
+  alpha : Nat
+  deriving Repr, BEq
+
+/-- The selection: macOS's accent blue at 35 % (over white ≈ `#b9cefa`). -/
+def Tint.sel : Tint := ⟨"3874f2", 90⟩
+/-- A search hit: yellow at 50 %. -/
+def Tint.hit : Tint := ⟨"ffff00", 128⟩
+/-- The current search hit: orange at 50 %. -/
+def Tint.cur : Tint := ⟨"ffa500", 128⟩
+
+/-- Two lower-case hex digits of `n mod 256`. -/
+def hex2 (n : Nat) : String :=
+  let d (k : Nat) : Char := "0123456789abcdef".toList.getD k '0'
+  String.ofList [d (n % 256 / 16), d (n % 16)]
+
+/-- The alpha suffix `::safepdf::tint` takes (two hex digits; Tk's `#RRGGBBAA`). -/
+def Tint.alphaHex (t : Tint) : String := hex2 (min 255 t.alpha)
+
+/-- The `-fill` colour of the X11 stipple fill. -/
+def Tint.fill (t : Tint) : String := "#" ++ t.rgb
+
+/-- Composite of a fill channel `f` at alpha `a` over a page channel `p` (what the canvas
+shows; the smoke test's expectation). -/
+def Tint.over (a f p : Nat) : Nat := (f * a + p * (255 - a) + 127) / 255
+
+#guard Tint.sel.alphaHex == "5a" && Tint.hit.alphaHex == "80" && hex2 0 == "00" && hex2 255 == "ff"
+#guard Tint.sel.fill == "#3874f2"
+-- Over white the selection is a light blue; over black ink the ink stays dark.
+#guard (Tint.over 90 0x38 255, Tint.over 90 0x74 255, Tint.over 90 0xf2 255) == (185, 206, 250)
+#guard Tint.over 90 0xf2 0 < 90
+
 /-- The slots that get overlays: the pages with a photo and the current page (task 9.3). -/
 def overlaySlots (s : State) : List Slot :=
   s.slots.toList.filter fun sl => sl.place.page == s.page || s.hasPhoto sl.place.page
 
 /-- Redraws the overlays of the pages on screen (`overlaySlots`): the marks' canvas items
 (`drawMarks`), all search hits (tag `hit`, the current one in orange), the selection (tag
-`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. -/
+`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. Hits and the
+selection are `Tint` fills: stippled rectangles on X11, translucent photos on Aqua (task 10.10;
+photos no item shows any more are deleted, `::safepdf::tintGc`). -/
 def drawOverlay (st : IO.Ref State) : IO Unit := do
   discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
   st.modify ({ · with bubble := none, pickerAt := none })
@@ -2297,12 +2357,14 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
   if s.shown.isNone then return
   let slots := overlaySlots s
   for sl in slots do drawMarks s sl
-  let rect (sl : Slot) (b : Box) (color tag : String) : IO Unit := do
+  -- X11: a stippled rectangle; Aqua (no stipples): a translucent photo (task 10.10).
+  let rect (sl : Slot) (b : Box) (t : Tint) (tag : String) : IO Unit := do
     let (x0, y0, x1, y1) := sl.rect b
-    let style := if s.stipple then ["-fill", color, "-stipple", "gray50", "-outline", ""]
-      else ["-fill", "", "-outline", color, "-width", "2"]
-    discard <| run ([".c", "create", "rectangle", toString x0.floor, toString y0.floor,
-      toString x1.ceil, toString y1.ceil] ++ style ++ ["-tags", tag])
+    let c := [toString x0.floor, toString y0.floor, toString x1.ceil, toString y1.ceil]
+    if s.stipple then
+      discard <| run ([".c", "create", "rectangle"] ++ c ++
+        ["-fill", t.fill, "-stipple", "gray50", "-outline", "", "-tags", tag])
+    else discard <| run (["::safepdf::tint", ".c"] ++ c ++ [t.rgb, t.alphaHex, tag])
   if !s.query.isEmpty then
     for sl in slots do
       let pg := sl.place.page
@@ -2310,12 +2372,13 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
         let hits := ix.hits s.query
         for i in [0:hits.size] do
           if let some (a, b) := hits[i]? then
-            let color := if s.hit == some (pg, i) then "orange" else "yellow"
-            for b in Select.rangeBoxes ix.cells a b do rect sl b color "hit"
+            let t := if s.hit == some (pg, i) then Tint.cur else Tint.hit
+            for b in Select.rangeBoxes ix.cells a b do rect sl b t "hit"
   if let some (p, a, b) := s.sel then
     if let some sl := slotOf s p then
       if let .ok ix ← pageIndex st p then
-        for b in Select.rangeBoxes ix.cells a b do rect sl b "#3874f2" "sel"
+        for b in Select.rangeBoxes ix.cells a b do rect sl b Tint.sel "sel"
+  if !s.stipple then discard <| run ["::safepdf::tintGc"]
   -- The free-text editor follows zoom, rotation and scrolling (task 9.9).
   if let some fe := s.ftEdit then
     if let some sl := slotOf s fe.page then
@@ -2984,6 +3047,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
     showViewChoice s false
     discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
+    discard <| run ["::safepdf::tintGc"]
     st.modify ({ · with bubble := none, pickerAt := none, slots := #[], layoutKey := none,
                         shown := none })
     clearPages st
@@ -5568,7 +5632,7 @@ def smokeText (st : IO.Ref State) (dir : String) : IO Unit := do
           -- The word's highlight in image pixels, and the page image, for an ink check.
           let s' ← st.get
           IO.FS.writeFile (file "word-rect.txt")
-            s!"{← run [".c", "coords", "sel"]}\n{s'.imgX} {s'.imgY}\n"
+            s!"{← run [".c", "bbox", "sel"]}\n{s'.imgX} {s'.imgY}\n"
           try discard <| run [photoOf 0, "write", file "text-page-1.ppm", "-format", "ppm"]
           catch _ => pure ()
       if let some (_, b) := (ix.hits (Select.normQuery "world"))[0]? then
@@ -9101,6 +9165,120 @@ def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "undo.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- The tint photos that exist (`::safepdf::tint`, task 10.10). -/
+def tintImages : IO Nat := do
+  let l ← run ["lsearch", "-all", "-inline", ← run ["image", "names"], "::safepdf::tint_*"]
+  return (l.splitOn " ").filter (!·.isEmpty) |>.length
+
+/-- Milliseconds (two decimals) of `k` runs of `act`, averaged. -/
+def timeMs (k : Nat) (act : IO Unit) : IO String := do
+  let t0 ← IO.monoNanosNow
+  for _ in [0:k] do act
+  let t1 ← IO.monoNanosNow
+  let us := (t1 - t0) / (1000 * max 1 k)
+  let frac := (us % 1000) / 10
+  return s!"{us / 1000}.{if frac < 10 then "0" else ""}{frac}"
+
+/-- Smoke steps of the highlight fills (`SAFEPDF_VIEWER_SMOKE_MODE=tint`, task 10.10) on a page
+whose first line is `Hello safe world` over a black marker under `safe` (as 1d) and whose
+other lines repeat `safe` (hundreds of search hits; non-embedded Helvetica unpainted). Writes
+`tint.txt`: the item kind of the selection (Ctrl+A) and of the hits (search `safe`), item and
+tint photo counts, and probes — at a canvas point, the items there bottom to top as
+`tag=kind`, image items with their pixel `(R G B A)` — over the marker (ink) and over white
+paper, for the selection, the current hit and another hit; drawing times of the overlays
+(average of 5 `drawOverlay` + `update idletasks`) as tint photos and as stippled rectangles,
+and the cost of filling one page-sized photo (option (b), a full overlay image, for
+comparison). Background mode cannot capture the composited window, so the smoke test
+composites the probed page and fill pixels itself. -/
+def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  settle st
+  discard <| run ["update"]
+  out := out.push s!"aqua: {!(← st.get).stipple}"
+  let .ok ix ← pageIndex st (← st.get).page | do
+    IO.FS.writeFile (file "tint.txt") "error: no text index\n"
+    discard <| run ["destroy", "."]
+  let hits := ix.hits (Select.normQuery "safe")
+  let boxOf (k : Nat) : Option Box := do
+    let (a, b) ← hits[k]?
+    (Select.rangeBoxes ix.cells a b).head?
+  let (some safe, some other, some hello) := (boxOf 0, boxOf 1, (ix.cells[0]?).map (·.box)) | do
+    IO.FS.writeFile (file "tint.txt") "error: words not found\n"
+    discard <| run ["destroy", "."]
+  let centre (b : Box) : Pt := ⟨(b.llx + b.urx) / 2, (b.lly + b.ury) / 2⟩
+  -- Inside the black marker (y 700–712.6) under `safe`.
+  let inkPt : Pt := ⟨(safe.llx + safe.urx) / 2, 706⟩
+  let probe (p : Pt) : IO String := do
+    let s ← st.get
+    let some bx := shownBox s | return "<no page>"
+    let (cx, cy, _, _) := canvasRect s bx ⟨p.x, p.y, p.x, p.y⟩
+    let (x, y) := (cx.floor, cy.floor)
+    let ids := ((← run [".c", "find", "overlapping", toString x, toString y, toString x,
+      toString y]).splitOn " ").filter (!·.isEmpty)
+    let mut parts : Array String := #[]
+    for id in ids do
+      let tag := ((← run [".c", "gettags", id]).splitOn " ").headD ""
+      let kind ← run [".c", "type", id]
+      if kind == "image" then
+        let img ← run [".c", "itemcget", id, "-image"]
+        let px ← match ((← run [".c", "coords", id]).splitOn " ").filterMap View.parseDecimal with
+          | [ix0, iy0] =>
+            try run [img, "get", toString (x - ix0.floor), toString (y - iy0.floor), "-withalpha"]
+            catch _ => pure "outside"
+          | _ => pure "?"
+        parts := parts.push s!"{tag}={kind}({px})"
+      else parts := parts.push s!"{tag}={kind}"
+    return ";".intercalate parts.toList
+  let kindOf (tag : String) : IO String := do
+    match ((← run [".c", "find", "withtag", tag]).splitOn " ").head? with
+    | some id => if id.isEmpty then pure "none" else run [".c", "type", id]
+    | none => pure "none"
+  let redraw : IO Unit := do drawOverlay st; discard <| run ["update", "idletasks"]
+  -- 1. Select the page.
+  sendEvent ".c" "<Control-Key-a>"
+  discard <| run ["update"]
+  out := out.push s!"sel: kind={← kindOf "sel"} items={← tagCount "sel"} photos={← tintImages}"
+  out := out.push s!"sel-ink: {← probe inkPt}"
+  out := out.push s!"sel-paper: {← probe (centre hello)}"
+  out := out.push s!"ms-sel: {← timeMs 5 redraw}"
+  -- 2. Search `safe`: the first hit (current, orange) lies over the marker.
+  st.modify ({ · with sel := none })
+  sendEvent ".c" "<Control-Key-f>"
+  discard <| run ["update", "idletasks"]
+  discard <| run ["set", "::safepdf::query", "safe"]
+  sendEvent ".find.e" "<Key-Return>"
+  discard <| run ["update"]
+  out := out.push s!"hit: kind={← kindOf "hit"} items={← tagCount "hit"} photos={← tintImages} status={← run [".status", "cget", "-text"]}"
+  out := out.push s!"hit-ink: {← probe inkPt}"
+  out := out.push s!"hit-paper: {← probe (centre other)}"
+  out := out.push s!"ms-hits: {← timeMs 5 redraw}"
+  -- 3. Everything at once, then the same as stippled rectangles (the X11 drawing).
+  sendEvent ".c" "<Control-Key-a>"
+  discard <| run ["update"]
+  out := out.push s!"ms-all: {← timeMs 5 redraw} items={(← tagCount "sel") + (← tagCount "hit")}"
+  let stip := (← st.get).stipple
+  st.modify ({ · with stipple := !stip })
+  out := out.push s!"ms-all-other: {← timeMs 5 redraw} stipple={!stip}"
+  st.modify ({ · with stipple := stip })
+  redraw
+  -- 4. One page-sized overlay photo filled with a translucent colour (option (b)'s floor).
+  let pg := photoOf (← st.get).page
+  let (w, h) := (← run ["image", "width", pg], ← run ["image", "height", pg])
+  let fill : IO Unit := do
+    discard <| run ["image", "create", "photo", "::safepdf::tintProbe", "-width", w, "-height", h]
+    discard <| run ["::safepdf::tintProbe", "put", "{#3874f25a}", "-to", "0", "0", w, h]
+    discard <| run ["image", "delete", "::safepdf::tintProbe"]
+  out := out.push s!"ms-fullpage-photo: {← timeMs 5 fill} size={w}x{h}"
+  -- 5. Closing the search and dropping the selection leaves no fill and no photo.
+  sendEvent ".find.e" "<Key-Escape>"
+  st.modify ({ · with sel := none })
+  redraw
+  out := out.push s!"closed: items={(← tagCount "sel") + (← tagCount "hit")} photos={← tintImages}"
+  out := out.push "done"
+  IO.FS.writeFile (file "tint.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -9211,6 +9389,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeNoteClose st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "noteclose.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "tint" then
+    try smokeTint st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "tint.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "dismiss" then
