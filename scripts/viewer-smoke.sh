@@ -109,7 +109,9 @@
 #      without optional content (9.r11b);
 #   10.10. highlight fills (SAFEPDF_VIEWER_SMOKE_MODE=tint): on Aqua the selection and search hits
 #      are translucent photo items over the page (ink visible through, paper tinted, composited
-#      from the probed pixels), on X11 stippled rectangles; drawing times printed;
+#      from the probed pixels), on X11 the hits are stippled rectangles and the selection photo
+#      items; the selection is one band per line, joined lines touching (10.18); drawing times
+#      printed;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
@@ -2566,8 +2568,13 @@ case_begin "10.10 tint"
 # none left once closed); the probed fill pixels composited over the probed page pixels keep
 # the marker's ink dark and tint white paper (selection blue, current hit orange, other hits
 # yellow). Background mode cannot capture the window, so the composite is computed here from
-# the two image pixels and the stacking order. On X11 they stay stippled rectangles. Drawing
-# times are printed, not checked.
+# the two image pixels and the stacking order. On X11 the hits stay stippled rectangles; the
+# selection is photo items on both platforms (10.18). Drawing times are printed, not checked.
+# Selection bands (10.18): Ctrl+A draws one band per line (41), each spanning its line's full
+# width; the 40 body lines' bands touch (each bottom is the next top), the heading's band is not
+# joined to them (paragraph break); a selection from mid line 3 to mid line 5 draws 3 bands
+# (start glyph to line end, full line, line start to end glyph) that touch, and the paper
+# between two selected lines is tinted (a sel photo pixel with alpha there).
 python3 -I -c '
 import sys
 lines = b"".join(b"0 -15 Td (%s) Tj\n" % (b"safe " * 14) for _ in range(40))
@@ -2606,9 +2613,33 @@ if aqua != (sys.argv[2] == "aqua"): errs.append("aqua = %r on %s" % (v.get("aqua
 kind = "image" if aqua else "rectangle"
 kv = lambda k: dict(re.findall(r"(\w+)=(\S+)", v.get(k, "")))
 sel, hit, closed = kv("sel"), kv("hit"), kv("closed")
-if sel.get("kind") != kind: errs.append("selection drawn as %r, want %s" % (sel.get("kind"), kind))
+if sel.get("kind") != "image": errs.append("selection drawn as %r, want image (both platforms, 10.18)" % sel.get("kind"))
 if hit.get("kind") != kind: errs.append("hits drawn as %r, want %s" % (hit.get("kind"), kind))
-if int(sel.get("items", 0)) < 41: errs.append("select-all: %r items, want one per line" % sel.get("items"))
+if int(sel.get("items", 0)) != 41: errs.append("select-all: %r items, want one band per line (41)" % sel.get("items"))
+# Selection bands (10.18).
+bands = lambda k: [tuple(int(t) for t in b.split(",")) for b in v.get(k, "").split(";") if b.count(",") == 3]
+sb, lx = bands("sel-bands"), [tuple(int(t) for t in b.split(",")) for b in v.get("sel-lines", "").split(";") if "," in b]
+print("tint sel-bands: %d bands, first %r, last %r" % (len(sb), sb[:2], sb[-1:]))
+if len(sb) != 41 or len(lx) != 41: errs.append("select-all: %d bands, %d lines, want 41" % (len(sb), len(lx)))
+else:
+    for i, (b, l) in enumerate(zip(sb, lx)):
+        if abs(b[0] - l[0]) > 1 or abs(b[2] - l[1]) > 1: errs.append("band %d x %r, line %r" % (i, (b[0], b[2]), l)); break
+    for i in range(1, 40):
+        if sb[i][3] != sb[i + 1][1]: errs.append("bands %d/%d do not touch: %r %r" % (i, i + 1, sb[i], sb[i + 1])); break
+    if sb[0][3] >= sb[1][1]: errs.append("heading band joined to the body: %r %r" % (sb[0], sb[1]))
+    if not all(b[3] - b[1] >= 15 for b in sb[1:]): errs.append("body bands thinner than a line: %r" % sb[1:3])
+s3 = bands("sel3-bands")
+ends = [int(t) for t in v.get("sel3-ends", "").split(",") if t.lstrip("-").isdigit()]
+print("tint sel3: %r ends %r" % (s3, ends))
+if len(s3) != 3 or len(ends) != 2 or len(lx) != 41: errs.append("3-line selection: %r ends %r" % (s3, v.get("sel3-ends")))
+else:
+    (f, m, l) = s3
+    if abs(f[0] - ends[0]) > 1 or abs(f[2] - lx[3][1]) > 1: errs.append("first band %r: want start %d to line end %d" % (f, ends[0], lx[3][1]))
+    if abs(m[0] - lx[4][0]) > 1 or abs(m[2] - lx[4][1]) > 1: errs.append("interior band %r: want line %r" % (m, lx[4]))
+    if abs(l[0] - lx[5][0]) > 1 or abs(l[2] - ends[1]) > 1: errs.append("last band %r: want line start %d to end %d" % (l, lx[5][0], ends[1]))
+    if f[3] != m[1] or m[3] != l[1]: errs.append("3-line bands do not touch: %r" % (s3,))
+gap = re.search(r"sel=image\((\d+) (\d+) (\d+) (\d+)\)", v.get("sel3-gap", ""))
+if not gap or int(gap.group(4)) == 0: errs.append("paper between selected lines not tinted: %r" % v.get("sel3-gap"))
 if int(hit.get("items", 0)) != 561: errs.append("search: %r hit items, want 561" % hit.get("items"))
 if "hit 1/561 on page 1" not in v.get("hit", ""): errs.append("search status: %r" % v.get("hit"))
 if closed != {"items": "0", "photos": "0"}: errs.append("after closing: %r" % v.get("closed"))
@@ -2638,17 +2669,21 @@ def comp(k, tag, rgb, alpha):
     print("tint %s: page %r + fill %r -> %r" % (k, p[:3], f, c))
     return p[:3], c
 lum = lambda c: (299 * c[0] + 587 * c[1] + 114 * c[2]) // 1000
+# The selection is a photo fill on both platforms (10.18), the hits on Aqua only.
+rs = [comp("sel-ink", "sel", (56, 116, 242), (64, 128)), comp("sel-paper", "sel", (56, 116, 242), (64, 128))]
+if None not in rs:
+    (pi, si), (pp, sp) = rs
+    # The ink shows through: the fill over the marker stays much darker than over paper.
+    if lum(si) + 100 > lum(sp): errs.append("selection hides the ink: %r vs paper %r" % (si, sp))
+    if not (sp[2] - sp[0] > 40 and sp[0] < 230 and sp[0] > 100): errs.append("selection paper tint %r" % (sp,))
 if aqua:
-    r = [comp("sel-ink", "sel", (56, 116, 242), (64, 128)), comp("sel-paper", "sel", (56, 116, 242), (64, 128)),
-         comp("hit-ink", "hit", (255, 165, 0), (96, 160)), comp("hit-paper", "hit", (255, 255, 0), (96, 160))]
-    if None not in r:
-        (pi, si), (pp, sp), (hpi, hi), (hpp, hp) = r
+    r = [comp("hit-ink", "hit", (255, 165, 0), (96, 160)), comp("hit-paper", "hit", (255, 255, 0), (96, 160))]
+    if None not in r and None not in rs:
+        (pi, si), (pp, sp) = rs
+        (hpi, hi), (hpp, hp) = r
         if max(pi + hpi) > 64 or min(pp + hpp) < 250: errs.append("probe points: ink %r %r, paper %r %r" % (pi, hpi, pp, hpp))
-        # The ink shows through: the fill over the marker stays much darker than over paper.
-        if lum(si) + 100 > lum(sp): errs.append("selection hides the ink: %r vs paper %r" % (si, sp))
         if lum(hi) + 60 > lum(hp): errs.append("current hit hides the ink: %r vs paper %r" % (hi, hp))
         # The paper is tinted, not white and not opaque colour.
-        if not (sp[2] - sp[0] > 40 and sp[0] < 230 and sp[0] > 100): errs.append("selection paper tint %r" % (sp,))
         if not (hp[0] > 240 and hp[1] > 240 and 80 < hp[2] < 200): errs.append("hit paper tint %r" % (hp,))
 for k in ("ms-sel", "ms-hits", "ms-all", "ms-all-other", "ms-fullpage-photo"):
     print("tint %s: %s" % (k, v.get(k)))
