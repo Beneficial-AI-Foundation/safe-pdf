@@ -18,7 +18,9 @@ STRICT_RULES = [
     ("partial", re.compile(r"\bpartial\b")),
     ("unsafe", re.compile(r"\bunsafe\b")),
     ("panic!", re.compile(r"\bpanic!")),
-    ("`!` call (get!/head!/...)", re.compile(r"(?<![\w'.])[\w.']*[A-Za-z_][\w']*!(?!=)")),
+    # `s!`/`m!`/`f!` are string-interpolation macros (`s!"…"`), not partial calls.
+    ("`!` call (get!/head!/...)",
+     re.compile(r"(?<![\w'.])(?![smf]!)[\w.']*[A-Za-z_][\w']*!(?!=)")),
     ("`[i]!` indexing", re.compile(r"[\]\)]!(?!=)")),
     ("sorry", re.compile(r"\bsorry\b")),
 ]

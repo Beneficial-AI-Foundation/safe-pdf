@@ -46,3 +46,191 @@ import SafePdf
 #print axioms SafePdf.PdfObject.Canonical.of_mem_dict
 #print axioms SafePdf.PdfObject.Canonical.keys_nodup
 #print axioms SafePdf.PdfObject.realOf_canonical
+
+-- Phase 1, task 1.2: lexer spec (SafePdf/Spec/Lex.lean)
+#print axioms SafePdf.Spec.Lex.skipWs_length_le
+#print axioms SafePdf.Spec.Lex.skipComment_length_le
+#print axioms SafePdf.Spec.Lex.regularRun_snd_length_le
+#print axioms SafePdf.Spec.Lex.litBody_length_lt
+#print axioms SafePdf.Spec.Lex.hexBody_length_le
+#print axioms SafePdf.Spec.Lex.nextAt_consumes
+#print axioms SafePdf.Spec.Lex.next_consumes
+#print axioms SafePdf.Spec.Lex.nextAt_nil
+#print axioms SafePdf.Spec.Lex.next_eq_none_of_skipWs_nil
+#print axioms SafePdf.Spec.Lex.next_white
+#print axioms SafePdf.Spec.Lex.skipComment_append
+#print axioms SafePdf.Spec.Lex.skipWs_comment
+#print axioms SafePdf.Spec.Lex.next_comment
+
+-- Phase 1, task 1.3: tokenizer (SafePdf/Core/Lex.lean)
+#print axioms SafePdf.Core.Lex.next_pos
+#print axioms SafePdf.Core.Lex.litStr_bounds
+#print axioms SafePdf.Core.Lex.hexStr_bounds
+#print axioms SafePdf.Core.Lex.nameRun_bounds
+#print axioms SafePdf.Core.Lex.readRun_bounds
+#print axioms SafePdf.Core.Lex.lt_escapeAt
+
+-- Phase 1, task 1.4: object grammar spec (SafePdf/Spec/Object.lean)
+#print axioms SafePdf.Spec.Object.parse_eq_ok_iff
+#print axioms SafePdf.Spec.Object.parse_isError_iff
+#print axioms SafePdf.Spec.Object.Parses.unique
+#print axioms SafePdf.Spec.Object.Parses.depth_le
+#print axioms SafePdf.Spec.Object.parse_depth_le
+#print axioms SafePdf.Spec.Object.Parses.length_lt
+#print axioms SafePdf.Spec.Object.parse_length_lt
+#print axioms SafePdf.Spec.Object.Parses.canonical
+
+-- Phase 1, task 1.5: object parser (SafePdf/Core/ObjParse.lean)
+#print axioms SafePdf.Core.ObjParse.parseObject_pos
+#print axioms SafePdf.Core.ObjParse.parseObject_depth
+#print axioms SafePdf.Core.ObjParse.parseObject_dict_keys_nodup
+#print axioms SafePdf.Core.ObjParse.parseObj_pos
+#print axioms SafePdf.Core.ObjParse.parseObj_depth
+
+-- Phase 1, task 1.6: lexer equivalence, C5 (SafePdf/Spec/LexEquiv.lean)
+#print axioms SafePdf.Spec.LexEquiv.next_eq
+#print axioms SafePdf.Spec.LexEquiv.lexAll_eq
+#print axioms SafePdf.Spec.LexEquiv.tokenAt_eq
+#print axioms SafePdf.Spec.LexEquiv.litStr_eq
+#print axioms SafePdf.Spec.LexEquiv.hexStr_eq
+#print axioms SafePdf.Spec.LexEquiv.nameRun_eq
+#print axioms SafePdf.Spec.LexEquiv.parseNumber_eq
+#print axioms SafePdf.Spec.LexEquiv.skipWs_rest
+#print axioms SafePdf.Spec.LexEquiv.readRun_eq
+
+-- Phase 1, task 1.7: printer + round trip (SafePdf/Spec/RoundTrip.lean)
+#print axioms SafePdf.Spec.RoundTrip.lexAll_print
+#print axioms SafePdf.Spec.RoundTrip.parse_printTokens
+#print axioms SafePdf.Spec.RoundTrip.roundTrip_spec
+#print axioms SafePdf.Spec.RoundTrip.roundTrip_core
+#print axioms SafePdf.Spec.RoundTrip.roundTrip_core_spec
+
+-- Phase 1, task 1.8: object parser equivalence, C5 (SafePdf/Spec/ObjEquiv.lean)
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_ok_iff
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_error_iff
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_ok_iff_lexAll
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_error_iff_lexAll
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_of_spec_full
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_of_spec_full_size
+#print axioms SafePdf.Spec.ObjEquiv.parseObj_of_parses_full
+#print axioms SafePdf.Spec.ObjEquiv.lexFrom_of_lexAll
+
+-- Phase 1, M1 headline: parseObject (print o) = o (SafePdf/Spec/RoundTripCore.lean)
+#print axioms SafePdf.Spec.RoundTripCore.parseObject_print
+
+-- Phase 2, task 2.1: classic xref table + trailer (SafePdf/Core/Xref.lean)
+#print axioms SafePdf.Core.Xref.entryAt_eq
+#print axioms SafePdf.Core.Xref.header_pos
+#print axioms SafePdf.Core.Xref.entries_ok
+#print axioms SafePdf.Core.Xref.sections_ok
+#print axioms SafePdf.Core.Xref.XrefSection.keys_nodup
+#print axioms SafePdf.Core.Xref.parseXrefTable_inUse_lt
+#print axioms SafePdf.Core.Xref.parseXrefTable_gen_le
+#print axioms SafePdf.Core.Xref.parseXrefTable_length_le
+#print axioms SafePdf.Core.Xref.parseXrefTable_nodup
+#print axioms SafePdf.Core.Xref.parseXrefTable_pos
+#print axioms SafePdf.Core.Xref.findStartxref_lt
+
+-- Phase 2, task 2.2: /Prev chain termination (SafePdf/Spec/XrefTerm.lean)
+#print axioms SafePdf.Spec.XrefTerm.loadChain_terminates
+#print axioms SafePdf.Spec.XrefTerm.loadChain_offsets_nodup
+#print axioms SafePdf.Spec.XrefTerm.loadChain_offsets_lt
+#print axioms SafePdf.Spec.XrefTerm.loadChain_length_le
+#print axioms SafePdf.Spec.XrefTerm.loadChain_ok_reach
+#print axioms SafePdf.Spec.XrefTerm.loadChain_cycle_rejected
+#print axioms SafePdf.Spec.XrefTerm.loadChainCounted_calls_le
+#print axioms SafePdf.Spec.XrefTerm.mergeChain_lookup
+#print axioms SafePdf.Core.Xref.Chain.length_lt_of_fresh
+#print axioms SafePdf.Core.Xref.Chain.mergeTwo_sorted
+
+-- Phase 2, task 2.3: indirect /Length (SafePdf/Core/Xref/Length.lean)
+#print axioms SafePdf.Core.Xref.Length.resolveLength_calls_le
+#print axioms SafePdf.Core.Xref.Length.resolveLength_self
+#print axioms SafePdf.Core.Xref.Length.lengthDict_self
+#print axioms SafePdf.Core.Xref.Length.parseIndirectResolved_pos
+#print axioms SafePdf.Core.Xref.Length.parseIndirectResolved_data
+
+-- Phase 2, task 2.6: repair path (SafePdf/Repair.lean)
+#print axioms SafePdf.Repair.scanAttempts_le
+#print axioms SafePdf.Repair.scanFailures_le
+#print axioms SafePdf.Repair.scanObjects_length_le
+#print axioms SafePdf.Repair.scanObjects_header
+#print axioms SafePdf.Repair.scanObjects_offset_lt
+#print axioms SafePdf.Repair.scanObjects_sorted
+#print axioms SafePdf.Repair.scanObjects_keys_nodup
+#print axioms SafePdf.Repair.repair_ok
+#print axioms SafePdf.Repair.repair_offset_lt
+#print axioms SafePdf.Repair.repair_length_le
+#print axioms SafePdf.Repair.repair_keys_nodup
+
+-- Phase 3, task 3.1: FlateDecode (SafePdf/Core/Filter/Flate.lean)
+#print axioms SafePdf.Core.Filter.Flate.inflate_size_le
+#print axioms SafePdf.Core.Filter.Flate.zlibDecode_size_le
+#print axioms SafePdf.Core.Filter.Flate.flateDecode_size_le
+#print axioms SafePdf.Core.Filter.Flate.copyBack_size
+
+-- Phase 3, task 3.2: PNG/TIFF predictors (SafePdf/Core/Filter/Predictor.lean)
+#print axioms SafePdf.Core.Filter.Predictor.decodePng_exact
+#print axioms SafePdf.Core.Filter.Predictor.decodePng_size
+#print axioms SafePdf.Core.Filter.Predictor.decodePng_size_le
+#print axioms SafePdf.Core.Filter.Predictor.decodeTiff2_size
+#print axioms SafePdf.Core.Filter.Predictor.decodeTiff2_exact
+#print axioms SafePdf.Core.Filter.Predictor.decode_size
+#print axioms SafePdf.Core.Filter.Predictor.decode_size_le
+#print axioms SafePdf.Core.Filter.Predictor.unfilterRow_spec
+#print axioms SafePdf.Core.Filter.Predictor.unfilterRowSpec_none
+#print axioms SafePdf.Core.Filter.Predictor.unfilterRow_eq_specGo
+
+-- Phase 2, task 2.4a: xref streams in the chain walk (SafePdf/Spec/XrefTerm.lean)
+#print axioms SafePdf.Spec.XrefTerm.step_calls_le
+#print axioms SafePdf.Spec.XrefTerm.step_ok
+#print axioms SafePdf.Spec.XrefTerm.walk_calls_le
+#print axioms SafePdf.Spec.XrefTerm.walk_ok
+#print axioms SafePdf.Spec.XrefTerm.parseSection_of_table
+#print axioms SafePdf.Spec.XrefTerm.PrevStep.of_table
+#print axioms SafePdf.Spec.XrefTerm.parseSection_of_stream
+#print axioms SafePdf.Spec.XrefTerm.PrevStep.of_stream
+
+-- Phase 2, task 2.4b: object streams (SafePdf/Core/Xref/ObjStm.lean)
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_offsets_sorted
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_bounds
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_first_le
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_nums_pos
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_nums_nodup
+#print axioms SafePdf.Core.Xref.ObjStm.decodeObjStm_count_le
+#print axioms SafePdf.Core.Xref.ObjStm.getObject_depth
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_depth
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_no_recursion
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_rank
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_self
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_nested
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_work
+
+-- Phase 2, task 2.5: unambiguity S6 (SafePdf/Spec/Unambiguous.lean)
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_of_ok
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_eq_error_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_eq_some_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_eq_none_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_winner_unique
+#print axioms SafePdf.Spec.Unambiguous.mergeChain_keys_nodup
+#print axioms SafePdf.Spec.Unambiguous.mergeChain_mem_unique
+#print axioms SafePdf.Spec.Unambiguous.lookupEntry_mergeChain_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_of_cons
+#print axioms SafePdf.Spec.Unambiguous.loadChain_update
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_update
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_hybrid_table
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_hybrid_stream
+#print axioms SafePdf.Spec.Unambiguous.checkSize_ok_iff
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_lt_size
+-- Phase 2, task 2.11: opening documents (SafePdf/Core/Open.lean)
+#print axioms SafePdf.Core.Open.validate_eq
+#print axioms SafePdf.Core.Open.validate_root
+#print axioms SafePdf.Core.Open.repairOpen_repaired
+#print axioms SafePdf.Core.Open.openFile_repaired
+#print axioms SafePdf.Core.Open.openFile_strict
+#print axioms SafePdf.Core.Open.openFile_root
+#print axioms SafePdf.Core.Open.parseIndirectBodyWith_depth
+#print axioms SafePdf.Core.Open.parseIndirectResolved_depth
+#print axioms SafePdf.Core.Open.getObject_depth
+#print axioms SafePdf.Core.Open.getObject_work
+#print axioms SafePdf.Core.Open.getObject_length_calls_le

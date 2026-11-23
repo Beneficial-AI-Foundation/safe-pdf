@@ -27,6 +27,16 @@ structure Limits where
   maxGStateDepth : Nat := 256
   /-- Maximum content-stream operators per page. -/
   maxOpsPerPage : Nat := 10000000
+  /-- Maximum number of revisions (cross-reference sections) followed along the trailer
+  `/Prev` chain of incremental updates (Plan.md §5.2, ISO 32000-2 §7.5.6). Termination of the
+  chain walk does not depend on it (the visited set bounds it by the input size); it caps the
+  work at `maxRevisions` table parses. Excess yields `Error.limitExceeded .revisions`. -/
+  maxRevisions : Nat := 4096
+  /-- Maximum number of failed object-parse attempts during the repair scan (Plan.md §5.4).
+  After that many failures the scan stops parsing but still records object headers, bounding
+  its worst-case time by `O(maxRepairFailures · input size)`. Exhausting it is not an error:
+  repair is best-effort, so no `LimitKind` corresponds to it. -/
+  maxRepairFailures : Nat := 256
   deriving Repr, Inhabited
 
 namespace Limits

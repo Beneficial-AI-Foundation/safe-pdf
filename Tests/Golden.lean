@@ -1,4 +1,5 @@
 import SafePdf
+import Tests.ObjRender
 
 /-!
 # Golden-file test harness (Plan.md §6 Phase 0, §7 item 1)
@@ -32,7 +33,9 @@ def formatDocument (d : Document) : String :=
   let v := match d.version with
     | some (major, minor) => s!"{major}.{minor}"
     | none => "none"
-  s!"ok\nheaderOffset: {d.headerOffset}\nversion: {v}\nbyteLength: {d.byteLength}\n"
+  s!"ok\nheaderOffset: {d.headerOffset}\nversion: {v}\nbyteLength: {d.byteLength}\n" ++
+    s!"open: {if d.repaired then "repaired" else "strict"}\nrevisions: {d.revisions}\n" ++
+    s!"objects: {d.objectCount}\nroot: {d.root.1} {d.root.2}\n"
 
 /-- Render a parse `Error` as stable, line-oriented text. -/
 def formatError (e : Error) : String :=
@@ -42,15 +45,32 @@ def formatError (e : Error) : String :=
     | .unsupported what => s!"unsupported: {what}"
   s!"error\n{body}\n"
 
-/-- Renderer for the `header` suite: the result of the Phase 0 `SafePdf.parse` stub. -/
+/-- Renderer for the `header` suite: the result of `SafePdf.parse` (header check, then
+`Core.Open.openFile`). -/
 def renderHeader (bytes : ByteArray) : String :=
   match SafePdf.parse bytes with
   | .ok d => formatDocument d
   | .error e => formatError e
 
+/-- Renderer for the `objects` suite: one direct object from offset 0 under `Limits.default`
+(`SafePdf.parseObjectAt`), then the end position. -/
+def renderObjects (bytes : ByteArray) : String :=
+  match SafePdf.parseObjectAt Limits.default bytes 0 with
+  | .ok (o, r) => "ok\n" ++ ObjRender.unlines (ObjRender.renderObj 0 "" o) ++ s!"end: {r}\n"
+  | .error e => formatError e
+
+/-- Renderer for the `indirect` suite: one indirect object or stream from offset 0 under
+`Limits.default` (`SafePdf.parseIndirectAt`), then the end position. -/
+def renderIndirect (bytes : ByteArray) : String :=
+  match SafePdf.parseIndirectAt Limits.default bytes 0 with
+  | .ok (io, r) => "ok\n" ++ ObjRender.unlines (ObjRender.renderIndirect io) ++ s!"end: {r}\n"
+  | .error e => formatError e
+
 /-- Registry of golden suites: suite name (= directory under `Tests/golden/`) and renderer. -/
 def renderers : List (String × (ByteArray → String)) :=
-  [ ("header", renderHeader) ]
+  [ ("header", renderHeader),
+    ("objects", renderObjects),
+    ("indirect", renderIndirect) ]
 
 /-- Whether `path` is a golden input (not an expected file, a note, or a hidden file). -/
 def isInput (path : System.FilePath) : Bool :=

@@ -3,7 +3,10 @@ import SafePdf
 /-!
 # Fuzz driver (Plan.md §6 Phase 0, §7 items 2–3)
 
-Calls `SafePdf.parse` on generated inputs and reports outcomes. Deterministic: all
+Calls every parser entry point on generated inputs and reports outcomes per entry point:
+`SafePdf.parse` (opens the file, task 2.11), `SafePdf.parseObjectAt` at offset 0 and at a pseudo-random
+offset (`Limits.default`) and at offset 0 with `maxObjectDepth := 8`,
+`SafePdf.parseIndirectAt` at offset 0, and `Core.Lex.lexAll`. Deterministic: all
 randomness comes from a SplitMix64 generator seeded by `--seed`, so a campaign (and any
 input it reports) is reproduced exactly by rerunning with the same arguments.
 
@@ -20,8 +23,11 @@ Defaults: 10000 iterations, seed 1, max length 4096, slow threshold 100 ms, seed
 directories `Tests/adversarial` and `corpus` (missing directories are skipped).
 
 Exit code: 0 when the campaign completes; 1 if the shell part raised an uncaught exception;
-2 on bad arguments. Since `parse` is pure and total, it cannot crash; a hang would show up as
-a slow input or a timeout of the whole run.
+2 on bad arguments. Since the entry points are pure and total, they cannot crash; a hang
+would show up as a slow input or a timeout of the whole run. Each call is timed separately;
+calls slower than `--slow-ms` are reported with the entry point, position and input prefix.
+The summary has one line per entry point and a total line with an input hash: the same
+arguments give the same inputs, positions and outcome counts.
 -/
 
 namespace SafePdf.Fuzz
@@ -167,7 +173,13 @@ def builtinSeeds : Array ByteArray :=
   #["%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n".toUTF8,
     "%PDF-2.0\n".toUTF8,
     "junk before header %PDF-1.4\n".toUTF8,
-    "%PDF-".toUTF8]
+    "%PDF-".toUTF8,
+    "[1 2 0 R << /A (x) /B <00ff> >> /N#20 -3.5 true null]".toUTF8,
+    "1 0 obj << /Length 5 >> stream\nhello\nendstream endobj".toUTF8,
+    "12 0 obj\n<< /Type /Page /Kids [3 0 R] /Res << /F << /F1 5 0 R >> >> >>\nendobj\n".toUTF8,
+    "(a\\(b\\)\\101\\\r\n (n)) <4142 4> /A#42 +.5 -0 [] << >>".toUTF8,
+    String.join (List.replicate 300 "[") |>.toUTF8,
+    String.join (List.replicate 40 "<< /K [") |>.toUTF8]
 
 /-- Load seed inputs from the given directories, skipping missing ones. -/
 def loadSeeds (dirs : List String) : IO (Array ByteArray) := do
@@ -216,48 +228,110 @@ def genInput (g : Rng) (cfg : Config) (seeds : Array ByteArray) : ByteArray × R
     -- keep large seeds whole (truncating them would never test the full file)
     (if base.size > cfg.maxLen then b else b.extract 0 cfg.maxLen, g)
 
-/-- Run the campaign and print the summary. -/
+/-! ## Entry points under test -/
+
+/-- Outcome class of one call: `0` ok, `1` malformed, `2` limit exceeded, `3` unsupported. -/
+def classify {α : Type} : Except Error α → Nat
+  | .ok _ => 0
+  | .error (.malformed ..) => 1
+  | .error (.limitExceeded _) => 2
+  | .error (.unsupported _) => 3
+
+/-- Limits with a small nesting depth, so the depth limit is hit often. -/
+def shallowLimits : Limits := { maxObjectDepth := 8 }
+
+/-- Names of the entry points, in the order `runEntry` numbers them. -/
+def entryNames : Array String :=
+  #["parse", "parseObjectAt@0", "parseObjectAt@rand", "parseObjectAt@0/depth8",
+    "parseIndirectAt@0", "lexAll"]
+
+/-- Call entry point `k` on `input` (`pos` is the pseudo-random position) and classify the
+result. A lexer error counts as malformed. -/
+def runEntry (k : Nat) (input : ByteArray) (pos : Nat) : Nat :=
+  match k with
+  | 0 => classify (SafePdf.parse input)
+  | 1 => classify (SafePdf.parseObjectAt Limits.default input 0)
+  | 2 => classify (SafePdf.parseObjectAt Limits.default input pos)
+  | 3 => classify (SafePdf.parseObjectAt shallowLimits input 0)
+  | 4 => classify (SafePdf.parseIndirectAt Limits.default input 0)
+  | _ => match SafePdf.Core.Lex.lexAll input with
+    | .ok _ => 0
+    | .error _ => 1
+
+/-- Per-entry-point counters. -/
+structure Stat where
+  /-- Calls returning `.ok`. -/
+  ok : Nat := 0
+  /-- `Error.malformed` (and lexer errors). -/
+  malformed : Nat := 0
+  /-- `Error.limitExceeded`. -/
+  limit : Nat := 0
+  /-- `Error.unsupported`. -/
+  unsupported : Nat := 0
+  /-- Calls slower than the threshold. -/
+  slow : Nat := 0
+  /-- Slowest call in milliseconds. -/
+  maxMs : Nat := 0
+
+/-- Record one outcome class and duration. -/
+def Stat.record (s : Stat) (c : Nat) (ms : Nat) (isSlow : Bool) : Stat :=
+  let s := match c with
+    | 0 => { s with ok := s.ok + 1 }
+    | 1 => { s with malformed := s.malformed + 1 }
+    | 2 => { s with limit := s.limit + 1 }
+    | _ => { s with unsupported := s.unsupported + 1 }
+  { s with slow := s.slow + (if isSlow then 1 else 0), maxMs := max s.maxMs ms }
+
+/-- 64-bit hash as 16 hex digits. -/
+def hashHex (hash : UInt64) : String :=
+  hexPrefix ⟨#[(hash >>> 56).toUInt8, (hash >>> 48).toUInt8, (hash >>> 40).toUInt8,
+    (hash >>> 32).toUInt8, (hash >>> 24).toUInt8, (hash >>> 16).toUInt8,
+    (hash >>> 8).toUInt8, hash.toUInt8]⟩ 8
+
+/-! ## Campaign loop -/
+
+/-- Run the campaign and print the summary: one line per entry point, then a total line with
+the input hash (same arguments → same summary lines, apart from timing-dependent slow
+counts; the slowest-call times are on a separate `timing` line). -/
 def campaign (cfg : Config) : IO Unit := do
   let seeds ← loadSeeds (cfg.seedDirs.getD ["Tests/adversarial", "corpus"])
   IO.println s!"fuzz: iters={cfg.iters} seed={cfg.seed} max-len={cfg.maxLen} seeds={seeds.size}"
   let mut g : Rng := ⟨cfg.seed.toUInt64⟩
-  let mut ok := 0
-  let mut malformed := 0
-  let mut limit := 0
-  let mut unsupported := 0
-  let mut withVersion := 0
-  let mut slow := 0
+  let mut stats : Array Stat := entryNames.map (fun _ => {})
+  let mut slowInputs := 0
   let mut totalBytes := 0
   let mut hash : UInt64 := 0xcbf29ce484222325
   for it in [0:cfg.iters] do
     let (input, g') := genInput g cfg seeds
+    let (pos, g') := g'.below (input.size + 1)
     g := g'
     totalBytes := totalBytes + input.size
     hash := fnv hash input
-    let t0 ← IO.monoNanosNow
-    -- the `match` is inside the IO chain, so `parse` is evaluated before `t1` is read
-    let outcome ← match SafePdf.parse input with
-      | .ok d => pure (if d.version.isSome then 0 else 1)
-      | .error (.malformed ..) => pure 2
-      | .error (.limitExceeded _) => pure 3
-      | .error (.unsupported _) => pure 4
-    let t1 ← IO.monoNanosNow
-    match outcome with
-    | 0 => ok := ok + 1; withVersion := withVersion + 1
-    | 1 => ok := ok + 1
-    | 2 => malformed := malformed + 1
-    | 3 => limit := limit + 1
-    | _ => unsupported := unsupported + 1
-    let ms := (t1 - t0) / 1000000
-    if ms > cfg.slowMs then
-      slow := slow + 1
-      IO.println s!"fuzz: SLOW iteration {it}: {ms} ms, {input.size} bytes, prefix {hexPrefix input 32}"
-  IO.println s!"fuzz: summary: iters={cfg.iters} ok={ok} (with version {withVersion}) \
-    error={malformed + limit + unsupported} (malformed {malformed}, limit {limit}, \
-    unsupported {unsupported}) slow(>{cfg.slowMs}ms)={slow} bytes={totalBytes} \
-    input-hash={hexPrefix ⟨#[(hash >>> 56).toUInt8, (hash >>> 48).toUInt8, (hash >>> 40).toUInt8,
-      (hash >>> 32).toUInt8, (hash >>> 24).toUInt8, (hash >>> 16).toUInt8,
-      (hash >>> 8).toUInt8, hash.toUInt8]⟩ 8}"
+    let mut slowHere := false
+    for k in [0:entryNames.size] do
+      let t0 ← IO.monoNanosNow
+      -- `lazyPure` forces the pure call to run here, between the two clock reads
+      let c ← IO.lazyPure (fun _ => runEntry k input pos)
+      let t1 ← IO.monoNanosNow
+      let ms := (t1 - t0) / 1000000
+      let isSlow := ms > cfg.slowMs
+      stats := stats.modify k (·.record c ms isSlow)
+      if isSlow then
+        slowHere := true
+        IO.println s!"fuzz: SLOW iteration {it} {entryNames[k]?.getD "?"} (pos {pos}): \
+          {ms} ms, {input.size} bytes, prefix {hexPrefix input 32}"
+    if slowHere then slowInputs := slowInputs + 1
+  for k in [0:entryNames.size] do
+    let s := stats[k]?.getD {}
+    IO.println s!"fuzz: summary {entryNames[k]?.getD "?"}: ok={s.ok} \
+      error={s.malformed + s.limit + s.unsupported} (malformed {s.malformed}, \
+      limit {s.limit}, unsupported {s.unsupported}) slow(>{cfg.slowMs}ms)={s.slow}"
+  -- timing varies between runs, so it is kept off the summary lines
+  let maxes := (List.range entryNames.size).map fun k =>
+    s!"{entryNames[k]?.getD "?"}={(stats[k]?.getD {}).maxMs}"
+  IO.println s!"fuzz: timing (slowest call, ms): {" ".intercalate maxes}"
+  IO.println s!"fuzz: summary: iters={cfg.iters} entry-points={entryNames.size} \
+    slow-inputs={slowInputs} bytes={totalBytes} input-hash={hashHex hash}"
 
 end SafePdf.Fuzz
 
