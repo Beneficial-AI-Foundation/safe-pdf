@@ -22,17 +22,17 @@ Design document: Plan.md
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
 |---|---|---|---|---|
-| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | ready (2026-11-18) |
-| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | ready (2026-11-19) |
-| 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | ready (2026-11-19) |
-| 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | ready (2026-11-19) |
-| 4 | `phase-4-document` | `phase-3-filters` | [#5](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/5) | ready (2026-11-19) |
-| 5 | `phase-5-content` | `phase-4-document` | [#6](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/6) | ready (2026-11-19) |
-| 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | ready (2026-11-20; CI run 44766606520 on 490f559 green) |
-| 7 | `phase-7-raster` | `phase-6-fonts-text` | [#8](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/8) | ready (2026-11-20; CI runs 44778238929/44778250412 on 6620260 green) |
-| 8 | `phase-8-shell` | `phase-7-raster` | [#9](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/9) | ready (2026-11-20; CI run 44794683620 on 4684b5a green) |
-| 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | ready (2026-11-23; M9 verified incl. the human's macOS re-check) |
-| 10 | `phase-10-polish` | `phase-9-gui` | — | none (the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from #10's tip) |
+| 0 | `phase-0-infra` | `origin/main` | [#1](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/1) | merged (2026-11-23) |
+| 1 | `phase-1-lexer-objects` | `phase-0-infra` | [#2](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/2) | merged (2026-11-23) |
+| 2 | `phase-2-xref` | `phase-1-lexer-objects` | [#3](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/3) | merged (2026-11-23) |
+| 3 | `phase-3-filters` | `phase-2-xref` | [#4](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/4) | merged (2026-11-23) |
+| 4 | `phase-4-document` | `phase-3-filters` | [#5](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/5) | merged (2026-11-23) |
+| 5 | `phase-5-content` | `phase-4-document` | [#6](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/6) | merged (2026-11-23) |
+| 6 | `phase-6-fonts-text` | `phase-5-content` | [#7](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/7) | merged (2026-11-23) |
+| 7 | `phase-7-raster` | `phase-6-fonts-text` | [#8](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/8) | merged (2026-11-23) |
+| 8 | `phase-8-shell` | `phase-7-raster` | [#9](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/9) | merged (2026-11-23) |
+| 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | merged (2026-11-23) |
+| 10 | `phase-10-polish` | `origin/main` | — | none (the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from main, where the whole stack #1–#10 merged 2026-11-23) |
 | 11 | `phase-11-macos-shell` | `phase-10-polish` | — | none |
 | 12 | `phase-12-hardening` | `phase-11-macos-shell` | — | none |
 States: none · draft · awaiting-ci · ready (<date>) · changes-requested · merged · closed.
