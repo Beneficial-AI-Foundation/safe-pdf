@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -77,6 +77,9 @@
 #   1p. platform keys and the icon (SAFEPDF_VIEWER_SMOKE_MODE=keys, as installed and with
 #      SAFEPDF_VIEWER_PLATFORM=aqua): accelerator labels, Command twins of the Ctrl bindings,
 #      ::tk::mac::Quit, the six icon sizes, _NET_WM_ICON when xprop is installed (9.r3);
+#   1q. the review of 2026-11-23 (SAFEPDF_VIEWER_SMOKE_MODE=r4): the view-mode drop-down next to
+#      the page count in sync with the View and » menus, the float bubble's Add comment, no
+#      intermediate page position when the outline closes or opens at Page Fit (9.r4);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -512,7 +515,7 @@ common = {
 want_nav = dict(common, **{
     "pages": "3", "has-outline": "true", "sidebar-shown": "true", "panes": ".ol .v",
     "toggle-mapped": "1",
-    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of " + layout_m + " " + layout_r,
+    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of,.bar.vmode " + layout_m + " " + layout_r,
     "field0": "i", "of0": "(1 of 3)",
     "after-next": "2 ii (2 of 3)", "after-next-prev": "2 ii", "after-prev-at-start": "1 i",
     "entry-last": "3 1", "entry-999": "3 1", "entry-abc": "3 1", "entry-first": "1 i",
@@ -525,7 +528,7 @@ want_nav = dict(common, **{
 want_two = dict(common, **{
     "pages": "2", "has-outline": "false", "sidebar-shown": "false", "panes": ".v",
     "toggle-mapped": "0",
-    "layout": ".bar.l=.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of " + layout_m + " " + layout_r,
+    "layout": ".bar.l=.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of,.bar.vmode " + layout_m + " " + layout_r,
     "field0": "1", "of0": "of 2",
     "after-next": "2 2 of 2", "after-next-prev": "1 1", "after-prev-at-start": "1 1",
     "entry-last": "2 2", "entry-999": "2 2", "entry-abc": "2 2", "entry-first": "1 1",
@@ -1561,6 +1564,81 @@ else:
 for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
+done
+
+# 1q. Review 2026-11-23 (task 9.r4, SAFEPDF_VIEWER_SMOKE_MODE=r4, `Viewer.smokeR4`), in the
+#     default view (Vertical Scrolling): the toolbar's view-mode drop-down next to the page
+#     count (its four entries, each invoked, scroll/spread variables and icon; the View menu's
+#     Even Spreads and the » menu's Vertical Scrolling followed by it; Two Pages keeps even
+#     spreads); on the text PDF the float bubble has Highlight and Add comment, and Add comment
+#     adds one note anchored to the selection, opens its popup and closes the bubble; on the
+#     outline PDF (and the M9 papers when they have an outline), at Page Fit in Single Page and
+#     Vertical Scrolling, closing and opening the outline moves the page frame straight from
+#     its start to its final position (sampled at every canvas <Configure> and every 2 ms):
+#     no intermediate x, in the canvas or on the screen.
+r4_case() {
+  local name="$1" pdf="$2" d="$work/out-r4-$1"
+  SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=r4 run_viewer "$d" "$pdf" || true
+  python3 -I -c '
+import re, sys
+name, path = sys.argv[1], sys.argv[2]
+try: lines = open(path, encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: r4 %s: no r4.txt" % name, file=sys.stderr); sys.exit(1)
+v = {}
+for l in lines:
+    k, _, r = l.partition(": ")
+    v[k] = r
+errs = []
+def starts(k, x):
+    if not v.get(k, "").startswith(x): errs.append("%s = %r, want %r..." % (k, v.get(k), x))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+starts("view0", "vertical vertical none icon=vertical items=2 on=1")
+if v.get("view-entries") != "Single Page|Vertical Scrolling|Two Pages|Two Pages Scrolling":
+    errs.append("entries %r" % v.get("view-entries"))
+if not v.get("view-left", "").endswith(".bar.next .bar.pg .bar.of .bar.vmode"):
+    errs.append("view-mode button not after the page count: %r" % v.get("view-left"))
+starts("view-tip", "View mode: Vertical Scrolling")
+for k, want in (("single", "single page none icon=single items=1"),
+                ("two", "two page odd icon=two items=2"),
+                ("two-scroll", "two-scroll vertical odd icon=two-scroll items=4"),
+                ("vertical", "vertical vertical none icon=vertical items=2")):
+    starts("view-" + k, want)
+    st = v.get("view-" + k, "").split(" state=")[-1].split(" slots")[0]
+    if st != " ".join(want.split()[1:3]): errs.append("view-%s: state %r" % (k, st))
+starts("menu-even", "two-scroll vertical even icon=two-scroll")
+starts("view-two-even", "two page even icon=two")
+starts("more-vertical", "two-scroll vertical even icon=two-scroll")
+starts("menu-none", "vertical vertical none icon=vertical")
+if name == "text":
+    if "[highlight, comment]" not in v.get("bubble", ""): errs.append("bubble: %r" % v.get("bubble"))
+    if v.get("bubble-in-region") != "true": errs.append("bubble outside the scroll region")
+    if v.get("bubble-bind") != "::safepdf::bubTip b:comment {Add comment}":
+        errs.append("tooltip %r" % v.get("bubble-bind"))
+    if v.get("bubble-tip") != "1 Add comment": errs.append("tooltip shown: %r" % v.get("bubble-tip"))
+    starts("comment", "added=1 note-on-selection=true popup=1 bubble-after=false sel-after=false")
+outl = [k for k in v if k.startswith("outline-")]
+if name == "nav" and len(outl) != 4: errs.append("outline cases: %r" % outl)
+for k in outl:
+    samples = re.findall(r"\{(\w+) (\d+) (\S+) (\S+) (\S+)\}", v[k])
+    want_shown = "shown=true" if "-open-" in k else "shown=false"
+    if not v[k].startswith(want_shown): errs.append("%s: %r" % (k, v[k][:20]))
+    if not any(s[0] == "conf" for s in samples): errs.append("%s: the canvas never changed size" % k)
+    for col, what in ((2, "x"), (4, "screen x")):
+        seq = []
+        for s in samples:
+            if not seq or seq[-1] != s[col]: seq.append(s[col])
+        if len(seq) > 2 or "none" in seq:
+            errs.append("%s: %s went %s (intermediate position)" % (k, what, " -> ".join(seq)))
+        else:
+            print("r4 %s %s: %s %s (%d samples)" % (name, k, what, " -> ".join(seq), len(samples)))
+for e in errs: print("FAIL: r4 %s: %s" % (name, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$name" "$d/r4.txt" || fail=1
+}
+r4_case text "$work/text.pdf"
+r4_case nav "$work/nav.pdf"
+for p in $m9papers; do
+  if [ -f "$p" ]; then r4_case "paper-$(basename "$p" .pdf)" "$p"; fi
 done
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
