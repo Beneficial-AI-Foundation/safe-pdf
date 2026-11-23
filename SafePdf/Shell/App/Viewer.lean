@@ -10,6 +10,7 @@ import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
 import SafePdf.Shell.App.Xfdf
+import SafePdf.Shell.App.Icons
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
@@ -139,6 +140,10 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   selected one of the mode's kind. Unsaved ones are canvas items (`drawMarks`), saved ones are
   drawn by the renderer from their appearance streams (edits through the preview). Add
   comment adds a note (`addNote`).
+* **macOS keys and the icon** (task 9.r3): after the window is built, `Menu.platformScript`
+  gives every Ctrl binding its Command twin on aqua (menu labels `Command-S`, ⌘ in the Save
+  tooltip and status hints via `keyText`, `::tk::mac::Quit` → Quit); `setIcon` sets the
+  embedded `Icons` PNGs with `wm iconphoto . -default`.
 * **Saving** (tasks 9.5c, 9.r2; Tk-free flow and decisions in `Save`): Ctrl+S / File → Save /
   the toolbar's Save writes the unsaved marks **into the opened file** as an incremental
   update (Plan S8/C7, Decision 2026-11-23), checked by a strict reopen and read-back, refused
@@ -644,6 +649,15 @@ def modeName (c : Toolbar.ZoomChoice) : String := c.statusName
 /-- Evaluates a command built from literal words (every word quoted by `Tcl.quote`). -/
 def run (words : List String) : IO String :=
   Shim.eval (Tcl.Script.render ⟨[Tcl.cmd words]⟩)
+
+/-- The platform the keys are bound and labelled for (task 9.r3; set once at start-up from
+`tk windowingsystem`, `Menu.Platform`). -/
+initialize platformRef : IO.Ref Menu.Platform ← IO.mkRef .other
+
+/-- A constant UI text naming keys the X11 way (`Ctrl+O`) in the platform's form (`⌘O` on
+macOS, `Menu.Platform.keyText`). Only for the viewer's own texts, never document data. -/
+def keyText (s : String) : IO String :=
+  return (← platformRef.get).keyText s
 
 /-- Shows `msg` in the status line. -/
 def setStatus (msg : String) : IO Unit := do
@@ -1344,7 +1358,7 @@ proc ::safepdf::noteEdit {id text x y} {
   pack $w.t -side top -fill both -expand 1 -padx 6 -pady {6 0}
   bind $w <Escape> [list destroy $w]
   # break: the popup is gone after noteDone, so the Text class binding must not run.
-  bind $w.t <Control-Return> \"[list ::safepdf::noteDone $id save]; break\"
+  ::safepdf::primaryBind $w.t Return \"[list ::safepdf::noteDone $id save]; break\"
   focus $w.t
 }
 proc ::safepdf::noteDone {id what} {
@@ -1435,7 +1449,7 @@ proc ::safepdf::ftOpen {x y text px fg} {
   bindtags .c.ft [list .c.ft Text all]
   bind .c.ft <Escape> {::safepdf::emit ftCommit; break}
   bind .c.ft <KeyRelease> ::safepdf::ftFit
-  bind .c.ft <Control-q> {::safepdf::emit quit}
+  ::safepdf::primaryBind .c.ft q {::safepdf::emit quit}
   .c create window $x $y -anchor nw -window .c.ft -tags ftedit
   ::safepdf::ftFit
   focus .c.ft
@@ -2343,7 +2357,7 @@ def setSaveLabels (library : Bool) : IO Unit := do
     discard <| run [m, "entryconfigure", toString i, "-label",
       if library then "Save to library" else Menu.Cmd.save.label]
   discard <| run ["set", "::safepdf::btn(tip,.bar.save)",
-    if library then "Save to library (Ctrl+S)" else "Save (Ctrl+S)"]
+    ← keyText (if library then "Save to library (Ctrl+S)" else "Save (Ctrl+S)")]
 
 /-- Opens the file `path` (`Inspect.load`: size check against `Limits.maxInputBytes`, then
 `SafePdf.parseWith`). A local file: a library the window had (task 10.1b) is let go, its
@@ -2888,7 +2902,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
   showOutline st false
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
-  setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
+  setStatus (← keyText "No file. Press Ctrl+O or Open... to choose a PDF.")
 
 /-- Tk image of the swatch of colour `c` (a 14 px square, task 9.4). -/
 def swatch (c : Marks.Color) : String := s!"::safepdf::sw::{c.name}"
@@ -2902,10 +2916,27 @@ def colorMenu (path : String) : IO Unit := do
       "-compound", "left", "-variable", Menu.colorVar, "-value", c.name,
       "-command", Menu.colorScript]
 
+/-- Sets the application and window icon (task 9.r3): the embedded PNGs of `Icons.all`
+become photo images `::safepdf::iconN` (Tk 9 reads PNG natively) and
+`wm iconphoto . -default` gets them largest first (X11: `_NET_WM_ICON` with every size;
+Windows: the window icons; macOS: the first image becomes the Dock and dialog icon of the
+unbundled app). Embedded rather than read from `docs/branding/` so that an installed
+`viewer` does not need the source tree (about 160 KB of base64 in the binary). A failure
+only leaves Tk's default icon. -/
+def setIcon : IO Unit := do
+  try
+    for (n, d) in Icons.all do
+      discard <| run ["image", "create", "photo", s!"::safepdf::icon{n}", "-format", "png",
+        "-data", d]
+    discard <| run (["wm", "iconphoto", ".", "-default"] ++
+      Icons.all.map fun (n, _) => s!"::safepdf::icon{n}")
+  catch e => IO.eprintln s!"viewer: no icon: {e}"
+
 /-- Builds the menubar `.menubar` from `Menu.menubar` (every word a literal through
 `Tcl.quote`; the `-command` scripts are the model's constants) and attaches it to the main
 window; then the mark entries of the context menu (`Menu.popupMarks`, task 9.4). -/
 def buildMenus : IO Unit := do
+  let plat ← platformRef.get
   for c in Marks.Color.all do
     discard <| run ["image", "create", "photo", swatch c, "-width", "14", "-height", "14"]
     discard <| run [swatch c, "put", "#8f8f9d", "-to", "0", "0", "14", "14"]
@@ -2927,10 +2958,10 @@ def buildMenus : IO Unit := do
           discard <| run [m.path, "add", "radiobutton", "-label", c.label, "-variable", var,
             "-value", val, "-underline", toString c.underline, "-command", c.script]
         | none =>
-          discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accel,
+          discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accelOn plat,
             "-underline", toString c.underline, "-command", c.script]
       | .check c var =>
-        discard <| run [m.path, "add", "checkbutton", "-label", c.label, "-accelerator", c.accel,
+        discard <| run [m.path, "add", "checkbutton", "-label", c.label, "-accelerator", c.accelOn plat,
           "-underline", toString c.underline, "-variable", var, "-onvalue", "1",
           "-offvalue", "0", "-command", c.script]
   discard <| run [".", "configure", "-menu", Menu.barPath]
@@ -2945,18 +2976,19 @@ def buildMenus : IO Unit := do
         "-menu", path]
     | .cmd c | .check c _ =>
       discard <| run [Menu.popPath, "insert", ix, "command", "-label", c.label,
-        "-accelerator", c.accel, "-command", c.popScript]
+        "-accelerator", c.accelOn plat, "-command", c.popScript]
 
 /-- Builds the toolbar from `Toolbar.layout` (task 9.7): icon buttons (`::safepdf::iconButton`
 with the model's constant icon name, tooltip and script), separators, the page field and the
 zoom drop-down (its menu `.zoommenu` lists `ZoomChoice.presets` as radio entries on
 `::safepdf::zoomSel`), and the overflow menu `.more` (`Toolbar.overflow`). -/
 def buildToolbar : IO Unit := do
+  let plat ← platformRef.get
   for (g, items) in Toolbar.layout do
     for it in items do
       match it with
       | .button b =>
-        discard <| run ["::safepdf::iconButton", b.path, b.icon, b.tip, b.script]
+        discard <| run ["::safepdf::iconButton", b.path, b.icon, plat.keyText b.tip, b.script]
         discard <| run ["::safepdf::barPack", b.path, g, "-padx", "2", "-pady", "4"]
       | .sep w =>
         discard <| run ["::safepdf::vsep", w]
@@ -2977,7 +3009,7 @@ def buildToolbar : IO Unit := do
           var, "-value", val, "-command", c.script]
       | none =>
         discard <| run [Toolbar.morePath, "add", "command", "-label", c.label, "-accelerator",
-          c.accel, "-command", c.script]
+          c.accelOn plat, "-command", c.script]
 
 /-- The part of the state the enabled rules look at. -/
 def menuCtx (s : State) : Menu.Ctx :=
@@ -3809,7 +3841,7 @@ def selStatus (st : IO.Ref State) : IO Unit := do
   let some (p, a, b) := s.sel | return
   if let .ok ix ← pageIndex st p then
     setStatus s!"page {p + 1}: selected {(Select.rangeText ix.cells a b).length} characters \
-      (Ctrl+C copies)"
+      ({← keyText "Ctrl+C"} copies)"
 
 /-- Mouse press at window position `(wx, wy)`: clears the selection and remembers the page
 point where a drag starts. -/
@@ -3931,7 +3963,7 @@ def copySel (st : IO.Ref State) : IO Unit := do
       discard <| run ["clipboard", "clear"]
       discard <| run ["clipboard", "append", "--", t]
       setStatus s!"copied {t.length} characters"
-  | none => setStatus "nothing selected (drag over text, double-click a word, or Ctrl+A)"
+  | none => setStatus (← keyText "nothing selected (drag over text, double-click a word, or Ctrl+A)")
 
 /-- Scrolls the current search hit into view (centred on an axis where it is not visible). -/
 def scrollToHit (st : IO.Ref State) : IO Unit := do
@@ -5660,6 +5692,56 @@ def smokeAsync (st : IO.Ref State) (dir : String) : IO Unit := do
     append "done"
     discard <| run ["destroy", "."]
 
+/-- Smoke step of the platform keys and the icon (`SAFEPDF_VIEWER_SMOKE_MODE=keys`, task
+9.r3), on the text PDF; with `SAFEPDF_VIEWER_PLATFORM=aqua` the aqua mapping is installed
+on X11 (where Tk's `Command` modifier is Meta). Writes `keys.txt`: the platform, menu and
+context-menu accelerators, the bindings of Ctrl/Command+S and Ctrl/Command+Shift+S, the
+quit binding of the find bar and `primaryBind`, `::tk::mac::Quit`, the Save tooltip, the
+status after the primary-modifier Select all key (generated as a Tk event), the icon images'
+sizes and, when `xprop` is installed, the start of the window's `_NET_WM_ICON`. -/
+def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
+  let plat ← platformRef.get
+  let mut out : Array String := #[]
+  out := out.push s!"platform: {repr plat}"
+  let accel (c : Menu.Cmd) : IO String := do
+    let some (m, i) := Menu.locate c | return "?"
+    run [m, "entrycget", toString i, "-accelerator"]
+  out := out.push s!"accel-open: {← accel .openFile}"
+  out := out.push s!"accel-save: {← accel .save}"
+  out := out.push s!"accel-saveas: {← accel .saveAs}"
+  out := out.push s!"accel-quit: {← accel .quit}"
+  out := out.push s!"accel-zoomin: {← accel .zoomIn}"
+  out := out.push s!"accel-back: {← accel .back}"
+  out := out.push s!"accel-pop-copy: {← run [Menu.popPath, "entrycget", "Copy", "-accelerator"]}"
+  out := out.push s!"accel-pop-delete: {← run [Menu.popPath, "entrycget", "Delete mark", "-accelerator"]}"
+  for seq in ["<Control-Key-s>", "<Command-Key-s>", "<Control-Key-S>", "<Command-Key-S>",
+      "<Shift-Command-Key-s>", "<Command-Key-q>", "<Command-Key-plus>"] do
+    out := out.push s!"bind {seq}: [{← run ["bind", ".", seq]}]"
+  out := out.push s!"bind-find: [{← run ["bind", ".find.e", "<Command-Key-q>"]}]"
+  out := out.push s!"primaryBind: [{← run ["info", "body", "::safepdf::primaryBind"]}]"
+  out := out.push s!"mac-quit: [{← run ["info", "procs", "::tk::mac::Quit"]}] [{←
+    try run ["info", "body", "::tk::mac::Quit"] catch _ => pure ""}]"
+  out := out.push s!"save-tip: {← run ["set", "::safepdf::btn(tip,.bar.save)"]}"
+  let mods := if plat == .aqua then "Command" else "Control"
+  sendEvent ".c" s!"<{mods}-Key-a>"
+  discard <| run ["update"]
+  out := out.push s!"status-selectall: {← run [".status", "cget", "-text"]}"
+  for (n, _) in Icons.all do
+    let img := s!"::safepdf::icon{n}"
+    out := out.push s!"icon{n}: {← run ["image", "width", img]}x{← run ["image", "height", img]}"
+  discard <| run ["update"]
+  -- Tk sets the property on the toplevel's wrapper, the X parent of `winfo id .` (without a
+  -- window manager `wm frame .` is the window itself).
+  if (← run ["auto_execok", "xprop"]) != "" && (← run ["auto_execok", "xwininfo"]) != "" then
+    let r ← try Shim.eval "if {[regexp {Parent window id: (0x[0-9a-f]+)} \
+        [exec xwininfo -children -id [winfo id .] 2>/dev/null] -> p]} \
+        {exec xprop -id $p -f _NET_WM_ICON 32c -len 64 _NET_WM_ICON 2>/dev/null} else {set p {no wrapper}}"
+      catch e => pure s!"error {e}"
+    out := out.push s!"net-wm-icon: {r}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of the Tcl lockdown (`SAFEPDF_VIEWER_SMOKE_MODE=lockdown`, task 8.7), run by
 `scripts/viewer-smoke.sh` with `HOME` holding a hostile `~/.Xdefaults` (script-valued
 resources that would create the file `pwned`) and, on the same display, a second Tk
@@ -6399,6 +6481,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "async.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "keys" then
+    try smokeKeys st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "lockdown" then
     try smokeLockdown st dir
     catch e =>
@@ -6616,7 +6704,7 @@ Keys: Next/space, Prior/BackSpace scroll by a window (then next/previous page);
 Down/Up/Right/Left scroll; Home/End first/last page; + - zoom in/out; 0 actual size;
 f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+W close;
 View menu: Page/Vertical Scrolling, No/Odd/Even Spreads (continuous and facing pages);
-Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
+Ctrl+Q quit (on macOS every Ctrl key is also Command). The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
 Add text: click to place a text box (Escape or a click elsewhere ends it, double-click
@@ -6688,8 +6776,16 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
+    -- Task 9.r3: keys and labels for the platform (Command on macOS), then the icon. The
+    -- smoke run can ask for the aqua mapping on X11 (`SAFEPDF_VIEWER_PLATFORM=aqua`).
+    let forced := smokeDir.isSome && (← IO.getEnv "SAFEPDF_VIEWER_PLATFORM") == some "aqua"
+    let ws ← Shim.eval "tk windowingsystem"
+    let plat := if forced then .aqua else Menu.Platform.ofWindowingSystem ws
+    platformRef.set plat
+    setIcon
     buildMenus
     buildToolbar
+    discard <| Shim.eval (Menu.platformScript plat)
     if let some g ← IO.getEnv "SAFEPDF_VIEWER_GEOMETRY" then
       if let some (w, h) := parseGeometry g then
         discard <| run ["wm", "geometry", ".", s!"{w}x{h}"]
@@ -6717,7 +6813,7 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   if let some f := file then guarded (openFile st f)
   guarded (init st)
   if (← st.get).path.isNone then
-    setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
+    setStatus (← keyText "No file. Press Ctrl+O or Open... to choose a PDF.")
     if smokeDir.isNone then discard <| run ["after", "idle", "::safepdf::emit open"]
   guarded (syncMenus st)
   if smokeDir.isSome then discard <| run ["after", "300", "::safepdf::emit smoke"]
