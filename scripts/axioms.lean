@@ -1265,3 +1265,7 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Shell.App.Toolbar.pressed_unique
 #print axioms SafePdf.Shell.App.Toolbar.Mode.of_selectEditor_twice
 #print axioms SafePdf.Shell.App.Toolbar.Mode.of_toolClick_twice
+#print axioms SafePdf.Shell.App.Select.shape_covers
+#print axioms SafePdf.Shell.App.Select.meetAt_spec
+#print axioms SafePdf.Shell.App.Select.bandAt_meet
+#print axioms SafePdf.Shell.App.Select.bandAt_covers
