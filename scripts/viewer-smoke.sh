@@ -107,6 +107,9 @@
 #      turns its sibling off, the locked group stays, thumbnails follow, Save keeps the state
 #      and leaves /OCProperties alone, reopening restores the defaults, no Layers button
 #      without optional content (9.r11b);
+#   10.10. highlight fills (SAFEPDF_VIEWER_SMOKE_MODE=tint): on Aqua the selection and search hits
+#      are translucent photo items over the page (ink visible through, paper tinted, composited
+#      from the probed pixels), on X11 stippled rectangles; drawing times printed;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
@@ -2534,6 +2537,104 @@ if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: dismiss: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-dismiss/dismiss.txt" || fail=1
+
+case_begin "10.10 tint"
+# 10.10. Highlight fills (SAFEPDF_VIEWER_SMOKE_MODE=tint, `Viewer.smokeTint`) on a generated page:
+# "Hello safe world" over a black marker under "safe" (as 1d), then 40 lines of 14 "safe"s
+# (561 search hits; Helvetica unpainted). On Aqua the selection (Ctrl+A) and the search hits
+# are translucent photo image items above the page image (one photo per colour and size,
+# none left once closed); the probed fill pixels composited over the probed page pixels keep
+# the marker's ink dark and tint white paper (selection blue, current hit orange, other hits
+# yellow). Background mode cannot capture the window, so the composite is computed here from
+# the two image pixels and the stacking order. On X11 they stay stippled rectangles. Drawing
+# times are printed, not checked.
+python3 -I -c '
+import sys
+lines = b"".join(b"0 -15 Td (%s) Tj\n" % (b"safe " * 14) for _ in range(40))
+c = (b"0 g 118.008 700 34.02 12.6 re f\n"
+     b"BT /F1 18 Tf 72 700 Td (Hello safe world) Tj ET\n"
+     b"BT /F1 12 Tf 72 675 Td " + lines + b"ET\n")
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$work/tint.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=tint run_viewer "$work/out-tint" "$work/tint.pdf" \
+  || { echo "FAIL: tint: run failed" >&2; fail=1; }
+cat "$work/out-tint/tint.txt" 2>/dev/null || true
+python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: tint: no tint.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+aqua = v.get("aqua") == "true"
+if aqua != (sys.argv[2] == "aqua"): errs.append("aqua = %r on %s" % (v.get("aqua"), sys.argv[2]))
+kind = "image" if aqua else "rectangle"
+kv = lambda k: dict(re.findall(r"(\w+)=(\S+)", v.get(k, "")))
+sel, hit, closed = kv("sel"), kv("hit"), kv("closed")
+if sel.get("kind") != kind: errs.append("selection drawn as %r, want %s" % (sel.get("kind"), kind))
+if hit.get("kind") != kind: errs.append("hits drawn as %r, want %s" % (hit.get("kind"), kind))
+if int(sel.get("items", 0)) < 41: errs.append("select-all: %r items, want one per line" % sel.get("items"))
+if int(hit.get("items", 0)) != 561: errs.append("search: %r hit items, want 561" % hit.get("items"))
+if "hit 1/561 on page 1" not in v.get("hit", ""): errs.append("search status: %r" % v.get("hit"))
+if closed != {"items": "0", "photos": "0"}: errs.append("after closing: %r" % v.get("closed"))
+if aqua and int(hit.get("photos", 99)) > 12:
+    errs.append("561 hits made %r photos (one per colour and size expected)" % hit.get("photos"))
+def probe(k):
+    # [(tag, kind, (r, g, b, a) or None)] bottom to top
+    out = []
+    for part in v.get(k, "").split(";"):
+        m = re.match(r"([^=]*)=(\w+)(?:\(([^)]*)\))?$", part)
+        if not m: continue
+        px = tuple(int(t) for t in m.group(3).split()) if m.group(3) and m.group(3)[0].isdigit() else None
+        out.append((m.group(1), m.group(2), px))
+    return out
+over = lambda a, f, p: (f * a + p * (255 - a) + 127) // 255
+def comp(k, tag, rgb, alpha):
+    items = probe(k)
+    pg = [i for i, t in enumerate(items) if t[0] == "pimg"]
+    fl = [i for i, t in enumerate(items) if t[0] == tag]
+    if not pg or not fl: errs.append("%s: page or %s item missing: %r" % (k, tag, v.get(k))); return None
+    if fl[-1] < pg[0]: errs.append("%s: the fill lies under the page image" % k)
+    p, f = items[pg[0]][2], items[fl[-1]][2]
+    if p is None or f is None or len(f) != 4: errs.append("%s: pixels %r" % (k, v.get(k))); return None
+    if f[:3] != rgb or not alpha[0] <= f[3] <= alpha[1]:
+        errs.append("%s: fill pixel %r, want %r at alpha %r" % (k, f, rgb, alpha))
+    c = tuple(over(f[3], f[i], p[i]) for i in range(3))
+    print("tint %s: page %r + fill %r -> %r" % (k, p[:3], f, c))
+    return p[:3], c
+lum = lambda c: (299 * c[0] + 587 * c[1] + 114 * c[2]) // 1000
+if aqua:
+    r = [comp("sel-ink", "sel", (56, 116, 242), (64, 128)), comp("sel-paper", "sel", (56, 116, 242), (64, 128)),
+         comp("hit-ink", "hit", (255, 165, 0), (96, 160)), comp("hit-paper", "hit", (255, 255, 0), (96, 160))]
+    if None not in r:
+        (pi, si), (pp, sp), (hpi, hi), (hpp, hp) = r
+        if max(pi + hpi) > 64 or min(pp + hpp) < 250: errs.append("probe points: ink %r %r, paper %r %r" % (pi, hpi, pp, hpp))
+        # The ink shows through: the fill over the marker stays much darker than over paper.
+        if lum(si) + 100 > lum(sp): errs.append("selection hides the ink: %r vs paper %r" % (si, sp))
+        if lum(hi) + 60 > lum(hp): errs.append("current hit hides the ink: %r vs paper %r" % (hi, hp))
+        # The paper is tinted, not white and not opaque colour.
+        if not (sp[2] - sp[0] > 40 and sp[0] < 230 and sp[0] > 100): errs.append("selection paper tint %r" % (sp,))
+        if not (hp[0] > 240 and hp[1] > 240 and 80 < hp[2] < 200): errs.append("hit paper tint %r" % (hp,))
+for k in ("ms-sel", "ms-hits", "ms-all", "ms-all-other", "ms-fullpage-photo"):
+    print("tint %s: %s" % (k, v.get(k)))
+for e in errs: print("FAIL: tint: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-tint/tint.txt" "$platform" || fail=1
 
 # Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
 case_end
