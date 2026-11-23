@@ -1282,7 +1282,7 @@ if [ -z "$lockwish" ]; then
 else
   cat > "$work/attacker.tcl" <<'TCL'
 wm withdraw .
-lassign $argv dir
+lassign $argv dir plat
 namespace eval ::safepdf {}
 set t0 [clock milliseconds]
 while {![file exists $dir/up] && [clock milliseconds] - $t0 < 40000} { after 50 }
@@ -1292,11 +1292,36 @@ puts $f "control-resources: [.ctl cget -validate] [.ctl cget -validatecommand]"
 .ctl configure -validate none
 puts $f "interps: [winfo interps]"
 set ok 0
-foreach i [lsort -unique [concat [winfo interps] tk viewer safe-pdf]] {
-  if {$i eq [tk appname]} continue
-  set code [catch {send $i {set ::safepdf::lockSent 1}} r]
-  puts $f "send $i: $code $r"
-  if {$code == 0} { incr ok }
+# The viewer started with SAFEPDF_VIEWER_DRIVE=1 reports its unique application name in
+# lockdown.txt (task 10.19): the control sends to exactly that one, asynchronously (a send the
+# viewer never services blocks until it exits), and the viewer proves the script ran by
+# creating $dir/sent; the attacker polls for the file. Without it (the lockdown run) every
+# registered interpreter (X11: the display is the test's own) or, on Aqua, only the usual names
+# (`winfo interps` there lists every Tk interpreter of the user, including other runs' and
+# foreign programs, which must not be sent scripts) are tried.
+set vname ""
+catch {
+  set lf [open $dir/lockdown.txt]
+  foreach l [split [read $lf] "\n"] {
+    if {[string match "appname: *" $l]} { set vname [string range $l 9 end] }
+  }
+  close $lf
+}
+if {$vname ne ""} {
+  set t1 [clock milliseconds]
+  set code [catch {send -async $vname "close \[open $dir/sent w\]; set ::safepdf::lockSent 1"} r]
+  puts $f "send-async $vname: $code $r"
+  while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50 }
+  puts $f "sent-file: [file exists $dir/sent] after [expr {[clock milliseconds] - $t1}] ms"
+  if {[file exists $dir/sent]} { incr ok }
+} else {
+  set cands [expr {$plat eq "aqua" ? {tk viewer safe-pdf} : [concat [winfo interps] tk viewer safe-pdf]}]
+  foreach i [lsort -unique $cands] {
+    if {$i eq [tk appname]} continue
+    set code [catch {send $i {set ::safepdf::lockSent 1}} r]
+    puts $f "send $i: $code $r"
+    if {$code == 0} { incr ok }
+  }
 }
 puts $f "sends-ok: $ok"
 close $f
@@ -1319,8 +1344,34 @@ TCL
 *Toplevel.container: 1
 XD
     env HOME="$d/home" SAFEPDF_VIEWER_SMOKE="$d" SAFEPDF_VIEWER_SMOKE_MODE=lockdown "$@" \
-      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5"; wait $v' _ \
-      "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d"
+      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5" "$6"; wait $v' _ \
+      "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d" "$platform"
+  }
+  # aqua_send_works: two plain wish processes, one asynchronous send between them (15 s).
+  aqua_send_works() {
+    local b="$work/send-base"
+    rm -rf "$b"; mkdir -p "$b"
+    cat > "$b/srv.tcl" <<'TCL'
+wm withdraw .
+tk appname safepdf-send-baseline
+close [open [lindex $argv 0]/up w]
+after 20000 exit
+TCL
+    cat > "$b/cli.tcl" <<'TCL'
+wm withdraw .
+set d [lindex $argv 0]
+set t0 [clock milliseconds]
+while {![file exists $d/up] && [clock milliseconds] - $t0 < 10000} { after 50 }
+catch {send -async safepdf-send-baseline "close \[open $d/got w\]"}
+set t0 [clock milliseconds]
+while {![file exists $d/got] && [clock milliseconds] - $t0 < 15000} { after 50 }
+exit
+TCL
+    "$lockwish" "$b/srv.tcl" "$b" & local sv=$!
+    "$lockwish" "$b/cli.tcl" "$b"
+    kill "$sv" 2>/dev/null || true
+    wait "$sv" 2>/dev/null || true
+    [ -e "$b/got" ]
   }
   lock_run "$work/out-lock" || { echo "FAIL: lockdown run failed" >&2; fail=1; }
   cat "$work/out-lock/lockdown.txt" "$work/out-lock/attack.txt" 2>/dev/null || true
@@ -1358,8 +1409,17 @@ sys.exit(1 if errs else 0)
 ' "$work/out-lock" "$platform" || fail=1
   lock_run "$work/out-drive" SAFEPDF_VIEWER_DRIVE=1 || { echo "FAIL: drive-hook run failed" >&2; fail=1; }
   cat "$work/out-drive/attack.txt" 2>/dev/null || true
-  grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null \
-    || { echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1; }
+  if ! grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null; then
+    # The control failed. If Tk Aqua cannot deliver a send between two plain wish processes
+    # either (task 10.19: AppleEvents are not dispatched in a session with a locked screen),
+    # the control is inconclusive in this session: skipped, not failed. Any other failure
+    # stays one.
+    if [ "$platform" = aqua ] && ! aqua_send_works; then
+      skip_case "1l drive control" "Tk Aqua send does not deliver between two plain wish processes in this session (locked screen?)"
+    else
+      echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1
+    fi
+  fi
   [ ! -e "$work/out-drive/pwned" ] || { echo "FAIL: a hostile resource ran with the hook" >&2; fail=1; }
 fi
 
