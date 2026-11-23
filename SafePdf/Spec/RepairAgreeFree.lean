@@ -5,7 +5,7 @@ import SafePdf.Spec.WritePrefix
 # C4 with free entries `n ≥ 1` (task 12.7a)
 
 Plan.md §5 (claim C4), §5.2 (fuel = number of objects), §5.4 (the repair path), §6 Phase 12
-"Proof gaps" (task 12.7a); `docs/safety.md` §5, gap 1. Extends `Spec.RepairAgree` (task 12.7),
+"Proof gaps" (tasks 12.7a, 12.7d); `docs/safety.md` §5, gap 1. Extends `Spec.RepairAgree` (task 12.7),
 whose H2 forbade free entries other than object 0.
 
 ## The obstacle
@@ -15,10 +15,11 @@ repaired section does not, so the two sections differ in length, and `getObject`
 section length (`OpenDoc.objectCount`) as the fuel of `/Length` resolution
 (`Length.parseIndirectResolved`) and of object streams (`ObjStm.fetchCompressed`). Besides, the
 strict lookup returns `free` where the repaired one returns nothing: `getObject` maps both to
-`null` (rule G4), but `/Length` resolution reports them with **different messages**
-(`malformed 0 "/Length refers to free object n"` against `"… not in the xref"`;
-`freeLengthBytes`). Exact equality of `getObject` is therefore false under the relaxed
-hypothesis; the theorem states the strongest true relation, `Agree`.
+`null` (rule G4), and until task 12.7d `/Length` resolution reported them with **different
+messages** (`malformed 0 "/Length refers to free object n"` against `"… not in the xref"`;
+`freeLengthBytes`), so 12.7a could only state `Agree`. Task 12.7d made Core report both with
+one message (`Length.lengthMissingMsg`; likewise `ObjStm.containerMissingMsg` for object
+stream containers), and `getObject` is now **equal** on both paths (`c4_free_eq`).
 
 ## Theorems
 
@@ -29,22 +30,22 @@ hypothesis; the theorem states the strongest true relation, `Agree`.
   related by `LookupRel` (same entries once `free` is forgotten) and fuels above `cnt S V`
   (in-use objects not being visited), resolution agrees; lifted by `lengthOf_agree`,
   `parseIndirectWith_agree` (only the call point matters, `parseIndirectWith_err`) and
-  `getObject_agree`.
+  `getObject_agree`. Exact forms (task 12.7d): `resolve_eq`, `lengthOf_eq`, `getObject_eq`.
 * `HypFree` (decidable, checker `checkFree`): `Hyp` with H2 relaxed to `EntryOkFree` (free
   entries allowed for every number; H1, H3–H6 unchanged; `Hyp.toFree`). A free `n ≥ 1` has no
   scan hit, by H3: "shadowed" hits do not exist, since the scan keeps the newest hit of every
   number.
-* `c4_free` / `c4_free_check`: the repair path succeeds, same bytes, same in-use entries
-  (`inUse_mem_iff`), same `/Root`, and `Agree` of `getObject` for every `num gen` (equal, or
-  both `malformed 0`; `Agree.ok_iff`: the same successes). The fixtures `freeEntryBytes`
-  (passes `checkFree`, fails 12.7's `check`, sections of 7 and 6 entries, `getObject` equal)
-  and `freeLengthBytes` (the message difference) are checked by `#guard`.
+* `c4_free_eq` / `c4_free_eq_check`: the repair path succeeds, same bytes, same in-use
+  entries (`inUse_mem_iff`), same `/Root`, and **equal** `getObject` for every `num gen`.
+  `c4_free` / `c4_free_check` keep 12.7a's statement (`Agree`: equal, or both `malformed 0`;
+  `Agree.ok_iff`: the same successes), now derived from the exact form. The fixtures
+  `freeEntryBytes` (passes `checkFree`, fails 12.7's `check`, sections of 7 and 6 entries,
+  `getObject` equal) and `freeLengthBytes` (a `/Length` naming the free object: the same
+  error on both paths) are checked by `#guard`.
 
 ## Open
 
 * Compressed entries and encrypted files (as in `Spec.RepairAgree`).
-* Exact equality under `HypFree` would need `Length.resolveLengthAux` to report a free and a
-  missing entry alike (a Core change), or a hypothesis that no `/Length` names a free object.
 -/
 
 namespace SafePdf.Spec.RepairAgreeFree
@@ -192,6 +193,42 @@ theorem resolve_agree {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefE
         · exact Agree.refl _
       · rcases h1 with h1 | ⟨a, g, h1⟩ <;> rcases h2 with h2 | ⟨a', g', h2⟩ <;>
           rw [h1, h2] <;> exact Or.inr ⟨_, _, rfl, rfl⟩
+
+/-- **Exact form of `resolve_agree`** (task 12.7d): since Core reports a free and a missing
+`/Length` target with the same message (`Length.lengthMissingMsg`), resolution with related
+lookups and fuels above `cnt S V` gives **equal** results. -/
+theorem resolve_eq {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefEntry}
+    (h : LookupRel l1 l2) (limits : Limits) (bytes : ByteArray) (S : List Nat)
+    (hS : ∀ n off g, l1 n = some (.inUse off g) → n ∈ S) :
+    ∀ f1 f2 V ref, cnt S V < f1 → cnt S V < f2 →
+      (resolveLengthAux pre l1 limits bytes f1 V ref).2 =
+        (resolveLengthAux pre l2 limits bytes f2 V ref).2 := by
+  intro f1
+  induction f1 with
+  | zero => intro f2 V ref h1; omega
+  | succ k ih =>
+    intro f2 V ref hk hj
+    obtain ⟨j, rfl⟩ : ∃ j, f2 = j + 1 := ⟨f2 - 1, by omega⟩
+    rw [resolveLengthAux, resolveLengthAux]
+    by_cases hv : ref.1 ∈ V
+    · simp only [hv, ↓reduceIte]
+      rw [errOffset_eq h]
+    · simp only [hv, ↓reduceIte]
+      rcases h.cases ref.1 with ⟨off, g, h1, h2⟩ | ⟨h1, h2⟩
+      · rw [h1, h2]
+        simp only
+        split
+        · rename_i hg
+          rcases hp : parseLengthObj limits bytes off ref.1 ref.2 with e | o
+          · rfl
+          · cases o
+            all_goals try rfl
+            rename_i m hh
+            have hlt := cnt_cons_lt (hS _ _ _ h1) hv
+            exact ih j _ _ (by omega) (by omega)
+        · rfl
+      · rcases h1 with h1 | ⟨a, g, h1⟩ <;> rcases h2 with h2 | ⟨a', g', h2⟩ <;>
+          rw [h1, h2]
 
 /-- **Fuel monotonicity of `/Length` resolution** (any lookup, compressed entries included):
 if resolution succeeds with fuel `f`, it performs the same parses and gives the same result
@@ -362,6 +399,22 @@ theorem lengthOf_agree {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option Xref
       · rw [he1, he2]; exact Or.inr ⟨e1, e2, rfl, rfl⟩
     all_goals exact Agree.refl _
 
+/-- `lengthOf` is **equal** for related lookups and fuels above `cnt S [self]` (task 12.7d). -/
+theorem lengthOf_eq {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefEntry}
+    (h : LookupRel l1 l2) (limits : Limits) (bytes : ByteArray) (S : List Nat)
+    (hS : ∀ n off g, l1 n = some (.inUse off g) → n ∈ S) (f1 f2 self : Nat)
+    (h1 : cnt S [self] < f1) (h2 : cnt S [self] < f2) (d : Dict) (at_ : Nat) :
+    lengthOf pre l1 limits bytes f1 self d at_ = lengthOf pre l2 limits bytes f2 self d at_ := by
+  unfold lengthOf lengthDict
+  rcases hd : Dict.lookup d Core.ObjParse.nameLength with _ | o
+  · rfl
+  · cases o
+    case ref m g =>
+      simp only
+      unfold resolveLength
+      rw [resolve_eq (pre := pre) h limits bytes S hS f1 f2 [self] (m, g) h1 h2]
+    all_goals rfl
+
 /-- **Fuel monotonicity of the object parse** (`Length.parseIndirectResolved`, any lookup): a
 parse that succeeds with fuel `f` gives the same result with any fuel `f' ≥ f`. -/
 theorem parseIndirectResolved_mono {lookup : Nat → Option XrefEntry} {limits : Limits}
@@ -451,6 +504,29 @@ theorem getObject_agree {d d' : OpenDoc} (hb : d.bytes = d'.bytes) (hc : d.crypt
     · simp only [hg, ↓reduceIte]; exact Agree.refl _
   · rcases h1 with h1 | ⟨a, g, h1⟩ <;> rcases h2 with h2 | ⟨a', g', h2⟩ <;> rw [h1, h2] <;>
       exact Agree.refl _
+
+/-- **`getObject` is equal** on two unencrypted documents over the same bytes whose lookups
+are related by `LookupRel`, when both fuels (`objectCount`) exceed the number of in-use
+objects (task 12.7d: the exact form of `getObject_agree`). -/
+theorem getObject_eq {d d' : OpenDoc} (hb : d.bytes = d'.bytes) (hc : d.crypt = none)
+    (hc' : d'.crypt = none) (h : LookupRel d.lookup d'.lookup) (S : List Nat)
+    (hS : ∀ n off g, d.lookup n = some (.inUse off g) → n ∈ S)
+    (hf : S.length < d.objectCount) (hf' : S.length < d'.objectCount) (limits : Limits)
+    (num gen : Nat) : d.getObject limits num gen = d'.getObject limits num gen := by
+  have hpre : d.pre = d'.pre := by unfold OpenDoc.pre; rw [hc, hc']
+  unfold OpenDoc.getObject OpenDoc.getObjectTrace
+  rcases h.cases num with ⟨off, g, h1, h2⟩ | ⟨h1, h2⟩
+  · rw [h1, h2]
+    simp only
+    by_cases hg : g = gen
+    · simp only [hg, ↓reduceIte, OpenDoc.decrypt, hc, hc']
+      rw [parseIndirectResolved_eq_with, parseIndirectResolved_eq_with, ← hb, ← hpre]
+      rw [parseIndirectWith_congr (lenF := lengthOf d.pre d.lookup limits d.bytes d.objectCount)
+        (lenG := lengthOf d.pre d'.lookup limits d.bytes d'.objectCount)
+        (fun n dd p _ => lengthOf_eq h limits d.bytes S hS _ _ n
+          (Nat.lt_of_le_of_lt (cnt_le S [n]) hf) (Nat.lt_of_le_of_lt (cnt_le S [n]) hf') dd p)]
+    · simp only [hg, ↓reduceIte]
+  · rcases h1 with h1 | ⟨a, g, h1⟩ <;> rcases h2 with h2 | ⟨a', g', h2⟩ <;> rw [h1, h2]
 
 /-! ## The hypothesis with free entries -/
 
@@ -573,20 +649,19 @@ theorem validate_agree {limits : Limits} {d₁ d₂ : OpenDoc}
       rw [((hg n g).ok_iff _).mpr heq]
     all_goals cases h
 
-/-- **C4 with free entries (repair conservativity).** If the strict path opens `bytes` as `d`
-and `HypFree limits bytes d` holds (free entries allowed for every object number), the repair
-path also succeeds; its document is flagged `repaired`, has the same bytes, the same in-use
-entries and the same `/Root` as `d`, and for **every** `num gen` its `getObject` agrees with
-`d`'s: the same result, or both `malformed 0` errors (`Agree`; in particular the same
-successes, `Agree.ok_iff`). The sections themselves may differ: free entries `n ≥ 1` are
-absent from the repaired one. -/
-theorem c4_free {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+/-- **C4 with free entries, exact form (repair conservativity; task 12.7d).** If the strict
+path opens `bytes` as `d` and `HypFree limits bytes d` holds (free entries allowed for every
+object number), the repair path also succeeds; its document is flagged `repaired`, has the
+same bytes, the same in-use entries and the same `/Root` as `d`, and for **every** `num gen`
+its `getObject` is **equal** to `d`'s. The sections themselves may differ: free entries
+`n ≥ 1` are absent from the repaired one. -/
+theorem c4_free_eq {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     (hs : strictOpen limits bytes = .ok d) (hh : HypFree limits bytes d) :
     ∃ d', repairOpen limits bytes = .ok d' ∧ d'.repaired = true ∧ d'.bytes = d.bytes ∧
       (∀ n off g, (n, XrefEntry.inUse off g) ∈ d'.xref.entries ↔
         (n, XrefEntry.inUse off g) ∈ d.xref.entries) ∧
       d'.trailer.root? = d.trailer.root? ∧
-      ∀ num gen, Agree (d'.getObject limits num gen) (d.getObject limits num gen) := by
+      ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen := by
   have hin := inUse_mem_iff hh
   obtain ⟨hz, hent, -, -, htr, hpl⟩ := hh
   have hbytes := strictOpen_bytes hs
@@ -647,10 +722,11 @@ theorem c4_free {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
           ⟨(0, .free 0 65535), by simp [scanSection], by simp [isInUse]⟩
       simp only [d', OpenDoc.objectCount, OpenDoc.mk', List.size_toArray]
       omega
-    have hg : ∀ num gen, Agree (d'.getObject limits num gen) (d.getObject limits num gen) :=
+    have hg : ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen :=
       fun num gen =>
-        (getObject_agree (by rw [hbytes]; rfl) hc rfl hrel S hS hf hf' limits num gen).symm
-    have hv : validate limits d' = .ok d' := validate_agree hroot.symm hg hval
+        (getObject_eq (by rw [hbytes]; rfl) hc rfl hrel S hS hf hf' limits num gen).symm
+    have hv : validate limits d' = .ok d' :=
+      validate_agree hroot.symm (fun num gen => Or.inl (hg num gen)) hval
     refine ⟨d', ?_, rfl, by rw [hbytes]; rfl, fun n off g => (hin n off g).symm, hroot, hg⟩
     unfold repairOpen
     rw [hrep]
@@ -658,6 +734,36 @@ theorem c4_free {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     rw [withCrypt_plain (d := d') henc]
     exact hv
   · cases htr
+
+/-- **C4 with free entries (repair conservativity).** `c4_free_eq` with its last conjunct
+weakened to `Agree` (equal results, or both `malformed 0` errors; in particular the same
+successes, `Agree.ok_iff`). Kept with this statement for its users; since task 12.7d the
+`Agree` is always the left disjunct (equality). -/
+theorem c4_free {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+    (hs : strictOpen limits bytes = .ok d) (hh : HypFree limits bytes d) :
+    ∃ d', repairOpen limits bytes = .ok d' ∧ d'.repaired = true ∧ d'.bytes = d.bytes ∧
+      (∀ n off g, (n, XrefEntry.inUse off g) ∈ d'.xref.entries ↔
+        (n, XrefEntry.inUse off g) ∈ d.xref.entries) ∧
+      d'.trailer.root? = d.trailer.root? ∧
+      ∀ num gen, Agree (d'.getObject limits num gen) (d.getObject limits num gen) := by
+  obtain ⟨d', h1, h2, h3, h4, h5, h6⟩ := c4_free_eq hs hh
+  exact ⟨d', h1, h2, h3, h4, h5, fun num gen => Or.inl (h6 num gen)⟩
+
+/-- **C4 with free entries, exact form, from the checker** (task 12.7d). -/
+theorem c4_free_eq_check {limits : Limits} {bytes : ByteArray}
+    (hc : checkFree limits bytes = true) :
+    ∃ d d', strictOpen limits bytes = .ok d ∧ repairOpen limits bytes = .ok d' ∧
+      d'.repaired = true ∧ d'.bytes = d.bytes ∧
+      (∀ n off g, (n, XrefEntry.inUse off g) ∈ d'.xref.entries ↔
+        (n, XrefEntry.inUse off g) ∈ d.xref.entries) ∧
+      d'.trailer.root? = d.trailer.root? ∧
+      ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen := by
+  unfold checkFree at hc
+  split at hc
+  · rename_i d hs
+    obtain ⟨d', h⟩ := c4_free_eq hs (of_decide_eq_true hc)
+    exact ⟨d, d', hs, h⟩
+  · cases hc
 
 /-- **C4 with free entries, from the checker.** -/
 theorem c4_free_check {limits : Limits} {bytes : ByteArray} (hc : checkFree limits bytes = true) :
@@ -721,11 +827,18 @@ def counts (bytes : ByteArray) : Option (Nat × Nat) :=
 #guard bothErr freeEntryBytes 5 = some ("ok", "ok")
 #guard both freeEntryBytes 6 = some ("other", "other")
 
--- Why `c4_free` concludes `Agree` and not equality: a `/Length` naming a free object fails on
--- both paths, with different `malformed 0` messages ("free" against "not in the xref").
+-- A `/Length` naming a free object (strict path) or a missing one (repair path) fails with
+-- the same `malformed 0` error since task 12.7d, so `getObject` is equal (`c4_free_eq`).
+-- Before 12.7d the messages differed ("free object 4" against "not in the xref").
 #guard checkFree Limits.default freeLengthBytes = true
-#guard bothErr freeLengthBytes 5 = some ("malformed 0: /Length refers to free object 4",
-  "malformed 0: /Length refers to object 4, not in the xref")
+#guard bothErr freeLengthBytes 5 = some (
+  "malformed 0: /Length refers to object 4, which is free or not in the xref",
+  "malformed 0: /Length refers to object 4, which is free or not in the xref")
+#guard (match strictOpen Limits.default freeLengthBytes,
+    repairOpen Limits.default freeLengthBytes with
+  | .ok d, .ok d' => (List.range 8).all fun n =>
+      errText (d.getObject Limits.default n 0) == errText (d'.getObject Limits.default n 0)
+  | _, _ => false)
 
 -- 12.7's fixtures: `repair-diff.pdf` still fails (H2' on object 3, H3 on object 2), and the
 -- corrected file passes (`Hyp.toFree`).

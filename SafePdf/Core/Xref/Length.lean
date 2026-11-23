@@ -111,6 +111,12 @@ open SafePdf.Core.Filter (Budget)
 the budgeted `/Length` resolver below (rule L6) can charge the object streams it decodes;
 `Core.Xref.ObjStm` imports this module. Names are unchanged. -/
 
+/-- The error message for an object stream `c` whose xref entry is free or absent (task 12.7d:
+both cases give the same message, so a free entry and a missing one are indistinguishable,
+as they are to `OpenDoc.getObject`, rule G4). -/
+def containerMissingMsg (c : Nat) : String :=
+  s!"object stream {c} is free or not in the xref"
+
 /-- `decodeObjStm` with the budget: the decode is `Filter.decodeBytesB` (rules O1–O4). -/
 def decodeObjStmB (limits : Limits) (budget : Budget) (st : Stream) :
     (Except Error ObjStm) × Budget :=
@@ -227,6 +233,12 @@ def errOffset (lookup : Nat → Option XrefEntry) (n : Nat) : Nat :=
   | some (.inUse off _) => off
   | _ => 0
 
+/-- The error message for a `/Length` reference to object `n` whose xref entry is free or
+absent (task 12.7d: one message for both, so that the strict and repaired paths, which differ
+only there, fail alike; `Spec.RepairAgreeFree.c4_free_eq`). -/
+def lengthMissingMsg (n : Nat) : String :=
+  s!"/Length refers to object {n}, which is free or not in the xref"
+
 /-- The length denoted by the integer `l` found at `off` (rule L4): `l ≥ 0`, else an error. -/
 def intLength (off : Nat) (l : Int) : Except Error Nat :=
   if 0 ≤ l then .ok l.toNat else .error (.malformed off "negative /Length")
@@ -301,8 +313,8 @@ def resolveLengthAux (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (lim
     | 0 => (0, .error (.limitExceeded .objects))
     | fuel + 1 =>
       match lookup ref.1 with
-      | none => (0, .error (.malformed 0 s!"/Length refers to object {ref.1}, not in the xref"))
-      | some (.free _ _) => (0, .error (.malformed 0 s!"/Length refers to free object {ref.1}"))
+      | none => (0, .error (.malformed 0 (lengthMissingMsg ref.1)))
+      | some (.free _ _) => (0, .error (.malformed 0 (lengthMissingMsg ref.1)))
       | some (.compressed c idx) =>
         if c = ref.1 ∨ c ∈ visiting then
           (0, .error (.cycle (errOffset lookup c)
@@ -330,8 +342,8 @@ def resolveLengthAux (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (lim
             (0, .error (if c' = ref.1 ∨ c' ∈ visiting then
               .cycle 0 s!"cyclic /Length through object stream {c}"
               else .malformed 0 s!"object stream {c} is itself in an object stream"))
-          | some (.free _ _) => (0, .error (.malformed 0 s!"object stream {c} is free"))
-          | none => (0, .error (.malformed 0 s!"object stream {c} is not in the xref"))
+          | some (.free _ _) => (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)))
+          | none => (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)))
       | some (.inUse off g') =>
         if g' = ref.2 then
           match parseLengthObj limits bytes off ref.1 ref.2 with
@@ -741,9 +753,9 @@ def resolveLengthAuxB (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (li
     | fuel + 1 =>
       match lookup ref.1 with
       | none =>
-        (0, .error (.malformed 0 s!"/Length refers to object {ref.1}, not in the xref"), budget)
+        (0, .error (.malformed 0 (lengthMissingMsg ref.1)), budget)
       | some (.free _ _) =>
-        (0, .error (.malformed 0 s!"/Length refers to free object {ref.1}"), budget)
+        (0, .error (.malformed 0 (lengthMissingMsg ref.1)), budget)
       | some (.compressed c idx) =>
         if c = ref.1 ∨ c ∈ visiting then
           (0, .error (.cycle (errOffset lookup c)
@@ -774,8 +786,9 @@ def resolveLengthAuxB (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (li
             (0, .error (if c' = ref.1 ∨ c' ∈ visiting then
               .cycle 0 s!"cyclic /Length through object stream {c}"
               else .malformed 0 s!"object stream {c} is itself in an object stream"), budget)
-          | some (.free _ _) => (0, .error (.malformed 0 s!"object stream {c} is free"), budget)
-          | none => (0, .error (.malformed 0 s!"object stream {c} is not in the xref"), budget)
+          | some (.free _ _) =>
+            (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)), budget)
+          | none => (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)), budget)
       | some (.inUse off g') =>
         if g' = ref.2 then
           match parseLengthObj limits bytes off ref.1 ref.2 with
