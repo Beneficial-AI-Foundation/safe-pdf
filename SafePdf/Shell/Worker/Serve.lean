@@ -11,8 +11,9 @@ so that the GUI can stop it (kill) at any time and, in task 12.2b, run it in a s
 * **Input is bytes, never a path.** The worker opens no document file: the client sends the
   document in a `Request.openDoc` frame (`SafePdf.Api.openBytes`, strict mode available). The
   only files it reads are the substitute fonts in the fixed system font directories
-  (`Worker.workerFonts`, loaded once, on the first `openDoc`) — a known gap for 12.2b, which
-  decides whether the GUI sends font bytes instead.
+  (`Worker.workerFaces`), read once at startup **before** the worker confines itself (task
+  12.2b, `SafePdf.Shell.Worker.Sandbox`); the loop receives them as the initial `State` and
+  does no file or environment access of its own.
 * **No environment needed.** Nothing reads environment variables or the working directory;
   the client starts it with an empty environment and `/` as working directory.
 * **Loop.** Read a frame from stdin (`Worker.readFrame`, cap `Protocol.requestCap`), decode it
@@ -36,12 +37,12 @@ open SafePdf SafePdf.Core
 open SafePdf.Shell.Worker
 open SafePdf.Shell.Worker.Protocol (Request Response ErrorKind)
 
-/-- The worker's state: the open document and the substitute fonts (loaded on first open). -/
+/-- The worker's state: the open document and the substitute fonts (loaded at startup). -/
 structure State where
   /-- The open document. -/
   doc : Option Api.Document := none
   /-- Substitute fonts for non-embedded standard-14 faces. -/
-  subst : Option Raster.Subst.SubstFonts := none
+  subst : Raster.Subst.SubstFonts := {}
 
 /-- The protocol's target of an API target. -/
 def target : Api.Target → Protocol.Target
@@ -92,29 +93,25 @@ def answerDoc (d : Api.Document) (subst : Raster.Subst.SubstFonts) : Request →
     | .error e => pageError e
   | .openDoc .. | .quit => .error .malformed "unreachable"
 
-/-- Answer one request, updating the state. -/
-def answer (st : State) (req : Request) : IO (State × Response) := do
+/-- Answer one request, updating the state (pure: no file, network or environment access). -/
+def answer (st : State) (req : Request) : State × Response :=
   match req with
   | .openDoc bytes allowRepair =>
     match Api.openBytes bytes { allowRepair } with
-    | .error e => return ({ st with doc := none }, .error .openFailed e.message)
-    | .ok d =>
-      let subst ← match st.subst with
-        | some s => pure s
-        | none => workerFonts d.limits
-      return ({ doc := some d, subst := some subst },
-        .docInfo d.pageCount d.repaired d.encrypted)
-  | .quit => return (st, .bye)
+    | .error e => ({ st with doc := none }, .error .openFailed e.message)
+    | .ok d => ({ st with doc := some d }, .docInfo d.pageCount d.repaired d.encrypted)
+  | .quit => (st, .bye)
   | _ =>
     match st.doc with
-    | none => return (st, .error .noDocument "no document is open")
-    | some d => return (st, answerDoc d (st.subst.getD {}) req)
+    | none => (st, .error .noDocument "no document is open")
+    | some d => (st, answerDoc d st.subst req)
 
-/-- The request loop. Returns the exit status. -/
-def loop (limits : Limits) : IO UInt32 := do
+/-- The request loop, starting with the substitute fonts `subst`. Its only effects are reading
+stdin and writing stdout. Returns the exit status. -/
+def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) : IO UInt32 := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
-  let mut st : State := {}
+  let mut st : State := { subst }
   repeat
     match ← readFrame stdin (Protocol.requestCap limits) with
     | .eof => return 0
@@ -128,7 +125,7 @@ def loop (limits : Limits) : IO UInt32 := do
       | .error e =>
         writeAll stdout (Protocol.frameResponse limits (.error .malformed (reprStr e)))
       | .ok req =>
-        let (st', resp) ← answer st req
+        let (st', resp) := answer st req
         st := st'
         writeAll stdout (Protocol.frameResponse limits resp)
         if let .quit := req then return 0
