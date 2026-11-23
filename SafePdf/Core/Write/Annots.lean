@@ -766,12 +766,13 @@ def build (doc : Doc.Doc) (marks : List Mark) : Except Error (Marks × List AuxS
     | .error e => .error e
     | .ok pages => .ok (pages, flat.map apOf)
 
-/-- **Write `marks` into `doc`** as an incremental update (tasks 9.5a + 9.5b). -/
-def writeMarks (limits : Limits) (doc : Doc.Doc) (marks : List Mark) :
-    Except Error ByteArray :=
+/-- **Write `marks` into `doc`** as an incremental update (tasks 9.5a + 9.5b); `ivSeed` as
+for `writeEdits`. -/
+def writeMarks (limits : Limits) (doc : Doc.Doc) (marks : List Mark)
+    (ivSeed : ByteArray := ByteArray.empty) : Except Error ByteArray :=
   match build doc marks with
   | .error e => .error e
-  | .ok (ms, aux) => Incremental.writeAnnots limits doc ms aux
+  | .ok (ms, aux) => Incremental.writeAnnots limits doc ms aux ivSeed
 
 /-! ## Edits of saved marks (rules A10, A11; task 9.5g) -/
 
@@ -902,11 +903,13 @@ def buildEdits (doc : Doc.Doc) (e : EditSet) :
       | .error err => .error err
       | .ok sups => .ok (pes, sups, addAps ++ e.sups.map (apOf ·.mark))
 
-/-- **Write an edit set into `doc`** as one incremental update (tasks 9.5a, 9.5b, 9.5g). -/
-def writeEdits (limits : Limits) (doc : Doc.Doc) (e : EditSet) : Except Error ByteArray :=
+/-- **Write an edit set into `doc`** as one incremental update (tasks 9.5a, 9.5b, 9.5g);
+`ivSeed` feeds the AES IVs of an encrypted document (task 12.4). -/
+def writeEdits (limits : Limits) (doc : Doc.Doc) (e : EditSet)
+    (ivSeed : ByteArray := ByteArray.empty) : Except Error ByteArray :=
   match buildEdits doc e with
   | .error err => .error err
-  | .ok (pes, sups, aux) => Incremental.writeUpdate limits doc pes sups aux
+  | .ok (pes, sups, aux) => Incremental.writeUpdate limits doc pes sups aux ivSeed
 
 /-! ## Properties -/
 
