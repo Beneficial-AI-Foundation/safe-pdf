@@ -1269,3 +1269,8 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Shell.App.Select.meetAt_spec
 #print axioms SafePdf.Shell.App.Select.bandAt_meet
 #print axioms SafePdf.Shell.App.Select.bandAt_covers
+-- Phase 12, task 12.7: C4 with explicit hypotheses (SafePdf/Spec/RepairAgree.lean)
+#print axioms SafePdf.Spec.RepairAgree.c4
+#print axioms SafePdf.Spec.RepairAgree.c4_check
+#print axioms SafePdf.Spec.RepairAgree.entries_eq
+#print axioms SafePdf.Spec.RepairAgree.newestHits_mem_iff

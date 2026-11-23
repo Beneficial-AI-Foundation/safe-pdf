@@ -80,6 +80,7 @@ import SafePdf.Core.Write.Encrypt
 import SafePdf.Core.Write.Annots
 import SafePdf.Spec.Write
 import SafePdf.Spec.WritePrefix
+import SafePdf.Spec.RepairAgree
 import SafePdf.Core.Annot
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text
