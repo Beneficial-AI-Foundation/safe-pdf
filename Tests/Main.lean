@@ -38,6 +38,7 @@ import Tests.Annot
 import Tests.DCT
 import Tests.OpenSettings
 import Tests.OptionalContent
+import Tests.Attachments
 
 /-!
 # Test runner
@@ -95,7 +96,8 @@ def suites : List Suite :=
     { name := "annot", run := SafePdf.Tests.Annot.run },
     { name := "dct", run := SafePdf.Tests.DCT.run },
     { name := "open-settings", run := SafePdf.Tests.OpenSettings.run },
-    { name := "optional-content", run := SafePdf.Tests.OptionalContent.run } ]
+    { name := "optional-content", run := SafePdf.Tests.OptionalContent.run },
+    { name := "attachments", run := SafePdf.Tests.Attachments.run } ]
 
 end SafePdf.Tests
 

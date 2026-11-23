@@ -1233,3 +1233,8 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Content.Run.stepR_oc_visible
 #print axioms SafePdf.Core.Content.Run.foldl_oc_visible
 #print axioms SafePdf.Core.Content.Run.runOps_oc_visible
+#print axioms SafePdf.Core.Doc.Attachments.list_entries_le
+#print axioms SafePdf.Core.Doc.Attachments.clean_length_le
+#print axioms SafePdf.Core.Doc.Attachments.clean_safe
+#print axioms SafePdf.Core.Doc.Attachments.fileNameOf_noSlash
+#print axioms SafePdf.Core.Doc.Attachments.decode_size_le
