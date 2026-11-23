@@ -196,7 +196,9 @@ else
 fi
 
 # Background mode (task 10.11, the macOS default): the shim (c/tk_shim.c) makes a smoke run
-# never activate and keeps its windows invisible and off screen, so the user can keep working.
+# never activate and keeps its windows invisible and off screen, so the user can keep working
+# (since 10.16 it also blocks Tk's own activation requests and native full screen;
+# SAFEPDF_SMOKE_TRACE_ACTIVATION=1 logs each blocked call).
 # With no active application Tk has no keyboard focus: checks that read the focus are relaxed
 # (the focus part is dropped) and 1q is skipped. SAFEPDF_SMOKE_FOREGROUND=1 runs the old
 # foreground mode (windows on screen, the app activated: leave the machine alone meanwhile).
