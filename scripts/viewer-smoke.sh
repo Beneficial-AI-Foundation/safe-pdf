@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r2; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -69,6 +69,10 @@
 #      wheel end to end in all four view modes, bubble highlight + note + Add text + Draw, Save ->
 #      Close -> reopen (pixels), XFDF export/import round trip, a fresh process on the saved file,
 #      qpdf, byte prefix, mutool (9.6);
+#   1o. wheel flow (SAFEPDF_VIEWER_SMOKE_MODE=wheelflow) on the four-page M9 fixture and the M9
+#      papers: a fresh file opens in Vertical Scrolling; bursts of small trackpad and wheel
+#      deltas cross page boundaries without stalling, going back or jumping in every view mode
+#      (9.r1); every other case runs with SAFEPDF_VIEWER_VIEW=single unless it says otherwise;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -100,10 +104,13 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# run_viewer DIR FILE: smoke-mode run with a 60 s timeout.
+# run_viewer DIR FILE: smoke-mode run with a 60 s timeout. Files open in vertical scrolling
+# since 9.r1; the cases written for the single-page view keep it through SAFEPDF_VIEWER_VIEW
+# (set it empty for the real default, as case 1o does).
 run_viewer() {
   mkdir -p "$1"
-  SAFEPDF_VIEWER_SMOKE="$1" timeout 60 "${wrap[@]}" "$viewer" "$2"
+  SAFEPDF_VIEWER_VIEW="${SAFEPDF_VIEWER_VIEW-single}" SAFEPDF_VIEWER_SMOKE="$1" \
+    timeout 60 "${wrap[@]}" "$viewer" "$2"
 }
 
 # ppm_stats FILE: prints "W H NONWHITE" for a binary PPM (P6, maxval 255).
@@ -1407,6 +1414,56 @@ m9papers="${SAFEPDF_SMOKE_PAPERS-corpus/files/arxiv-1706.03762.pdf}"
 for p in $m9papers; do
   if [ -f "$p" ]; then m9_case "paper-$(basename "$p" .pdf)" "$p"
   else echo "viewer-smoke: $p missing, M9 paper run skipped"; fi
+done
+
+# 1o. Wheel flow across page boundaries and the default view mode (task 9.r1;
+#     SAFEPDF_VIEWER_SMOKE_MODE=wheelflow, `Viewer.smokeWheelFlow`), on the four-page M9 fixture
+#     and the M9 papers, opened without SAFEPDF_VIEWER_VIEW: the file opens in Vertical
+#     Scrolling without spreads (state and View menu radio variables); then in single,
+#     continuous, facing and continuous facing mode at Page Width, and single at Page Fit, a
+#     trackpad-like burst of 12 px <TouchpadScroll> deltas with +-1 px sideways jitter and a
+#     burst of third-notch <MouseWheel> deltas, 8 ms apart and never pausing, must reach page 5
+#     (or the last page) without going back; the longest run of events that move nothing is at
+#     most the page-turn push (a quarter view of trackpad travel on a page that fits, a notch
+#     for the wheel) and zero in the vertical modes; no step jumps further than one event plus
+#     the push carried onto a new page.
+wheelflow_case() {  # wheelflow_case NAME PDF
+  local d="$work/wheelflow-$1"
+  SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2" \
+    || { echo "FAIL: wheelflow $1: run failed" >&2; fail=1; return; }
+  python3 -I -c '
+import math, sys
+name, path = sys.argv[1], sys.argv[2]
+lines = open(path, encoding="utf-8").read().splitlines()
+errs = []
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+if v.get("default") != "scroll=vertical spread=none radio=vertical none continuous=1":
+    errs.append("a fresh file is not in Vertical Scrolling: %r" % v.get("default"))
+seen = 0
+for l in lines:
+    if not l.startswith("flow-"): continue
+    seen += 1
+    label, rest = l[5:].split(": ", 1)
+    f = dict(t.split("=", 1) for t in rest.split())
+    view = int(f["view"])
+    pad = label.endswith("-pad")
+    vertical = label.startswith("continuous")
+    step = 12 if pad else math.ceil(view / 30) + 1
+    stall_max = 0 if vertical else (math.ceil(view / 4 / 12) + 1 if pad else 3)
+    step_max = step if vertical else 2 * step
+    if f["reached"] != "true": errs.append("%s stopped on page %s after %s events" % (label, f["page"], f["events"]))
+    if f["back"] != "0": errs.append("%s went backwards %s times" % (label, f["back"]))
+    if int(f["max-stall"]) > stall_max: errs.append("%s stalled for %s events (max %d)" % (label, f["max-stall"], stall_max))
+    if int(f["max-step"]) > step_max: errs.append("%s jumped %s px (max %d)" % (label, f["max-step"], step_max))
+    print("wheelflow %s: %s" % (name, l))
+if seen != 10: errs.append("expected 10 bursts, got %d (%r)" % (seen, lines[:3]))
+for e in errs: print("FAIL: wheelflow %s: %s" % (name, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$1" "$d/wheelflow.txt" || fail=1
+}
+wheelflow_case four "$work/m9four.pdf"
+for p in $m9papers; do
+  if [ -f "$p" ]; then wheelflow_case "paper-$(basename "$p" .pdf)" "$p"; fi
 done
 
 # 2. Bad inputs: the viewer must not crash and must report the error.

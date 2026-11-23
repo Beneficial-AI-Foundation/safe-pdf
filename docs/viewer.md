@@ -24,10 +24,12 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
   PDF.js (see *Toolbar and sidebar* below), a scrollable canvas (scroll bars) with the current
-  page — or, in the other view modes, all pages or two side by side (see *View modes* below;
-  `SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing` sets the initial one) —,
-  a status line (file, page, zoom, rotation, pixel size, render time or "from cache",
-  notes, the view mode when it is not the single page, or the error).
+  pages — every file opens in continuous vertical scrolling (View → Vertical Scrolling, No
+  Spreads, as PDF.js; task 9.r1), or, in the other view modes, one page or two side by side
+  (see *View modes* below; `SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing`
+  sets the initial one) —, a status line (file, page, zoom, rotation, pixel size, render time
+  or "from cache", notes, the view mode when it is not the default, or the error). A file
+  opened later in the same window keeps the mode chosen in the View menu.
 * Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
@@ -45,7 +47,7 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   (16384) is cropped by the renderer ("cropped" in the status line).
 * **Rotation**: view rotation in 90° steps, combined with each page's `/Rotate`; the window
   centre's page point stays at the centre.
-* **Scrolling** in the single-page view (and the facing view) is page-at-a-time: the canvas
+* **Scrolling** in the single-page view (and the facing view; not the default since 9.r1) is page-at-a-time: the canvas
   holds one page (spread). Scrolling past the bottom (or right) edge with the keys moves to the
   top of the next page; past the top, to the bottom of the previous page. The mouse wheel does
   the same (9.2, below). In the continuous modes the canvas holds the whole document (9.3).
@@ -162,10 +164,13 @@ instead of the system UI font; canvas drawing on X11 is not antialiased, so icon
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
 Add image (stamp) and Print come after M9.
 
-## Wheel scrolling across pages (9.2)
+## Wheel scrolling across pages (9.2, 9.r1)
 
 The wheel continues into the next / previous page as the keys do. Pure logic in
-`View.wheelStep` (`#guard` checks), driven by `::safepdf::emit wheel AXIS KIND D`:
+`View.wheelStep` (`#guard` checks, including `View.wheelPages`, a simulated document), driven by
+`::safepdf::emit wheel AXIS KIND D`. Each axis keeps its own state (`View.Wheels`, 9.r1). In the
+continuous modes (the default) the wheel simply scrolls the document; the rules below on page
+edges are for the page scroll modes (single page, facing).
 
 * **Deltas.** `<MouseWheel>` `%D` is in 1/120 notches on Tk ≥ 8.7 (Tk 9 turns X11 wheel
   buttons into `<MouseWheel>`) and on Windows; `<Button-4>`/`<Button-5>` (Tk 8.6 on X11) are
@@ -174,19 +179,38 @@ The wheel continues into the next / previous page as the keys do. Pure logic in
   (as Tk's `scroll 1 units`); smaller deltas (high-resolution wheels, trackpads) accumulate
   their fractions (`View.Wheel.acc`) instead of being rounded to a notch or lost.
 * **Edges.** Within the page the view scrolls and stops exactly at the edge (the rest of that
-  event is dropped). Only further events at the edge push past it; when the push reaches one
-  notch (a quarter of the view for trackpads) the page turns: down → top of the next page,
-  up → bottom of the previous page. A tiny overscroll never turns a page; a pause of 400 ms or
-  a change of direction forgets the push. A page that fits the window (fit page) turns with
-  every notch.
-* **Momentum.** After a trackpad turns the page, trackpad events are ignored until a 400 ms
-  pause, so inertial scrolling does not run through several pages. Wheel notches are not
-  latched.
+  event is dropped, so no part of a page is skipped). Further events at the edge push past it;
+  when the push reaches the threshold (`View.wheelThreshold`) the page turns: down → top of the
+  next page, up → bottom of the previous page. Threshold: one notch for wheels (a tenth of the
+  view); for trackpads a twentieth of the view (the gap between pages), but at least a quarter
+  of the view less what the page scrolls, so a page that fits the window (Page Fit) costs a
+  quarter of a view of finger travel. A tiny overscroll never turns a page; a pause of 400 ms
+  or a change of direction forgets the push.
+* **Flow (9.r1).** No event is ever swallowed: the push beyond the threshold is carried onto
+  the page just turned to, so a swipe, a fast wheel or trackpad momentum flows on into the new
+  page with its next event. 9.2 ignored every trackpad event after a turn until a 400 ms pause
+  (the gesture and its momentum stopped dead on the new page — the human's "when it scrolls to
+  the next page then it stops scrolling"), and shared one state between the axes, so the ±1 px
+  sideways jitter of a vertical swipe (`<TouchpadScroll>` carries both deltas) reset the push
+  and the page never turned at all (reproduced on X11: 3000 generated events stuck on page 1).
+* **Precision.** The wheel's `moveto` uses twelve digits (`Viewer.fmtFracFine`); with six, a
+  one-pixel step in a document taller than 500 000 pixels (vertical modes) rounded back to
+  where it started.
 * **Horizontal** (`Shift`+wheel, trackpad sideways): scrolls and stops at the edge; it never
   turns pages (the `Left`/`Right` keys still do).
-* Not tested here: real macOS trackpad deltas (the smoke test generates Tk 9 `<MouseWheel>`
-  and `<Button-4/5>` events on X11; the `line` and `pixel` kinds are covered by the `#guard`s
-  only).
+* **Smoke** (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, case 1o): bursts of 12 px
+  `<TouchpadScroll>` events with sideways jitter and of third-notch `<MouseWheel>` events, 8 ms
+  apart, through five pages in every view mode at Page Width and in the single page at Page
+  Fit; trace of (event, ms, page, top) in `wheelflow-trace.txt`. On `arxiv-1706.03762.pdf`
+  (882 px view) before 9.r1 the trackpad bursts never left page 1 in the page modes; after,
+  the longest run of events that moved nothing is 3 (single, Page Width), 18 (Page Fit and
+  facing: the quarter-view push), 0 in the continuous modes.
+* **Not verified here (aqua only):** real macOS trackpad and Magic Mouse events. The smoke test
+  generates Tk 9 `<TouchpadScroll>` and `<MouseWheel>` events on X11 (and `xdotool` wheel
+  buttons); whether Tk 9 on macOS delivers momentum as further `<TouchpadScroll>` events, the
+  size of its deltas, the scale of `<MouseWheel>` `%D` for a mouse there, and the feel of the
+  thresholds are not tested; the `line` kind (Tk 8.6 on macOS) is covered by the `#guard`s
+  only.
 
 ## View modes (9.3)
 
@@ -200,8 +224,8 @@ starts).
 
 | Mode | Scroll | Spread | Shows |
 |---|---|---|---|
-| single page (default) | Page Scrolling | No Spreads | one page at a time |
-| continuous | Vertical Scrolling | No Spreads | all pages stacked, 10 px apart (`View.pageGap`) |
+| single page | Page Scrolling | No Spreads | one page at a time |
+| continuous (default, 9.r1) | Vertical Scrolling | No Spreads | all pages stacked, 10 px apart (`View.pageGap`) |
 | facing | Page Scrolling | Odd / Even Spreads | one spread at a time: two pages side by side |
 | continuous facing | Vertical Scrolling | Odd / Even Spreads | all spreads stacked |
 
@@ -233,9 +257,9 @@ starts).
   the facing modes; Previous/First are disabled in the first spread, Next/Last in the last. In
   the continuous modes a jump scrolls the page's top (with the 8 px margin) to the window top;
   the keys PageDown/Space/arrows scroll the whole document, Home/End go to the first/last page.
-* **Wheel**: in the page scroll modes as in 9.2 (a spread turns after a push past the edge); in
-  the continuous modes the wheel simply scrolls the document (`View.wheelStep` without page
-  crossing).
+* **Wheel**: in the page scroll modes as in 9.2/9.r1 (a spread turns after a push past the
+  edge, and the gesture flows on); in the continuous modes the wheel simply scrolls the
+  document (`View.wheelStep` without page crossing).
 * **Rendering and memory**: the current page — in the facing view its whole spread — is
   shown first; the other pages in view and one more place before and after them
   (`View.wantedPages`) follow (`renderMore`, nearest to the current page first). Since 8.8 all
@@ -711,7 +735,7 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `c/tk_shim.c` | Tcl interpreter, Tk init, `::safepdf::emit` → Lean callback, `Tk_PhotoPutBlock` from an RGBA `ByteArray`, event loop. Adapted from bib-lean's `c/tk_shim.c`. |
 | `SafePdf/Shell/App/Shim.lean` | `@[extern]` bindings and the exported dispatcher `safepdf_gui_dispatch`. Only the `viewer` executable may import it. |
 | `SafePdf/Shell/App/Tcl.lean`, `TclLemmas.lean` | Tcl scripts as data and the proof that `Tcl.quote` is injection-free (`parseWordStr_quote`, `parseScript_render`, …). Copied from bib-lean `BibLean/Gui/Tcl.lean` + `Tcl/Lemmas.lean`. Built by default (lib `SafePdfApp`). |
-| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), view modes (9.3: spreads, paging by spread, page layout, visible and wanted pages, page at a point, scroll positions, fit box; theorems `mem_spreadPages`, `nextPage_spread`, `stack_pairwise`), the LRU page cache. |
+| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, `wheelPages`, 9.2, 9.r1), view modes (9.3: spreads, paging by spread, page layout, visible and wanted pages, page at a point, scroll positions, fit box; theorems `mem_spreadPages`, `nextPage_spread`, `stack_pairwise`), the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
 | `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
@@ -995,6 +1019,15 @@ original is unchanged and a byte prefix of the saved file, and that `mutool draw
 shows each mark in its colour inside its box. On arxiv-1706.03762 (15 pages) the wheel passes
 pages 1…15 in 72 notches (single page, Automatic Zoom), 186 (continuous), spreads 1…8 in 7
 (facing) and 42 (continuous facing); the whole M9 pair runs in about 4 s.
+
+The `wheelflow` case (9.r1, `Viewer.smokeWheelFlow`, script case 1o) runs on the four-page M9
+fixture and the M9 papers, opened **without** `SAFEPDF_VIEWER_VIEW` (every other case of the
+script runs with `SAFEPDF_VIEWER_VIEW=single`, the view it was written for): the file must
+open in Vertical Scrolling, No Spreads (state and both radio variables); then the bursts
+described under *Wheel scrolling across pages* must reach page 5 (or the last page) in every
+view mode without going back, without a run of motionless events longer than the page-turn
+push (none in the continuous modes), and without a step longer than one event plus the
+carried push. About 12 s per file.
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
