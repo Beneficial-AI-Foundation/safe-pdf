@@ -549,3 +549,14 @@ saturation/clamping assumed where stated.
 The chain bound needs a magnitude hypothesis: an error made at step `j` is carried to the
 end by the exact product of the matrices concatenated after it, so a large later scale
 magnifies it. `PartialNormLe K` states that hypothesis; no unconditional linear bound exists.
+
+### More error bounds (task 12.8b, `SafePdf/Spec/RasterError2.lean`)
+
+| Surface | Proved | Open |
+|---|---|---|
+| Type 3 weights | `weightI_near`: `wR ≤ wI ≤ wR+1`, unequal only within 17/2¹⁸ of a tie; `weightsAtI_eq`, `dist_down`/`dist_up` link the kernel to both formulas; `sum_near` (sums differ by at most the index count), `checkWeightsB_sum` (= 256 when adjusted) | list-level `l`/`r` range identity |
+| Axial/radial per pixel | `step_near`: after k steps within (−1−k/2, k/2] units (2⁻²⁴ axial, 2⁻¹⁸ radial); `stepI_toInt_clamped`: no Int64 wrap under the clamps for k ≤ 2³²; `isqrtFrom_bound`: ≥ ⌊√n⌋, exact when converged | — |
+| Shading functions | `powNat_near` (≤ n·2⁻²⁵ for \|x\| ≤ 1); `exp_component_near` (type 2, natural exponent: 2⁻²⁵ + n·2⁻²⁵·\|c₁−c₀\|) | `log2Q`/`exp2Q`, types 0/3, 256-entry LUTs |
+| Image resampling | `bil_near`: 12-bit bilinear within (E−2, E] of the exact bilinear value at the 12-bit weights (`lerpU_toNat`: no wrap) | 12-bit fraction truncation, 32-bit stepping, `boxDown` (tested only) |
+| Stroke pen / arcs | — | outline vs exact offset curve and pen chord error: needs a rational cos/sin bound model (core `Rat` has no cos) |
+

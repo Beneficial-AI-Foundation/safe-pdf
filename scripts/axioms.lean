@@ -1349,3 +1349,26 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Shell.Worker.Protocol.request_prefix
 #print axioms SafePdf.Shell.Worker.Protocol.response_prefix
 #print axioms SafePdf.Shell.Worker.Protocol.frame_bounded
+-- Phase 12, task 12.7c: C4 for encrypted files and compressed entries (SafePdf/Spec/RepairAgreeExt.lean)
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_enc
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_enc_check
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_comp
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_comp_check
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_eq_crypt
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_sec
+#print axioms SafePdf.Spec.RepairAgreeExt.withCrypt_congr
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_sub
+-- Phase 12, task 12.8b: remaining raster error bounds (SafePdf/Spec/RasterError2.lean)
+#print axioms SafePdf.Spec.RasterError2.weightI_near
+#print axioms SafePdf.Spec.RasterError2.smoothI_near
+#print axioms SafePdf.Spec.RasterError2.dist_down
+#print axioms SafePdf.Spec.RasterError2.dist_up
+#print axioms SafePdf.Spec.RasterError2.sum_near
+#print axioms SafePdf.Spec.RasterError2.checkWeightsB_sum
+#print axioms SafePdf.Spec.RasterError2.weightsAtI_eq
+#print axioms SafePdf.Spec.RasterError2.step_near
+#print axioms SafePdf.Spec.RasterError2.stepI_toInt_clamped
+#print axioms SafePdf.Spec.RasterError2.isqrtFrom_bound
+#print axioms SafePdf.Spec.RasterError2.powNat_near
+#print axioms SafePdf.Spec.RasterError2.exp_component_near
+#print axioms SafePdf.Spec.RasterError2.bil_near
