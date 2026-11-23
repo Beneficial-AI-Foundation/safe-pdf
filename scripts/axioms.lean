@@ -1215,3 +1215,6 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Filter.decodeOne_cap
 #print axioms SafePdf.Core.Filter.Flate.flateDecode_cap
 #print axioms SafePdf.Core.Raster.Clip.filledBuf_eq
+#print axioms SafePdf.Core.Doc.OpenSettings.read_dest_page
+#print axioms SafePdf.Core.Doc.OpenSettings.titleOf_le
+#print axioms SafePdf.Core.Doc.OpenSettings.zoomOf_percent_bounds
