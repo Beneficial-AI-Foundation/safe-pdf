@@ -114,29 +114,97 @@ def readVersion (bytes : ByteArray) (i : Nat) : Option (Nat × Nat) :=
 
 end Parse
 
-/-- Parse `bytes` under explicit resource limits: the input size, the `%PDF-x.y` header,
-then `Core.Open.Session.open` (strict, else repaired; decodes charged to the document budget,
-task 4.5). -/
-def parseWith (limits : Limits) (bytes : ByteArray) : Except Error Document :=
+/-- Parse `bytes` under explicit resource limits, logging the repair path (task 12.1): the
+input size, the `%PDF-x.y` header, then `Core.Open.Session.openLogged` (strict, else — only
+when `allowRepair` — repaired; decodes charged to the document budget, task 4.5). With
+`allowRepair := false` the repair path never runs (`parseLogged_strictOnly`). -/
+def parseLogged (limits : Limits) (bytes : ByteArray) (allowRepair : Bool := true) :
+    Except Error Document × Core.Open.RepairLog :=
   if bytes.size > limits.maxInputBytes then
-    .error (.limitExceeded .inputBytes)
+    (.error (.limitExceeded .inputBytes), ⟨0, false⟩)
   else
     match Parse.findHeader bytes with
-    | none => .error (.malformed 0 "missing %PDF header")
+    | none => (.error (.malformed 0 "missing %PDF header"), ⟨0, false⟩)
     | some off =>
-      match Core.Open.Session.open limits bytes with
-      | .error e => .error e
-      | .ok s =>
+      match Core.Open.Session.openLogged limits bytes allowRepair with
+      | (.error e, log) => (.error e, log)
+      | (.ok s, log) =>
         match s.doc.trailer.root? with
-        | none => .error (.malformed 0 "trailer has no /Root")
+        | none => (.error (.malformed 0 "trailer has no /Root"), log)
         | some root =>
-          .ok { headerOffset := off
-                version := Parse.readVersion bytes (off + Parse.headerMagic.length)
-                byteLength := bytes.size
-                doc := s.doc
-                root
-                session := s
-                session_doc := rfl }
+          (.ok { headerOffset := off
+                 version := Parse.readVersion bytes (off + Parse.headerMagic.length)
+                 byteLength := bytes.size
+                 doc := s.doc
+                 root
+                 session := s
+                 session_doc := rfl }, log)
+
+/-- Parse `bytes` under explicit resource limits: the input size, the `%PDF-x.y` header,
+then `Core.Open.Session.open` (strict, else repaired unless `allowRepair := false`; decodes
+charged to the document budget, task 4.5). `parseLogged` without the log. -/
+def parseWith (limits : Limits) (bytes : ByteArray) (allowRepair : Bool := true) :
+    Except Error Document :=
+  (parseLogged limits bytes allowRepair).1
+
+/-- **Strict-only parse** (task 12.1, M12 "a strict-only open records zero repair
+attempts"): with `allowRepair := false` the repair path runs zero times, and a parsed
+document is not repaired. -/
+theorem parseLogged_strictOnly (limits : Limits) (bytes : ByteArray) :
+    (parseLogged limits bytes false).2.attempts = 0 ∧
+    ∀ d, (parseLogged limits bytes false).1 = .ok d → d.repaired = false := by
+  obtain ⟨ha, hr⟩ := Core.Open.Session.openLogged_false limits bytes
+  unfold parseLogged
+  split
+  · exact ⟨rfl, fun d hd => by cases hd⟩
+  · split
+    · exact ⟨rfl, fun d hd => by cases hd⟩
+    · rcases ho : Core.Open.Session.openLogged limits bytes false with ⟨r, log⟩
+      rw [ho] at ha hr
+      simp only at ha hr
+      rcases r with e | s
+      · exact ⟨ha, fun d hd => by cases hd⟩
+      · simp only
+        split
+        · exact ⟨ha, fun d hd => by cases hd⟩
+        · refine ⟨ha, fun d hd => ?_⟩
+          simp only [Except.ok.injEq] at hd
+          subst hd
+          exact hr s rfl
+
+/-- A refused parse (`refused = true`) had repair off: the strict path failed with a
+non-final error and the repair path did not run. -/
+theorem parseLogged_refused {limits : Limits} {bytes : ByteArray} {allowRepair : Bool}
+    (h : (parseLogged limits bytes allowRepair).2.refused = true) : allowRepair = false := by
+  unfold parseLogged at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · rcases ho : Core.Open.Session.openLogged limits bytes allowRepair with ⟨r, log⟩
+      have hlog : (Core.Open.Session.openLogged limits bytes allowRepair).2 = log := by rw [ho]
+      rw [ho] at h
+      have hl : log.refused = true := by
+        rcases r with e | s
+        · exact h
+        · simp only at h
+          split at h <;> exact h
+      unfold Core.Open.Session.openLogged at hlog
+      rcases hb : Core.Open.openFileBLogged limits (Core.Filter.Budget.init limits) bytes allowRepair
+        with ⟨⟨r1, b1, c1⟩, log1⟩
+      rw [hb] at hlog
+      have hl1 : (Core.Open.openFileBLogged limits (Core.Filter.Budget.init limits) bytes allowRepair).2.refused
+          = true := by
+        rw [hb]; rcases r1 with e | d <;> (simp only at hlog; subst hlog; exact hl)
+      unfold Core.Open.openFileBLogged at hl1
+      cases allowRepair
+      · rfl
+      · split at hl1
+        · cases hl1
+        · simp only [Bool.not_true, Bool.false_eq_true, ite_false] at hl1
+          split at hl1
+          · cases hl1
+          · split at hl1 <;> cases hl1
 
 /-- Parse `bytes` under `Limits.default`. The fuzzing entry point (Plan.md §6 Phase 0). -/
 def parse (bytes : ByteArray) : Except Error Document :=

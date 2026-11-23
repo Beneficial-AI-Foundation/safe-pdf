@@ -37,6 +37,14 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   re-reads the same objects through a scanned section, would at best rediscover the same
   cycle and at worst "succeed" by picking a different object, silently accepting the attack.
   Other strict errors (broken offsets, missing keywords) still fall back to repair (P3).
+* P6. **True strict mode** (task 12.1, Plan.md §6 Phase 12): `openFileWith … (allowRepair :=
+  false)`, `openFileBLogged`, `Session.openLogged` never run the repair path: a non-final
+  strict error is returned as is, with `RepairLog.refused`. Each logged open returns a
+  `RepairLog` counting its repair-path runs; `openFileLogged_strictOnly`,
+  `openFileBLogged_false`, `Session.openLogged_false` prove the count is 0 with repair off,
+  and `openFileWith_false` that the strict-only open *is* `strictOpen`. With repair on, the
+  logged opens are `openFile`/`openFileB`/`Session.open` (`openFileWith_true`,
+  `openFileBLogged_true`, `Session.openLogged_true`), so every earlier theorem applies.
 
 ## Object resolution (`OpenDoc.getObject`)
 
@@ -1496,6 +1504,205 @@ theorem Session.open_bytes {limits : Limits} {bytes : ByteArray} {s : Session}
     exact openFileB_bytes (by rw [hf])
 
 
+/-! ### True strict mode (task 12.1, rule P6) -/
+
+/-- What the repair switch did during one open (task 12.1, rule P6). -/
+structure RepairLog where
+  /-- Runs of the repair path (`repairOpen` / `repairOpenB`): 0 or 1. -/
+  attempts : Nat
+  /-- The strict path failed with a non-final error and repair was off: the error returned
+  is the strict path's and the repair path did not run. -/
+  refused : Bool
+  deriving Repr, DecidableEq
+
+/-- **Open with the repair switch, logged** (rule P6): `openFile` when `allowRepair`; else the
+strict path alone, a non-final strict error being returned with `refused := true`. The log
+counts the repair-path runs of *this* computation. -/
+def openFileLogged (limits : Limits) (bytes : ByteArray) (allowRepair : Bool) :
+    Except Error OpenDoc × RepairLog :=
+  match strictOpen limits bytes with
+  | .ok d => (.ok d, ⟨0, false⟩)
+  | .error e =>
+    if e.isFinal then (.error e, ⟨0, false⟩)
+    else if !allowRepair then (.error e, ⟨0, true⟩)
+    else
+      match repairOpen limits bytes with
+      | .ok d => (.ok d, ⟨1, false⟩)
+      | .error e' => (.error (bothFailed e e'), ⟨1, false⟩)
+
+/-- **Open with the repair switch** (rule P6): `openFileLogged` without the log. -/
+def openFileWith (limits : Limits) (bytes : ByteArray) (allowRepair : Bool := true) :
+    Except Error OpenDoc :=
+  (openFileLogged limits bytes allowRepair).1
+
+/-- With repair on, `openFileWith` is `openFile`. -/
+theorem openFileWith_true (limits : Limits) (bytes : ByteArray) :
+    openFileWith limits bytes true = openFile limits bytes := by
+  unfold openFileWith openFileLogged openFile
+  rcases strictOpen limits bytes with e | d
+  · simp only
+    by_cases hf : e.isFinal = true
+    · simp [hf]
+    · simp only [hf, Bool.false_eq_true, ite_false, Bool.not_true]
+      rcases repairOpen limits bytes with e' | d' <;> rfl
+  · rfl
+
+/-- **Strict only is the strict path** (rule P6): with repair off, `openFileWith` is
+`strictOpen`, whose definition does not mention the repair path. -/
+theorem openFileWith_false (limits : Limits) (bytes : ByteArray) :
+    openFileWith limits bytes false = strictOpen limits bytes := by
+  unfold openFileWith openFileLogged
+  rcases strictOpen limits bytes with e | d
+  · simp only
+    by_cases hf : e.isFinal = true <;> simp [hf]
+  · rfl
+
+/-- **Zero repair attempts in strict mode** (rule P6, M12 "a strict-only open records zero
+repair attempts"). -/
+theorem openFileLogged_strictOnly (limits : Limits) (bytes : ByteArray) :
+    (openFileLogged limits bytes false).2.attempts = 0 := by
+  unfold openFileLogged
+  rcases strictOpen limits bytes with e | d
+  · simp only
+    by_cases hf : e.isFinal = true <;> simp [hf]
+  · rfl
+
+/-- A refused open (`refused = true`) had repair off and returned the strict path's
+non-final error. -/
+theorem openFileLogged_refused {limits : Limits} {bytes : ByteArray} {allowRepair : Bool}
+    (h : (openFileLogged limits bytes allowRepair).2.refused = true) :
+    allowRepair = false ∧ ∃ e, strictOpen limits bytes = .error e ∧ e.isFinal = false ∧
+      (openFileLogged limits bytes allowRepair).1 = .error e := by
+  unfold openFileLogged at h ⊢
+  rcases hs : strictOpen limits bytes with e | d
+  · rw [hs] at h
+    simp only at h ⊢
+    by_cases hf : e.isFinal = true
+    · simp [hf] at h
+    · cases allowRepair
+      · refine ⟨rfl, e, rfl, by simpa using hf, ?_⟩
+        simp [hf]
+      · simp only [hf, Bool.false_eq_true, ite_false, Bool.not_true] at h
+        split at h <;> simp at h
+  · rw [hs] at h
+    simp at h
+
+/-- A strictly opened document is not flagged repaired. -/
+theorem strictOpen_not_repaired {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+    (h : strictOpen limits bytes = .ok d) : d.repaired = false := by
+  obtain ⟨revs, -, -, hc, -⟩ := strictOpen_ok h
+  unfold ofChain at hc
+  split at hc
+  · cases hc
+  · obtain ⟨c, rfl⟩ := withCrypt_ok hc
+    rfl
+
+/-- **S7 in strict mode**: a document opened with repair off is not repaired. -/
+theorem openFileWith_false_repaired {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+    (h : openFileWith limits bytes false = .ok d) : d.repaired = false := by
+  rw [openFileWith_false] at h
+  exact strictOpen_not_repaired h
+
+/-- **Budgeted open with the repair switch, logged** (rule P6): `openFileB` when
+`allowRepair`; else `strictOpenB` alone (a non-final error is returned with
+`refused := true`, the strict attempt's cache dropped as in `openFileB`). -/
+def openFileBLogged (limits : Limits) (budget : Budget) (bytes : ByteArray)
+    (allowRepair : Bool) : ((Except Error OpenDoc) × Budget × Cache) × RepairLog :=
+  match strictOpenB limits budget bytes with
+  | (.ok d, b1, c1) => ((.ok d, b1, c1), ⟨0, false⟩)
+  | (.error e, b1, _) =>
+    if e.isFinal then ((.error e, b1, []), ⟨0, false⟩)
+    else if !allowRepair then ((.error e, b1, []), ⟨0, true⟩)
+    else
+      match repairOpenB limits b1 bytes with
+      | (.ok d, b2, c2) => ((.ok d, b2, c2), ⟨1, false⟩)
+      | (.error e', b2, _) => ((.error (bothFailed e e'), b2, []), ⟨1, false⟩)
+
+/-- With repair on, the logged budgeted open is `openFileB`. -/
+theorem openFileBLogged_true (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    (openFileBLogged limits budget bytes true).1 = openFileB limits budget bytes := by
+  unfold openFileBLogged openFileB
+  rcases strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
+  rcases r1 with e | d
+  · simp only
+    by_cases hf : e.isFinal = true
+    · simp [hf]
+    · simp only [hf, Bool.false_eq_true, ite_false, Bool.not_true]
+      rcases repairOpenB limits b1 bytes with ⟨r2, b2, c2⟩
+      rcases r2 with e' | d' <;> rfl
+  · rfl
+
+/-- **Budgeted strict only** (rule P6): with repair off the result is `strictOpenB`'s, the
+budget left is `strictOpenB`'s, and the repair path ran zero times. -/
+theorem openFileBLogged_false (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    (openFileBLogged limits budget bytes false).1.1 = (strictOpenB limits budget bytes).1 ∧
+    (openFileBLogged limits budget bytes false).1.2.1 = (strictOpenB limits budget bytes).2.1 ∧
+    (openFileBLogged limits budget bytes false).2.attempts = 0 := by
+  unfold openFileBLogged
+  rcases strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
+  rcases r1 with e | d
+  · simp only
+    by_cases hf : e.isFinal = true <;> simp [hf]
+  · simp
+
+/-- A document of the budgeted strict path is not flagged repaired. -/
+theorem strictOpenB_not_repaired {limits : Limits} {budget : Budget} {bytes : ByteArray}
+    {d : OpenDoc} (h : (strictOpenB limits budget bytes).1 = .ok d) : d.repaired = false := by
+  unfold strictOpenB at h
+  rcases hl : Core.Xref.Chain.loadChainB limits budget bytes with ⟨r0, b0⟩
+  rw [hl] at h
+  rcases r0 with e | revs
+  · cases h
+  · simp only at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · rename_i d2 hd
+        have := validateB_eq_self h
+        subst this
+        unfold ofChain at hd
+        split at hd
+        · cases hd
+        · obtain ⟨c, rfl⟩ := withCrypt_ok hd
+          rfl
+
+/-- **Open a session with the repair switch, logged** (rule P6): `openFileBLogged` from the
+full budget `Budget.init limits`. -/
+def Session.openLogged (limits : Limits) (bytes : ByteArray) (allowRepair : Bool) :
+    Except Error Session × RepairLog :=
+  match openFileBLogged limits (Budget.init limits) bytes allowRepair with
+  | ((.ok d, b, c), log) => (.ok ⟨d, b, c⟩, log)
+  | ((.error e, _, _), log) => (.error e, log)
+
+/-- With repair on, the logged session open is `Session.open`. -/
+theorem Session.openLogged_true (limits : Limits) (bytes : ByteArray) :
+    (Session.openLogged limits bytes true).1 = Session.open limits bytes := by
+  have h := openFileBLogged_true limits (Budget.init limits) bytes
+  unfold Session.openLogged Session.open
+  rcases hl : openFileBLogged limits (Budget.init limits) bytes true with ⟨⟨r, b, c⟩, log⟩
+  rw [hl] at h
+  simp only at h
+  rw [← h]
+  rcases r with e | d <;> rfl
+
+/-- **Strict-only session** (rule P6, M12): with repair off the repair path runs zero times,
+and an opened session's document is not repaired. -/
+theorem Session.openLogged_false (limits : Limits) (bytes : ByteArray) :
+    (Session.openLogged limits bytes false).2.attempts = 0 ∧
+    ∀ s, (Session.openLogged limits bytes false).1 = .ok s → s.doc.repaired = false := by
+  obtain ⟨h1, -, h3⟩ := openFileBLogged_false limits (Budget.init limits) bytes
+  unfold Session.openLogged
+  rcases hl : openFileBLogged limits (Budget.init limits) bytes false with ⟨⟨r, b, c⟩, log⟩
+  rw [hl] at h1 h3
+  simp only at h1 h3
+  rcases r with e | d
+  · exact ⟨h3, fun s hs => by cases hs⟩
+  · refine ⟨h3, fun s hs => ?_⟩
+    simp only [Except.ok.injEq] at hs
+    subst hs
+    exact strictOpenB_not_repaired h1.symm
+
 /-! ## Tests -/
 
 section Tests
@@ -1549,6 +1756,15 @@ private def isNull : Except Error IndirectBody → Bool
 
 -- A broken xref is repaired.
 #guard os minimalBroken == "ok repaired=true revs=0 n=3"
+
+-- Rule P6: strict only, the broken xref is refused with zero repair attempts; with repair
+-- on, one attempt.
+#guard (openFileLogged Limits.default minimalBroken false).2 == ⟨0, true⟩ &&
+  (match (openFileLogged Limits.default minimalBroken false).1 with
+    | .error e => !e.isFinal | .ok _ => false)
+#guard (openFileLogged Limits.default minimalBroken true).2 == ⟨1, false⟩
+#guard (Session.openLogged Limits.default minimalBroken false).2 == ⟨0, true⟩
+#guard (openFileLogged Limits.default minimalValid false).2 == ⟨0, false⟩
 
 -- A `/Prev` cycle is final: no repair (rule P5), although the scan would find the objects.
 #guard os minimalPrevSelf == "cycle@110 xref /Prev cycle"

@@ -95,7 +95,8 @@ All coordinates are exact rationals (`Rat`) in PDF page space (points, origin bo
 `Target`: `none`, `page index fit`, `danglingDest fit` (a destination whose page is not in the
 document), `unresolved name`, `uri uri`, `action kind` (other actions: never executed or
 followed). `Error`: `pdf e` (a core `SafePdf.Error`: malformed, limit exceeded,
-unsupported, reference cycle, encryption), `repairRefused`, `pageOutOfRange i n`,
+unsupported, reference cycle, encryption), `repairRefused e` (strict mode: the strict path
+failed with the non-final error `e`; the repair path was not run), `pageOutOfRange i n`,
 `badZoom z`; `Error.message` / `toString` give English text.
 
 **Anchoring recipe (C2).** Store an annotation or a selection in page space. To draw it on a

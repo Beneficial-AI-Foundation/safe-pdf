@@ -1,5 +1,6 @@
 import SafePdf.Shell.App.Marks
 import SafePdf.Core.Annot
+import SafePdf.Shell.Read
 
 /-!
 # XFDF import and export of user marks (tasks 9.5d, 9.11; Plan.md §6 Phase 9 "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
@@ -985,16 +986,19 @@ def importItems (s : Store) (items : List Item) : Store × List Nat × Nat :=
 
 /-! ## Files -/
 
-/-- Reads and imports the XFDF file `path` (the size is checked before reading); an error
-message for the status bar otherwise. -/
+/-- Reads and imports the XFDF file `path` through the shared capped read
+(`Shell.Read.readFile`, task 12.1: at most `lim.maxBytes + 1` bytes through a handle, so a
+file that grows while it is read is still refused); an error message for the status bar
+otherwise. -/
 def readFile (lim : Limits) (path : String) (pages : Option Nat := none) :
     IO (Except String Report) := do
   try
-    let md ← System.FilePath.metadata path
-    if md.byteSize.toNat > lim.maxBytes then
-      return .error (Error.tooLarge md.byteSize.toNat lim.maxBytes).message
-    let bytes ← IO.FS.readBinFile path
-    return (readXfdf lim bytes pages).mapError Error.message
+    match ← Shell.Read.readFile path lim.maxBytes .inputBytes with
+    | .error _ =>
+      -- The size for the message: the file system's, at least the bytes the read saw.
+      let size ← try pure (← System.FilePath.metadata path).byteSize.toNat catch _ => pure 0
+      return .error (Error.tooLarge (max size (lim.maxBytes + 1)) lim.maxBytes).message
+    | .ok bytes => return (readXfdf lim bytes pages).mapError Error.message
   catch e => return .error s!"cannot read {path}: {e}"
 
 /-! ## Checks -/
