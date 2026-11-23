@@ -652,3 +652,45 @@ import SafePdf
 #print axioms SafePdf.Core.Doc.contentPart_total
 #print axioms SafePdf.Core.Doc.decodeContentsBC_total
 #print axioms SafePdf.Core.Doc.decodeContentsS_total
+-- Phase 6, task 6.4: encodings, standard-14 metrics, widths
+#print axioms SafePdf.Core.Font.standardEncoding_size
+#print axioms SafePdf.Core.Font.winAnsiEncoding_size
+#print axioms SafePdf.Core.Font.macRomanEncoding_size
+#print axioms SafePdf.Core.Font.pdfDocEncoding_size
+#print axioms SafePdf.Core.Font.applyDiffsAux_size
+#print axioms SafePdf.Core.Font.applyDifferences_size
+#print axioms SafePdf.Core.Font.simpleEncoding_size
+#print axioms SafePdf.Core.Font.std14_rows_size
+#print axioms SafePdf.Core.Font.parseW_length_le
+#print axioms SafePdf.Core.Font.setFirst_size
+#print axioms SafePdf.Core.Font.fillConst_size
+#print axioms SafePdf.Core.Font.fillRun_size
+#print axioms SafePdf.Core.Font.buildWAux_size
+#print axioms SafePdf.Core.Font.buildWTable_size
+#print axioms SafePdf.Core.Font.SimpleMetrics.ofDict_table_size
+#print axioms SafePdf.Core.Font.identityCodes_length
+-- Phase 6, task 6.3: Type 1 fonts
+#print axioms SafePdf.Core.Font.Type1.decrypt_size
+#print axioms SafePdf.Core.Font.Type1.eexecDecrypt_size
+#print axioms SafePdf.Core.Font.Type1.decryptCharstring_size
+#print axioms SafePdf.Core.Font.Type1.scanWhile_bounds
+#print axioms SafePdf.Core.Font.Type1.scanString_bounds
+#print axioms SafePdf.Core.Font.Type1.tokAt_spec
+#print axioms SafePdf.Core.Font.Type1.nextTok_spec
+#print axioms SafePdf.Core.Font.Type1.encodingOf_size
+#print axioms SafePdf.Core.Font.Type1.mkAdvances_get
+#print axioms SafePdf.Core.Font.Type1.Font1.advance_eq
+#print axioms SafePdf.Core.Font.Type1.run_stack_le
+#print axioms SafePdf.Core.Font.Type1.run_calls_le
+-- Phase 5, task 5.2b: content runner with resources (SafePdf/Core/Content/Run.lean)
+#print axioms SafePdf.Core.Content.Run.formJob_num
+#print axioms SafePdf.Core.Content.Run.doStep_form_fresh
+#print axioms SafePdf.Core.Content.Run.viaExec_bound
+#print axioms SafePdf.Core.Content.Run.localStep_bound
+#print axioms SafePdf.Core.Content.Run.stepR_good
+#print axioms SafePdf.Core.Content.Run.foldl_good
+#print axioms SafePdf.Core.Content.Run.runOps_good
+#print axioms SafePdf.Core.Content.St.init_good
+#print axioms SafePdf.Core.Content.runPage_ops_le
+#print axioms SafePdf.Core.Content.runPage_items_le
+#print axioms SafePdf.Core.Content.runBytes_items_le_max

@@ -17,6 +17,11 @@ For every `Tests/adversarial/*.pdf` the suite runs the Phase 2 entry points:
   points a viewer uses; the cyclic files must fail with `Error.cycle`, not open repaired),
 * `parseIndirectAt` at every `N G obj` offset found by `scanObjects`, and `parseObjectAt`
   at the body of each such object,
+* when the file opens: `interpret` (task 5.2b), every page's content run through
+  `Core.Content.runBytes` with the page resources (forms expanded under the nesting fuel, the
+  visited set, the operator and form-expansion caps), summarised as pages, forms expanded,
+  operators executed, items, warnings and truncation; the form-recursion files must terminate
+  with a warning, not an error;
 * for `length-*` files, `Core.Xref.Length.parseIndirectResolved` at every such offset, with a
   lookup built from `Chain.mergeChain` of `loadChain`'s revisions, or (when `loadChain` fails,
   e.g. on xref streams before task 2.4) from the repaired section.
@@ -207,8 +212,20 @@ def expectations : String → List (String × Expect)
   -- layers to reject.
   | "pages-kids-cycle.pdf" =>
     [("openFile", .okEq "strict revs=1 objects=6"), ("parse", .okEq "strict root=(1, 0)")]
+  -- task 5.2b: the self-drawing form is expanded once; its inner `Do` is cut by the visited
+  -- set with one warning (not an error); only the /BBox clip item is emitted
   | "xobject-recursive.pdf" =>
-    [("openFile", .okEq "strict revs=1 objects=7"), ("parse", .okEq "strict root=(1, 0)")]
+    [("openFile", .okEq "strict revs=1 objects=7"), ("parse", .okEq "strict root=(1, 0)"),
+     ("interpret", .okEq "pages=1 forms=1 ops=2 items=1 warnings=1 truncated=false")]
+  -- Fm1 → Fm2 → Fm1: both expanded once, the second Fm1 cut (one warning)
+  | "xobject-mutual.pdf" =>
+    [("openFile", .okEq "strict revs=1 objects=8"), ("parse", .okEq "strict root=(1, 0)"),
+     ("interpret", .okEq "pages=1 forms=2 ops=7 items=4 warnings=1 truncated=false")]
+  -- 16-way fan-out over 8 levels (16^8 expansions without a cap): stopped by the
+  -- form-expansion cap `Run.defaultMaxForms` = 100000, one warning per form `Do` skipped after it
+  | "xobject-fanout.pdf" =>
+    [("openFile", .okEq "strict revs=1 objects=14"), ("parse", .okEq "strict root=(1, 0)"),
+     ("interpret", .okEq "pages=1 forms=100000 ops=287571 items=193745 warnings=81 truncated=false")]
   -- xref stream whose entry places object 5 in object stream 5 (task 2.4a rejects it; a
   -- cycle error since task 2.13, so openFile and parse do not fall back to repair)
   | "objstm-self-container.pdf" =>
@@ -226,7 +243,8 @@ def expectations : String → List (String × Expect)
 /-- The files the table is about; each must exist in the corpus. -/
 def knownFiles : List String :=
   ["minimal-valid.pdf", "xref-prev-cycle.pdf", "xref-prev-self.pdf", "length-self-ref.pdf",
-   "length-mutual.pdf", "pages-kids-cycle.pdf", "xobject-recursive.pdf",
+   "length-mutual.pdf", "pages-kids-cycle.pdf", "xobject-recursive.pdf", "xobject-mutual.pdf",
+   "xobject-fanout.pdf",
    "objstm-self-container.pdf", "deep-nesting.pdf"]
 
 /-! ## Timed calls -/
@@ -316,6 +334,33 @@ def startxrefPos (b : ByteArray) : Option Nat := (findAll b "startxref").getLast
 
 /-! ## Per-file runs -/
 
+/-- The content runner's document access (as the `svg` view's `docSource`). -/
+def docSrc (lim : Limits) (doc : Core.Doc.Doc) : Core.Content.Source Core.Filter.Budget :=
+  ⟨fun b n g => (doc.file.getObject lim n g, b),
+   fun b n st =>
+     let r := Core.Doc.decodeBodyB doc.file lim b (Core.Doc.offsetOf doc.file n) (.stream st)
+     (Core.Doc.contentData (Core.Doc.offsetOf doc.file n) r.1, r.2)⟩
+
+/-- Run every page's content with its resources (one document budget); summary of the
+totals. Pages whose contents do not decode count as such. -/
+def interpretAll (lim : Limits) (d : Core.Open.OpenDoc) : Except Error String := do
+  let doc ← Core.Doc.ofOpen lim d
+  let env : Core.Content.Env Core.Filter.Budget Unit :=
+    { cfg := { limits := lim }, src := docSrc lim doc, observe := fun u _ _ _ => u }
+  let r := doc.pages.foldl (fun (acc : Core.Filter.Budget × Nat × Nat × Nat × Nat × Bool × Nat)
+      page =>
+    let (b, forms, ops, items, warns, tr, bad) := acc
+    match doc.decodeContentsB lim b page with
+    | (.error _, b) => (b, forms, ops, items, warns, tr, bad + 1)
+    | (.ok parts, b) =>
+      let bytes := parts.foldl (fun a p => (a.push 32) ++ p) ByteArray.empty
+      let st := Core.Content.runBytes env (page.resources.getD []) bytes b ()
+      (st.s, forms + st.forms, ops + st.ops, items + st.items.size, warns + st.warnings,
+        tr || st.truncated, bad)) (Core.Filter.Budget.init lim, 0, 0, 0, 0, false, 0)
+  let (_, forms, ops, items, warns, tr, bad) := r
+  let badS := if bad == 0 then "" else s!" undecodable={bad}"
+  return s!"pages={doc.pages.size} forms={forms} ops={ops} items={items} warnings={warns} truncated={tr}{badS}"
+
 /-- A `lookup` for `parseIndirectResolved` and the fuel (object count) from a section. -/
 def lookupOf (sec : XrefSection) : (Nat → Option XrefEntry) × Nat :=
   (fun k => Chain.lookupEntry k sec.entries, sec.entries.length)
@@ -343,6 +388,7 @@ def runFile (name : String) (bytes : ByteArray) : IO Nat := do
   -- object resolution through the opened document (cycles below the root surface here)
   match opened with
   | .ok d =>
+    let _ ← call st name "interpret" (← ex "interpret") id (fun _ => interpretAll lim d)
     for (n, g, _) in objs do
       let k := s!"getObject obj {n}"
       let _ ← call st name k (← ex k) (fun _ => "body") (fun _ => d.getObject lim n g)

@@ -1,0 +1,79 @@
+--- ops
+file:       input
+open:       strict
+pages:      1 (0 with undecodable contents, 0 truncated)
+forms:      5 expanded
+operators:  80, covered 80 (100.00%), unsupported 0, warned 2
+warnings:   interpreter 2, tokenizer 0
+items:      fillPath=11 strokePath=4 clip=5 image=3
+  #0  ops 80  forms 5  covered 80  unsupported 0  warned 2  warnings 2+0  items fillPath=11 strokePath=4 clip=5 image=3
+histogram:
+  re          13  warned 0
+  f           11  warned 0
+  Do           9  warned 2
+  rg           8  warned 0
+  Q            5  warned 0
+  cm           5  warned 0
+  q            5  warned 0
+  S            4  warned 0
+  RG           3  warned 0
+  cs           3  warned 0
+  gs           3  warned 0
+  sc           3  warned 0
+  l            2  warned 0
+  m            2  warned 0
+  BI           1  warned 0
+  CS           1  warned 0
+  SCN          1  warned 0
+  g            1  warned 0
+--- ops --json
+{"page": 0, "error": null, "parts": 1, "contentBytes": 437, "ops": 80, "forms": 5, "covered": 80, "unsupported": 0, "warned": 2, "interpWarnings": 2, "tokWarnings": 0, "truncated": false, "items": {"fillPath": 11, "strokePath": 4, "clip": 5, "glyphRun": 0, "image": 3, "shading": 0, "unsupported": 0}, "unsupportedOps": {}}
+{"summary": {"path": "input", "open": "strict", "pages": 1, "errorPages": 0, "truncatedPages": 0, "ops": 80, "forms": 5, "covered": 80, "unsupported": 0, "warned": 2, "interpWarnings": 2, "tokWarnings": 0, "maxPageOps": 80, "items": {"fillPath": 11, "strokePath": 4, "clip": 5, "glyphRun": 0, "image": 3, "shading": 0, "unsupported": 0}, "histogram": {"re": {"count": 13, "unsupported": 0, "warned": 0}, "f": {"count": 11, "unsupported": 0, "warned": 0}, "Do": {"count": 9, "unsupported": 0, "warned": 2}, "rg": {"count": 8, "unsupported": 0, "warned": 0}, "Q": {"count": 5, "unsupported": 0, "warned": 0}, "cm": {"count": 5, "unsupported": 0, "warned": 0}, "q": {"count": 5, "unsupported": 0, "warned": 0}, "S": {"count": 4, "unsupported": 0, "warned": 0}, "RG": {"count": 3, "unsupported": 0, "warned": 0}, "cs": {"count": 3, "unsupported": 0, "warned": 0}, "gs": {"count": 3, "unsupported": 0, "warned": 0}, "sc": {"count": 3, "unsupported": 0, "warned": 0}, "l": {"count": 2, "unsupported": 0, "warned": 0}, "m": {"count": 2, "unsupported": 0, "warned": 0}, "BI": {"count": 1, "unsupported": 0, "warned": 0}, "CS": {"count": 1, "unsupported": 0, "warned": 0}, "SCN": {"count": 1, "unsupported": 0, "warned": 0}, "g": {"count": 1, "unsupported": 0, "warned": 0}}}}
+--- consistency
+page 0: ok
+--- svg page 1
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="612" height="792" viewBox="0 0 612 792" data-page="1">
+<rect x="0" y="0" width="612" height="792" fill="white"/>
+<g transform="matrix(1 0 0 -1 0 792)">
+<g clip-path="url(#c0)">
+<path d="M60 610 L160 610 L160 710 L60 710 Z" fill="rgb(0%,0%,100%)" fill-rule="nonzero"/>
+<path transform="matrix(1 0 0 1 60 610)" d="M10 10 L90 90" fill="none" stroke="rgb(0%,0%,0%)" stroke-width="3" stroke-linecap="round" stroke-linejoin="miter" stroke-miterlimit="10"/>
+</g>
+<g clip-path="url(#c1)">
+<path d="M100 650 L120 650 L120 670 L100 670 Z" fill="rgb(0%,100%,0%)" fill-rule="nonzero"/>
+</g>
+<g clip-path="url(#c0)">
+<path d="M210 610 L260 610 L260 660 L210 660 Z" fill="rgb(100%,0%,0%)" fill-rule="nonzero"/>
+</g>
+<g clip-path="url(#c2)">
+<path d="M305 605 L355 605 L355 655 L305 655 Z" fill="rgb(0%,0%,100%)" fill-rule="nonzero"/>
+<path transform="matrix(0.5 0 0 0.5 305 605)" d="M10 10 L90 90" fill="none" stroke="rgb(0%,0%,0%)" stroke-width="3" stroke-linecap="round" stroke-linejoin="miter" stroke-miterlimit="10"/>
+</g>
+<g clip-path="url(#c3)">
+<path d="M325 625 L335 625 L335 635 L325 635 Z" fill="rgb(0%,100%,0%)" fill-rule="nonzero"/>
+</g>
+<g clip-path="url(#c2)">
+<path d="M380 605 L405 605 L405 630 L380 630 Z" fill="rgb(100%,0%,0%)" fill-rule="nonzero"/>
+</g>
+<g clip-path="url(#c4)">
+<path d="M0 0 L10 0 L10 10 L0 10 Z" fill="rgb(50%,50%,50%)" fill-rule="nonzero"/>
+</g>
+<rect x="0" y="0" width="1" height="1" transform="matrix(100 0 0 50 50 450)" fill="rgb(80%,80%,80%)" data-image="Im0" data-object="8 0" data-width="2" data-height="2" data-bpc="8" data-colorspace="DeviceGray"/>
+<rect x="0" y="0" width="1" height="1" transform="matrix(40 0 0 40 200 450)" fill="rgb(0%,0%,100%)" data-image="Mask" data-object="9 0" data-width="8" data-height="1" data-mask="stencil"/>
+<path d="M50 400 L250 400 L250 420 L50 420 Z" fill="none" stroke="rgb(100%,0%,0%)" stroke-opacity="0.5" stroke-width="4" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10" stroke-dasharray="6 2" stroke-dashoffset="0"/>
+<path d="M50 350 L250 350 L250 370 L50 370 Z" fill="rgb(0%,100%,0%)" fill-opacity="0.25" fill-rule="nonzero"/>
+<path d="M50 300 L90 300 L90 340 L50 340 Z" fill="rgb(100%,50.1961%,0%)" fill-opacity="0.25" fill-rule="nonzero"/>
+<path d="M100 300 L140 300 L140 340 L100 340 Z" fill="rgb(100%,50%,50%)" fill-opacity="0.25" fill-rule="nonzero"/>
+<path d="M150 300 L190 300 L190 340 L150 340 Z" fill="rgb(0%,50%,100%)" fill-opacity="0.25" fill-rule="nonzero"/>
+<path d="M200 300 L240 300 L240 340 L200 340 Z" fill="none" stroke="rgb(25%,25%,25%)" stroke-opacity="0.5" stroke-width="4" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10" stroke-dasharray="6 2" stroke-dashoffset="0"/>
+<rect x="0" y="0" width="1" height="1" transform="matrix(20 0 0 20 300 300)" fill="rgb(80%,80%,80%)" data-image="inline" data-decoded="2 bytes" data-width="2" data-height="1" data-bpc="8" data-colorspace="DeviceGray"/>
+<defs>
+<clipPath id="c0" clipPathUnits="userSpaceOnUse"><path d="M60 610 L160 610 L160 710 L60 710 Z" clip-rule="nonzero"/></clipPath>
+<clipPath id="c1" clipPathUnits="userSpaceOnUse" clip-path="url(#c0)"><path d="M60 610 L160 610 L160 710 L60 710 Z" clip-rule="nonzero"/></clipPath>
+<clipPath id="c2" clipPathUnits="userSpaceOnUse"><path d="M305 605 L355 605 L355 655 L305 655 Z" clip-rule="nonzero"/></clipPath>
+<clipPath id="c3" clipPathUnits="userSpaceOnUse" clip-path="url(#c2)"><path d="M305 605 L355 605 L355 655 L305 655 Z" clip-rule="nonzero"/></clipPath>
+<clipPath id="c4" clipPathUnits="userSpaceOnUse"><path d="M0 0 L50 0 L50 50 L0 50 Z" clip-rule="nonzero"/></clipPath>
+</defs>
+</g>
+</svg>
