@@ -4418,8 +4418,13 @@ def menuCtx (s : State) : Menu.Ctx :=
 
 /-- Sets the `-state` of every menubar entry, overflow-menu entry and toolbar button whose
 enabled state (`Toolbar.states`) changed since the last call, and shows or hides the sidebar
-toggle (`Sidebar.toggleVisible`). Runs after every event. -/
+toggle (`Sidebar.toggleVisible`). Runs after every event. Does nothing once the main window is
+gone (the menubar command deleted): a handler that destroyed `.` (a smoke case ending, a quit) is followed by this sync, and
+configuring the destroyed menubar would only print `invalid command name ".menubar.edit"`
+(task 10.20). -/
 def syncMenus (st : IO.Ref State) : IO Unit := do
+  -- Tk deletes the widget commands (`.menubar…`) with the main window.
+  if (← run ["info", "commands", Menu.barPath]) == "" then return
   let s ← st.get
   let c := menuCtx s
   let now := Toolbar.states c
