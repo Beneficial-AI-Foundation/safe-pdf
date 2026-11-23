@@ -1305,3 +1305,11 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Core.Text.extract_visible
 #print axioms SafePdf.Core.Text.Options.keeps_hiddenWhy
 #print axioms SafePdf.Core.Text.Options.hiddenWhy_isSome_of_invisible
+-- Phase 12, task 12.7b: C4 with a byte-level hypothesis (SafePdf/Spec/RepairAgreeBytes.lean)
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_bytes
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_bytes_check
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_free_bytes
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_free_bytes_check
+#print axioms SafePdf.Spec.RepairAgreeBytes.hits_eq_headers
+#print axioms SafePdf.Spec.RepairAgreeBytes.hits_sublist_headers
+#print axioms SafePdf.Spec.RepairAgreeBytes.mem_headers

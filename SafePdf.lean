@@ -82,6 +82,7 @@ import SafePdf.Spec.Write
 import SafePdf.Spec.WritePrefix
 import SafePdf.Spec.RepairAgree
 import SafePdf.Spec.RepairAgreeFree
+import SafePdf.Spec.RepairAgreeBytes
 import SafePdf.Core.Annot
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text
