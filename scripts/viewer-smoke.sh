@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6, 9.r8, 9.r9, 9.r12; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6, 9.r8, 9.r9, 9.r10, 9.r11b, 9.r12; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -100,6 +100,12 @@
 #      file's attachments (name tree with kids + file attachment annotation) without decoding,
 #      Save attachment as... writes exactly the decoded bytes, refused targets, UseAttachments
 #      opens the panel, an icon click selects its row, no Attachments button without (9.r10);
+#   1w. layers panel (SAFEPDF_VIEWER_SMOKE_MODE=layers) on generated files with optional
+#      content: /PageMode /UseOC opens it, the tree follows /Order (heading, nesting, locked),
+#      toggling an OFF group paints its content and makes its word findable, a radio member
+#      turns its sibling off, the locked group stays, thumbnails follow, Save keeps the state
+#      and leaves /OCProperties alone, reopening restores the defaults, no Layers button
+#      without optional content (9.r11b);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -2103,6 +2109,132 @@ if os.path.isdir(d):
 for e in errs: print("FAIL: attach: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/att" "$work/out-att" || fail=1
+
+# 1w. Layers panel (task 9.r11b, SAFEPDF_VIEWER_SMOKE_MODE=layers, `Viewer.smokeLayers`) on
+#     generated PDFs (none in the corpus has optional content): oc.pdf (/PageMode /UseOC; one
+#     page whose squares and words are in the groups Base ON, Extra OFF, Notes ON, the radio
+#     pair English ON / French OFF under the UTF-16 heading "Languages" + U+202E, Locked
+#     (locked, ON, nested under Notes by an unlabelled array), Orphan (ON, not in /Order), and
+#     an OCMD AllOn(Base, Extra)); oc-nomode.pdf (no page mode: Layers button, sidebar closed),
+#     oc-noorder.pdf (no /Order: every group by name) and plain.pdf (/UseOC without
+#     /OCProperties: no button, no note). The viewer runs on a copy (saved.pdf), adds a note,
+#     saves it (incremental update) and opens it again.
+mkdir -p "$work/oc" "$work/out-oc"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(objs):
+    n = max(objs) + 1
+    body, offs = b"%PDF-1.7\n", {}
+    for k in sorted(objs):
+        offs[k] = len(body)
+        v = objs[k]
+        if isinstance(v, str): v = v.encode("latin-1")
+        body += b"%d 0 obj\n" % k + v + b"\nendobj\n"
+    x = len(body)
+    body += b"xref\n0 %d\n0000000000 65535 f \n" % n
+    body += b"".join((b"%010d 00000 n \n" % offs[k]) if k in offs else b"0000000000 65535 f \n" for k in range(1, n))
+    body += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n, x)
+    return body
+def sq(tag, rgb, x, y, word=None):
+    s = "/OC /%s BDC %s rg %d %d 100 100 re f" % (tag, rgb, x, y)
+    if word: s += " BT /F1 20 Tf %d %d Td (%s) Tj ET" % (x, y - 30, word)
+    return s + " EMC\n"
+c = (sq("oa", "1 0 0", 50, 600, "alpha") + sq("ob", "0 0 1", 200, 600, "bravo") +
+     sq("om", "0 0.6 0", 350, 600) + sq("oe", "1 0.5 0", 50, 400, "english") +
+     sq("of", "0.5 0 0.5", 200, 400, "french") + sq("ol", "0.3 0.3 0.3", 350, 400) +
+     sq("on", "0 0.5 0.5", 50, 200) + "0 g BT /F1 20 Tf 50 120 Td (always visible) Tj ET\n")
+label = "<FEFF" + "".join("%04X" % ord(ch) for ch in "Languages‮") + ">"
+def doc(cat, props):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+            3: "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> "
+               "/Properties << /oa 10 0 R /ob 11 0 R /om 20 0 R /oe 13 0 R /of 14 0 R /ol 15 0 R /on 16 0 R >> >> >>",
+            4: "<< /Length %d >>\nstream\n%sendstream" % (len(c), c),
+            5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            20: "<< /Type /OCMD /OCGs [10 0 R 11 0 R] /P /AllOn >>"}
+    for k, nm in [(10, "Base"), (11, "Extra"), (12, "Notes"), (13, "English"), (14, "French"),
+                  (15, "Locked"), (16, "Orphan")]:
+        objs[k] = "<< /Type /OCG /Name (%s) >>" % nm
+    if props is not None:
+        objs[1] = objs[1][:-3] + " /OCProperties 21 0 R >>"
+        objs[21] = props
+    return pdf(objs)
+ocgs = "/OCGs [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R]"
+d = "/Name (Default) /OFF [11 0 R 14 0 R] /RBGroups [[13 0 R 14 0 R]] /Locked [15 0 R]"
+order = "/Order [10 0 R 11 0 R [%s 13 0 R 14 0 R] 12 0 R [15 0 R]]" % label
+props = "<< %s /D << %s %s >> >>" % (ocgs, d, order)
+open(out + "/oc.pdf", "wb").write(doc("/PageMode /UseOC", props))
+open(out + "/oc-nomode.pdf", "wb").write(doc("", props))
+open(out + "/oc-noorder.pdf", "wb").write(doc("/PageMode /UseOC", "<< %s /D << %s >> >>" % (ocgs, d)))
+open(out + "/plain.pdf", "wb").write(doc("/PageMode /UseOC", None))
+ ' "$work/oc"
+cp "$work/oc/oc.pdf" "$work/oc/saved.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=layers \
+  run_viewer "$work/out-oc" "$work/oc/saved.pdf" || true
+cut -c1-200 "$work/out-oc/layers.txt" 2>/dev/null || true
+python3 -I -c '
+import sys
+ocd, outd = sys.argv[1], sys.argv[2]
+try: lines = open(outd + "/layers.txt", encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: layers: no layers.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def want(k, part):
+    if part not in v.get(k, ""): errs.append("%s = %r lacks %r" % (k, v.get(k), part))
+def lacks(k, part):
+    if part in v.get(k, ""): errs.append("%s = %r has %r" % (k, v.get(k), part))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+white, blue, green, orange, purple = "(255 255 255)", "(0 0 255)", "(0 153 0)", "(255 128 0)", "(128 0 128)"
+want("start", "shown=true panel=layers layersBtn=true list=1 rows=7 title=Layers")
+lacks("start", "not available")
+tree = "0:Base:1;0:Extra:0;0:[Languages];1:English:1;1:French:0;0:Notes:1;1:Locked:1:locked"
+want("rows", tree)
+lacks("rows", "Orphan")
+want("px-start", "base=(255 0 0) extra=%s ocmd=%s en=%s fr=%s locked=(77 77 77) orphan=(0 128 128)" % (white, white, orange, white))
+want("text-start", "alpha=1 bravo=0 english=1 french=0 always=1")
+want("thumb-start", "have=true px=%s" % white)
+want("extra-on", "0:Extra:1;")
+want("px-extra", "extra=%s ocmd=%s" % (blue, green))
+want("text-extra", "bravo=1")
+want("french-on", "1:English:0;1:French:1;")
+want("px-french", "en=%s fr=%s" % (white, purple))
+want("text-french", "english=0 french=1")
+want("locked", "1:Locked:1:locked")
+want("locked", "status=layer Locked is locked")
+want("px-locked", "locked=(77 77 77)")
+want("collapsed", "1:English:0:hidden;1:French:1:hidden;")
+want("expanded", "1:English:0;1:French:1;")
+want("thumb-after", "have=true px=%s" % blue)
+want("saved", "dirty=false status=saved 1 new")
+want("saved-rows", "0:Extra:1;0:[Languages];1:English:0;1:French:1;")
+want("px-saved", "extra=%s ocmd=%s en=%s fr=%s" % (blue, green, white, purple))
+want("reopened", "shown=true panel=layers layersBtn=true")
+want("reopened-rows", tree)
+want("px-reopened", "extra=%s ocmd=%s en=%s fr=%s" % (white, white, orange, white))
+want("text-reopened", "alpha=1 bravo=0 english=1 french=0")
+want("oc-nomode", "shown=false")
+want("oc-nomode", "layersBtn=true")
+want("oc-noorder", "shown=true panel=layers layersBtn=true list=1 rows=7")
+want("oc-noorder-rows", "0:Base:1;0:Extra:0;0:Notes:1;0:English:1;0:French:0;0:Locked:1:locked;0:Orphan:1")
+want("plain", "shown=false")
+want("plain", "layersBtn=false")
+lacks("plain", "not available")
+# Save wrote an incremental update that leaves /OCProperties (and the catalog) alone.
+orig = open(ocd + "/oc.pdf", "rb").read()
+saved = open(ocd + "/saved.pdf", "rb").read()
+if not saved.startswith(orig) or len(saved) <= len(orig):
+    errs.append("saved.pdf is not an incremental update of oc.pdf")
+else:
+    tail = saved[len(orig):]
+    for bad in [b"OCProperties", b"/OCGs", b"/ON", b"/OFF", b"\n1 0 obj", b"\n21 0 obj"]:
+        if bad in tail: errs.append("the update writes %r" % bad)
+for e in errs: print("FAIL: layers: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/oc" "$work/out-oc" || fail=1
+if command -v qpdf >/dev/null 2>&1; then
+  qpdf --check "$work/oc/saved.pdf" >/dev/null 2>&1 || { echo "FAIL: layers: qpdf --check saved.pdf" >&2; fail=1; }
+fi
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"

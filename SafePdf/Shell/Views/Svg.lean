@@ -120,6 +120,11 @@ per page is printed (JSON with `--json`). The SVG is produced from the `DisplayL
   glyphs, `data-item`/`data-seq` (provenance) and `data-text`.
 * XML text and attribute values are escaped (`&`, `<`, `>`, `"`), XML-invalid control
   characters replaced; comments never contain `--`.
+* **Optional content** (task 9.r11b): both views run under the document's default visibility
+  state (`defaultOC`, the `/OCProperties /D` configuration, as the viewer opens a file), so
+  content in an OFF layer is not drawn in the SVG and its items are not counted in `ops`; its
+  operators still run (they are covered and counted in the histogram). Without
+  `/OCProperties` nothing changes.
 -/
 
 namespace SafePdf.Shell.Views.Svg
@@ -264,20 +269,29 @@ def observe (o : Obs) (op : Op) (w u : Nat) : Obs :=
   let warned := if u == 0 && w > 0 then 1 else 0
   { hist := o.hist.add op.op 1 (if u > 0 then 1 else 0) warned, warned := o.warned + warned }
 
-/-- The runner environment of the views. -/
-def runEnv (limits : Limits) (doc : Doc) : SafePdf.Core.Content.Env Budget Obs :=
-  { cfg := interpConfig limits, src := docSource limits doc, observe }
+/-- The document's default optional content state (task 9.r11b: the views show what the viewer
+shows when a file opens; `Core.Text.docOCState` under a fresh budget, so that a document
+without `/OCProperties` gives the empty state and unchanged output). -/
+def defaultOC (limits : Limits) (doc : Doc) : OptionalContent.State :=
+  (SafePdf.Core.Text.docOCState limits doc (Budget.init limits)).1
+
+/-- The runner environment of the views, under the optional content state `oc`. -/
+def runEnv (limits : Limits) (doc : Doc) (oc : OptionalContent.State := defaultOC limits doc) :
+    SafePdf.Core.Content.Env Budget Obs :=
+  { cfg := interpConfig limits, src := docSource limits doc, observe, oc }
 
 /-- Analyse one page from its decoded contents, running forms under `budget`; returns the
-analysis and the budget left. -/
+analysis and the budget left. Content hidden by optional content (`oc`, by default the
+document's default configuration, `defaultOC`) is not in the items, as in the viewer. -/
 def analyze (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (keepItems : Bool)
-    (decoded : Except Error (List ByteArray)) (budget : Budget) : PageOps × Budget :=
+    (decoded : Except Error (List ByteArray)) (budget : Budget)
+    (oc : OptionalContent.State := defaultOC limits doc) : PageOps × Budget :=
   match decoded with
   | .error e => ({ index, error := some e }, budget)
   | .ok parts =>
     let bytes := joinParts parts
     let t := SafePdf.Core.Content.Ops.tokenize limits bytes
-    let st := SafePdf.Core.Content.runPage (runEnv limits doc) (page.resources.getD []) t.ops
+    let st := SafePdf.Core.Content.runPage (runEnv limits doc oc) (page.resources.getD []) t.ops
       budget {}
     let kinds := st.items.foldl (fun k it => k.modify (kindIndex it) (· + 1))
       (Array.replicate nKinds 0)
@@ -290,10 +304,11 @@ def analyze (limits : Limits) (doc : Doc) (page : Page) (index : Nat) (keepItems
 def analyzeDoc (limits : Limits) (doc : Doc) (keepItems : Bool) : Array PageOps := Id.run do
   let mut budget := Budget.init limits
   let mut out : Array PageOps := #[]
+  let oc := defaultOC limits doc
   for h : i in [0:doc.pages.size] do
     let page := doc.pages[i]'h.upper
     let (r, b) := doc.decodeContentsB limits budget page
-    let (po, b) := analyze limits doc page i keepItems r b
+    let (po, b) := analyze limits doc page i keepItems r b oc
     budget := b
     out := out.push po
   return out
@@ -302,6 +317,7 @@ def analyzeDoc (limits : Limits) (doc : Doc) (keepItems : Bool) : Array PageOps 
 def analyzeDocTimed (limits : Limits) (doc : Doc) : IO (Array (PageOps × Nat)) := do
   let mut budget := Budget.init limits
   let mut out : Array (PageOps × Nat) := #[]
+  let oc := defaultOC limits doc
   for h : i in [0:doc.pages.size] do
     let page := doc.pages[i]'h.upper
     let b0 := budget
@@ -309,7 +325,7 @@ def analyzeDocTimed (limits : Limits) (doc : Doc) : IO (Array (PageOps × Nat)) 
     -- `lazyPure` evaluates the (strict) pair when this action runs, between the clock reads.
     let r ← IO.lazyPure fun _ =>
       let (d, b) := doc.decodeContentsB limits b0 page
-      analyze limits doc page i false d b
+      analyze limits doc page i false d b oc
     match r with
     | (po, b) =>
       let t1 ← IO.monoNanosNow
@@ -890,10 +906,11 @@ def svgView : View where
         let dir : System.FilePath := dir
         IO.FS.createDirAll dir
         let mut budget := Budget.init cfg.limits
+        let oc := defaultOC cfg.limits doc
         for h : k in [0:doc.pages.size] do
           let page := doc.pages[k]'h.upper
           let (r, b) := doc.decodeContentsB cfg.limits budget page
-          let (po, b) := analyze cfg.limits doc page k true r b
+          let (po, b) := analyze cfg.limits doc page k true r b oc
           budget := b
           let svg := renderPage cfg.limits doc page k po
             (if text then textOverlay cfg.limits doc page else [])
