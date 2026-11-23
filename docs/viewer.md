@@ -147,6 +147,21 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     text reverts the field to the current page (and says so in the status line); Escape or
     leaving the field reverts it too. The field follows every page change (arrows, keys, wheel,
     links, outline). The entry has its own bind tags, so typing does not trigger viewer keys.
+    Right after `of N`, the **view-mode drop-down** (9.r4, `Toolbar.ViewChoice`): a small
+    rounded button (`.bar.vmode`, 56 × 32 px, the zoom box's border and radius) with an icon
+    of the current mode drawn with canvas items — one page, two stacked pages, two pages side
+    by side, four pages in a grid — and a chevron; its tooltip names the mode. Clicking it
+    opens a menu (`.viewmenu`) with **Single Page**, **Vertical Scrolling** (the start-up
+    default since 9.r1), **Two Pages** and **Two Pages Scrolling** as radio entries: each is a
+    pair of the 9.3 modes (`ViewChoice.modes`: Page / Vertical Scrolling with No Spreads or
+    spreads; a two-page choice keeps Even Spreads when they are on, else takes Odd Spreads)
+    and runs `emit viewMode view KEY`. Whatever changes the mode — this menu, View → Page /
+    Vertical Scrolling and No / Odd / Even Spreads, the same entries of the `»` menu,
+    `SAFEPDF_VIEWER_VIEW` — goes through `Viewer.setViewMode`, which sets the View and `»`
+    menus' variables (`::safepdf::scrollMode`, `::safepdf::spreadMode`) and the drop-down's
+    checked entry and icon (`::safepdf::viewSel` = `ViewChoice.ofModes` of the two), so all
+    three always agree (`ViewChoice.ofModes_modes`, `modes_ofModes`). Disabled (dimmed) with no
+    document.
   * *centre* (centred in the window): − / + (zoom out / in one step, as the keys) and the zoom
     drop-down, a rounded button showing the current choice; clicking it opens a menu with
     Automatic Zoom, Actual Size, Page Fit, Page Width, 50 %, 75 %, 100 %, 125 %, 150 %, 200 %,
@@ -167,6 +182,20 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
     16 px icons in `#3b3b44`, dimmed when disabled (PDF.js: opacity 0.5); a tooltip appears
     after 600 ms; separators are 1 px × 20 px.
+* **Opening and closing the sidebar** (9.r4): the canvas changes width with it. Window
+  resizes are reported to Lean 100 ms after the last `<Configure>` (a window drag sends many),
+  so before 9.r4 the canvas showed the old layout in the new width for that time — the page,
+  centred for the old width, sat at the old offset from the canvas's new left edge (on closing
+  it jumped left by the sidebar's width, then back to the centre; "the page flickers to the
+  side", most visible at Page Fit). Now `Viewer.showOutline` calls `::safepdf::resizeSoon`
+  first: for 300 ms the canvas's `<Configure>` binding reports a change of its width at once
+(height-only changes, such as the find bar's, stay debounced). Tk runs
+  that binding while it lays out the panes, before it paints the canvas at its new size, so
+  Lean lays the pages out for the new width (and at a fit zoom renders or takes from the cache
+  the new zoom) before anything is drawn: the page goes straight to its final place, in
+  every view mode. Smoke case 1q samples the page frame's canvas and screen x at every
+  `<Configure>` and every 2 ms and requires just the start and the end value (before the fix:
+  screen x 403 → 117 → 260 on closing, 260 → 531 → 396 on opening).
 * **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`): a white panel titled
   *Document outline* on the `#f0f0f4` background. It **opens on load only when the document
   has an outline**; without one it stays closed and the toggle is hidden (F9 and View → Outline
@@ -602,11 +631,17 @@ with Tk canvas items; colours sampled from the Firefox screenshot
 `#6b45d3`).
 
 * **Float bubble**: after a text selection (mouse-up of a drag, a double click, Ctrl+A) a
-  small rounded bubble with the Highlight icon; its right edge is at the end of the lowest
+  small rounded bubble with the Highlight icon and, after a divider, **Add comment** (9.r4:
+  the toolbar's note icon); its right edge is at the end of the lowest
   selected line and its top 6 px below it (PDF.js `#getLastPoint`,
   `--editor-toolbar-vert-offset`), above the selection when it would leave the scroll region
   at the bottom, and clamped into it (`Bubble.place`). Clicking it highlights in the current
-  colour (Edit → Highlight selection's script, `Bubble.Btn.cmd?`).
+  colour (Edit → Highlight selection's script, `Bubble.Btn.cmd?`). Add comment runs Add
+  note… (the toolbar's Add comment, Edit → Add note…): a note anchored to the selection's
+  quads, its popup opened for typing; the selection and with it the bubble go away. Both
+  buttons show a tooltip (Highlight, Add comment) after 600 ms over them, as toolbar buttons
+  do (each button has a white hit area under its icon, tag `b:NAME`; `Bubble.Btn.tip`). The
+  wider bubble (67 px) is placed and clamped as before (`place_inside` holds for any size).
 * **Edit bubble**: on a selected highlight (after creating it, or a click on it): the colour
   swatch with a chevron, Comment and Delete, separated by dividers. The chevron opens the
   colour picker (five swatches in a column under the button, the highlight's colour ringed;
@@ -637,7 +672,8 @@ with Tk canvas items; colours sampled from the Firefox screenshot
 
 Not done (visible differences from the reference): Tk on X11 draws no antialiasing and no
 real shadow (a 2 px offset grey shape stands in), so the pill-shaped bubble and the round
-swatches have jagged edges; the bubble buttons have no hover background or tooltips; the
+swatches have jagged edges; the bubble buttons have no hover background (tooltips since
+9.r4); the
 pop-over is a rectangle window, so its rounded corners show the canvas colour behind them
 (`#f0f0f4`); the toolbar's toggled Highlight button is grey, not PDF.js's lavender; fonts are
 Tk's default; a comment is a separate note mark anchored to the highlight's quads (PDF.js
@@ -646,7 +682,7 @@ keeps the comment in the highlight annotation), so deleting the highlight leaves
 | Key / mouse | Action |
 |---|---|
 | mouse-up after selecting | float bubble (with the Highlight tool on: highlight at once) |
-| bubble buttons | Highlight; colour ▾ (picker), Comment, Delete |
+| bubble buttons | after a selection: Highlight, Add comment (9.r4); on a highlight: colour ▾ (picker), Comment, Delete |
 | toolbar Highlight without a selection | Highlight tool and pop-over on / off |
 | `Escape` | close the pop-over and the picker, dismiss the bubble (clears the selection and the selected mark) |
 
@@ -771,8 +807,8 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
 | `SafePdf/Shell/App/Marks.lean` | Tk-free model of highlights and notes with `#guard` checks: PDF.js colours, marks with stable ids and `/NM` names, quads and `/QuadPoints`, note icon boxes, the store (add, remove, recolour, edit, restore), hit-testing, the multiply blend into the page image (task 9.4). |
 | `SafePdf/Shell/App/Save.lean` | Tk-free save flow (task 9.5c) with `#guard` checks: marks → `Core.Write.Annots.Mark`, PDF dates, reading our marks back from a document, the read-back check, default target, atomic write. |
-| `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js, placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
-| `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
+| `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js (float bubble: Highlight and Add comment since 9.r4), placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
+| `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7), the view-mode drop-down's choices (`ViewChoice`, theorems `ofModes_modes`, `modes_ofModes`; task 9.r4). |
 | `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
@@ -1098,6 +1134,20 @@ on X11, where Tk's `Command` modifier is Meta): `Command-O`/`Command-S`/`Command
 `<Command-Key-a>` selects all (status `… (⌘C copies)`). Both runs check the six icon images
 (16–512 px) and, when `xprop`/`xwininfo` are installed, that the toplevel's wrapper carries
 `_NET_WM_ICON` starting with `512, 512`.
+
+The `r4` case (9.r4, `Viewer.smokeR4`, script case 1q) runs in the default view on the text
+PDF, the outline PDF and the M9 papers. The view-mode drop-down: it starts on Vertical
+Scrolling, lists the four modes, sits right after `of N`; each entry, invoked, sets the
+scroll and spread variables of the View and `»` menus and redraws its icon (1, 2, 2 or 4
+page shapes); View → Even Spreads and `»` → Vertical Scrolling move its checked entry; Two
+Pages keeps even spreads. On the text PDF a drag over `world` shows the float bubble with
+`[highlight, comment]` inside the scroll region, its Add comment tooltip shows, and Add
+comment adds exactly one note anchored to the selection's quads with its popup open and the
+bubble gone. With an outline, in Single Page and Vertical Scrolling at Page Fit, the outline
+is closed and opened while `r4Probe` samples the first page frame's canvas and screen x at
+every `<Configure>` of the canvas and every 2 ms for 700 ms; the run of distinct values must
+be just start → end (an intermediate value fails: the flicker). It writes `toolbar.png`,
+`viewmenu.png`, `bubble.png` and `bubble-tip.png` when `import` is installed.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the

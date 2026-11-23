@@ -120,12 +120,18 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   a mark selects it (a note also opens its popup); Delete or Edit → Delete mark removes it,
   a colour entry recolours it.
 * **Selection bubble and Highlight pop-over** (task 9.8, pure logic in `Bubble`): after a
-  text selection a floating Highlight button at the selection's end; on a selected highlight
+  text selection a floating bubble at the selection's end with Highlight and Add comment (task
+  9.r4: a note anchored to the selection; tooltips on both); on a selected highlight
   the edit bubble (colour swatch with a picker, Comment, Delete), canvas items placed again on
   every redraw (`drawBubble`); the toolbar's Highlight button without a selection toggles the
   Highlight tool and its pop-over `.hlbar` (swatches, thickness slider, "Show all"; `syncTool`,
   `drawPopover`); with the tool on a mouse-up that selects text highlights it at once; Escape
   closes the pop-over and dismisses the bubble.
+* **Review 2026-11-23** (task 9.r4): the toolbar's view-mode drop-down `.bar.vmode` after the
+  page count (`Toolbar.ViewChoice`, kept in sync with the View and `»` menus by
+  `setViewMode` / `showViewChoice`); opening or closing the outline sidebar lays the pages out
+  for the canvas's new width from inside its `<Configure>` binding (`showOutline`,
+  `::safepdf::resizeSoon`), so the page never shows at the old offset (the Page Fit flicker).
 * **Add text and Draw** (task 9.9, PDF.js's FreeText and Ink editors; pure state in
   `Bubble.Ui`/`Bubble.EdPop`, marks in `Marks`): the toolbar's Add text and Draw buttons turn
   their mode on with a parameter pop-over `.edbar` (`drawEdPop`: colour swatches, Font size /
@@ -922,6 +928,83 @@ proc ::safepdf::zoomShow {label sel on} {
     -fill [expr {$on ? $::safepdf::col(text) : $::safepdf::col(inkOff)}]
   .bar.zoom itemconfigure chev -fill [expr {$on ? $::safepdf::col(ink) : $::safepdf::col(inkOff)}]
 }
+# View-mode drop-down (9.r4) next to the page count: a small rounded button with the icon of
+# the current mode (::safepdf::icon::view-KEY) and a chevron; the menu .viewmenu holds the four
+# modes (radio entries on ::safepdf::viewSel, set by Lean from the scroll and spread modes).
+proc ::safepdf::icon::view-single {c} {
+  $c create rectangle 11 8 21 24 -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::view-vertical {c} {
+  $c create rectangle 11 6 21 14 -outline black -width 1.5 -tags inko
+  $c create rectangle 11 18 21 26 -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::view-two {c} {
+  $c create rectangle 7 9 15 23 -outline black -width 1.5 -tags inko
+  $c create rectangle 17 9 25 23 -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::view-two-scroll {c} {
+  $c create rectangle 8 6 15 14 -outline black -width 1.5 -tags inko
+  $c create rectangle 17 6 24 14 -outline black -width 1.5 -tags inko
+  $c create rectangle 8 18 15 26 -outline black -width 1.5 -tags inko
+  $c create rectangle 17 18 24 26 -outline black -width 1.5 -tags inko
+}
+set ::safepdf::viewSel vertical
+set ::safepdf::viewOn 0
+set ::safepdf::viewShown {}
+proc ::safepdf::viewBox {} {
+  upvar #0 ::safepdf::col c
+  canvas .bar.vmode -width 56 -height 32 -background $c(bar) -highlightthickness 0 \
+    -borderwidth 0 -takefocus 0
+  ::safepdf::rrect .bar.vmode 1 1 55 31 15 -fill $c(field) -outline $c(fieldLine) -tags frame
+  .bar.vmode create line 36 13.5 40.5 18 45 13.5 -width 1.6 -fill $c(ink) -capstyle round \
+    -joinstyle round -tags chev
+  ::safepdf::barPack .bar.vmode .bar.l -padx {2 0}
+  foreach {k v} {in 0 tip {}} { set ::safepdf::btn($k,.bar.vmode) $v }
+  bind .bar.vmode <Enter> {
+    if {$::safepdf::viewOn} {.bar.vmode itemconfigure frame -fill $::safepdf::col(hover)}
+    set ::safepdf::btn(in,.bar.vmode) 1
+    after cancel $::safepdf::tipId
+    set ::safepdf::tipId [after 600 [list ::safepdf::tipShow .bar.vmode]]
+  }
+  bind .bar.vmode <Leave> {
+    .bar.vmode itemconfigure frame -fill $::safepdf::col(field)
+    set ::safepdf::btn(in,.bar.vmode) 0
+    after cancel $::safepdf::tipId
+    destroy .tip
+  }
+  bind .bar.vmode <ButtonPress-1> ::safepdf::postView
+  menu .viewmenu -tearoff 0 -background white -activebackground $c(hover) \
+    -activeforeground $c(text) -foreground $c(text) -font ::safepdf::fBar -relief solid \
+    -borderwidth 1 -activeborderwidth 0 -selectcolor $c(ink)
+}
+proc ::safepdf::postView {} {
+  if {!$::safepdf::viewOn} return
+  after cancel $::safepdf::tipId
+  destroy .tip
+  tk_popup .viewmenu [winfo rootx .bar.vmode] [expr {[winfo rooty .bar.vmode] + [winfo height .bar.vmode] + 2}]
+}
+# Shows mode KEY (tooltip TIP) on the button, enabled or not; the icon is redrawn on change.
+proc ::safepdf::viewShow {key tip on} {
+  set ::safepdf::viewOn $on
+  set ::safepdf::viewSel $key
+  set ::safepdf::btn(tip,.bar.vmode) $tip
+  set w .bar.vmode
+  if {$::safepdf::viewShown ne $key} {
+    set ::safepdf::viewShown $key
+    $w delete vicon
+    ::safepdf::icon::view-$key $w
+    $w addtag vicon withtag inkf
+    $w addtag vicon withtag inko
+    $w dtag inkf inkf
+    $w dtag inko inko
+    $w move vicon 3 0
+  }
+  set ink [expr {$on ? $::safepdf::col(ink) : $::safepdf::col(inkOff)}]
+  foreach i [$w find withtag vicon] {
+    if {[$w type $i] eq {line}} { $w itemconfigure $i -fill $ink } else { $w itemconfigure $i -outline $ink }
+  }
+  $w itemconfigure chev -fill $ink
+}
 # Overflow menu (PDF.js's secondary toolbar), posted under the right edge of the » button.
 menu .more -tearoff 0 -background white -activebackground $::safepdf::col(hover) \\
   -activeforeground $::safepdf::col(text) -foreground $::safepdf::col(text) \\
@@ -1124,9 +1207,28 @@ bind .c <Control-Button-5> {::safepdf::wheelZoom -1 %x %y; break}
 bind . <Control-o> {::safepdf::emit open}
 bind . <Control-w> {::safepdf::emit close}
 bind . <Control-q> {::safepdf::emit quit}
+# Resizes are debounced (a window drag sends many); for 300 ms after ::safepdf::resizeSoon
+# (the outline sidebar opens or closes, 9.r4) a change of the canvas width is reported at
+# once, from inside the <Configure> binding: Tk calls it while laying out the panes, before
+# the canvas is painted at its new size, so the pages never show at the old layout in the new
+# width. Height-only changes (find bar, go-to bar) stay debounced.
+set ::safepdf::resizeNow 0
+set ::safepdf::resizeNowId {}
+set ::safepdf::confW 0
+proc ::safepdf::resizeSoon {} {
+  set ::safepdf::resizeNow 1
+  after cancel $::safepdf::resizeNowId
+  set ::safepdf::resizeNowId [after 300 {set ::safepdf::resizeNow 0}]
+}
 bind .c <Configure> {
   after cancel $::safepdf::resizeId
-  set ::safepdf::resizeId [after 100 {::safepdf::emit resize [winfo width .c] [winfo height .c]}]
+  set ::safepdf::confW0 $::safepdf::confW
+  set ::safepdf::confW %w
+  if {$::safepdf::resizeNow && %w != $::safepdf::confW0} {
+    ::safepdf::emit resize %w %h
+  } else {
+    set ::safepdf::resizeId [after 100 {::safepdf::emit resize [winfo width .c] [winfo height .c]}]
+  }
 }
 # Selection (8.2c): press/drag/release and double-click on the page, context menu.
 bind .c <ButtonPress-1> {focus .c; ::safepdf::emit press %x %y}
@@ -1409,6 +1511,28 @@ proc ::safepdf::bubColor {c bx cy hex open tags} {
   $c create line [expr {$bx + 26.5}] [expr {$cy - $d}] [expr {$bx + 30}] [expr {$cy + $d}] [expr {$bx + 33.5}] [expr {$cy - $d}] -fill $::safepdf::col(bubInk) -width 1.3 -capstyle round -joinstyle round -tags $tags
 }
 # A swatch at cx cy of diameter d; the selected one ringed (2 px, 2 px away).
+# Tooltips of the bubble's buttons (9.r4): canvas item tag b:NAME, shown under its button.
+proc ::safepdf::bubTip {tag text} {
+  after cancel $::safepdf::tipId
+  set ::safepdf::tipId [after 600 [list ::safepdf::bubTipShow $tag $text]]
+}
+proc ::safepdf::bubTipShow {tag text} {
+  set b [.c bbox $tag]
+  if {$b eq {}} return
+  destroy .tip
+  toplevel .tip -background $::safepdf::col(fieldLine) -borderwidth 0
+  wm overrideredirect .tip 1
+  label .tip.l -text $text -font ::safepdf::fBar -background white \
+    -foreground $::safepdf::col(text) -padx 6 -pady 3
+  pack .tip.l -padx 1 -pady 1
+  set x [expr {[winfo rootx .c] + round([lindex $b 0] - [.c canvasx 0])}]
+  set y [expr {[winfo rooty .c] + round([lindex $b 3] - [.c canvasy 0]) + 8}]
+  wm geometry .tip +$x+$y
+}
+proc ::safepdf::bubTipHide {} {
+  after cancel $::safepdf::tipId
+  destroy .tip
+}
 proc ::safepdf::swatch {c cx cy d hex sel tags} {
   set r [expr {$d / 2.0}]
   if {$sel} {
@@ -1661,7 +1785,8 @@ def drawMarks (s : State) (sl : Slot) : IO Unit := do
           "-outline", "#0060df", "-width", "2", "-tags", s!"{tags} marksel"]
 
 /-- Draws the bubble (canvas items tagged `bub`, task 9.8; `Bubble`): after a text selection
-(not while dragging) the float bubble with the Highlight button, on a selected highlight the
+(not while dragging) the float bubble with the Highlight and Add comment buttons (task 9.r4;
+each button with a hover tooltip, `Bubble.Btn.tip`), on a selected highlight the
 edit bubble (colour swatch and chevron, Comment, Delete) and, when open, its colour picker.
 Placed by `Bubble.place` in canvas coordinates inside the scroll region, on the page of the
 selection or the mark (task 9.3: any laid-out page), so it scrolls with the page; every redraw
@@ -1706,6 +1831,12 @@ def drawBubble (st : IO.Ref State) : IO Unit := do
   for (b, x0, x1) in k.layout do
     let tags := s!"bub b:{b.name}"
     let cx := r.x0 + (x0 + x1) / 2
+    -- The button's area (white, under its icon) carries the hover tooltip (task 9.r4).
+    discard <| run [".c", "create", "rectangle", num (r.x0 + x0), num (r.y0 + Bubble.pad),
+      num (r.x0 + x1), num (r.y1 - Bubble.pad), "-fill", "white", "-outline", "", "-tags", tags]
+    discard <| run [".c", "bind", s!"b:{b.name}", "<Enter>",
+      s!"::safepdf::bubTip b:{b.name} \{{b.tip}}"]
+    discard <| run [".c", "bind", s!"b:{b.name}", "<Leave>", "::safepdf::bubTipHide"]
     match b with
     | .color =>
       let hex := (mark.map (·.color.hex)).getD s.hlColor.hex
@@ -2173,6 +2304,12 @@ def applyScroll (st : IO.Ref State) : IO Unit := do
   if s.scroll == .vertical then
     if let some (top, _, _, _) ← viewBand s then st.modify ({ · with ownTop := some top })
 
+/-- Shows the current view mode on the view-mode drop-down (task 9.r4,
+`Toolbar.ViewChoice.ofModes`): its icon, tooltip and checked entry, enabled with a document. -/
+def showViewChoice (s : State) (on : Bool) : IO Unit := do
+  let c := Toolbar.ViewChoice.ofModes s.scroll s.spread
+  discard <| run ["::safepdf::viewShow", c.key, s!"View mode: {c.label}", if on then "1" else "0"]
+
 /-- Updates title, page field, zoom field and (when the layout or the current page changed, or
 a scroll is pending) the page images. A new layout (`layoutKeyOf` changed: document, view
 mode, zoom, rotation, window size, or the spread shown in the page scroll mode) is computed by
@@ -2187,6 +2324,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
   | some _, some doc =>
     showPageField s
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "1"]
+    showViewChoice s true
     if doc.pages.size == 0 then return
     let key := layoutKeyOf s
     let relaid := s.layoutKey != some key
@@ -2225,6 +2363,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
   | _, _ =>
     discard <| run ["::safepdf::setPage", "", "", "0"]
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
+    showViewChoice s false
     discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
     st.modify ({ · with bubble := none, pickerAt := none, slots := #[], layoutKey := none,
                         shown := none })
@@ -2261,13 +2400,19 @@ def prefetch (st : IO.Ref State) : IO Unit := do
 /-! ## Outline panel (task 8.2d) -/
 
 /-- Shows or hides the outline sidebar (the left pane of `.pw`); the sidebar toggle button
-looks pressed while it is shown (PDF.js's `toggled`). -/
+looks pressed while it is shown (PDF.js's `toggled`). The canvas's next width changes are
+reported at once instead of after the 100 ms resize debounce (`::safepdf::resizeSoon`), so
+the pages are laid out for the new width before the canvas is painted at it: at Page Fit the
+page goes straight to its new place (task 9.r4). -/
 def showOutline (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
   -- The View → Outline check entry toggles its variable before it runs the command; set it
   -- back to the panel's real state whatever happens below.
   discard <| run ["set", Menu.outlineVar, if s.outlineShown then "1" else "0"]
   if on == s.outlineShown then return
+  -- The canvas changes width: lay the pages out again as soon as it has its new size, before
+  -- Tk paints it (task 9.r4, `::safepdf::resizeSoon`).
+  discard <| run ["::safepdf::resizeSoon"]
   if on then discard <| run [".pw", "insert", "0", ".ol", "-weight", "0"]
   else discard <| run [".pw", "forget", ".ol"]
   discard <| run ["set", Menu.outlineVar, if on then "1" else "0"]
@@ -2521,15 +2666,20 @@ def rotate (st : IO.Ref State) (cw : Bool) : IO Unit := do
   refresh st
 
 /-- Handles `viewMode scroll KEY` / `viewMode spread KEY` (task 9.3; View menu and the overflow
-menu's radio entries): switches the scroll mode (`page`, `vertical`) or the spread mode
-(`none`, `odd`, `even`), keeping the current page, shown from its top. The radio variables
-(`Menu.scrollVar`, `Menu.spreadVar`) and `::safepdf::continuous` (which makes key scrolling
-report `viewChanged`) are set to the state whatever happens. -/
+menu's radio entries) and `viewMode view KEY` (task 9.r4, the toolbar's view-mode drop-down,
+`Toolbar.ViewChoice.modes`): switches the scroll mode (`page`, `vertical`), the spread mode
+(`none`, `odd`, `even`) or both, keeping the current page, shown from its top. The radio
+variables (`Menu.scrollVar`, `Menu.spreadVar`, the drop-down's `::safepdf::viewSel` with its
+icon) and `::safepdf::continuous` (which makes key scrolling report `viewChanged`) are set to
+the state whatever happens, so the View menu, the `»` menu and the drop-down agree. -/
 def setViewMode (st : IO.Ref State) (what key : String) : IO Unit := do
   let s ← st.get
   let s' := match what with
     | "scroll" => (View.ScrollMode.ofKey key).map fun m => { s with scroll := m }
     | "spread" => (View.SpreadMode.ofKey key).map fun m => { s with spread := m }
+    | "view" => (Toolbar.ViewChoice.ofKey key).map fun (c : Toolbar.ViewChoice) =>
+      let (sc, sp) := c.modes s.spread
+      { s with scroll := sc, spread := sp }
     | _ => none
   let changed := match s' with
     | some s' => s.doc.isSome && (s'.scroll != s.scroll || s'.spread != s.spread)
@@ -2542,6 +2692,7 @@ def setViewMode (st : IO.Ref State) (what key : String) : IO Unit := do
   discard <| run ["set", Menu.scrollVar, s.scroll.key]
   discard <| run ["set", Menu.spreadVar, s.spread.key]
   discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
+  showViewChoice s s.doc.isSome
   if changed then refresh st
 
 /-! ## Saving (task 9.5c) -/
@@ -2997,7 +3148,8 @@ def buildMenus : IO Unit := do
 /-- Builds the toolbar from `Toolbar.layout` (task 9.7): icon buttons (`::safepdf::iconButton`
 with the model's constant icon name, tooltip and script), separators, the page field and the
 zoom drop-down (its menu `.zoommenu` lists `ZoomChoice.presets` as radio entries on
-`::safepdf::zoomSel`), and the overflow menu `.more` (`Toolbar.overflow`). -/
+`::safepdf::zoomSel`), the view-mode drop-down (task 9.r4: `.bar.vmode`, menu `.viewmenu`
+with `ViewChoice.all` as radio entries on `::safepdf::viewSel`), and the overflow menu `.more` (`Toolbar.overflow`). -/
 def buildToolbar : IO Unit := do
   let plat ← platformRef.get
   for (g, items) in Toolbar.layout do
@@ -3011,6 +3163,11 @@ def buildToolbar : IO Unit := do
         discard <| run ["::safepdf::barPack", w, g, "-padx", "2"]
       | .pageField => discard <| run ["::safepdf::pageField"]
       | .zoomBox => discard <| run ["::safepdf::zoomBox"]
+      | .viewBox => discard <| run ["::safepdf::viewBox"]
+  for c in Toolbar.ViewChoice.all do
+    discard <| run [".viewmenu", "add", "radiobutton", "-label", c.label, "-value", c.key,
+      "-variable", "::safepdf::viewSel",
+      "-command", "::safepdf::emit viewMode view $::safepdf::viewSel"]
   for c in Toolbar.ZoomChoice.presets do
     discard <| run [".zoommenu", "add", "radiobutton", "-label", c.label, "-value", c.key,
       "-variable", "::safepdf::zoomSel",
@@ -3603,6 +3760,7 @@ def bubbleClick (st : IO.Ref State) (wx wy : Int) : IO Bool := do
   if let some (k, r) := s.bubble then
     if r.contains cx cy then
       st.modify ({ · with bubblePress := true })
+      discard <| run ["::safepdf::bubTipHide"]
       match Bubble.hit k r cx cy with
       | some .color =>
         st.modify fun s => { s with ui := { s.ui with picker := !s.ui.picker } }
@@ -5708,6 +5866,151 @@ def smokeAsync (st : IO.Ref State) (dir : String) : IO Unit := do
     append "done"
     discard <| run ["destroy", "."]
 
+/-- Tcl probes of the outline-toggle check of `smokeR4` (task 9.r4): `r4sample WHY` appends
+`{WHY canvas-width x y screen-x}` to `::safepdf::r4log`, where x and y are the canvas-window
+position of the first page frame and screen-x its x on the screen (`none` without one); it runs at every `<Configure>` of the canvas (after
+the viewer's own binding) and every 2 ms while `r4tick` runs. -/
+def r4Probe : String := "
+set ::safepdf::r4log {}
+proc ::safepdf::r4sample {why} {
+  set b [.c bbox pageframe]
+  if {$b eq {}} { set x none; set y none; set sx none } else {
+    set x [expr {round([lindex $b 0] - [.c canvasx 0])}]
+    set y [expr {round([lindex $b 1] - [.c canvasy 0])}]
+    set sx [expr {[winfo rootx .c] + $x}]
+  }
+  lappend ::safepdf::r4log [list $why [winfo width .c] $x $y $sx]
+}
+proc ::safepdf::r4tick {n} {
+  ::safepdf::r4sample tick
+  if {$n > 0} { after 2 [list ::safepdf::r4tick [expr {$n - 1}]] }
+}
+bind .c <Configure> {+::safepdf::r4sample conf}
+proc ::safepdf::r4toggle {} {
+  set ::safepdf::r4log {}
+  ::safepdf::r4sample start
+  ::safepdf::btnInvoke .bar.sidebar
+  ::safepdf::r4tick 200
+  set ::safepdf::r4done 0
+  after 700 {set ::safepdf::r4done 1}
+  vwait ::safepdf::r4done
+  ::safepdf::r4sample end
+  return $::safepdf::r4log
+}
+"
+
+/-- Smoke steps of task 9.r4 (`SAFEPDF_VIEWER_SMOKE_MODE=r4`), on the text PDF (bubble) or the
+outline PDF (sidebar), started in the default view. Writes `r4.txt`:
+* the view-mode drop-down: the default (Vertical Scrolling), each of its four entries
+  invoked (scroll and spread variables, the checked entry, the icon), the View menu's Even
+  Spreads and the `»` menu's Page Scrolling followed by the drop-down, Two Pages keeping Even
+  Spreads; `toolbar.png` / `viewmenu.png` (when `import` is installed);
+* with text: a drag over `world` shows the float bubble with its two buttons
+  (`bubble.png`); its Add comment adds one note anchored to the selection's quads, opens
+  its popup and closes the bubble;
+* with an outline: at Page Fit in Single Page and Vertical Scrolling, the outline closed and
+  opened, each with the page frame's window position sampled at every canvas `<Configure>`
+  and every 2 ms for 700 ms (`r4Probe`); the distinct x positions in order must be just the
+  start and the end. -/
+def smokeR4 (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let shot (name : String) (win : String) : IO Unit := do
+    discard <| run ["update"]
+    try
+      let wid ← if win == "root" then pure "root" else run ["winfo", "id", win]
+      discard <| IO.Process.output { cmd := "import", args := #["-window", wid, "-depth", "8", file name] }
+    catch _ => pure ()
+  let vars : IO String := do
+    return s!"{← run ["set", "::safepdf::viewSel"]} {← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} icon={← run ["set", "::safepdf::viewShown"]} items={(← run [".bar.vmode", "find", "withtag", "vicon"]).splitOn " " |>.length} on={← run ["set", "::safepdf::viewOn"]}"
+  out := out.push s!"view0: {← vars}"
+  out := out.push s!"view-entries: {← run [".viewmenu", "entrycget", "0", "-label"]}|{← run [".viewmenu", "entrycget", "1", "-label"]}|{← run [".viewmenu", "entrycget", "2", "-label"]}|{← run [".viewmenu", "entrycget", "3", "-label"]}"
+  out := out.push s!"view-left: {← run ["pack", "slaves", ".bar.l"]}"
+  out := out.push s!"view-tip: {← run ["set", "::safepdf::btn(tip,.bar.vmode)"]}"
+  for c in Toolbar.ViewChoice.all.reverse ++ [.vertical] do
+    discard <| run [".viewmenu", "invoke", c.label]
+    discard <| run ["update"]
+    let s ← st.get
+    out := out.push s!"view-{c.key}: {← vars} state={s.scroll.key} {s.spread.key} slots={s.slots.size}"
+  let invokeMenu (k : Menu.Cmd) : IO Unit := do
+    if let some (m, i) := Menu.locate k then discard <| run [m, "invoke", toString i]
+    discard <| run ["update"]
+  invokeMenu .spreadEven
+  out := out.push s!"menu-even: {← vars}"
+  discard <| run [".viewmenu", "invoke", "Two Pages"]
+  discard <| run ["update"]
+  out := out.push s!"view-two-even: {← vars}"
+  discard <| run [Toolbar.morePath, "invoke", "Vertical Scrolling"]
+  discard <| run ["update"]
+  out := out.push s!"more-vertical: {← vars}"
+  invokeMenu .spreadNone
+  out := out.push s!"menu-none: {← vars}"
+  shot "toolbar.png" "."
+  discard <| run [".viewmenu", "post", toString ((← run ["winfo", "rootx", ".bar.vmode"]).toNat?.getD 0),
+    toString ((← run ["winfo", "rooty", ".bar.vmode"]).toNat?.getD 0 + 34)]
+  shot "viewmenu.png" "root"
+  discard <| run [".viewmenu", "unpost"]
+  -- (a) The float bubble's Add comment.
+  if let .ok ix ← pageIndex st 0 then
+    if let some (wa, wb) := (ix.hits (Select.normQuery "world"))[0]? then
+      if let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix (wb - 1)) then
+        sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+        sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+        sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+        discard <| run ["update"]
+        let s ← st.get
+        let quads : List Box := match s.sel with
+          | some (_, a, b) => Select.rangeBoxes ix.cells a b
+          | none => []
+        match s.bubble with
+        | some (k, r) =>
+          out := out.push s!"bubble: {repr k} {k.btns.map (·.name)} w={r.x1 - r.x0} items={← tagCount "b:comment"}"
+          out := out.push s!"bubble-in-region: {decide (0 ≤ r.x0 ∧ r.x1 ≤ (s.regionW : Rat) ∧ 0 ≤ r.y0 ∧ r.y1 ≤ (s.regionH : Rat))}"
+          out := out.push s!"bubble-bind: {← run [".c", "bind", "b:comment", "<Enter>"]}"
+          shot "bubble.png" "."
+          discard <| run ["::safepdf::bubTipShow", "b:comment", "Add comment"]
+          out := out.push s!"bubble-tip: {← run ["winfo", "exists", ".tip"]} {← try run [".tip.l", "cget", "-text"] catch _ => pure ""}"
+          shot "bubble-tip.png" "root"
+          discard <| run ["::safepdf::bubTipHide"]
+          let n0 := s.marks.marks.size
+          let some (_, x0, x1) := k.layout.find? (·.1 == .comment) | pure ()
+          let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+          let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+          let bx := toString (r.x0 + (x0 + x1) / 2 - vx).floor
+          let byy := toString ((r.y0 + r.y1) / 2 - vy).floor
+          let t := toString (← IO.monoMsNow)
+          sendEvent ".c" "<ButtonPress-1>" ["-x", bx, "-y", byy, "-time", t]
+          sendEvent ".c" "<ButtonRelease-1>" ["-x", bx, "-y", byy, "-time", t]
+          discard <| run ["update"]
+          let s ← st.get
+          let added := s.marks.marks.toList.drop n0
+          let anchored := added.any fun m => match m.kind with
+            | .note _ (.quads qs) => qs == quads && !qs.isEmpty
+            | _ => false
+          out := out.push s!"comment: added={added.length} note-on-selection={anchored} popup={← run ["winfo", "exists", ".note"]} bubble-after={s.bubble.isSome} sel-after={s.sel.isSome}"
+          if let some m := added.head? then
+            discard <| run ["::safepdf::noteDone", toString m.id, "save"]
+            discard <| run ["update"]
+        | none => out := out.push "bubble: none"
+  -- (c) The outline toggle at Page Fit.
+  if !(← st.get).outline.isEmpty then
+    discard <| Shim.eval r4Probe
+    for c in [Toolbar.ViewChoice.single, .vertical] do
+      discard <| run [".viewmenu", "invoke", c.label]
+      discard <| run [".zoommenu", "invoke", "Page Fit"]
+      discard <| run ["update"]
+      if !(← st.get).outlineShown then
+        discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+        discard <| run ["after", "300", "set ::safepdf::r4w 1"]
+        discard <| run ["vwait", "::safepdf::r4w"]
+      for what in ["close", "open"] do
+        let log ← run ["::safepdf::r4toggle"]
+        out := out.push s!"outline-{what}-{c.key}: shown={(← st.get).outlineShown} {log}"
+  out := out.push "done"
+  IO.FS.writeFile (file "r4.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke step of the platform keys and the icon (`SAFEPDF_VIEWER_SMOKE_MODE=keys`, task
 9.r3), on the text PDF; with `SAFEPDF_VIEWER_PLATFORM=aqua` the aqua mapping is installed
 on X11 (where Tk's `Command` modifier is Meta). Writes `keys.txt`: the platform, menu and
@@ -6584,6 +6887,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "r4" then
+    try smokeR4 st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "r4.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "lockdown" then
     try smokeLockdown st dir
     catch e =>
@@ -6894,6 +7203,7 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
         discard <| run ["set", Menu.scrollVar, sc.key]
         discard <| run ["set", Menu.spreadVar, sp.key]
         discard <| run ["set", "::safepdf::continuous", if sc == .vertical then "1" else "0"]
+    showViewChoice (← st.get) false
     if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
     if let some sc := View.parseDecimal (← Shim.eval "tk scaling") then

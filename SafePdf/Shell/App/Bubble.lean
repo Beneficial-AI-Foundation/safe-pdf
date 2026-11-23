@@ -11,8 +11,9 @@ checked by `#guard`s and small theorems). The design reference is PDF.js, Firefo
 `.editToolbar`, `.colorPicker`, `#highlightParamsToolbarContainer`); `Viewer` re-draws it
 with Tk canvas items, nothing of PDF.js is copied.
 
-* **Bubbles** (`Kind`): after a text selection, the *float* bubble with one Highlight button
-  (PDF.js's highlight floating button); on a selected highlight, the *edit* bubble: a colour
+* **Bubbles** (`Kind`): after a text selection, the *float* bubble with the Highlight button
+  (PDF.js's highlight floating button) and, after a divider, Add comment (task 9.r4: a note
+  anchored to the selection, the toolbar's Add comment); on a selected highlight, the *edit* bubble: a colour
   swatch with a chevron (`Btn.color`, opens the colour picker), Comment and Delete, separated
   by dividers. Sizes from PDF.js's CSS: 28 px buttons, 2 px padding, 1 px border, dividers
   with 2 px margins, the colour button 4 + 16 + 4 + 12 + 4 px.
@@ -143,7 +144,7 @@ theorem place_inside (sel : List Rect) (w h : Rat) (area r : Rect)
 
 /-- Which bubble is shown. -/
 inductive Kind where
-  /-- After a text selection: one Highlight button. -/
+  /-- After a text selection: Highlight and Add comment (task 9.r4). -/
   | float
   /-- On a selected highlight: colour, Comment, Delete. -/
   | edit
@@ -157,7 +158,8 @@ inductive Btn where
   | highlight
   /-- The colour swatch with the chevron (opens the colour picker). -/
   | color
-  /-- Add or edit the note attached to the highlight. -/
+  /-- Add a note: on the float bubble anchored to the selection (task 9.r4), on the edit
+  bubble the note attached to the highlight. -/
   | comment
   /-- Delete the highlight. -/
   | delete
@@ -176,6 +178,13 @@ def Btn.cmd? : Btn → Option Menu.Cmd
   | .color => none
   | .comment => some .addNote
   | .delete => some .deleteMark
+
+/-- Tooltip of a button (shown after a short hover, as the toolbar's). -/
+def Btn.tip : Btn → String
+  | .highlight => "Highlight"
+  | .color => "Highlight color"
+  | .comment => "Add comment"
+  | .delete => "Delete"
 
 /-- Border plus padding around the buttons (1 + 2 px). -/
 def pad : Rat := 3
@@ -196,7 +205,7 @@ def Btn.width : Btn → Rat
 
 /-- Buttons of a bubble, left to right. -/
 def Kind.btns : Kind → List Btn
-  | .float => [.highlight]
+  | .float => [.highlight, .comment]
   | .edit => [.color, .comment, .delete]
   | .editor => [.delete]
 
@@ -564,8 +573,9 @@ theorem Ui.toggleTool_popover (u : Ui) : u.toggleTool.popover = u.toggleTool.too
 #guard lastPoint [⟨10, 22, 60, 32⟩, ⟨70, 22, 90, 32⟩, ⟨10, 10, 300, 20⟩] == some (90, 32)
 #guard lastPoint [] == none
 #guard unionAll [⟨10, 10, 100, 20⟩, ⟨5, 22, 60, 32⟩] == some ⟨5, 10, 100, 32⟩
--- Layouts: float = one button; edit = colour | comment | delete.
-#guard Kind.float.layout == [(.highlight, 3, 31)] && Kind.float.width == 34
+-- Layouts: float = highlight | comment (task 9.r4); edit = colour | comment | delete.
+#guard Kind.float.layout == [(.highlight, 3, 31), (.comment, 36, 64)] &&
+  Kind.float.width == 67 && Kind.float.dividers == [67 / 2]
 #guard Kind.edit.layout == [(.color, 3, 43), (.comment, 48, 76), (.delete, 81, 109)]
 #guard Kind.edit.width == 112 && Kind.edit.dividers == [91 / 2, 157 / 2] && height == 34
 -- Placement: right edge at the last point, 6 px below; clamped; flipped above at the bottom.
@@ -579,6 +589,14 @@ private def eb : Rect := ⟨188, 148, 300, 182⟩
 #guard hit .edit eb 200 160 == some .color && hit .edit eb 250 160 == some .comment &&
   hit .edit eb 280 160 == some .delete && hit .edit eb 233 160 == none &&
   hit .edit eb 150 160 == none && hit .edit eb 200 190 == none
+-- The float bubble (task 9.r4): Highlight then Add comment, which runs Add note… (a note
+-- anchored to the selection); it stays inside the area at the right and bottom edges.
+#guard Kind.float.btns.filterMap Btn.cmd? == [.highlight, .addNote]
+#guard let fb : Rect := ⟨233, 148, 300, 182⟩
+  hit .float fb 240 160 == some .highlight && hit .float fb 280 160 == some .comment &&
+  hit .float fb 266 160 == none
+#guard place [⟨900, 100, 999, 120⟩] Kind.float.width height area == some ⟨932, 126, 999, 160⟩
+#guard place [⟨960, 760, 1000, 795⟩] Kind.float.width height area == some ⟨933, 720, 1000, 754⟩
 #guard Btn.highlight.cmd? == some .highlight && Btn.delete.cmd? == some .deleteMark &&
   Btn.comment.cmd? == some .addNote && Btn.color.cmd? == none
 -- The picker: under the bubble, or above it near the bottom; rows map to colours.
