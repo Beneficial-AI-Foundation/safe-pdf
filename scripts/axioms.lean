@@ -1252,3 +1252,11 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Shell.App.Toolbar.mem_onClick
 #print axioms SafePdf.Shell.App.Toolbar.onOpen_rivals
 #print axioms SafePdf.Shell.App.Toolbar.Transient.not_self_rival
+#print axioms SafePdf.Shell.App.View.stepInZ_gt
+#print axioms SafePdf.Shell.App.View.stepOutZ_lt
+#print axioms SafePdf.Shell.App.View.stepInZ_isSome
+#print axioms SafePdf.Shell.App.View.stepOutZ_isSome
+#print axioms SafePdf.Shell.App.View.quant_mono
+#print axioms SafePdf.Shell.App.View.pctZoom_mono
+#print axioms SafePdf.Shell.App.View.zoomSteps_pairwise
+#print axioms SafePdf.Shell.App.View.stepOutZ_stepInZ_le
