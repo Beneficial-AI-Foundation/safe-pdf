@@ -18,6 +18,7 @@ Design document: Plan.md
   deliberately coarse; each task is split (size check) when its phase becomes current.
 
 ## Current wave
+* wave 55 (2026-11-23, phase 10): 10.6 (wt), 10.7 (wt), 10.9 (wt), 10.10 (wt) — all edit `Viewer.lean`; conflicts resolved at integration (precedent: wave 50)
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -127,11 +128,11 @@ Tasks 10.1–10.4 (bib-lean reader mode, all done 2026-11-20) are archived in [d
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
 | 10.5 | Viewer presents as **SafePDF**: window title (`NAME - page k/n - SafePDF`), about text; executable stays `viewer`; smoke title checks updated | 9.1 | `SafePdf/Shell/App/Viewer.lean`, `scripts/viewer-smoke.sh` | wt | todo |
-| 10.6 | Escape + click-away dismiss every transient: tool pop-overs (today they never close), highlight/note popups, find/go-to bars; one dismissal discipline in the toolbar/menu state | 9.7 | `SafePdf/Shell/App/Viewer.lean`, `SafePdf/Shell/App/Toolbar.lean` | wt | todo |
-| 10.7 | Mark keys: Backspace/Delete removes the selected highlight/note; undo/redo stack (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z) over mark create/edit/move/delete, saved-mark edits (9.5g) included | 9.5g | `SafePdf/Shell/App/Marks.lean`, `SafePdf/Shell/App/Viewer.lean` | wt | todo |
+| 10.6 | Escape + click-away dismiss every transient: tool pop-overs (today they never close), highlight/note popups, find/go-to bars; one dismissal discipline in the toolbar/menu state | 9.7 | `SafePdf/Shell/App/Viewer.lean`, `SafePdf/Shell/App/Toolbar.lean` | wt | doing (2026-11-23) |
+| 10.7 | Mark keys: Backspace/Delete removes the selected highlight/note; undo/redo stack (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z) over mark create/edit/move/delete, saved-mark edits (9.5g) included | 9.5g | `SafePdf/Shell/App/Marks.lean`, `SafePdf/Shell/App/Viewer.lean` | wt | doing (2026-11-23) |
 | 10.8 | Select-text tool: explicit default tool in the toolbar; cursor telegraphs the action — I-beam over text, crosshair in draw mode, hand over links (today only links change it) | 9.7, 9.9 | `SafePdf/Shell/App/Toolbar.lean`, `SafePdf/Shell/App/Viewer.lean` | wt | todo |
-| 10.9 | macOS key conventions: Cmd variants of every shortcut (Cmd+O/F/C/G/A/W/Z…), platform-selected bindings, Linux keeps Ctrl; `docs/viewer.md` key table per platform | 9.1 | `SafePdf/Shell/App/Viewer.lean`, `docs/viewer.md` | wt | todo |
-| 10.10 | Aqua highlight rendering: translucent fills via an overlay image instead of outlines (Tk Aqua has no stipples) for selection, search hits and marks | 8.2c | `SafePdf/Shell/App/Viewer.lean` | wt | todo |
+| 10.9 | macOS key conventions: Cmd variants of every shortcut (Cmd+O/F/C/G/A/W/Z…), platform-selected bindings, Linux keeps Ctrl; `docs/viewer.md` key table per platform | 9.1 | `SafePdf/Shell/App/Viewer.lean`, `docs/viewer.md` | wt | doing (2026-11-23) |
+| 10.10 | Aqua highlight rendering: translucent fills via an overlay image instead of outlines (Tk Aqua has no stipples) for selection, search hits and marks | 8.2c | `SafePdf/Shell/App/Viewer.lean` | wt | doing (2026-11-23) |
 Exit criterion checked: [ ]
 
 ## Phase 11 — Native macOS shell (Tk stays on Linux)
