@@ -7196,6 +7196,11 @@ def smokeOpenSettings (st : IO.Ref State) (dir : String) : IO Unit := do
     settle st
     out := out.push (← row f)
     if f == "prefs" || f == "full" then
+      -- Tk Aqua ignores leaving full screen while the window is still entering it: wait for
+      -- the transition, as a user would (task 10.11).
+      if f == "full" && (← isAqua) then
+        discard <| run ["after", "1000"]
+        discard <| run ["update"]
       sendEvent ".c" "<Key-Escape>"
       settle st
       out := out.push (← row s!"{f}-escape")

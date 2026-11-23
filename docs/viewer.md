@@ -1110,8 +1110,11 @@ system library directories as `-Wl,-L…` (searched after the toolchain's) plus
 
     scripts/viewer-smoke.sh [--no-build]
 
-Builds `viewer`, then runs it with `SAFEPDF_VIEWER_SMOKE=DIR` (uses `$DISPLAY` when an X
-server answers, else `xvfb-run -a`). In smoke mode the viewer drives itself with Tk key
+Builds `viewer`, then runs it with `SAFEPDF_VIEWER_SMOKE=DIR` (on Linux: uses `$DISPLAY` when
+an X server answers, else `xvfb-run -a`; on macOS see below). It ends with a summary: cases
+passed, skipped (with the reason) and failed on this platform (`case_begin NAME` starts a case;
+a new case appended to the script starts with it too). `SAFEPDF_SMOKE_KEEP=1` keeps the work
+directory (printed at the start) for inspection. In smoke mode the viewer drives itself with Tk key
 events (`event generate`) and writes photos and state files (`Viewer.smoke`): `f` (fit page;
 the viewer opens in Automatic Zoom), `page-1.ppm`,
 `Next`, `page-2.ppm` + `state.txt` (title, status, page), `Home` `0` → `zoom-100.ppm`, `+` →
@@ -1494,6 +1497,42 @@ creates nothing. The shell then checks that no `*.tmp` file is left. Disk full w
 by hand (a 16 KiB tmpfs: `cannot save to f.pdf: resource exhausted (… no space left on
 device)`, the title keeps `* `, Quit → Save stays open with `quitting cancelled`, no
 temporary file); `ulimit -f` cannot simulate it (SIGXFSZ kills the process).
+
+### Smoke test on macOS (10.11)
+
+On macOS (`uname -s` = Darwin) the script runs the viewer natively on Tk Aqua (Homebrew
+`tcl-tk` 9.x): no X server, no `xvfb-run`. Every run shows its window on screen for a few
+seconds (the whole script takes 2–3 minutes). **Leave the machine alone while it runs**: macOS
+does not let a background process take the keyboard focus from the app you are using, and the
+cases that read `focus` (1r's three-way prompt, 1t's note popup), enter full screen (1s) or
+wait for focus-driven events (1q) then fail or time out. A locked screen has the same
+effect (no app gets the focus; the script warns when the front app is `loginwindow`). GNU `stat -c` and `cmp -n` are
+replaced by BSD equivalents on macOS (`file_size`, `file_mode`, `cmp_prefix`).
+
+What differs on Aqua, and how the script handles it:
+
+* **1l lockdown** runs (Tk Aqua has `send` and reads `~/.Xdefaults`). `winfo interps` lists
+  every Tk interpreter of the user, not of one display, so other Tk programs may appear; the
+  check instead requires every `send` to fail with "no application named" or inside an
+  interpreter without `::safepdf` (not a viewer).
+* **1p keys** and **1r savedlg**: only the aqua variant runs (natively); the X11 variant is
+  skipped — Tk Aqua cannot install the X11 mapping or dialog options.
+* **1s opensettings**: page 1 alone in an even spread is checked against the midpoint of
+  TwoColumnLeft's columns (the canvas width, hence the pixel x, differs); with a window manager
+  `wm attributes . -fullscreen` reads back 1 while in full screen; `smokeOpenSettings` waits
+  1 s before Escape on Aqua, which ignores leaving full screen while the window is still
+  entering it.
+* Everything else runs with the Linux expectations (pixel checks read the page photos, so
+  translucent highlights and Retina scaling do not matter; `tk scaling` here is 1.334).
+* `qpdf`, `xprop`/`xwininfo` and ImageMagick `import` checks skip themselves when missing, as
+  on Linux.
+
+Known macOS failures (real viewer bugs, left failing and named in the summary as
+`KNOWN-MAC-BUG`): **1i bubble** and **1m async** — at `tk scaling` 1.334 Automatic Zoom capped
+at 125 % quantises to 106/64 and shows 124 %; Zoom In goes to 125 %, the same quantised zoom,
+so `+` does nothing visible and `+` `-` ends at 100 % (1i's later clicks miss; 1m sees no
+second render). **1s opensettings** — a `/PageMode /FullScreen` file's status line lacks
+"full screen (Escape leaves)" until the next status update.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
