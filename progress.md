@@ -18,6 +18,7 @@ Design document: Plan.md
   deliberately coarse; each task is split (size check) when its phase becomes current.
 
 ## Current wave
+* wave 59 (2026-11-23, phase 11 + ready phase-12 tasks per the size rule): 11.1 (wt), 12.4 (wt), 12.7 (new) — no viewer runs except 11.1's own native window, if any, which must not take focus
 
 ## Branches and PRs
 | Phase | Branch | Base | PR | State |
@@ -149,7 +150,7 @@ Exit criterion checked: [x] (2026-11-23 on the wave-58 branch, macOS: every Phas
 Plan.md §6 Phase 11 (added 2026-11-23 at the human's request). Exit: **M11**: the macOS app passes the M8/M9 corpus and session checks natively (Cmd keys, momentum scroll, Retina, dark mode); the Linux Tk build stays green and unchanged.
 | ID | Task | Needs | Owns | Par | Status |
 |---|---|---|---|---|---|
-| 11.1 | AppKit spike: minimal Cocoa shell (open, render a page, scroll, zoom) over the `safe-pdf-core` C API via a small Objective-C shim; record the feel delta + FFI surface in Decisions | — | `macos/` (new) | wt | todo |
+| 11.1 | AppKit spike: minimal Cocoa shell (open, render a page, scroll, zoom) over the `safe-pdf-core` C API via a small Objective-C shim; record the feel delta + FFI surface in Decisions | — | `macos/` (new) | wt | doing (2026-11-23) |
 | 11.2 | Shell architecture decision: how the native shell consumes the shared Tk-free logic (View/Select/Links/Marks/Save) — C exports vs thin reimplementation; Decisions entry | 11.1 | Decisions entry | solo | todo |
 | 11.3 | Full native shell: PDF.js toolbar/sidebar parity (9.7), selection bubble, marks + save flows, Cmd keys, trackpad momentum + pinch zoom, Retina, dark mode, native dialogs | 11.2 | `macos/`, `SafePdf/Shell/App/` | wt | todo |
 | 11.4 | Platform build selection: macOS builds the native shell, Linux keeps Tk `viewer`; both non-default targets; macOS CI job (workflow patch while pushes are blocked) | 11.3 | `lakefile.lean`, `docs/ci-viewer-step.patch` | wt | todo |
@@ -163,10 +164,10 @@ Plan.md §6 Phase 12 (added 2026-11-23 at the human's request). Exit: **M12**: t
 | 12.1 | Capped reads everywhere + true strict mode: share the inspector's capped read with `Api.openFile`, XFDF import and the overwrite comparison; thread `allowRepair` into the open so strict-only skips repair work | — | `SafePdf/Api.lean`, `SafePdf/Core/Open.lean`, `SafePdf/Shell/App/Save.lean`, `SafePdf/Shell/App/Xfdf.lean` | wt | todo |
 | 12.2 | Restricted, stoppable document worker: core + document-derived font/image processing in a child process the GUI can kill; GUI brokers file/clipboard/save; no credential in the child; async rendering lands with it (UI never blocks on a render) | — | `SafePdf/Shell/` | wt | todo |
 | 12.3 | One budget per user operation: reservation before dispatch, shared allowance across search/export/render, worker memory ceiling + deadline outside Lean's cost model; CI interleave scenario (zoom/search/thumbnails) against published ceilings | 12.2 | `SafePdf/Shell/App/` | wt | todo |
-| 12.4 | Writer confidentiality: fresh AES IVs from OS randomness passed into the pure writer; explicit policy for legacy RC4 writes and signed inputs; prep for external crypto review | — | `SafePdf/Core/Write/Encrypt.lean`, `SafePdf/Shell/App/Save.lean` | wt | todo |
+| 12.4 | Writer confidentiality: fresh AES IVs from OS randomness passed into the pure writer; explicit policy for legacy RC4 writes and signed inputs; prep for external crypto review | — | `SafePdf/Core/Write/Encrypt.lean`, `SafePdf/Shell/App/Save.lean` | wt | doing (2026-11-23) |
 | 12.5 | Degraded/hidden content visible: trusted file-identity line in document full screen; invisible-text provenance in exports; revision-retention notice on annotation delete | — | `SafePdf/Shell/App/Viewer.lean`, `SafePdf/Core/Text.lean` | wt | todo |
 | 12.6 | Independent verification rig: lean4lean re-check in CI, compiled-vs-interpreted differential over the suites, viewer/pixel/position CI jobs on a pinned corpus, OSS-Fuzz onboarding plan | — | `.github/workflows/ci.yml` (patch), `scripts/` | wt | todo |
-| 12.7 | C4 as a theorem with explicit hypotheses (which strict-accepted files, which observations agree) — `Tests/golden/xref/repair-diff.pdf` is the divergence example to scope around | — | `SafePdf/Spec/` | new | todo |
+| 12.7 | C4 as a theorem with explicit hypotheses (which strict-accepted files, which observations agree) — `Tests/golden/xref/repair-diff.pdf` is the divergence example to scope around | — | `SafePdf/Spec/` | new | doing (2026-11-23) |
 | 12.8 | Targeted numeric error bounds for the raster float surfaces (transforms, flattening tolerances) vs the ℚ model; fill/stroke already integer fixed-point | — | `SafePdf/Core/Raster/`, `SafePdf/Spec/` | wt | todo |
 | 12.9 | External review / red team: scope and commission (core, writer, shell boundary); record the findings' disposition | — | `docs/` | solo | todo |
 Exit criterion checked: [ ]
