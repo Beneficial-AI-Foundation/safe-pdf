@@ -114,7 +114,7 @@ Design rules:
 | S5 | Isolation of unverified code | Any FFI decoder runs sandboxed; its outputs are revalidated. (Process-level sandbox is a shell concern; the *revalidation* is proven) |
 | S6 | Unambiguous interpretation | Each (file, object id) resolves to at most one object, even across incremental updates; parse is deterministic: `parse bytes = parse bytes` trivially, but also *version-stable* via the executable spec |
 | S7 | Local, visible failure | A malformed object/page yields `Error`, never an exception; page n failing does not affect page m; repaired files are flagged `.repaired := true` |
-| S8 | Integrity & privacy | The core never modifies a file in place (S4); on an explicit save the annotation writer emits `bytes ++ update`, the original bytes a prefix (C7), to a new file or to bib-lean's `PUT` route; permission flags treated as advisory; no network in the core (the bib-lean reader mode's HTTP client is shell code) |
+| S8 | Integrity & privacy | The core never modifies a file in place (S4); on an explicit save the annotation writer emits `bytes ++ update`, the original bytes a prefix (C7), to a new file, over the opened file after the user confirms (temporary file + atomic rename; amended 2026-11-23 by the human), or to bib-lean's `PUT` route; permission flags treated as advisory; no network in the core (the bib-lean reader mode's HTTP client is shell code) |
 
 ### Correctness properties — proven
 
