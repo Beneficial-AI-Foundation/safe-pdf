@@ -15,7 +15,10 @@ then Debian's `fonts-urw-base35`, then `fonts-texgyre`) and hands their bytes to
 data: a `SubstFonts` table with one program per standard-14 face. Parsing is pure and lazy
 (`Thunk`): a face is parsed by the existing Type 1 parser (`Font.Type1.parse`) or, for an
 OpenType file, by the CFF parser on its `CFF ` table (`otfCFF?`), the first time a page needs
-it, and then shared by every page.
+it, and then shared by every page. Since task 9.r7 a program may also be a TrueType font —
+a `.ttf` file or one face of a `.ttc` collection such as macOS's `Helvetica.ttc`
+(`Program.parseFace`; the Shell picks the face by PostScript name) — parsed by
+`Font.TrueType.parseAt`.
 
 ## Choosing the substitute (MuPDF 1.25.1, `source/pdf/pdf-font.c`)
 
@@ -215,23 +218,43 @@ inductive Program where
   | type1 (f : Font.Type1.Font1)
   /-- A CFF font (the `CFF ` table of an OpenType file). -/
   | cff (f : Font.CFF.CFFFont)
+  /-- A TrueType font (a `.ttf` file or one face of a `.ttc` collection, e.g. macOS's
+  `Helvetica.ttc`; task 9.r7), with the built-in encoding of the face it stands for. -/
+  | trueType (f : Font.TrueType.TTFont) (builtin : Encoding)
 
 /-- The built-in encoding of a substitute program (the implicit base of the font's encoding). -/
 def Program.builtin : Program → Encoding
   | .type1 f => f.encoding
   | .cff f => Text.cffEncoding f
+  | .trueType _ e => e
+
+/-- The built-in encoding a TrueType substitute stands in for: the standard-14 AFM encodings
+(`StandardEncoding`; Symbol's and ZapfDingbats' own). -/
+def builtinOf : Std14 → Encoding
+  | .symbol => Font.symbolEncoding
+  | .zapfDingbats => Font.zapfDingbatsEncoding
+  | _ => Font.standardEncoding
 
 /-- Most OpenType table directory records read. -/
 def maxOtfTables : Nat := 64
 
-/-- The `CFF ` table of an OpenType (`OTTO`) file, if any. -/
-def otfCFF? (b : ByteArray) : Option ByteArray := do
-  let tag ← Font.TrueType.u32At b 0
+/-- The `CFF ` table of the OpenType (`OTTO`) face whose offset table is at `dir`, if any. -/
+def otfCFFAt? (b : ByteArray) (dir : Nat) : Option ByteArray := do
+  let tag ← Font.TrueType.u32At b dir
   if tag != Font.TrueType.tagOf "OTTO" then none
-  let n ← Font.TrueType.u16At b 4
-  let recs := (List.range (min n maxOtfTables)).filterMap (Font.TrueType.readRec b)
+  let n ← Font.TrueType.u16At b (dir + 4)
+  let recs := (List.range (min n maxOtfTables)).filterMap (Font.TrueType.readRecAt b dir)
   let r ← Font.TrueType.findTable b recs (Font.TrueType.tagOf "CFF ")
   some (b.extract r.offset (r.offset + r.length))
+
+/-- The `CFF ` table of an OpenType (`OTTO`) file, if any. -/
+def otfCFF? (b : ByteArray) : Option ByteArray := otfCFFAt? b 0
+
+/-- Whether the offset table at `dir` is a TrueType one (`0x00010000` or `'true'`). -/
+def isTrueTypeAt (b : ByteArray) (dir : Nat) : Bool :=
+  match Font.TrueType.u32At b dir with
+  | some v => v == 0x00010000 || v == Font.TrueType.tagOf "true"
+  | none => false
 
 /-- Parse a substitute program: an OpenType file through its `CFF ` table, anything else as
 a Type 1 font (PFB segments, or clear text followed by `eexec`). `none` when it does not
@@ -247,6 +270,24 @@ def Program.parse (limits : Limits) (bytes : ByteArray) : Option Program :=
     | .ok f => some (.type1 f)
     | .error _ => none
 
+/-- **Parse face `idx` of a substitute file** standing in for `face` (task 9.r7): a TrueType
+collection's face `idx` (TrueType or CFF outlines), a TrueType file (`idx = 0`), else as
+`Program.parse` (OpenType CFF, Type 1). -/
+def Program.parseFace (limits : Limits) (face : Std14) (bytes : ByteArray) (idx : Nat) :
+    Option Program :=
+  if Font.TrueType.isCollection bytes || isTrueTypeAt bytes 0 then do
+    let dir ← Font.TrueType.faceOffset? bytes idx
+    if isTrueTypeAt bytes dir then
+      match Font.TrueType.parseAt limits bytes dir with
+      | .ok f => some (.trueType f (builtinOf face))
+      | .error _ => none
+    else
+      let tbl ← otfCFFAt? bytes dir
+      match Font.CFF.parse limits tbl with
+      | .ok f => if f.isCID then none else some (.cff f)
+      | .error _ => none
+  else if idx == 0 then Program.parse limits bytes else none
+
 /-- The substitute programs found by the Shell, one per standard-14 face at most, each parsed
 on first use (`Thunk`). The empty table (the default) paints nothing, as before task 7.7. -/
 structure SubstFonts where
@@ -255,9 +296,14 @@ structure SubstFonts where
 
 instance : Inhabited SubstFonts := ⟨{}⟩
 
-/-- Build the table from file contents (first entry per face wins). -/
+/-- Build the table from file contents and face indices (first entry per face wins; the
+index selects a face of a TrueType collection, `0` otherwise). -/
+def SubstFonts.ofFaces (limits : Limits) (files : List (Std14 × ByteArray × Nat)) : SubstFonts :=
+  { faces := files.map fun (f, b, i) => (f, Thunk.mk fun _ => Program.parseFace limits f b i) }
+
+/-- Build the table from file contents (first entry per face wins; face 0 of a collection). -/
 def SubstFonts.ofBytes (limits : Limits) (files : List (Std14 × ByteArray)) : SubstFonts :=
-  { faces := files.map fun (f, b) => (f, Thunk.mk fun _ => Program.parse limits b) }
+  SubstFonts.ofFaces limits (files.map fun (f, b) => (f, b, 0))
 
 /-- The program of a face, if the Shell found one and it parses. -/
 def SubstFonts.get? (t : SubstFonts) (f : Std14) : Option Program :=

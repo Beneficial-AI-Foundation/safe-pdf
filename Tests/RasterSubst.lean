@@ -17,7 +17,9 @@ Always checked: the MuPDF substitute choice (`Subst.choose`/`chooseFor` on the f
 and that without substitute programs (`renderDocPage` default) the page stays blank.
 
 With the system fonts (`Shell.Fonts.findFiles`: `SAFEPDF_FONT_DIR`, URW base-35, TeX Gyre)
-every line must be painted inside its band. When the faces come from URW base-35 (the
+every line must be painted inside its band. Task 9.r7 (always run, `runMac`): TrueType
+collections and the macOS search below a temporary root, with generated box fonts; a
+collection of real fonts (DejaVu Sans) when installed. When the faces come from URW base-35 (the
 outlines MuPDF bundles) and `mutool` is installed, the page is compared with
 `mutool draw -r 72`: per line, ink within 3% and the ink's column extent within 1 px; and at
 most 0.1% of the page's pixels differ by the `pixels.py` metric (3 × 3 neighbourhood,
@@ -159,6 +161,140 @@ def choiceCases : List (String × Subst.Choice) :=
     ("F6", { face := .helvetica, stretch := true }),
     ("F7", { face := .timesBold, stretch := true }) ]
 
+/-! ## macOS system fonts and TrueType collections (task 9.r7)
+
+Fixtures `Tests/fixtures-subst/mini.ttc` (four box faces named Helvetica, Helvetica-Bold,
+Times-Roman, Times-Bold; face `i`'s box is `100 · (i + 1)` units wide) and `mini.ttf`
+(`CourierNewPSMT`, 250 wide), made by `python3 -I Tests/fixtures-subst/make_ttc.py synthetic`.
+The macOS search runs below a temporary root (`Fonts.SearchConfig.root`). -/
+
+/-- The collection fixture. -/
+def miniTtc : System.FilePath := "Tests/fixtures-subst/mini.ttc"
+
+/-- The single-font fixture. -/
+def miniTtf : System.FilePath := "Tests/fixtures-subst/mini.ttf"
+
+/-- Copy `src` to `root / rel`, creating directories. -/
+def place (root : System.FilePath) (rel : String) (src : System.FilePath) : IO Unit := do
+  let p := root / rel
+  if let some d := p.parent then IO.FS.createDirAll d
+  IO.FS.writeBinFile p (← IO.FS.readBinFile src)
+
+/-- The faces found below `root` (home `root/home`, no `$SAFEPDF_FONT_DIR`), as
+`(face, path relative to root, index)`, and their substitute table. -/
+def foundBelow (root : System.FilePath) :
+    IO (List (Font.Std14 × String × Nat) × Subst.SubstFonts) := do
+  let c ← Shell.Fonts.listVersions { root, home := some (root / "home") }
+  let fs ← Shell.Fonts.findFacesIn c
+  let pre := root.toString ++ "/"
+  let rel (p : System.FilePath) : String :=
+    if pre.isPrefixOf p.toString then (p.toString.drop pre.length).toString else p.toString
+  return (fs.map fun x => (x.face, rel x.path, x.index), Shell.Fonts.tableOf {} fs)
+
+/-- Darkness of each fixture line (rows of its band) of a render. -/
+def lineInks (img : Clip.Image) : List Nat :=
+  let m := Rgb.ofImage img
+  lines.map fun (b, _) => let (y0, y1) := band b; (bandInk m y0 y1).1
+
+/-- The task 9.r7 checks on fixture `pdf`; returns the number of failures. -/
+def runMac (pdf : ByteArray) : IO Nat := do
+  let mut failures := 0
+  let report (s : String) : IO Unit := IO.println s!"  FAIL raster-subst (9.r7): {s}"
+  let ttc ← IO.FS.readBinFile miniTtc
+  let ttf ← IO.FS.readBinFile miniTtf
+  -- 1. collection header, PostScript names, face selection, face parsing
+  let names := Font.TrueType.facePsNames ttc
+  if names != [some "Helvetica", some "Helvetica-Bold", some "Times-Roman", some "Times-Bold"] then
+    failures := failures + 1; report s!"mini.ttc names {names}"
+  if (Font.TrueType.faceByPsName? ttc "Times-Bold", Font.TrueType.faceByPsName? ttc "Courier",
+      Font.TrueType.facePsNames ttf) != (some 3, none, [some "CourierNewPSMT"]) then
+    failures := failures + 1; report "face lookup by PostScript name"
+  for i in [0:4] do
+    let w := match Font.TrueType.parseFace {} ttc i with
+      | .ok f => ((f.glyphOutline 2).bind (·.bboxUnits)).map fun (_, _, x1, _) => x1
+      | .error _ => none
+    if w != some (50 + 100 * ((i : Int) + 1)) then
+      failures := failures + 1; report s!"face {i}: box right edge {w}"
+  if (Font.TrueType.parseFace {} ttc 4).toOption.isSome then
+    failures := failures + 1; report "face 4 of a 4-face collection parses"
+  -- 2. the search order below a temporary root
+  let root ← IO.FS.createTempDir
+  try
+    for f in ["Helvetica.ttc", "Times.ttc", "Courier.ttc"] do
+      place root s!"System/Library/Fonts/{f}" miniTtc
+    place root "System/Library/Fonts/Supplemental/Courier New.ttf" miniTtf
+    let (mac, table) ← foundBelow root
+    let want : List (Font.Std14 × String × Nat) :=
+      [(.helvetica, "System/Library/Fonts/Helvetica.ttc", 0),
+        (.helveticaBold, "System/Library/Fonts/Helvetica.ttc", 1),
+        (.timesRoman, "System/Library/Fonts/Times.ttc", 2),
+        (.timesBold, "System/Library/Fonts/Times.ttc", 3),
+        (.courier, "System/Library/Fonts/Supplemental/Courier New.ttf", 0)]
+    if mac != want then failures := failures + 1; report s!"macOS system faces {mac.map fun (f, p, i) => (repr f, p, i)}"
+    -- rendering with them: every line painted, the bold face (wider box) darker
+    match renderWith pdf table with
+    | some img =>
+      let inks := lineInks img
+      if inks.any (· < 255 * 300) then failures := failures + 1; report s!"line inks {inks}"
+      match inks with
+      | h :: hb :: _ =>
+        if hb * 2 < h * 3 then
+          failures := failures + 1; report s!"Helvetica-Bold ink {hb} not above Helvetica {h}"
+      | _ => pure ()
+    | none => failures := failures + 1; report "fixture does not render with macOS faces"
+    -- earlier sources win: Ghostscript version directories (newest first), ~/Library/Fonts
+    place root "opt/homebrew/share/ghostscript/9.56.1/Resource/Font/NimbusSans-Regular" miniTtf
+    place root "opt/homebrew/share/ghostscript/9.56.1/Resource/Font/NimbusSans-Bold" miniTtf
+    place root "opt/homebrew/share/ghostscript/10.04.0/Resource/Font/NimbusSans-Regular" miniTtf
+    place root "home/Library/Fonts/texgyretermes-regular.otf" miniTtf
+    place root "Library/Fonts/texgyretermes-regular.otf" miniTtf
+    let (got, _) ← foundBelow root
+    let pick (f : Font.Std14) : Option String := (got.lookup f).map (·.1)
+    let w2 := [some "opt/homebrew/share/ghostscript/10.04.0/Resource/Font/NimbusSans-Regular",
+      some "opt/homebrew/share/ghostscript/9.56.1/Resource/Font/NimbusSans-Bold",
+      some "home/Library/Fonts/texgyretermes-regular.otf",
+      some "System/Library/Fonts/Times.ttc", none]
+    let g2 := [pick .helvetica, pick .helveticaBold, pick .timesRoman, pick .timesBold,
+      pick .symbol]
+    if g2 != w2 then failures := failures + 1; report s!"search order {g2}"
+  finally
+    IO.FS.removeDirAll root
+  -- 3. a collection of real TrueType fonts (DejaVu Sans, Bold), when python3 and they exist
+  let dv := "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+  let dvb := "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+  if !((← System.FilePath.pathExists dv) && (← System.FilePath.pathExists dvb)) then
+    IO.println "  raster-subst: DejaVu Sans not installed; real-collection check skipped"
+    return failures
+  let dir ← IO.FS.createTempDir
+  try
+    let out := dir / "dejavu.ttc"
+    let ok ← try
+        let o ← IO.Process.output { cmd := "python3", args := #["-I",
+          "Tests/fixtures-subst/make_ttc.py", "merge", out.toString, dv, dvb] }
+        pure (o.exitCode == 0)
+      catch _ => pure false
+    if !ok then
+      IO.println "  raster-subst: python3 not available; real-collection check skipped"
+    else
+      let b ← IO.FS.readBinFile out
+      match Font.TrueType.faceByPsName? b "DejaVuSans",
+          Font.TrueType.faceByPsName? b "DejaVuSans-Bold" with
+      | some 0, some 1 =>
+        let fs : List (Font.Std14 × ByteArray × Nat) :=
+          [(.helvetica, b, 0), (.helveticaBold, b, 1), (.timesRoman, b, 0), (.courier, b, 0),
+            (.timesBold, b, 1)]
+        match renderWith pdf (Subst.SubstFonts.ofFaces {} fs) with
+        | some img =>
+          let inks := lineInks img
+          if inks.any (· < 255 * 300) then
+            failures := failures + 1; report s!"DejaVu collection line inks {inks}"
+        | none =>
+          failures := failures + 1; report "fixture does not render with DejaVu collection"
+      | a, c => failures := failures + 1; report s!"DejaVu collection faces {a} {c}"
+  finally
+    IO.FS.removeDirAll dir
+  return failures
+
 /-- Run the suite. -/
 def run : IO Nat := do
   let mut failures := 0
@@ -190,13 +326,15 @@ def run : IO Nat := do
   match renderWith bytes {} with
   | some img => if ink img != 0 then failures := failures + 1; report s!"blank page has ink {ink img}"
   | none => failures := failures + 1; report "fixture does not render"
+  -- 2b. task 9.r7: TrueType collections, the macOS search (always run, fixtures)
+  failures := failures + (← runMac bytes)
   -- 3. with the system's substitute fonts
   let files ← SafePdf.Shell.Fonts.findFiles
   let need := [Font.Std14.helvetica, .helveticaBold, .timesRoman, .courier, .timesBold]
   if !need.all fun f => files.any (·.1 == f) then
     IO.println "  raster-subst: substitute fonts not found (install fonts-urw-base35 or set SAFEPDF_FONT_DIR); painting checks skipped"
     return failures
-  let subst := Subst.SubstFonts.ofBytes {} (files.map fun (f, _, b) => (f, b))
+  let subst ← SafePdf.Shell.Fonts.loadSubstFonts {}
   let some img := renderWith bytes subst
     | report "fixture does not render with substitutes"; return failures + 1
   let ours := Rgb.ofImage img
