@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export, 9.r8 document open settings)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export, 9.r8 document open settings, 9.r10 attachments panel)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -203,8 +203,8 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   Document Outline*, *Show Attachments*, *Show Layers*; the shown panel's button drawn
   pressed) above a white panel with its heading (*Thumbnails*, *Document outline*) on the
   `#f0f0f4` background. A button shows only when the document has that content
-  (`Sidebar.buttons`: thumbnails always, the outline when there is one; attachments and
-  layers come with tasks 9.r10 / 9.r11b). The sidebar **opens on load as the document's
+  (`Sidebar.buttons`: thumbnails always, the outline when there is one; attachments since 9.r10 (see
+  *Attachments panel* below) when the document has some; layers come with task 9.r11b). The sidebar **opens on load as the document's
   `/PageMode` says** (`Sidebar.onLoad`): `/UseThumbs` → thumbnails, `/UseOutlines` → the
   outline, `/UseNone` and `/FullScreen` → closed; without a page mode the outline when there is
   one, else closed. The toggle (F9, View → Sidebar, the toolbar button) works for every
@@ -272,7 +272,8 @@ true)`. The window's size and position are the user's and are never reset.
 | `/PageMode /UseNone` | sidebar closed |
 | `/UseOutlines` | sidebar open on the outline (when the file has one, else closed) |
 | `/UseThumbs` | sidebar open on the thumbnails (9.r9; every document has them) |
-| `/UseAttachments`, `/UseOC` | no such panels yet (tasks 9.r10, 9.r11b): the outline rule (open with an outline) and the note "attachments / layers panel not available yet" (`Sidebar.missingNote`) |
+| `/UseAttachments` | sidebar open on the attachments (9.r10) when the file has attachments; else the outline rule (open with an outline), no note |
+| `/UseOC` | no such panel yet (task 9.r11b): the outline rule (open with an outline) and the note "layers panel not available yet" (`Sidebar.missingNote`) |
 | `/FullScreen` | `wm attributes . -fullscreen 1`, sidebar closed, note "full screen (Escape leaves)"; Escape leaves and applies `/NonFullScreenPageMode` to the sidebar |
 | `/OpenAction` destination or `/S /GoTo` | page, position (`/XYZ` left/top, `/FitH` top, …: the page point at the window's top-left, as links) and zoom: `/XYZ` zoom > 0 → that percentage (clamped to 25–800 %), `null`/0 → Automatic Zoom stays; `/Fit`, `/FitB` → Page Fit; `/FitH`, `/FitBH` → Page Width; `/FitV`, `/FitBV` → Page Fit (best effort: no fit-height zoom; the same for portrait pages in a wide window); `/FitR` → Page Fit with the rectangle's left/top at the top-left (best effort). Named destinations through `/Dests` and `/Names /Dests`. |
 | `/OpenAction` JavaScript, URI, Launch, Named, GoToR, … | **never executed**; note "open action /KIND ignored (not executed)". `/Next` chains are not followed. |
@@ -298,6 +299,56 @@ Unverified: on aqua `. configure -menu {}` leaves Tk's default application menu 
 cannot disappear on macOS); full screen on aqua uses the native full-screen space; without a
 window manager (Xvfb) `wm attributes . -fullscreen` reads back 0, so the smoke test checks the
 viewer's state only.
+
+## Attachments panel (9.r10)
+
+Files embedded in the PDF (ISO 32000-2 §7.11.4) are listed in a sidebar panel after PDF.js's
+attachments view (`web/pdf_attachment_viewer.js`; nothing copied). The data is read by the
+verified core module `SafePdf/Core/Doc/Attachments.lean` (pure, total, bounded; rules A1–A6
+in its module doc), the panel's Tk-free model is `SafePdf/Shell/App/Attach.lean`.
+
+* **What is listed**: the `/Names /EmbeddedFiles` name tree (walked by `Nav.treeEntries`:
+  visited set, `/Kids` cycles cut) in its order, then the `/FileAttachment` annotations of
+  every page (`/FS`); an annotation whose file specification is already listed adds no row
+  (its page is noted). At most 1024 rows.
+* **A row**: the name — `/UF`, else `/F`, else the name-tree key; decoded as a text string,
+  control characters, bidi overrides/isolates, LRM/RLM and line separators removed, at most
+  200 characters — and the size **known without decoding** (`Attachments.listedSize`:
+  `/Params /Size`, else the stream's `/DL`, else the stored length of an unfiltered stream);
+  `?` for a compressed file of unknown size until it is decoded, `—` for an external file
+  reference (no `/EF`), `error` once decoding failed. **Listing decodes nothing**, so a large
+  attachment never stalls the window. A file is decoded only on demand: when it is saved
+  (the filter chain under the viewer's limits: a decompression bomb is a limit error in the
+  status line and its row), and when its **tooltip** opens (600 ms over a row; a probe under
+  the viewer's limits with the per-stream cap lowered to 16 MB, `Attach.probeLimit`: a larger
+  file shows `> 16 MB` and is decoded only when saved). The tooltip shows the description
+  (`/Desc`), the MIME type (`/Subtype`), creation and modification dates (`/Params`), the page
+  of its annotation, the stored size of a compressed file not decoded yet, and any problem or
+  decoding error. Selecting a row describes it in the status line.
+* **Save attachment as…**: double-click a row, press Return, or right-click (on aqua also
+  Control-click / Button-2) → *Save attachment as…*. The bytes are decoded first (an error is
+  reported, no dialog), then `tk_getSaveFile` (title *Save attachment as*, no `-filetypes`:
+  any type; on aqua the Format pop-up would overflow, 9.r6) starts in the opened file's
+  folder with the **sanitized** name proposed (`Attachments.fileNameOf`: the last path
+  component only, `:*?"<>|` → `_`, no leading dots, ≤ 200 bytes; `../../etc/evil:name.txt` →
+  `evil_name.txt`). Refused with a status message: a folder, **the opened PDF**, a read-only
+  file, a folder that is not writable (`Attach.targetProblem`, the rules of 9.r6). The file is
+  written atomically (`Save.writeAtomic`: temporary file in the same folder, then rename;
+  permissions of a replaced file kept) with exactly the decoded bytes.
+* **Never run**: the viewer has no "open" or "open with" action for attachments; nothing
+  launches, opens or interprets an attachment's bytes.
+* **Icons on the page**: a click inside a file attachment annotation's `/Rect` (drawn by the
+  renderer from its appearance stream when it has one) opens the sidebar on the attachments
+  panel and selects that row; it never opens the file.
+* **Panel switcher** (9.r9's): the *Show Attachments* button shows only when the document
+  has attachments (`Sidebar.Content.hasAttachments`, set in `Viewer.contentOf`); the panel's
+  widgets are `.ol.at` / `.ol.as` (`::safepdf::panelWidgets(attachments)`,
+  `::safepdf::panelShown::attachments` for its scroll bar). `/PageMode /UseAttachments`
+  opens it (`Sidebar.onLoad`); without attachments the outline rule applies, with no note.
+
+Unverified (no Mac here): the secondary click on aqua (Button-2/3, Control-click), the
+`ttk::treeview` look under the aqua theme, and `tk_getSaveFile` on aqua with an
+attachment name.
 
 ## Wheel scrolling across pages (9.2, 9.r1)
 
@@ -938,7 +989,8 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `SafePdf/Shell/App/Save.lean` | Tk-free save flow (task 9.5c) with `#guard` checks: marks → `Core.Write.Annots.Mark`, PDF dates, reading our marks back from a document, the read-back check, default target, atomic write. |
 | `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js (float bubble: Highlight and Add comment since 9.r4), placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7), the view-mode drop-down's choices (`ViewChoice`, theorems `ofModes_modes`, `modes_ofModes`; task 9.r4). |
-| `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; tests `Tests/OpenSettings.lean`. |
+| `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; | `SafePdf/Core/Doc/Attachments.lean` | Embedded files (task 9.r10; pure, total, bounded): the `/EmbeddedFiles` tree and `/FileAttachment` annotations, sanitized names and default file names, sizes, MIME types, dates, decoding under the limits; theorems `list_entries_le`, `clean_safe`, `clean_length_le`, `fileNameOf_noSlash`, `decode_size_le`; tests `Tests/Attachments.lean`. |
+| `SafePdf/Shell/App/Attach.lean` | Tk-free attachments-panel model with `#guard` checks: size column, tooltip, status text, refused save targets, the icon under a click (task 9.r10). |
 | `SafePdf/Shell/App/Sidebar.lean` | Tk-free sidebar model with `#guard` checks: the panel list and switcher buttons per content, the panel opened by page mode and by the toggle (9.r8, 9.r9), thumbnail sizes, layout, lazy band, eviction and keyboard steps (9.r9), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
@@ -1333,6 +1385,22 @@ highlight stays; white space only on a selection is removed; the Cancel button a
 `WM_DELETE_WINDOW` script behave as Escape (empty → removed, typed → saved); Add note… while
 an empty note's popup is open removes that note; Edit → Delete mark with the popup open
 closes it and a stale `noteClose` is ignored.
+
+The `attach` case (9.r10, `Viewer.smokeAttach`, case 1v) generates `att.pdf`
+(`/PageMode /UseAttachments`, an outline, an `/EmbeddedFiles` tree with kids holding a plain
+`hello.txt` with `/Desc` and `/Params`, a FlateDecode `data.bin` without `/Size` and an
+external file specification, and a file attachment annotation on page 2 named
+`../../etc/evil:name.txt` plus a right-to-left override), `outline.pdf` and `noatt.pdf`.
+It checks: the sidebar opens on the attachments panel with its Show Attachments and Show
+Document Outline buttons; the rows before any decoding (`data.bin ?`, `hello.txt 26 B`,
+`external.pdf —`, the hostile name without the override, `16 B`) and the tooltips (data.bin's
+stored size; hello.txt's description, type and dates); the tooltip probe (`attProbe`) turns
+`data.bin` into `10 KB`; Save attachment as… on every row writes exactly the generator's bytes
+(also compared with `pdfdetach -saveall` when installed), proposes `evil_name.txt`, and
+refuses the external file; the opened PDF, a read-only file, a read-only folder and a folder
+are refused and stay unchanged; the switcher and the toggle; a click on the annotation's icon
+(sidebar closed on the outline panel) opens the attachments panel on its row; `outline.pdf`
+has no Attachments button, nor has `noatt.pdf` (its sidebar has the thumbnails only).
 
 The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
 alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real

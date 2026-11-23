@@ -6,6 +6,7 @@ import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Menu
 import SafePdf.Shell.App.Toolbar
 import SafePdf.Shell.App.Sidebar
+import SafePdf.Shell.App.Attach
 import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
@@ -112,6 +113,14 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   (page and scroll fractions) in a back/forward history (Alt+Left/Alt+Right, toolbar). Page
   labels (`Nav.labelTable`) appear in the title, toolbar and status line (`page iii (3/120)`);
   Ctrl+G opens a go-to bar accepting a label or a page number (`Links.gotoPage`).
+* **Attachments** (task 9.r10, data from the verified `Core.Doc.Attachments`, model in
+  `Attach`): the sidebar's attachments panel (`.ol.at`, plugged into 9.r9's switcher) lists
+  the embedded files (name, size known without decoding; description and details as a
+  tooltip). Files are decoded only on demand: Save attachment as… (double-click, Return, the
+  context menu; `saveAttachment` writes the decoded bytes to a file chosen with
+  `tk_getSaveFile`, the opened PDF, read-only files and folders refused, `Save.writeAtomic`)
+  and the tooltip's probe (at most 16 MB, `attProbe`). An attachment is never opened or run.
+  A click on a file attachment annotation's icon selects its row.
 * **Marks** (task 9.4, pure model in `Marks`): highlights of the selection in PDF.js's five
   colours (toolbar Highlight button, `h`, Edit menu, context-menu colour cascade) and notes
   (Add note… on the selection or at the right-clicked point; a popup edits the text), kept in
@@ -435,6 +444,12 @@ structure State where
   olRows : List Sidebar.Row := []
   /-- Which outline rows are open (`Sidebar.toggle`). -/
   olOpen : Array Bool := #[]
+  /-- The document's attachments (task 9.r10, `Core.Doc.Attachments.list`). -/
+  attList : Array Core.Doc.Attachments.Attachment := #[]
+  /-- The file attachment annotations' icons (task 9.r10): page, rectangle, row. -/
+  attIcons : List Core.Doc.Attachments.Icon := []
+  /-- What decoding each attachment gave, once it was decoded (saved or probed). -/
+  attStatus : Array (Option Attach.Probe) := #[]
   /-- Whether the sidebar toggle is shown (`none`: not applied yet). -/
   toggleShown : Option Bool := none
   /-- The user's highlights and notes of the open document (task 9.4). -/
@@ -1178,6 +1193,90 @@ proc ::safepdf::panelShown::thumbnails {} {
   ::safepdf::thScroll {*}[.ol.th yview]
 }
 bind .ol.th <Configure> {::safepdf::thRegion}
+# Attachments panel (9.r10): the embedded files as a list .ol.at in row 1 of .ol.p (item aN =
+# attachment N: name and size; description and details as a tooltip, ::safepdf::attTip(aN),
+# refreshed by `attProbe N` before it shows). Double-click, Return and the context menu's
+# Save attachment as... save the decoded bytes to a chosen file; nothing here ever opens or
+# runs an attachment.
+ttk::style configure Att.Treeview -font ::safepdf::fOl -background $::safepdf::col(panel) -fieldbackground $::safepdf::col(panel) -foreground $::safepdf::col(text) -borderwidth 0 -rowheight [expr {[font metrics ::safepdf::fOl -linespace] + 10}]
+ttk::treeview .ol.at -style Att.Treeview -columns size -show tree -selectmode browse -height 10 -yscrollcommand ::safepdf::attScroll
+.ol.at column #0 -stretch 1 -width 150 -minwidth 60
+.ol.at column size -stretch 0 -width 70 -anchor e
+ttk::scrollbar .ol.as -orient vertical -command {.ol.at yview}
+grid .ol.at -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.as -in .ol.p -row 1 -column 1 -sticky ns
+raise .ol.at; raise .ol.as
+grid remove .ol.at .ol.as
+set ::safepdf::panelWidgets(attachments) {.ol.at .ol.as}
+proc ::safepdf::attScroll {a b} {
+  .ol.as set $a $b
+  if {$::safepdf::panel ne {attachments}} return
+  if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.as } else { grid .ol.as }
+}
+proc ::safepdf::panelShown::attachments {} { ::safepdf::attScroll {*}[.ol.at yview] }
+menu .attmenu -tearoff 0
+.attmenu add command -label {Save attachment as…} -command ::safepdf::attSaveSel
+proc ::safepdf::attSaveSel {} {
+  set i [lindex [.ol.at selection] 0]
+  if {$i ne {}} { ::safepdf::emit attSave [string range $i 1 end] }
+}
+proc ::safepdf::attMenu {x y rx ry} {
+  set i [.ol.at identify item $x $y]
+  if {$i eq {}} return
+  .ol.at selection set $i
+  .ol.at focus $i
+  tk_popup .attmenu $rx $ry
+}
+set ::safepdf::attHoverItem {}
+proc ::safepdf::attHover {x y} {
+  set i [.ol.at identify item $x $y]
+  if {$i eq $::safepdf::attHoverItem} return
+  set ::safepdf::attHoverItem $i
+  after cancel $::safepdf::tipId
+  destroy .tip
+  if {$i ne {}} { set ::safepdf::tipId [after 600 [list ::safepdf::attTipShow $i]] }
+}
+proc ::safepdf::attTipShow {i} {
+  if {![.ol.at exists $i]} return
+  ::safepdf::emit attProbe [string range $i 1 end]
+  set b [.ol.at bbox $i]
+  if {$b eq {} || ![info exists ::safepdf::attTip($i)] || $::safepdf::attTip($i) eq {}} return
+  destroy .tip
+  toplevel .tip -background $::safepdf::col(fieldLine) -borderwidth 0
+  wm overrideredirect .tip 1
+  label .tip.l -text $::safepdf::attTip($i) -font ::safepdf::fBar -background white -foreground $::safepdf::col(text) -padx 6 -pady 3 -justify left -wraplength 360
+  pack .tip.l -padx 1 -pady 1
+  wm geometry .tip +[expr {[winfo rootx .ol.at] + [lindex $b 0] + 16}]+[expr {[winfo rooty .ol.at] + [lindex $b 1] + [lindex $b 3] + 4}]
+}
+proc ::safepdf::attTipHide {} {
+  set ::safepdf::attHoverItem {}
+  after cancel $::safepdf::tipId
+  destroy .tip
+}
+proc ::safepdf::attClear {} {
+  ::safepdf::attTipHide
+  .ol.at delete [.ol.at children {}]
+  array unset ::safepdf::attTip
+}
+bind .ol.at <Double-Button-1> {if {[.ol.at identify item %x %y] ne {}} ::safepdf::attSaveSel}
+bind .ol.at <Return> ::safepdf::attSaveSel
+bind .ol.at <<TreeviewSelect>> {set ::safepdf::attSel [lindex [.ol.at selection] 0]; if {$::safepdf::attSel ne {}} {::safepdf::emit attSelect [string range $::safepdf::attSel 1 end]}}
+bind .ol.at <Button-3> {::safepdf::attMenu %x %y %X %Y}
+if {[tk windowingsystem] eq {aqua}} {
+  # The secondary click on a Mac: Button-2 or Button-3 (depending on the Tk version) and
+  # Control-click.
+  bind .ol.at <Button-2> {::safepdf::attMenu %x %y %X %Y}
+  bind .ol.at <Control-Button-1> {::safepdf::attMenu %x %y %X %Y; break}
+}
+bind .ol.at <Motion> {::safepdf::attHover %x %y}
+bind .ol.at <Leave> ::safepdf::attTipHide
+# The save dialog of an attachment (no -filetypes: any file type; on aqua the Format pop-up
+# would overflow, 9.r6); ::safepdf::autoPath answers it in smoke mode.
+proc ::safepdf::askAttachSave {dir file args} {
+  set ::safepdf::lastDialog [list $dir $file {*}$args]
+  if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
+  return [tk_getSaveFile -parent . -title {Save attachment as} -initialdir $dir -initialfile $file {*}$args]
+}
 bind .ol.th <ButtonRelease-1> {focus .ol.th; ::safepdf::emit thClick [%W canvasy %y]}
 bind .ol.th <Key-Up> {::safepdf::emit thKey up; break}
 bind .ol.th <Key-Down> {::safepdf::emit thKey down; break}
@@ -2832,7 +2931,8 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
 /-! ## Sidebar panels (task 9.r9) -/
 
 /-- What the open document offers the sidebar (task 9.r9: which panel buttons show). -/
-def contentOf (s : State) : Sidebar.Content := { hasOutline := !s.outline.isEmpty }
+def contentOf (s : State) : Sidebar.Content :=
+  { hasOutline := !s.outline.isEmpty, hasAttachments := !s.attList.isEmpty }
 
 /-- Shows the switcher buttons of the panels the document has (`Sidebar.buttons`, in order)
 and presses the shown panel's button (PDF.js's toggled view button). -/
@@ -2868,6 +2968,60 @@ def panelClick (st : IO.Ref State) (k : String) : IO Unit := do
   let s ← st.get
   let some p := Sidebar.Panel.ofKey k | return
   if s.doc.isSome && p.available (contentOf s) then showPanel st p
+
+/-! ## Attachments panel (task 9.r10) -/
+
+/-- Writes row `i` of the attachments list (`.ol.at` item `aN`): its size column and tooltip
+from what is known (`Attach.sizeColumn`, `Attach.tooltip`). -/
+def attRow (s : State) (i : Nat) : IO Unit := do
+  let some a := s.attList[i]? | return
+  let pr := (s.attStatus[i]?).getD none
+  discard <| run [".ol.at", "set", s!"a{i}", "size", Attach.sizeColumn a pr]
+  discard <| run ["set", s!"::safepdf::attTip(a{i})", Attach.tooltip a pr]
+
+/-- Fills the attachments list `.ol.at` from `State.attList` (model `Attach`): one item `aN`
+per attachment with its name, size column and tooltip. Nothing is decoded here: sizes come
+from `/Params /Size`, `/DL` or an unfiltered stream's length (`Attachments.listedSize`). -/
+def fillAttachments (st : IO.Ref State) : IO Unit := do
+  discard <| run ["::safepdf::attClear"]
+  let s ← st.get
+  for i in [0:s.attList.size] do
+    let some a := s.attList[i]? | continue
+    discard <| run [".ol.at", "insert", "", "end", "-id", s!"a{i}", "-text", a.name]
+    attRow s i
+
+/-- Keeps what decoding attachment `i` gave and updates its row. -/
+def attRecord (st : IO.Ref State) (i : Nat) (pr : Attach.Probe) : IO Unit := do
+  st.modify fun s => { s with attStatus := s.attStatus.modify i (fun _ => some pr) }
+  attRow (← st.get) i
+
+/-- Handles `attProbe N` (its tooltip is about to show): decodes attachment `N` once, under the
+viewer's limits with the per-stream cap lowered to `Attach.probeLimit`, so that hovering never
+decodes more than 16 MB (a larger file is decoded only when saved). -/
+def attProbe (st : IO.Ref State) (i : Nat) : IO Unit := do
+  let s ← st.get
+  let (some doc, some a) := (s.doc, s.attList[i]?) | return
+  if ((s.attStatus[i]?).getD none).isSome || a.stream.isNone then return
+  let lim := { limits with maxDecodedStreamBytes := min limits.maxDecodedStreamBytes Attach.probeLimit }
+  let r ← IO.lazyPure fun _ => (Core.Doc.Attachments.decode doc lim a).map ByteArray.size
+  attRecord st i <| match r with
+    | .ok n => .decoded n
+    | .error (.limitExceeded .decodedStreamBytes) => .large
+    | .error e => .failed (renderError e)
+
+/-- The status line text of attachment `i`. -/
+def attText (s : State) (i : Nat) : Option String :=
+  (s.attList[i]?).map fun a => Attach.selectedText a ((s.attStatus[i]?).getD none)
+
+/-- Selects attachment `i` (a click on its annotation's icon on the page): opens the sidebar
+on the attachments panel, selects and shows its row, describes it in the status line. -/
+def attSelect (st : IO.Ref State) (i : Nat) : IO Unit := do
+  if i ≥ (← st.get).attList.size then return
+  showSidebar st (some .attachments)
+  discard <| run [".ol.at", "selection", "set", s!"a{i}"]
+  discard <| run [".ol.at", "focus", s!"a{i}"]
+  discard <| run [".ol.at", "see", s!"a{i}"]
+  if let some t := attText (← st.get) i then setStatus t
 
 /-! ## Document open settings (task 9.r8) -/
 
@@ -3056,8 +3210,10 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
                               labels := #[], outline := #[], links := #[], hover := none,
                               history := {}, marks := {}, markSel := none, slots := #[],
                               layoutKey := none, ownTop := none, ftEdit := none,
-                              inkSession := none, inkStroke := none, moveFrom := none }
+                              inkSession := none, inkStroke := none, moveFrom := none,
+                              attList := #[], attIcons := [], attStatus := #[] }
   clearPages st
+  discard <| run ["::safepdf::attClear"]
   discard <| run ["destroy", ".note"]
   discard <| run ["destroy", ".c.ft"]
   discard <| run [".c", "delete", "ftedit", "inkcur"]
@@ -3077,6 +3233,11 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
       (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
     st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
     fillOutline st
+    -- Task 9.r10: the attachments, listed without decoding any.
+    let att ← IO.lazyPure fun _ => Core.Doc.Attachments.list doc limits
+    st.modify ({ · with attList := att.entries.toArray, attIcons := att.icons,
+                        attStatus := Array.replicate att.entries.length none })
+    fillAttachments st
     -- Task 9.r8: the document's open settings, on every open except the reopen after a save
     -- (`keepView`: the user's view stays, outline included).
     let (mode, prefs, notes) ← if keepView then pure (none, {}, [])
@@ -3685,6 +3846,49 @@ def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
     Save.writeAtomic path xml.toUTF8 (keepPermissions path)
     setStatus s!"exported {s.marks.marks.size} mark(s) to {baseName path}"
   catch e => setStatus s!"cannot export to {baseName path}: {Save.oneLine (toString e)}"
+
+/-- **Save attachment as…** (task 9.r10; double-click, Return or the context menu in the
+attachments panel): decodes attachment `i` (`Core.Doc.Attachments.decode`: the filter chain
+under the viewer's limits; an error is reported and nothing is asked; the result is kept for
+its row), asks for a file (`::safepdf::askAttachSave`: `tk_getSaveFile` without `-filetypes`,
+starting in the opened file's folder with the sanitized `Attachment.fileName`; Tk confirms
+replacing a file), refuses a folder, the opened PDF, a read-only file and an unwritable folder
+(`Attach.targetProblem`, the rules of task 9.r6) and writes exactly the decoded bytes
+atomically (`Save.writeAtomic`). The attachment is never opened, launched or executed. -/
+def saveAttachment (st : IO.Ref State) (i : Nat) : IO Unit := do
+  let s ← st.get
+  let (some doc, some a) := (s.doc, s.attList[i]?) | return
+  if let some p := a.problem then
+    setStatus s!"cannot save attachment {a.name}: {p.message}"
+    return
+  let bytes ← match ← IO.lazyPure fun _ => Core.Doc.Attachments.decode doc limits a with
+    | .ok b =>
+      attRecord st i (.decoded b.size)
+      pure b
+    | .error e =>
+      attRecord st i (.failed (renderError e))
+      setStatus s!"cannot save attachment {a.name}: {renderError e}"
+      return
+  let dir ← dialogDirOf s (s.path.getD "")
+  let chosen ← run ["::safepdf::askAttachSave", dir, a.fileName]
+  if chosen.isEmpty then
+    setStatus "save attachment cancelled"
+    return
+  let name := baseName chosen
+  let isDir ← System.FilePath.isDir chosen
+  let ex ← System.FilePath.pathExists chosen
+  let fw := ex && (← run ["file", "writable", chosen]) == "1"
+  let dw := (← run ["file", "writable", dirOf chosen]) == "1"
+  let opened ← match s.path with
+    | some p => if s.inMemory then pure false else samePath chosen p
+    | none => pure false
+  match Attach.targetProblem name isDir ex fw dw opened with
+  | some p => setStatus s!"cannot save attachment: {p}"
+  | none =>
+    try
+      Save.writeAtomic chosen bytes (keepPermissions chosen)
+      setStatus s!"saved attachment {a.name} ({bytes.size} bytes) to {name}"
+    catch e => setStatus s!"cannot save attachment to {name}: {Save.oneLine (toString e)}"
 
 /-- The `tk_getOpenFile` dialog (after the unsaved-marks question), starting in the opened
 file's folder; opens the chosen file (nothing when cancelled). -/
@@ -4783,6 +4987,11 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
     -- Add text mode: a click places a text box (task 9.9).
     if s.ui.editor == .text then
       ftOpenAt st none pg p1 "" s.ui.ftSize s.ui.ftColor
+      return
+    -- A file attachment annotation's icon selects its row in the attachments panel (task
+    -- 9.r10); the attachment is not opened.
+    if let some i := Attach.iconAt s.attIcons pg p1 then
+      attSelect st i
       return
     if let some (_, l) := Links.linkAt (← linksOf st pg) p1 then activate st l.action
     return
@@ -8028,6 +8237,107 @@ def smokeThumbPerf (st : IO.Ref State) (dir : String) : IO Unit := do
       rss0-kib: {rss0}\nrss-first-screen-kib: {rss1}\nrss-end-kib: {rss2}\nhwm-kib: {hwm}\n"
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the attachments panel (`SAFEPDF_VIEWER_SMOKE_MODE=attach`, task 9.r10), on
+the generated `att.pdf` (`/PageMode /UseAttachments`, an outline, two files in the
+`/EmbeddedFiles` tree, one external file specification, a file attachment annotation on page
+2) with `outline.pdf` and `noatt.pdf` beside it. Writes `attach.txt`: the panel as opened
+(sidebar, panel, switcher buttons, toggle), the rows before any decoding (name and size
+column) and two tooltips (one probed, `attProbe`); Save attachment as… of every row to
+`save-N.bin` in `DIR` (the dialog answered by `::safepdf::autoPath`; the dialog's proposed
+name); the refused targets (the opened PDF, a read-only file, a read-only folder, a folder);
+the switcher buttons; the sidebar toggle; a click on the annotation's icon (sidebar closed on
+the outline panel before) selects its row; the other two files (no attachments button). -/
+def smokeAttach (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let panelRow (name : String) : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    return s!"{name}: shown={s.outlineShown} panel={s.panel.info.key} \
+      outlineBtn={← run ["winfo", "ismapped", ".ol.sw.outline"]} \
+      attBtn={← run ["winfo", "ismapped", ".ol.sw.attachments"]} \
+      list={← run ["winfo", "ismapped", ".ol.at"]} \
+      toggle={← run ["winfo", "ismapped", ".bar.sidebar"]} atts={s.attList.size}"
+  let status : IO String := run [".status", "cget", "-text"]
+  let rowsNow : IO String := do
+    let items := (← run [".ol.at", "children", ""]).splitOn " " |>.filter (!·.isEmpty)
+    let mut rows : Array String := #[]
+    for i in items do
+      rows := rows.push s!"{← run [".ol.at", "item", i, "-text"]}|{← run [".ol.at", "set", i, "size"]}"
+    return ";".intercalate rows.toList
+  out := out.push (← panelRow "start")
+  out := out.push s!"rows: {← rowsNow}"
+  let tip (i : Nat) : IO String := do
+    return (← run ["set", s!"::safepdf::attTip(a{i})"]).replace "\n" " / "
+  out := out.push s!"tip0: {← tip 0}"
+  out := out.push s!"tip1: {← tip 1}"
+  -- The tooltip's probe decodes data.bin (its size is not in the file).
+  discard <| run ["::safepdf::emit", "attProbe", "0"]
+  out := out.push s!"probed: {← rowsNow} tip0={← tip 0}"
+  -- Save attachment as… for every row.
+  let n := (← st.get).attList.size
+  for k in [0:n] do
+    discard <| run ["set", "::safepdf::lastDialog", ""]
+    discard <| run ["set", "::safepdf::autoPath", s!"{dir}/save-{k}.bin"]
+    discard <| run ["::safepdf::emit", "attSave", toString k]
+    let dlg ← run ["lindex", ← run ["set", "::safepdf::lastDialog"], "1"]
+    out := out.push s!"save-{k}: proposed={dlg} status={← status}"
+  -- Refused targets: the opened PDF, a read-only file, a read-only folder, a folder.
+  let some pdf := (← st.get).path | return
+  IO.FS.writeFile s!"{dir}/ro.bin" "read-only\n"
+  discard <| run ["file", "attributes", s!"{dir}/ro.bin", "-permissions", "0444"]
+  IO.FS.createDirAll s!"{dir}/rodir"
+  discard <| run ["file", "attributes", s!"{dir}/rodir", "-permissions", "0555"]
+  for (nm, target) in [("pdf", pdf), ("ro", s!"{dir}/ro.bin"), ("rodir", s!"{dir}/rodir/x.bin"),
+      ("folder", dir)] do
+    discard <| run ["set", "::safepdf::autoPath", target]
+    discard <| run ["::safepdf::emit", "attSave", "0"]
+    out := out.push s!"refused-{nm}: {← status}"
+  discard <| run ["file", "attributes", s!"{dir}/rodir", "-permissions", "0755"]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  -- The selection's status line and the context menu's entry.
+  discard <| run [".ol.at", "selection", "set", "a1"]
+  discard <| run ["update"]
+  out := out.push s!"select-a1: {← status}"
+  out := out.push s!"menu: {← run [".attmenu", "entrycget", "0", "-label"]}"
+  -- The switcher and the toggle.
+  discard <| run ["::safepdf::btnInvoke", ".ol.sw.outline"]
+  out := out.push (← panelRow "switch-outline")
+  discard <| run ["::safepdf::btnInvoke", ".ol.sw.attachments"]
+  out := out.push (← panelRow "switch-attachments")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  out := out.push (← panelRow "toggle-off")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  out := out.push (← panelRow "toggle-on")
+  -- The annotation's icon on page 2: with the sidebar closed on the outline panel, a click on
+  -- it opens the attachments panel and selects its row.
+  showPanel st .outline
+  showSidebar st none
+  let s ← st.get
+  if let some ic := s.attIcons.head? then
+    goTo st ic.page
+    settle st
+    let s ← st.get
+    if let some sl := slotOf s ic.page then
+      let (x0, y0, x1, y1) := sl.rect (Box.ofRect ic.rect)
+      let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+        View.parseDecimal (← run [".c", "canvasy", "0"])) | return
+      let wx := toString ((x0 + x1) / 2 - vx).floor
+      let wy := toString ((y0 + y1) / 2 - vy).floor
+      sendEvent ".c" "<ButtonPress-1>" ["-x", wx, "-y", wy]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", wx, "-y", wy]
+      discard <| run ["update"]
+      out := out.push s!"{← panelRow "icon"} sel={← run [".ol.at", "selection"]} \
+        entry={ic.entry} status={← status}"
+  -- A file with an outline and no attachments; a file with neither.
+  for f in ["outline", "noatt"] do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push (← panelRow f)
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "attach.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -8114,6 +8424,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "thumbs" then smokeThumbs st dir else smokeThumbPerf st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / s!"{s.smokeMode}.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "attach" then
+    try smokeAttach st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "attach.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "noteclose" then
@@ -8271,6 +8587,10 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
     if s.doc.isSome then showSidebar st (Sidebar.afterToggle s.outlineShown s.panel (contentOf s))
     else showOutline st false
   | ["panel", k] => panelClick st k
+  | ["attSave", k] => if let some i := k.toNat? then saveAttachment st i
+  | ["attProbe", k] => if let some i := k.toNat? then attProbe st i
+  | ["attSelect", k] =>
+    if let some i := k.toNat? then if let some t := attText s i then setStatus t
   | ["thView"] => thumbView st
   | ["thClick", y] => thumbClick st y
   | ["thKey", k] => thumbKey st k

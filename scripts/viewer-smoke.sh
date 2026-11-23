@@ -96,6 +96,10 @@
 #      per content, lazy rendering, click / keyboard / highlight following the main view, the
 #      image budget, rotation, /PageMode /UseThumbs, the toggle without an outline; and
 #      (=thumbperf, reported only) timings and memory on the corpus paper when present (9.r9);
+#   1v. attachments panel (SAFEPDF_VIEWER_SMOKE_MODE=attach): the panel lists a generated
+#      file's attachments (name tree with kids + file attachment annotation) without decoding,
+#      Save attachment as... writes exactly the decoded bytes, refused targets, UseAttachments
+#      opens the panel, an icon click selects its row, no Attachments button without (9.r10);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1970,6 +1974,135 @@ for f in corpus/files/arxiv-1706.03762.pdf; do
   SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=thumbperf run_viewer "$work/out-thperf" "$f" || true
   tr '\n' ' ' < "$work/out-thperf/thumbperf.txt" 2>/dev/null | sed 's/^/thumbperf: /'; echo
 done
+
+# 1v. Attachments panel (task 9.r10, SAFEPDF_VIEWER_SMOKE_MODE=attach, `Viewer.smokeAttach`)
+#     on generated PDFs: att.pdf (/PageMode /UseAttachments, an outline, /EmbeddedFiles tree
+#     with kids: hello.txt (plain, /Desc, /Params) and data.bin (FlateDecode, no /Size), an
+#     external file specification, a file attachment annotation on page 2 whose /UF is
+#     "../../etc/evil:name.txt" with a right-to-left override) opens on the attachments panel
+#     with both switcher buttons; Save attachment as... writes exactly the decoded bytes of
+#     every embedded file (compared with the generator's payloads and with pdfdetach when
+#     installed), proposes the sanitized name (evil_name.txt), refuses the external one, the
+#     opened PDF (unchanged), a read-only file (unchanged), a read-only folder and a folder;
+#     listing decodes nothing (data.bin: "?" until its tooltip probe); a click on the
+#     annotation's icon opens the panel on its row; outline.pdf and noatt.pdf (no
+#     attachments) have no Show Attachments button.
+mkdir -p "$work/att" "$work/out-att"
+python3 -I -c '
+import sys, zlib
+out = sys.argv[1]
+hello = b"Hello from an attachment.\n"
+data = bytes(range(256)) * 40
+evil = b"note \xe2\x9c\x93 inside\n"
+def pdf(cat, pages, extra):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 612 792] >>" % (
+                " ".join("%d 0 R" % (3 + i) for i in range(len(pages))), len(pages))}
+    for i, annots in enumerate(pages):
+        objs[3 + i] = "<< /Type /Page /Parent 2 0 R /Contents 9 0 R %s >>" % annots
+    c = "0.6 g 72 600 300 100 re f"
+    objs[9] = "<< /Length %d >>\nstream\n%s\nendstream" % (len(c), c)
+    objs.update(extra)
+    n = max(objs) + 1
+    body, offs = b"%PDF-1.7\n", {}
+    for k in sorted(objs):
+        offs[k] = len(body)
+        v = objs[k]
+        if isinstance(v, str): v = v.encode("latin-1")
+        body += b"%d 0 obj\n" % k + v + b"\nendobj\n"
+    x = len(body)
+    body += b"xref\n0 %d\n0000000000 65535 f \n" % n
+    body += b"".join((b"%010d 00000 n \n" % offs[k]) if k in offs else b"0000000000 65535 f \n" for k in range(1, n))
+    body += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n, x)
+    return body
+def stream(d, raw):
+    return b"<< " + d.encode() + b" /Length %d >>\nstream\n" % len(raw) + raw + b"\nendstream"
+outline = {20: "<< /Type /Outlines /First 21 0 R /Last 21 0 R /Count 1 >>",
+           21: "<< /Title (Start) /Parent 20 0 R /Dest [3 0 R /Fit] >>"}
+uf = "".join("%04X" % ord(ch) for ch in "../../etc/evil:name.txt‮")
+att = {10: "<< /Kids [11 0 R 12 0 R] >>",
+       11: "<< /Limits [(data.bin) (hello.txt)] /Names [(data.bin) 14 0 R (hello.txt) 13 0 R] >>",
+       12: "<< /Limits [(z) (z)] /Names [(z) 15 0 R] >>",
+       13: "<< /Type /Filespec /F (hello.txt) /UF (hello.txt) /Desc (A greeting) /EF << /F 16 0 R >> >>",
+       14: "<< /Type /Filespec /F (data.bin) /EF << /F 17 0 R >> >>",
+       15: "<< /Type /Filespec /F (external.pdf) >>",
+       16: stream("/Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size %d /CreationDate (D:20251123101500Z) /ModDate (D:20251124) >>" % len(hello), hello),
+       17: stream("/Type /EmbeddedFile /Filter /FlateDecode", zlib.compress(data)),
+       18: "<< /Type /Annot /Subtype /FileAttachment /Rect [400 600 430 640] /FS 19 0 R /Contents (attached) /AP << /N 22 0 R >> >>",
+       19: "<< /Type /Filespec /F (evil.txt) /UF <FEFF" + uf + "> /EF << /F 23 0 R >> >>",
+       22: stream("/Type /XObject /Subtype /Form /BBox [0 0 30 40]", b"0 0 1 rg 0 0 30 40 re f"),
+       23: stream("/Type /EmbeddedFile", evil)}
+att.update(outline)
+open(out + "/att.pdf", "wb").write(pdf("/PageMode /UseAttachments /Outlines 20 0 R /Names << /EmbeddedFiles 10 0 R >>", ["", "/Annots [18 0 R]"], att))
+open(out + "/outline.pdf", "wb").write(pdf("/Outlines 20 0 R", ["", ""], outline))
+open(out + "/noatt.pdf", "wb").write(pdf("", ["", ""], {}))
+for n, b in [("hello", hello), ("data", data), ("evil", evil)]:
+    open("%s/%s.expect" % (out, n), "wb").write(b)
+' "$work/att"
+cp "$work/att/att.pdf" "$work/att/att.orig"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=attach \
+  run_viewer "$work/out-att" "$work/att/att.pdf" || true
+cut -c1-200 "$work/out-att/attach.txt" 2>/dev/null || true
+if command -v pdfdetach >/dev/null 2>&1; then
+  mkdir -p "$work/att/detach"
+  pdfdetach -saveall -o "$work/att/detach" "$work/att/att.pdf" >/dev/null 2>&1 || true
+fi
+python3 -I -c '
+import os, sys
+att, outd = sys.argv[1], sys.argv[2]
+try: lines = open(outd + "/attach.txt", encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: attach: no attach.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def want(k, part):
+    if part not in v.get(k, ""): errs.append("%s = %r lacks %r" % (k, v.get(k), part))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+want("start", "shown=true panel=attachments outlineBtn=1 attBtn=1 list=1 toggle=1 atts=4")
+want("rows", "data.bin|?;hello.txt|26 B;external.pdf|\u2014;../../etc/evil:name.txt|16 B")
+want("tip0", "Stored: ")
+want("tip0", "(compressed)")
+want("probed", "data.bin|10 KB;hello.txt|26 B")
+want("tip1", "A greeting / Type: text/plain / Created: 2025-11-23 10:15 / Modified: 2025-11-24")
+read = lambda p: open(p, "rb").read()
+expect = {0: "data", 1: "hello", 3: "evil"}
+for k, n in expect.items():
+    want("save-%d" % k, "saved attachment")
+    p = "%s/save-%d.bin" % (outd, k)
+    if not os.path.exists(p) or read(p) != read("%s/%s.expect" % (att, n)):
+        errs.append("save-%d: bytes differ from %s" % (k, n))
+want("save-3", "proposed=evil_name.txt")
+want("save-1", "proposed=hello.txt")
+want("save-2", "cannot save attachment external.pdf: not embedded")
+if os.path.exists(outd + "/save-2.bin"): errs.append("save-2: external file written")
+want("refused-pdf", "is the opened document")
+want("refused-ro", "is read-only")
+want("refused-rodir", "is not writable")
+want("refused-folder", "is a folder")
+if read(att + "/att.pdf") != read(att + "/att.orig"): errs.append("the opened PDF changed")
+if read(outd + "/ro.bin") != b"read-only\n": errs.append("the read-only file changed")
+if os.path.exists(outd + "/rodir/x.bin"): errs.append("written into the read-only folder")
+want("select-a1", "attachment hello.txt (26 B)")
+want("menu", "Save attachment as…")
+want("switch-outline", "shown=true panel=outline outlineBtn=1 attBtn=1")
+want("switch-outline", "list=0")
+want("switch-attachments", "panel=attachments outlineBtn=1 attBtn=1")
+want("switch-attachments", "list=1")
+want("toggle-off", "shown=false panel=attachments")
+want("toggle-on", "shown=true panel=attachments")
+want("icon", "shown=true panel=attachments")
+want("icon", "sel=a3 entry=3")
+want("outline", "shown=true panel=outline outlineBtn=1 attBtn=0 list=0 toggle=1 atts=0")
+want("noatt", "shown=false")
+want("noatt", "attBtn=0 list=0 toggle=1 atts=0")
+d = att + "/detach"
+if os.path.isdir(d):
+    for k, name in [(0, "data.bin"), (1, "hello.txt")]:
+        p = os.path.join(d, name)
+        if os.path.exists(p) and read(p) != read("%s/save-%d.bin" % (outd, k)):
+            errs.append("save-%d differs from pdfdetach" % k)
+for e in errs: print("FAIL: attach: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/att" "$work/out-att" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
