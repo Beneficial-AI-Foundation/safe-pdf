@@ -38,11 +38,35 @@ tools) only while no `lake build` runs in the main checkout, and never call `lea
 builds stay with the orchestrator. In a worktree the server's `LEAN_PROJECT_PATH` still points
 at the main checkout, so worktree subagents keep using `lake build` / `lake env lean` locally.
 
+**Every agent working on Lean code uses the Lean MCP tools as its primary proof loop** (load
+them with ToolSearch `lean_` when they are deferred). Required working pattern:
+
+* **Shared checkout (`new` tasks):** develop proofs interactively with `lean_goal` (goal state
+  at a line), `lean_diagnostic_messages` (errors for your file), `lean_multi_attempt` (try
+  several tactics at one position before editing) and `lean_hover_info`, instead of repeated
+  whole-file `lake env lean` runs. Use `lake env lean <file>` once at the end as the final
+  check, and quote it in the report.
+* **Worktree (`wt` tasks):** the server sees the main checkout, not your worktree, so build and
+  check with `lake` locally; still use the MCP *search* tools and `lean_run_code` (scratch
+  snippets against the main checkout's modules) to find lemmas and test tactics.
+* **Finding lemmas (everyone):** before proving a helper, search for it — `lean_local_search`
+  (project and core), `lean_loogle` (by type shape), `lean_leansearch` / `lean_leanfinder`
+  (natural language), `lean_hammer_premise` (premises for the current goal). There is no Mathlib: a hit that lives only in Mathlib is not
+  usable.
+* If the `lean_*` tools are missing in a session, say so in the report and fall back to
+  `lake env lean`; do not stop.
+
+Setup per machine: `.mcp.json` names the macOS path (`/opt/homebrew/bin/uvx`). Elsewhere,
+override it once in local scope, e.g. in the Linux sandbox
+`claude mcp add --scope local lean-lsp -e LEAN_PROJECT_PATH=$PWD -- /usr/bin/uvx lean-lsp-mcp`
+(run in the main checkout; local scope wins over the project entry). MCP servers load at
+session start, so start Claude Code from the main checkout after adding it.
+
 ## Shared registries (subagents never edit these; report the lines to add)
 
 * `SafePdf.lean` — umbrella imports of every module under `SafePdf/` (except `Shell/`).
 * `Tests/Main.lean` — the `suites` list of test suites.
-* `lakefile.toml` — targets and options. Every module under `Tests/` belongs to lib `Tests` via `globs = ["Tests.+"]`, so new test modules need no lakefile line.
+* `lakefile.lean` — targets and options (was `lakefile.toml` until 8.2a). Every module under `Tests/` belongs to lib `Tests` via ``globs := #[.submodules `Tests]``, so new test modules need no lakefile line. The `viewer` exe (Tk) is not a default target; see `docs/viewer.md`.
 * `progress.md` — the ledger (orchestrator only).
 
 ## Layout (Plan.md §10)

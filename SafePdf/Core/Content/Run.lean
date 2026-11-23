@@ -33,8 +33,14 @@ never an error (M5: the interpreter never fails).
   source (charged to its budget), tokenized with `Ops.tokenize`, and run nested as
   `q`, `/Matrix cm`, clip to `/BBox` (in form space; one informational `clip` item), the
   form's operators, `Q`: the invoking machine is restored *as a whole* afterwards, so nothing a
-  form does (unbalanced `q`, open text object, pending `W`) leaks out. Transparency groups,
-  `/OC` and `/Ref` are ignored.
+  form does (unbalanced `q`, open text object, pending `W`) leaks out. `/OC` and `/Ref` are
+  ignored.
+* **Transparency groups** (task 7.3c, §11.6.6, §8.10.3): a form with `/Group << /S /Transparency
+  >>` is bracketed by `groupBegin g` … `groupEnd` instead of the informational `clip` item
+  (`g` records `/I`, `/K`, the page-space `/BBox`, and the `ca`, blend mode and soft mask
+  at the `Do`); inside it alpha, blend mode and soft mask restart from their initial values
+  (`resetTx`). `/CS` of the group is ignored. A form adds at most two items of its own
+  (`FormJob.pre_post_le`), as before.
 * **Termination**: nesting is bounded by **fuel** `Limits.maxXObjectDepth` (structural
   recursion on it: `runOps`), and a form whose object number is on the current nesting path
   (`Frame.visited`) is **not** re-entered (self-reference or mutual recursion): one warning,
@@ -46,18 +52,32 @@ never an error (M5: the interpreter never fails).
   `Paint.maxItems · maxOpsPerPage` items however its forms nest (`runBytes_items_le_max`). Form
   decoding is charged to the source's budget; tokenizing is linear in the decoded bytes.
   Because a form tree without cycles can still fan out ("billion laughs"), at most
-  `Env.maxForms` (default `defaultMaxForms` = 100,000) forms are expanded per page; further
-  form `Do`s are skipped with a warning (an interim constant: `Limits` has no such field).
+  `Env.maxForms` (default `Limits.maxFormsPerPage` = 100,000) forms are expanded per page;
+  further form `Do`s are skipped with a warning.
 * **`Do` on an image** (`/Subtype /Image`): `DisplayItem.image (.xobject name num gen)` with the
   CTM (the unit square), the fill snapshot (stencil masks, §8.9.6.2) and the clip. The image
   data is **not** decoded (rendering is phase 7); its dictionary is summarised by consumers.
   `/Subtype /PS` is ignored silently (§8.8.2); a missing or malformed XObject is a warning.
 * **Inline images** are executed by `exec` (an `.inline dict data` item); `Ops.tokenize` has
   already expanded the dictionary's abbreviations and sliced the data.
+* **Font identity** (`Tf`, task 6.7a): `exec` sets the font by resource name; the runner then
+  resolves that name in the current frame's `/Font` resources and records the font *object*
+  in `FontRef.id`: `.ref num gen` when the entry is an indirect reference, else `.res owner`
+  (the entry of that name in the resources of `Frame.owner`: 0 for the page, the form's object
+  number for a form with its own `/Resources`). So a form's `/F1` and the page's `/F1` are
+  different fonts, and a font set before a form is invoked keeps its identity inside it.
 * **`gs`** (§8.4.5, Table 57): `/LW`, `/LC`, `/LJ`, `/ML`, `/D`, `/RI`, `/CA`, `/ca` are
-  applied to the graphics state (what the display list carries). Ignored, documented: `/Font`
-  (the display list's `FontRef` names a `/Font` *resource*, an ExtGState font is an indirect
-  font dictionary: phase 6), `/SMask`, `/BM`, `/AIS`, `/TK`, `/OP`, `/op`, `/OPM`, `/BG`,
+  applied to the graphics state (what the display list carries); `/Font [ref size]` sets the
+  font (`FontId.ref`, empty resource name) and size (a direct font dictionary there is skipped
+  with a warning). `/BM` (task 7.3c): a name or an array of names, the first recognised one
+  wins, unknown means `Normal`. `/SMask` (task 7.3c, §11.6.5): `/None` clears the soft mask; a
+  dictionary `<< /S /Luminosity|/Alpha /G form /BC [...] >>` has its group `/G` run like a
+  form (same nesting fuel, visited path and form budget; in the coordinates at the `gs`;
+  `resetTx` state) into a separate list, wrapped as one `softMask id info items` item (`id` =
+  the operator count at the `gs`, unique per page) and the state's `softMask` becomes
+  `some id` (`gsR`; `gsR_good`: the wrapper counts as the `gs`'s one item, the group's items
+  are counted by its nested run, so every item bound below still holds). A mask that cannot be
+  expanded is a warning and clears the mask. `/TR` is ignored. Ignored, documented: `/AIS`, `/TK`, `/OP`, `/op`, `/OPM`, `/BG`,
   `/BG2`, `/UCR`, `/UCR2`, `/TR`, `/TR2`, `/HT`, `/FL`, `/SM`, `/SA`, `/UseBlackPtComp`,
   `/HTO`, `/Type`. A malformed value of an applied key is skipped with a warning; a missing
   ExtGState is a warning.
@@ -75,6 +95,21 @@ never an error (M5: the interpreter never fails).
   space); `Lab` shows `L*/100` as gray. Initial colours follow §8.6: index 0, tint 1, `L* = 0`;
   an `ICCBased` space with 4 components starts at `(0, 0, 0, 0)`. An unresolvable resource
   name keeps 5.2a's behaviour (`.other name 0 .gray`) and adds a warning.
+* **`BDC` property lists** (task 6.8d, §14.6.2): a `/Properties` resource name is looked up in
+  the current frame and handed to `exec` as an inline dictionary (`bdcStep`, `bdcProps`; an
+  indirect `/ActualText` value is fetched), so `exec`'s `/ActualText` handling sees both forms.
+* **Resource annotation** (task 7.3f): every item a step emits is annotated in the current
+  frame (`annotItem`), so consumers resolve resources without the page's resources: an `sh`
+  records its `ResRef` (`resRefOf`: the indirect object, or the owner form `num gen` of a
+  direct entry, or `.page`); a pattern colour in a fill/stroke snapshot (fills, strokes, glyph
+  runs, stencil images) records a `PatternUse` — its `ResRef`, the frame's **base matrix**
+  (`Frame.base`: identity for the page, the form's start CTM `/Matrix × CTM` for a form or
+  soft-mask group, §8.7.3) and, for uncoloured patterns, the underlying colour of the last
+  `SCN`/`scn` (`patBook`: computed in the underlying space of a named `[/Pattern base]` space,
+  else by operand count; kept in `Machine.patFill`/`patStroke`, not saved by `q`/`Q`, matched
+  by pattern name); an inline image's resource-name `/ColorSpace` is replaced by its
+  definition in the current frame, as a direct object (`CSInfo.toObj`). Consumers look a
+  `ResRef` up with `resLookup`. Annotation keeps the item count (`annotAll_length`).
 -/
 
 namespace SafePdf.Core.Content
@@ -96,13 +131,6 @@ def Source.empty : Source Unit :=
   ⟨fun s _ _ => (.error (.malformed 0 "no document"), s),
    fun s _ _ => (.error (.malformed 0 "no document"), s)⟩
 
-/-- Default cap on form expansions per page (interim constant of task 5.2b; `Limits` has no
-such field yet). Without it a form tree without cycles, within the nesting fuel, that invokes
-each child many times ("billion laughs": 16 children over 8 levels) runs until
-`maxOpsPerPage` operators, i.e. millions of form decodes (≈ 30 s). With it the run stops
-expanding after `defaultMaxForms` forms (each further form `Do` is skipped with a warning). -/
-def defaultMaxForms : Nat := 100000
-
 /-- The runner's environment: interpreter configuration, document source, and an observer
 called once per executed operator with its warning and unknown-operator counts (the `ops`
 view's histogram; `fun w _ _ _ => w` when unused). -/
@@ -113,8 +141,12 @@ structure Env (σ ω : Type) where
   src : Source σ
   /-- Per-operator observer. -/
   observe : ω → Op → Nat → Nat → ω
-  /-- Maximum number of form expansions per page (see `defaultMaxForms`). -/
-  maxForms : Nat := defaultMaxForms
+  /-- Maximum number of form expansions per page, by default `Limits.maxFormsPerPage` of
+  `cfg.limits`. Without it a form tree without cycles, within the nesting fuel, that invokes
+  each child many times ("billion laughs": 16 children over 8 levels) runs until
+  `maxOpsPerPage` operators, i.e. millions of form decodes (≈ 30 s). With it the run stops
+  expanding after `maxForms` forms (each further form `Do` is skipped with a warning). -/
+  maxForms : Nat := cfg.limits.maxFormsPerPage
 
 /-- The resource context of the content being run. -/
 structure Frame where
@@ -122,6 +154,16 @@ structure Frame where
   res : Dict
   /-- Object numbers of the forms on the current nesting path (innermost first). -/
   visited : List Nat
+  /-- Whose resources `res` are: 0 for the page, else the object number of the form whose own
+  `/Resources` they are (a form without them inherits its parent's owner). Identifies direct
+  font dictionaries (`FontId.res`). -/
+  owner : Nat
+  /-- Generation number of the owner form (`0` for the page; task 7.3f, `ResRef.form`). -/
+  ownerGen : Nat
+  /-- Base matrix (task 7.3f): the CTM at the start of the content being run, i.e. its
+  default coordinate space → page space (the identity for the page; a form's `/Matrix` × the
+  CTM at its `Do`). Pattern colours record it (`PatternUse.base`, §8.7.3). -/
+  base : Matrix
 
 /-- Runner state. -/
 structure St (σ ω : Type) where
@@ -188,8 +230,8 @@ def numsOf : PdfObject → Option (List Fixed)
 
 /-- What a `Do` operand names. -/
 inductive XObj where
-  /-- A form XObject: object number, the stream. -/
-  | form (num : Nat) (st : Stream)
+  /-- A form XObject: object number, generation, the stream. -/
+  | form (num gen : Nat) (st : Stream)
   /-- An image XObject. -/
   | image (num gen : Nat) (dict : Dict)
   /-- A PostScript XObject (ignored, §8.8.2). -/
@@ -205,7 +247,7 @@ def xobjectOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (name : Name) 
     | (.ok (.stream st), s) =>
       match Dict.get? st.dict (nm "Subtype") with
       | some (.name t) =>
-        if t = nm "Form" then (.form n st, s)
+        if t = nm "Form" then (.form n g st, s)
         else if t = nm "Image" then (.image n g st.dict, s)
         else if t = nm "PS" then (.ignored, s)
         else (.missing, s)
@@ -230,17 +272,27 @@ def rectPath (m : Matrix) (x0 y0 x1 y1 : Fixed) : Path :=
   let p := fun x y => Matrix.apply m ⟨x, y⟩
   ⟨#[.moveTo (p x0 y0), .lineTo (p x1 y0), .lineTo (p x1 y1), .lineTo (p x0 y1), .closePath]⟩
 
-/-- A form's resources: its own `/Resources`, else the parent's. -/
-def formResources {σ : Type} (src : Source σ) (s : σ) (d : Dict) (parent : Dict) :
-    Dict × σ :=
+/-- A form's resources and their owner (`Frame.owner`): its own `/Resources` (owner: the
+form's object number `num`), else the parent's (`parent`, owner `owner`). -/
+def formResources {σ : Type} (src : Source σ) (s : σ) (d : Dict) (parent : Dict) (owner num : Nat) :
+    (Dict × Nat) × σ :=
   match Dict.get? d (nm "Resources") with
-  | none => (parent, s)
+  | none => ((parent, owner), s)
   | some o =>
     match resolve src s o with
-    | (.dict r, s) => (r, s)
-    | (_, s) => (parent, s)
+    | (.dict r, s) => ((r, num), s)
+    | (_, s) => ((parent, owner), s)
 
 /-! ## ExtGState (§8.4.5) -/
+
+/-- A `/BM` value (§11.6.3): a name, or an array of names of which the first recognised one
+is used; an unknown name, or an array with none recognised, means `Normal`. -/
+def blendOf : PdfObject → Option BlendMode
+  | .name n => some ((BlendMode.ofName? n).getD .normal)
+  | .array xs => some ((xs.findSome? fun o => match o with
+      | .name n => BlendMode.ofName? n
+      | _ => none).getD .normal)
+  | _ => none
 
 /-- Apply one ExtGState entry (value resolved): new state and warnings. -/
 def gsEntry (g : GState) (k : Name) (v : PdfObject) : GState × Nat :=
@@ -279,10 +331,30 @@ def gsEntry (g : GState) (k : Name) (v : PdfObject) : GState × Nat :=
     match num? v with
     | some x => ({ g with fillAlpha := Comp.ofFixed x }, 0)
     | none => (g, 1)
+  else if k = nm "Font" then
+    match v with
+    | .array [.ref n gen, sz] =>
+      match num? sz with
+      | some x =>
+        ({ g with text := { g.text with font := some { name := ⟨[]⟩, size := x, id := .ref n gen } } },
+          0)
+      | none => (g, 1)
+    | _ => (g, 1)
+  else if k = nm "BM" then
+    match blendOf v with
+    | some b => ({ g with blendMode := b }, 0)
+    | none => (g, 1)
+  else if k = nm "SMask" then
+    -- `/None` clears the mask; a dictionary clears it too here: `stepR` sets the new mask
+    -- after expanding its group (`gsR`).
+    match v with
+    | .name _ | .dict _ => ({ g with softMask := none }, 0)
+    | _ => ({ g with softMask := none }, 1)
   else (g, 0)
 
 /-- Keys `gsEntry` applies (others are ignored without resolving their values). -/
-def gsKeys : List String := ["LW", "LC", "LJ", "ML", "D", "RI", "CA", "ca"]
+def gsKeys : List String :=
+  ["LW", "LC", "LJ", "ML", "D", "RI", "CA", "ca", "Font", "BM", "SMask"]
 
 /-- Apply an ExtGState dictionary: new state, warnings, source state. -/
 def applyExtGState {σ : Type} (src : Source σ) (s : σ) (d : Dict) (g : GState) :
@@ -519,6 +591,152 @@ def namedCS {σ : Type} (src : Source σ) (s : σ) (res : Dict) (name : Name) :
   | (some o, s) => csInfo src s o
   | (none, s) => (none, s)
 
+/-! ## Resource annotation (task 7.3f)
+
+Items that name resources record where those live, resolved here in the current frame, so that
+the rasterizer's loaders never consult the page's resources for content of a form. -/
+
+/-- Where resource `name` of category `cat` (`"Shading"`, `"Pattern"`) lives, seen from frame
+`fr`: the referenced object when the entry is an indirect reference, else (a direct entry, or
+none at all) the resources of the frame's owner (`.page` for the page, `.form` for a form
+with its own `/Resources`). -/
+def resRefOf {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (cat : String) (name : Name) :
+    ResRef × σ :=
+  match resEntry src s fr.res cat name with
+  | (some (.ref n g), s) => (.ref n g, s)
+  | (_, s) => (if fr.owner = 0 then .page else .form fr.owner fr.ownerGen, s)
+
+/-- **Look up a recorded resource** (the consumer side of `resRefOf`): resource `name` of
+category `cat` where `r` says it lives — the referenced object itself, the page's resources
+`pageRes`, or the own `/Resources` of form `num gen`. -/
+def resLookup {σ : Type} (src : Source σ) (s : σ) (pageRes : Dict) (cat : String) (r : ResRef)
+    (name : Name) : Option PdfObject × σ :=
+  match r with
+  | .ref n g => (some (.ref n g), s)
+  | .page => resEntry src s pageRes cat name
+  | .form n g =>
+    match src.fetch s n g with
+    | (.ok (.stream st), s) =>
+      match Dict.get? st.dict (nm "Resources") with
+      | some o =>
+        let (d, s) := dictOf src s o
+        resEntry src s d cat name
+      | none => (none, s)
+    | (_, s) => (none, s)
+
+/-- The pattern use of colour `c` in frame `fr` (`none` for a non-pattern colour): where the
+pattern lives, the frame's base matrix, and the underlying colour the last `SCN`/`scn` gave
+this pattern (`pst.under`, kept only when its pattern name is `c`'s). -/
+def patternUse {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (pst : PatState) :
+    Color → Option PatternUse × σ
+  | .pattern n =>
+    let (r, s) := resRefOf src s fr "Pattern" n
+    let under := match pst.under with
+      | some (n', c) => if n' = n then some c else none
+      | none => none
+    (some { res := r, base := fr.base, under }, s)
+  | _ => (none, s)
+
+/-- Record the pattern use in a fill snapshot. -/
+def annotFill {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (pst : PatState) (f : FillStyle) :
+    FillStyle × σ :=
+  let (p, s) := patternUse src s fr pst f.color
+  ({ f with pattern := p }, s)
+
+/-- Record the pattern use in a stroke snapshot. -/
+def annotStroke {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (pst : PatState)
+    (f : StrokeStyle) :
+    StrokeStyle × σ :=
+  let (p, s) := patternUse src s fr pst f.color
+  ({ f with pattern := p }, s)
+
+/-- The name of a device space. -/
+def devName : DeviceSpace → Name
+  | .gray => nm "DeviceGray"
+  | .rgb => nm "DeviceRGB"
+  | .cmyk => nm "DeviceCMYK"
+
+/-- A number as an object (exact: `Fixed.toDecimal`). -/
+def fixedObj (x : Fixed) : PdfObject := .real x.toDecimal
+
+/-- A **direct** colour-space object that `csInfo` resolves without any document access to
+the same rendering behaviour (task 7.3f; used to inline a resource colour space into an inline
+image's parameters): device names, `[/Indexed base hival (lookup)]` with the table as a
+string, `[/Separation /Spot alt fn]` with a type 2 function dictionary (or `null`: the
+darkness placeholder), `[/DeviceN [/C …] alt null]`, `[/Lab << >>]`. (An `ICCBased` CMYK space
+becomes `/DeviceCMYK`: only its initial colour differs, which images do not use.) -/
+def CSInfo.toObj : CSInfo → PdfObject
+  | .dev d _ => .name (devName d)
+  | .pattern => .name (nm "Pattern")
+  | .indexed b hival lut =>
+    .array [.name (nm "Indexed"), .name (devName b), .int hival, .string lut.data.toList]
+  | .separation a fn =>
+    let f : PdfObject := match fn with
+      | some e => .dict [(nm "FunctionType", .int 2), (nm "Domain", .array [.int 0, .int 1]),
+          (nm "C0", .array (e.c0.map fixedObj)), (nm "C1", .array (e.c1.map fixedObj)),
+          (nm "N", .int e.n)]
+      | none => .null
+    .array [.name (nm "Separation"), .name (nm "Spot"), .name (devName a), f]
+  | .deviceN n a =>
+    .array [.name (nm "DeviceN"), .array (List.replicate n (.name (nm "C"))), .name (devName a),
+      .null]
+  | .lab => .array [.name (nm "Lab"), .dict []]
+
+/-- An inline image's parameters with a resource-name `/ColorSpace` (not a device name, not
+`Pattern`) replaced by the definition of that name in the current frame (`CSInfo.toObj`;
+§8.9.7: the name is looked up in the current resource dictionary). Unresolvable names are kept. -/
+def annotInline {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (d : Dict) : Dict × σ :=
+  match Dict.get? d (nm "ColorSpace") with
+  | some (.name n) =>
+    if (deviceOfName n).isSome || n = nm "Pattern" then (d, s) else
+    match namedCS src s fr.res n with
+    | (some info, s) =>
+      ((nm "ColorSpace", info.toObj) :: d.filter (fun kv => kv.1 != nm "ColorSpace"), s)
+    | (none, s) => (d, s)
+  | _ => (d, s)
+
+/-- **Annotate one emitted item** with where its resources live (task 7.3f): pattern uses of
+fill and stroke snapshots, the `ResRef` of an `sh`, an inline image's named colour space. -/
+def annotItem {σ : Type} (src : Source σ) (fr : Frame) (pf ps : PatState) (s : σ) :
+    DisplayItem → DisplayItem × σ
+  | .fillPath p r f c =>
+    let (f, s) := annotFill src s fr pf f
+    (.fillPath p r f c, s)
+  | .strokePath p k c =>
+    let (k, s) := annotStroke src s fr ps k
+    (.strokePath p k c, s)
+  | .glyphRun r c =>
+    let (f, s) := annotFill src s fr pf r.fill
+    let (k, s) := annotStroke src s fr ps r.stroke
+    (.glyphRun { r with fill := f, stroke := k } c, s)
+  | .image (.inline d data) ctm f c =>
+    let (d, s) := annotInline src s fr d
+    let (f, s) := annotFill src s fr pf f
+    (.image (.inline d data) ctm f c, s)
+  | .image isrc ctm f c =>
+    let (f, s) := annotFill src s fr pf f
+    (.image isrc ctm f c, s)
+  | .shading n _ ctm f c =>
+    let (r, s) := resRefOf src s fr "Shading" n
+    (.shading n r ctm f c, s)
+  | it => (it, s)
+
+/-- Annotate a list of emitted items. -/
+def annotAll {σ : Type} (src : Source σ) (fr : Frame) (pf ps : PatState) :
+    σ → List DisplayItem → List DisplayItem × σ
+  | s, [] => ([], s)
+  | s, it :: rest =>
+    let a := annotItem src fr pf ps s it
+    let r := annotAll src fr pf ps a.2 rest
+    (a.1 :: r.1, r.2)
+
+/-- Annotation keeps the number of items. -/
+theorem annotAll_length {σ : Type} (src : Source σ) (fr : Frame) (pf ps : PatState) :
+    ∀ (s : σ) (l : List DisplayItem), (annotAll src fr pf ps s l).1.length = l.length
+  | _, [] => rfl
+  | s, it :: rest => by
+    simp only [annotAll, List.length_cons, annotAll_length src fr pf ps _ rest]
+
 /-! ## Steps -/
 
 /-- Output of a step that does not nest: machine, items, warnings, unknown-operator count,
@@ -547,6 +765,38 @@ def gsStep {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op
         (withGs m g, [], w, 0, s)
       | (_, s) => (m, [], 1, 0, s)
     | (none, s) => (m, [], 1, 0, s)
+
+/-- The font object that resource name `name` denotes in frame `fr` (`FontId`): the
+referenced object when the `/Font` entry is a reference, else the entry of that name in the
+frame owner's resources. -/
+def fontIdOf {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (name : Name) : FontId × σ :=
+  match resEntry src s fr.res "Font" name with
+  | (some (.ref n g), s) => (.ref n g, s)
+  | (_, s) => (.res fr.owner, s)
+
+/-- The font name `Tf` selects (the operand pattern `exec` accepts). -/
+def tfName? (o : List PdfObject) : Option Name :=
+  match lastN 2 o with
+  | some [.name n, sz] => (num? sz).map fun _ => n
+  | _ => none
+
+/-- Record font object `id` in the current font when it has resource name `n`. -/
+def setFontId (m : Machine) (n : Name) (id : FontId) : Machine :=
+  let g := m.core.gs
+  withGs m { g with text := { g.text with
+    font := g.text.font.map fun f => if f.name = n then { f with id } else f } }
+
+/-- `Tf`: `exec` selects the font by name, then the name is resolved in the current frame
+(`fontIdOf`). -/
+def tfStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    Local σ :=
+  match viaExec env.cfg m s op with
+  | (m', its, w, u, s1) =>
+    match tfName? op.operands with
+    | some n =>
+      let (id, s2) := fontIdOf env.src s1 fr n
+      (setFontId m' n id, its, w, u, s2)
+    | none => (m', its, w, u, s1)
 
 /-- `CS`/`cs`: a resource name is resolved; device names and `Pattern` go to `exec`. -/
 def csStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (stroke : Bool) (m : Machine) (s : σ)
@@ -587,17 +837,50 @@ def scStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (stroke : Bool) (m : Ma
     (op : Op) : Local σ :=
   scStepIn env fr stroke (if stroke then m.core.gs.strokeSpace else m.core.gs.fillSpace) m s op
 
+/-- The property list of `BDC` with its `/ActualText` resolved (task 6.8d): an inline
+dictionary, or a `/Properties` resource name (ISO 32000-2 §14.6.2) looked up in the current
+frame; an indirect `/ActualText` value is fetched. `none` when the operands are not
+`/Tag dict-or-name` or the name is not a dictionary resource. -/
+def bdcProps {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (o : List PdfObject) :
+    Option (Name × Dict) × σ :=
+  let withText (tag : Name) (d : Dict) (s : σ) : Option (Name × Dict) × σ :=
+    match Dict.get? d (nm "ActualText") with
+    | some (.ref n g) =>
+      let (v, s) := resolve src s (.ref n g)
+      (some (tag, (nm "ActualText", v) :: d), s)
+    | _ => (some (tag, d), s)
+  match lastN 2 o with
+  | some [.name tag, .dict d] => withText tag d s
+  | some [.name tag, .name p] =>
+    match resEntry src s fr.res "Properties" p with
+    | (some e, s) =>
+      match resolve src s e with
+      | (.dict d, s) => withText tag d s
+      | (_, s) => (none, s)
+    | (none, s) => (none, s)
+  | _ => (none, s)
+
+/-- `BDC`: `exec` sees the property list as an inline dictionary (`bdcProps`), so a
+`/Properties` resource carries its `/ActualText` like an inline one. -/
+def bdcStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    Local σ :=
+  match bdcProps env.src s fr op.operands with
+  | (some (tag, d), s) => viaExec env.cfg m s { op with operands := [.name tag, .dict d] }
+  | (none, s) => viaExec env.cfg m s op
+
 /-- Every operator but `Do`. -/
 def localStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
     Local σ :=
   match op.op with
   | [103, 115] => gsStep env.src fr m s op          -- gs
+  | [84, 102] => tfStep env fr m s op               -- Tf
   | [67, 83] => csStep env fr true m s op           -- CS
   | [99, 115] => csStep env fr false m s op         -- cs
   | [83, 67] => scStep env fr true m s op           -- SC
   | [83, 67, 78] => scStep env fr true m s op       -- SCN
   | [115, 99] => scStep env fr false m s op         -- sc
   | [115, 99, 110] => scStep env fr false m s op    -- scn
+  | [66, 68, 67] => bdcStep env fr m s op           -- BDC
   | _ => viaExec env.cfg m s op
 
 /-- A form to expand: object number, operators, tokenizer warnings, resources, the graphics
@@ -612,12 +895,73 @@ structure FormJob where
   tokW : Nat
   /-- The form's resources. -/
   res : Dict
+  /-- Whose resources they are (`Frame.owner`). -/
+  owner : Nat
+  /-- Generation number of the owner (`Frame.ownerGen`). -/
+  ownerGen : Nat
   /-- Graphics state at the start of the form. -/
   gs : GState
   /-- The `/BBox` clip, page space. -/
   clip : Option Path
   /-- Warnings (a missing or malformed `/BBox`). -/
   w : Nat
+  /-- The transparency group the form is, if any (task 7.3c). -/
+  group : Option GroupInfo := none
+  /-- Fill pattern bookkeeping at the `Do` (task 7.3f; the colour is inherited). -/
+  patFill : PatState := {}
+  /-- Stroke pattern bookkeeping at the `Do`. -/
+  patStroke : PatState := {}
+
+/-- Items emitted before the form's own items: `groupBegin` for a transparency group, else the
+informational `/BBox` `clip` item. -/
+def FormJob.pre (j : FormJob) : List DisplayItem :=
+  match j.group with
+  | some g => [.groupBegin g]
+  | none => j.clip.toList.map (.clip · .nonzero)
+
+/-- Items emitted after the form's own items: `groupEnd` for a transparency group. -/
+def FormJob.post (j : FormJob) : List DisplayItem :=
+  match j.group with
+  | some _ => [.groupEnd]
+  | none => []
+
+/-- The frame a form job runs in, nested in `fr`: the form's resources and owner, the form
+on the nesting path, the form's start CTM as base matrix. -/
+def FormJob.frame (j : FormJob) (fr : Frame) : Frame :=
+  ⟨j.res, j.num :: fr.visited, j.owner, j.ownerGen, j.gs.ctm⟩
+
+/-- A form adds at most two items of its own (`Paint.maxItems`, charged to its `Do`). -/
+theorem FormJob.pre_post_le (j : FormJob) : j.pre.length + j.post.length ≤ 2 := by
+  unfold FormJob.pre FormJob.post
+  cases j.group <;> cases j.clip <;> simp
+
+/-- The graphics state inside a transparency group or soft-mask group: alpha, blend mode and
+soft mask reset to their initial values (§11.6.6; they apply to the group as a whole). -/
+def resetTx (g : GState) : GState :=
+  { g with fillAlpha := Comp.one, strokeAlpha := Comp.one, blendMode := BlendMode.normal,
+           softMask := Option.none }
+
+/-- A boolean entry (`false` when absent or malformed). -/
+def boolEntry (d : Dict) (k : String) : Bool :=
+  match Dict.get? d (nm k) with
+  | some (.bool b) => b
+  | _ => false
+
+/-- The transparency group of a form dictionary `d` (`/Group` with `/S /Transparency`),
+composited with the alpha, blend mode and soft mask of `gs`; `bbox` in page space. -/
+def groupOf {σ : Type} (src : Source σ) (s : σ) (d : Dict) (gs : GState) (bbox : Option Path) :
+    Option GroupInfo × σ :=
+  match Dict.get? d (nm "Group") with
+  | none => (none, s)
+  | some o =>
+    let (g, s) := dictOf src s o
+    match Dict.get? g (nm "S") with
+    | some (.name t) =>
+      if t = nm "Transparency" then
+        (some { bbox := bbox, isolated := boolEntry g "I", knockout := boolEntry g "K",
+                alpha := gs.fillAlpha, blend := gs.blendMode, smask := gs.softMask }, s)
+      else (none, s)
+    | _ => (none, s)
 
 /-- What `Do` does, before any nesting. -/
 inductive DoOut (σ : Type) where
@@ -628,25 +972,29 @@ inductive DoOut (σ : Type) where
   | form (job : FormJob) (s : σ)
 
 /-- Prepare form `n` (dictionary `d`, decoded content `bytes`). -/
-def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n : Nat) (d : Dict)
+def formJob {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machine) (n g : Nat) (d : Dict)
     (bytes : ByteArray) (s : σ) : DoOut σ :=
   let t := Ops.tokenize env.cfg.limits bytes
-  let r := formResources env.src s d fr.res
+  let r := formResources env.src s d fr.res fr.owner n
   let gs := m.core.gs
   let ctm := Matrix.mul (formMatrix d) gs.ctm
-  match bboxOf d with
-  | some (x0, y0, x1, y1) =>
-    let path := rectPath ctm x0 y0 x1 y1
-    .form ⟨n, t.ops, t.warnings, r.1, { gs with ctm, clip := ⟨path, .nonzero⟩ :: gs.clip },
-      some path, 0⟩ r.2
-  | none => .form ⟨n, t.ops, t.warnings, r.1, { gs with ctm }, none, 1⟩ r.2
+  let path := (bboxOf d).map fun (x0, y0, x1, y1) => rectPath ctm x0 y0 x1 y1
+  let grp := groupOf env.src r.2 d gs path
+  let gs1 := if grp.1.isSome then resetTx gs else gs
+  let gs2 := match path with
+    | some p => { gs1 with ctm, clip := ⟨p, .nonzero⟩ :: gs1.clip }
+    | none => { gs1 with ctm }
+  .form ⟨n, t.ops, t.warnings, r.1.1, r.1.2,
+    if r.1.2 = n then g else fr.ownerGen, gs2, path, if path.isSome then 0 else 1, grp.1,
+    m.patFill, m.patStroke⟩
+    grp.2
 
 /-- `formJob` prepares form `n`. -/
-theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n : Nat}
+theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} {n g : Nat}
     {d : Dict} {bytes : ByteArray} {s : σ} {job : FormJob} {s' : σ}
-    (h : formJob env fr m n d bytes s = .form job s') : job.num = n := by
+    (h : formJob env fr m n g d bytes s = .form job s') : job.num = n := by
   unfold formJob at h
-  split at h <;> (cases h; rfl)
+  cases h; rfl
 
 /-- `Do /Name` (`nest`: fuel is left for a form). -/
 def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Machine) (s : σ)
@@ -658,18 +1006,169 @@ def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mach
     | (.missing, s) => .done none 1 s
     | (.ignored, s) => .done none 0 s
     | (.image n g _, s) =>
-      .done (some (.image (.xobject name n g) m.core.gs.ctm m.core.gs.fillStyle m.core.gs.clip))
-        0 s
-    | (.form n st, s) =>
+      let f := annotFill env.src s fr m.patFill m.core.gs.fillStyle
+      .done (some (.image (.xobject name n g) m.core.gs.ctm f.1 m.core.gs.clip)) 0 f.2
+    | (.form n g st, s) =>
       if fr.visited.contains n then .done none 1 s
       else if nest then
         match env.src.decode s n st with
         | (.error _, s) => .done none 1 s
-        | (.ok bytes, s) => formJob env fr m n st.dict bytes s
+        | (.ok bytes, s) => formJob env fr m n g st.dict bytes s
       else .done none 1 s
 
 /-- The machine a form runs in: the given graphics state, everything else fresh. -/
-def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none⟩
+def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none, {}, {}⟩
+
+/-- The machine a form job runs in: `formMachine` with the invoking machine's pattern
+bookkeeping (task 7.3f). -/
+def FormJob.machine (j : FormJob) : Machine :=
+  { formMachine j.gs with patFill := j.patFill, patStroke := j.patStroke }
+
+/-! ## Soft masks (§11.6.5, task 7.3c) -/
+
+/-- What an ExtGState's `/SMask` asks for. -/
+inductive MaskOut (σ : Type) where
+  /-- No soft-mask dictionary (absent, `/None`, or no ExtGState). -/
+  | none (s : σ)
+  /-- A soft-mask dictionary that cannot be expanded (malformed, missing group, on the
+  nesting path, no fuel or form budget left): one warning, the mask is cleared. -/
+  | bad (s : σ)
+  /-- Expand the mask group `job`. -/
+  | form (info : SoftMaskInfo) (job : FormJob) (s : σ)
+
+/-- The ExtGState dictionary `gs` names, if any. -/
+def gsDict? {σ : Type} (src : Source σ) (fr : Frame) (s : σ) (op : Op) : Option Dict × σ :=
+  match lastName? op.operands with
+  | none => (none, s)
+  | some n =>
+    match resEntry src s fr.res "ExtGState" n with
+    | (some o, s) =>
+      match resolve src s o with
+      | (.dict d, s) => (some d, s)
+      | (_, s) => (none, s)
+    | (none, s) => (none, s)
+
+/-- A device colour from 1, 3 or 4 components (`/BC`); black otherwise. -/
+def colorOfNums : List Fixed → Color
+  | [g] => .gray (Comp.ofFixed g)
+  | [r, g, b] => .rgb (Comp.ofFixed r) (Comp.ofFixed g) (Comp.ofFixed b)
+  | [c, m, y, k] => .cmyk (Comp.ofFixed c) (Comp.ofFixed m) (Comp.ofFixed y) (Comp.ofFixed k)
+  | _ => .gray Comp.zero
+
+/-- The `/S` of a soft-mask dictionary. -/
+def maskKind? (sm : Dict) : Option SoftMaskKind :=
+  match Dict.get? sm (nm "S") with
+  | some (.name k) =>
+    if k = nm "Luminosity" then some .luminosity
+    else if k = nm "Alpha" then some .alpha
+    else none
+  | _ => none
+
+/-- Prepare the soft mask of `gs` (`nest`: fuel and form budget are left). The mask group
+`/G` is run like a form in the state at the `gs` (its coordinate system, §11.6.5.2) with
+alpha, blend mode and soft mask reset (`resetTx`). `/TR` is ignored. -/
+def maskJob {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Machine) (s : σ)
+    (op : Op) : MaskOut σ :=
+  match gsDict? env.src fr s op with
+  | (none, s) => .none s
+  | (some d, s) =>
+    match Dict.get? d (nm "SMask") with
+    | none => .none s
+    | some o =>
+      match resolve env.src s o with
+      | (.name _, s) => .none s
+      | (.dict sm, s) =>
+        let bc := ((Dict.get? sm (nm "BC")).bind numsOf).map colorOfNums
+        match maskKind? sm, Dict.get? sm (nm "G") with
+        | some kind, some (.ref n g) =>
+          if fr.visited.contains n || !nest then .bad s else
+          match env.src.fetch s n g with
+          | (.ok (.stream st), s) =>
+            match env.src.decode s n st with
+            | (.ok bytes, s) =>
+              match formJob env fr (withGs m (resetTx m.core.gs)) n g st.dict bytes s with
+              | .form job s =>
+                .form { kind, backdrop := bc.getD (.gray Comp.zero), bbox := job.clip } job s
+              | .done _ _ s => .bad s
+            | (.error _, s) => .bad s
+          | (_, s) => .bad s
+        | _, _ => .bad s
+      | (_, s) => .bad s
+
+/-- **`gs` in the runner**: `gsStep` applies the ExtGState; a soft-mask dictionary's group
+is then run by `inner` into a fresh item list, wrapped into one
+`softMask id info items` item (`id` = the operator count `ops` at this `gs`, unique in the
+page), and the graphics state's `softMask` is set to `some id`. -/
+def gsR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω → Array Op → St σ ω))
+    (fr : Frame) (m : Machine) (items : DisplayList) (warnings unsupported ops forms : Nat)
+    (truncated : Bool) (s : σ) (obs : ω) (op : Op) : St σ ω :=
+  match gsStep env.src fr m s op with
+  | (m1, _, w, _, s1) =>
+    let obs1 := env.observe obs op w 0
+    match maskJob env (inner.isSome && decide (forms < env.maxForms)) fr m1 s1 op with
+    | .none s2 => ⟨m1, items, warnings + w, unsupported, ops + 1, forms, truncated, s2, obs1⟩
+    | .bad s2 => ⟨m1, items, warnings + w + 1, unsupported, ops + 1, forms, truncated, s2, obs1⟩
+    | .form info job s2 =>
+      match inner with
+      | none => ⟨m1, items, warnings + w + 1, unsupported, ops + 1, forms, truncated, s2, obs1⟩
+      | some run =>
+        match run (job.frame fr)
+            ⟨job.machine, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+              forms + 1, truncated, s2, obs1⟩ job.ops with
+        | ⟨_, items2, w2, u2, ops2, forms2, tr2, s3, obs3⟩ =>
+          ⟨withGs m1 { m1.core.gs with softMask := some ops },
+            items.push (.softMask ops info items2), w2, u2, ops2, forms2, tr2, s3, obs3⟩
+
+/-! ## Uncoloured patterns (task 7.3f, §8.7.3.3) -/
+
+/-- Bookkeeping after `CS`/`cs` (space `sp` now current): a pattern space selected by a
+resource name remembers that name (its underlying space is read at `SCN`/`scn`). -/
+def csBook (sp : ColorSpace) (op : Op) : PatState :=
+  match sp, lastName? op.operands with
+  | .pattern, some n => { space := if (deviceOfName n).isNone && n != nm "Pattern" then some n else none }
+  | _, _ => {}
+
+/-- The underlying space of pattern colour space resource `key` (`[/Pattern base]`). -/
+def underOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (key : Name) : Option CSInfo × σ :=
+  match resEntry src s res "ColorSpace" key with
+  | (some o, s) =>
+    match resolve src s o with
+    | (.array [.name p, b], s) => if p = nm "Pattern" then csInfo src s b else (none, s)
+    | (_, s) => (none, s)
+  | (none, s) => (none, s)
+
+/-- Bookkeeping after `SCN`/`scn` (current space `sp`, colour `c` after `exec`): in a pattern
+space with colour operands before the pattern name, record the pattern's underlying colour —
+computed in the underlying space of the named pattern space, else by operand count (1, 3, 4:
+gray, RGB, CMYK). -/
+def scnBook {σ : Type} (src : Source σ) (fr : Frame) (p : PatState) (sp : ColorSpace) (c : Color)
+    (s : σ) (op : Op) : PatState × σ :=
+  match sp, c with
+  | .pattern, .pattern n =>
+    let xs := op.operands.filterMap num?
+    if xs.isEmpty then ({ p with under := none }, s) else
+    let (info, s) := match p.space with
+      | some key => underOf src s fr.res key
+      | none => (none, s)
+    let col := match info with
+      | some i => i.color xs
+      | none => colorOfNums xs
+    ({ p with under := some (n, col) }, s)
+  | _, _ => (p, s)
+
+/-- Pattern bookkeeping of one executed local operator (`m`: the machine after it). -/
+def patBook {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    PatState × PatState × σ :=
+  match op.op with
+  | [67, 83] => (m.patFill, csBook m.core.gs.strokeSpace op, s)   -- CS
+  | [99, 115] => (csBook m.core.gs.fillSpace op, m.patStroke, s)  -- cs
+  | [83, 67, 78] =>                                               -- SCN
+    let r := scnBook src fr m.patStroke m.core.gs.strokeSpace m.core.gs.strokeColor s op
+    (m.patFill, r.1, r.2)
+  | [115, 99, 110] =>                                             -- scn
+    let r := scnBook src fr m.patFill m.core.gs.fillSpace m.core.gs.fillColor s op
+    (r.1, m.patStroke, r.2)
+  | _ => (m.patFill, m.patStroke, s)
 
 /-- **One runner step.** At the operator cap nothing is executed (the first time, one
 warning). `Do` of a form runs `inner` (the runner with one less fuel) from `formMachine`, then
@@ -690,20 +1189,24 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
         match inner with
         | some run =>
           let w := job.w + job.tokW
-          match run ⟨job.res, job.num :: fr.visited⟩
-              ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
+          match run (job.frame fr)
+              ⟨job.machine, pushAll items job.pre,
                 warnings + w, unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op w 0⟩ job.ops with
           | ⟨_, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩ =>
-            ⟨m, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩
+            ⟨m, pushAll items2 job.post, w2, u2, ops2, forms2, tr2, s2, obs2⟩
         | none =>
           ⟨m, items, warnings + 1, unsupported, ops + 1, forms, truncated, s',
             env.observe obs op 1 0⟩
+    else if op.op = [103, 115] then -- gs
+      gsR env inner fr m items warnings unsupported ops forms truncated s obs op
     else
       match localStep env fr m s op with
       | (m', its, w, u, s') =>
-        ⟨m', pushAll items its, warnings + w, unsupported + u, ops + 1, forms, truncated, s',
-          env.observe obs op w u⟩
+        let pb := patBook env.src fr m' s' op
+        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 its
+        ⟨{ m' with patFill := pb.1, patStroke := pb.2.1 }, pushAll items a.1, warnings + w,
+          unsupported + u, ops + 1, forms, truncated, a.2, env.observe obs op w u⟩
 
 /-- **The runner**, by structural recursion on the nesting fuel: a form invoked at fuel
 `f + 1` runs at fuel `f`; at fuel 0 forms are skipped (warning). -/
@@ -729,7 +1232,7 @@ theorem doStep_form_fresh {σ ω : Type} {env : Env σ ω} {nest : Bool} {fr : F
     · cases h
     · cases h
     · cases h
-    · rename_i n' st s1 _
+    · rename_i n' _ st s1 _
       by_cases hv : fr.visited.contains n' = true
       · simp only [hv, ↓reduceIte] at h; cases h
       · cases nest
@@ -791,6 +1294,17 @@ theorem localStep_bound {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machi
           · exact viaExec_bound env.cfg m _ op
         · exact viaExec_bound env.cfg m _ op
     · exact viaExec_bound env.cfg m s op
+  have htf : (tfStep env fr m s op).2.1.length + pendBit (tfStep env fr m s op).1
+      ≤ pendBit m + Paint.maxItems := by
+    have := viaExec_bound env.cfg m s op
+    unfold tfStep
+    revert this
+    rcases viaExec env.cfg m s op with ⟨m', its, w, u, s1⟩
+    intro hv
+    dsimp only at hv ⊢
+    split
+    · exact hv
+    · exact hv
   unfold localStep
   split
   · unfold gsStep
@@ -801,18 +1315,82 @@ theorem localStep_bound {σ ω : Type} (env : Env σ ω) (fr : Frame) (m : Machi
         · simp only [List.length_nil, hgs]; omega
         · exact hk
       · exact hk
+  · exact htf
   · exact hcs true s
   · exact hcs false s
   · exact hsc true s
   · exact hsc true s
   · exact hsc false s
   · exact hsc false s
+  · unfold bdcStep
+    split
+    · exact viaExec_bound env.cfg m _ _
+    · exact viaExec_bound env.cfg m _ _
   · exact viaExec_bound env.cfg m s op
 
 /-- The bound invariant with slack `k`: items, plus `1` for a pending clip, plus `k`, are at
 most `Paint.maxItems` per executed operator; and at most `maxOpsPerPage` operators ran. -/
 def Good {σ ω : Type} (lim : Limits) (k : Nat) (st : St σ ω) : Prop :=
   st.items.size + pendBit st.m + k ≤ Paint.maxItems * st.ops ∧ st.ops ≤ lim.maxOpsPerPage
+
+/-- `gsStep` keeps the pending clip. -/
+theorem gsStep_pend {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    pendBit (gsStep src fr m s op).1 = pendBit m := by
+  unfold gsStep
+  split
+  · rfl
+  · split
+    · split
+      · rfl
+      · rfl
+    · rfl
+
+/-- **`gs` keeps `Good`**: the soft-mask item counts as the `gs` operator's one item, the
+mask group's own items are counted by the nested run. -/
+theorem gsR_good {σ ω : Type} (env : Env σ ω)
+    (inner : Option (Frame → St σ ω → Array Op → St σ ω))
+    (hin : ∀ run, inner = some run → ∀ k fr st ops,
+      Good env.cfg.limits k st → Good env.cfg.limits k (run fr st ops))
+    (fr : Frame) (k : Nat) (m : Machine) (items : DisplayList)
+    (warnings unsupported ops forms : Nat) (truncated : Bool) (s : σ) (obs : ω) (op : Op)
+    (hcap : ops < env.cfg.limits.maxOpsPerPage)
+    (h : items.size + pendBit m + k ≤ Paint.maxItems * ops) :
+    Good env.cfg.limits k (gsR env inner fr m items warnings unsupported ops forms truncated s obs op) := by
+  have hp := gsStep_pend env.src fr m s op
+  unfold gsR
+  revert hp
+  rcases gsStep env.src fr m s op with ⟨m1, its, w, u, s1⟩
+  intro hp
+  simp only at hp ⊢
+  have hbase : items.size + pendBit m1 + k ≤ Paint.maxItems * (ops + 1) ∧
+      ops + 1 ≤ env.cfg.limits.maxOpsPerPage := by
+    simp only [Paint.maxItems] at h ⊢; omega
+  split
+  · exact hbase
+  · exact hbase
+  · rename_i info job s2 _
+    split
+    · exact hbase
+    · rename_i run _
+      have h1 : Good env.cfg.limits (items.size + 1 + pendBit m + k)
+          ⟨job.machine, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+            forms + 1, truncated, s2, env.observe obs op w 0⟩ := by
+        unfold Good
+        simp only [FormJob.machine, formMachine, pendBit, Option.isSome_none, Bool.false_eq_true,
+          ↓reduceIte,
+          Paint.maxItems, List.size_toArray, List.length_nil] at h ⊢
+        omega
+      have h2 := hin run rfl _ (job.frame fr) _ job.ops h1
+      revert h2
+      rcases run (job.frame fr)
+          ⟨job.machine, #[], warnings + w + (job.w + job.tokW), unsupported, ops + 1,
+            forms + 1, truncated, s2, env.observe obs op w 0⟩ job.ops with
+        ⟨m2, items2, w2, u2, ops2, forms2, tr2, s3, obs3⟩
+      intro h2
+      unfold Good at h2 ⊢
+      have hw : pendBit (withGs m1 { m1.core.gs with softMask := some ops }) = pendBit m1 := rfl
+      simp only [Array.size_push, hw] at h2 ⊢
+      omega
 
 /-- **One step keeps `Good`**, given that the nested runner keeps it for every slack. -/
 theorem stepR_good {σ ω : Type} (env : Env σ ω)
@@ -841,34 +1419,40 @@ theorem stepR_good {σ ω : Type} (env : Env σ ω)
           omega
         · have hrun : inner = some run := hi
           simp only
-          have hcl : (job.clip.toList.map (DisplayItem.clip · FillRule.nonzero)).length ≤ 1 := by
-            cases job.clip <;> simp
-          have h1 : Good env.cfg.limits (pendBit m + k)
-              ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
+          have hcl := FormJob.pre_post_le job
+          have h1 : Good env.cfg.limits (pendBit m + k + job.post.length)
+              ⟨job.machine, pushAll items job.pre,
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ := by
             unfold Good
-            simp only [size_pushAll, formMachine, pendBit, Option.isSome_none,
+            simp only [size_pushAll, FormJob.machine, formMachine, pendBit, Option.isSome_none,
               Bool.false_eq_true, ↓reduceIte, Paint.maxItems] at h hcl ⊢
             omega
-          have h2 := hin run hrun (pendBit m + k) ⟨job.res, job.num :: fr.visited⟩ _ job.ops h1
+          have h2 := hin run hrun (pendBit m + k + job.post.length)
+            (job.frame fr) _ job.ops h1
           revert h2
-          rcases run ⟨job.res, job.num :: fr.visited⟩
-              ⟨formMachine job.gs, pushAll items (job.clip.toList.map (.clip · .nonzero)),
+          rcases run (job.frame fr)
+              ⟨job.machine, pushAll items job.pre,
                 warnings + (job.w + job.tokW), unsupported, ops + 1, forms + 1, truncated, s',
                 env.observe obs op (job.w + job.tokW) 0⟩ job.ops with
             ⟨m2, items2, w2, u2, ops2, forms2, tr2, s2, obs2⟩
           intro h2
           unfold Good at h2
-          simp only at h2 ⊢
+          simp only [size_pushAll] at h2 ⊢
           omega
-    · -- every other operator
-      have hb := localStep_bound env fr m s op
-      revert hb
-      rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
-      intro hb
-      simp only [size_pushAll, Paint.maxItems] at h hb ⊢
-      omega
+    · split
+      · -- gs
+        exact gsR_good env inner hin fr k m items warnings unsupported ops forms truncated s obs op
+          (by omega) h.1
+      · -- every other operator
+        have hb := localStep_bound env fr m s op
+        revert hb
+        rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
+        intro hb
+        have hl := annotAll_length env.src fr (patBook env.src fr m' s' op).1
+          (patBook env.src fr m' s' op).2.1 (patBook env.src fr m' s' op).2.2 its
+        simp only [size_pushAll, hl, pendBit, Paint.maxItems] at h hb ⊢
+        omega
 
 /-- Folding steps keeps `Good`. -/
 theorem foldl_good {σ ω : Type} (env : Env σ ω)
@@ -909,7 +1493,7 @@ def St.init {σ ω : Type} (s : σ) (obs : ω) : St σ ω :=
 `Limits.maxXObjectDepth`, from the initial machine. Total; never fails. -/
 def runPage {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ) (obs : ω) :
     St σ ω :=
-  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, []⟩ (St.init s obs) ops
+  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
 
 /-- Tokenize and run decoded page content; tokenizer warnings and truncation are added. -/
 def runBytes {σ ω : Type} (env : Env σ ω) (res : Dict) (bytes : ByteArray) (s : σ)
@@ -935,7 +1519,7 @@ theorem runPage_items_le {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Ar
     (obs : ω) :
     (runPage env res ops s obs).items.size ≤
       Paint.maxItems * (runPage env res ops s obs).ops := by
-  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, []⟩ (St.init s obs) ops
+  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
     (St.init_good _ s obs)).1
   unfold runPage
   omega
@@ -1083,6 +1667,77 @@ private def gsRes : String :=
   some (Comp.ofFixed (Fixed.ofDecimal ⟨25, 2⟩))
 #guard (run [] gsRes "/GS0 gs").warnings == 0
 #guard (run [] gsRes "/GS9 gs").warnings == 1
+-- transparency (7.3c): blend modes, transparency groups, soft masks
+#guard ((run [] gsRes "/GS0 gs 0 0 1 1 re f").items[0]?.bind fillOf).map (·.blend) ==
+  some .multiply
+#guard ((run [] "<< /ExtGState << /G << /BM [/Foo /Screen] >> >> >>" "/G gs 0 0 1 1 re S").items[0]?.bind
+  strokeOf).map (·.blend) == some .screen
+private def grpDoc : List (Nat × IndirectBody) :=
+  [(6, strm "<< /Subtype /Form /BBox [0 0 10 10] /Group << /S /Transparency /I true >> >>"
+     "0 0 10 10 re f 5 5 10 10 re f"),
+   (7, strm "<< /Subtype /Form /BBox [0 0 4 4] /Group << /S /Transparency >> >>" "0 0 4 4 re f")]
+private def grpRes : String :=
+  "<< /XObject << /Fm1 6 0 R >> /ExtGState << /H << /ca 0.5 /BM /Multiply >> " ++
+  "/M << /SMask << /S /Luminosity /G 7 0 R /BC [1] >> >> /N << /SMask /None >> " ++
+  "/B << /SMask << /S /Luminosity /G 9 0 R >> >> >> >>"
+#guard kinds (run grpDoc grpRes "/H gs /Fm1 Do 0 0 1 1 re f") ==
+  ["groupBegin", "fillPath", "fillPath", "groupEnd", "fillPath"]
+#guard (match (run grpDoc grpRes "/H gs /Fm1 Do").items[0]? with
+  | some (DisplayItem.groupBegin g) => g.isolated && !g.knockout && g.blend == .multiply &&
+      g.alpha == Comp.ofFixed (Fixed.ofDecimal ⟨5, 1⟩) && g.bbox.isSome
+  | _ => false)
+-- inside the group alpha and blend mode are reset; after it they are back
+#guard ((run grpDoc grpRes "/H gs /Fm1 Do").items[1]?.bind fillOf).map (fun f => (f.alpha, f.blend))
+  == some (Comp.one, .normal)
+#guard ((run grpDoc grpRes "/H gs /Fm1 Do 0 0 1 1 re f").items[4]?.bind fillOf).map (·.blend)
+  == some .multiply
+#guard (run grpDoc grpRes "/H gs /Fm1 Do").warnings == 0
+-- a soft mask: one nested item (its group's items), referenced by later painting
+#guard kinds (run grpDoc grpRes "/M gs 0 0 1 1 re f") == ["softMask", "fillPath"]
+#guard (match (run grpDoc grpRes "q /M gs 0 0 1 1 re f").items[0]? with
+  | some (DisplayItem.softMask 1 info its) => info.kind == .luminosity &&
+      info.backdrop == .gray Comp.one && its.toList.map DisplayItem.kind == ["fillPath"]
+  | _ => false)
+#guard ((run grpDoc grpRes "q /M gs 0 0 1 1 re f").items[1]?.bind fillOf).map (·.smask)
+  == some (some 1)
+#guard ((run grpDoc grpRes "q /M gs Q 0 0 1 1 re f").items[1]?.bind fillOf).map (·.smask)
+  == some none
+#guard ((run grpDoc grpRes "/M gs /N gs 0 0 1 1 re f").items[1]?.bind fillOf).map (·.smask)
+  == some none
+#guard (run grpDoc grpRes "/M gs").warnings == 0
+#guard (run grpDoc grpRes "/M gs").forms == 1
+-- a mask group that cannot be expanded: one warning, no mask
+#guard kinds (run grpDoc grpRes "/B gs 0 0 1 1 re f") == ["fillPath"]
+#guard (run grpDoc grpRes "/B gs").warnings == 1
+#guard (run grpDoc grpRes "/M gs" { maxXObjectDepth := 0 }).warnings == 1
+-- font identity (6.7a): `Tf` resolved in the current frame; ExtGState `/Font`
+private def fontOf : DisplayItem → Option FontRef
+  | .glyphRun r _ => some r.font
+  | _ => none
+private def fontDoc : List (Nat × IndirectBody) :=
+  [(6, strm "<< /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 21 0 R >> >> >>"
+     "BT /F1 9 Tf (x) Tj ET"),
+   (7, strm "<< /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 << /Subtype /Type1 >> >> >> >>"
+     "BT /F1 9 Tf (x) Tj ET"),
+   (8, strm "<< /Subtype /Form /BBox [0 0 1 1] /Resources << /Font << /F1 23 0 R >> >> >>"
+     "BT (y) Tj ET"),
+   (9, strm "<< /Subtype /Form /BBox [0 0 1 1] >>" "BT /F2 5 Tf (z) Tj ET")]
+private def fontRes : String :=
+  "<< /Font << /F1 20 0 R /F2 << /Subtype /Type1 >> >> " ++
+  "/XObject << /A 6 0 R /B 7 0 R /C 8 0 R /D 9 0 R >> /ExtGState << /G << /Font [22 0 R 7] >> >> >>"
+private def fontsIn (c : String) : List FontRef :=
+  (run fontDoc fontRes c).items.toList.filterMap fontOf
+#guard (fontsIn "BT /F1 12 Tf (a) Tj ET").map (·.id) == [.ref 20 0]
+#guard (fontsIn "BT /F2 12 Tf (a) Tj ET").map (·.id) == [.res 0]
+#guard (fontsIn "/A Do BT /F1 12 Tf (a) Tj ET").map (·.id) == [.ref 21 0, .ref 20 0]
+#guard (fontsIn "/B Do").map (·.id) == [.res 7]
+-- a font selected before a form keeps its identity inside it (form 8 has its own /F1)
+#guard (fontsIn "/F1 12 Tf /C Do").map (·.id) == [.ref 20 0]
+-- a form without /Resources resolves in the invoking content's frame
+#guard (fontsIn "/D Do").map (·.id) == [.res 0]
+#guard (fontsIn "BT /G gs (a) Tj ET").map (fun f => (f.id, f.size)) == [(.ref 22 0, fi 7)]
+#guard (run fontDoc fontRes "BT /G gs (a) Tj ET").warnings == 0
+#guard (run [] "<< /ExtGState << /G << /Font [<< >> 7] >> >> >>" "/G gs").warnings == 1
 -- named colour spaces
 private def csDoc : List (Nat × IndirectBody) :=
   [(10, strm "<< /N 3 /Alternate /DeviceRGB >>" ""),
@@ -1122,6 +1777,66 @@ private def fillCol (cs : String) : Option Color :=
     Dict.get? d (Name.ofString "ColorSpace") == some (.name (Name.ofString "DeviceGray")) &&
       data.size == 1
   | _ => false)
+-- resource annotation (7.3f): `sh`, pattern uses and inline colour spaces resolved in the
+-- frame that emits them; the pattern base matrix is the form's start CTM
+private def annDoc : List (Nat × IndirectBody) :=
+  [(30, strm ("<< /Subtype /Form /BBox [0 0 10 10] /Matrix [2 0 0 2 0 0] /Resources << " ++
+      "/Shading << /S1 40 0 R /S2 << /ShadingType 2 >> >> /Pattern << /P1 41 0 R >> " ++
+      "/ColorSpace << /Ix [/Indexed /DeviceRGB 1 <000000FF0000>] >> >> >>")
+     "/S1 sh /S2 sh /Pattern cs /P1 scn 0 0 1 1 re f BI /W 1 /H 1 /CS /Ix /BPC 8 ID x EI"),
+   (31, strm "<< /Subtype /Form /BBox [0 0 10 10] >>" "/S0 sh /Pattern CS /P0 SCN 0 0 1 1 re S"),
+   (32, strm "<< /Subtype /Form /BBox [0 0 10 10] >>" "0 0 1 1 re S")]
+private def annRes : String :=
+  "<< /XObject << /Fm 30 0 R /Fn 31 0 R >> /Shading << /S0 << /ShadingType 2 >> >> " ++
+  "/Pattern << /P0 42 0 R >> >>"
+private def annItems : List DisplayItem := (run annDoc annRes "1 0 0 1 5 5 cm /Fm Do /S0 sh").items.toList
+private def shRes : DisplayItem → Option ResRef
+  | .shading _ r _ _ _ => some r
+  | _ => none
+#guard annItems.filterMap shRes == [.ref 40 0, .form 30 0, .page]
+#guard (annItems.filterMap fillOf).map (·.pattern) ==
+  [some { res := .ref 41 0, base := ⟨fi 2, fi 0, fi 0, fi 2, fi 5, fi 5⟩ }]
+#guard annItems.any fun
+  | .image (.inline d _) _ _ _ => (Dict.get? d (nm "ColorSpace")).isSome &&
+      (match Dict.get? d (nm "ColorSpace") with
+       | some o => ((csInfo Source.empty () o).1.map (·.color [fi 1])) ==
+           some (.rgb Comp.one Comp.zero Comp.zero)
+       | none => false)
+  | _ => false
+-- a form without its own resources resolves in the page's; strokes record the use too
+#guard ((run annDoc annRes "/Fn Do").items.toList.filterMap shRes) == [.page]
+#guard ((run annDoc annRes "/Fn Do").items.toList.filterMap strokeOf).map (·.pattern) ==
+  [some { res := .ref 42 0, base := Matrix.identity }]
+-- uncoloured patterns: the `scn` colour operands in the underlying space
+private def uRes : String :=
+  "<< /ColorSpace << /PCS [/Pattern /DeviceRGB] /PIx [/Pattern [/Indexed /DeviceRGB 1 <000000FF0000>]] >> " ++
+  "/Pattern << /P0 42 0 R >> >>"
+private def underOfRun (c : String) : List (Option Color) :=
+  ((run [] uRes c).items.toList.filterMap fillOf).map fun f => f.pattern.bind (·.under)
+#guard underOfRun "/PCS cs 1 0 0 /P0 scn 0 0 1 1 re f" == [some (.rgb Comp.one Comp.zero Comp.zero)]
+#guard underOfRun "/PIx cs 1 /P0 scn 0 0 1 1 re f" == [some (.rgb Comp.one Comp.zero Comp.zero)]
+#guard underOfRun "/Pattern cs 1 /P0 scn 0 0 1 1 re f" == [some (.gray Comp.one)]
+#guard underOfRun "/PCS cs /P0 scn 0 0 1 1 re f" == [none]
+-- the underlying colour is inherited by a form
+#guard ((run annDoc ("<< /XObject << /Fn 32 0 R >> /ColorSpace << /PCS [/Pattern /DeviceRGB] >> " ++
+    "/Pattern << /P0 42 0 R >> /Shading << /S0 1 0 R >> >>") "/PCS CS 0 1 0 /P0 SCN /Fn Do").items.toList.filterMap
+    strokeOf).map (fun k => k.pattern.bind (·.under)) == [some (.rgb Comp.zero Comp.one Comp.zero)]
+-- the consumer side: `resLookup`
+#guard ((resLookup (mkSrc annDoc) () [] "Shading" (.form 30 0) (nm "S2")).1.map fun
+  | .dict _ => true | _ => false) == some true
+#guard (resLookup (mkSrc annDoc) () [] "Shading" (.ref 40 0) (nm "S1")).1.isSome
+-- non-pattern colours record nothing
+#guard ((run [] "<< >>" "0 0 1 1 re f").items.toList.filterMap fillOf).map (·.pattern) == [none]
+-- `CSInfo.toObj` resolves, without document access, to the same colours
+private def csRound (i : CSInfo) (xs : List Fixed) : Bool :=
+  (csInfo Source.empty () i.toObj).1.map (·.color xs) == some (i.color xs)
+#guard csRound (.dev .rgb (.rgb Comp.zero Comp.zero Comp.zero)) [fi 1, fi 0, fi 0]
+#guard csRound (.indexed .rgb 1 ⟨#[0, 0, 0, 255, 0, 0]⟩) [fi 1]
+#guard csRound (.separation .cmyk (some ⟨[fi 0, fi 0, fi 0, fi 0], [fi 0, fi 1, fi 0, fi 0], 1⟩))
+  [Fixed.ofDecimal ⟨5, 1⟩]
+#guard csRound (.separation .gray none) [Fixed.ofDecimal ⟨25, 2⟩]
+#guard csRound (.deviceN 2 .cmyk) [fi 1, fi 0]
+#guard csRound .lab [fi 50, fi 0, fi 0]
 
 end Tests
 

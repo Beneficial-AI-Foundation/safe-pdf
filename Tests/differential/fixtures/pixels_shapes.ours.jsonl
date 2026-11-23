@@ -1,0 +1,3 @@
+{"page": 1, "width": 612, "height": 792, "dpi": 72, "ms": 6.191, "nanos": 6191333, "status": "ok", "error": null, "file": "@FIXTURES@/pixels_shapes2.ours.ppm"}
+{"page": 2, "width": 100, "height": 201, "dpi": 72, "ms": 0.198, "nanos": 198916, "status": "ok", "error": null, "file": "@FIXTURES@/pixels_shapes2.ours.ppm"}
+{"summary": {"path": "Tests/golden/svg/shapes.pdf", "open": "strict", "pages": 2, "rendered": 2, "errors": 0, "dpi": 72, "parseMs": 0.027, "medianMs": 0.198, "maxMs": 6.191, "totalMs": 6.390}}

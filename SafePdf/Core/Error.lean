@@ -21,6 +21,14 @@ inductive LimitKind where
   | revisions
   /-- Number of filters in one stream's `/Filter` chain (`Limits.maxFilters`). -/
   | filters
+  /-- Number of charstrings in one embedded font program (`Limits.maxFontGlyphs` for Type 1,
+  `Limits.maxCFFGlyphs` for CFF). -/
+  | fontGlyphs
+  /-- Subroutine index (Type 1) or Subrs INDEX size (CFF) in one embedded font program
+  (`Limits.maxFontSubrs`). -/
+  | fontSubrs
+  /-- Number of Font DICTs in a CID-keyed CFF font's `FDArray` (`Limits.maxFontDicts`). -/
+  | fontDicts
   deriving Repr, DecidableEq, Inhabited
 
 /-- Errors produced by the verified core. -/

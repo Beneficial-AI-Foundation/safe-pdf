@@ -217,6 +217,7 @@ def targetText {n : Nat} : Target n → String
     | some nm => s!"named \"{safeBytes nm}\" -> {core}"
     | none => core
   | .unresolved nm => s!"unresolved \"{safeBytes nm}\""
+  | .uri _ => "action URI"
   | .action k => s!"action {safeBytes k}"
 
 /-- JSON fields of a target. -/
@@ -231,6 +232,7 @@ def targetJson {n : Nat} : Target n → List (String × String)
       ("fit", jsonString (fitName d.fit)),
       ("name", jsonOpt (d.name.map (jsonString ∘ safeBytes))) ]
   | .unresolved nm => [ ("target", jsonString "unresolved"), ("name", jsonString (safeBytes nm)) ]
+  | .uri _ => [ ("target", jsonString "action"), ("action", jsonString "URI") ]
   | .action k => [ ("target", jsonString "action"), ("action", jsonString (safeBytes k)) ]
 
 /-- One text line per outline item, indented by depth. -/

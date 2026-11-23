@@ -244,7 +244,7 @@ def diff(a, b, path, out, warn):
 # ---- loaders ----------------------------------------------------------------
 def load_ours(text):
     objs, errors, summary = {}, {}, None
-    for ln, line in enumerate(text.splitlines(), 1):
+    for ln, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:

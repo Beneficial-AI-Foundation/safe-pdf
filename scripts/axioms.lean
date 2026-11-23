@@ -11,6 +11,12 @@ Keep one line per top-level theorem (spec equivalences, totality and bound theor
 This file is outside the library and is never imported.
 -/
 import SafePdf
+import SafePdf.Shell.App.TclLemmas
+import SafePdf.Shell.App.View
+import SafePdf.Shell.App.Marks
+import SafePdf.Shell.App.Bubble
+import SafePdf.Shell.App.Select
+import SafePdf.Shell.App.Links
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -694,3 +700,423 @@ import SafePdf
 #print axioms SafePdf.Core.Content.runPage_ops_le
 #print axioms SafePdf.Core.Content.runPage_items_le
 #print axioms SafePdf.Core.Content.runBytes_items_le_max
+-- Phase 6, task 6.1: TrueType fonts
+#print axioms SafePdf.Core.Font.TrueType.u8At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.u16At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.u32At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.i16At_some_lt
+#print axioms SafePdf.Core.Font.TrueType.u16At_lt
+#print axioms SafePdf.Core.Font.TrueType.findTable_bounds
+#print axioms SafePdf.Core.Font.TrueType.tableBytes_size
+#print axioms SafePdf.Core.Font.TrueType.seg4Find_lt
+#print axioms SafePdf.Core.Font.TrueType.TTFont.advanceOfGlyph_lt
+#print axioms SafePdf.Core.Font.TrueType.TTFont.lookupIn_lt
+#print axioms SafePdf.Core.Font.TrueType.outlineAux_zero
+#print axioms SafePdf.Core.Font.TrueType.outlineAux_visited
+-- Phase 6, task 6.5: ToUnicode CMaps and text extraction
+#print axioms SafePdf.Core.Font.CMap.parse_entries_le_tokens
+#print axioms SafePdf.Core.Font.CMap.parse_entries_le_max
+#print axioms SafePdf.Core.Font.CMap.tokenize_length_le
+#print axioms SafePdf.Core.Font.CMap.CMap.codes_flatten
+#print axioms SafePdf.Core.Font.CMap.CMap.decode_flatten
+#print axioms SafePdf.Core.Text.SplitKind.codes_flatten
+#print axioms SafePdf.Core.Text.extract_from_items
+#print axioms SafePdf.Core.Text.runGlyphs_codes
+#print axioms SafePdf.Core.Text.extractPage_glyphs
+#print axioms SafePdf.Core.Text.extractPage_items
+
+-- Phase 6, task 6.4b: Symbol/ZapfDingbats encodings (SafePdf/Core/Font/Encoding.lean)
+#print axioms SafePdf.Core.Font.symbolEncoding_size
+#print axioms SafePdf.Core.Font.zapfDingbatsEncoding_size
+#print axioms SafePdf.Core.Font.symbolicBuiltin?_size
+#print axioms SafePdf.Core.Font.implicitBase_size
+#print axioms SafePdf.Core.Font.symbolic_rows_size
+
+-- Phase 7, task 7.1: ℚ geometry and C2 (SafePdf/Core/Raster/Geom.lean)
+#print axioms SafePdf.Core.Raster.Geom.Aff.mul_assoc
+#print axioms SafePdf.Core.Raster.Geom.Aff.apply_mul
+#print axioms SafePdf.Core.Raster.Geom.Aff.inv_apply_apply
+#print axioms SafePdf.Core.Raster.Geom.Aff.apply_inv_apply
+#print axioms SafePdf.Core.Raster.Geom.Fixed.toRat_injective
+#print axioms SafePdf.Core.Raster.Geom.Aff.ofMatrix_mul_exact
+#print axioms SafePdf.Core.Raster.Geom.Matrix.apply_x_err
+#print axioms SafePdf.Core.Raster.Geom.Matrix.apply_y_err
+#print axioms SafePdf.Core.Raster.Geom.rotAdd_assoc
+#print axioms SafePdf.Core.Raster.Geom.rotationOfInt_degrees_add
+#print axioms SafePdf.Core.Raster.Geom.toPage_toScreen
+#print axioms SafePdf.Core.Raster.Geom.toScreen_toPage
+#print axioms SafePdf.Core.Raster.Geom.toPageView_toScreenView
+#print axioms SafePdf.Core.Raster.Geom.toScreenView_toPageView
+#print axioms SafePdf.Core.Raster.Geom.toScreen_rotAdd_r90
+#print axioms SafePdf.Core.Raster.Geom.toScreen_mem
+
+-- Phase 6, task 6.2: CFF (SafePdf/Core/Font/CFF.lean)
+#print axioms SafePdf.Core.Font.CFF.u8_lt
+#print axioms SafePdf.Core.Font.CFF.readBE_lt
+#print axioms SafePdf.Core.Font.CFF.Index.item_end_le
+#print axioms SafePdf.Core.Font.CFF.Index.count_le
+#print axioms SafePdf.Core.Font.CFF.Index.items_size
+#print axioms SafePdf.Core.Font.CFF.bias_pos
+#print axioms SafePdf.Core.Font.CFF.run_stack_le
+#print axioms SafePdf.Core.Font.CFF.run_calls_le
+#print axioms SafePdf.Core.Font.CFF.run_steps_le
+#print axioms SafePdf.Core.Font.CFF.evalList_size
+#print axioms SafePdf.Core.Font.CFF.CFFFont.advance_eq
+#print axioms SafePdf.Core.Font.CFF.CFFFont.numGlyphs_le_max
+
+-- Phase 7, task 7.2a: fill core (SafePdf/Core/Raster/Fill.lean)
+#print axioms SafePdf.Core.Raster.Fill.bez_sub_chord
+#print axioms SafePdf.Core.Raster.Fill.chord_err
+#print axioms SafePdf.Core.Raster.Fill.flatten_err
+#print axioms SafePdf.Core.Raster.Fill.flatten_err_tol
+#print axioms SafePdf.Core.Raster.Fill.bezNum_eq
+#print axioms SafePdf.Core.Raster.Fill.roundDivI_err
+#print axioms SafePdf.Core.Raster.Fill.segCount_spec
+#print axioms SafePdf.Core.Raster.Fill.flatten_size_le
+#print axioms SafePdf.Core.Raster.Fill.rowLoop_inv
+#print axioms SafePdf.Core.Raster.Fill.fillEdges_size
+#print axioms SafePdf.Core.Raster.Fill.fillEdgesCounted_steps_le
+#print axioms SafePdf.Core.Raster.Fill.maskRect_le
+#print axioms SafePdf.Core.Raster.Fill.covByte_full
+
+-- Phase 6, task 6.7c: CIDToGIDMap (SafePdf/Core/Text.lean)
+#print axioms SafePdf.Core.Text.CIDToGID.gid_table_lt
+
+-- Phase 7, task 7.2c: clipping and path rendering (SafePdf/Core/Raster/Clip.lean)
+#print axioms SafePdf.Core.Raster.Clip.mul255_le_left
+#print axioms SafePdf.Core.Raster.Clip.mul255_le_right
+#print axioms SafePdf.Core.Raster.Clip.mul255_le_255
+#print axioms SafePdf.Core.Raster.Fill.Mask.tabulate_size
+#print axioms SafePdf.Core.Raster.Fill.Mask.tabulate_get
+#print axioms SafePdf.Core.Raster.Fill.Mask.inter_get_le_left
+#print axioms SafePdf.Core.Raster.Fill.Mask.inter_get_le_right
+#print axioms SafePdf.Core.Raster.Clip.covAt_le_mask
+#print axioms SafePdf.Core.Raster.Clip.covAt_le_clip
+#print axioms SafePdf.Core.Raster.Clip.covAt_le_255
+#print axioms SafePdf.Core.Raster.Clip.ClipCache.insert_length_le
+#print axioms SafePdf.Core.Raster.Clip.clipMaskC_steps_le
+#print axioms SafePdf.Core.Raster.Clip.renderItemsCounted_steps_le
+#print axioms SafePdf.Core.Raster.Clip.renderItems_size
+#print axioms SafePdf.Core.Raster.Clip.renderPaths_size
+#print axioms SafePdf.Core.Raster.Clip.pageSize_le
+
+-- Phase 7, task 7.2b: stroking (SafePdf/Core/Raster/Stroke.lean)
+#print axioms SafePdf.Core.Raster.Stroke.sqrtQ_spec
+#print axioms SafePdf.Core.Raster.Stroke.sqrtQ_rel
+#print axioms SafePdf.Core.Raster.Stroke.pushPoly_size
+#print axioms SafePdf.Core.Raster.Stroke.emit_size
+#print axioms SafePdf.Core.Raster.Stroke.capStart_size
+#print axioms SafePdf.Core.Raster.Stroke.capEnd_size
+#print axioms SafePdf.Core.Raster.Stroke.dot_size
+#print axioms SafePdf.Core.Raster.Stroke.join_size
+#print axioms SafePdf.Core.Raster.Stroke.dashEnd_size
+#print axioms SafePdf.Core.Raster.Stroke.dashThrough_size
+#print axioms SafePdf.Core.Raster.Stroke.dashLoop_size
+#print axioms SafePdf.Core.Raster.Stroke.solidSub_size
+#print axioms SafePdf.Core.Raster.Stroke.strokeSub_size
+#print axioms SafePdf.Core.Raster.Stroke.strokeSubs_size
+#print axioms SafePdf.Core.Raster.Stroke.mkSegs_size
+#print axioms SafePdf.Core.Raster.Stroke.strokeDPath_size_le
+#print axioms SafePdf.Core.Raster.Stroke.subpaths_bound
+#print axioms SafePdf.Core.Raster.Stroke.strokeEdges_size_le
+
+-- Phase 7, task 7.2d: raster caps in Limits
+#print axioms SafePdf.Core.Raster.Fill.segCount_tol_of_cap
+#print axioms SafePdf.Core.Raster.Fill.Config.one_le_segCap
+#print axioms SafePdf.Core.Raster.Stroke.Geo.make_polyCap
+
+-- Phase 7, task 7.3a: glyph outlines (SafePdf/Core/Font/Outline.lean, SafePdf/Core/Raster/Glyph.lean)
+#print axioms SafePdf.Core.Font.Outline.PathAcc.size_le
+#print axioms SafePdf.Core.Font.Outline.PathAcc.push_size
+#print axioms SafePdf.Core.Raster.Glyph.Cache.insert_length_le
+#print axioms SafePdf.Core.Raster.Glyph.outlineToD_size
+#print axioms SafePdf.Core.Raster.Glyph.addGlyph_size_le
+#print axioms SafePdf.Core.Raster.Glyph.runPath_size_le
+#print axioms SafePdf.Core.Raster.Glyph.paintAll_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemG_size
+#print axioms SafePdf.Core.Raster.Glyph.renderPage_size
+
+-- Phase 7, task 7.2e: fast compositor (SafePdf/Core/Raster/Clip.lean)
+#print axioms SafePdf.Core.Raster.Clip.composite_size
+#print axioms SafePdf.Core.Raster.Clip.compositeSpec_size
+#print axioms SafePdf.Core.Raster.Clip.compLoopSpec_size
+
+-- Phase 7, task 7.3b: images (SafePdf/Core/Raster/Image.lean)
+#print axioms SafePdf.Core.Raster.Image.rd_eq_getB
+#print axioms SafePdf.Core.Raster.Image.sampleOffset_lt
+#print axioms SafePdf.Core.Raster.Image.samplesLoop_size
+#print axioms SafePdf.Core.Raster.Image.samples_size
+#print axioms SafePdf.Core.Raster.Image.pushPixel_size
+#print axioms SafePdf.Core.Raster.Image.rgbaLoop_size
+#print axioms SafePdf.Core.Raster.Image.finish_dims
+#print axioms SafePdf.Core.Raster.Image.decodePixmap_pixels
+#print axioms SafePdf.Core.Raster.Image.putPx_size
+#print axioms SafePdf.Core.Raster.Image.colLoop_size
+#print axioms SafePdf.Core.Raster.Image.rowLoop_size
+#print axioms SafePdf.Core.Raster.Image.place_size
+#print axioms SafePdf.Core.Raster.Image.placeRect_area_le
+#print axioms SafePdf.Core.Raster.Image.place_steps_le
+#print axioms SafePdf.Core.Raster.Image.renderImage_size
+#print axioms SafePdf.Core.Raster.Image.renderImage_steps_le
+
+-- Phase 7, task 7.2f: fast scanline filler (SafePdf/Core/Raster/Fill.lean)
+#print axioms SafePdf.Core.Raster.Fill.fillEdgesSpec_size
+#print axioms SafePdf.Core.Raster.Fill.fillEdgesCountedSpec_steps_le
+#print axioms SafePdf.Core.Raster.Fill.sortAct_size
+#print axioms SafePdf.Core.Raster.Fill.rowLoopF_inv
+#print axioms SafePdf.Core.Raster.Fill.fillRows_spec
+
+-- Phase 7, task 7.3e: image masks, smooth sampling, fast placement
+#print axioms SafePdf.Core.Raster.Image.u8_eq
+#print axioms SafePdf.Core.Raster.Image.samplesRows_size
+#print axioms SafePdf.Core.Raster.Image.keyLoop_size
+#print axioms SafePdf.Core.Raster.Image.push4_size
+#print axioms SafePdf.Core.Raster.Image.resCols_size
+#print axioms SafePdf.Core.Raster.Image.resRows_size
+#print axioms SafePdf.Core.Raster.Image.alphaLoop_size
+#print axioms SafePdf.Core.Raster.Image.matteLoop_size
+#print axioms SafePdf.Core.Raster.Image.pushAvg_size
+#print axioms SafePdf.Core.Raster.Image.boxCols_size
+#print axioms SafePdf.Core.Raster.Image.boxRows_size
+#print axioms SafePdf.Core.Raster.Image.size_ite
+#print axioms SafePdf.Core.Raster.Image.pixel_size
+#print axioms SafePdf.Core.Raster.Image.downscales_le
+
+-- Phase 7, task 7.3c: transparency (SafePdf/Core/Raster/Transparency.lean, Run, Glyph wiring)
+#print axioms SafePdf.Core.Content.Run.FormJob.pre_post_le
+#print axioms SafePdf.Core.Content.Run.gsStep_pend
+#print axioms SafePdf.Core.Content.Run.gsR_good
+#print axioms SafePdf.Core.Raster.Transparency.blendSep_le
+#print axioms SafePdf.Core.Raster.Transparency.blendSep_normal
+#print axioms SafePdf.Core.Raster.Transparency.blendRGB_le
+#print axioms SafePdf.Core.Raster.Transparency.combinePx_size
+#print axioms SafePdf.Core.Raster.Transparency.span_size
+#print axioms SafePdf.Core.Raster.Transparency.spans_size
+#print axioms SafePdf.Core.Raster.Transparency.combine_size
+#print axioms SafePdf.Core.Raster.Transparency.addMask_length_le
+#print axioms SafePdf.Core.Raster.Transparency.fillBuf_size
+#print axioms SafePdf.Core.Raster.Transparency.beginLayer_open_le
+#print axioms SafePdf.Core.Raster.Transparency.beginLayer_size
+#print axioms SafePdf.Core.Raster.Transparency.endLayer_size
+#print axioms SafePdf.Core.Raster.Transparency.beginGroup_size
+#print axioms SafePdf.Core.Raster.Transparency.tabulate_size
+#print axioms SafePdf.Core.Raster.Transparency.maskFrom_size
+#print axioms SafePdf.Core.Raster.Transparency.addMask_stack
+#print axioms SafePdf.Core.Raster.Transparency.paintFx_inv
+#print axioms SafePdf.Core.Raster.Transparency.renderTx_inv
+#print axioms SafePdf.Core.Raster.Transparency.foldl_renderTx_inv
+#print axioms SafePdf.Core.Raster.Transparency.renderTx_items_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemG_tx
+#print axioms SafePdf.Core.Raster.Glyph.painterG_lawful
+
+-- Phase 7, task 7.3d: shadings (SafePdf/Core/Raster/Shading.lean)
+#print axioms SafePdf.Core.Raster.Shading.Fn.eval_length
+#print axioms SafePdf.Core.Raster.Shading.lutIdx_lt
+#print axioms SafePdf.Core.Raster.Shading.buildLut_size
+#print axioms SafePdf.Core.Raster.Shading.paint_size
+#print axioms SafePdf.Core.Raster.Shading.paint_steps_le
+#print axioms SafePdf.Core.Raster.Shading.paintMesh_inv
+#print axioms SafePdf.Core.Raster.Shading.withBBox_cost
+#print axioms SafePdf.Core.Raster.Shading.renderShading_size
+#print axioms SafePdf.Core.Raster.Shading.renderShading_steps_le
+#print axioms SafePdf.Core.Raster.Shading.renderPatternFill_size
+#print axioms SafePdf.Core.Raster.Shading.renderFill_size
+
+-- Phase 7, task 7.3f: display-list gaps
+#print axioms SafePdf.Core.Content.Run.annotAll_length
+#print axioms SafePdf.Core.Raster.Shading.paintPattern_size
+#print axioms SafePdf.Core.Raster.Shading.renderStroke_size
+
+-- Phase 7, task 7.3g: tiling patterns (SafePdf/Core/Raster/Tiling.lean)
+#print axioms SafePdf.Core.Raster.Tiling.blitRow_size
+#print axioms SafePdf.Core.Raster.Tiling.blitRows_size
+#print axioms SafePdf.Core.Raster.Tiling.blit_size
+#print axioms SafePdf.Core.Raster.Tiling.forTiles_inv
+#print axioms SafePdf.Core.Raster.Tiling.meanFill_size
+#print axioms SafePdf.Core.Raster.Tiling.modeA_size
+#print axioms SafePdf.Core.Raster.Tiling.modeB_size
+#print axioms SafePdf.Core.Raster.Tiling.renderTiling_size
+#print axioms SafePdf.Core.Raster.Tiling.renderTilingFill_size
+
+-- Phase 7, task 7.2g: layer dirty rects, fast combine
+#print axioms SafePdf.Core.Raster.Clip.u8_eq
+#print axioms SafePdf.Core.Raster.Clip.toNat_u8_le
+#print axioms SafePdf.Core.Raster.Clip.blend_eq
+#print axioms SafePdf.Core.Raster.Transparency.combinePxF_size
+#print axioms SafePdf.Core.Raster.Transparency.spanF_size
+#print axioms SafePdf.Core.Raster.Transparency.spansF_size
+#print axioms SafePdf.Core.Raster.Transparency.combineFast_size
+#print axioms SafePdf.Core.Raster.Transparency.openCount_touchStack
+#print axioms SafePdf.Core.Raster.Transparency.touchStack_ok
+#print axioms SafePdf.Core.Raster.Transparency.touch_sized
+#print axioms SafePdf.Core.Raster.Transparency.pushN_size
+#print axioms SafePdf.Core.Raster.Transparency.appendN_size
+#print axioms SafePdf.Core.Raster.Transparency.copySlice_size
+#print axioms SafePdf.Core.Raster.Transparency.copyIn_size
+#print axioms SafePdf.Core.Raster.Transparency.copyRows_size
+#print axioms SafePdf.Core.Raster.Transparency.fillRows_size
+#print axioms SafePdf.Core.Raster.Transparency.beginItem_size
+#print axioms SafePdf.Core.Raster.Transparency.beginItem_open_le
+#print axioms SafePdf.Core.Raster.Transparency.lumLoop_size
+#print axioms SafePdf.Core.Raster.Transparency.alphaLoop_size
+#print axioms SafePdf.Core.Raster.Transparency.maskFromSpec_size
+
+-- Phase 8, task 8.3: annotation appearance streams (SafePdf/Core/Annot.lean)
+#print axioms SafePdf.Core.Annot.aOf_corners
+#print axioms SafePdf.Core.Annot.parseAll_length
+#print axioms SafePdf.Core.Annot.widgetsLast_length
+#print axioms SafePdf.Core.Annot.collect_drawn_le
+#print axioms SafePdf.Core.Annot.runOne_good
+#print axioms SafePdf.Core.Annot.foldl_runOne_good
+#print axioms SafePdf.Core.Annot.runAppearances_ops_le
+#print axioms SafePdf.Core.Annot.runAppearances_items_le
+#print axioms SafePdf.Core.Annot.pageAnnots_bounds
+
+-- Phase 7, task 7.2i: integer stroker
+#print axioms SafePdf.Core.Raster.Stroke.gridQ_err
+
+-- Phase 7, task 7.2h: fixed-point glyph transforms
+#print axioms SafePdf.Core.Raster.Glyph.outlineToDF_size
+#print axioms SafePdf.Core.Raster.Glyph.runPathSpec_size_le
+
+-- Phase 8, task 8.2a: Tcl quoting (SafePdf/Shell/App/Tcl*.lean, copied from bib-lean)
+#print axioms SafePdf.Shell.App.Tcl.parseWordStr_quote
+#print axioms SafePdf.Shell.App.Tcl.parseWord_quoteList
+#print axioms SafePdf.Shell.App.Tcl.parseWordStr_quote_append
+#print axioms SafePdf.Shell.App.Tcl.parseCmd_render
+#print axioms SafePdf.Shell.App.Tcl.parseScript_render
+#print axioms SafePdf.Shell.App.Tcl.nul_not_mem_quoteList
+
+-- Phase 7, task 7.2j: bucketed filler, forward differences
+#print axioms SafePdf.Core.Raster.Fill.ySort_size
+#print axioms SafePdf.Core.Raster.Fill.bezNum_d3
+#print axioms SafePdf.Core.Raster.Fill.bezNum_fd0
+#print axioms SafePdf.Core.Raster.Fill.cubicLoopFD_eq
+#print axioms SafePdf.Core.Raster.Fill.cubicFD_eq
+
+-- Phase 8, task 8.2b: viewer zoom anchoring
+#print axioms SafePdf.Shell.App.View.reanchor_self
+
+-- Phase 8, task 8.3b: shared annotation budget, annotation text
+#print axioms SafePdf.Core.Annot.docAnnots_shared_ops
+#print axioms SafePdf.Core.Annot.withAnnots_glyphs
+
+-- Phase 7, task 7.3h2: tiling strokes, text, full cell painter
+#print axioms SafePdf.Core.Raster.Tiling.renderTilingStroke_size
+#print axioms SafePdf.Core.Raster.Tiling.paintTilingMask_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemWith_size
+#print axioms SafePdf.Core.Raster.Glyph.renderItemWith_tx
+#print axioms SafePdf.Core.Raster.Glyph.cellPainterD_size
+
+-- Phase 8, task 8.2c: viewer search soundness
+#print axioms SafePdf.Shell.App.Select.findAll_sound
+
+-- Phase 8, task 8.2d: viewer links and history
+#print axioms SafePdf.Shell.App.Links.toNat_ofNat_small
+#print axioms SafePdf.Shell.App.Links.hexDigit_ascii
+#print axioms SafePdf.Shell.App.Links.uriByte_ascii
+#print axioms SafePdf.Shell.App.Links.uriText_ascii
+#print axioms SafePdf.Shell.App.Links.History.back_push
+
+-- Phase 8, task 8.4: library API (SafePdf/Api.lean)
+#print axioms SafePdf.Api.openBytes_strict
+#print axioms SafePdf.Api.toPage_toScreen
+#print axioms SafePdf.Api.toScreen_toPage
+#print axioms SafePdf.Api.toScreen_eq
+#print axioms SafePdf.Api.pageText_glyphs_ofCore
+#print axioms SafePdf.Api.pageText_glyphs
+#print axioms SafePdf.Api.glyph_provenance
+#print axioms SafePdf.Api.glyph_codes
+#print axioms SafePdf.Api.renderPage_size
+#print axioms SafePdf.Api.outline_bounded
+
+-- Phase 8, task 8.3d: NoRotate
+#print axioms SafePdf.Core.Annot.noRotate_fixes_corner
+
+-- Phase 7, task 7.3i1: knockout group emission (spec)
+#print axioms SafePdf.Spec.Content.paintItems_eq
+
+-- Phase 7, task 7.3j: Type 3 fonts (SafePdf/Core/Raster/Type3.lean)
+#print axioms SafePdf.Core.Raster.Type3.renderRun_size
+#print axioms SafePdf.Core.Raster.Type3.drawGlyph_size
+#print axioms SafePdf.Core.Raster.Type3.drawImages_size
+#print axioms SafePdf.Core.Raster.Type3.drawImage_size
+#print axioms SafePdf.Core.Raster.Type3.placeNoFit_size
+
+-- Phase 7, task 7.6a: baseline JPEG (SafePdf/Quarantine/DCT.lean)
+#print axioms SafePdf.Quarantine.DCT.decode_pixels
+#print axioms SafePdf.Quarantine.DCT.finalize_pixels
+
+-- Phase 7, task 7.3k: MuPDF stencil scaler for Type 3 glyphs
+#print axioms SafePdf.Core.Raster.Type3.drawImageWith_size
+#print axioms SafePdf.Core.Raster.Type3.drawImagesC_size
+#print axioms SafePdf.Core.Raster.Type3.drawCached_size
+
+-- Phase 7, task 7.3l: page-wide Type 3 glyph cache
+#print axioms SafePdf.Core.Raster.Type3.GlyphCache.insert_count_le
+#print axioms SafePdf.Core.Raster.Type3.GlyphCache.insert_bytes_le
+-- Phase 7, task 7.7: substitute fonts
+#print axioms SafePdf.Core.Raster.Subst.widthTable_length_le
+#print axioms SafePdf.Core.Raster.Glyph.substCodes_size
+-- Phase 6, task 6.8d: ActualText marked content
+#print axioms SafePdf.Core.Text.shownItems_eq_extract
+#print axioms SafePdf.Spec.Content.mark_step
+#print axioms SafePdf.Core.Content.Interp.markOp_marks_le
+-- Phase 9, task 9.5a: incremental-update writer (C7)
+#print axioms SafePdf.Spec.Write.c7
+#print axioms SafePdf.Spec.Write.writeAnnots_prefix
+#print axioms SafePdf.Spec.Write.writeAnnots_chain
+#print axioms SafePdf.Spec.Write.writeAnnots_untouched
+#print axioms SafePdf.Spec.Write.writeAnnots_open
+#print axioms SafePdf.Spec.Write.writeAnnots_annots
+#print axioms SafePdf.Spec.Write.plan_marks
+#print axioms SafePdf.Spec.Write.plan_page
+#print axioms SafePdf.Spec.Write.newDict_lookup_ne
+#print axioms SafePdf.Spec.Write.serialize_roundtrip
+-- Phase 9, task 9.4: marks model
+#print axioms SafePdf.Shell.App.Marks.Store.add_id
+#print axioms SafePdf.Shell.App.Marks.Store.add_next
+-- Phase 9, task 9.5b: annotation objects for user marks
+#print axioms SafePdf.Spec.Write.writeAnnots_aux
+#print axioms SafePdf.Core.Write.Annots.utf16_utf16be
+#print axioms SafePdf.Core.Write.Annots.textOf_textBytes_utf16
+#print axioms SafePdf.Core.Write.Annots.annotDicts_isAnnot
+#print axioms SafePdf.Core.Write.Annots.IsAnnot.lookup
+#print axioms SafePdf.Core.Write.Annots.build_ok
+#print axioms SafePdf.Core.Write.Annots.quadsOf_quadPoints
+#print axioms SafePdf.Core.Write.Annots.quadPoints_length
+#print axioms SafePdf.Core.Write.Annots.pageDicts_length
+#print axioms SafePdf.Core.Write.Annots.decRound_canonical
+-- Phase 9, task 9.8: bubble placement
+#print axioms SafePdf.Shell.App.Bubble.place_inside
+#print axioms SafePdf.Shell.App.Bubble.clampInto_lo
+#print axioms SafePdf.Shell.App.Bubble.clampInto_hi
+#print axioms SafePdf.Shell.App.Bubble.Ui.escape_closes
+-- Phase 6, task 6.8f: text clipped by clip paths
+#print axioms SafePdf.Core.Text.unclipped_of_none
+-- Phase 9, task 9.5f: annotating encrypted documents (writer rule W10)
+#print axioms SafePdf.Spec.Write.writeAnnots_aux_plain
+#print axioms SafePdf.Spec.Write.writeAnnots_crypt
+#print axioms SafePdf.Spec.Write.sameCrypt_ok
+#print axioms SafePdf.Core.Write.Incremental.auxBody_none
+#print axioms SafePdf.Core.Write.Encrypt.pkcs7Pad_size
+#print axioms SafePdf.Core.Write.Encrypt.pkcs7Pad_mod
+#print axioms SafePdf.Core.Write.Encrypt.pkcs7Pad_gt
+#print axioms SafePdf.Core.Write.Encrypt.encLen_none
+-- Phase 7, task 7.9: render-time tail
+#print axioms SafePdf.Core.Raster.Stroke.arcCountGoI_eq
+#print axioms SafePdf.Core.Raster.Stroke.arcCount_eq
+#print axioms SafePdf.Core.Raster.Stroke.strokePathT_empty
+#print axioms SafePdf.Core.Raster.Transparency.restoreAll_size
+#print axioms SafePdf.Core.Raster.Transparency.materializeTop_sized
+#print axioms SafePdf.Core.Raster.Transparency.materializeS_inv
+#print axioms SafePdf.Core.Raster.Transparency.knockItemL_inv
+#print axioms SafePdf.Core.Raster.Transparency.paintKL_inv
+#print axioms SafePdf.Core.Raster.Transparency.paintKTL_inv
+#print axioms SafePdf.Core.Raster.Transparency.pushKnockL_size
+-- Phase 9, task 9.3: view-mode layout
+#print axioms SafePdf.Shell.App.View.mem_spreadPages
+#print axioms SafePdf.Shell.App.View.spreadOf_lt_count
+#print axioms SafePdf.Shell.App.View.spreadOf_spreadFirst
+#print axioms SafePdf.Shell.App.View.nextPage_spread
+#print axioms SafePdf.Shell.App.View.stack_pairwise

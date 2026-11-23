@@ -59,6 +59,9 @@ def renderLimitKind : LimitKind → String
   | .opsPerPage => "operators per page"
   | .revisions => "xref revision count"
   | .filters => "filters per stream"
+  | .fontGlyphs => "glyphs per font program"
+  | .fontSubrs => "subroutine index per font program"
+  | .fontDicts => "Font DICTs per CFF font program"
 
 /-- Human-readable rendering of a core `Error`. -/
 def renderError : Error → String
@@ -80,7 +83,15 @@ def formatMs (nanos : Nat) : String :=
 def hexDigit (n : Nat) : Char :=
   if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
 
-/-- Escape one character for a JSON string literal. -/
+/-- The `\uXXXX` escape of a code unit below `0x10000` (four lowercase hex digits). -/
+def jsonUnicodeEscape (n : Nat) : String :=
+  "\\u" ++ (hexDigit (n / 4096 % 16)).toString ++ (hexDigit (n / 256 % 16)).toString ++
+    (hexDigit (n / 16 % 16)).toString ++ (hexDigit (n % 16)).toString
+
+/-- Escape one character for a JSON string literal.  Every control character below `0x20`
+(RFC 8259) is escaped; so are DEL, U+0085 NEL, U+2028 and U+2029, which many line splitters
+(Python `str.splitlines`, JavaScript pre-ES2019 sources) treat as line breaks, so a JSON
+object stays on one physical line for any reader. -/
 def jsonEscapeChar (c : Char) : String :=
   match c with
   | '"' => "\\\""
@@ -89,8 +100,8 @@ def jsonEscapeChar (c : Char) : String :=
   | '\r' => "\\r"
   | '\t' => "\\t"
   | c =>
-    if c.toNat < 0x20 then
-      "\\u00" ++ (hexDigit (c.toNat / 16)).toString ++ (hexDigit (c.toNat % 16)).toString
+    let n := c.toNat
+    if n < 0x20 || n == 0x7f || n == 0x85 || n == 0x2028 || n == 0x2029 then jsonUnicodeEscape n
     else c.toString
 
 /-- A JSON string literal (with quotes) for `s`. -/

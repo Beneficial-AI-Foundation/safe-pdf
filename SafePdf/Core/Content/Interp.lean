@@ -30,7 +30,10 @@ text showing), §8.9.7 (inline images), §14.6 (marked content), §7.8.2 (`BX`/`
   without a current point are skipped (warning). A painting operator (`S s f F f* B B* b b*
   n`) emits `Paint.items` for a non-empty path (with the clip in force *before* it), then, if
   `W`/`W*` was pending, intersects the clip and emits a `clip` item; the path is then cleared.
-  So one operator can emit 3 items (`W … b`), but the `W` itself emitted none: the potential
+  Fill-and-stroke with a translucent or blended stroke is bracketed by a knockout group
+  (`Paint.items`, task 7.3i, as MuPDF `pdf_show_path`); glyph runs that fill and stroke stay one
+  item (the renderer splits them into its own knockout group, `Transparency.splitRun?`).
+  So one operator can emit 5 items (`W … b`), but the `W` itself emitted none: the potential
   `items + [clip pending]` grows by at most `Paint.maxItems` per operator, which gives
   `interp_items_le`.
 * **Colour**: `CS`/`cs` map `DeviceGray`/`G`, `DeviceRGB`/`RGB`, `DeviceCMYK`/`CMYK` and
@@ -43,11 +46,18 @@ text showing), §8.9.7 (inline images), §14.6 (marked content), §7.8.2 (`BX`/`
   text space, including `Tc`/`Tw`/`Tz`; the default stub returns 0); per `TJ` number `a`,
   `-(a / 1000) · Tfs · Th` exactly as §9.4.4 states. Text operators outside `BT … ET` are
   executed but warned.
-* **Ignored without warning**: `gs` (ExtGState resolution is 5.2b), `d0`/`d1`, marked content
-  `BMC BDC EMC MP DP`. `ri`/`i` are recorded in the `GState`.
+* **Ignored without warning**: `gs` (ExtGState resolution is 5.2b), `d0`/`d1`, `MP`/`DP`.
+  `ri`/`i` are recorded in the `GState`.
+* **Marked content** (`markOp`, task 6.8d, §14.6, §14.9.4): `BMC`/`BDC` … `EMC` nesting is
+  tracked in `Core.marks` (at most `Limits.maxMarkedDepth`, deeper sequences only counted); a
+  `BDC` whose inline property list has `/ActualText` emits `actualTextBegin`, its matching
+  `EMC` emits `actualTextEnd`. A stray `EMC` is ignored without warning (as MuPDF). Each
+  content stream (page, form) starts with no open sequence, so a form cannot close the
+  invoker's sequences.
 * **XObjects, shadings, inline images**: `Do` emits a placeholder
   `image (.xobject name 0 0)` (5.2b resolves it to an image or expands a form); `sh` a
-  `shading` item; `BI` an `image (.inline dict data)` item with the raw data.
+  `shading` item (resource `.page`, resolved by 5.2b; with the fill snapshot for `ca`, blend
+  mode and soft mask, task 7.3f); `BI` an `image (.inline dict data)` item with the raw data.
 -/
 
 namespace SafePdf.Core.Content
@@ -81,6 +91,23 @@ structure Core where
   inText : Bool := false
   /-- Nesting depth of `BX … EX`. -/
   bxDepth : Nat := 0
+  /-- Open marked-content sequences (`BMC`/`BDC`, §14.6), innermost first, at most
+  `Limits.maxMarkedDepth`: `true` when the sequence emitted `actualTextBegin` (task 6.8d). -/
+  marks : List Bool := []
+  /-- Open marked-content sequences beyond `Limits.maxMarkedDepth` (counted only). -/
+  markOver : Nat := 0
+  deriving Inhabited
+
+/-- Pattern-colour bookkeeping of one painting mode (task 7.3f), maintained by the resource
+runner (5.2b), never by `exec`: the `/ColorSpace` resource name of the current pattern space
+(`[/Pattern base]` spaces), and the underlying colour the last `SCN`/`scn` gave an uncoloured
+(PaintType 2) pattern, with that pattern's name. Not saved by `q`/`Q` (consumers check the
+name against the current colour). -/
+structure PatState where
+  /-- Resource name of the current pattern colour space, if it was named. -/
+  space : Option Name := none
+  /-- Pattern name and underlying colour of the last `SCN`/`scn` with colour operands. -/
+  under : Option (Name × Color) := none
   deriving Inhabited
 
 /-- The full interpreter state. -/
@@ -91,6 +118,10 @@ structure Machine where
   stack : GStack := {}
   /-- Clip rule set by `W`/`W*`, applied at the next painting operator. -/
   pending : Option FillRule := none
+  /-- Pattern bookkeeping for filling (task 7.3f; runner only). -/
+  patFill : PatState := {}
+  /-- Pattern bookkeeping for stroking (task 7.3f; runner only). -/
+  patStroke : PatState := {}
   deriving Inhabited
 
 /-- Interpreter output. -/
@@ -230,7 +261,8 @@ def spaceOp (c : Core) (stroke : Bool) (o : List PdfObject) : Out :=
 first so the path array stays unshared and is extended in place. -/
 def addSegs (c : Core) (segs : List Segment) (cur start : Option Point) : Core :=
   match c with
-  | ⟨gs, tm, path, _, _, it, bx⟩ => ⟨gs, tm, ⟨segs.foldl Array.push path.segs⟩, cur, start, it, bx⟩
+  | ⟨gs, tm, path, _, _, it, bx, mk, mo⟩ =>
+    ⟨gs, tm, ⟨segs.foldl Array.push path.segs⟩, cur, start, it, bx, mk, mo⟩
 
 /-- A user-space point mapped to page space by the CTM. -/
 def pt (c : Core) (x y : Fixed) : Point := Matrix.apply c.gs.ctm ⟨x, y⟩
@@ -318,6 +350,67 @@ def showText (cfg : Config) (c : Core) (parts : List TextPart) (w : Nat) : Out :
 def textPart? : PdfObject → Option TextPart
   | .string s => some (.str s)
   | o => (num? o).map .adjust
+
+/-! ## Marked content (§14.6, task 6.8d) -/
+
+/-- The `/ActualText` string of a `BDC` property list given inline (`/Tag << … >> BDC`; the
+runner replaces a `/Properties` resource name by its dictionary before `exec`, `Run.bdcOp`). -/
+def actualTextOf (o : List PdfObject) : Option (List UInt8) :=
+  match lastN 2 o with
+  | some [.name _, .dict d] =>
+    match d.lookup (Name.ofString "ActualText") with
+    | some (.string s) => some s
+    | _ => none
+  | _ => none
+
+/-- Open a marked-content sequence (`BMC`, `BDC`) whose `/ActualText` is `atx`: tracked below
+`lim` open sequences (emitting `actualTextBegin` for `/ActualText`), else only counted. -/
+def openMark (lim : Nat) (c : Core) (atx : Option (List UInt8)) : Out :=
+  if c.marks.length < lim then
+    ({ c with marks := atx.isSome :: c.marks }, atx.map .actualTextBegin, 0, 0)
+  else ok { c with markOver := c.markOver + 1 }
+
+/-- `EMC`: close the innermost sequence (a counted one first); emit `actualTextEnd` when it was
+opened by `actualTextBegin`; with no open sequence, nothing (as MuPDF). -/
+def closeMark (c : Core) : Out :=
+  match c.markOver with
+  | n + 1 => ok { c with markOver := n }
+  | 0 =>
+    match c.marks with
+    | [] => ok c
+    | b :: rest => ({ c with marks := rest }, if b then some .actualTextEnd else none, 0, 0)
+
+/-- `BMC`, `BDC`, `EMC`, `MP`, `DP` with nesting limit `lim` (`openMark`, `closeMark`).
+`MP`/`DP` (a point, not a sequence) change nothing. -/
+def markOp (lim : Nat) (c : Core) (op : Op) : Out :=
+  match op.op with
+  | [69, 77, 67] => closeMark c -- EMC
+  | [66, 77, 67] => openMark lim c none -- BMC
+  | [66, 68, 67] => openMark lim c (actualTextOf op.operands) -- BDC
+  | _ => ok c -- MP, DP
+
+/-- `markOp` keeps at most `lim` tracked sequences. -/
+theorem markOp_marks_le (lim : Nat) (c : Core) (op : Op) (h : c.marks.length ≤ lim) :
+    (markOp lim c op).1.marks.length ≤ lim := by
+  have ho : ∀ atx, (openMark lim c atx).1.marks.length ≤ lim := by
+    intro atx
+    unfold openMark
+    split
+    · simp only [List.length_cons]; omega
+    · exact h
+  unfold markOp
+  split
+  · unfold closeMark
+    rcases c with ⟨gs, tm, path, cur, start, it, bx, mk, mo⟩
+    cases mo with
+    | succ n => exact h
+    | zero =>
+      cases mk with
+      | nil => exact h
+      | cons b rest => simp only [List.length_cons] at h ⊢; omega
+  · exact ho _
+  · exact ho _
+  · exact h
 
 /-! ## Operator classification -/
 
@@ -442,7 +535,7 @@ def simple (cfg : Config) (c : Core) (op : Op) : Out :=
     match lastN 2 o with
     | some [.name n, sz] =>
       match num? sz with
-      | some s => ok (setText c { c.gs.text with font := some ⟨n, s⟩ })
+      | some s => ok (setText c { c.gs.text with font := some { name := n, size := s } })
       | none => bad c
     | _ => bad c
   | [84, 114] => -- Tr
@@ -500,14 +593,15 @@ def simple (cfg : Config) (c : Core) (op : Op) : Out :=
     | none => bad c
   | [115, 104] => -- sh
     match lastName? o with
-    | some n => (c, some (.shading n c.gs.ctm c.gs.clip), 0, 0)
+    | some n => (c, some (.shading n .page c.gs.ctm c.gs.fillStyle c.gs.clip), 0, 0)
     | none => bad c
   | [66, 73] => -- BI (from the tokenizer: the dictionary and the raw data)
     match o with
     | [.dict d] => (c, some (.image (.inline d op.data) c.gs.ctm c.gs.fillStyle c.gs.clip), 0, 0)
     | _ => bad c
   -- marked content (§14.6) and compatibility (§7.8.2)
-  | [66, 77, 67] | [66, 68, 67] | [69, 77, 67] | [77, 80] | [68, 80] => ok c
+  | [66, 77, 67] | [66, 68, 67] | [69, 77, 67] | [77, 80] | [68, 80] =>
+    markOp cfg.limits.maxMarkedDepth c op
   | [66, 88] => ok { c with bxDepth := c.bxDepth + 1 } -- BX
   | [69, 88] => -- EX
     match c.bxDepth with
@@ -541,10 +635,10 @@ cleared. -/
 def paintStep (m : Machine) (p : Option Paint) (close : Bool) :
     Machine × List DisplayItem × Nat × Nat :=
   match m with
-  | ⟨c0, stack, pending⟩ =>
+  | ⟨c0, stack, pending, pf, ps⟩ =>
     let c := if close then closeCore c0 else c0
     match c with
-    | ⟨gs, tm, path, _, _, inText, bx⟩ =>
+    | ⟨gs, tm, path, _, _, inText, bx, mk, mo⟩ =>
       let empty := path.segs.isEmpty
       let paintItems : List DisplayItem := if empty then [] else paintItemsOf p path gs
       let clipItems : List DisplayItem :=
@@ -555,7 +649,8 @@ def paintStep (m : Machine) (p : Option Paint) (close : Bool) :
         match pending with
         | some r => if empty then gs else { gs with clip := ⟨path, r⟩ :: gs.clip }
         | none => gs
-      (⟨⟨gs', tm, {}, none, none, inText, bx⟩, stack, none⟩, paintItems ++ clipItems, 0, 0)
+      (⟨⟨gs', tm, {}, none, none, inText, bx, mk, mo⟩, stack, none, pf, ps⟩, paintItems ++ clipItems,
+        0, 0)
 
 /-- Execute one operator: new machine, emitted items, warnings, unknown-operator count. -/
 def exec (cfg : Config) (m : Machine) (op : Op) : Machine × List DisplayItem × Nat × Nat :=
@@ -625,7 +720,7 @@ theorem paintStep_bound (m : Machine) (p : Option Paint) (close : Bool) :
   obtain ⟨c0, stack, pending⟩ := m
   simp only [paintStep]
   generalize (if close = true then closeCore c0 else c0) = c
-  obtain ⟨gs, tm, path, cur, start, inText, bx⟩ := c
+  obtain ⟨gs, tm, path, cur, start, inText, bx, mk, mo⟩ := c
   simp only [pendBit, List.length_append, Option.isSome_none]
   have := paintItemsOf_length_le p path gs
   cases pending <;> by_cases he : path.segs.isEmpty = true <;>
@@ -843,6 +938,21 @@ private def txt : String :=
 #guard (run "/Span <</MCID 0>> BDC /P BMC EMC EMC /GS0 gs /Perceptual ri 1 i [3 1] 0 d").warnings
   == 0
 #guard kinds "/Span <</MCID 0>> BDC /P BMC EMC EMC /GS0 gs /Perceptual ri 1 i [3 1] 0 d" == []
+-- /ActualText: begin/end items around the matching EMC only; stray EMC ignored
+#guard kinds "/Span <</ActualText (.)>> BDC /P BMC EMC EMC EMC" == ["actualTextBegin", "actualTextEnd"]
+#guard kinds "/P BMC /Span <</ActualText (x)>> BDC /Q BMC EMC EMC EMC" ==
+  ["actualTextBegin", "actualTextEnd"]
+#guard (match item "/Span <</ActualText <feff002e>>> BDC EMC" 0 with
+  | some (.actualTextBegin t) => t == [0xfe, 0xff, 0, 46]
+  | _ => false)
+#guard kinds "/Span /MC0 BDC EMC /Span <</ActualText 3>> BDC EMC" == []
+#guard (run "EMC /Span <</ActualText (x)>> BDC").warnings == 0
+-- beyond maxMarkedDepth sequences are counted, not tracked, and EMCs still match
+#guard (interpBytes { limits := { maxMarkedDepth := 1 } }
+  "/A BMC /Span <</ActualText (x)>> BDC EMC EMC".toUTF8).items.size == 0
+#guard ((interpBytes { limits := { maxMarkedDepth := 1 } }
+  "/Span <</ActualText (x)>> BDC /A BMC EMC EMC".toUTF8).items.toList.map DisplayItem.kind) ==
+  ["actualTextBegin", "actualTextEnd"]
 
 end Tests
 
