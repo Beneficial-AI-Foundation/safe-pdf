@@ -32,7 +32,8 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   or "from cache", notes, the view mode when it is not the default, notes about open settings
   that were not honoured, or the error). Every open starts afresh (task 9.r8): a mode or zoom
   chosen for one file does not carry over to the next; only the reopen after Save keeps them.
-* Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
+* Title: `NAME - page k/n - SafePDF`, with page labels `NAME - page iii (3/120) - SafePDF`.
+* About (task 10.5): the app presents as **SafePDF** (the executable stays `viewer`). Help → About SafePDF (all platforms; on macOS also the application menu's About, `tkAboutDialog`) opens a message box. The macOS application menu's own name comes from the process (`viewer`) until a bundle exists (task 11.x).
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
 * **Zoom** (`Toolbar.ZoomChoice` over `View.Mode`): Automatic Zoom (default, as in PDF.js:
@@ -1218,7 +1219,7 @@ First, Previous at the start (stays), Go to page… (`ii` → page 2), Back, For
 entry states checked on pages 1 and 3 and after the jump); View → Outline twice (panel and
 check variable follow), Actual size, Zoom in (125 %), Zoom out, Fit width, Fit page, Rotate
 right/left; Edit → Find… (bar mapped), Select all (no text on that page); File → Close (title
-`safe-pdf`, document entries disabled) and File → Quit, which ends the run. Before closing, the
+`SafePDF`, document entries disabled) and File → Quit, which ends the run. Before closing, the
 same run checks the wheel (9.2) with generated Tk 9 `<MouseWheel>` events: in fit page one
 notch down turns to page 2 and one up back to page 1; at 200 % notches scroll page 1 down,
 the view reaches the bottom and exactly one notch more turns to the top of page 2; eleven
@@ -1632,7 +1633,7 @@ The `m9` / `m9-reopen` smoke runs (see "Smoke test" above) on the two fixtures a
     wheel-facing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=7 monotone=true field=15 last=true bottom=true
     wheel-cfacing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=42 monotone=true field=15 last=true bottom=true
     saved: true false 4 4
-    closed: true 0 safe-pdf
+    closed: true 0 SafePDF
     reopened: true 4 4 false false
     marks-reopened: highlight 0 yellow 1 | ink 0 2 [5, 5] 4 100 #0060DF | note 0 yellow M9 note ✓ [x] | text 0 M9 text 59 60 16 #D70022
     pixels-reopened: hl=55 note=30 text=14 ink=10

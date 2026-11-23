@@ -262,7 +262,7 @@ if [ "$n1" -lt $((w1 * h1 / 10)) ]; then echo "FAIL: page 1 is (nearly) blank" >
 if [ "$n2" -lt 100 ]; then echo "FAIL: page 2 is (nearly) blank" >&2; fail=1; fi
 if [ "$w2" -le "$h2" ]; then echo "FAIL: page 2 (/Rotate 90) is not landscape" >&2; fail=1; fi
 grep -q '^page: 2/2$' "$work/out/state.txt" || { echo "FAIL: Next key did not reach page 2" >&2; fail=1; }
-grep -q '^title: two.pdf - page 2/2 - safe-pdf$' "$work/out/state.txt" \
+grep -q '^title: two.pdf - page 2/2 - SafePDF$' "$work/out/state.txt" \
   || { echo "FAIL: unexpected window title" >&2; fail=1; }
 grep -q '^status: .*from cache' "$work/out/state.txt" \
   || { echo "FAIL: page 2 was not prefetched into the cache" >&2; fail=1; }
@@ -314,7 +314,7 @@ case_begin "1c odd file name"
 odd='odd [exit 7] $HOME {x" \.pdf'
 cp "$work/two.pdf" "$work/$odd"
 run_viewer "$work/out-odd" "$work/$odd"
-grep -qxF "title: $odd - page 2/2 - safe-pdf" "$work/out-odd/state.txt" \
+grep -qxF "title: $odd - page 2/2 - SafePDF" "$work/out-odd/state.txt" \
   || { echo "FAIL: odd file name not shown verbatim" >&2; fail=1; }
 echo "odd name: $(grep '^title:' "$work/out-odd/state.txt")"
 
@@ -466,7 +466,7 @@ v = dict(l.split(": ", 1) for l in open(d + "/nav.txt", encoding="utf-8").read()
          if ": " in l)
 rd = lambda n: open(d + "/" + n, encoding="utf-8").read()
 want = {
-    "title0": "nav.pdf - page i (1/3) - safe-pdf",
+    "title0": "nav.pdf - page i (1/3) - SafePDF",
     "outline-shown": "true",
     "outline-titles": "Intro|Chapter|Section",
     "outline-depths": "[0, 0, 1]",
@@ -474,7 +474,7 @@ want = {
     "cursor-internal": "hand2",
     "status-hover-internal": "go to page 1 (3/3)",
     "page-after-link": "3",
-    "title-after-link": "nav.pdf - page 1 (3/3) - safe-pdf",
+    "title-after-link": "nav.pdf - page 1 (3/3) - SafePDF",
     "page-after-back": "1",
     "page-after-forward": "3",
     "page-after-back2": "1",
@@ -482,7 +482,7 @@ want = {
     "status-hover-uri": "external link (click to copy the address): " + uri,
     "page-after-uri": "1",
     "page-after-outline-section": "2",
-    "title-after-outline-section": "nav.pdf - page ii (2/3) - safe-pdf",
+    "title-after-outline-section": "nav.pdf - page ii (2/3) - SafePDF",
     "page-after-outline-chapter": "3",
     "page-after-goto-ii": "2",
     "page-after-goto-1": "3",
@@ -522,12 +522,13 @@ v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().sp
          if ": " in l)
 want = {
     "menubar": ".menubar",
-    "cascades": "File|Edit|View|Go",
+    "cascades": "File|Edit|View|Go|Help",
     "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
     "entries.menubar.edit": "Undo|Redo|Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Sidebar|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
+    "entries.menubar.help": "About SafePDF",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
                     "Back=disabled,Forward=disabled,Copy=disabled,Sidebar=normal",
     "toolbar-prev-page1": "disabled",
@@ -553,7 +554,7 @@ want = {
     "rot-after-right": "90",
     "rot-after-left": "0",
     "find-bar-mapped": "1",
-    "title-after-close": "safe-pdf",
+    "title-after-close": "SafePDF",
     "states-after-close": "Close=disabled,Next page=disabled,Zoom in=disabled,Open...=normal,Quit=normal",
 }
 want.update({
@@ -1485,9 +1486,9 @@ for x in (v, r):
 try:
     n = int(v.get("pages", "0"))
     need(n >= 2, "pages: %r" % v.get("pages"))
-    want = {"menubar": ".menubar", "menus": "File,Edit,View,Go", "arrow-next": "2", "arrow-prev": "1",
+    want = {"menubar": ".menubar", "menus": "File,Edit,View,Go,Help", "arrow-next": "2", "arrow-prev": "1",
             "bubble": "float true", "bubble-highlight": "1 edit", "note": "2",
-            "saved": "true false 4 4", "closed": "true 0 safe-pdf", "reopened": "true 4 4 false false",
+            "saved": "true false 4 4", "closed": "true 0 SafePDF", "reopened": "true 4 4 false false",
             "canvas-items": "0 0 0", "export": "exported 4 mark(s) to m9.xfdf",
             "removed": "0 hl=0 note=0 text=0 ink=0", "back-to-single": "1 1",
             "import": "m9.xfdf: 4 imported, 0 already present, 0 skipped"}
@@ -1979,7 +1980,7 @@ want("fit", zoom="Page Fit", page="1", outline="true")
 want("named", page="4", zoom="Page Width", off="0")
 want("js", page="1", zoom="Automatic Zoom"); has("js", "status", "open action /JavaScript ignored (not executed)")
 want("uri", page="1"); has("uri", "status", "open action /URI ignored (not executed)")
-want("prefs", bar="0", menu="", ys="0"); has("prefs", "title", "Open Settings Test - page 1/5 - safe-pdf")
+want("prefs", bar="0", menu="", ys="0"); has("prefs", "title", "Open Settings Test - page 1/5 - SafePDF")
 has("prefs", "status", "Escape shows them")
 want("prefs-escape", bar="1", menu=".menubar", ys="1")
 want("r2l", view="page,odd", rtl="true")
