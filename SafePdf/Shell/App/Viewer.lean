@@ -63,11 +63,14 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   they move to the top of the next page; past the top they move to the bottom of the previous
   page (page-at-a-time). The mouse wheel does the same (task 9.2, `wheel`, logic in
   `View.wheelStep`: small deltas accumulate, the page turns only after the view reached the
-  edge and the wheel pushes on past it); Shift+wheel scrolls horizontally without turning
-  pages; Ctrl+wheel zooms about the mouse pointer.
+  edge and the wheel pushes on past it; task 9.r1: each axis has its own state, nothing is
+  swallowed after a turn and the push beyond the threshold flows on into the new page);
+  Shift+wheel scrolls horizontally without turning pages; Ctrl+wheel zooms about the mouse
+  pointer.
 * **View modes** (task 9.3, pure layout in `View`): the View menu and the overflow menu choose
   the scroll mode (Page / Vertical Scrolling) and the spread mode (No / Odd / Even Spreads):
-  single page, continuous, facing, continuous facing. `computeLayout` places the pages
+  single page, continuous, facing, continuous facing. Files open in continuous (Vertical
+  Scrolling, No Spreads; task 9.r1). `computeLayout` places the pages
   (`View.layoutRows`) as `Slot`s; every page on the canvas has a white frame and its own photo
   `::safepdf::pgN`; the current page (its spread in the facing view) is shown first, the
   other pages in view and their neighbours follow (`viewChanged`, `renderMore`, workers and
@@ -383,8 +386,8 @@ structure State where
   /-- Enabled states last applied to the menubar entries and toolbar buttons
   (`Menu.entryStates` order; empty: not applied yet). -/
   menuStates : List Bool := []
-  /-- Wheel state: sub-pixel remainder and push past the page edge (task 9.2). -/
-  wheel : View.Wheel := {}
+  /-- Wheel state of each axis: movement owed and push past the page edge (tasks 9.2, 9.r1). -/
+  wheel : View.Wheels := {}
   /-- Rows of the outline tree (task 9.7, `Sidebar.rows`). -/
   olRows : List Sidebar.Row := []
   /-- Which outline rows are open (`Sidebar.toggle`). -/
@@ -401,8 +404,9 @@ structure State where
   one more on each side) and their render result before the highlights are multiplied in
   (`Marks.composite`), or the render error. -/
   photos : Array (Nat × Except String Clip.Image) := #[]
-  /-- Scroll mode (task 9.3, PDF.js "Page Scrolling" / "Vertical Scrolling"). -/
-  scroll : View.ScrollMode := .page
+  /-- Scroll mode (task 9.3, PDF.js "Page Scrolling" / "Vertical Scrolling"); files open in
+  vertical scrolling (task 9.r1, as in PDF.js). -/
+  scroll : View.ScrollMode := .vertical
   /-- Spread mode (task 9.3, PDF.js "No / Odd / Even Spreads"). -/
   spread : View.SpreadMode := .none
   /-- The laid-out pages (one spread in the page scroll mode, all pages in the vertical ones),
@@ -561,11 +565,12 @@ def Slot.toPage (sl : Slot) (cx cy : Rat) : Pt :=
 def State.hasPhoto (s : State) (p : Nat) : Bool :=
   s.photos.any (·.1 == p)
 
-/-- What the status line adds for the view mode (nothing in the single-page view). -/
+/-- What the status line adds for the view mode (nothing in the default view, vertical
+scrolling without spreads, task 9.r1). -/
 def modeNote (s : State) : String :=
   let sc := match s.scroll with
-    | .page => ""
-    | .vertical => "vertical scrolling"
+    | .page => "page scrolling"
+    | .vertical => ""
   let sp := match s.spread with
     | .none => ""
     | .odd => "odd spreads"
@@ -576,8 +581,8 @@ def modeNote (s : State) : String :=
   | "", b => s!"; {b}"
   | a, b => s!"; {a}, {b}"
 
-#guard modeNote {} == "" && modeNote { scroll := .vertical, spread := .odd } ==
-  "; vertical scrolling, odd spreads"
+#guard modeNote {} == "" && modeNote { scroll := .page, spread := .odd } ==
+  "; page scrolling, odd spreads" && modeNote { spread := .even } == "; even spreads"
 
 /-- Last path component of a file name (for the window title). -/
 def baseName (path : String) : String :=
@@ -608,6 +613,22 @@ def num (r : Rat) : String :=
 
 #guard num 12 = "12.00" && num (3 / 2) = "1.50" && num (-1 / 4) = "-0.25"
 #guard fmtFrac (1 / 4) = "0.250000"
+
+/-- A fraction in `[0, 1]` with twelve digits, for the wheel's `moveto` (task 9.r1): Tk rounds
+`moveto` to the nearest pixel, and six digits are off by up to `region / 10⁶` pixels, over
+half a pixel in the vertical modes of a document taller than 500 000 pixels (some 450 pages
+at Page Width), where a one-pixel trackpad step would round back to where it started and the
+wheel would stall. -/
+def fmtFracFine (r : Rat) : String :=
+  let r := max 0 (min 1 r)
+  let n := (r * 1000000000000).floor.toNat
+  s!"{n / 1000000000000}.{padLeft 12 '0' (toString (n % 1000000000000))}"
+
+-- Pixel 400 001 of a 900 000-pixel region: six digits land 0.6 px short (Tk rounds that to
+-- 400 000), twelve digits within 10⁻⁶ px.
+#guard fmtFracFine (1 / 4) = "0.250000000000" && fmtFracFine 1 = "1.000000000000"
+#guard fmtFrac ((400001 : Rat) / 900000) = "0.444445" &&
+  fmtFracFine ((400001 : Rat) / 900000) = "0.444445555555"
 #guard fmtFrac 2 = "1.000000"
 #guard fmtFrac (-1) = "0.000000"
 
@@ -985,9 +1006,9 @@ ttk::frame .v
 # View modes (9.3): radio variables of the View and overflow menus; in the vertical modes every
 # change of the vertical view (keys, scroll bar, wheel) is reported once per idle moment as
 # `viewChanged` (current page, renders).
-set ::safepdf::scrollMode page
+set ::safepdf::scrollMode vertical
 set ::safepdf::spreadMode none
-set ::safepdf::continuous 0
+set ::safepdf::continuous 1
 set ::safepdf::vcPending 0
 proc ::safepdf::yscroll {a b} {
   .ys set $a $b
@@ -2364,7 +2385,9 @@ def zoomChoose (st : IO.Ref State) (key : String) : IO Unit := do
 scroll within the page (small deltas accumulate), or, on the vertical axis after reaching the
 edge and pushing on past it by `View.wheelThreshold`, turn to the top of the next page (spread)
 or the bottom of the previous one, as the keys do. In the vertical modes the wheel only
-scrolls (task 9.3). -/
+scrolls (task 9.3). Task 9.r1: each axis has its own state (`View.Wheels`), no event is
+swallowed after a turn, and the push beyond the threshold stays owed to the new page (kept
+across `goTo`, which resets the wheel); a turn at either end of the document owes nothing. -/
 def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || s.shown.isNone then return
@@ -2382,24 +2405,31 @@ def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
   let view := ((b - a) * r + 1 / 2).floor.toNat
   let now ← IO.monoMsNow
   -- In the vertical modes the wheel simply scrolls the whole document (task 9.3).
-  let (w, act) := View.wheelStep s.wheel now (View.wheelPixels kind d view) (kind == .pixel)
-    (isY && s.scroll == .page) top view region (View.wheelThreshold kind view)
+  let (w, act) := View.wheelStep (if isY then s.wheel.y else s.wheel.x) now
+    (View.wheelPixels kind d view) (isY && s.scroll == .page) top view region
+    (View.wheelThreshold kind view (region - view))
+  let save (w : View.Wheel) : IO Unit :=
+    st.modify fun s => { s with wheel := if isY then { s.wheel with y := w } else { s.wheel with x := w } }
   match act with
-  | .none => st.modify ({ · with wheel := w })
+  | .none => save w
   | .scrollTo p =>
-    st.modify ({ · with wheel := w })
+    save w
     -- Tk rounds `moveto` to the nearest pixel, so the fraction p / region lands on p.
     discard <| run [".c", if isY then "yview" else "xview", "moveto",
-      fmtFrac ((p : Rat) / (max region 1 : Nat))]
+      fmtFracFine ((p : Rat) / (max region 1 : Nat))]
     viewChanged st
   | .next =>
     let q := View.nextPage s.spread s.pageCount s.page
-    if q != s.page then goTo st q .top
-    st.modify ({ · with wheel := w })
+    if q != s.page then
+      goTo st q .top
+      save w
+    else save { w with acc := 0 }
   | .prev =>
     let q := View.prevPage s.spread s.page
-    if q != s.page then goTo st q .bottom
-    st.modify ({ · with wheel := w })
+    if q != s.page then
+      goTo st q .bottom
+      save w
+    else save { w with acc := 0 }
 
 /-- Rotates the view by a quarter turn (`cw` or `ccw`), keeping the window centre's page
 point at the centre. -/
@@ -5285,6 +5315,107 @@ def smokeScroll (st : IO.Ref State) (dir : String) : IO Unit := do
       canvas: {s.canvasW}x{s.canvasH}\nstatus: {← run [".status", "cget", "-text"]}\n"
   discard <| run ["destroy", "."]
 
+/-- The current page and the view's top edge in scroll-region pixels (task 9.r1 traces). -/
+def wheelPos (st : IO.Ref State) : IO (Nat × Nat) := do
+  let s ← st.get
+  let some (a, _) := viewFracs (← run [".c", "yview"]) | return (s.page, 0)
+  return (s.page, (a * (s.regionH : Rat) + 1 / 2).floor.toNat)
+
+/-- The `-delta` of a generated `<TouchpadScroll>` event with pixel deltas `dx`, `dy` (Tk 9
+packs them as `dx << 16 | dy & 0xffff`; `tk::PreciseScrollDeltas` unpacks them). -/
+def touchpadDelta (dx dy : Int) : Int :=
+  dx * 65536 + (if dy < 0 then dy + 65536 else dy)
+
+/-- One burst of wheel events for `smokeWheelFlow` (task 9.r1): from the top of page 1 in
+the current view mode, sends `ev i` for `i = 0, 1, …` 8 ms apart with no pause (a trackpad
+gesture or a fast wheel; between events only Tk's event loop runs, as for a user, no settling
+of renders) until the current spread reaches the spread of page `target + 1`, or `maxEv`
+events. Appends `label event ms page top` lines to `trace` and returns a summary line:
+`reached`, `events`, the longest run of events that moved nothing (`max-stall`), moves
+backwards (`back`), the largest move between two events on one page or, in the vertical
+modes, in the document (`max-step`, pixels), and the largest top of a page just turned to in
+the page modes (`turn-top`). -/
+def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : String)
+    (ev : Nat → IO Unit) (target maxEv : Nat) : IO String := do
+  sendKey "Home"
+  settle st
+  let s0 ← st.get
+  let sp := s0.spread
+  let goal := View.spreadOf sp (min target (s0.pageCount - 1))
+  let vertical := s0.scroll == .vertical
+  let t0 ← IO.monoMsNow
+  let (p, y) ← wheelPos st
+  let mut p0 := p
+  let mut y0 := y
+  let mut stall := 0
+  let mut maxStall := 0
+  let mut back := 0
+  let mut maxStep := 0
+  let mut turnTop := 0
+  let mut events := 0
+  for i in [0:maxEv] do
+    if View.spreadOf sp (← st.get).page ≥ goal then break
+    ev i
+    events := i + 1
+    discard <| run ["update"]
+    IO.sleep 8
+    let (p1, y1) ← wheelPos st
+    trace.modify (·.push s!"{label} {i} {(← IO.monoMsNow) - t0} {p1 + 1} {y1}")
+    if p1 == p0 && y1 == y0 then
+      stall := stall + 1
+      maxStall := max maxStall stall
+    else stall := 0
+    if vertical then
+      if y1 < y0 then back := back + 1
+      maxStep := max maxStep (y1 - y0)
+    else if p1 < p0 || (p1 == p0 && y1 < y0) then back := back + 1
+    else if p1 == p0 then maxStep := max maxStep (y1 - y0)
+    else turnTop := max turnTop y1
+    p0 := p1
+    y0 := y1
+  let s ← st.get
+  return s!"flow-{label}: reached={decide (View.spreadOf sp s.page ≥ goal)} page={s.page + 1} \
+    events={events} max-stall={maxStall} back={back} max-step={maxStep} turn-top={turnTop} \
+    view={s.canvasH} ms={(← IO.monoMsNow) - t0}"
+
+/-- Wheel flow across page boundaries (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, task 9.r1): first
+the view mode a freshly opened file is in (`default:`, the state and the View menu's radio
+variables); then, in each of the four view modes at Page Width and in the single-page mode at
+Page Fit, a trackpad-like burst of small `<TouchpadScroll>` deltas (12 px down, with ±1 px
+of sideways jitter, as Tk 9 on macOS delivers them) and a burst of third-notch
+`<MouseWheel>` deltas (high-resolution wheels) from page 1 to page 5 (`flowBurst`). Writes
+`wheelflow.txt` and the per-event trace `wheelflow-trace.txt`. -/
+def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  settle st
+  let s0 ← st.get
+  let mut out : Array String := #[]
+  out := out.push s!"pages: {s0.pageCount}"
+  out := out.push s!"default: scroll={s0.scroll.key} spread={s0.spread.key} \
+    radio={← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} \
+    continuous={← run ["set", "::safepdf::continuous"]}"
+  let trace ← IO.mkRef (#[] : Array String)
+  let pad (i : Nat) : IO Unit :=
+    sendEvent ".c" "<TouchpadScroll>"
+      ["-delta", toString (touchpadDelta ([0, 1, 0, -1].getD (i % 4) 0) (-12)), "-x", "300", "-y", "300"]
+  let fine (_ : Nat) : IO Unit :=
+    sendEvent ".c" "<MouseWheel>" ["-delta", "-40", "-x", "300", "-y", "300"]
+  let cases : List (String × String × String × Toolbar.ZoomChoice) :=
+    [("single", "page", "none", .pageWidth), ("continuous", "vertical", "none", .pageWidth),
+     ("facing", "page", "odd", .pageWidth), ("continuous-facing", "vertical", "odd", .pageWidth),
+     ("single-fit", "page", "none", .pageFit)]
+  for (label, sc, sp, z) in cases do
+    setViewMode st "scroll" sc
+    setViewMode st "spread" sp
+    setMode st z none
+    settle st
+    out := out.push (← flowBurst st trace s!"{label}-pad" pad 4 3000)
+    out := out.push (← flowBurst st trace s!"{label}-fine" fine 4 3000)
+  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") ("\n".intercalate out.toList ++ "\n")
+  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow-trace.txt")
+    ("\n".intercalate (← trace.get).toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of non-blocking rendering (`SAFEPDF_VIEWER_SMOKE_MODE=async`, task 8.8; the
 viewer starts with `syncWaitMs := some 0`, so no event waits for a render) on a two-page PDF
 whose page 1 takes the renderer seconds (`scripts/viewer-smoke-pdf.py --slow`). Step 0 (page 1
@@ -6070,6 +6201,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "modes" then smokeModes st dir else smokeScroll st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "wheelflow" then
+    try smokeWheelFlow st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "async" then
