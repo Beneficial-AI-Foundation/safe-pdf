@@ -41,6 +41,7 @@ import Tests.OptionalContent
 import Tests.Attachments
 import Tests.WriteConfidentiality
 import Tests.CappedRead
+import Tests.Worker
 
 /-!
 # Test runner
@@ -101,7 +102,8 @@ def suites : List Suite :=
     { name := "optional-content", run := SafePdf.Tests.OptionalContent.run },
     { name := "attachments", run := SafePdf.Tests.Attachments.run },
     { name := "write-confidentiality", run := SafePdf.Tests.WriteConfidentiality.run },
-    { name := "capped-read", run := SafePdf.Tests.CappedRead.run } ]
+    { name := "capped-read", run := SafePdf.Tests.CappedRead.run },
+    { name := "worker", run := SafePdf.Tests.Worker.run } ]
 
 end SafePdf.Tests
 

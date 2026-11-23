@@ -123,6 +123,10 @@ lean_lib Tests where
 @[default_target] lean_exe inspect where
   root := `SafePdf.Shell.Main
 
+/-- The document worker (task 12.2a): serves a document received as bytes over stdin/stdout. -/
+@[default_target] lean_exe worker where
+  root := `SafePdf.Shell.Worker.Main
+
 /-- The test runner. -/
 lean_exe tests where
   root := `Tests.Main

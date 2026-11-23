@@ -18,6 +18,7 @@ import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Toolbar
+import SafePdf.Shell.Worker.Protocol
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -1326,3 +1327,25 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Spec.RasterError.polyline_tol
 #print axioms SafePdf.Spec.RasterError.device_curve_err
 #print axioms SafePdf.Spec.RasterError.qd_err
+
+-- Phase 12, task 12.2a: document worker protocol (SafePdf/Shell/Worker/Protocol.lean)
+#print axioms SafePdf.Shell.Worker.Protocol.Codec.decNatAux_rt
+#print axioms SafePdf.Shell.Worker.Protocol.Codec.decItems_rt
+#print axioms SafePdf.Shell.Worker.Protocol.decodeBody_rt
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_at
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_encodeFrame
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_tooLong
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_next_le
+#print axioms SafePdf.Shell.Worker.Protocol.decodeStream_encodeFrames
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_prefix
+#print axioms SafePdf.Shell.Worker.Protocol.requestCap_lt
+#print axioms SafePdf.Shell.Worker.Protocol.responseCap_lt
+#print axioms SafePdf.Shell.Worker.Protocol.request_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.response_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.request_frame_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.response_frame_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.request_stream
+#print axioms SafePdf.Shell.Worker.Protocol.response_stream
+#print axioms SafePdf.Shell.Worker.Protocol.request_prefix
+#print axioms SafePdf.Shell.Worker.Protocol.response_prefix
+#print axioms SafePdf.Shell.Worker.Protocol.frame_bounded
