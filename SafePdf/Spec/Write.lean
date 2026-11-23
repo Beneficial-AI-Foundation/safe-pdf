@@ -41,10 +41,14 @@ spec. This file proves, for every successful `Core.Write.Incremental.writeAnnots
    has the original's decryption state (file key, methods, `/Encrypt` object). Only the
    auxiliary streams' `/Length` differs (the written, encrypted length, `auxBody`);
    `writeAnnots_aux_plain` restates 9.5b's form for unencrypted documents. That the
-   encryption itself (`Core.Write.Encrypt`, RC4 / AES-CBC with a deterministic IV) is the
-   inverse of `Crypt.decryptBody` is not proved — the primitives are vector-tested, not
-   verified (Plan.md §6 Phase 4) — it is *checked* on every write by the self-check, and
-   tested on the encrypted fixtures and corpus files.
+   encryption itself (`Core.Write.Encrypt`, RC4 / AES-CBC with an IV derived from the
+   caller's seed) is the inverse of `Crypt.decryptBody` is not proved — the primitives are
+   vector-tested, not verified (Plan.md §6 Phase 4) — it is *checked* on every write by the
+   self-check, and tested on the encrypted fixtures and corpus files.
+5c. **Every IV seed** (task 12.4): the writer's entry points take an AES IV seed
+   (`ivSeed`, fresh OS randomness in the viewer, `Encrypt` rule E3'); every theorem of this
+   file is stated for an arbitrary seed (the section `variable {ivSeed}`), since the proofs
+   rest only on the self-check.
 6. `serialize_roundtrip`: the serializer is the Phase 1 printer, whose round trip
    `parseObject (serialize o) = o` is M1's `Spec.RoundTripCore.parseObject_print`.
 7. **Removal and supersession** (rule W11, task 9.5g; `writeUpdate`, of which `writeAnnots`
@@ -131,6 +135,9 @@ open SafePdf.Core.Xref (XrefEntry XrefSection Trailer)
 open SafePdf.Core.Xref.Chain (Revision loadChain lookupEntry)
 open SafePdf.Spec.Unambiguous (resolveEntry)
 
+-- The AES IV seed of the write (task 12.4): every theorem below holds for every seed.
+variable {ivSeed : ByteArray}
+
 /-! ## The serializer round trip -/
 
 /-- **Serializer round trip** (M1 reused): the strict object parser reads the serialized
@@ -146,8 +153,8 @@ theorem serialize_roundtrip (limits : Limits) (o : PdfObject) (hc : o.Canonical)
 self-checks. -/
 theorem writeUpdate_ok {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
-    ∃ p, planUpdate limits doc edits sups aux = .ok p ∧ out = result doc.file.bytes p ∧
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
+    ∃ p, planUpdate limits doc edits sups aux ivSeed = .ok p ∧ out = result doc.file.bytes p ∧
       checkChain limits doc.file.bytes out p.start p.keys = true ∧
       checkObjects limits out p.objects p.auxExpected p.crypt = true := by
   unfold writeUpdate at h
@@ -165,8 +172,8 @@ theorem writeUpdate_ok {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 /-- A successful write comes from a plan whose result passed both self-checks. -/
 theorem writeAnnots_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) :
-    ∃ p, plan limits doc marks aux = .ok p ∧ out = result doc.file.bytes p ∧
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
+    ∃ p, plan limits doc marks aux ivSeed = .ok p ∧ out = result doc.file.bytes p ∧
       checkChain limits doc.file.bytes out p.start p.keys = true ∧
       checkObjects limits out p.objects p.auxExpected p.crypt = true :=
   writeUpdate_ok h
@@ -174,14 +181,14 @@ theorem writeAnnots_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : 
 /-- **C7 (1), prefix, general writer** (rule W11): the original bytes are a prefix. -/
 theorem writeUpdate_prefix {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) : ∃ u, out = doc.file.bytes ++ u := by
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) : ∃ u, out = doc.file.bytes ++ u := by
   obtain ⟨p, _, rfl, _, _⟩ := writeUpdate_ok h
   exact ⟨_, rfl⟩
 
 /-- The general writer's result extends the original. -/
 theorem writeUpdate_extends {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
     PrefixStable.Extends doc.file.bytes out := by
   obtain ⟨u, rfl⟩ := writeUpdate_prefix h
   exact PrefixStable.Extends.append _ _
@@ -189,13 +196,13 @@ theorem writeUpdate_extends {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 /-- **C7 (1), prefix.** The original bytes are a prefix of the result (S8). -/
 theorem writeAnnots_prefix {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) : ∃ u, out = doc.file.bytes ++ u :=
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) : ∃ u, out = doc.file.bytes ++ u :=
   writeUpdate_prefix h
 
 /-- The result extends the original (`PrefixStable.Extends`). -/
 theorem writeAnnots_extends {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) : PrefixStable.Extends doc.file.bytes out :=
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) : PrefixStable.Extends doc.file.bytes out :=
   writeUpdate_extends h
 
 /-! ## The chain check -/
@@ -226,8 +233,8 @@ theorem checkChain_ok {limits : Limits} {bytes out : ByteArray} {start : Nat} {k
 /-- **C7 (2), revision structure, general writer** (rule W11). -/
 theorem writeUpdate_chain {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
-    ∃ p revs sec' tr' off', planUpdate limits doc edits sups aux = .ok p ∧
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
+    ∃ p revs sec' tr' off', planUpdate limits doc edits sups aux ivSeed = .ok p ∧
       loadChain limits doc.file.bytes = .ok revs ∧
       loadChain limits out = .ok ((sec', tr', off') :: revs) ∧
       doc.file.bytes.size ≤ off' ∧ tr'.prev? = some p.start ∧
@@ -245,8 +252,8 @@ section in front: its `/Prev` is the original `startxref`, its object numbers ar
 the plan's keys. -/
 theorem writeAnnots_chain {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) :
-    ∃ p revs sec' tr' off', plan limits doc marks aux = .ok p ∧
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
+    ∃ p revs sec' tr' off', plan limits doc marks aux ivSeed = .ok p ∧
       loadChain limits doc.file.bytes = .ok revs ∧
       loadChain limits out = .ok ((sec', tr', off') :: revs) ∧
       doc.file.bytes.size ≤ off' ∧ tr'.prev? = some p.start ∧
@@ -259,8 +266,8 @@ update does not write (not a rewritten page, new annotation, superseded object, 
 stream or xref stream) resolves to the same cross-reference entry as in the original. -/
 theorem writeUpdate_untouched {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream}
-    {out : ByteArray} {p : Plan} (h : writeUpdate limits doc edits sups aux = .ok out)
-    (hp : planUpdate limits doc edits sups aux = .ok p) {n : Nat} (hn : n ∉ p.keys) :
+    {out : ByteArray} {p : Plan} (h : writeUpdate limits doc edits sups aux ivSeed = .ok out)
+    (hp : planUpdate limits doc edits sups aux ivSeed = .ok p) {n : Nat} (hn : n ∉ p.keys) :
     resolveEntry limits out n = resolveEntry limits doc.file.bytes n := by
   obtain ⟨p', revs, sec', tr', off', hp', h2, hnew, _, _, _, hkeys⟩ := writeUpdate_chain h
   rw [hp] at hp'
@@ -276,8 +283,8 @@ theorem writeUpdate_untouched {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 to the same cross-reference entry in the result as in the original. -/
 theorem writeAnnots_untouched {limits : Limits} {doc : Doc.Doc} {marks : Marks}
     {aux : List AuxStream}
-    {out : ByteArray} {p : Plan} (h : writeAnnots limits doc marks aux = .ok out)
-    (hp : plan limits doc marks aux = .ok p) {n : Nat} (hn : n ∉ p.keys) :
+    {out : ByteArray} {p : Plan} (h : writeAnnots limits doc marks aux ivSeed = .ok out)
+    (hp : plan limits doc marks aux ivSeed = .ok p) {n : Nat} (hn : n ∉ p.keys) :
     resolveEntry limits out n = resolveEntry limits doc.file.bytes n :=
   writeUpdate_untouched h hp hn
 
@@ -385,8 +392,8 @@ theorem checkObjects_crypt {limits : Limits} {out : ByteArray}
 superseded ones included — fetches exactly as planned. -/
 theorem writeUpdate_open {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
       (∀ o ∈ p.objects, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2)) ∧
       (∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok (auxBody p.crypt a.2)) ∧
@@ -401,8 +408,8 @@ exactly as planned — for an encrypted document, after decryption by the reader
 the result's decryption state agrees with the plan's (the original's, `plan_ok`). -/
 theorem writeAnnots_open {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) :
-    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
+    ∃ p d', plan limits doc marks aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
       (∀ o ∈ p.objects, d'.getObject limits o.1 o.2.1 = .ok (.obj o.2.2)) ∧
       (∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok (auxBody p.crypt a.2)) ∧
@@ -560,7 +567,7 @@ theorem supOk_ok {limits : Limits} {doc : Doc.Doc} {size : Nat} {s : Supersede}
 /-- What a successful general plan says about its input (rules W1–W3, W9–W11). -/
 theorem planUpdate_ok {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
     {aux : List AuxStream} {p : Plan}
-    (h : planUpdate limits doc edits sups aux = .ok p) :
+    (h : planUpdate limits doc edits sups aux ivSeed = .ok p) :
     doc.file.repaired = false ∧ p.crypt = doc.file.crypt ∧
       p.size = doc.file.trailer.size ∧
       planEditPages limits doc doc.file.trailer.size edits = .ok p.pages ∧
@@ -606,7 +613,7 @@ theorem planUpdate_ok {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : 
 /-- What a successful plan says about its input (rules W1–W3, W9, W10). -/
 theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {p : Plan}
-    (h : plan limits doc marks aux = .ok p) :
+    (h : plan limits doc marks aux ivSeed = .ok p) :
     doc.file.repaired = false ∧ p.crypt = doc.file.crypt ∧
       p.size = doc.file.trailer.size ∧
       planPages limits doc doc.file.trailer.size marks = .ok p.pages ∧
@@ -617,18 +624,18 @@ theorem plan_ok {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List Au
 
 /-- `writeAnnots`'s plan supersedes nothing (rule W11). -/
 theorem plan_sups {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
-    {p : Plan} (h : plan limits doc marks aux = .ok p) : p.sups = [] :=
+    {p : Plan} (h : plan limits doc marks aux ivSeed = .ok p) : p.sups = [] :=
   (planUpdate_ok h).2.2.2.2.2.1
 
 /-- `writeAnnots`'s page plans remove nothing (rule W11). -/
 theorem plan_removed {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
-    {p : Plan} (h : plan limits doc marks aux = .ok p) : ∀ pp ∈ p.pages, pp.removed = [] :=
+    {p : Plan} (h : plan limits doc marks aux ivSeed = .ok p) : ∀ pp ∈ p.pages, pp.removed = [] :=
   planPages_removed (plan_ok h).2.2.2.1
 
 /-- **The plan covers exactly `marks`**: page indices and annotation dictionaries, in order. -/
 theorem plan_marks {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {p : Plan}
-    (h : plan limits doc marks aux = .ok p) :
+    (h : plan limits doc marks aux ivSeed = .ok p) :
     p.pages.map (fun pp => (pp.index, pp.annots.map Prod.snd)) = marks :=
   (planPages_ok (plan_ok h).2.2.2.1).1
 
@@ -636,7 +643,7 @@ theorem plan_marks {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List
 new annotation numbers are fresh (at or above the original `/Size`). -/
 theorem plan_page {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {p : Plan}
-    (h : plan limits doc marks aux = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
+    (h : plan limits doc marks aux ivSeed = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
     PageOk limits doc doc.file.trailer.size pp :=
   (planPages_ok (plan_ok h).2.2.2.1).2 pp hpp
 
@@ -644,7 +651,7 @@ theorem plan_page {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List 
 and added dictionaries, in order. -/
 theorem planUpdate_edits {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {p : Plan}
-    (h : planUpdate limits doc edits sups aux = .ok p) :
+    (h : planUpdate limits doc edits sups aux ivSeed = .ok p) :
     p.pages.map (fun pp => (pp.index, pp.removed, pp.annots.map Prod.snd)) =
       edits.map (fun e => (e.index, refObjs e.remove, e.add)) :=
   (planEditPages_ok (planUpdate_ok h).2.2.2.1).1
@@ -652,7 +659,7 @@ theorem planUpdate_edits {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 /-- Each page of a general plan is a `PageOk` whose removed references are on its old list. -/
 theorem planUpdate_page {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {p : Plan}
-    (h : planUpdate limits doc edits sups aux = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
+    (h : planUpdate limits doc edits sups aux ivSeed = .ok p) {pp : PagePlan} (hpp : pp ∈ p.pages) :
     PageOk limits doc doc.file.trailer.size pp ∧ ∀ r ∈ pp.removed, r ∈ pp.old :=
   (planEditPages_ok (planUpdate_ok h).2.2.2.1).2 pp hpp
 
@@ -713,8 +720,8 @@ the list is `pp.kept` (the old list without the removed references, in order) fo
 are fresh; the page fetches as its rewritten dictionary. -/
 theorem writeUpdate_annots {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
       p.pages.map (fun pp => (pp.index, pp.removed, pp.annots.map Prod.snd)) =
         edits.map (fun e => (e.index, refObjs e.remove, e.add)) ∧
@@ -746,8 +753,8 @@ result fetches under the same number and generation **exactly the new dictionary
 encrypted document after decryption, rule W10). -/
 theorem writeUpdate_sups {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       p.sups = sups ∧ (sups.map Prod.fst).Nodup ∧
       ∀ s ∈ sups,
         s.1 < doc.file.trailer.size ∧ (∀ pg ∈ doc.pages.toList, pg.num ≠ s.1) ∧
@@ -764,8 +771,8 @@ theorem writeUpdate_sups {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 exactly its annotation dictionary; the new numbers are fresh. -/
 theorem writeAnnots_annots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) :
-    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
+    ∃ p d', plan limits doc marks aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.repaired = false ∧
       p.pages.map (fun pp => (pp.index, pp.annots.map Prod.snd)) = marks ∧
       ∀ pp ∈ p.pages,
@@ -805,8 +812,8 @@ theorem numberAux_fst (n : Nat) (as : List AuxStream) :
 plus the number of added annotations (superseded objects take no new numbers). -/
 theorem writeUpdate_aux {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream}
-    {out : ByteArray} (h : writeUpdate limits doc edits sups aux = .ok out) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    {out : ByteArray} (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       p.aux.map Prod.snd = aux ∧
       p.aux.map Prod.fst = (List.range aux.length).map
         (doc.file.trailer.size + (p.pages.map fun pp => pp.annots.length).sum + ·) ∧
@@ -825,8 +832,8 @@ data (`auxBody`: the data length for an unencrypted document, see `writeAnnots_a
 the encrypted length `Encrypt.encLen` for an encrypted one, whose data the reader decrypts
 back to exactly the given bytes). -/
 theorem writeAnnots_aux {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
-    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
-    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
+    ∃ p d', plan limits doc marks aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       p.aux.map Prod.snd = aux ∧
       p.aux.map Prod.fst = (List.range aux.length).map
         (doc.file.trailer.size + (p.pages.map fun pp => pp.annots.length).sum + ·) ∧
@@ -836,9 +843,9 @@ theorem writeAnnots_aux {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux :
 /-- **Auxiliary streams of an unencrypted document** (rule W9, the 9.5b statement): each
 fetches back as exactly `a.body` (`/Length` = its data length). -/
 theorem writeAnnots_aux_plain {limits : Limits} {doc : Doc.Doc} {marks : Marks}
-    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out)
     (hplain : doc.file.crypt = none) :
-    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    ∃ p d', plan limits doc marks aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       p.aux.map Prod.snd = aux ∧
       ∀ a ∈ p.aux, d'.getObject limits a.1 0 = .ok a.2.body := by
   obtain ⟨p, d', hp, hd, hs, _, haux⟩ := writeAnnots_aux h
@@ -848,7 +855,7 @@ theorem writeAnnots_aux_plain {limits : Limits} {doc : Doc.Doc} {marks : Marks}
 /-- **The result keeps the original's encryption, general writer** (rules W10, W11). -/
 theorem writeUpdate_crypt {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
     ∃ d', Open.openFile limits out = .ok d' ∧ SameCrypt d'.crypt doc.file.crypt := by
   obtain ⟨p, d', hp, hd, _, _, _, hcr⟩ := writeUpdate_open h
   exact ⟨d', hd, (planUpdate_ok hp).2.1 ▸ hcr⟩
@@ -860,7 +867,7 @@ equal (every field: handler incl. `/EncryptMetadata` and crypt filters, file key
 trailer or indirect, superseded or not. -/
 theorem writeUpdate_crypt_eq {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt := by
   obtain ⟨p, hp, _, _, hc⟩ := writeUpdate_ok h
   obtain ⟨d', hd, hcr⟩ := checkObjects_crypt hc
@@ -869,7 +876,7 @@ theorem writeUpdate_crypt_eq {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 /-- **The result has exactly the original's decryption state** (task 9.5e2) for
 `writeAnnots`: see `writeUpdate_crypt_eq`. -/
 theorem writeAnnots_crypt_eq {limits : Limits} {doc : Doc.Doc} {marks : Marks}
-    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt :=
   writeUpdate_crypt_eq h
 
@@ -879,7 +886,7 @@ stream methods and encryption-dictionary object — the new objects are encrypte
 same readers as the old ones, never written in the clear into an encrypted file without
 the reader noticing (the self-check decrypts them back, `writeAnnots_open`). -/
 theorem writeAnnots_crypt {limits : Limits} {doc : Doc.Doc} {marks : Marks}
-    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out) :
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
     ∃ d', Open.openFile limits out = .ok d' ∧ SameCrypt d'.crypt doc.file.crypt :=
   writeUpdate_crypt h
 
@@ -902,7 +909,7 @@ or above the original `/Size`: an added annotation, an auxiliary stream, the xre
 an original object that fetches as a dictionary (a rewritten page or a superseded object,
 rule W11). -/
 theorem keys_cases {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
-    {aux : List AuxStream} {p : Plan} (hp : planUpdate limits doc edits sups aux = .ok p)
+    {aux : List AuxStream} {p : Plan} (hp : planUpdate limits doc edits sups aux ivSeed = .ok p)
     {m : Nat} (hm : m ∈ p.keys) :
     doc.file.trailer.size ≤ m ∨
       ∃ gk dd, doc.file.getObject limits m gk = .ok (.obj (.dict dd)) := by
@@ -942,7 +949,7 @@ theorem keys_cases {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : Lis
 original (`WritePrefix.NotLen`): new numbers have no entry, rewritten pages and superseded
 objects are dictionaries. -/
 theorem keys_notLen {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
-    {aux : List AuxStream} {p : Plan} (hp : planUpdate limits doc edits sups aux = .ok p)
+    {aux : List AuxStream} {p : Plan} (hp : planUpdate limits doc edits sups aux ivSeed = .ok p)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {m : Nat} (hm : m ∈ p.keys) :
     WritePrefix.NotLen doc.file.pre doc.file.lookup limits doc.file.bytes m := by
   rcases keys_cases hp hm with hge | ⟨gk, dd, hg⟩
@@ -979,9 +986,9 @@ every object number the update does not write **fetches the same value**: every 
 same body on the result, `/Length` resolution, object streams and decryption included. -/
 theorem writeUpdate_value' {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
-    (hp : planUpdate limits doc edits sups aux = .ok p) :
+    (hp : planUpdate limits doc edits sups aux ivSeed = .ok p) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v := by
@@ -1031,9 +1038,9 @@ same body on the result, `/Length` resolution, object streams and decryption inc
 Since task 9.5e2 a corollary of `writeUpdate_value'`, which needs no `EncKept`. -/
 theorem writeUpdate_value {limits : Limits} {doc : Doc.Doc} {edits : Edits}
     {sups : List Supersede} {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
-    (hp : planUpdate limits doc edits sups aux = .ok p) (_henc : EncKept doc p) :
+    (hp : planUpdate limits doc edits sups aux ivSeed = .ok p) (_henc : EncKept doc p) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v :=
@@ -1041,9 +1048,9 @@ theorem writeUpdate_value {limits : Limits} {doc : Doc.Doc} {edits : Edits}
 
 /-- **C7 (3), value level** (task 9.5e) for `writeAnnots`: see `writeUpdate_value`. -/
 theorem writeAnnots_value {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
-    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
-    (hp : plan limits doc marks aux = .ok p) (henc : EncKept doc p) :
+    (hp : plan limits doc marks aux ivSeed = .ok p) (henc : EncKept doc p) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v :=
@@ -1052,9 +1059,9 @@ theorem writeAnnots_value {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux
 /-- **C7 (3), value level, no side condition** (tasks 9.5e, 9.5e2) for `writeAnnots`: see
 `writeUpdate_value'`. -/
 theorem writeAnnots_value' {limits : Limits} {doc : Doc.Doc} {marks : Marks}
-    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    {aux : List AuxStream} {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) {p : Plan}
-    (hp : plan limits doc marks aux = .ok p) :
+    (hp : plan limits doc marks aux ivSeed = .ok p) :
     ∃ d', Open.openFile limits out = .ok d' ∧ d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v :=
@@ -1063,7 +1070,7 @@ theorem writeAnnots_value' {limits : Limits} {doc : Doc.Doc} {marks : Marks}
 /-! ## C7 -/
 
 /-- **C7 (Plan.md §4): the incremental update is conservative.** For every successful
-`writeAnnots limits doc marks aux = .ok out`:
+`writeAnnots limits doc marks aux ivSeed = .ok out`:
 
 * the original bytes are a prefix of `out` (S8);
 * `out`'s chain is the original chain with one new section (`/Prev` = old `startxref`)
@@ -1076,10 +1083,10 @@ theorem writeAnnots_value' {limits : Limits} {doc : Doc.Doc} {marks : Marks}
 `writeAnnots_value`.) -/
 theorem c7 {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
     {out : ByteArray}
-    (h : writeAnnots limits doc marks aux = .ok out) :
+    (h : writeAnnots limits doc marks aux ivSeed = .ok out) :
     (∃ u, out = doc.file.bytes ++ u) ∧
     ∃ p revs sec' tr' off' d',
-      plan limits doc marks aux = .ok p ∧
+      plan limits doc marks aux ivSeed = .ok p ∧
       loadChain limits out = .ok ((sec', tr', off') :: revs) ∧
       loadChain limits doc.file.bytes = .ok revs ∧
       tr'.prev? = some p.start ∧ Xref.findStartxref doc.file.bytes = .ok p.start ∧
@@ -1103,7 +1110,7 @@ theorem c7 {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStre
     fun pp hpp => ⟨(hall pp hpp).1, (hall pp hpp).2.1, (hall pp hpp).2.2.2.1⟩⟩
 
 /-- **C7 for the generalized update** (Plan.md §4 C7, rule W11, task 9.5g). For every
-successful `writeUpdate limits doc edits sups aux = .ok out`:
+successful `writeUpdate limits doc edits sups aux ivSeed = .ok out`:
 
 * the original bytes are a prefix of `out` (S8);
 * `out`'s chain is the original chain with one new section (`/Prev` = old `startxref`)
@@ -1118,10 +1125,10 @@ successful `writeUpdate limits doc edits sups aux = .ok out`:
   `out` fetches exactly its new dictionary there. -/
 theorem c7Update {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
     {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out) :
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out) :
     (∃ u, out = doc.file.bytes ++ u) ∧
     ∃ p revs sec' tr' off' d',
-      planUpdate limits doc edits sups aux = .ok p ∧
+      planUpdate limits doc edits sups aux ivSeed = .ok p ∧
       loadChain limits out = .ok ((sec', tr', off') :: revs) ∧
       loadChain limits doc.file.bytes = .ok revs ∧
       tr'.prev? = some p.start ∧ Xref.findStartxref doc.file.bytes = .ok p.start ∧
@@ -1168,7 +1175,7 @@ theorem openFile_self {limits : Limits} {bytes : ByteArray} {doc : Doc.Doc}
 
 /-- **C7 at the value level, general writer, no side condition** (tasks 9.5e, 9.5e2;
 alongside `c7Update`, whose statement is unchanged). For every successful
-`writeUpdate limits doc edits sups aux = .ok out` of a document opened from its bytes
+`writeUpdate limits doc edits sups aux ivSeed = .ok out` of a document opened from its bytes
 (`openFile_self` for `Doc.openDoc`) — unencrypted, or encrypted with a direct trailer
 `/Encrypt` dictionary or an indirect one (superseded or not) — the plan `p` and the strictly
 opened result `d'` are those of `c7Update`, the result has exactly the original's decryption
@@ -1176,9 +1183,9 @@ state, and every object number not in `p.keys` fetches exactly as in the origina
 successful `getObject`, any generation). -/
 theorem c7Value' {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
     {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v := by
@@ -1187,7 +1194,7 @@ theorem c7Value' {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List 
   exact ⟨p, d', hp, hd, hc, hv⟩
 
 /-- **C7 at the value level, general writer** (task 9.5e; alongside `c7Update`, whose
-statement is unchanged). For every successful `writeUpdate limits doc edits sups aux = .ok out`
+statement is unchanged). For every successful `writeUpdate limits doc edits sups aux ivSeed = .ok out`
 of a document opened from its bytes (`openFile_self` for `Doc.openDoc`): the plan `p` and the
 strictly opened result `d'` are those of `c7Update`, and if the encryption dictionary is kept
 (`EncKept`: unencrypted, or `/Encrypt` an indirect object not in `p.keys`) the result has the
@@ -1196,9 +1203,9 @@ the original (every successful `getObject`, any generation). Since task 9.5e2 a 
 of `c7Value'`, which drops the `EncKept` condition. -/
 theorem c7Value {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
     {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       (EncKept doc p → d'.crypt = doc.file.crypt ∧
         ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
           d'.getObject limits n g = .ok v) := by
@@ -1208,9 +1215,9 @@ theorem c7Value {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List S
 /-- **C7 at the value level for unencrypted documents** (task 9.5e): no side condition. -/
 theorem c7Value_plain {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : List Supersede}
     {aux : List AuxStream} {out : ByteArray}
-    (h : writeUpdate limits doc edits sups aux = .ok out)
+    (h : writeUpdate limits doc edits sups aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) (hplain : doc.file.crypt = none) :
-    ∃ p d', planUpdate limits doc edits sups aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    ∃ p d', planUpdate limits doc edits sups aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v := by
   obtain ⟨p, d', hp, hd, hv⟩ := c7Value h hd0
@@ -1218,9 +1225,9 @@ theorem c7Value_plain {limits : Limits} {doc : Doc.Doc} {edits : Edits} {sups : 
 
 /-- **C7 at the value level for `writeAnnots`** (task 9.5e; alongside `c7`). -/
 theorem c7ValueAnnots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
-    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
-    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    ∃ p d', plan limits doc marks aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       (EncKept doc p → d'.crypt = doc.file.crypt ∧
         ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
           d'.getObject limits n g = .ok v) :=
@@ -1229,9 +1236,9 @@ theorem c7ValueAnnots {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : L
 /-- **C7 at the value level for `writeAnnots`, no side condition** (tasks 9.5e, 9.5e2;
 alongside `c7`): see `c7Value'`. -/
 theorem c7ValueAnnots' {limits : Limits} {doc : Doc.Doc} {marks : Marks} {aux : List AuxStream}
-    {out : ByteArray} (h : writeAnnots limits doc marks aux = .ok out)
+    {out : ByteArray} (h : writeAnnots limits doc marks aux ivSeed = .ok out)
     (hd0 : Open.openFile limits doc.file.bytes = .ok doc.file) :
-    ∃ p d', plan limits doc marks aux = .ok p ∧ Open.openFile limits out = .ok d' ∧
+    ∃ p d', plan limits doc marks aux ivSeed = .ok p ∧ Open.openFile limits out = .ok d' ∧
       d'.crypt = doc.file.crypt ∧
       ∀ n, n ∉ p.keys → ∀ g v, doc.file.getObject limits n g = .ok v →
         d'.getObject limits n g = .ok v :=

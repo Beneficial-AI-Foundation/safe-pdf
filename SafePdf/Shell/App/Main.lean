@@ -112,7 +112,7 @@ def annotsDemo (y : BibLean.Annots.Sync) (s : Marks.Store) : IO String := do
   s := (s.addNote 0 .yellow "demo note" (.point ⟨pi.box.llx + 20, pi.box.ury - 20⟩)).1
   y.onMarksChanged s
   let d := y.document
-  match Save.build d.limits d.doc s (← Save.nowDate) with
+  match ← Save.buildNow d.limits d.doc s with
   | .error e => return s!"save failed: {e}"
   | .ok (bytes, _) =>
     y.onSaved bytes

@@ -3888,7 +3888,7 @@ def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := 
     else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
       ({o.appended} bytes appended)"
   setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
-    unchanged at its start"
+    unchanged at its start{Save.notesText o.notes}"
 
 /-- Writes the document with its unsaved marks to another file `target` (Save As…;
 `Save.write`: the incremental update, checked by a strict reopen before anything is written,
@@ -3920,7 +3920,7 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
   let s ← st.get
   let some doc := s.doc | return some false
   let name := baseName path
-  match Save.build limits doc s.marks (← Save.nowDate) with
+  match ← Save.buildNow limits doc s.marks with
   | .error e =>
     setStatus s!"cannot save to {name}: {e}"
     return some false
@@ -3963,7 +3963,8 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
       setStatus s!"cannot save to {name}: {Save.oneLine (toString e)}"
       return some false
     afterWrite st s.page { path, marks := n, appended := bytes.size - doc.file.bytes.size,
-                           size := bytes.size, total := got.length }
+                           size := bytes.size, total := got.length,
+                           notes := Save.notesFor limits doc n }
     return some true
 
 /-- **Save to library** (task 10.1b, Save in bib-lean's reader mode): `Save.build`'s bytes (the
@@ -3975,7 +3976,7 @@ nothing is written to disk; then the window reopens those bytes from memory on t
 def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc) : IO Bool := do
   let s ← st.get
   setStatus "saving to the library..."
-  match Save.build limits doc s.marks (← Save.nowDate) with
+  match ← Save.buildNow limits doc s.marks with
   | .error e =>
     setStatus s!"cannot save to the library: {e}"
     return false
@@ -3986,7 +3987,7 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
     marksChanged st
     let appended := bytes.size - doc.file.bytes.size
     setStatus s!"saved {n} new, changed or deleted mark(s) to the library ({appended} bytes \
-      appended; {got.length} marks in its file)"
+      appended; {got.length} marks in its file){Save.notesText (Save.notesFor limits doc n)}"
     return true
 
 /-- The directory of `path` for a file dialog (`.` when it has none). -/

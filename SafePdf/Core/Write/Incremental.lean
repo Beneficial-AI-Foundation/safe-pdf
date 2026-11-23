@@ -30,8 +30,9 @@ dictionaries (task 9.5b builds `/Highlight` and `/Text` ones). The update holds:
   trailer but no decryption state is still refused: it cannot occur after a strict open.)
 * W10. **Encrypted documents** (task 9.5f): the written objects are encrypted with the
   document's own security handler and file key (`Core.Write.Encrypt`, rules E1-E7: per-object
-  key by Algorithm 1, RC4 / AES-128 / AES-256 by `/StrF` and `/StmF`, a deterministic AES IV
-  derived by SHA-256 since the core has no randomness). The plan keeps both forms: the
+  key by Algorithm 1, RC4 / AES-128 / AES-256 by `/StrF` and `/StmF`, an AES IV derived by
+  SHA-256 from the caller's `ivSeed` — fresh OS randomness in the viewer, task 12.4 — since the
+  core itself has no randomness; every theorem of `Spec.Write` holds for every seed). The plan keeps both forms: the
   plaintext objects (`Plan.objects`, `Plan.aux` — what the reader must see) and the written
   ones (`Plan.wire`, `Plan.auxWire`). An auxiliary stream's `/Length` is that of its written
   data, so its decrypted body is `auxBody` (with `/Length` = `Encrypt.encLen`). The trailer
@@ -391,29 +392,30 @@ def Plan.auxExpected (p : Plan) : List (Nat × IndirectBody) :=
   p.aux.map fun a => (a.1, auxBody p.crypt a.2)
 
 /-- One object as written (rule W10): encrypted under `st`, if any. -/
-def wireObject (st : Option Crypt.State) (o : Nat × Nat × PdfObject) :
+def wireObject (st : Option Crypt.State) (seed : ByteArray) (o : Nat × Nat × PdfObject) :
     Except Error (Nat × Nat × PdfObject) :=
   match st with
   | none => .ok o
   | some s =>
-    match Encrypt.encryptObject s o.1 o.2.1 o.2.2 with
+    match Encrypt.encryptObject s o.1 o.2.1 o.2.2 seed with
     | .ok o' => .ok (o.1, o.2.1, o')
     | .error e => .error e
 
 /-- One auxiliary stream as written (rules W9, W10): dictionary (strings encrypted under `st`)
 with `/Length` of the written data, and the (encrypted) data. -/
-def wireAux (st : Option Crypt.State) (a : Nat × AuxStream) :
+def wireAux (st : Option Crypt.State) (seed : ByteArray) (a : Nat × AuxStream) :
     Except Error (Nat × Dict × List UInt8) :=
   match st with
   | none => .ok (a.1, a.2.fullDict, a.2.data)
   | some s =>
-    match Encrypt.encryptStream s a.1 0 a.2.dict a.2.data with
+    match Encrypt.encryptStream s a.1 0 a.2.dict a.2.data seed with
     | .ok (d, data) => .ok (a.1, setKey d nameLength (.int data.length), data)
     | .error e => .error e
 
-/-- **Planning** (rules W1–W3, W9–W11): checks the input and reads the pages. -/
+/-- **Planning** (rules W1–W3, W9–W11): checks the input and reads the pages. `ivSeed`
+feeds the AES IVs of an encrypted document (rule W10, `Encrypt` rule E3'). -/
 def planUpdate (limits : Limits) (doc : Doc.Doc) (edits : Edits) (sups : List Supersede)
-    (aux : List AuxStream := []) : Except Error Plan :=
+    (aux : List AuxStream := []) (ivSeed : ByteArray := ByteArray.empty) : Except Error Plan :=
   let d := doc.file
   if d.repaired then .error (.unsupported "incremental update of a repaired document")
   else if d.trailer.encrypted && d.crypt.isNone then
@@ -438,15 +440,16 @@ def planUpdate (limits : Limits) (doc : Doc.Doc) (edits : Edits) (sups : List Su
           d.trailer.dict, numberAux n0 aux, sups, d.crypt, [], []⟩
         if limits.maxObjects + 1 < p.newSize then .error (.limitExceeded .objects)
         else
-          match p.objects.mapM (wireObject d.crypt), p.aux.mapM (wireAux d.crypt) with
+          match p.objects.mapM (wireObject d.crypt ivSeed),
+            p.aux.mapM (wireAux d.crypt ivSeed) with
           | .ok w, .ok wa => .ok { p with wire := w, auxWire := wa }
           | .error e, _ => .error e
           | _, .error e => .error e
 
 /-- **Planning for `writeAnnots`** (rules W1–W3, W9): add-only page edits, no supersessions. -/
-def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
-    Except Error Plan :=
-  planUpdate limits doc (marks.map PageEdit.ofMarks) [] aux
+def plan (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := [])
+    (ivSeed : ByteArray := ByteArray.empty) : Except Error Plan :=
+  planUpdate limits doc (marks.map PageEdit.ofMarks) [] aux ivSeed
 
 /-! ## Layout -/
 
@@ -597,10 +600,12 @@ def result (bytes : ByteArray) (p : Plan) : ByteArray :=
 removed from `/Annots`, annotations added) and `sups` (objects superseded under their own
 number and generation) to the opened document `doc` as one incremental update:
 `doc.file.bytes ++ update`, self-checked by the strict parser (rule W8). `aux` are extra
-stream objects (rule W9). -/
+stream objects (rule W9). `ivSeed` feeds the AES IVs of an encrypted document (rule W10;
+the viewer passes fresh OS randomness, task 12.4). -/
 def writeUpdate (limits : Limits) (doc : Doc.Doc) (edits : Edits) (sups : List Supersede)
-    (aux : List AuxStream := []) : Except Error ByteArray :=
-  match planUpdate limits doc edits sups aux with
+    (aux : List AuxStream := []) (ivSeed : ByteArray := ByteArray.empty) :
+    Except Error ByteArray :=
+  match planUpdate limits doc edits sups aux ivSeed with
   | .error e => .error e
   | .ok p =>
     let out := result doc.file.bytes p
@@ -613,10 +618,10 @@ def writeUpdate (limits : Limits) (doc : Doc.Doc) (edits : Edits) (sups : List S
 /-- **Entry point** (Plan.md C7). Append `marks` to the opened document `doc` as an
 incremental update: `doc.file.bytes ++ update`, self-checked by the strict parser (rule W8).
 `aux` are extra stream objects (rule W9; appearance streams, task 9.5b). It is `writeUpdate`
-with add-only page edits and no supersessions (rule W11). -/
-def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := []) :
-    Except Error ByteArray :=
-  writeUpdate limits doc (marks.map PageEdit.ofMarks) [] aux
+with add-only page edits and no supersessions (rule W11); `ivSeed` as for `writeUpdate`. -/
+def writeAnnots (limits : Limits) (doc : Doc.Doc) (marks : Marks) (aux : List AuxStream := [])
+    (ivSeed : ByteArray := ByteArray.empty) : Except Error ByteArray :=
+  writeUpdate limits doc (marks.map PageEdit.ofMarks) [] aux ivSeed
 
 
 end SafePdf.Core.Write.Incremental
