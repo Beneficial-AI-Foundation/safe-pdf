@@ -424,6 +424,25 @@ structure State where
   scroll : View.ScrollMode := .vertical
   /-- Spread mode (task 9.3, PDF.js "No / Odd / Even Spreads"). -/
   spread : View.SpreadMode := .none
+  /-- The view a file without `/PageLayout` opens in (task 9.r8): Vertical Scrolling without
+  spreads, or what `SAFEPDF_VIEWER_VIEW` asks for at start-up. -/
+  defaultView : View.ScrollMode × View.SpreadMode := (.vertical, .none)
+  /-- Spreads run right to left (task 9.r8, `/ViewerPreferences /Direction /R2L`): the first
+  page of a spread is on the right. -/
+  rtl : Bool := false
+  /-- The window is in full screen (task 9.r8, `/PageMode /FullScreen`); Escape leaves. -/
+  fullScreen : Bool := false
+  /-- The page mode applied on leaving full screen (`/NonFullScreenPageMode`). -/
+  afterFullScreen : Core.Doc.OpenSettings.PageMode := .useNone
+  /-- The document's `/Title` as display text, when `/DisplayDocTitle` asks for it in the
+  window title (task 9.r8). -/
+  docTitle : Option String := none
+  /-- What the document's viewer preferences hide (task 9.r8): toolbar, menubar, scroll bars
+  (`/HideToolbar`, `/HideMenubar`, `/HideWindowUI`); Escape shows them again. -/
+  hidden : Bool × Bool × Bool := (false, false, false)
+  /-- Notes about open settings that were not honoured (task 9.r8), added to the status line
+  until the next open. -/
+  openNote : String := ""
   /-- The laid-out pages (one spread in the page scroll mode, all pages in the vertical ones),
   in page order. -/
   slots : Array Slot := #[]
@@ -548,6 +567,9 @@ def computeLayout (s : State) (doc : Doc) : Array Slot × Nat × Nat :=
     | some vp => SafePdf.Core.Raster.Clip.pageSize limits.maxPageSide vp.zoom vp.rot vp.box
     | none => (0, 0)
   let (ps, rw, rh) := View.layoutRows sizes rows s.canvasW s.canvasH (s.scroll == .page)
+  -- Task 9.r8, `/Direction /R2L`: spreads mirrored, the first page of each on the right (rows
+  -- are centred in the region, so mirroring the region keeps them centred).
+  let ps := if s.rtl && s.spread != .none then ps.map (View.mirrorPlace rw) else ps
   (ps.filterMap fun pl => (vps[pl.page]?.join).map (⟨pl, ·⟩), rw, rh)
 
 /-- The layout key of the state (task 9.3). -/
@@ -590,6 +612,7 @@ def modeNote (s : State) : String :=
     | .none => ""
     | .odd => "odd spreads"
     | .even => "even spreads"
+  let sp := if s.rtl && s.spread != .none then s!"{sp}, right to left" else sp
   match sc, sp with
   | "", "" => ""
   | a, "" => s!"; {a}"
@@ -597,7 +620,9 @@ def modeNote (s : State) : String :=
   | a, b => s!"; {a}, {b}"
 
 #guard modeNote {} == "" && modeNote { scroll := .page, spread := .odd } ==
-  "; page scrolling, odd spreads" && modeNote { spread := .even } == "; even spreads"
+  "; page scrolling, odd spreads" && modeNote { spread := .even } == "; even spreads" &&
+  modeNote { spread := .odd, rtl := true } == "; odd spreads, right to left" &&
+  modeNote { rtl := true } == ""
 
 /-- Last path component of a file name (for the window title). -/
 def baseName (path : String) : String :=
@@ -605,12 +630,13 @@ def baseName (path : String) : String :=
 
 /-- Window title: `safe-pdf`, or `NAME - page k/n - safe-pdf`, with `* ` in front while there
 are unsaved marks (task 9.5c); `NAME` is `titleOverride` when set (task 10.1b), else the
-file name. -/
+file name, or the document's `/Title` when its `/DisplayDocTitle` asks for it (task 9.r8,
+`docTitle`). -/
 def State.title (s : State) : String :=
   match s.path, s.doc with
   | some p, some _ =>
     let star := if s.marks.dirty then "* " else ""
-    s!"{star}{s.titleOverride.getD (baseName p)} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
+    s!"{star}{s.titleOverride.getD (s.docTitle.getD (baseName p))} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
   | some p, none => s!"{s.titleOverride.getD (baseName p)} - safe-pdf"
   | none, _ => "safe-pdf"
 
@@ -2069,7 +2095,7 @@ def showStatus (st : IO.Ref State) (how : String) : IO Unit := do
         s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
       (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
     setStatus s!"{path}: {page}, {pct}% ({modeName s.zoomSel}), \
-      rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}"
+      rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}{s.openNote}"
 
 /-- Shows the current page in the toolbar's page field (`Toolbar.entryText`: the number, or
 the label when the document has labels) and the "of N" label next to it (task 9.7). -/
@@ -2477,10 +2503,182 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
   discard <| run [".ol.t", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
   discard <| run ["::safepdf::olSetTri", toString i, Sidebar.triangle true on]
 
+/-! ## Document open settings (task 9.r8) -/
+
+/-- Sets the View menu's and the `»` menu's radio variables, `::safepdf::continuous` and the
+view-mode drop-down to the state's view mode (as `setViewMode` does). -/
+def syncViewVars (s : State) : IO Unit := do
+  discard <| run ["set", Menu.scrollVar, s.scroll.key]
+  discard <| run ["set", Menu.spreadVar, s.spread.key]
+  discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
+  showViewChoice s s.doc.isSome
+
+/-- Shows or hides the toolbar, the menubar and the scroll bars (task 9.r8,
+`/ViewerPreferences /HideToolbar`, `/HideMenubar`, `/HideWindowUI`; `(false, false, false)`
+shows them all). On aqua the menubar cannot be removed (Tk keeps a default one there). -/
+def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit := do
+  let (tb, mb, ui) := hidden
+  let old := (← st.get).hidden
+  if old == hidden then return
+  if tb != old.1 then
+    if tb then discard <| run ["pack", "forget", ".bar"]
+    else discard <| run ["pack", ".bar", "-side", "top", "-fill", "x", "-before", ".barline"]
+  if mb != old.2.1 then
+    discard <| run [".", "configure", "-menu", if mb then "" else Menu.barPath]
+  if ui != old.2.2 then
+    if ui then discard <| run ["grid", "remove", ".ys", ".xs"]
+    else discard <| run ["grid", ".ys", ".xs"]
+  discard <| run ["::safepdf::resizeSoon"]
+  st.modify ({ · with hidden })
+
+/-- Enters or leaves full screen (task 9.r8, `/PageMode /FullScreen`): `wm attributes .
+-fullscreen`. Leaving applies the document's `/NonFullScreenPageMode` to the outline. -/
+def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
+  let s ← st.get
+  if on == s.fullScreen then return
+  discard <| run ["::safepdf::resizeSoon"]
+  discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
+  st.modify ({ · with fullScreen := on })
+  if !on && s.doc.isSome then
+    showOutline st (Sidebar.shownOnLoad (some s.afterFullScreen) (!s.outline.isEmpty))
+    if let some p := Core.Doc.OpenSettings.panelMissing (some s.afterFullScreen) then
+      setStatus s!"{p} panel not available yet"
+
+/-- The view a document without open settings gets (task 9.r8): the default view mode, left
+to right, Automatic Zoom, full window UI, no document title, no notes. -/
+def resetOpenView (st : IO.Ref State) : IO Unit := do
+  setFullScreen st false
+  applyChrome st (false, false, false)
+  st.modify fun s => { s with scroll := s.defaultView.1, spread := s.defaultView.2, rtl := false,
+                              zoomSel := .auto, docTitle := none, openNote := "",
+                              afterFullScreen := .useNone }
+  syncViewVars (← st.get)
+
+/-- The zoom choice for an open destination's zoom (task 9.r8, rule O5 of
+`Core.Doc.OpenSettings`): a percentage clamped to the viewer's 25–800 %; Fit and FitR → Page
+Fit; FitH → Page Width; FitV → Page Fit (best effort: there is no fit-height choice; for a
+portrait page in a landscape window it is the same zoom); `keep` → unchanged. -/
+def zoomChoiceOf (z : Core.Doc.OpenSettings.Zoom) (cur : Toolbar.ZoomChoice) :
+    Toolbar.ZoomChoice :=
+  match z with
+  | .keep => cur
+  | .percent p => .pct (max View.minPct (min View.maxPct p))
+  | .fitPage | .fitHeight => .pageFit
+  | .fitWidth => .pageWidth
+
+#guard zoomChoiceOf (.percent 150) .auto == .pct 150 && zoomChoiceOf (.percent 5) .auto == .pct 25 &&
+  zoomChoiceOf (.percent 6400) .auto == .pct 800 && zoomChoiceOf .keep .auto == .auto &&
+  zoomChoiceOf .fitHeight .auto == .pageFit && zoomChoiceOf .fitWidth .auto == .pageWidth
+
+/-- The view modes of a `/PageLayout` (PDF.js `apiPageLayoutToViewerModes`; Odd Spreads put
+the odd pages on the left, Even Spreads on the right). -/
+def modesOf (l : Core.Doc.OpenSettings.PageLayout) : View.ScrollMode × View.SpreadMode :=
+  (if l.continuous then .vertical else .page,
+   match l.spread with
+   | .none => .none
+   | .oddLeft => .odd
+   | .oddRight => .even)
+
+#guard modesOf .singlePage == (.page, .none) && modesOf .oneColumn == (.vertical, .none) &&
+  modesOf .twoColumnLeft == (.vertical, .odd) && modesOf .twoColumnRight == (.vertical, .even) &&
+  modesOf .twoPageLeft == (.page, .odd) && modesOf .twoPageRight == (.page, .even)
+
+/-- `/FitWindow` (task 9.r8): sizes the window so that the canvas shows page `p` at the zoom
+choice's percentage (100 % for the fit choices), both pages of a spread side by side, at most
+90 % of the screen. -/
+def fitWindow (st : IO.Ref State) (doc : Doc) (p : Nat) : IO Unit := do
+  let s ← st.get
+  let some page := doc.pages[p]? | return
+  let (pw, ph) := View.boxSize (rotAdd page.rotate s.rot) (Box.ofRect page.cropBox)
+  let (fw, fh) := View.fitBox s.spread pw ph
+  let pct := match s.zoomSel with | .pct q => q | _ => 100
+  let z := View.pctZoom pct s.scaling
+  let cw := (fw * z).ceil.toNat + 2 * View.margin + (if s.spread == .none then 0 else View.pageGap)
+  let ch := (fh * z).ceil.toNat + 2 * View.margin
+  let num (w : String) : IO (Option Nat) := return (← run ["winfo", w, "."]).toNat?
+  let (some ww, some wh, some sw, some sh) :=
+    (← num "width", ← num "height", ← num "screenwidth", ← num "screenheight") | return
+  let w := min (sw * 9 / 10) (cw + (ww - s.canvasW))
+  let h := min (sh * 9 / 10) (ch + (wh - s.canvasH))
+  discard <| run ["wm", "geometry", ".", s!"{max w 480}x{max h 240}"]
+
+/-- `/CenterWindow` (task 9.r8): puts the window in the middle of the screen. -/
+def centerWindow : IO Unit := do
+  discard <| run ["update", "idletasks"]
+  let get (w : String) : IO Nat := return ((← run ["winfo", w, "."]).toNat?).getD 0
+  let (ww, wh, sw, sh) := (← get "width", ← get "height", ← get "screenwidth", ← get "screenheight")
+  discard <| run ["wm", "geometry", ".", s!"+{(sw - ww) / 2}+{(sh - wh) / 2}"]
+
+/-- The status note while the document's preferences hide parts of the window. -/
+def hiddenNote : String := "the document hides parts of the window (Escape shows them)"
+
+/-- The status note while the document is shown in full screen. -/
+def fullScreenNote : String := "full screen (Escape leaves)"
+
+/-- **Applies the document's open settings** (task 9.r8, `Core.Doc.OpenSettings.read`) to the
+state `resetOpenView` left: `/PageLayout` → view mode, `/Direction /R2L` → right-to-left
+spreads, `/OpenAction` (a destination or a GoTo action only, never anything else) → page, zoom
+and position, `/DisplayDocTitle` → the window title from `/Title`, the hiding preferences,
+`/FullScreen`. Returns the page mode (for the outline), the viewer preferences (FitWindow and
+CenterWindow are applied by `openWith` once the outline is laid out) and the notes for the
+status line (what was not honoured). -/
+def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
+    IO (Option Core.Doc.OpenSettings.PageMode × Core.Doc.OpenSettings.Prefs × List String) := do
+  let o ← IO.lazyPure fun _ => Core.Doc.OpenSettings.read doc limits
+  let pr := o.prefs
+  if let some l := o.layout then
+    let (sc, sp) := modesOf l
+    st.modify ({ · with scroll := sc, spread := sp })
+  let docTitle := if pr.displayDocTitle then
+      (o.title.map Links.textString).filter (·.any (· != ' ')) else none
+  st.modify fun s => { s with rtl := pr.direction == .r2l, docTitle,
+                              afterFullScreen := pr.nonFullScreen }
+  if let some d := o.dest then
+    if let some j := Links.jumpOf d then
+      let z := Core.Doc.OpenSettings.zoomOf d.fit
+      st.modify fun s => { s with page := j.page, pending := some (.dest j.left j.top),
+                                  zoomSel := zoomChoiceOf z s.zoomSel }
+  syncViewVars (← st.get)
+  applyChrome st (pr.hideToolbar, pr.hideMenubar, pr.hideWindowUI)
+  let mut notes := o.issues.map (·.message)
+  if let some p := Core.Doc.OpenSettings.panelMissing o.mode then
+    notes := notes ++ [s!"{p} panel not available yet"]
+  if pr.hideToolbar || pr.hideMenubar || pr.hideWindowUI then
+    notes := notes ++ [hiddenNote]
+  if o.mode == some .fullScreen then
+    setFullScreen st true
+    notes := notes ++ [fullScreenNote]
+  return (o.mode, pr, notes)
+
+/-- Escape's window part (task 9.r8): leaves full screen, else shows what the document's
+viewer preferences hid. Returns whether it did anything. -/
+def escapeWindow (st : IO.Ref State) : IO Bool := do
+  let s ← st.get
+  -- The status notes that told how to get here are done.
+  st.modify fun s => { s with openNote := ((s.openNote.replace s!"; {fullScreenNote}" "").replace
+    s!"; {hiddenNote}" "") }
+  if s.fullScreen then
+    setFullScreen st false
+    return true
+  if s.hidden != (false, false, false) then
+    applyChrome st (false, false, false)
+    setStatus "toolbar, menu bar and scroll bars shown"
+    return true
+  return false
+
 /-- Opens the document `load` gives under the name `path`: builds the page tree, shows page 1.
 A failure (`load`'s message, e.g. `cannot read: …`) ends up in the status line with an empty
-page. Shared by `openFile` and `openBytes`. -/
-def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc)) : IO Unit := do
+page. Shared by `openFile` and `openBytes`.
+
+Task 9.r8: every open starts from the default view (`resetOpenView`: the start-up view mode,
+Automatic Zoom, page 1, full window UI) and applies the document's open settings
+(`applyOpenSettings`), so nothing carries over from the previous file. With `keepView` (the
+reopen after Save / Save to library) the user's view mode, zoom, outline and window stay as
+they were and the document's settings are not applied again. -/
+def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
+    (keepView : Bool := false) : IO Unit := do
+  let wasShown := (← st.get).outlineShown
+  if !keepView then resetOpenView st
   st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
                               shown := none }
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
@@ -2509,13 +2707,27 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
       (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
     st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
     fillOutline st
-    showOutline st (Sidebar.shownOnLoad (!outline.isEmpty))
+    -- Task 9.r8: the document's open settings, on every open except the reopen after a save
+    -- (`keepView`: the user's view stays, outline included).
+    let (mode, prefs, notes) ← if keepView then pure (none, {}, [])
+      else applyOpenSettings st doc
+    -- Before anything lays the window out: a `<Configure>` refresh shows the status line.
+    st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
+    showOutline st (if keepView then wasShown && !outline.isEmpty
+      else Sidebar.shownOnLoad mode (!outline.isEmpty))
+    let readCanvas : IO Unit := do
+      discard <| run ["update", "idletasks"]
+      if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
+          (← run ["winfo", "height", ".c"]).toNat?) then
+        if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
     -- Lay the window out again so that the first render uses the canvas size beside the
     -- outline panel.
-    discard <| run ["update", "idletasks"]
-    if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
-        (← run ["winfo", "height", ".c"]).toNat?) then
-      if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
+    readCanvas
+    if !(← st.get).fullScreen then
+      if prefs.fitWindow then
+        fitWindow st doc (← st.get).page
+        readCanvas
+      if prefs.centerWindow then centerWindow
     if doc.pages.size == 0 then
       refresh st
       setStatus s!"{path}: the document has no pages"
@@ -2538,10 +2750,10 @@ def setSaveLabels (library : Bool) : IO Unit := do
 /-- Opens the file `path` (`Inspect.load`: size check against `Limits.maxInputBytes`, then
 `SafePdf.parseWith`). A local file: a library the window had (task 10.1b) is let go, its
 pending posts still go out on their own thread. -/
-def openFile (st : IO.Ref State) (path : String) : IO Unit := do
+def openFile (st : IO.Ref State) (path : String) (keepView : Bool := false) : IO Unit := do
   if (← st.get).library.isSome then setSaveLabels false
   st.modify ({ · with inMemory := false, titleOverride := none, library := none })
-  openWith st path do
+  openWith st path (keepView := keepView) do
     match ← Inspect.load {} path with
     | .error msg => return .error s!"cannot read: {msg}"
     | .ok input =>
@@ -2554,9 +2766,10 @@ HTTP and never writes it to disk): `bytes` through `SafePdf.Api.openBytes` (the 
 limits, the lenient path allowed as for files), shown under the name `name` (the title uses
 `titleOverride` when set). `State.library` and `titleOverride` are kept, so a library reopens
 its saved bytes with this. -/
-def openBytes (st : IO.Ref State) (name : String) (bytes : ByteArray) : IO Unit := do
+def openBytes (st : IO.Ref State) (name : String) (bytes : ByteArray) (keepView : Bool := false) :
+    IO Unit := do
   st.modify ({ · with inMemory := true })
-  openWith st name do
+  openWith st name (keepView := keepView) do
     match SafePdf.Api.openBytes bytes { limits } with
     | .ok d => return .ok d.doc
     | .error e => return .error s!"cannot open: {e.message}"
@@ -2778,7 +2991,9 @@ Save works) and reports. -/
 def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := do
   let own := (← st.get).ownFiles
   st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
-  openFile st o.path
+  -- Task 9.r8: the reopen keeps the user's view (the document's open settings are not
+  -- applied again).
+  openFile st o.path (keepView := true)
   goTo st page
   let what := if o.marks == 0 then "a copy (no changed marks)"
     else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
@@ -2877,7 +3092,7 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
     return false
   | .ok (bytes, got, n) =>
     lib.onSaved bytes
-    openBytes st name bytes
+    openBytes st name bytes (keepView := true)
     goTo st s.page
     marksChanged st
     let appended := bytes.size - doc.file.bytes.size
@@ -3809,6 +4024,8 @@ def popDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
 /-- Escape (task 9.8): closes the colour picker and the pop-over and dismisses the bubble (the
 text selection and the selected mark are cleared; the tool stays on). -/
 def escape (st : IO.Ref State) : IO Unit := do
+  -- Task 9.r8: full screen ends, parts of the window the document hid come back.
+  discard <| escapeWindow st
   st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none,
                               inkSession := none }
   drawOverlay st
@@ -6083,6 +6300,63 @@ def smokeR4 (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "r4.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- The fixtures of the open-settings smoke step (task 9.r8), opened one after another from
+the directory of the file the viewer started with (`scripts/viewer-smoke.sh` case 1s writes
+them). -/
+def openSettingsFixtures : List String :=
+  ["layout-SinglePage", "layout-OneColumn", "layout-TwoColumnLeft", "layout-TwoColumnRight",
+   "layout-TwoPageLeft", "layout-TwoPageRight", "mode-UseOutlines", "mode-UseNone",
+   "mode-UseThumbs", "xyz", "fit", "named", "js", "uri", "prefs", "r2l", "full", "window",
+   "none"]
+
+/-- Smoke steps of task 9.r8 (`SAFEPDF_VIEWER_SMOKE_MODE=opensettings`): opens each of
+`openSettingsFixtures` with `openFile` (the File → Open path after its dialog) and writes one
+line per file to `opensettings.txt`: view mode (state and the View menu's variables), right to
+left, zoom choice, page, outline shown, full screen (state and `wm attributes`), toolbar /
+menubar / scroll bar shown, window title, the view top's offset from the current page's top,
+the page frames' x in a spread, and the status line. Escape is pressed after `prefs` (the
+hidden toolbar comes back) and after `full` (full screen ends, the outline opens for
+`/NonFullScreenPageMode /UseOutlines`); `xyz` is reopened with `keepView` after the user
+changed the view (the reopen after Save keeps it); the last file has no settings (nothing
+carries over). -/
+def smokeOpenSettings (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let row (name : String) : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    let off ← match slotOf s s.page, ← viewBand s with
+      | some sl, some (top, _, _, _) => pure s!"{(top : Int) - (sl.place.y : Int)}"
+      | _, _ => pure "-"
+    let xs := s.slots.toList.take 2 |>.map (fun sl => s!"{sl.place.page}@{sl.place.x}")
+    return s!"{name}: view={s.scroll.key},{s.spread.key} vars={← run ["set", Menu.scrollVar]},\
+      {← run ["set", Menu.spreadVar]} rtl={s.rtl} zoom={s.zoomSel.label} page={s.page + 1} \
+      outline={s.outlineShown} full={s.fullScreen},{← run ["wm", "attributes", ".", "-fullscreen"]} \
+      bar={← run ["winfo", "ismapped", ".bar"]} menu={← run [".", "cget", "-menu"]} \
+      ys={← run ["winfo", "ismapped", ".ys"]} geom={← run ["wm", "geometry", "."]} off={off} xs={",".intercalate xs} \
+      title={← run ["wm", "title", "."]} status={← run [".status", "cget", "-text"]}"
+  out := out.push (← row "start")
+  for f in openSettingsFixtures do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push (← row f)
+    if f == "prefs" || f == "full" then
+      sendEvent ".c" "<Key-Escape>"
+      settle st
+      out := out.push (← row s!"{f}-escape")
+    if f == "xyz" then
+      -- The user's changes win until the next open; the reopen after Save keeps them.
+      setViewMode st "view" "two"
+      zoom st "actual" none
+      settle st
+      out := out.push (← row "xyz-user")
+      openFile st s!"{base}/{f}.pdf" (keepView := true)
+      settle st
+      out := out.push (← row "xyz-keep")
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "opensettings.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke step of the platform keys and the icon (`SAFEPDF_VIEWER_SMOKE_MODE=keys`, task
 9.r3), on the text PDF; with `SAFEPDF_VIEWER_PLATFORM=aqua` the aqua mapping is installed
 on X11 (where Tk's `Command` modifier is Meta). Writes `keys.txt`: the platform, menu and
@@ -7070,6 +7344,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "r4.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "opensettings" then
+    try smokeOpenSettings st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "opensettings.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "savedlg" then
     try smokeSaveDialogs st dir
     catch e =>
@@ -7306,6 +7586,9 @@ Ctrl+S saves the marks into FILE-annotated.pdf (an incremental update: the origi
 stay unchanged at its start); Ctrl+Shift+S saves to a chosen file; marks saved in a file are
 restored when it is opened; saved marks can be recoloured, deleted and edited (9.5g). Closing or quitting asks about unsaved marks.
 File > Import annotations... / Export annotations... read and write XFDF (STEM.xfdf by default).
+Files open as their /PageLayout, /PageMode, /OpenAction (destinations only; JavaScript and
+other actions are never run) and viewer preferences say; Escape leaves full screen and shows
+a toolbar, menubar or scroll bars the document hid.
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
@@ -7330,8 +7613,9 @@ SAFEPDF_VIEWER_SMOKE_MODE=async: rendering on worker threads, placeholders, stal
 SAFEPDF_VIEWER_DRIVE=1: test hook keeping Tk's send command (scripts/viewer-corpus.sh drives
 the viewer through it); without it other X clients cannot send Tcl to the viewer.
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).
-SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: initial view mode (facing:
-odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads)."
+SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: view mode of files without
+/PageLayout (facing: odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads).
+SAFEPDF_VIEWER_SMOKE_MODE=opensettings: the document open settings steps (task 9.r8)."
 
 /-- Runs the viewer with `init` run once the window is built (task 10.1b: `viewer --biblean`
 opens its document from memory there, `openBytes`), after the file named in `args`, if any.
@@ -7382,7 +7666,7 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
     -- The initial view mode (task 9.3).
     if let some v ← IO.getEnv "SAFEPDF_VIEWER_VIEW" then
       if let some (sc, sp) := View.viewModeOf v then
-        st.modify ({ · with scroll := sc, spread := sp })
+        st.modify ({ · with scroll := sc, spread := sp, defaultView := (sc, sp) })
         discard <| run ["set", Menu.scrollVar, sc.key]
         discard <| run ["set", Menu.spreadVar, sp.key]
         discard <| run ["set", "::safepdf::continuous", if sc == .vertical then "1" else "0"]

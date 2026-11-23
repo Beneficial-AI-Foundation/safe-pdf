@@ -19,17 +19,19 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export, 9.r8 document open settings)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
   PDF.js (see *Toolbar and sidebar* below), a scrollable canvas (scroll bars) with the current
-  pages — every file opens in continuous vertical scrolling (View → Vertical Scrolling, No
-  Spreads, as PDF.js; task 9.r1), or, in the other view modes, one page or two side by side
+  pages — a file opens as its own open settings say (see *Document open settings* below),
+  otherwise in continuous vertical scrolling (View → Vertical Scrolling, No Spreads, as PDF.js;
+  task 9.r1) at Automatic Zoom on page 1, or, in the other view modes, one page or two side by side
   (see *View modes* below; `SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing`
-  sets the initial one) —, a status line (file, page, zoom, rotation, pixel size, render time
-  or "from cache", notes, the view mode when it is not the default, or the error). A file
-  opened later in the same window keeps the mode chosen in the View menu.
+  sets the one for files without `/PageLayout`) —, a status line (file, page, zoom, rotation, pixel size, render time
+  or "from cache", notes, the view mode when it is not the default, notes about open settings
+  that were not honoured, or the error). Every open starts afresh (task 9.r8): a mode or zoom
+  chosen for one file does not carry over to the next; only the reopen after Save keeps them.
 * Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
@@ -197,8 +199,9 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   `<Configure>` and every 2 ms and requires just the start and the end value (before the fix:
   screen x 403 → 117 → 260 on closing, 260 → 531 → 396 on opening).
 * **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`): a white panel titled
-  *Document outline* on the `#f0f0f4` background. It **opens on load only when the document
-  has an outline**; without one it stays closed and the toggle is hidden (F9 and View → Outline
+  *Document outline* on the `#f0f0f4` background. It **opens on load when the document has an
+  outline**, unless its `/PageMode` is `/UseNone` or `/FullScreen` (task 9.r8,
+  `Sidebar.shownOnLoad`); without an outline it stays closed and the toggle is hidden (F9 and View → Outline
   do nothing then). The outline is a text widget drawn as a tree: one row per entry, indented
   20 px per level, long titles wrapped; entries with children have a disclosure triangle (▼
   open, ▶ closed; entries with a positive `/Count` start open); clicking a triangle collapses
@@ -213,6 +216,55 @@ toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu San
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
 Add image (stamp) and Print come after M9.
+
+## Document open settings (9.r8)
+
+ISO 32000-2 §7.7.2, §12.2, §12.3.2; ledger Decision 2026-11-23 "The viewer honours every
+document open setting". `Core.Doc.OpenSettings.read` (pure, total, never fails the document;
+rules O1–O7 in its module doc; suite `open-settings`) reads them, `Viewer.applyOpenSettings`
+applies them on **every open** (start-up, File → Open, Close + Open, bib-lean's reader). A
+file opened later starts again from the defaults (`resetOpenView`: the start-up view mode,
+Automatic Zoom, page 1, outline when there is one, the whole window UI, the file name as title)
+— nothing carries over from the previous file. Changes the user makes (View menu, zoom,
+F9, Escape) win until the next open. **The reopen after Save / Save to library keeps the
+user's current view** (view mode, zoom, outline, page; the document's settings are not
+applied again: they have not changed and the user is mid-work) — `openWith … (keepView :=
+true)`. The window's size and position are the user's and are never reset.
+
+| Setting | What the viewer does |
+|---|---|
+| `/PageLayout /SinglePage` | Single Page (Page Scrolling, No Spreads) |
+| `/OneColumn` | Vertical Scrolling, No Spreads |
+| `/TwoColumnLeft` / `/TwoColumnRight` | Two Pages Scrolling with Odd / Even Spreads |
+| `/TwoPageLeft` / `/TwoPageRight` | Two Pages with Odd / Even Spreads |
+| `/PageMode /UseNone` | outline closed |
+| `/UseOutlines` | outline open (when the file has one) |
+| `/UseThumbs`, `/UseAttachments`, `/UseOC` | no such panels yet (tasks 9.r9–9.r11): the outline rule (open with an outline) and the note "thumbnails / attachments / layers panel not available yet" |
+| `/FullScreen` | `wm attributes . -fullscreen 1`, outline closed, note "full screen (Escape leaves)"; Escape leaves and applies `/NonFullScreenPageMode` to the outline |
+| `/OpenAction` destination or `/S /GoTo` | page, position (`/XYZ` left/top, `/FitH` top, …: the page point at the window's top-left, as links) and zoom: `/XYZ` zoom > 0 → that percentage (clamped to 25–800 %), `null`/0 → Automatic Zoom stays; `/Fit`, `/FitB` → Page Fit; `/FitH`, `/FitBH` → Page Width; `/FitV`, `/FitBV` → Page Fit (best effort: no fit-height zoom; the same for portrait pages in a wide window); `/FitR` → Page Fit with the rectangle's left/top at the top-left (best effort). Named destinations through `/Dests` and `/Names /Dests`. |
+| `/OpenAction` JavaScript, URI, Launch, Named, GoToR, … | **never executed**; note "open action /KIND ignored (not executed)". `/Next` chains are not followed. |
+| `/HideToolbar`, `/HideMenubar`, `/HideWindowUI` | toolbar (`pack forget .bar`), menubar (`. configure -menu {}`), scroll bars (`grid remove .ys .xs`) hidden; note "the document hides parts of the window (Escape shows them)"; **Escape** shows them again (so a document can never lock the user out of the UI; the keys keep working meanwhile) |
+| `/FitWindow` | window sized for the first page at the open zoom (100 % for the fit choices), both pages of a spread, at most 90 % of the screen |
+| `/CenterWindow` | window centred on the screen |
+| `/DisplayDocTitle` | window title from `/Info /Title` (text string, control and bidi characters as spaces, ≤ 500 characters; XMP `dc:title` not read: no XMP parser) |
+| `/Direction /R2L` | spreads mirrored: the first page of a spread on the right (`View.mirrorPlace`); status "…, right to left"; keys and wheel unchanged |
+| `/NonFullScreenPageMode` | outline rule on leaving full screen |
+| print keys (`PrintScaling`, `Duplex`, `ViewArea`, …) | ignored |
+
+Invalid values (wrong type, unknown name, a destination outside the document or not found)
+leave the default and add a note ("invalid /PageLayout ignored", "open destination … not
+found"); notes stay at the end of the status line until the next open (Escape drops the
+full-screen and hidden-UI ones). Hyperref writes `/PageMode /UseOutlines /OpenAction [p1 /Fit]`
+by default, so most LaTeX papers now open at Page Fit with the outline (checked on
+`arxiv-0704.0001`, `arxiv-1301.3781`, `arxiv-1904.00001`, `arxiv-2006.00001`: page 1 whole at
+73–78 % in the 1200×960 window, outline open; `arxiv-0905.0002` (`/UseNone` + Fit): Page Fit,
+outline closed; `arxiv-2111.00001` (`/DisplayDocTitle true`, no `/Title` in `/Info`): the file
+name stays the title; `arxiv-2209.00001` (`/OneColumn`): Vertical Scrolling, Automatic Zoom).
+
+Unverified: on aqua `. configure -menu {}` leaves Tk's default application menu (the menubar
+cannot disappear on macOS); full screen on aqua uses the native full-screen space; without a
+window manager (Xvfb) `wm attributes . -fullscreen` reads back 0, so the smoke test checks the
+viewer's state only.
 
 ## Wheel scrolling across pages (9.2, 9.r1)
 
@@ -840,7 +892,8 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `SafePdf/Shell/App/Save.lean` | Tk-free save flow (task 9.5c) with `#guard` checks: marks → `Core.Write.Annots.Mark`, PDF dates, reading our marks back from a document, the read-back check, default target, atomic write. |
 | `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js (float bubble: Highlight and Add comment since 9.r4), placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7), the view-mode drop-down's choices (`ViewChoice`, theorems `ofModes_modes`, `modes_ofModes`; task 9.r4). |
-| `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
+| `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; tests `Tests/OpenSettings.lean`. |
+| `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows (by page mode, 9.r8), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
@@ -1179,6 +1232,22 @@ is closed and opened while `r4Probe` samples the first page frame's canvas and s
 every `<Configure>` of the canvas and every 2 ms for 700 ms; the run of distinct values must
 be just start → end (an intermediate value fails: the flicker). It writes `toolbar.png`,
 `viewmenu.png`, `bubble.png` and `bubble-tip.png` when `import` is installed.
+
+The `opensettings` case (9.r8, `Viewer.smokeOpenSettings`, script case 1s) runs in the
+default view on generated five-page files with an outline, opened one after another with
+`openFile` (File → Open after its dialog), one line per file in `opensettings.txt`: every
+`/PageLayout` (state and View-menu variables; Even Spreads put page 1 alone on the right),
+`/PageMode` UseOutlines / UseNone / UseThumbs (outline open / closed / open + note),
+`/OpenAction [p3 /XYZ 0 792 1.5]` (page 3 at 150 %, its top at the window top), then Two Pages
++ Actual Size chosen and the file reopened with `keepView` (both kept), `[p1 /Fit]` + UseOutlines
+(Page Fit, outline), a GoTo to a named destination in a `/Names /Dests` tree (page 4, Page
+Width), JavaScript and URI open actions (page 1, Automatic Zoom, the "ignored (not executed)"
+note), HideToolbar + HideMenubar + HideWindowUI + DisplayDocTitle (toolbar, menubar and
+scroll bars gone, title from `/Info /Title`; Escape brings them back), TwoPageLeft + R2L
+(page 1 right of page 2), FullScreen + `/NonFullScreenPageMode /UseOutlines` (outline closed;
+Escape leaves full screen and opens it), FitWindow + CenterWindow at zoom 0.5 (window
+resized and centred), and last a file without settings: Vertical Scrolling, Automatic Zoom,
+page 1, outline, toolbar, its file name as title.
 
 The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
 alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real

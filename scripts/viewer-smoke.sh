@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6, 9.r8; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -83,6 +83,11 @@
 #   1r. the save dialogs (SAFEPDF_VIEWER_SMOKE_MODE=savedlg, as installed and with
 #      SAFEPDF_VIEWER_PLATFORM=aqua): keyboard of the three-way prompt, Save As… / Export
 #      options, extensions, long/odd names, refused targets, a vanished file (9.r6);
+#   1s. document open settings (SAFEPDF_VIEWER_SMOKE_MODE=opensettings) on generated files:
+#      every /PageLayout, /PageMode with an outline, /OpenAction destinations (page 3 at
+#      150 %, Fit, a named one), JavaScript/URI open actions ignored, ViewerPreferences
+#      (hiding, DisplayDocTitle, R2L, FullScreen, FitWindow/CenterWindow), then a file without
+#      settings opens in the defaults again (9.r8);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1695,6 +1700,121 @@ sys.exit(1 if errs else 0)
   fi
   chmod -R u+w "$sd" 2>/dev/null || true
 done
+
+# 1s. Document open settings (task 9.r8, SAFEPDF_VIEWER_SMOKE_MODE=opensettings,
+#     `Viewer.smokeOpenSettings`), in the real default view: generated five-page PDFs with an
+#     outline, each opened in turn through the File → Open path: every /PageLayout (view mode
+#     and the View menu's variables; TwoColumnRight/TwoPageRight put page 1 alone on the
+#     right), /PageMode UseOutlines / UseNone / UseThumbs (outline open / closed / open with a
+#     "thumbnails panel not available yet" note), /OpenAction [page 3 /XYZ 0 792 1.5] (page 3
+#     at 150 %, its top at the window top), the user's Two Pages + Actual Size kept by the
+#     reopen after Save (`keepView`), [p1 /Fit] (Page Fit), a GoTo to a named destination in a
+#     /Names /Dests tree (page 4, Page Width), JavaScript and URI open actions (ignored, noted),
+#     /ViewerPreferences HideToolbar + HideMenubar + HideWindowUI + DisplayDocTitle (window
+#     title from /Info /Title; Escape shows them again), TwoPageLeft + /Direction /R2L (page 1
+#     right of page 2), FullScreen with /NonFullScreenPageMode /UseOutlines (outline closed,
+#     Escape leaves and opens it), FitWindow + CenterWindow at /XYZ zoom 0.5; then a file
+#     without settings opens in Vertical Scrolling, Automatic Zoom, page 1 (nothing carried
+#     over).
+mkdir -p "$work/os"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(cat, title):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R /Outlines 13 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5 /MediaBox [0 0 612 792] >>"}
+    for i in range(5):
+        objs[3 + i] = "<< /Type /Page /Parent 2 0 R /Contents %d 0 R >>" % (8 + i)
+        c = "0.%d g 72 72 %d %d re f" % (2 + i, 100 + 60 * i, 100 + 100 * i)
+        objs[8 + i] = "<< /Length %d >>\nstream\n%s\nendstream" % (len(c), c)
+    objs[13] = "<< /Type /Outlines /First 14 0 R /Last 15 0 R /Count 2 >>"
+    objs[14] = "<< /Title (One) /Parent 13 0 R /Next 15 0 R /Dest [3 0 R /Fit] >>"
+    objs[15] = "<< /Title (Four) /Parent 13 0 R /Prev 14 0 R /Dest [6 0 R /Fit] >>"
+    objs[16] = "<< /Title (%s) >>" % title
+    body, offs = b"%PDF-1.7\n", {}
+    for n in sorted(objs):
+        offs[n] = len(body)
+        body += ("%d 0 obj\n%s\nendobj\n" % (n, objs[n])).encode("latin-1")
+    x = len(body)
+    body += b"xref\n0 17\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % offs[n] for n in range(1, 17))
+    body += ("trailer\n<< /Size 17 /Root 1 0 R /Info 16 0 R >>\nstartxref\n%d\n%%%%EOF\n" % x).encode()
+    return body
+cases = {"none": ""}
+for l in ["SinglePage", "OneColumn", "TwoColumnLeft", "TwoColumnRight", "TwoPageLeft", "TwoPageRight"]:
+    cases["layout-" + l] = "/PageLayout /" + l
+for m in ["UseOutlines", "UseNone", "UseThumbs"]:
+    cases["mode-" + m] = "/PageMode /" + m
+cases["xyz"] = "/OpenAction [5 0 R /XYZ 0 792 1.5]"
+cases["fit"] = "/PageMode /UseOutlines /OpenAction [3 0 R /Fit]"
+cases["named"] = "/OpenAction << /S /GoTo /D (four) >> /Names << /Dests << /Names [(four) [6 0 R /FitH 792]] >> >>"
+cases["js"] = "/OpenAction << /S /JavaScript /JS (app.alert\\(1\\)) >>"
+cases["uri"] = "/OpenAction << /S /URI /URI (https://example.org/) >>"
+cases["prefs"] = "/ViewerPreferences << /HideToolbar true /HideMenubar true /HideWindowUI true /DisplayDocTitle true >>"
+cases["window"] = "/OpenAction [3 0 R /XYZ null null 0.5] /ViewerPreferences << /FitWindow true /CenterWindow true >>"
+cases["r2l"] = "/PageLayout /TwoPageLeft /ViewerPreferences << /Direction /R2L >>"
+cases["full"] = "/PageMode /FullScreen /ViewerPreferences << /NonFullScreenPageMode /UseOutlines >>"
+for name, cat in cases.items():
+    open("%s/%s.pdf" % (out, name), "wb").write(pdf(cat, "Open Settings Test" if name == "prefs" else "unused"))
+' "$work/os"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=opensettings \
+  run_viewer "$work/out-os" "$work/os/none.pdf" || true
+python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: opensettings: no opensettings.txt", file=sys.stderr); sys.exit(1)
+rows = {}
+for l in lines:
+    name, _, rest = l.partition(": ")
+    head, _, status = rest.partition(" status=")
+    d = dict(p.split("=", 1) for p in re.split(r" (?=[a-z]+=)", head) if "=" in p)
+    d["status"] = status
+    rows[name] = d
+errs = []
+def want(name, **kv):
+    r = rows.get(name)
+    if r is None: errs.append("%s: missing" % name); return
+    for k, v in kv.items():
+        k = k.rstrip("_")
+        if r.get(k) != v: errs.append("%s: %s = %r, want %r" % (name, k, r.get(k), v))
+def has(name, k, part):
+    if part not in rows.get(name, {}).get(k, ""): errs.append("%s: %s lacks %r" % (name, k, part))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+default = dict(view="vertical,none", vars="vertical,none", rtl="false", zoom="Automatic Zoom",
+               page="1", outline="true", bar="1", menu=".menubar", ys="1")
+want("start", **default)
+for l, v in [("SinglePage", "page,none"), ("OneColumn", "vertical,none"),
+             ("TwoColumnLeft", "vertical,odd"), ("TwoColumnRight", "vertical,even"),
+             ("TwoPageLeft", "page,odd"), ("TwoPageRight", "page,even")]:
+    want("layout-" + l, view=v, vars=v, zoom="Automatic Zoom", page="1")
+for l in ["TwoColumnRight", "TwoPageRight"]:
+    if not rows.get("layout-" + l, {}).get("xs", "").startswith("0@237"):
+        errs.append("%s: page 1 not alone on the right: %r" % (l, rows.get("layout-" + l, {}).get("xs")))
+want("mode-UseOutlines", outline="true"); want("mode-UseNone", outline="false")
+want("mode-UseThumbs", outline="true"); has("mode-UseThumbs", "status", "thumbnails panel not available yet")
+want("xyz", page="3", zoom="150%", off="0", view="vertical,none")
+want("xyz-user", view="page,odd", zoom="Actual Size")
+want("xyz-keep", view="page,odd", zoom="Actual Size")
+want("fit", zoom="Page Fit", page="1", outline="true")
+want("named", page="4", zoom="Page Width", off="0")
+want("js", page="1", zoom="Automatic Zoom"); has("js", "status", "open action /JavaScript ignored (not executed)")
+want("uri", page="1"); has("uri", "status", "open action /URI ignored (not executed)")
+want("prefs", bar="0", menu="", ys="0"); has("prefs", "title", "Open Settings Test - page 1/5 - safe-pdf")
+has("prefs", "status", "Escape shows them")
+want("prefs-escape", bar="1", menu=".menubar", ys="1")
+want("r2l", view="page,odd", rtl="true")
+m = re.match(r"0@(\d+),1@(\d+)$", rows.get("r2l", {}).get("xs", ""))
+if not m or int(m.group(1)) <= int(m.group(2)): errs.append("r2l: page 1 not right of page 2: %r" % rows.get("r2l", {}).get("xs"))
+want("full", full="true,0", outline="false"); has("full", "status", "full screen (Escape leaves)")
+want("full-escape", full="false,0", outline="true")
+want("window", zoom="50%")
+if rows.get("window", {}).get("geom", "").startswith("1200x960"): errs.append("window: FitWindow did not resize")
+want("none", **default); has("none", "title", "none.pdf - page 1/5")
+for n in ["start", "layout-OneColumn", "xyz", "js", "prefs", "r2l", "full", "window", "none"]:
+    r = rows.get(n, {})
+    print("opensettings %s: %s %s %s p%s outline=%s full=%s bar=%s rtl=%s" % (n, r.get("view"), r.get("zoom"), r.get("geom"), r.get("page"), r.get("outline"), r.get("full"), r.get("bar"), r.get("rtl")))
+for e in errs: print("FAIL: opensettings %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-os/opensettings.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
