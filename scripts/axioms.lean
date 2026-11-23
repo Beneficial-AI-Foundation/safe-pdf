@@ -17,6 +17,7 @@ import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
+import SafePdf.Shell.App.Toolbar
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -1238,3 +1239,16 @@ import SafePdf.Shell.App.Links
 #print axioms SafePdf.Core.Doc.Attachments.clean_safe
 #print axioms SafePdf.Core.Doc.Attachments.fileNameOf_noSlash
 #print axioms SafePdf.Core.Doc.Attachments.decode_size_le
+#print axioms SafePdf.Shell.App.Marks.History.undo_record
+#print axioms SafePdf.Shell.App.Marks.History.redo_undo
+#print axioms SafePdf.Shell.App.Marks.History.undo_redo
+#print axioms SafePdf.Shell.App.Marks.History.start_bounded
+#print axioms SafePdf.Shell.App.Marks.History.record_bounded
+#print axioms SafePdf.Shell.App.Marks.History.undo_bounded
+#print axioms SafePdf.Shell.App.Marks.History.redo_bounded
+#print axioms SafePdf.Shell.App.Toolbar.Transient.mem_order
+#print axioms SafePdf.Shell.App.Toolbar.onEscape_sub
+#print axioms SafePdf.Shell.App.Toolbar.onEscape_nonempty
+#print axioms SafePdf.Shell.App.Toolbar.mem_onClick
+#print axioms SafePdf.Shell.App.Toolbar.onOpen_rivals
+#print axioms SafePdf.Shell.App.Toolbar.Transient.not_self_rival

@@ -512,7 +512,7 @@ want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
-    "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
+    "entries.menubar.edit": "Undo|Redo|Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Sidebar|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
@@ -1629,7 +1629,9 @@ case_begin "1p keys"
 #     with SAFEPDF_VIEWER_PLATFORM=aqua (the macOS mapping on X11, where Tk's Command is
 #     Meta): Command-S labels, Command twins of every Ctrl binding (Save, Save As both ways,
 #     Quit also in the find bar), ::tk::mac::Quit = File -> Quit, the Save tooltip as ⌘S,
-#     Command+A selects all. Both: the six embedded icons load at their sizes and, when xprop
+#     Command+A selects all; 10.9: the macOS conventions (⌘G/⇧⌘G find, ⌥⌘G go to page,
+#     ⌘[ back, ⌘↑ first page, ⌃⌘S sidebar, ⌘L rotate left, ⌘9 fit page, ⌘. in dialogs) and
+#     their labels, none of them on X11. Both: the six embedded icons load at their sizes and, when xprop
 #     is installed, the window carries _NET_WM_ICON starting with the 512 px image.
 for kp in x11 aqua; do
   if [ "$kp" = x11 ] && [ "$platform" = aqua ]; then
@@ -1662,7 +1664,7 @@ if "net-wm-icon" in v and not v["net-wm-icon"].startswith("_NET_WM_ICON(CARDINAL
 if kp == "aqua":
     want("accel-open", "Command-O"); want("accel-save", "Command-S")
     want("accel-saveas", "Command-Shift-S"); want("accel-quit", "Command-Q")
-    want("accel-zoomin", "Command-+"); want("accel-back", "Option-Left")
+    want("accel-zoomin", "Command-+"); want("accel-back", "Command-[")  # 10.9: was Option-Left
     want("accel-pop-copy", "Command-C"); want("accel-pop-delete", "Delete")
     want("bind <Control-Key-s>", "[::safepdf::emit save]")
     want("bind <Command-Key-s>", "[::safepdf::emit save]")
@@ -1674,6 +1676,21 @@ if kp == "aqua":
     want("mac-quit", "[::tk::mac::Quit] [::safepdf::emit quit]")
     want("save-tip", "Save (⌘S)")
     if "⌘C copies" not in v.get("status-selectall", ""): errs.append("Command+A: %r" % v.get("status-selectall"))
+    # 10.9: macOS conventions (Preview, HIG).
+    want("accel-goto", "Command-Option-G"); want("accel-first", "Command-Up")
+    want("accel-forward", "Command-]"); want("accel-outline", "Control-Command-S")
+    want("accel-rotccw", "Command-L")
+    want("bind <Command-Key-g>", "[::safepdf::emit find next $::safepdf::query]")
+    want("bind <Command-Key-G>", "[::safepdf::emit find prev $::safepdf::query]")
+    want("bind <Option-Command-Key-g>", "[::safepdf::showGoto]")
+    want("bind <Control-Key-g>", "[::safepdf::showGoto]")
+    want("bind <Command-Key-bracketleft>", "[::safepdf::emit back]")
+    want("bind <Command-Key-Up>", "[::safepdf::emit first]")
+    want("bind <Control-Command-Key-s>", "[::safepdf::emit outlineToggle]")
+    want("bind <Command-Key-l>", "[::safepdf::emit rotate ccw]")
+    want("bind <Command-Key-9>", "[::safepdf::emit zoom fitpage]")
+    want("bind-find-next", "[::safepdf::emit find next $::safepdf::query; break]")
+    want("cancelBind", "[bind $w <Command-Key-period> $script]")
 else:
     want("accel-open", "Ctrl+O"); want("accel-save", "Ctrl+S")
     want("accel-saveas", "Ctrl+Shift+S"); want("accel-quit", "Ctrl+Q")
@@ -1686,6 +1703,14 @@ else:
     want("mac-quit", "[] []")
     want("save-tip", "Save (Ctrl+S)")
     if "Ctrl+C copies" not in v.get("status-selectall", ""): errs.append("Ctrl+A: %r" % v.get("status-selectall"))
+    # 10.9: X11 keeps Ctrl+G = Go to page, Alt+Left, Home, F9, Shift+R; no Command binding.
+    want("accel-goto", "Ctrl+G"); want("accel-first", "Home"); want("accel-forward", "Alt+Right")
+    want("accel-outline", "F9"); want("accel-rotccw", "Shift+R")
+    want("bind <Control-Key-g>", "[::safepdf::showGoto]")
+    for s in ("<Command-Key-g>", "<Command-Key-G>", "<Option-Command-Key-g>", "<Command-Key-bracketleft>",
+              "<Command-Key-Up>", "<Control-Command-Key-s>", "<Command-Key-l>", "<Command-Key-9>"):
+        want("bind " + s, "[]")
+    want("bind-find-next", "[]"); want("cancelBind", "[]")
 for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
@@ -2383,6 +2408,95 @@ done
 case_end
 
 # New cases go here, each starting with `case_begin "NAME"` so the summary names it.
+
+case_begin "1x undo"
+# 1x. Delete and undo/redo on marks (task 10.7, SAFEPDF_VIEWER_SMOKE_MODE=undo, `Viewer.smokeUndo`)
+# on a copy of the text PDF of 1d: Backspace removes the selected highlight, Ctrl+Z restores it
+# (pixels), Ctrl+Shift+Z removes it again, undoing everything is clean (Undo disabled); a
+# note's text edit and creation are undone and redone; after Ctrl+S (Overwrite) the saved
+# highlight is deleted with Delete and restored with Ctrl+Z (clean again, drawn from the
+# file), then recoloured green and saved: the file holds both marks. Externally: qpdf --check.
+mkdir -p "$work/undo" "$work/out-undo"
+cp "$work/text.pdf" "$work/undo/text.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=undo run_viewer "$work/out-undo" "$work/undo/text.pdf"
+cat "$work/out-undo/undo.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+want = {
+    "start": "0 white disabled disabled",
+    "highlighted": "1 tinted true normal disabled",
+    "backspace": "true 0 white normal disabled",
+    "undo-delete": "1 tinted true normal normal",
+    "redo-delete": "0 white normal disabled",
+    "undo-all": "0 white false false disabled normal",
+    "undo-empty": "0 nothing to undo",
+    "redo-highlight": "1 tinted normal normal",
+    "note": "true first normal disabled",
+    "note-edited": "second",
+    "note-undo1": "first",
+    "note-undo2": "[]",
+    "note-undo3": "<none> 1",
+    "note-redo": "first 2 normal normal",
+    "saved": "true 2 false false tinted disabled disabled",
+    "saved-delete": "true 1 true true white normal",
+    "saved-undo": "2 false false tinted disabled true true",
+    "resaved": "2 false (some green) 83 255 188 disabled disabled",
+    "file-marks": "2 2",
+}
+errs = ["undo %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-undo/undo.txt" || fail=1
+if command -v qpdf >/dev/null 2>&1; then
+  qpdf --check "$work/undo/text.pdf" >/dev/null 2>&1 || { echo "FAIL: undo: qpdf --check" >&2; fail=1; }
+else echo "viewer-smoke: qpdf missing, check skipped"; fi
+case_begin "10.6 dismiss"
+# 10.6. Escape and click-away dismiss every transient (task 10.6, SAFEPDF_VIEWER_SMOKE_MODE=dismiss,
+#     `Viewer.smokeDismiss`, rule in `Toolbar.Transient`) on the text PDF: the find bar closes
+#     on a drag on the page (which still selects) and on Escape; Ctrl+F closes the go-to bar;
+#     a press inside the go-to bar keeps it, one on the status line closes it; the Highlight
+#     and Add text pop-overs stay on presses inside them and on the page, close on a press
+#     elsewhere and on Escape (tool / mode stay on); the colour picker closes on a press off
+#     the page; a note popup closes on a press on the page keeping its typed text (9.r12) and,
+#     empty, on Escape in the main window (the note goes).
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=dismiss run_viewer "$work/out-dismiss" "$work/text.pdf" || true
+cat "$work/out-dismiss/dismiss.txt" 2>/dev/null | cut -c1-160 || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: dismiss: no dismiss.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "find-open": "1 focus=.find.e",
+    "find-drag": "0 sel=true focus=.c",
+    "find-esc": "0",
+    "goto-open": "1",
+    "goto-rival": "goto=0 find=1",
+    "goto-inside": "1",
+    "goto-away": "0",
+    "hl-open": "1 tool=true",
+    "hl-inside": "1",
+    "hl-page": "1",
+    "hl-away": "0 tool=true",
+    "hl-reopen": "1 tool=true",
+    "hl-esc": "0 tool=true",
+    "hl-off": "false",
+    "ed-open": "1 text=true",
+    "ed-away": "0 text=true",
+    "ed-esc": "0 text=true",
+    "picker-open": "true",
+    "picker-away": "false false",
+    "note-inside": "1",
+    "note-away": "popup=0 notes=1 text=kept by a click away",
+    "note-open": "popup=1 notes=2",
+    "note-esc": "popup=0 notes=1",
+}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: dismiss: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-dismiss/dismiss.txt" || fail=1
 
 # Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
 case_end

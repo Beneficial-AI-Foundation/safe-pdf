@@ -1,6 +1,7 @@
 import SafePdf.Shell.App.Menu
 import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Links
+import SafePdf.Shell.App.Bubble
 
 /-!
 # Toolbar model after PDF.js (task 9.7; Plan.md §6 Phase 9 "Look and feel: imitate PDF.js", §8 native app, §10 `SafePdf/Shell/`)
@@ -41,6 +42,13 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   50 %–400 %, showing the current choice; a zoom reached with − / + that is not in the list
   shows as a percentage (PDF.js's custom option). Automatic Zoom is PDF.js's `auto` scale: the
   page width for portrait pages, the whole page for landscape ones, at most 125 %.
+* **Transients** (`Transient`, task 10.6; Plan.md §6 Phase 10): the note popup, the edit
+  bubble's colour picker, the Highlight and Add text / Draw pop-overs, the go-to and find bars.
+  One dismissal rule for all of them: Escape closes the topmost open one (`onEscape`); a press
+  anywhere in the main window outside a transient (and outside the button that toggles it)
+  closes it (`onClick`), and the press is not consumed: it goes on to do what it does (as
+  PDF.js's `closeSecondaryToolbar`); opening one closes its rival (`onOpen`: find ↔ go-to,
+  Highlight ↔ Add text / Draw pop-over).
 -/
 
 namespace SafePdf.Shell.App.Toolbar
@@ -499,5 +507,166 @@ def states (c : Ctx) : List Bool :=
 #guard overflowEntries.map (·.1) == [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18]
 -- Every overflow command is also in the menubar (one vocabulary).
 #guard overflowEntries.all fun (_, k) => (Menu.locate k).isSome
+
+/-! ## Transients and their dismissal (task 10.6) -/
+
+/-- A transient: a part of the window that opens on request and goes away on Escape or a click
+elsewhere (Plan.md §6 Phase 10). The selection bubble is not one of them: it belongs to the
+selection, which Escape and a click on the page clear (task 9.8). -/
+inductive Transient where
+  /-- The note popup `.note` (a toplevel; closing it follows 9.r12: `noteDone … close`). -/
+  | note
+  /-- The edit bubble's colour picker (canvas items on `.c`). -/
+  | picker
+  /-- The Highlight tool's pop-over `.hlbar` (the tool stays on when it closes). -/
+  | hlPop
+  /-- The Add text / Draw pop-over `.edbar` (the mode stays on when it closes). -/
+  | edPop
+  /-- The go-to-page bar `.goto`. -/
+  | goto
+  /-- The find bar `.find`. -/
+  | find
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Tk path of the page canvas. -/
+def pagePath : String := ".c"
+
+/-- The transients from the topmost down (the order Escape closes them in): the note popup is
+its own window above everything; the picker sits on the bubble on the page; the pop-overs
+hang over the page from the toolbar; the bars sit under the toolbar. -/
+def Transient.order : List Transient := [.note, .picker, .hlPop, .edPop, .goto, .find]
+
+/-- The Tk paths (with their descendants) where a press leaves transient `t` open: `t`'s own
+widgets, the toolbar button that toggles it (its own click decides), and for the picker and
+the tool pop-overs the page canvas. A press on the page goes to the viewer's `press`, which
+closes the picker unless it hits the picker or its colour button (task 9.8); the tool
+pop-overs stay open over the page because a click there uses their tool, and their swatches
+restyle what it selects (PDF.js keeps the parameters toolbar open with the editor mode). -/
+def Transient.keepPaths : Transient → List String
+  | .note => [".note"]
+  | .picker => [pagePath]
+  | .hlPop => [".hlbar", ".bar.highlight", pagePath]
+  | .edPop => [".edbar", ".bar.text", ".bar.draw", pagePath]
+  | .goto => [".goto"]
+  | .find => [".find"]
+
+/-- Whether Tk path `w` is `p` or one of its descendants. -/
+def within (w p : String) : Bool := w == p || w.startsWith (p ++ ".")
+
+/-- Whether a press on widget `w` leaves `t` open. -/
+def Transient.keeps (t : Transient) (w : String) : Bool := t.keepPaths.any (within w)
+
+/-- The transients that cannot be open together with `t` (opening `t` closes them): the two
+bars share the place under the toolbar; the two tool pop-overs belong to exclusive modes
+(`Bubble.Ui.selectEditor`, `Bubble.Ui.toolClick`). -/
+def Transient.rivals : Transient → List Transient
+  | .find => [.goto]
+  | .goto => [.find]
+  | .hlPop => [.edPop]
+  | .edPop => [.hlPop]
+  | _ => []
+
+/-- The topmost of the open transients `opened`. -/
+def topmost (opened : List Transient) : Option Transient :=
+  Transient.order.find? (opened.contains ·)
+
+/-- Escape: the transients to close, the topmost open one (none when nothing is open; then
+Escape goes on to its other jobs, such as leaving full screen). -/
+def onEscape (opened : List Transient) : List Transient := (topmost opened).toList
+
+/-- A mouse press on widget `w`: the open transients it closes (every one that does not keep
+`w`). The press itself is not consumed. -/
+def onClick (opened : List Transient) (w : String) : List Transient :=
+  opened.filter (!·.keeps w)
+
+/-- Opening `t`: the open transients to close first (its rivals). -/
+def onOpen (opened : List Transient) (t : Transient) : List Transient :=
+  opened.filter (t.rivals.contains ·)
+
+/-- Whether the press that dismisses a transient is consumed: no, it still selects, places or
+activates what it hits (PDF.js closes the secondary toolbar and lets the click through). -/
+def clickConsumed : Bool := false
+
+/-- Closing transient `t` in the tool state (`Bubble.Ui`): the picker and the pop-overs are
+flags there (the tool and the mode stay on); the others live in Tk only. -/
+def Transient.closeUi : Transient → Bubble.Ui → Bubble.Ui
+  | .picker, u => { u with picker := false }
+  | .hlPop, u => { u with popover := false }
+  | .edPop, u => { u with edPop := false }
+  | _, u => u
+
+/-- Every transient is in `Transient.order`. -/
+theorem Transient.mem_order (t : Transient) : t ∈ Transient.order := by
+  cases t <;> simp [Transient.order]
+
+/-- Escape closes at most one transient, and only an open one. -/
+theorem onEscape_sub (opened : List Transient) :
+    (onEscape opened).length ≤ 1 ∧ ∀ t ∈ onEscape opened, t ∈ opened := by
+  unfold onEscape topmost
+  cases h : Transient.order.find? (opened.contains ·) with
+  | none => simp
+  | some t =>
+    have := List.find?_some h
+    simp only [Option.toList_some, List.length_singleton, Nat.le_refl, List.mem_singleton,
+      forall_eq, true_and]
+    simpa using this
+
+/-- Escape closes something whenever something is open. -/
+theorem onEscape_nonempty (opened : List Transient) (h : opened ≠ []) : onEscape opened ≠ [] := by
+  unfold onEscape topmost
+  cases hf : Transient.order.find? (opened.contains ·) with
+  | some _ => simp
+  | none =>
+    exfalso
+    match opened, h with
+    | t :: _, _ =>
+      have := List.find?_eq_none.mp hf t (Transient.mem_order t)
+      simp at this
+
+/-- A press closes exactly the open transients that do not keep the pressed widget. -/
+theorem mem_onClick (opened : List Transient) (w : String) (t : Transient) :
+    t ∈ onClick opened w ↔ t ∈ opened ∧ t.keeps w = false := by
+  simp [onClick]
+
+/-- After opening `t` and closing `onOpen opened t`, none of `t`'s rivals is left open. -/
+theorem onOpen_rivals (opened : List Transient) (t u : Transient) (hu : u ∈ opened)
+    (hr : u ∈ t.rivals) : u ∈ onOpen opened t := by
+  simp [onOpen, hu, hr]
+
+/-- No transient is its own rival (opening one never closes itself). -/
+theorem Transient.not_self_rival (t : Transient) : t ∉ t.rivals := by
+  cases t <;> simp [Transient.rivals]
+
+-- Escape: the note popup first, then the picker, a pop-over, a bar; nothing open, nothing.
+#guard onEscape [.find, .hlPop, .note] == [.note]
+#guard onEscape [.find, .hlPop] == [.hlPop]
+#guard onEscape [.find, .picker, .edPop] == [.picker]
+#guard onEscape [.find] == [.find] && onEscape [.goto] == [.goto] && onEscape [] == []
+-- A press inside a transient, or on the button that toggles it, keeps it open.
+#guard onClick [.find] ".find.e" == [] && onClick [.find] ".find.close" == []
+#guard onClick [.goto] ".goto" == [] && onClick [.note] ".note.t" == []
+#guard onClick [.hlPop] ".hlbar" == [] && onClick [.hlPop] ".bar.highlight" == []
+#guard onClick [.edPop] ".edbar" == [] && onClick [.edPop] ".bar.draw" == [] &&
+  onClick [.edPop] ".bar.text" == []
+-- A press elsewhere closes it: the toolbar, the sidebar, the other bar.
+#guard onClick [.find] ".c" == [.find] && onClick [.goto] ".c" == [.goto]
+#guard onClick [.hlPop] ".bar.zin" == [.hlPop] && onClick [.hlPop] ".ol.th" == [.hlPop]
+#guard onClick [.edPop] ".bar.highlight" == [.edPop] && onClick [.edPop] ".ol.t" == [.edPop]
+#guard onClick [.find, .hlPop] ".goto.e" == [.find, .hlPop]
+#guard onClick [.note] ".c" == [.note] && onClick [.note] ".bar.more" == [.note]
+-- The page keeps the tool pop-overs and the picker (`press` handles the picker), and its
+-- children (the free-text editor `.c.ft`) count as the page; `.cx` would not.
+#guard onClick [.hlPop, .edPop, .picker, .find, .note] ".c" == [.find, .note]
+#guard onClick [.edPop, .find] ".c.ft" == [.find]
+#guard !within ".findx" ".find" && within ".find.e" ".find" && !within ".cx" ".c"
+#guard onClick [.picker] ".bar.zin" == [.picker]
+-- Opening a bar closes the other; opening a pop-over closes the other one.
+#guard onOpen [.find, .hlPop] .goto == [.find] && onOpen [.goto, .note] .find == [.goto]
+#guard onOpen [.hlPop, .find] .edPop == [.hlPop] && onOpen [.find] .note == []
+#guard !clickConsumed
+-- Closing a pop-over keeps its tool or mode on.
+#guard (Transient.hlPop.closeUi { tool := true, popover := true }) ==
+  ({ tool := true, popover := false } : Bubble.Ui)
+#guard (Transient.edPop.closeUi { editor := .text, edPop := true }).editor == .text
 
 end SafePdf.Shell.App.Toolbar
