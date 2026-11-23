@@ -48,6 +48,14 @@ the PDF and restores them from it.
   canvas items while unsaved, are hit-tested by their boxes (above highlights), and can be
   moved (`Store.translate`), edited (`setText`, `setRgb`, `setSize`, `setOpacity`,
   `addStroke`) and deleted.
+* **Undo and redo** (task 10.7, Plan.md §6 Phase 10; `History`): snapshots of the mark array
+  before each edit (create, recolour, text edit, move, delete, strokes, imports), at most
+  `historyCap` = 100 steps, redo cleared by a new edit, one slider drag one step (`record`
+  with `merge`). Only `Store.marks` is restored, so the saved bookkeeping of 9.5g stays and
+  `Store.dirty` follows: undoing back to the file's state makes the document clean again.
+  Laws: `History.undo_record` (undo after a recorded edit gives back the store),
+  `redo_undo`, `undo_redo`, and the bound `record_bounded` / `undo_bounded` /
+  `redo_bounded`.
 * **Pixels** (`multiplyRect`, `pixelRect`, `composite`): highlights are blended into the
   rendered page image with the *multiply* blend mode, as PDF.js draws them
   (`web/draw_layer_builder.css`: `mix-blend-mode: multiply`, fill opacity 1): white paper
@@ -526,6 +534,165 @@ def Store.hitAt (s : Store) (pb : Box) (page : Nat) (pt : Pt) : Option Nat :=
     if m.isNote then (ms.find? fun h => !h.isNote && h.quads == m.quads).getD m else m
   (icon <|> quad).map (·.id)
 
+/-! ## Undo and redo (task 10.7) -/
+
+/-- Depth of the undo history: at most this many edits can be undone (older ones are
+forgotten). Each entry is the store's mark array before an edit; the arrays share their marks,
+so an entry costs one pointer per mark — 100 entries of a document with a thousand marks stay
+well under a megabyte, and 100 steps is more than a reader retraces (PDF.js keeps 128). -/
+def historyCap : Nat := 100
+
+/-- Whether two marks are identical (`Mark.same`, plus a point note's point, which
+`Kind.same` leaves out). -/
+def Mark.identical (a b : Mark) : Bool :=
+  a.same b && match a.kind, b.kind with
+    | .note _ (.point p), .note _ (.point q) => p == q
+    | _, _ => true
+
+/-- Whether two mark arrays are identical, mark by mark (`Mark.identical`). -/
+def sameMarks (a b : Array Mark) : Bool :=
+  a.size == b.size && (a.toList.zip b.toList).all fun (x, y) => x.identical y
+
+/-- The undo/redo history of a document's marks (task 10.7, Plan.md §6 Phase 10): snapshots
+of `Store.marks`, the newest first. Only the marks are recorded, never `Store.saved`,
+`Store.base` or `Store.nextId`: an undo puts back the marks as they were and leaves the saved
+bookkeeping of 9.5g alone, so `Store.dirty` compares the restored marks with the file —
+undoing every edit since the open (or the last save) makes the document clean again, undoing
+the deletion of a saved mark brings it back as saved and unchanged, and ids stay fresh
+(`nextId` never goes back). -/
+structure History where
+  /-- Mark arrays before each recorded edit, the newest first (what Undo goes back to). -/
+  past : List (Array Mark) := []
+  /-- Mark arrays undone, the most recently undone first (what Redo goes forward to). -/
+  future : List (Array Mark) := []
+  /-- The marks as last recorded (the store's marks after the newest edit). -/
+  last : Array Mark := #[]
+  /-- The newest entry is open for merging (a slider drag in progress, `record` with
+  `merge`). -/
+  merging : Bool := false
+  deriving Inhabited
+
+/-- The empty history of a store whose marks are `ms` (on open). -/
+def History.start (ms : Array Mark) : History := { last := ms }
+
+/-- Records the store's marks `ms` after an edit: nothing when they are identical to `last`
+(`sameMarks`); else the marks before the edit (`last`) become the newest undo step (the oldest
+beyond `historyCap` is dropped) and redo is cleared (a new edit ends the redo branch). With
+`merge`, while the newest step is still open (`merging`), the change joins it instead (the
+steps of one slider drag are one undo step); `seal` closes it. -/
+def History.record (h : History) (ms : Array Mark) (merge : Bool := false) : History :=
+  if sameMarks h.last ms then h
+  else if merge && h.merging && !h.past.isEmpty then { h with last := ms, future := [] }
+  else { past := (h.last :: h.past).take historyCap, future := [], last := ms, merging := merge }
+
+/-- Closes the newest step for merging (a new slider press starts a step of its own). -/
+def History.seal (h : History) : History := { h with merging := false }
+
+/-- Whether there is an edit to undo. -/
+def History.canUndo (h : History) : Bool := !h.past.isEmpty
+
+/-- Whether there is an undone edit to redo. -/
+def History.canRedo (h : History) : Bool := !h.future.isEmpty
+
+/-- Undo on store `s` (whose marks are `last`): the store with the marks before the newest
+edit, the current marks moved to the redo list; `none` when there is nothing to undo. -/
+def History.undo (h : History) (s : Store) : Option (History × Store) :=
+  match h.past with
+  | [] => none
+  | b :: rest =>
+    some ({ past := rest, future := s.marks :: h.future, last := b, merging := false },
+      { s with marks := b })
+
+/-- Redo on store `s` (whose marks are `last`): the store with the marks of the most recently
+undone edit, the current marks moved back to the undo list; `none` when there is nothing to
+redo. -/
+def History.redo (h : History) (s : Store) : Option (History × Store) :=
+  match h.future with
+  | [] => none
+  | a :: rest =>
+    some ({ past := s.marks :: h.past, future := rest, last := a, merging := false },
+      { s with marks := a })
+
+/-- The history's length bound: undo and redo steps together are at most `historyCap`. -/
+def History.Bounded (h : History) : Prop := h.past.length + h.future.length ≤ historyCap
+
+/-- **Undo after an edit gives back the store before it**: from a history in step with the
+store `s` (`last = s.marks`), an edit that changes only the marks (to `ms`), recorded, then
+undone, yields `s` itself — saved ids, file state and next id included. -/
+theorem History.undo_record (h : History) (s : Store) (ms : Array Mark)
+    (hl : h.last = s.marks) (hd : sameMarks s.marks ms = false) :
+    ((h.record ms).undo { s with marks := ms }).map Prod.snd = some s := by
+  cases s
+  simp_all [History.record, History.undo, historyCap, List.take_succ_cons]
+
+/-- **Redo after undo gives back the history and the store** (the history only closes its
+merge step): when the history is in step with `s`, undoing then redoing returns `s`. -/
+theorem History.redo_undo (h h' : History) (s s' : Store) (hl : h.last = s.marks)
+    (hu : h.undo s = some (h', s')) : h'.redo s' = some (h.seal, s) := by
+  cases h with
+  | mk past future last merging =>
+    cases past with
+    | nil => simp [History.undo] at hu
+    | cons b rest =>
+      simp only [History.undo, Option.some.injEq, Prod.mk.injEq] at hu
+      obtain ⟨rfl, rfl⟩ := hu
+      cases s
+      simp_all [History.redo, History.seal]
+
+/-- **Undo after redo gives back the history and the store** (the history only closes its
+merge step). -/
+theorem History.undo_redo (h h' : History) (s s' : Store) (hl : h.last = s.marks)
+    (hr : h.redo s = some (h', s')) : h'.undo s' = some (h.seal, s) := by
+  cases h with
+  | mk past future last merging =>
+    cases future with
+    | nil => simp [History.redo] at hr
+    | cons a rest =>
+      simp only [History.redo, Option.some.injEq, Prod.mk.injEq] at hr
+      obtain ⟨rfl, rfl⟩ := hr
+      cases s
+      simp_all [History.undo, History.seal]
+
+/-- The empty history is bounded. -/
+theorem History.start_bounded (ms : Array Mark) : (History.start ms).Bounded := by
+  simp [History.start, History.Bounded]
+
+/-- **Recording keeps the history bounded** (`historyCap`). -/
+theorem History.record_bounded (h : History) (ms : Array Mark) (merge : Bool)
+    (hb : h.Bounded) : (h.record ms merge).Bounded := by
+  unfold History.record History.Bounded at *
+  split
+  · exact hb
+  · split
+    · simp only [List.length_nil, Nat.add_zero]; omega
+    · simp only [List.length_take, List.length_nil, Nat.add_zero]; omega
+
+/-- **Undo keeps the history bounded** (one step moves from undo to redo). -/
+theorem History.undo_bounded (h h' : History) (s s' : Store) (hb : h.Bounded)
+    (hu : h.undo s = some (h', s')) : h'.Bounded := by
+  cases h with
+  | mk past future last merging =>
+    cases past with
+    | nil => simp [History.undo] at hu
+    | cons b rest =>
+      simp only [History.undo, Option.some.injEq, Prod.mk.injEq] at hu
+      obtain ⟨rfl, rfl⟩ := hu
+      simp only [History.Bounded, List.length_cons] at *
+      omega
+
+/-- **Redo keeps the history bounded** (one step moves from redo to undo). -/
+theorem History.redo_bounded (h h' : History) (s s' : Store) (hb : h.Bounded)
+    (hr : h.redo s = some (h', s')) : h'.Bounded := by
+  cases h with
+  | mk past future last merging =>
+    cases future with
+    | nil => simp [History.redo] at hr
+    | cons a rest =>
+      simp only [History.redo, Option.some.injEq, Prod.mk.injEq] at hr
+      obtain ⟨rfl, rfl⟩ := hr
+      simp only [History.Bounded, List.length_cons] at *
+      omega
+
 /-! ## Pixels -/
 
 /-- `a · b / 255`, rounded (the multiply blend of two bytes). -/
@@ -681,6 +848,64 @@ private def ftKind (t : String) (sz : Nat) (c : Rgb) : Kind := .freeText t ⟨10
   (·.kind.same (.ink [[⟨400, 400⟩, ⟨420, 430⟩]] 2 50 (0, 0, 255))) == some true
 #guard let s := Store.load [⟨7, 0, .yellow, .freeText "x" ⟨1, 2⟩ 10 (0, 0, 0)⟩]
   !s.dirty && (s.translate 7 1 0).dirty && (s.setSize 7 11).dirty && !(s.setOpacity 7 3).dirty
+-- Undo/redo (task 10.7). An edit, recorded, then undone gives back the marks; redo again.
+private def applyEdit (hs : History × Store) (f : Store → Store) (merge : Bool := false) :
+    History × Store :=
+  let s := f hs.2
+  (hs.1.record s.marks merge, s)
+
+private def undo? (hs : History × Store) : Option (History × Store) := hs.1.undo hs.2
+private def redo? (hs : History × Store) : Option (History × Store) := hs.1.redo hs.2
+
+#guard let hs := applyEdit (History.start sample.marks, sample) (·.recolor 1 .pink)
+  hs.1.canUndo && !hs.1.canRedo &&
+  ((undo? hs).map fun (h, s) => sameMarks s.marks sample.marks && h.canRedo && !h.canUndo) ==
+    some true &&
+  (((undo? hs).bind redo?).map fun (h, s) => sameMarks s.marks hs.2.marks && h.canUndo) ==
+    some true
+-- Identical marks record nothing; a new edit clears redo.
+#guard (History.start sample.marks |>.record sample.marks).past.isEmpty
+#guard let hs := applyEdit (History.start sample.marks, sample) (·.remove 2)
+  ((undo? hs).map fun u => (applyEdit u (·.setText 2 "x")).1.canRedo) == some false
+-- Saved marks (9.5g): undoing an edit or a delete makes the document clean again, and the
+-- deleted saved mark comes back as saved; redo makes it dirty again.
+#guard let s0 := Store.load [⟨7, 0, .red, .highlight [q1]⟩, ⟨3, 0, .blue, .note "x" (.quads [q1])⟩]
+  let hs := applyEdit (applyEdit (History.start s0.marks, s0) (·.recolor 7 .green))
+    (·.removeWithComment 7)
+  hs.2.dirty && hs.2.pending == 2 &&
+  ((undo? hs).map fun (_, s) => s.dirty && s.deletedSaved.isEmpty && (s.find? 3).isSome) ==
+    some true &&
+  (((undo? hs).bind undo?).map fun (_, s) => !s.dirty && s.isSaved 7) == some true &&
+  ((((undo? hs).bind undo?).bind redo?).map fun (_, s) => s.dirty) == some true
+-- Ids stay fresh after undoing an addition.
+#guard let hs := applyEdit (History.start sample.marks, sample) (·.add 0 .red (.highlight [q1]) |>.1)
+  ((undo? hs).map fun (_, s) => (s.add 0 .red (.highlight [q1])).2) == some 6
+-- One slider drag (merge steps after a seal) is one undo step; a later drag is another.
+#guard let s0 : Store := (sample.add 0 .yellow (.ink [[⟨1, 1⟩, ⟨2, 2⟩]] 2 100 (0, 0, 0))).1
+  let hs := (History.start s0.marks, s0)
+  let hs := applyEdit hs (·.setSize 5 3) true
+  let hs := applyEdit hs (·.setSize 5 4) true
+  let hs := applyEdit hs (·.setSize 5 5) true
+  let hs := applyEdit (hs.1.seal, hs.2) (·.setSize 5 9) true
+  hs.1.past.length == 2 &&
+  ((undo? hs).map fun (_, s) => (s.find? 5).map (·.kind.same (.ink [[⟨1, 1⟩, ⟨2, 2⟩]] 5 100 (0, 0, 0)))) ==
+    some (some true) &&
+  (((undo? hs).bind undo?).map fun (_, s) => sameMarks s.marks s0.marks) == some true
+-- A non-merge edit after a drag starts its own step.
+#guard let hs := applyEdit (History.start sample.marks, sample) (·.recolor 1 .red) true
+  (applyEdit hs (·.recolor 1 .blue)).1.past.length == 2
+-- The depth is capped: 150 edits keep the newest 100 steps.
+private def edits150 : History × Store :=
+  (List.range 150).foldl (fun hs i => applyEdit hs (·.setText 2 (toString i)))
+    (History.start sample.marks, sample)
+
+#guard let hs := edits150
+  hs.1.past.length == historyCap &&
+  ((List.range 100).foldl (fun hs _ => hs.bind undo?) (some hs)).map
+    (fun (h, s) => (!h.canUndo, h.future.length, (s.find? 2).map (·.text))) ==
+    some (true, 100, some "49")
+-- A point note's point counts for `sameMarks` (`Mark.same` ignores it).
+#guard !sameMarks #[⟨1, 0, .yellow, .note "" (.point ⟨1, 1⟩)⟩] #[⟨1, 0, .yellow, .note "" (.point ⟨2, 1⟩)⟩]
 -- Multiply: white takes the colour, black stays black, alpha is kept.
 #guard mul8 255 0x98 == 0x98 && mul8 0 0xFF == 0 && mul8 128 128 == 64
 #guard (multiplyRect (ByteArray.mk #[255, 255, 255, 255, 0, 0, 0, 255]) 2 0 0 2 1

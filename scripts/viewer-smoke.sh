@@ -441,7 +441,7 @@ want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
-    "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
+    "entries.menubar.edit": "Undo|Redo|Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Sidebar|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
@@ -2259,6 +2259,48 @@ for f in "$work/garbage.pdf" "Tests/adversarial/pages-kids-cycle.pdf" "$work/mis
     fail=1
   fi
 done
+
+# 1x. Delete and undo/redo on marks (task 10.7, SAFEPDF_VIEWER_SMOKE_MODE=undo, `Viewer.smokeUndo`)
+# on a copy of the text PDF of 1d: Backspace removes the selected highlight, Ctrl+Z restores it
+# (pixels), Ctrl+Shift+Z removes it again, undoing everything is clean (Undo disabled); a
+# note's text edit and creation are undone and redone; after Ctrl+S (Overwrite) the saved
+# highlight is deleted with Delete and restored with Ctrl+Z (clean again, drawn from the
+# file), then recoloured green and saved: the file holds both marks. Externally: qpdf --check.
+mkdir -p "$work/undo" "$work/out-undo"
+cp "$work/text.pdf" "$work/undo/text.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=undo run_viewer "$work/out-undo" "$work/undo/text.pdf"
+cat "$work/out-undo/undo.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+want = {
+    "start": "0 white disabled disabled",
+    "highlighted": "1 tinted true normal disabled",
+    "backspace": "true 0 white normal disabled",
+    "undo-delete": "1 tinted true normal normal",
+    "redo-delete": "0 white normal disabled",
+    "undo-all": "0 white false false disabled normal",
+    "undo-empty": "0 nothing to undo",
+    "redo-highlight": "1 tinted normal normal",
+    "note": "true first normal disabled",
+    "note-edited": "second",
+    "note-undo1": "first",
+    "note-undo2": "[]",
+    "note-undo3": "<none> 1",
+    "note-redo": "first 2 normal normal",
+    "saved": "true 2 false false tinted disabled disabled",
+    "saved-delete": "true 1 true true white normal",
+    "saved-undo": "2 false false tinted disabled true true",
+    "resaved": "2 false (some green) 83 255 188 disabled disabled",
+    "file-marks": "2 2",
+}
+errs = ["undo %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-undo/undo.txt" || fail=1
+if command -v qpdf >/dev/null 2>&1; then
+  qpdf --check "$work/undo/text.pdf" >/dev/null 2>&1 || { echo "FAIL: undo: qpdf --check" >&2; fail=1; }
+else echo "viewer-smoke: qpdf missing, check skipped"; fi
 
 if [ "$fail" = 0 ]; then echo "viewer-smoke: OK"; else echo "viewer-smoke: FAILED" >&2; fi
 exit $fail
