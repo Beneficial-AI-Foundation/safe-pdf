@@ -1316,3 +1316,13 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Spec.RepairAgreeFree.c4_free_eq
 #print axioms SafePdf.Spec.RepairAgreeFree.c4_free_eq_check
 #print axioms SafePdf.Spec.RepairAgreeFree.getObject_eq
+-- Phase 12, task 12.8: raster error bounds
+#print axioms SafePdf.Spec.RasterError.mul_err
+#print axioms SafePdf.Spec.RasterError.ctm_err
+#print axioms SafePdf.Spec.RasterError.ctm_err_linear
+#print axioms SafePdf.Spec.RasterError.ctm_apply_err
+#print axioms SafePdf.Spec.RasterError.ofDecimal_err
+#print axioms SafePdf.Spec.RasterError.toSub_err
+#print axioms SafePdf.Spec.RasterError.polyline_tol
+#print axioms SafePdf.Spec.RasterError.device_curve_err
+#print axioms SafePdf.Spec.RasterError.qd_err
