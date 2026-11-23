@@ -138,6 +138,13 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   Highlight tool and its pop-over `.hlbar` (swatches, thickness slider, "Show all"; `syncTool`,
   `drawPopover`); with the tool on a mouse-up that selects text highlights it at once; Escape
   closes the pop-over and dismisses the bubble.
+* **Dismissal** (task 10.6, rule in `Toolbar.Transient`): the note popup, the colour picker,
+  the Highlight and Add text / Draw pop-overs and the go-to / find bars all close on Escape
+  (the topmost one; only with none open does Escape leave full screen) and on a mouse press
+  elsewhere in the main window (`::safepdf::clickAway` on the tag `all`, `clickAway`; the
+  press is not consumed). A press on the page keeps the tool pop-overs (their tool is in use
+  there) and is the picker's own (`press`); the note closes through `noteDone … close`
+  (9.r12); opening the find or go-to bar closes the other (`opening`).
 * **Review 2026-11-23** (task 9.r4): the toolbar's view-mode drop-down `.bar.vmode` after the
   page count (`Toolbar.ViewChoice`, kept in sync with the View and `»` menus by
   `setViewMode` / `showViewChoice`); opening or closing the outline sidebar lays the pages out
@@ -1613,12 +1620,19 @@ ttk::button .find.close -text {Close} -command ::safepdf::hideFind
 pack .find.l .find.e .find.prev .find.next .find.close -side left -padx 2 -pady 2
 bindtags .find.e [list .find.e TEntry all]
 proc ::safepdf::showFind {} {
+  ::safepdf::emit opening find
   if {![winfo ismapped .find]} { pack .find -side top -fill x -after .barline }
   focus .find.e
   .find.e selection range 0 end
   .find.e icursor end
 }
-proc ::safepdf::hideFind {} { pack forget .find; focus .c; ::safepdf::emit find close }
+# Closing a bar gives the focus back to the page only when it was in the bar (a click-away
+# on another entry keeps that entry focused; task 10.6).
+proc ::safepdf::refocus {bar} {
+  set f [focus]
+  if {$f eq {} || $f eq $bar || [string match $bar.* $f]} { focus .c }
+}
+proc ::safepdf::hideFind {} { pack forget .find; ::safepdf::refocus .find; ::safepdf::emit find close }
 bind .find.e <Return> {::safepdf::emit find next $::safepdf::query; break}
 bind .find.e <KP_Enter> {::safepdf::emit find next $::safepdf::query; break}
 bind .find.e <Shift-Return> {::safepdf::emit find prev $::safepdf::query; break}
@@ -1649,12 +1663,13 @@ ttk::button .goto.close -text {Close} -command ::safepdf::hideGoto
 pack .goto.l .goto.e .goto.go .goto.close -side left -padx 2 -pady 2
 bindtags .goto.e [list .goto.e TEntry all]
 proc ::safepdf::showGoto {} {
+  ::safepdf::emit opening goto
   if {![winfo ismapped .goto]} { pack .goto -side top -fill x -after .barline }
   focus .goto.e
   .goto.e selection range 0 end
   .goto.e icursor end
 }
-proc ::safepdf::hideGoto {} { pack forget .goto; focus .c }
+proc ::safepdf::hideGoto {} { pack forget .goto; ::safepdf::refocus .goto }
 bind .goto.e <Return> {::safepdf::emit goto $::safepdf::gotoText; break}
 bind .goto.e <KP_Enter> {::safepdf::emit goto $::safepdf::gotoText; break}
 bind .goto.e <Escape> {::safepdf::hideGoto; break}
@@ -2000,6 +2015,15 @@ proc ::safepdf::inkAdd {x y} {
   .c coords inkcur {*}$::safepdf::inkPts
 }
 bind . <Key-Escape> {::safepdf::emit escape}
+# Click-away (task 10.6, Toolbar.onClick): a press anywhere in the main window closes the open
+# transients it lies outside of. Bound on the tag all, so it runs after the widget's own
+# bindings and the press still does its job; presses in other toplevels (the note popup,
+# menus, dialogs) are not click-aways.
+proc ::safepdf::clickAway {w} {
+  if {[catch {winfo toplevel $w} top] || $top ne {.}} return
+  ::safepdf::emit clickAway $w
+}
+bind all <ButtonPress-1> {+::safepdf::clickAway %W}
 focus .c
 "
 
@@ -4887,13 +4911,74 @@ def popDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
   syncTool st
   setStatus s!"thickness {v} (used by free highlights)"
 
-/-- Escape (task 9.8): closes the colour picker and the pop-over and dismisses the bubble (the
-text selection and the selected mark are cleared; the tool stays on). -/
+/-! ## Dismissing transients (task 10.6) -/
+
+/-- The transients open now (`Toolbar.Transient`, in `Transient.order`): the note popup and
+the bars from Tk (a bar counts as open while it is packed), the picker and the pop-overs
+from the tool state (a pop-over only with a document, as `syncTool` shows it). -/
+def openTransients (st : IO.Ref State) : IO (List Toolbar.Transient) := do
+  let s ← st.get
+  let packed (w : String) : IO Bool := do
+    return !(← try run ["winfo", "manager", w] catch _ => pure "").isEmpty
+  let note := (← try run ["winfo", "exists", ".note"] catch _ => pure "0") == "1"
+  let goto ← packed ".goto"
+  let find ← packed ".find"
+  let hl := s.ui.popover && s.doc.isSome
+  let ed := s.ui.edPop && s.ui.editor != .none && s.doc.isSome
+  return Toolbar.Transient.order.filter fun
+    | .note => note
+    | .picker => s.pickerAt.isSome || s.ui.picker
+    | .hlPop => hl
+    | .edPop => ed
+    | .goto => goto
+    | .find => find
+
+/-- Closes transient `t` the way its own Close does: the note popup through `noteDone … close`
+(task 9.r12: a typed text is kept, an empty new note removed; never a bare `destroy .note`),
+the bars through `hideFind` / `hideGoto`, the picker and the pop-overs in the tool state
+(`Transient.closeUi`: the tool and the mode stay on). -/
+def dismiss (st : IO.Ref State) (t : Toolbar.Transient) : IO Unit := do
+  match t with
+  | .note =>
+    let id ← try run ["set", "::safepdf::noteId"] catch _ => pure ""
+    discard <| run ["::safepdf::noteDone", id, "close"]
+  | .goto => discard <| run ["::safepdf::hideGoto"]
+  | .find => discard <| run ["::safepdf::hideFind"]
+  | .picker =>
+    st.modify fun s => { s with ui := t.closeUi s.ui }
+    drawOverlay st
+  | .hlPop | .edPop =>
+    st.modify fun s => { s with ui := t.closeUi s.ui }
+    syncTool st
+
+/-- Handles `clickAway W` (task 10.6): a mouse press on widget `W` of the main window closes
+the open transients it lies outside of (`Toolbar.onClick`). The press is not consumed: the
+widget's own bindings have already run (the binding sits on the tag `all`). -/
+def clickAway (st : IO.Ref State) (w : String) : IO Unit := do
+  for t in Toolbar.onClick (← openTransients st) w do dismiss st t
+
+/-- Handles `opening find` / `opening goto` (task 10.6): before a bar opens, its rival closes
+(`Toolbar.onOpen`; the pop-overs' rivalry is in `Bubble.Ui`). -/
+def opening (st : IO.Ref State) (name : String) : IO Unit := do
+  let t : Option Toolbar.Transient := match name with
+    | "find" => some .find
+    | "goto" => some .goto
+    | _ => none
+  let some t := t | return
+  for u in Toolbar.onOpen (← openTransients st) t do dismiss st u
+
+/-- Escape (tasks 9.8, 10.6): closes the topmost open transient (`Toolbar.onEscape`: the note
+popup, the picker, a pop-over, then the go-to or find bar); only when none was open does it
+leave full screen or bring back what the document hid (task 9.r8, `escapeWindow`). Every
+Escape also dismisses the bubble (the text selection and the selected mark are cleared, the
+picker with it) and ends a drawing session; the Highlight tool and the Add text / Draw mode
+stay on. -/
 def escape (st : IO.Ref State) : IO Unit := do
-  -- Task 9.r8: full screen ends, parts of the window the document hid come back.
-  discard <| escapeWindow st
-  st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none,
-                              inkSession := none }
+  let closed := Toolbar.onEscape (← openTransients st)
+  for t in closed do dismiss st t
+  if closed.isEmpty then discard <| escapeWindow st
+  st.modify fun s => { s with ui := { s.ui with picker := false }, sel := none, markSel := none,
+                              pressPt := none, inkSession := none }
   drawOverlay st
   syncTool st
 
@@ -8321,6 +8406,136 @@ def smokeNoteClose (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "noteclose.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the dismissal rule (`SAFEPDF_VIEWER_SMOKE_MODE=dismiss`, task 10.6,
+`Toolbar.Transient`) on the text PDF of `smokeText`. Each line of `dismiss.txt` gives what is
+open after a step (`1`/`0`: the bar or pop-over is packed / placed): the find bar closes on a
+drag on the page (and the drag still selects: the click is not consumed) and on Escape with
+the focus on the page; Ctrl+F closes the go-to bar; the go-to bar stays on a press inside it
+and closes on a press on the status line; the Highlight pop-over stays on a press inside it
+and on the page, closes on a press elsewhere (the tool stays on) and on Escape; the Add text
+pop-over likewise (the mode stays on); the edit bubble's colour picker closes on a press
+outside the page; a note popup with typed text closes on a press on the page (the text is
+kept, task 9.r12), an empty new one on Escape in the main window (the note goes). -/
+def smokeDismiss (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let upd : IO Unit := discard <| run ["update"]
+  let packed (w : String) : IO String := do
+    return if (← run ["winfo", "manager", w]).isEmpty then "0" else "1"
+  let placed (w : String) : IO String := run ["winfo", "ismapped", w]
+  let note : IO String := run ["winfo", "exists", ".note"]
+  let press (w : String) (x y : String := "2") : IO Unit := do
+    sendEvent w "<ButtonPress-1>" ["-x", x, "-y", y, "-time", toString (← IO.monoMsNow)]
+    sendEvent w "<ButtonRelease-1>" ["-x", x, "-y", y, "-time", toString (← IO.monoMsNow)]
+    upd
+  let btn (w : String) : IO Unit := press w "16" "16"
+  let dragSel (q : String) : IO Unit := do
+    let some (wa, wb) := (ix.hits (Select.normQuery q))[0]? | return
+    let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix (wb - 1)) | return
+    sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+    sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    upd
+  let some blank ← boxWindowPos st ⟨40, 760, 40, 760⟩ | throw (IO.userError "page not shown")
+  let pause : IO Unit := discard <| run ["after", "600"]
+  -- 1. The find bar: a drag on the page closes it and still selects; Escape closes it.
+  sendEvent ".c" "<Control-Key-f>"
+  upd
+  out := out.push s!"find-open: {← packed ".find"} focus={← run ["focus"]}"
+  dragSel "world"
+  out := out.push s!"find-drag: {← packed ".find"} sel={(← st.get).sel.isSome} focus={← run ["focus"]}"
+  sendEvent ".c" "<Control-Key-f>"
+  upd
+  sendKey "Escape"
+  upd
+  out := out.push s!"find-esc: {← packed ".find"}"
+  -- 2. The go-to bar: Ctrl+F closes it (rivals); a press inside keeps it, one outside closes it.
+  sendEvent ".c" "<Control-Key-g>"
+  upd
+  out := out.push s!"goto-open: {← packed ".goto"}"
+  sendEvent ".c" "<Control-Key-f>"
+  upd
+  out := out.push s!"goto-rival: goto={← packed ".goto"} find={← packed ".find"}"
+  sendEvent ".find.e" "<Key-Escape>"
+  sendEvent ".c" "<Control-Key-g>"
+  upd
+  press ".goto.e"
+  out := out.push s!"goto-inside: {← packed ".goto"}"
+  press ".status"
+  out := out.push s!"goto-away: {← packed ".goto"}"
+  -- 3. The Highlight pop-over.
+  pause
+  btn ".bar.highlight"
+  out := out.push s!"hl-open: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  press ".hlbar"
+  out := out.push s!"hl-inside: {← placed ".hlbar"}"
+  press ".c" blank.1 blank.2
+  out := out.push s!"hl-page: {← placed ".hlbar"}"
+  press ".status"
+  out := out.push s!"hl-away: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  pause
+  btn ".bar.highlight"
+  pause
+  btn ".bar.highlight"
+  out := out.push s!"hl-reopen: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  sendKey "Escape"
+  upd
+  out := out.push s!"hl-esc: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  pause
+  btn ".bar.highlight"
+  out := out.push s!"hl-off: {(← st.get).ui.tool}"
+  -- 4. The Add text pop-over.
+  pause
+  btn ".bar.text"
+  out := out.push s!"ed-open: {← placed ".edbar"} text={(← st.get).ui.editor == .text}"
+  press ".status"
+  out := out.push s!"ed-away: {← placed ".edbar"} text={(← st.get).ui.editor == .text}"
+  pause
+  btn ".bar.text"
+  pause
+  btn ".bar.text"
+  sendKey "Escape"
+  upd
+  out := out.push s!"ed-esc: {← placed ".edbar"} text={(← st.get).ui.editor == .text}"
+  pause
+  btn ".bar.text"
+  -- 5. The edit bubble's colour picker.
+  dragSel "safe"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  upd
+  if let some (k, r) := (← st.get).bubble then
+    if let some (_, x0, x1) := k.layout.find? (·.1 == .color) then
+      let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+      let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+      pause
+      press ".c" (toString (r.x0 + (x0 + x1) / 2 - vx).floor) (toString ((r.y0 + r.y1) / 2 - vy).floor)
+  out := out.push s!"picker-open: {(← st.get).pickerAt.isSome}"
+  press ".status"
+  out := out.push s!"picker-away: {(← st.get).pickerAt.isSome} {(← st.get).ui.picker}"
+  sendKey "Escape"
+  upd
+  -- 6. The note popup: a press on the page closes it the 9.r12 way (typed text kept).
+  let notes : IO (List Marks.Mark) := return (← st.get).marks.marks.toList.filter (·.isNote)
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.addNote.label]
+  upd
+  discard <| run [".note.t", "insert", "end", "kept by a click away"]
+  press ".note.t"
+  out := out.push s!"note-inside: {← note}"
+  pause
+  press ".c" blank.1 blank.2
+  out := out.push s!"note-away: popup={← note} notes={(← notes).length} text={((← notes).getLast?.map (·.text)).getD "<none>"}"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.addNote.label]
+  upd
+  out := out.push s!"note-open: popup={← note} notes={(← notes).length}"
+  sendKey "Escape"
+  upd
+  out := out.push s!"note-esc: popup={← note} notes={(← notes).length}"
+  out := out.push "done"
+  IO.FS.writeFile (file "dismiss.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Waits until the thumbnails panel has rendered every thumbnail it wants (task 9.r9 smoke
 tests): processes Tk events, starts renders (`thumbView`), waits for them (`thumbPoll`). -/
 def thumbSettle (st : IO.Ref State) : IO Unit := do
@@ -8973,6 +9188,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "noteclose.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "dismiss" then
+    try smokeDismiss st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "dismiss.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "savedlg" then
     try smokeSaveDialogs st dir
     catch e =>
@@ -9154,6 +9375,8 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["hlTool"] => hlToolToggle st
   | ["showAll"] => toggleShowAll st
   | ["escape"] => escape st
+  | ["clickAway", w] => clickAway st w
+  | ["opening", name] => opening st name
   | ["popClick", x, y] => popClick st x y
   | ["edClick", x, y] => edClick st x y
   | ["edDrag", x, y] => edDrag st x y
