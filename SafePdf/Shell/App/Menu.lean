@@ -27,7 +27,12 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   label in Tk.
 * **Platform keys** (task 9.r3, `Platform`, `Key`, `platformScript`): on macOS every Ctrl
   binding gets its Command twin and the labels read `Command-S` (drawn ⌘S); on X11/Windows
-  nothing changes.
+  nothing changes. Task 10.9 (macOS key conventions, after Preview and the HIG): the Command
+  keys of a command are its own list (`Cmd.macKeys`), so a few differ from the Ctrl key —
+  ⌥⌘G Go to page (⌘G / ⇧⌘G are Find next / previous, `Action`), ⌘[ / ⌘] Back / Forward,
+  ⌘↑ / ⌘↓ first / last page, ⌃⌘S Sidebar, ⌃⌘H Highlight, ⌘R / ⌘L rotate, ⌘9 fit page — and
+  ⌘. cancels the viewer's dialogs (`::safepdf::cancelBind`). `keyTable` lists every key of
+  the main window per platform, checked for conflicts by `#guard`s.
 * **Context menu** (right button): Copy, Select all, Find…, then the mark entries
   `popupMarks` — Highlight (colour cascade), Add note… (at the clicked point, `Cmd.popScript`),
   Delete mark (task 9.4).
@@ -204,6 +209,9 @@ structure Key where
   shift : Bool := false
   /-- With Alt (Option on macOS). -/
   alt : Bool := false
+  /-- With the Control key itself beside the primary modifier: only in macOS keys (⌃⌘S;
+  task 10.9), where the primary modifier is Command. -/
+  ctrl : Bool := false
   /-- Tk keysym; a letter in lower case. -/
   sym : String
   /-- The key's name in accelerator labels (`O`, `+`, `F9`, `PageUp`, `Left`). -/
@@ -220,11 +228,11 @@ names, drawn as ⌘ ⇧ ⌥ glyphs). -/
 def Key.label (p : Platform) (k : Key) : String :=
   match p with
   | .other =>
-    (if k.primary then "Ctrl+" else "") ++ (if k.shift then "Shift+" else "") ++
+    (if k.primary || k.ctrl then "Ctrl+" else "") ++ (if k.shift then "Shift+" else "") ++
       (if k.alt then "Alt+" else "") ++ k.shown
   | .aqua =>
-    (if k.primary then "Command-" else "") ++ (if k.shift then "Shift-" else "") ++
-      (if k.alt then "Option-" else "") ++ k.shown
+    (if k.ctrl then "Control-" else "") ++ (if k.primary then "Command-" else "") ++
+      (if k.shift then "Shift-" else "") ++ (if k.alt then "Option-" else "") ++ k.shown
 
 /-- The Tk event sequences of a key with the primary modifier (none for other keys: their
 bindings do not depend on the platform). A shifted letter is bound by its upper-case keysym
@@ -240,6 +248,25 @@ def Key.sequences (p : Platform) (k : Key) : List String :=
         (if m == "Command" then [s!"<Shift-{alt}{m}-Key-{k.sym}>"] else [])
     else if k.shift then [s!"<Shift-{alt}{m}-Key-{k.sym}>"]
     else [s!"<{alt}{m}-Key-{k.sym}>"]
+
+/-- The Tk event sequences of any key with `m` as its primary modifier (`Control` for the
+X11 keys, `Command` for the macOS keys) and `alt` the Tk name of its Alt key (`Alt`;
+`Option` on aqua, the name Tk's own aqua bindings use). Shifted letters as in
+`Key.sequences` (task 10.9; equal to it on the primary keys, `#guard`). -/
+def Key.seqs (m alt : String) (k : Key) : List String :=
+  let mods := (if k.ctrl then "Control-" else "") ++ (if k.alt then alt ++ "-" else "") ++
+    (if k.primary then m ++ "-" else "")
+  if k.shift && isLetterSym k.sym then
+    s!"<{mods}Key-{k.sym.toUpper}>" ::
+      (if m == "Command" && k.primary then [s!"<Shift-{mods}Key-{k.sym}>"] else [])
+  else if k.shift then [s!"<Shift-{mods}Key-{k.sym}>"]
+  else [s!"<{mods}Key-{k.sym}>"]
+
+/-- The sequences of an X11 key (Control, Alt). -/
+def Key.x11Seqs (k : Key) : List String := k.seqs "Control" "Alt"
+
+/-- The sequences of a macOS key (Command, Option). -/
+def Key.macSeqs (k : Key) : List String := k.seqs "Command" "Option"
 
 /-- A key with the primary modifier. -/
 def primaryKey (sym shown : String) (shift : Bool := false) : Key :=
@@ -282,23 +309,6 @@ def Cmd.key : Cmd → Option Key
   | .importXfdf | .exportXfdf | .addNote | .hlTool | .showAll | .scrollPage
   | .scrollVertical | .spreadNone | .spreadOdd | .spreadEven => none
 
-/-- The key shown on platform `p`: on aqua the zoom commands show their Command form
-(⌘+, ⌘−, ⌘0, the macOS convention; the plain keys still work). -/
-def Cmd.keyOn (p : Platform) (c : Cmd) : Option Key :=
-  match p, c with
-  | .aqua, .zoomIn => some (primaryKey "plus" "+")
-  | .aqua, .zoomOut => some (primaryKey "minus" "-")
-  | .aqua, .actualSize => some (primaryKey "0" "0")
-  | _, c => c.key
-
-/-- Accelerator text shown in the menus on platform `p` (empty: none). -/
-def Cmd.accelOn (p : Platform) (c : Cmd) : String :=
-  ((c.keyOn p).map (Key.label p)).getD ""
-
-/-- Accelerator text on X11/Windows (`accelOn .other`). -/
-def Cmd.accel (c : Cmd) : String :=
-  c.accelOn .other
-
 /-- Every primary-modifier key that runs the command from the main window (bound on the
 toplevel `.`): its accelerator plus alternatives (`=` and keypad `+` zoom in too). -/
 def Cmd.primaryKeys : Cmd → List Key
@@ -308,6 +318,76 @@ def Cmd.primaryKeys : Cmd → List Key
   | c => match c.key with
     | some k => if k.primary then [k] else []
     | none => []
+
+/-- The Command keys of the command on macOS (task 10.9; `primary` = Command, bound on `.`
+by `platformScript` on aqua only, beside the X11 keys, which stay). The first is the menu
+accelerator there. By default the Command twins of `primaryKeys` (⌘O, ⌘S, ⇧⌘S, ⌘W, ⌘Q,
+⌘C, ⌘A, ⌘F, ⌘+ / ⌘= / ⌘−, ⌘0). Where macOS has its own convention (Preview, HIG) it wins:
+Go to page ⌥⌘G (⌘G is Find next, `Action.findNext`), Back / Forward ⌘[ / ⌘], First / Last
+page ⌘↑ / ⌘↓, Sidebar ⌃⌘S (the HIG's Show Sidebar), Highlight ⌃⌘H, Rotate right / left
+⌘R / ⌘L, Fit page ⌘9 (Preview's Zoom to Fit). The plain keys (`h`, `F9`, `r`, `Home`, …)
+work on both platforms. -/
+def Cmd.macKeys : Cmd → List Key
+  | .gotoPage => [{ primary := true, alt := true, sym := "g", shown := "G" }]
+  | .back => [primaryKey "bracketleft" "["]
+  | .forward => [primaryKey "bracketright" "]"]
+  | .firstPage => [primaryKey "Up" "Up"]
+  | .lastPage => [primaryKey "Down" "Down"]
+  | .outline => [{ primary := true, ctrl := true, sym := "s", shown := "S" }]
+  | .highlight => [{ primary := true, ctrl := true, sym := "h", shown := "H" }]
+  | .rotateCw => [primaryKey "r" "R"]
+  | .rotateCcw => [primaryKey "l" "L"]
+  | .fitPage => [primaryKey "9" "9"]
+  | c => c.primaryKeys
+
+/-- The key shown on platform `p`: on aqua the first macOS key (⌘+, ⌘−, ⌘0 for the zoom
+commands, the macOS convention, and the keys of `Cmd.macKeys`), else the X11 key (plain keys
+such as PageUp or `w` are the same on both). -/
+def Cmd.keyOn (p : Platform) (c : Cmd) : Option Key :=
+  match p with
+  | .aqua => c.macKeys.head?.orElse fun _ => c.key
+  | .other => c.key
+
+/-- Accelerator text shown in the menus on platform `p` (empty: none). -/
+def Cmd.accelOn (p : Platform) (c : Cmd) : String :=
+  ((c.keyOn p).map (Key.label p)).getD ""
+
+/-- Accelerator text on X11/Windows (`accelOn .other`). -/
+def Cmd.accel (c : Cmd) : String :=
+  c.accelOn .other
+
+/-- Key actions of the main window that are not menubar commands (task 10.9). -/
+inductive Action where
+  /-- Find the next hit of the find bar's query. -/
+  | findNext
+  /-- Find the previous hit. -/
+  | findPrev
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Every key action. -/
+def Action.all : List Action := [.findNext, .findPrev]
+
+/-- What the action does (the key table of `docs/viewer.md`). -/
+def Action.name : Action → String
+  | .findNext => "Find next"
+  | .findPrev => "Find previous"
+
+/-- The constant script of the action on `.` (as the find bar's buttons). -/
+def Action.script : Action → String
+  | .findNext => "::safepdf::emit find next $::safepdf::query"
+  | .findPrev => "::safepdf::emit find prev $::safepdf::query"
+
+/-- The X11 keys (plain, bound in `Viewer.setupScript` on `.` and the find bar): F3 /
+Shift+F3 (Ctrl+G is Go to page on X11, as before). -/
+def Action.x11Keys : Action → List Key
+  | .findNext => [plainKey "F3" "F3"]
+  | .findPrev => [{ shift := true, sym := "F3", shown := "F3" }]
+
+/-- The macOS Command keys (bound by `platformScript` on aqua, on `.` and in the find bar):
+⌘G / ⇧⌘G, the macOS Find Next / Find Previous. F3 stays. -/
+def Action.macKeys : Action → List Key
+  | .findNext => [primaryKey "g" "G"]
+  | .findPrev => [primaryKey "g" "G" (shift := true)]
 
 /-- The quit key, bound also on the text fields that have their own bind tags (the page
 field, the find and go-to bars, the FreeText editor), so that it works while typing. -/
@@ -573,6 +653,25 @@ def entryStates (c : Ctx) : List Bool :=
 def locate (cmd : Cmd) : Option (String × Nat) :=
   (entryList.find? (·.2.2 == cmd)).map fun (p, i, _) => (p, i)
 
+/-- Every key bound on the main window's tag `.` on platform `p`, as (Tk sequence, script):
+the X11 keys of every command (plain and Ctrl, on both platforms: the Control bindings stay
+on aqua), the actions' X11 keys and, on aqua, the macOS keys of commands and actions. The
+`#guard`s below check that no sequence runs two different scripts. -/
+def keyTable (p : Platform) : List (String × String) :=
+  let x11 := Cmd.all.flatMap (fun c =>
+      ((c.key.toList.filter (!·.primary)) ++ c.primaryKeys).flatMap fun k =>
+        k.x11Seqs.map (·, c.script)) ++
+    Action.all.flatMap fun a => (a.x11Keys.flatMap Key.x11Seqs).map (·, a.script)
+  let mac := match p with
+    | .aqua => Cmd.all.flatMap (fun c => (c.macKeys.flatMap Key.macSeqs).map (·, c.script)) ++
+        Action.all.flatMap fun a => (a.macKeys.flatMap Key.macSeqs).map (·, a.script)
+    | .other => []
+  x11 ++ mac
+
+/-- Whether no Tk sequence in the list is bound to two different scripts. -/
+def conflictFree (t : List (String × String)) : Bool :=
+  t.all fun (q, s) => t.all fun (q', s') => q != q' || s == s'
+
 /-- The Tcl script that installs the platform's primary-modifier bindings (run once after
 `Viewer.setupScript`; every word through `Tcl.quote`): for every command its `primaryKeys`
 on `.`, the quit key on `quitEntries`, the context menu's accelerator labels, the proc
@@ -583,7 +682,16 @@ script. On X11/Windows the bindings repeat the Control bindings `setupScript` ma
 def platformScript (p : Platform) : String :=
   let bindAll (tag : String) (k : Key) (script : String) : List (List String) :=
     (k.sequences p).map fun seq => ["bind", tag, seq, script]
-  let cmds := Cmd.all.flatMap fun c => c.primaryKeys.flatMap fun k => bindAll "." k c.script
+  let cmds := Cmd.all.flatMap fun c =>
+    c.primaryKeys.flatMap fun k => k.x11Seqs.map fun q => ["bind", ".", q, c.script]
+  -- macOS keys (task 10.9): the commands' and actions' Command keys on `.`, the find actions
+  -- also in the find bar (own bind tags; `break` keeps the entry's class bindings out).
+  let macs : List (List String) := match p with
+    | .aqua =>
+      (Cmd.all.flatMap fun c => (c.macKeys.flatMap Key.macSeqs).map fun q => ["bind", ".", q, c.script]) ++
+      (Action.all.flatMap fun a => (a.macKeys.flatMap Key.macSeqs).flatMap fun q =>
+        [["bind", ".", q, a.script], ["bind", ".find.e", q, a.script ++ "; break"]])
+    | .other => []
   let quits := quitEntries.flatMap fun w => bindAll w quitKey Cmd.quit.script
   let pops := popAccelCmds.map fun c =>
     [popPath, "entryconfigure", c.label, "-accelerator", c.accelOn p]
@@ -596,14 +704,20 @@ def platformScript (p : Platform) : String :=
   let proc := ["proc", "::safepdf::primaryBind", "w key script",
     "foreach m " ++ Tcl.quote (Tcl.Word.renderList (p.primaryMods.map .lit)) ++
       " { bind $w <$m-Key-$key> $script }"]
-  Tcl.Script.render (Tcl.Script.ofStrings (cmds ++ quits ++ pops ++ aqua ++ [proc]))
+  -- ⌘. cancels a dialog on macOS (task 10.9): the viewer's own dialogs call
+  -- `::safepdf::cancelBind W SCRIPT` beside their Escape binding; a no-op elsewhere.
+  let cancel := ["proc", "::safepdf::cancelBind", "w script", match p with
+    | .aqua => "bind $w <Command-Key-period> $script"
+    | .other => ""]
+  Tcl.Script.render (Tcl.Script.ofStrings (cmds ++ macs ++ quits ++ pops ++ aqua ++ [proc, cancel]))
 
 /-- A display text naming keys the X11 way (status messages, tooltips: `Ctrl+O`) in the
 platform's form: on aqua the macOS glyphs (`⌘O`, `⇧⌘S`, `⌥`). -/
 def Platform.keyText (p : Platform) (s : String) : String :=
   match p with
   | .other => s
-  | .aqua => ((s.replace "Ctrl+Shift+" "⇧⌘").replace "Ctrl+" "⌘").replace "Alt+" "⌥"
+  | .aqua => (((s.replace "Ctrl+Shift+" "⇧⌘").replace "Ctrl+" "⌘").replace "Alt+" "⌥").replace
+      "(F9)" "(⌃⌘S)"
 
 -- Every command is in the menubar exactly once.
 #guard Cmd.all.all fun c => (entryList.filter (·.2.2 == c)).length == 1
@@ -682,11 +796,19 @@ def Platform.keyText (p : Platform) (s : String) : String :=
   Cmd.openFile.accelOn .aqua == "Command-O" && Cmd.find.accelOn .aqua == "Command-F" &&
   Cmd.copy.accelOn .aqua == "Command-C" && Cmd.selectAll.accelOn .aqua == "Command-A" &&
   Cmd.quit.accelOn .aqua == "Command-Q" && Cmd.close.accelOn .aqua == "Command-W" &&
-  Cmd.gotoPage.accelOn .aqua == "Command-G"
+  Cmd.gotoPage.accelOn .aqua == "Command-Option-G"
 #guard Cmd.zoomIn.accelOn .aqua == "Command-+" && Cmd.zoomOut.accelOn .aqua == "Command--" &&
   Cmd.actualSize.accelOn .aqua == "Command-0"
-#guard Cmd.back.accelOn .aqua == "Option-Left" && Cmd.rotateCcw.accelOn .aqua == "Shift-R" &&
-  Cmd.outline.accelOn .aqua == "F9" && Cmd.highlight.accelOn .aqua == "H"
+-- macOS conventions (task 10.9; Preview, HIG).
+#guard Cmd.back.accelOn .aqua == "Command-[" && Cmd.forward.accelOn .aqua == "Command-]" &&
+  Cmd.rotateCw.accelOn .aqua == "Command-R" && Cmd.rotateCcw.accelOn .aqua == "Command-L" &&
+  Cmd.outline.accelOn .aqua == "Control-Command-S" &&
+  Cmd.highlight.accelOn .aqua == "Control-Command-H" &&
+  Cmd.firstPage.accelOn .aqua == "Command-Up" && Cmd.lastPage.accelOn .aqua == "Command-Down" &&
+  Cmd.fitPage.accelOn .aqua == "Command-9" && Cmd.fitWidth.accelOn .aqua == "W" &&
+  Cmd.prevPage.accelOn .aqua == "PageUp" && Cmd.deleteMark.accelOn .aqua == "Delete"
+-- Every command with a key on X11 has one on macOS, and the reverse.
+#guard Cmd.all.all fun c => (c.keyOn .aqua).isSome == c.key.isSome
 -- No Ctrl label on aqua, no Command label elsewhere.
 #guard Cmd.all.all fun c => !((c.accelOn .aqua).startsWith "Ctrl") &&
   !((c.accelOn .other).startsWith "Command")
@@ -709,6 +831,35 @@ def Platform.keyText (p : Platform) (s : String) : String :=
   ["<Control-Key-plus>", "<Command-Key-plus>", "<Control-Key-equal>", "<Command-Key-equal>",
    "<Control-Key-KP_Add>", "<Command-Key-KP_Add>"]
 #guard Cmd.back.primaryKeys.isEmpty && (Cmd.highlight.key.map (Key.sequences .aqua)) == some []
+-- Task 10.9: every command with a Ctrl key has Command keys on macOS (its twin, or the macOS
+-- convention), and every macOS key uses Command.
+#guard Cmd.all.all fun c => c.primaryKeys.isEmpty || !c.macKeys.isEmpty
+#guard Cmd.all.all fun c => c.macKeys.all (·.primary)
+#guard Action.all.all fun a => a.macKeys.all (·.primary) && a.x11Keys.all (!·.primary)
+-- `Key.seqs` agrees with `Key.sequences` on the primary keys.
+#guard Cmd.all.all fun c => c.primaryKeys.all fun k =>
+  k.sequences .other == k.x11Seqs && k.sequences .aqua == k.x11Seqs ++ k.macSeqs
+#guard (Cmd.all.filter fun c => c.macKeys != c.primaryKeys) ==
+  [.highlight, .outline, .fitPage, .rotateCw, .rotateCcw, .firstPage, .lastPage, .gotoPage,
+   .back, .forward]
+#guard Cmd.gotoPage.macKeys.flatMap Key.macSeqs == ["<Option-Command-Key-g>"] &&
+  Cmd.outline.macKeys.flatMap Key.macSeqs == ["<Control-Command-Key-s>"] &&
+  Cmd.back.macKeys.flatMap Key.macSeqs == ["<Command-Key-bracketleft>"] &&
+  Cmd.firstPage.macKeys.flatMap Key.macSeqs == ["<Command-Key-Up>"] &&
+  Action.findPrev.macKeys.flatMap Key.macSeqs == ["<Command-Key-G>", "<Shift-Command-Key-g>"]
+#guard Cmd.back.key.map Key.x11Seqs == some ["<Alt-Key-Left>"] &&
+  Cmd.rotateCcw.key.map Key.x11Seqs == some ["<Key-R>"] &&
+  Action.findPrev.x11Keys.flatMap Key.x11Seqs == ["<Shift-Key-F3>"]
+-- No key runs two different scripts, on either platform; the macOS table extends the X11 one
+-- (the Control bindings stay on aqua) and only by Command sequences.
+#guard conflictFree (keyTable .other) && conflictFree (keyTable .aqua)
+#guard (keyTable .other).all fun e => (keyTable .aqua).contains e
+#guard (keyTable .aqua).all fun e => (keyTable .other).contains e ||
+  (e.1.splitOn "Command-").length == 2
+#guard (keyTable .other).all fun e => (e.1.splitOn "Command").length == 1
+#guard (keyTable .aqua).contains ("<Command-Key-g>", Action.findNext.script) &&
+  (keyTable .aqua).contains ("<Control-Key-g>", Cmd.gotoPage.script) &&
+  (keyTable .aqua).contains ("<Option-Command-Key-g>", Cmd.gotoPage.script)
 -- The script binds each command's own script; aqua adds Command+wheel and the Quit hook.
 #guard ((platformScript .other).splitOn "Command").length == 1
 #guard ((platformScript .aqua).splitOn "bind . {<Command-Key-s>} {::safepdf::emit save}").length == 2
@@ -716,6 +867,14 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard ((platformScript .aqua).splitOn "bind . {<Command-Key-q>} {::safepdf::emit quit}").length == 2
 #guard ((platformScript .aqua).splitOn "bind .find.e {<Command-Key-q>} {::safepdf::emit quit}").length == 2
 #guard ((platformScript .aqua).splitOn "proc ::tk::mac::Quit {} {::safepdf::emit quit}").length == 2
+-- Task 10.9 bindings: find next/previous on `.` and in the find bar, Go to page, ⌘. in dialogs.
+#guard ((platformScript .aqua).splitOn "bind . {<Command-Key-g>} {::safepdf::emit find next $::safepdf::query}").length == 2
+#guard ((platformScript .aqua).splitOn "bind .find.e {<Command-Key-G>} {::safepdf::emit find prev $::safepdf::query; break}").length == 2
+#guard ((platformScript .aqua).splitOn "bind . {<Option-Command-Key-g>} ::safepdf::showGoto").length == 2
+#guard ((platformScript .aqua).splitOn "bind . {<Command-Key-bracketleft>} {::safepdf::emit back}").length == 2
+#guard ((platformScript .aqua).splitOn "proc ::safepdf::cancelBind {w script} {bind $w <Command-Key-period> $script}").length == 2
+#guard ((platformScript .other).splitOn "proc ::safepdf::cancelBind {w script} {}").length == 2
+#guard ((platformScript .aqua).splitOn (".pop entryconfigure Back -accelerator " ++ Tcl.quote "Command-[")).length == 2
 #guard ((platformScript .aqua).splitOn ".pop entryconfigure Copy -accelerator Command-C").length == 2
 #guard ((platformScript .other).splitOn ".pop entryconfigure Copy -accelerator Ctrl+C").length == 2
 #guard ((platformScript .other).splitOn "{foreach m Control { bind $w").length == 2 &&
@@ -725,5 +884,7 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard Platform.aqua.keyText "Save (Ctrl+S)" == "Save (⌘S)" &&
   Platform.aqua.keyText "Press Ctrl+Shift+S" == "Press ⇧⌘S" &&
   Platform.other.keyText "Save (Ctrl+S)" == "Save (Ctrl+S)"
+#guard Platform.aqua.keyText "Toggle sidebar (F9)" == "Toggle sidebar (⌃⌘S)" &&
+  Platform.other.keyText "Toggle sidebar (F9)" == "Toggle sidebar (F9)"
 
 end SafePdf.Shell.App.Menu

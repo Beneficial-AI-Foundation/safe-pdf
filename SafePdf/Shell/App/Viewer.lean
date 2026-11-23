@@ -176,7 +176,9 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
 * **macOS keys and the icon** (task 9.r3): after the window is built, `Menu.platformScript`
   gives every Ctrl binding its Command twin on aqua (menu labels `Command-S`, ⌘ in the Save
   tooltip and status hints via `keyText`, `::tk::mac::Quit` → Quit); `setIcon` sets the
-  embedded `Icons` PNGs with `wm iconphoto . -default`.
+  embedded `Icons` PNGs with `wm iconphoto . -default`. Task 10.9 adds the macOS
+  conventions (`Menu.Cmd.macKeys`, `Menu.Action`: ⌘G / ⇧⌘G find, ⌥⌘G go to page, ⌘[ / ⌘],
+  ⌘↑ / ⌘↓, ⌃⌘S, ⌃⌘H, ⌘R / ⌘L, ⌘9) and ⌘. in the dialogs (`::safepdf::cancelBind`).
 * **Saving** (tasks 9.5c, 9.r2; Tk-free flow and decisions in `Save`): Ctrl+S / File → Save /
   the toolbar's Save writes the unsaved marks **into the opened file** as an incremental
   update (Plan S8/C7, Decision 2026-11-23), checked by a strict reopen and read-back, refused
@@ -1699,6 +1701,7 @@ clipboard.}
   pack $w.b -side bottom -fill x
   wm protocol $w WM_DELETE_WINDOW {set ::safepdf::uriAnswer 0}
   bind $w <Escape> {set ::safepdf::uriAnswer 0}
+  ::safepdf::cancelBind $w {set ::safepdf::uriAnswer 0}
   set ::safepdf::uriAnswer {}
   if {$::safepdf::autoConfirm} {
     after 300 {
@@ -1754,6 +1757,7 @@ proc ::safepdf::choose {title msg default cancel args} {
   pack $w.f -fill both -expand 1
   wm protocol $w WM_DELETE_WINDOW [list set ::safepdf::chooseAnswer $cancel]
   bind $w <Escape> [list set ::safepdf::chooseAnswer $cancel]
+  ::safepdf::cancelBind $w [list set ::safepdf::chooseAnswer $cancel]
   # Return (and keypad Enter) presses the focused button, as in tk_messageBox: after Tab to
   # Cancel, Return must cancel, not run the default (9.r6); the default has the focus first.
   bind $w <Return> [list ::safepdf::chooseReturn $w $default]
@@ -1863,6 +1867,7 @@ proc ::safepdf::noteEdit {id text x y} {
   pack $w.b -side bottom -fill x
   pack $w.t -side top -fill both -expand 1 -padx 6 -pady {6 0}
   bind $w <Escape> [list ::safepdf::noteDone $id close]
+  ::safepdf::cancelBind $w [list ::safepdf::noteDone $id close]
   # break: the popup is gone after noteDone, so the Text class binding must not run.
   ::safepdf::primaryBind $w.t Return \"[list ::safepdf::noteDone $id save]; break\"
   focus $w.t
@@ -7349,7 +7354,10 @@ on X11 (where Tk's `Command` modifier is Meta). Writes `keys.txt`: the platform,
 context-menu accelerators, the bindings of Ctrl/Command+S and Ctrl/Command+Shift+S, the
 quit binding of the find bar and `primaryBind`, `::tk::mac::Quit`, the Save tooltip, the
 status after the primary-modifier Select all key (generated as a Tk event), the icon images'
-sizes and, when `xprop` is installed, the start of the window's `_NET_WM_ICON`. -/
+sizes and, when `xprop` is installed, the start of the window's `_NET_WM_ICON`. Task 10.9
+adds (after the 9.r3 lines) the accelerators of Go to page, First page, Forward, Sidebar and
+Rotate left, the bindings of the macOS conventions on `.` and in the find bar, and
+`::safepdf::cancelBind`. -/
 def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
   let plat ← platformRef.get
   let mut out : Array String := #[]
@@ -7373,6 +7381,18 @@ def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
   out := out.push s!"mac-quit: [{← run ["info", "procs", "::tk::mac::Quit"]}] [{←
     try run ["info", "body", "::tk::mac::Quit"] catch _ => pure ""}]"
   out := out.push s!"save-tip: {← run ["set", "::safepdf::btn(tip,.bar.save)"]}"
+  -- Task 10.9: the macOS conventions (labels, bindings, ⌘. in dialogs).
+  out := out.push s!"accel-goto: {← accel .gotoPage}"
+  out := out.push s!"accel-first: {← accel .firstPage}"
+  out := out.push s!"accel-forward: {← accel .forward}"
+  out := out.push s!"accel-outline: {← accel .outline}"
+  out := out.push s!"accel-rotccw: {← accel .rotateCcw}"
+  for seq in ["<Command-Key-g>", "<Command-Key-G>", "<Option-Command-Key-g>", "<Control-Key-g>",
+      "<Command-Key-bracketleft>", "<Command-Key-Up>", "<Control-Command-Key-s>",
+      "<Command-Key-l>", "<Command-Key-9>"] do
+    out := out.push s!"bind {seq}: [{← run ["bind", ".", seq]}]"
+  out := out.push s!"bind-find-next: [{← run ["bind", ".find.e", "<Command-Key-g>"]}]"
+  out := out.push s!"cancelBind: [{← run ["info", "body", "::safepdf::cancelBind"]}]"
   let mods := if plat == .aqua then "Command" else "Control"
   sendEvent ".c" s!"<{mods}-Key-a>"
   discard <| run ["update"]
