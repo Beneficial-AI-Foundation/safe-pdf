@@ -83,6 +83,10 @@
 #   1r. the save dialogs (SAFEPDF_VIEWER_SMOKE_MODE=savedlg, as installed and with
 #      SAFEPDF_VIEWER_PLATFORM=aqua): keyboard of the three-way prompt, Save As… / Export
 #      options, extensions, long/odd names, refused targets, a vanished file (9.r6);
+#   1t. closing a note popup without Save (SAFEPDF_VIEWER_SMOKE_MODE=noteclose): Escape in the
+#      text widget, Cancel and the window's close button delete an empty new note (no icon
+#      left), save the typed text of a new one, keep a stored text; an empty highlight comment
+#      goes, the highlight stays (9.r12);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1695,6 +1699,49 @@ sys.exit(1 if errs else 0)
   fi
   chmod -R u+w "$sd" 2>/dev/null || true
 done
+
+# 1t. Closing a note popup without Save (task 9.r12, SAFEPDF_VIEWER_SMOKE_MODE=noteclose,
+#     `Viewer.smokeNoteClose`) on the text PDF: a new note + Escape (focus in the text widget)
+#     -> no note, no icon; a new note + typed text + Escape -> kept with the typed text; that
+#     note saved, reopened by a click, cleared + Escape -> kept with its text, still saved; an
+#     empty saved note reopened + Escape -> removed, an unsaved change (`*`); an empty
+#     highlight comment + Escape -> the comment goes, the highlight stays; white space only
+#     on a selection -> removed; Cancel and the window's close button as Escape; Add note…
+#     while an empty note's popup is open removes that note; a note deleted while its popup
+#     is open closes the popup, a stale close is ignored.
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=noteclose run_viewer "$work/out-noteclose" "$work/text.pdf" || true
+cat "$work/out-noteclose/noteclose.txt" 2>/dev/null | cut -c1-160 || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: noteclose: no noteclose.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "menu-open": "notes=1 icons=true popup=1  focus=.note.t",
+    "menu-esc": "notes=0 icons=false popup=0 ",
+    "typed-esc": "notes=1 icons=true popup=0 typed text",
+    "saved-clear-esc": "notes=1 icons=false popup=0 typed text shown=typed text dirty=false star=false",
+    "saved-empty-before": "notes=2 icons=false popup=0  star=false",
+    "saved-empty-open": "1",
+    "saved-empty-esc": "notes=1 icons=false popup=0 <gone> dirty=true star=true",
+    "comment-open": "1 anchored=true",
+    "comment-esc": "notes=1 icons=false popup=0 <gone> highlight=true",
+    "selection-blank-esc": "notes=1 icons=false popup=0 <gone>",
+    "cancel-empty": "notes=1 icons=false popup=0 <gone>",
+    "cancel-typed": "notes=2 icons=true popup=0 via cancel",
+    "wm-empty": "notes=2 icons=true popup=0 <gone>",
+    "wm-typed": "notes=3 icons=true popup=0 via close",
+    "switch": "notes=4 icons=true popup=1 <gone> other=true for=true",
+    "switch-esc": "notes=3 icons=true popup=0 <gone>",
+    "deleted-open": "notes=3 icons=true popup=0 <gone>",
+    "stale-close": "notes=3 icons=true popup=0 ",
+    "texts": "[typed text, via cancel, via close]",
+}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: noteclose: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-noteclose/noteclose.txt" || fail=1
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
