@@ -2481,6 +2481,8 @@ want = {
     "file-marks": "2 2",
     "find-keys": "ad 2 true false true",
     "note-keys": "fst 2 true",
+    "note-far": "true point false",
+    "note-inside": "quads false",
 }
 errs = ["undo %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 for e in errs: print("FAIL: " + e, file=sys.stderr)

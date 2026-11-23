@@ -4832,23 +4832,36 @@ def openNote (st : IO.Ref State) (id : Nat) : IO Unit := do
   discard <| run ["::safepdf::noteEdit", toString id, m.text, toString (max 0 x),
     toString (max 0 y)]
 
-/-- Handles `note [X Y]` (Edit → Add note…, the edit bubble's Comment, or the context menu at
-window position `(X, Y)`): adds a note anchored to the selection on the shown page; else,
-without a position and with a highlight selected, opens that highlight's comment (the note
-anchored to its quads, `Marks.Store.noteOn`) or adds one in its colour (task 9.8); else a note
-at the page point under `(X, Y)`, else at the window centre; selects it and opens its popup. -/
+/-- Handles `note [X Y]` (Edit → Add note…, the selection bubble's Add comment, or the context
+menu at window position `(X, Y)`). Without a position: a note anchored to the selection on the
+shown page (a comment on that text); else, with a highlight selected, opens that highlight's
+comment (the note anchored to its quads, `Marks.Store.noteOn`) or adds one in its colour (task
+9.8); else a note at the window centre. With a position (right-click → Add note…, task 10.17):
+a note at the page point under it, unless the click is inside the selection's highlight boxes
+(`Marks.noteAnchor`), which makes it a comment on the selection. Selects it, opens its popup. -/
 def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || (shownBox s).isNone then return
   let mut anchor : Option Marks.Anchor := none
   let mut page := s.page
+  -- The point under the click, and the selection's boxes on that page (empty: not there).
+  let click ← match pos with
+    | some (wx, wy) => pagePointAt st wx wy
+    | none => pure none
+  let mut selQs : List Box := []
+  let mut selPage := s.page
   if let some (p, a, b) := s.sel then
     if (slotOf s p).isSome then
       if let .ok ix ← pageIndex st p then
-        let qs := Select.rangeBoxes ix.cells a b
-        if !qs.isEmpty then
-          anchor := some (.quads qs)
-          page := p
+        selQs := Select.rangeBoxes ix.cells a b
+        selPage := p
+  if let some (pg, pt) := click then
+    -- A click on another page than the selection is never inside it.
+    anchor := Marks.noteAnchor (if pg == selPage then selQs else []) (some pt)
+    page := if (anchor.map fun | .quads _ => true | _ => false) == some true then selPage else pg
+  else if pos.isNone then
+    anchor := Marks.noteAnchor selQs none
+    page := selPage
   -- The comment of the selected highlight (the edit bubble's Comment, task 9.8): its note,
   -- or a new note anchored to its quads in its colour.
   let mut color := Marks.Color.yellow
@@ -4863,7 +4876,7 @@ def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
         page := m.page
         color := m.color
   if anchor.isNone then
-    let (wx, wy) := pos.getD (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
+    let (wx, wy) := (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
     if let some (pg, p) ← pagePointAt st wx wy then
       anchor := some (.point p)
       page := pg
@@ -9366,6 +9379,24 @@ def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
     sendEvent ".note.t" "<Key-Delete>"
     out := out.push s!"note-keys: {← run [".note.t", "get", "1.0", "end-1c"]} {← count} {(← st.get).page == pg0}"
     discard <| run ["destroy", ".note"]
+  -- 9. Right-click → Add note… (task 10.17, `addNote st (some pos)`): far from a word
+  -- selection it is a point note; inside the selection it is a comment on it (quads).
+  let noteKind : IO String := do
+    let s ← st.get
+    return ((s.markSel.bind s.marks.find?).map anchorKind).getD "<none>"
+  clicks 2
+  let selected := (← st.get).sel.isSome
+  let pos ← wposNow
+  let (some px0, some py0) := (pos.1.toInt?, pos.2.toInt?) | throw (IO.userError "bad position")
+  addNote st (some (px0, py0 + 150))
+  out := out.push s!"note-far: {selected} {← noteKind} {(← st.get).sel.isSome}"
+  discard <| run ["destroy", ".note"]
+  clicks 2
+  let pos1 ← wposNow
+  let (some px1, some py1) := (pos1.1.toInt?, pos1.2.toInt?) | throw (IO.userError "bad position")
+  addNote st (some (px1, py1))
+  out := out.push s!"note-inside: {← noteKind} {(← st.get).sel.isSome}"
+  discard <| run ["destroy", ".note"]
   IO.FS.writeFile (file "undo.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
