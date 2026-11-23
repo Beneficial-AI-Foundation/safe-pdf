@@ -3935,9 +3935,7 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
       if let some p := Save.writeProblem name fw dw then
         setStatus s!"cannot save: {p}"
         return some false
-    let disk : IO Save.DiskState := do
-      let d ← try pure (some (← IO.FS.readBinFile real)) catch _ => pure none
-      return Save.diskState doc.file.bytes d
+    let disk : IO Save.DiskState := Save.diskStateAt doc.file.bytes real
     let changed (ds : Save.DiskState) : IO (Option Bool) := do
       let a ← choose "File changed on disk" (Save.changedQuestion name ds) "saveas"
         (Save.changedButtons (← isAqua))

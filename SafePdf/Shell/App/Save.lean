@@ -3,6 +3,7 @@ import SafePdf.Shell.Views.Common
 import SafePdf.Core.Write.Annots
 import SafePdf.Core.Doc.Nav
 import SafePdf.Api
+import SafePdf.Shell.Read
 import Std.Time.DateTime.Timestamp
 
 /-!
@@ -91,7 +92,8 @@ checks and stores.
 * **Save overwrites the opened file** (task 9.r2, Decision 2026-11-23, Plan.md S8 amended):
   the pure decisions of the viewer's Save and close paths are here — `route` (library,
   Save As…, or overwrite with or without the first-overwrite question), `diskState` (the file
-  on disk still holds the bytes we opened, else Save refuses and offers Save As…),
+  on disk still holds the bytes we opened, else Save refuses and offers Save As…; read through
+  the shared capped read by `diskStateAt`, task 12.1),
   `writeProblem` (read-only file or folder: refused before anything is written), the dialog
   texts (`overwriteQuestion`, `changedQuestion`, `unsavedQuestion`), the button orders
   (`overwriteButtons`, `unsavedButtons`, `changedButtons`: on aqua the macOS order, the
@@ -477,8 +479,11 @@ def writeAtomic (path : String) (bytes : ByteArray)
     IO.FS.withFile tmp .writeNew fun h => do
       h.write bytes
       h.flush
-    let back ← IO.FS.readBinFile tmp
-    if back.data != bytes.data then
+    -- Capped read-back (task 12.1): more than `bytes.size` bytes is already a mismatch.
+    let back ← match ← Shell.Read.readFile tmp bytes.size .inputBytes with
+      | .ok b => pure b
+      | .error _ => pure ByteArray.empty
+    if back.size != bytes.size || back.data != bytes.data then
       throw (IO.userError s!"the temporary file {tmp} does not read back as written")
     prepare tmp
     IO.FS.rename tmp fp
@@ -531,6 +536,17 @@ def diskState (opened : ByteArray) (onDisk : Option ByteArray) : DiskState :=
   match onDisk with
   | none => .missing
   | some d => if d.size == opened.size && d.data == opened.data then .same else .changed
+
+/-- **The overwrite comparison on disk** (task 12.1): `diskState` of the file `path` against
+the `opened` bytes, read through the shared capped read (`Shell.Read.readFile`) with the cap
+`opened.size`, so a file that grew on disk (even one that keeps growing) is read only up to
+`opened.size + 1` bytes and reported `.changed`; `.missing` when it cannot be read. -/
+def diskStateAt (opened : ByteArray) (path : System.FilePath) : IO DiskState := do
+  try
+    match ← Shell.Read.readFile path opened.size .inputBytes with
+    | .ok b => return diskState opened (some b)
+    | .error _ => return .changed
+  catch _ => return .missing
 
 #guard diskState "abc".toUTF8 (some "abc".toUTF8) == .same
 #guard diskState "abc".toUTF8 (some "abd".toUTF8) == .changed

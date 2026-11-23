@@ -1,4 +1,5 @@
 import SafePdf.Shell.Views.Common
+import SafePdf.Shell.Read
 import SafePdf.Shell.Views.Summary
 import SafePdf.Shell.Views.Objects
 import SafePdf.Shell.Views.Resolve
@@ -94,38 +95,25 @@ def parseArgs : List String → Args → Except String Args
     if arg.startsWith "-" && arg != "-" then .error s!"unknown option '{arg}'"
     else parseArgs rest { a with positionals := arg :: a.positionals }
 
-/-- Read at most `cap` bytes from `h` in chunks; stops at end of file. `fuel` bounds the
-number of reads. -/
-def readCapped (h : IO.FS.Handle) (cap : Nat) : Nat → ByteArray → IO ByteArray
-  | 0, acc => pure acc
-  | fuel + 1, acc => do
-    if acc.size ≥ cap then return acc
-    let want := min (1 <<< 20) (cap - acc.size)
-    let chunk ← h.read want.toUSize
-    if chunk.size == 0 then return acc
-    readCapped h cap fuel (acc ++ chunk)
-
-/-- Load one file: check its size, read it, time the parse. `.error msg` on an I/O error. -/
+/-- Load one file: check its size, read it through the shared capped read
+(`Shell.Read.readFile`, task 12.1: at most `maxInputBytes + 1` bytes through a handle, so a file
+that grew since `metadata` is still caught), time the parse. `.error msg` on an I/O error. -/
 def load (cfg : Config) (path : String) : IO (Except String Input) := do
   try
     let p : System.FilePath := path
     let md ← p.metadata
     if md.type == .dir then return .error "is a directory"
     let size := md.byteSize.toNat
-    let maxBytes := cfg.limits.maxInputBytes
-    if size > maxBytes then
-      return .ok { path, size, bytes := ByteArray.empty,
-                   result := .error (.limitExceeded .inputBytes), parseNanos := 0 }
-    let h ← IO.FS.Handle.mk p .read
-    -- Read one byte past the limit so a file that grew since `metadata` is still caught.
-    let cap := maxBytes + 1
-    let bytes ← readCapped h cap (cap / (1 <<< 20) + 2) ByteArray.empty
-    let t0 ← IO.monoNanosNow
-    -- `lazyPure` evaluates the parse when this action runs, between the two clock reads,
-    -- so the compiler cannot float the pure call past either of them.
-    let result ← IO.lazyPure fun _ => SafePdf.parseWith cfg.limits bytes
-    let t1 ← IO.monoNanosNow
-    return .ok { path, size := max size bytes.size, bytes, result, parseNanos := t1 - t0 }
+    match ← Read.readFile p cfg.limits.maxInputBytes .inputBytes with
+    | .error e =>
+      return .ok { path, size, bytes := ByteArray.empty, result := .error e, parseNanos := 0 }
+    | .ok bytes =>
+      let t0 ← IO.monoNanosNow
+      -- `lazyPure` evaluates the parse when this action runs, between the two clock reads,
+      -- so the compiler cannot float the pure call past either of them.
+      let result ← IO.lazyPure fun _ => SafePdf.parseWith cfg.limits bytes
+      let t1 ← IO.monoNanosNow
+      return .ok { path, size := max size bytes.size, bytes, result, parseNanos := t1 - t0 }
   catch e =>
     return .error (toString e)
 

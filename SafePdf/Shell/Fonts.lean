@@ -1,4 +1,5 @@
 import SafePdf.Core.Raster.Subst
+import SafePdf.Shell.Read
 
 /-!
 # Substitute font programs from the system (tasks 7.7, 9.r7)
@@ -276,9 +277,11 @@ def listVersions (c : SearchConfig) : IO SearchConfig := do
 def readFont (p : System.FilePath) : IO (Option ByteArray) := do
   try
     let md ← p.metadata
-    if md.type == .file && md.byteSize.toNat ≤ maxFontFileBytes then
-      return some (← IO.FS.readBinFile p)
-    else return none
+    if md.type != .file then return none
+    -- The shared capped read (task 12.1): a font file that grows past the cap is absent.
+    match ← Read.readFile p maxFontFileBytes .inputBytes with
+    | .ok b => return some b
+    | .error _ => return none
   catch _ => return none
 
 /-- A file read once per search (macOS's three collections serve four faces each). -/
