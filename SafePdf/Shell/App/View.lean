@@ -64,21 +64,6 @@ def minPct : Nat := 25
 /-- Largest zoom step (percent). -/
 def maxPct : Nat := 800
 
-/-- The next zoom step above `cur` percent (`maxPct` at the top). -/
-def stepIn (cur : Nat) : Nat :=
-  (zoomSteps.find? (· > cur)).getD maxPct
-
-/-- The next zoom step below `cur` percent (`minPct` at the bottom). -/
-def stepOut (cur : Nat) : Nat :=
-  (zoomSteps.reverse.find? (· < cur)).getD minPct
-
-#guard stepIn 100 = 125
-#guard stepIn 97 = 100
-#guard stepIn 800 = 800
-#guard stepOut 100 = 75
-#guard stepOut 26 = 25
-#guard stepOut 25 = 25
-
 /-- Rounds a zoom down to a multiple of 1/64, at least 1/64. -/
 def quant (z : Rat) : Rat :=
   max (1 / 64) (((z * 64).floor : Rat) / 64)
@@ -125,6 +110,139 @@ def zoomPct (z scaling : Rat) : Nat :=
 
 #guard zoomPct (85 / 64) (4 / 3) = 100
 #guard zoomPct 2 1 = 200
+
+/-! ### Zoom in/out (task 10.12)
+
+Zoom in/out step on the *effective* (quantised) zoom `z`, not on a percentage: Zoom In goes
+to the first step whose quantised zoom `pctZoom p scaling` is strictly larger than `z`, Zoom
+Out to the last step whose quantised zoom is strictly smaller; `none` at the end of the range
+(the caller then leaves the zoom alone). Stepping on the rounded percentage (before 10.12)
+collided at `tk scaling` 1.334: Automatic Zoom capped at 125 % quantises to 106/64, shown as
+124 %, and "the step above 124 %" is 125 %, the same quantised zoom, so the first `+` did
+nothing. From a fit mode the rule is PDF.js's ("from auto, zoom in goes to the next step
+above the current scale"), and `+` then `-` lands on the largest step whose zoom is at most
+the starting zoom (`stepOutZ_stepInZ_le`): the starting zoom itself when it is a step's. -/
+
+/-- The zoom step (percent) that Zoom In goes to from effective zoom `z` at screen scale
+`scaling`: the first step whose quantised zoom is strictly larger than `z`; `none` when there
+is none (the top of the range). -/
+def stepInZ (z scaling : Rat) : Option Nat :=
+  zoomSteps.find? (fun p => decide (z < pctZoom p scaling))
+
+/-- The zoom step (percent) that Zoom Out goes to from effective zoom `z` at screen scale
+`scaling`: the last step whose quantised zoom is strictly smaller than `z`; `none` when there
+is none (the bottom of the range). -/
+def stepOutZ (z scaling : Rat) : Option Nat :=
+  zoomSteps.reverse.find? (fun p => decide (pctZoom p scaling < z))
+
+/-- Zoom In always enlarges the effective zoom. -/
+theorem stepInZ_gt {z scaling : Rat} {p : Nat} (h : stepInZ z scaling = some p) :
+    z < pctZoom p scaling := by
+  have := List.find?_some h
+  simpa using this
+
+/-- Zoom Out always shrinks the effective zoom. -/
+theorem stepOutZ_lt {z scaling : Rat} {p : Nat} (h : stepOutZ z scaling = some p) :
+    pctZoom p scaling < z := by
+  have := List.find?_some h
+  simpa using this
+
+/-- Zoom In moves whenever some step lies above the current zoom (it stops only at the top). -/
+theorem stepInZ_isSome {z scaling : Rat} {p : Nat} (hp : p ∈ zoomSteps)
+    (h : z < pctZoom p scaling) : (stepInZ z scaling).isSome := by
+  unfold stepInZ
+  rw [List.find?_isSome]
+  exact ⟨p, hp, by simpa using h⟩
+
+/-- Zoom Out moves whenever some step lies below the current zoom (it stops only at the
+bottom). -/
+theorem stepOutZ_isSome {z scaling : Rat} {p : Nat} (hp : p ∈ zoomSteps)
+    (h : pctZoom p scaling < z) : (stepOutZ z scaling).isSome := by
+  unfold stepOutZ
+  rw [List.find?_isSome]
+  exact ⟨p, List.mem_reverse.mpr hp, by simpa using h⟩
+
+/-- `quant` is monotone. -/
+theorem quant_mono {a b : Rat} (h : a ≤ b) : quant a ≤ quant b := by
+  unfold quant
+  have h1 : ((a * 64).floor : Rat) ≤ ((b * 64).floor : Rat) :=
+    Rat.intCast_le_intCast.mpr (Rat.floor_monotone (Rat.mul_le_mul_of_nonneg_right h (by decide)))
+  have h2 : ((a * 64).floor : Rat) / 64 ≤ ((b * 64).floor : Rat) / 64 := by
+    rw [Rat.div_def, Rat.div_def]
+    exact Rat.mul_le_mul_of_nonneg_right h1 (Rat.le_of_lt (Rat.inv_pos.mpr (by decide)))
+  rw [Rat.max_def, Rat.max_def]
+  split <;> split <;> grind
+
+/-- At a non-negative screen scale a larger percentage never gives a smaller zoom. -/
+theorem pctZoom_mono {p q : Nat} {scaling : Rat} (hs : 0 ≤ scaling) (h : p ≤ q) :
+    pctZoom p scaling ≤ pctZoom q scaling := by
+  unfold pctZoom
+  apply quant_mono
+  have hpq : (p : Rat) ≤ (q : Rat) := Rat.natCast_le_natCast.mpr h
+  have := Rat.mul_le_mul_of_nonneg_right hpq hs
+  rw [Rat.div_def, Rat.div_def]
+  exact Rat.mul_le_mul_of_nonneg_right this (Rat.le_of_lt (Rat.inv_pos.mpr (by decide)))
+
+/-- The steps are strictly increasing. -/
+theorem zoomSteps_pairwise : zoomSteps.Pairwise (· < ·) := by decide
+
+/-- `+` then `-` never ends above the starting zoom: Zoom Out from the step that Zoom In
+chose lands on a step whose zoom is at most the starting zoom `z` (for any non-negative
+screen scale; the largest such step, since every step between has a zoom above `z`). -/
+theorem stepOutZ_stepInZ_le {z scaling : Rat} {p q : Nat} (hs : 0 ≤ scaling)
+    (hin : stepInZ z scaling = some p) (hout : stepOutZ (pctZoom p scaling) scaling = some q) :
+    pctZoom q scaling ≤ z := by
+  have hlt := stepOutZ_lt hout
+  have hq : q ∈ zoomSteps := List.mem_reverse.mp (List.mem_of_find?_eq_some hout)
+  -- q < p: otherwise its zoom would be at least p's.
+  have hqp : q < p := by
+    refine Nat.lt_of_not_le fun hpq => ?_
+    exact absurd (pctZoom_mono hs hpq) (Rat.not_le.mpr hlt)
+  obtain ⟨_, as, bs, heq, has⟩ := List.find?_eq_some_iff_append.mp hin
+  have hpw := zoomSteps_pairwise
+  rw [heq, List.pairwise_append, List.pairwise_cons] at hpw
+  rw [heq] at hq
+  rcases List.mem_append.mp hq with hqa | hqb
+  · have := has q hqa
+    exact Rat.not_lt.mp (by simpa using this)
+  · rcases List.mem_cons.mp hqb with rfl | hqb
+    · exact absurd hqp (Nat.lt_irrefl _)
+    · exact absurd (hpw.2.1.1 q hqb) (Nat.lt_asymm hqp)
+
+/-- Screen scales the grid `#guard`s cover: plain, the 4/3 of a 96 dpi screen, 1.334 (macOS
+Tk Aqua as measured in 10.11), 2 and a Retina-like 2.667. -/
+private def gridScalings : List Rat := [1, 4 / 3, 1334 / 1000, 2, 2667 / 1000, 1 / 2]
+
+/-- Starting zooms for the grid: every step's zoom, every 1/64 from 1/64 to 20 (covers every
+fit zoom, which `fitZoom` keeps in `[1/16, 8]`, and the zooms between and on the steps). -/
+private def gridZooms (s : Rat) : List Rat :=
+  zoomSteps.map (pctZoom · s) ++ (List.range 1280).map (fun i => ((i + 1 : Nat) : Rat) / 64)
+
+-- Zoom In/Out change the quantised zoom strictly (larger/smaller) and stop only at the end
+-- of the range, for every scale and starting zoom of the grid; `+` then `-` ends on a step
+-- at most the starting zoom, on the start itself when it is a step's zoom.
+#guard gridScalings.all fun s => (gridZooms s).all fun z =>
+  (match stepInZ z s with
+   | some p => decide (z < pctZoom p s)
+   | none => decide (pctZoom maxPct s ≤ z)) &&
+  (match stepOutZ z s with
+   | some p => decide (pctZoom p s < z)
+   | none => decide (z ≤ pctZoom minPct s)) &&
+  (match stepInZ z s with
+   | some p => match stepOutZ (pctZoom p s) s with
+     | some q => decide (pctZoom q s ≤ z) &&
+         (!(zoomSteps.any (pctZoom · s == z)) || pctZoom q s == z)
+     | none => true
+   | none => true)
+-- The 10.11 collision: at 1.334 the capped Automatic Zoom (125 % → 106/64, shown as 124 %)
+-- zooms in to 150 %, and `+`, `-` returns to 125 %, not 100 %.
+#guard pctZoom 125 (1334 / 1000) = 106 / 64
+#guard zoomPct (106 / 64) (1334 / 1000) = 124
+#guard stepInZ (106 / 64) (1334 / 1000) = some 150
+#guard stepOutZ (pctZoom 150 (1334 / 1000)) (1334 / 1000) = some 125
+#guard stepInZ 1 1 = some 125 && stepOutZ 1 1 = some 75
+#guard stepInZ (pctZoom 800 1) 1 = none && stepOutZ (pctZoom 25 1) 1 = none
+#guard stepInZ 9 1 = none && stepOutZ (1 / 64) 1 = none
 
 /-- The effective zoom of `mode` for a canvas `cw × ch`, screen scale `scaling` and a box of
 displayed size `pw × ph` (page units). -/
