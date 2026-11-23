@@ -1,0 +1,26 @@
+name = "safe-pdf"
+version = "0.1.0"
+defaultTargets = ["SafePdf", "inspect"]
+
+[leanOptions]
+autoImplicit = false
+relaxedAutoImplicit = false
+
+[[lean_lib]]
+name = "SafePdf"
+
+[[lean_lib]]
+name = "Tests"
+globs = ["Tests.+"]
+
+[[lean_exe]]
+name = "inspect"
+root = "SafePdf.Shell.Main"
+
+[[lean_exe]]
+name = "tests"
+root = "Tests.Main"
+
+[[lean_exe]]
+name = "fuzz"
+root = "Tests.Fuzz.Main"
