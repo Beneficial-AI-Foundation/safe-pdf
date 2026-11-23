@@ -1,0 +1,9 @@
+Generated with the built-in image generation tool.
+Reference: BAIF official website header logo, https://www.beneficialaifoundation.org/
+
+Use case: logo-brand.
+Create a polished new project logo for "safe-pdf", using the attached official Beneficial AI Foundation logo as the brand reference.
+Reference role: preserve the distinctive BAIF symbol: a bright green central circular dot and TWO opposing quarter-circle arcs, one upper-right and one lower-left. The attached white shapes are foreground on transparency, not a black background. Do not include the foundation's long wordmark.
+Design: a clean upright document/page silhouette with one folded upper-right corner, drawn in moderately bold charcoal outlines. Integrate the BAIF opposing-arc-and-green-dot symbol in the center of the page. Keep its recognizable geometry and ample negative space. Arcs charcoal, dot the reference's vivid green. Add two short minimal charcoal horizontal text rules near the lower portion of the sheet, well spaced from the BAIF symbol.
+Below the emblem put exact text "safe-pdf" in a handsome bold geometric lowercase sans-serif, charcoal. Balanced compact vertical logo, emblem dominant, wordmark comfortably smaller. Flat precise vector-like graphic, crisp consistent strokes, restrained premium open-source software identity, readable at small sizes. One finished logo only, centered and generously padded.
+Transparent background with actual alpha. No background tile, no shadow, no gradients, no 3D, no mockup, no extra slogans, no shields or padlocks.
