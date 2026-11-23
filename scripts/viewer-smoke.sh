@@ -64,7 +64,8 @@
 #      generated fixtures and on real papers (SAFEPDF_SMOKE_PAPERS, default the git-ignored
 #      corpus/files/arxiv-1706.03762.pdf when present): menubar, page box, zoom drop-down, the
 #      wheel end to end in all four view modes, bubble highlight + note + Add text + Draw, Save ->
-#      Close -> reopen (pixels), XFDF export/import round trip, a fresh process on the saved file,
+#      Close -> reopen (pixels), XFDF export/import round trip, a fresh process on the saved file
+#      (free text visible on screen before any click, with and without substitute fonts, 9.r5),
 #      qpdf, byte prefix, mutool (9.6);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
@@ -966,6 +967,8 @@ want = {
     "deleted": "0 true true", "deleted-saved": "0 false 0 0",
     "after-delete-pixels": "0 255 255 255",
 }
+# task 9.r5: without a substitute Helvetica the saved free text is drawn on the canvas
+if v.get("subst") != "true": want["canvas-after-save"] = "1 0"
 errs = ["editors %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 starts = {"text-added": ("1 text Hello text ", " 10 #000000 1 0"),
           "text-edited": ("text Edited text ✓ ", " 10 #000000 true"),
@@ -1232,7 +1235,8 @@ sys.exit(1 if errs else 0)
 #     five-letter word, a note, Add text (red) and Draw (blue); Ctrl+S, File → Close, reopened
 #     from disk: the four marks equal and drawn by the renderer (pixels); XFDF export, every
 #     mark deleted (no colour left), import brings the same four back; a second process on
-#     the saved file restores them (pixels); qpdf --check, the original a byte prefix, and
+#     the saved file restores them (pixels) and shows the free text on screen before any click,
+#     with and without substitute fonts (task 9.r5); qpdf --check, the original a byte prefix, and
 #     `mutool draw` shows all four. Runs on two generated fixtures (3 and 4 pages: an odd and
 #     an even last spread) and on real papers: SAFEPDF_SMOKE_PAPERS (space-separated paths),
 #     default corpus/files/arxiv-1706.03762.pdf when present (git-ignored; skipped otherwise).
@@ -1272,6 +1276,33 @@ m9_case() {
   if [ -f "$d/$1-annotated.pdf" ]; then
     SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen run_viewer "$d/out2" "$d/$1-annotated.pdf" \
       || { echo "FAIL: m9 $1: reopen run failed" >&2; fail=1; }
+    # Task 9.r5: the saved free text must be visible on screen right after opening, before any
+    # click — also without a substitute Helvetica (as on macOS without Ghostscript/TeX Gyre
+    # fonts), where the renderer cannot paint its non-embedded font and the canvas draws it.
+    mkdir -p "$d/out3"
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen run_viewer "$d/out3" "$d/$1-annotated.pdf" \
+      || { echo "FAIL: m9 $1: reopen run without substitute fonts failed" >&2; fail=1; }
+    for o in out2 out3; do
+      st=$(sed -n 's/^screen-text: //p' "$d/$o/m9-reopen.txt" 2>/dev/null)
+      echo "viewer-smoke: m9 $1 ($o) screen-text: $st"
+      case "$st" in
+        skipped*) echo "viewer-smoke: ImageMagick import missing, screen check skipped" ;;
+        *) [ "${st%% *}" -ge 3 ] 2>/dev/null \
+             || { echo "FAIL: m9 $1 ($o): reopened free text not visible on screen: $st" >&2; fail=1; } ;;
+      esac
+      # still visible after rotating (90°, back) and in vertical / single page mode (the
+      # Page Width and page-change shots are reported only: the box may be scrolled away)
+      sa=$(sed -n 's/^screen-after: //p' "$d/$o/m9-reopen.txt" 2>/dev/null)
+      echo "viewer-smoke: m9 $1 ($o) screen-after: $sa"
+      for k in rot90 rot0 vertical single; do
+        v=$(printf '%s\n' "$sa" | tr ' ' '\n' | sed -n "s/^$k=\([0-9a-z]*\)\/.*/\1/p")
+        case "$v" in
+          skipped) ;;
+          *) [ "${v:-0}" -ge 3 ] 2>/dev/null \
+               || { echo "FAIL: m9 $1 ($o): free text not visible on screen after $k: $v" >&2; fail=1; } ;;
+        esac
+      done
+    done
   fi
   cat "$d/out/m9.txt" "$d/out2/m9-reopen.txt" 2>/dev/null | grep -v '^saved-status' || true
   python3 -I -c '

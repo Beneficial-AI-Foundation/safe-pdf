@@ -199,6 +199,13 @@ def Mark.isEditor (m : Mark) : Bool :=
   | .freeText .. | .ink .. => true
   | _ => false
 
+/-- Whether the mark is free text (task 9.r5: the one kind whose saved appearance needs a
+font program to be painted). -/
+def Mark.isFreeText (m : Mark) : Bool :=
+  match m.kind with
+  | .freeText .. => true
+  | _ => false
+
 /-- The note or free text (empty for a highlight and ink). -/
 def Mark.text (m : Mark) : String :=
   match m.kind with

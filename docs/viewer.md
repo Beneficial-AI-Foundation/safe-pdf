@@ -446,7 +446,16 @@ toolbar of `web/viewer.css` `.editorParamsToolbar`; nothing copied). Pure state 
   mode's kind (as PDF.js applies parameters to the selected editor); Delete or the bubble's
   Delete removes it. Saved ones are drawn by the renderer from their appearance streams, so
   an edit of a saved one goes through the preview (9.5g) and Save supersedes its annotation
-  (W11).
+  (W11). **Exception (task 9.r5):** a saved free text's appearance uses the non-embedded
+  standard-14 Helvetica, which the renderer paints only with a substitute font program (7.7,
+  `Shell/Fonts.lean`: URW base-35 or TeX Gyre files). Where none is found — macOS without
+  those fonts, the human's setup in the 2026-11-23 review — the reopened text box was
+  invisible until a double click opened its editor; now `drawMarks` draws saved free text on
+  the canvas like unsaved free text whenever `State.paintsHelvetica` is false (turned with the
+  page rotation via Tk's `-angle`). Smoke: `m9-reopen` reports `screen-text` (red pixels in
+  the text box on an X screenshot of the canvas, before any click) and `screen-after` (after
+  Page Width, a page change, rotation 90° and back, vertical and single page mode); the script
+  runs it with and without substitute fonts.
 * **In the PDF** (rules A12–A15 of `Core/Write/Annots.lean`, as pdf.js
   `FreeTextAnnotation`/`InkAnnotation.createNewDict`): `/FreeText` with `/Contents`, `/DA
   (/Helv SIZE Tf R G B rg)`, `/Rect` = the text box (`freeTextBox`: Helvetica AFM widths,
