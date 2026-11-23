@@ -305,8 +305,10 @@ def run83b (pdf : ByteArray) : IO Nat := do
 
 /-- Task 8.3c (1): optional content. Eight red squares (`/AP` 8) with `/OC`: group 5 (ON),
 6 (OFF in `/D`), 7 (`/Usage /View /ViewState /OFF`), membership dictionaries `AllOn [5 6]`,
-`AnyOn [5 6]`, `AllOff 6`, a `/VE` array (visible, as MuPDF), `AnyOff [5]`. `ocProps` is the
-catalog's `/OCProperties`. -/
+`AnyOn [5 6]`, `AllOff 6`, a `/VE` array, `AnyOff [5]`. `ocProps` is the catalog's
+`/OCProperties`. Since task 9.r11a the visibility is §8.11's (as PDF.js): `AllOn [5 6]` with 6
+OFF and `/VE [/And 6]` are hidden (MuPDF draws both), and `/D` is the default configuration
+(MuPDF prefers `/Configs [0]`). -/
 def ocFixture (ocProps : String) : ByteArray := mkPdf [
   s!"<< /Type /Catalog /Pages 2 0 R /OCProperties {ocProps} >>",
   "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>",
@@ -381,11 +383,12 @@ def synth2Fixture : ByteArray := mkPdf ([
 /-- Task 8.3c checks (`SAFEPDF_PPM_DIR` writes `oc-d.pdf`, `oc-configs.pdf` and their renders). -/
 def run83c : IO Nat := do
   let mut failures := 0
-  -- (1) /D: 6 off. (2) /Configs [0] wins over /D: everything on except 5.
+  -- (1) /D: 6 off (7 off by its /Usage). (2) /D is the default even with /Configs (task
+  -- 9.r11a; MuPDF uses /Configs [0]): BaseState OFF, 5 on.
   let cases : List (String × String × List Nat) := [
-    ("oc-d", "<< /OCGs [5 0 R 6 0 R 7 0 R] /D << /OFF [6 0 R] >> >>", [0, 2, 3, 4, 6]),
+    ("oc-d", "<< /OCGs [5 0 R 6 0 R 7 0 R] /D << /OFF [6 0 R] >> >>", [0, 3, 4]),
     ("oc-configs", "<< /OCGs [5 0 R 6 0 R 7 0 R] /D << /BaseState /OFF /ON [5 0 R] >> " ++
-      "/Configs [<< /OFF [5 0 R] >>] >>", [1, 2, 3, 6]),
+      "/Configs [<< /OFF [5 0 R] >>] >>", [0, 3, 4]),
     ("oc-none", "<< /OCGs [] /D << >> >>", [0, 1, 2, 3, 4, 5, 6, 7])]
   for (name, props, drawn) in cases do
     let pdf := ocFixture props

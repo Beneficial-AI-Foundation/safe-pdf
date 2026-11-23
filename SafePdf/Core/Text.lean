@@ -1572,16 +1572,20 @@ structure PageText where
   `Limits.maxFormsPerPage`. -/
   forms : Nat := 0
 
-/-- The runner environment with the fonts' advances. -/
-def textEnv {σ : Type} (limits : Limits) (src : Source σ) (fonts : FontTable) : Env σ Unit :=
-  { cfg := { limits, advance := advanceFn fonts }, src, observe := fun u _ _ _ => u }
+/-- The runner environment with the fonts' advances, under the optional content visibility
+state `oc` (task 9.r11a; default: everything visible). -/
+def textEnv {σ : Type} (limits : Limits) (src : Source σ) (fonts : FontTable)
+    (oc : Doc.OptionalContent.State := {}) : Env σ Unit :=
+  { cfg := { limits, advance := advanceFn fonts }, src, observe := fun u _ _ _ => u, oc }
 
 /-- **Entry point.** Extract the text of decoded page content `content` with resources `res`:
-load fonts, run the content once, read the glyph runs of that run's display list. Total. -/
+load fonts, run the content once, read the glyph runs of that run's display list. Content
+hidden by optional content in state `oc` (task 9.r11a) is neither in the display list nor in
+the text. Total. -/
 def extractPage {σ : Type} (limits : Limits) (src : Source σ) (res : Dict) (content : ByteArray)
-    (s : σ) (o : Options := {}) : PageText × σ :=
+    (s : σ) (o : Options := {}) (oc : Doc.OptionalContent.State := {}) : PageText × σ :=
   let (fonts, s) := loadFonts limits src s res
-  let st := runBytes (textEnv limits src fonts) res content s ()
+  let st := runBytes (textEnv limits src fonts oc) res content s ()
   let gs := extractItems fonts st.items.toList
   let sh := unclipped st.items (shownItems fonts o.pageBox st.items.toList)
   let (lines, text) := layout o sh
@@ -1591,17 +1595,17 @@ def extractPage {σ : Type} (limits : Limits) (src : Source σ) (res : Dict) (co
 /-- **C6 (same pass)**: the page's glyphs are the extraction of the page's own display list,
 under its own fonts — the list the runner produced, not a second interpretation. -/
 theorem extractPage_glyphs {σ : Type} (limits : Limits) (src : Source σ) (res : Dict)
-    (content : ByteArray) (s : σ) (o : Options) :
-    (extractPage limits src res content s o).1.glyphs =
-      extractItems (extractPage limits src res content s o).1.fonts
-        (extractPage limits src res content s o).1.items.toList := rfl
+    (content : ByteArray) (s : σ) (o : Options) (oc : Doc.OptionalContent.State) :
+    (extractPage limits src res content s o oc).1.glyphs =
+      extractItems (extractPage limits src res content s o oc).1.fonts
+        (extractPage limits src res content s o oc).1.items.toList := rfl
 
 /-- **C6 (display list)**: the page's display list is the runner's output for the page content
 with the fonts' advances. -/
 theorem extractPage_items {σ : Type} (limits : Limits) (src : Source σ) (res : Dict)
-    (content : ByteArray) (s : σ) (o : Options) :
-    (extractPage limits src res content s o).1.items =
-      (runBytes (textEnv limits src (loadFonts limits src s res).1) res content
+    (content : ByteArray) (s : σ) (o : Options) (oc : Doc.OptionalContent.State) :
+    (extractPage limits src res content s o oc).1.items =
+      (runBytes (textEnv limits src (loadFonts limits src s res).1 oc) res content
         (loadFonts limits src s res).2 ()).items := rfl
 
 /-! ### Documents -/
@@ -1633,15 +1637,33 @@ def Options.forPage (o : Options) (page : Page) : Options :=
     { o with pageBox := some (Fixed.ofDecimal c.llx, Fixed.ofDecimal c.lly,
                               Fixed.ofDecimal c.urx, Fixed.ofDecimal c.ury) }
 
+/-- **The document's default optional content state** (task 9.r11a): the catalog's
+`/OCProperties /D` configuration (`Doc.OptionalContent.defaultState`), objects fetched under
+the document budget. No `/OCProperties`: everything visible. -/
+def docOCState (limits : Limits) (doc : Doc) (budget : Budget) :
+    OptionalContent.State × Budget :=
+  OptionalContent.defaultState (Run.resolve (docSource limits doc)) limits budget doc.catalog
+
+/-- The optional content state to run a page under: the given one, else the document's default
+(`docOCState`). -/
+def ocStateFor (limits : Limits) (doc : Doc) (budget : Budget) :
+    Option OptionalContent.State → OptionalContent.State × Budget
+  | some st => (st, budget)
+  | none => docOCState limits doc budget
+
 /-- Extract the text of a page of an opened document, charging `budget`. Lines and text leave
-out glyphs entirely outside the page's CropBox (`Options.forPage`); `glyphs` keeps them. -/
+out glyphs entirely outside the page's CropBox (`Options.forPage`); `glyphs` keeps them.
+Content hidden by optional content (task 9.r11a) is left out: under `oc` when given (a layers
+panel's state), else under the document's default configuration (`docOCState`). -/
 def extractDocPage (limits : Limits) (doc : Doc) (page : Page) (budget : Budget)
-    (o : Options := {}) : (Except Error PageText) × Budget :=
+    (o : Options := {}) (oc : Option OptionalContent.State := none) :
+    (Except Error PageText) × Budget :=
   match doc.decodeContentsB limits budget page with
   | (.error e, b) => (.error e, b)
   | (.ok parts, b) =>
+    let (st, b) := ocStateFor limits doc b oc
     let (pt, b) := extractPage limits (docSource limits doc) (page.resources.getD [])
-      (joinParts parts) b (o.forPage page)
+      (joinParts parts) b (o.forPage page) st
     (.ok pt, b)
 
 /-! ## Spot checks -/
