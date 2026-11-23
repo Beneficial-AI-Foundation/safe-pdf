@@ -65,7 +65,71 @@ no panics, no `sorry` — and the properties are machine-checked theorems, not g
   C7; encrypted files are annotated with the document's own handler; the result is strictly
   re-parsed before a byte reaches disk.
 
-### 2.4 Evidence beyond the proofs
+### 2.4 The confined document worker (tasks 12.2a, 12.2b)
+
+The `worker` executable (`SafePdf/Shell/Worker/`) receives a document as **bytes** over
+stdin and answers render, text, outline and link requests over stdout; the client starts it
+with an empty environment and `/` as working directory, and can kill it at any time. Since
+12.2b it confines itself before it reads its first request (`Sandbox.prepare`,
+`c/worker_sandbox.c`):
+
+1. **Environment**: a non-empty environment makes it refuse to serve (exit 3). The client
+   passes none (`inheritEnv := false`), so `$HOME`, bib-lean's token and any credential of
+   the GUI never reach the process that parses untrusted bytes.
+2. **Fonts first**: the substitute fonts are read from the fixed system font directories,
+   every file in full, *before* confinement (measured: worker startup 7.8 → 13.0 ms median
+   on an M-series Mac, i.e. ~5 ms for 14 faces plus the sandbox; the first `openDoc` no longer
+   reads them). Parsing them stays lazy and pure.
+3. **Sandbox**, irreversible, before any request:
+   * **macOS**: `sandbox_init` with the SBPL profile `(version 1) (deny default)` — nothing
+     is allowed: no file read or write (not even of the font files already read), no
+     directory listing, no network, no process exec/fork, no Mach/XPC lookup, no POSIX IPC,
+     no IOKit, no sysctl. Reading and writing the descriptors it already holds
+     (stdin/stdout/stderr), allocating memory and starting threads are not sandbox
+     operations and keep working. `sandbox_init` is deprecated API but works on macOS 26
+     (Chromium's renderer sandbox uses the same mechanism).
+   * **Linux** (**untested**: written on macOS, never run on Linux yet): `PR_SET_NO_NEW_PRIVS`
+     and a seccomp-bpf allowlist applied to every thread (`SECCOMP_FILTER_FLAG_TSYNC`):
+     read/write/readv/writev/close/lseek/fstat on existing descriptors, memory
+     (mmap/munmap/mremap/mprotect/madvise/brk), threads (futex, `clone` only with
+     `CLONE_THREAD`, `clone3` → ENOSYS so glibc falls back), signals to itself only,
+     clocks/sleep/getrandom, exit. Everything else — `open`/`openat`/`openat2`, `socket`,
+     `connect`, `execve`, `fork`, `ptrace`, `kill`, `ioctl`, `pipe` … — fails with EPERM;
+     a foreign architecture or an x32 call kills the process. `newfstatat`/`statx` are
+     allowed because glibc implements `fstat` with them, so a compromised worker can learn a
+     path's *metadata* (existence, size, times), never its contents. Landlock and `bwrap`
+     are not used: seccomp already removes every call that opens a path, and Landlock
+     cannot be applied to the runtime's existing threads.
+   * **Anything else** (another OS, a Linux build without the kernel headers or on an
+     architecture other than x86-64/arm64): confinement fails.
+4. **No unconfined fallback**: if any step fails the worker exits (3: environment, 4:
+   sandbox) without reading a request. There is **no debug escape** in `worker` — no flag
+   and no environment variable (the environment is empty anyway). The unconfined *control*
+   mode exists only in the separate test executable `worker-probe`.
+
+**Evidence** (`scripts/worker-confinement-test.sh`, suite `worker-confinement`): a probe
+child started exactly as the client starts the worker is denied reading `/etc/hosts`,
+re-reading a font file it read at startup, creating a file in `/tmp`, listing `/`,
+connecting to a listening socket on 127.0.0.1, seeing the parent's `SAFEPDF_PROBE_TOKEN`
+and spawning `/bin/echo`, while a thread and a render still work; an unconfined control
+child is allowed all of these, so the probes detect access. The `worker` suite renders
+byte-equal to in-process rendering through the confined worker.
+
+**What is not confined, or not yet**:
+* Font files on disk are parsed after confinement but were *read* before it: a malicious
+  file planted in a system font directory is still parsed — by the verified font code, in
+  the confined process.
+* The confined worker can still burn CPU and memory up to the core's limits, write
+  anything to its stdout (the client caps and decodes every frame) and to stderr; the
+  client's deadline kill is the bound on time.
+* Descriptors inherited from the parent stay usable; the client passes only
+  stdin/stdout/stderr.
+* The GUI process itself (Tk, the C shim, clipboard, saves, bib-lean's token) is not
+  sandboxed (item 7 below), and until task 12.2c the Tk viewer still renders in-process.
+* Running the worker inside an already sandboxed app (e.g. a future App-Sandboxed macOS
+  shell) may make `sandbox_init` fail; the worker then refuses to serve (task 11.x decides).
+
+### 2.5 Evidence beyond the proofs
 
 Proofs show we meet *our* spec; testing ties the spec to the world (§7): differential
 testing against qpdf (71,854/71,854 objects, 2,450/2,450 pages agree), MuPDF and pdftotext
@@ -108,6 +172,9 @@ provenance (C6), a repair path proven total and bounded that never overrides a s
   could break a "proven" property at runtime.
 * **The C shim and Tk.** `c/tk_shim.c` and the Tcl/Tk libraries are C in the shell process.
   They never parse document bytes, but they share the address space with everything else.
+* **The OS sandboxes.** The worker's confinement (§2.4) trusts the macOS seatbelt (a
+  deprecated, undocumented profile language) and Linux seccomp, plus the small
+  `c/worker_sandbox.c` that installs them; the Linux filter has not been run yet.
 * **Our spec of ISO 32000.** Proofs are against our reading of a loose spec; differential
   testing and `deviations-from-spec.md` are the mitigation, not a proof.
 * **Floats in the rasterizer.** The ℚ model is the proven reference; the compiled float
@@ -136,7 +203,9 @@ security review; those items protect the user even if every current theorem is c
     parsing (`repairRefused` rejects post-parse today).
 0b. **A stoppable, restricted document worker**: run the core plus document-derived font and
     image processing in a child process the GUI can kill; broker file, clipboard, save and
-    bib-lean access in the GUI; keep the library token out of the child.
+    bib-lean access in the GUI; keep the library token out of the child. *Status:* the
+    worker exists and confines itself (macOS tested, Linux untested; §2.4); the viewer moves
+    onto it in task 12.2c.
 0c. **Budget a whole user operation**: reserve memory for concurrent page buffers, thumbnails
     and caches before dispatch, and carry one shared work allowance through a search, export
     or render — per-call budgets reset today, so concurrency multiplies them.

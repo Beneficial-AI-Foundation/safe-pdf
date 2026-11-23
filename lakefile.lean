@@ -123,9 +123,37 @@ lean_lib Tests where
 @[default_target] lean_exe inspect where
   root := `SafePdf.Shell.Main
 
-/-- The document worker (task 12.2a): serves a document received as bytes over stdin/stdout. -/
+/-- `c/worker_sandbox.c` (task 12.2b): the worker's confinement (macOS seatbelt, Linux
+seccomp). Plain C with Lean's include directory; no pkg-config. Attached only to `worker`
+(like `tkShim` to `viewer`: an `extern_lib` would be linked into every executable). -/
+target workerSandbox pkg : FilePath := do
+  let src ← inputTextFile <| pkg.dir / "c" / "worker_sandbox.c"
+  let oFile := pkg.buildDir / "c" / "worker_sandbox.o"
+  buildO oFile src #["-I", (← getLeanIncludeDir).toString] #["-fPIC", "-O2", "-Wall", "-Wextra"]
+    "cc" getLeanTrace
+
+/-- The same file compiled with `-DSAFEPDF_WORKER_PROBE` (adds the TCP probe), for the
+test-only `worker-probe` executable. -/
+target workerSandboxProbe pkg : FilePath := do
+  let src ← inputTextFile <| pkg.dir / "c" / "worker_sandbox.c"
+  let oFile := pkg.buildDir / "c" / "worker_sandbox_probe.o"
+  buildO oFile src #["-I", (← getLeanIncludeDir).toString]
+    #["-fPIC", "-O2", "-Wall", "-Wextra", "-DSAFEPDF_WORKER_PROBE"] "cc" getLeanTrace
+
+/-- The document worker (tasks 12.2a, 12.2b): confines itself, then serves a document received
+as bytes over stdin/stdout. -/
 @[default_target] lean_exe worker where
   root := `SafePdf.Shell.Worker.Main
+  moreLinkObjs := #[workerSandbox]
+
+/-- Test-only (task 12.2b): the worker's startup and confinement followed by probes that must
+fail (open a file, connect to 127.0.0.1, read the parent's environment, spawn a process).
+A default target so that the `worker-confinement` suite always finds it after `lake build`;
+`scripts/worker-confinement-test.sh` runs it verbosely. Never shipped: it is not the
+`worker` the client starts. -/
+@[default_target] lean_exe «worker-probe» where
+  root := `SafePdf.Shell.Worker.Probe
+  moreLinkObjs := #[workerSandboxProbe]
 
 /-- The test runner. -/
 lean_exe tests where
