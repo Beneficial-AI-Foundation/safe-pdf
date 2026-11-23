@@ -24,7 +24,9 @@ advances and sizes (C3: text ↔ position) and the reading-order lines of `Text.
   A drag from `p` to `q` selects `nearest p … nearest q` in reading order (`dragRange`);
   `wordAt` extends a cell to its word (letters, digits and non-ASCII characters joined without
   separator); `rangeText` is the text to copy; `rangeBoxes` the highlight rectangles (one per
-  line run).
+  line run, for search hits and highlight marks); `selBands` the drawn selection (one band per
+  line, full line height, consecutive lines of a paragraph joined; task 10.18, see the section
+  doc and `bandAt_meet`, `shape_covers`, `bandAt_covers`).
 * **Search.** `normChars cs`: the page text lower-cased (ASCII and Latin-1 letters) with every
   whitespace run collapsed to one space, each character tagged with the cell it comes from
   (separator characters with the cell they precede). `normQuery` normalises a query the same
@@ -180,24 +182,193 @@ def wordAt (cs : Array Cell) (i : Nat) : Nat × Nat :=
 def Box.union (a b : Box) : Box :=
   ⟨min a.llx b.llx, min a.lly b.lly, max a.urx b.urx, max a.ury b.ury⟩
 
-/-- Highlight boxes of the cells `a … b` (inclusive): one box per run of cells on the same
-line, in reading order. -/
-def rangeBoxes (cs : Array Cell) (a b : Nat) : List Box :=
+/-- The runs of the cells `a … b` (inclusive) on one line, in reading order: the line, the
+index of the run's first cell and the union of the run's boxes. -/
+def lineRuns (cs : Array Cell) (a b : Nat) : List (Nat × Nat × Box) :=
   let lo := min a b
   let hi := max a b
   let (done, cur) := (List.range (hi + 1 - lo)).foldl
-    (fun (acc : Array Box × Option (Nat × Box)) k =>
+    (fun (acc : Array (Nat × Nat × Box) × Option (Nat × Nat × Box)) k =>
       match cs[lo + k]? with
       | none => acc
       | some c =>
         match acc.2 with
-        | some (l, bx) =>
-          if l == c.line then (acc.1, some (l, Box.union bx c.box))
-          else (acc.1.push bx, some (c.line, c.box))
-        | none => (acc.1, some (c.line, c.box))) (#[], none)
+        | some (l, i, bx) =>
+          if l == c.line then (acc.1, some (l, i, Box.union bx c.box))
+          else (acc.1.push (l, i, bx), some (c.line, lo + k, c.box))
+        | none => (acc.1, some (c.line, lo + k, c.box))) (#[], none)
   match cur with
-  | some (_, bx) => (done.push bx).toList
+  | some r => (done.push r).toList
   | none => done.toList
+
+/-- Highlight boxes of the cells `a … b` (inclusive): one box per run of cells on the same
+line, in reading order (search hits, highlight marks' quads). -/
+def rangeBoxes (cs : Array Cell) (a b : Nat) : List Box :=
+  (lineRuns cs a b).map (·.2.2)
+
+/-! ## Selection bands (task 10.18)
+
+The selection is drawn as one band per line, a continuous fill as in PDF.js and Preview:
+
+* **Height.** A band spans its line's full height: from the lowest to the highest glyph box of
+  the whole line (every cell of that line, selected or not).
+* **Width.** The first line of the selection runs from the selection start (its leftmost
+  selected glyph box) to the line's end, interior lines from the line's start to its end, the
+  last line from the line's start to the selection end; a single-line selection from the start
+  to the end glyph. Each band also contains the union of the line's selected glyph boxes
+  (`shape`), so it covers every selected glyph box whatever the glyph order.
+* **Joining.** Two consecutive bands are joined — the upper one's bottom and the lower one's
+  top both move to the midpoint of the gap — when (1) both lines are left-to-right horizontal
+  text (direction 0), (2) the layout puts a plain line break between them (`"\n"`: same
+  direction and frame, baseline step within `Options.paraGap`; a paragraph break `"\n\n"` or a
+  column change is never joined), and (3) the gap between the bands is between 0 and the
+  smaller band's height. Bands only ever grow (`lowerTo`, `raiseTo`), so overlapping bands of
+  tightly set lines stay as they are (they already touch).
+* **Other directions.** Lines that are not left-to-right horizontal (rotated or vertical
+  text) keep the run box of their selected glyphs, as `rangeBoxes`, and are never joined.
+
+Copy and search are unchanged (`rangeText`, `findAll`); only the drawn shape is new. -/
+
+/-- `a` lies inside `b`. -/
+def Box.inside (a b : Box) : Prop :=
+  b.llx ≤ a.llx ∧ b.lly ≤ a.lly ∧ a.urx ≤ b.urx ∧ a.ury ≤ b.ury
+
+instance (a b : Box) : Decidable (Box.inside a b) := by unfold Box.inside; exact inferInstance
+
+/-- The band of one selected line before joining: the full line's height (`full`), from the
+selection start (`first` line) or the line start to the selection end (`last` line) or the
+line end, united with the selected glyphs' run box `sel`. -/
+def shape (first last : Bool) (full sel : Box) : Box :=
+  Box.union sel ⟨if first then sel.llx else full.llx, full.lly,
+    if last then sel.urx else full.urx, full.ury⟩
+
+/-- **A shaped band covers the selected glyphs of its line.** -/
+theorem shape_covers (first last : Bool) (full sel : Box) :
+    Box.inside sel (shape first last full sel) := by
+  unfold Box.inside shape Box.union
+  simp only
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> grind
+
+/-- Moves a band's bottom down to `m` (when joined below); never shrinks it. -/
+def lowerTo (b : Box) : Option Rat → Box
+  | some m => { b with lly := min b.lly m }
+  | none => b
+
+/-- Moves a band's top up to `m` (when joined above); never shrinks it. -/
+def raiseTo (b : Box) : Option Rat → Box
+  | some m => { b with ury := max b.ury m }
+  | none => b
+
+/-- Height of a box. -/
+def Box.height (b : Box) : Rat := b.ury - b.lly
+
+/-- Where the bands `k` and `k + 1` of `bs` meet, when `ok k` (same paragraph, both horizontal)
+and the gap from the upper band's bottom down to the lower band's top is between 0 and the
+smaller band's height: the gap's midpoint. -/
+def meetAt (bs : Array Box) (ok : Nat → Bool) (k : Nat) : Option Rat :=
+  match bs[k]?, bs[k + 1]? with
+  | some u, some w =>
+    if ok k && decide (w.ury ≤ u.lly) &&
+        decide (u.lly - w.ury ≤ min (Box.height u) (Box.height w)) then
+      some ((u.lly + w.ury) / 2)
+    else none
+  | _, _ => none
+
+/-- Where band `k` meets band `k - 1` (none for the first band). -/
+def prevMeet (bs : Array Box) (ok : Nat → Bool) : Nat → Option Rat
+  | 0 => none
+  | j + 1 => meetAt bs ok j
+
+/-- The joined band `k` of the shaped bands `bs`: lowered to the meeting point with band
+`k + 1`, raised to the one with band `k - 1`. -/
+def bandAt (bs : Array Box) (ok : Nat → Bool) (k : Nat) : Option Box :=
+  bs[k]?.map fun b => raiseTo (lowerTo b (meetAt bs ok k)) (prevMeet bs ok k)
+
+/-- The meeting point lies in the gap: at or below the upper band's bottom, at or above the
+lower band's top. -/
+theorem meetAt_spec {bs : Array Box} {ok : Nat → Bool} {k : Nat} {m : Rat}
+    (h : meetAt bs ok k = some m) :
+    ∃ u w, bs[k]? = some u ∧ bs[k + 1]? = some w ∧ m ≤ u.lly ∧ w.ury ≤ m := by
+  unfold meetAt at h
+  split at h
+  · rename_i u w hu hw
+    split at h
+    · rename_i hc
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+      cases h
+      exact ⟨u, w, hu, hw, by grind, by grind⟩
+    · cases h
+  · cases h
+
+/-- **Joined bands meet**: when bands `k` and `k + 1` are joined, the bottom of band `k` is the
+top of band `k + 1` (no gap, no overlap). -/
+theorem bandAt_meet {bs : Array Box} {ok : Nat → Bool} {k : Nat} {m : Rat}
+    (h : meetAt bs ok k = some m) :
+    ∃ u w, bandAt bs ok k = some u ∧ bandAt bs ok (k + 1) = some w ∧ u.lly = m ∧ w.ury = m := by
+  obtain ⟨u, w, hu, hw, hm1, hm2⟩ := meetAt_spec h
+  refine ⟨raiseTo (lowerTo u (some m)) (prevMeet bs ok k),
+    raiseTo (lowerTo w (meetAt bs ok (k + 1))) (some m),
+    by simp [bandAt, hu, h], by simp [bandAt, hw, prevMeet, h], ?_, ?_⟩
+  · cases prevMeet bs ok k <;> simp [raiseTo, lowerTo] <;> grind
+  · cases meetAt bs ok (k + 1) <;> simp [raiseTo, lowerTo] <;> grind
+
+/-- **Joining only grows a band**: the joined band `k` contains the shaped band `k`. -/
+theorem bandAt_covers {bs : Array Box} {ok : Nat → Bool} {k : Nat} {b : Box}
+    (h : bs[k]? = some b) : ∃ c, bandAt bs ok k = some c ∧ Box.inside b c := by
+  refine ⟨raiseTo (lowerTo b (meetAt bs ok k)) (prevMeet bs ok k), by simp [bandAt, h], ?_⟩
+  unfold Box.inside
+  cases meetAt bs ok k <;> cases prevMeet bs ok k <;> simp [raiseTo, lowerTo] <;> grind
+
+/-- The first cell of the line of cell `i` (moving left at most `fuel` cells). -/
+def lineStart (cs : Array Cell) : Nat → Nat → Nat
+  | 0, i => i
+  | fuel + 1, i =>
+    match i with
+    | 0 => 0
+    | j + 1 =>
+      match cs[j]?, cs[j + 1]? with
+      | some p, some c => if p.line == c.line then lineStart cs fuel j else j + 1
+      | _, _ => j + 1
+
+/-- The last cell of the line of cell `i` (moving right at most `fuel` cells). -/
+def lineEnd (cs : Array Cell) : Nat → Nat → Nat
+  | 0, i => i
+  | fuel + 1, i =>
+    match cs[i]?, cs[i + 1]? with
+    | some c, some n => if c.line == n.line then lineEnd cs fuel (i + 1) else i
+    | _, _ => i
+
+/-- The selection bands of the cells `a … b` (inclusive), one per line in reading order (see
+the section doc); `dirs` gives each line's direction (`PageIndex.lineDirs`, missing: 0). -/
+def selBands (cs : Array Cell) (dirs : Array Nat) (a b : Nat) : List Box :=
+  if cs.size == 0 then [] else
+  let lo := min a b
+  let hi := min (max a b) (cs.size - 1)
+  let sel := (lineRuns cs lo hi).toArray
+  let full := lineRuns cs (lineStart cs lo lo) (lineEnd cs cs.size hi)
+  let n := sel.size
+  let horiz (l : Nat) : Bool := dirs[l]?.getD 0 == 0
+  let fullOf (l : Nat) : Option (Nat × Nat × Box) := full.find? (·.1 == l)
+  let shaped : Array Box := sel.mapIdx fun k r =>
+    match horiz r.1, fullOf r.1 with
+    | true, some (_, _, f) => shape (k == 0) (k + 1 == n) f r.2.2
+    | _, _ => r.2.2
+  let ok (k : Nat) : Bool :=
+    match sel[k]?, sel[k + 1]? with
+    | some (l0, _, _), some (l1, _, _) =>
+      horiz l0 && horiz l1 &&
+        ((fullOf l1).bind fun (_, i, _) => cs[i]?.map (·.sep == "\n")).getD false
+    | _, _ => false
+  (List.range n).filterMap (bandAt shaped ok)
+
+/-- Every selected glyph box lies inside one of the selection bands (checked by `#guard`s;
+the parts are `shape_covers` and `bandAt_covers`). -/
+def bandsCover (cs : Array Cell) (dirs : Array Nat) (a b : Nat) : Bool :=
+  let bs := selBands cs dirs a b
+  (List.range (max a b + 1 - min a b)).all fun k =>
+    match cs[min a b + k]? with
+    | some c => bs.any fun band => decide (Box.inside c.box band)
+    | none => true
 
 /-! ## Search -/
 
@@ -268,12 +439,17 @@ structure PageIndex where
   cells : Array Cell
   /-- Normalised text with cell tags (`normChars cells`). -/
   hay : Array (Char × Nat)
+  /-- The direction (`Line.dir`) of each line, by `Cell.line` (for `selBands`). -/
+  lineDirs : Array Nat
   deriving Inhabited
 
 /-- The index of an extracted page (default layout options, as the text view). -/
 def PageIndex.ofText (pt : Text.PageText) : PageIndex :=
   let cs := cellsOf {} pt.lines
-  ⟨cs, normChars cs⟩
+  ⟨cs, normChars cs, pt.lines.map (·.dir)⟩
+
+/-- The selection bands of the cells `a … b` on this page (`selBands`). -/
+def PageIndex.bands (ix : PageIndex) (a b : Nat) : List Box := selBands ix.cells ix.lineDirs a b
 
 /-- The hits of `q` on a page, as cell ranges. -/
 def PageIndex.hits (ix : PageIndex) (q : Array Char) : Array (Nat × Nat) :=
@@ -329,6 +505,44 @@ private def samplePT : Text.PageText :=
 #guard rangeText sampleCells (wordAt sampleCells 8).1 (wordAt sampleCells 8).2 == "World"
 -- One highlight box per line run.
 #guard rangeBoxes sampleCells 6 12 == [⟨140, 698, 166, 708⟩, ⟨100, 686, 111, 696⟩]
+-- Selection bands (10.18): "World" to the line end (166, past the overprint), the next line
+-- from its start to "Ze"; the 2-point gap closed at 697; "end" after a paragraph break is
+-- not joined (its own height, 598–608).
+#guard selBands sampleCells #[0, 0, 0] 6 12 == [⟨140, 697, 166, 708⟩, ⟨100, 686, 111, 697⟩]
+#guard selBands sampleCells #[0, 0, 0] 2 17 ==
+  [⟨112, 697, 166, 708⟩, ⟨100, 686, 125, 697⟩, ⟨100, 598, 110, 608⟩]
+#guard selBands sampleCells #[0, 0, 0] 17 2 == selBands sampleCells #[0, 0, 0] 2 17
+-- A single-line selection: from the start glyph to the end glyph, the line's full height.
+#guard selBands sampleCells #[0, 0, 0] 1 2 == [⟨107, 698, 115, 708⟩]
+#guard selBands sampleCells #[] 0 100 == selBands sampleCells #[0, 0, 0] 0 18
+#guard selBands #[] #[] 0 3 == []
+#guard (List.range 19).all fun a => (List.range 19).all fun b => bandsCover sampleCells #[0, 0, 0] a b
+-- Copy is unchanged by the drawing.
+#guard rangeText sampleCells 2 17 == "llo World\nZebra\n\nen"
+
+/-- Three lines of one paragraph (baselines 700, 688, 676, size 10; widths 15, 25, 10). -/
+private def para : List Glyph :=
+  [mkG "a" 100 700 5, mkG "b" 105 700 5, mkG "c" 110 700 5,
+   mkG "d" 100 688 5, mkG "e" 105 688 5, mkG "f" 110 688 5, mkG "g" 115 688 5, mkG "h" 120 688 5,
+   mkG "i" 100 676 5, mkG "j" 105 676 5]
+
+private def paraCells : Array Cell := cellsOf {} (Text.layout {} para).1
+
+-- Interior line: its full width and height, meeting both neighbours (685 and 697).
+#guard selBands paraCells #[0, 0, 0] 1 8 ==
+  [⟨105, 697, 115, 708⟩, ⟨100, 685, 125, 697⟩, ⟨100, 674, 105, 685⟩]
+#guard (List.range 10).all fun a => (List.range 10).all fun b => bandsCover paraCells #[0, 0, 0] a b
+-- Consecutive bands touch: each band's bottom is the next one's top.
+#guard let bs := selBands paraCells #[0, 0, 0] 0 9
+  (bs.zip bs.tail).all fun (u, w) => u.lly == w.ury
+-- A gap larger than a line height is never joined, even within one layout paragraph (lines 40
+-- apart with a paragraph gap of 10000 ‰, so the layout keeps a plain line break).
+#guard selBands (cellsOf { paraGap := 10000 } (Text.layout { paraGap := 10000 }
+  [mkG "a" 100 700 5, mkG "b" 100 660 5]).1) #[0, 0] 0 1 == [⟨100, 698, 105, 708⟩, ⟨100, 658, 105, 668⟩]
+-- Vertical text (direction 1) keeps the selected glyphs' run boxes and is never joined.
+#guard selBands paraCells #[1, 1, 1] 1 8 == rangeBoxes paraCells 1 8
+#guard selBands paraCells #[0, 1, 0] 1 8 ==
+  [⟨105, 698, 115, 708⟩, ⟨100, 686, 125, 696⟩, ⟨100, 674, 105, 684⟩]
 -- Search: case-insensitive, whitespace-normalised, hits mapped back to cells.
 #guard normQuery "  hELLO \n  world " == #['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd']
 #guard normQuery "ÀB×" == #['à', 'b', '×']

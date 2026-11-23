@@ -1009,10 +1009,24 @@ page copies exactly the page text of the text view.
   pointer, in reading order, are selected (`Select.dragRange`). A click without moving clears
   the selection. **Double-click** selects a word (letters, digits, non-ASCII characters
   without a separator in between, `Select.wordAt`). **Ctrl+A** selects the page.
-* The selection is drawn over the page image (one box per line run, `Select.rangeBoxes`,
-  mapped back with `Geom.toScreen`); the page is not re-rendered. **Highlight rendering**
-  (task 10.10): on X11 the selection and the search hits are canvas rectangles stippled 50 %
-  (`-stipple gray50`; blue `#3874f2`, hits yellow, the current hit orange). Tk Aqua has no
+* The selection is drawn over the page image (mapped back with `Geom.toScreen`; the page is
+  not re-rendered) as a **continuous light-blue fill** as in PDF.js and Preview (task 10.18,
+  `Select.selBands`): one band per selected line, spanning the line's full height (lowest to
+  highest glyph box of the whole line); the first line from the selection start to the line's
+  end, interior lines from the line's start to its end, the last line from its start to the
+  selection end (a single line from the start glyph to the end glyph). Consecutive bands are
+  joined, both edges moved to the middle of the gap, when both lines are left-to-right
+  horizontal, the layout puts a plain line break (`"\n"`) between them (never across a
+  paragraph break `"\n\n"` or a column change) and the gap is at most the smaller band's
+  height. Bands only grow, so tightly set lines whose bands overlap stay as they are; rotated
+  and vertical lines keep their selected glyphs' run box (`Select.rangeBoxes`) and are not
+  joined. Band edges are rounded to the nearest pixel, so joined bands share a pixel edge. The
+  bands are translucent photo items (`::safepdf::tint`, `#3874f2` at 35 %) on **both**
+  platforms; copy and search ranges are unchanged. Checked by `#guard`s in `Select` and the
+  theorems `shape_covers`, `bandAt_covers` (bands cover every selected glyph box) and
+  `bandAt_meet` (joined bands meet), and by smoke case 10.10 (`sel-bands`). **Highlight
+  rendering** (task 10.10): on X11 the search hits are canvas rectangles stippled 50 %
+  (`-stipple gray50`; hits yellow, the current hit orange). Tk Aqua has no
   stipples (they used to be outlines there), so on macOS each box is a canvas **image item
   showing a translucent photo** (`::safepdf::tint`): the colour at alpha 35 % for the
   selection (`#3874f2`, over white ≈ `#b9cefa`) and 50 % for hits (`#ffff00`, current
@@ -1022,8 +1036,9 @@ page copies exactly the page text of the text view.
   redraw `::safepdf::tintGc` deletes the photos no item shows (`image inuse`). A single
   page-sized overlay image composited in Lean was rejected: it costs O(page pixels) per redraw
   (≈ 150 ns/px for Lean compositing, ~130 ms on a 612 × 792 pt page at 133 %, on every drag
-  motion), the per-box photos O(boxes). X11 keeps the stipples (unverified there: Tk's X11 alpha
-  blending reads the window back per redraw); switching it is the `State.stipple` flag. User
+  motion), the per-box photos O(boxes). X11 keeps the stipples for search hits (Tk's X11 alpha
+  blending reads the window back per redraw, and a page can have hundreds of hits; the
+  selection is one band per line); switching it is the `State.stipple` flag. User
   highlight marks are not affected (multiplied into the page image, below); unsaved drawings
   with an opacity below 88 % are stippled on X11 and opaque on Aqua.
 * **Ctrl+C** (or the right-button menu: Copy, Select all, Find…) copies the selected text

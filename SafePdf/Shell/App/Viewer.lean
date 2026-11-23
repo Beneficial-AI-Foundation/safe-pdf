@@ -92,8 +92,9 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   normalised search text). A mouse press/drag/release maps the window positions to page space
   with `Geom.toPage` and selects the glyphs between the nearest glyphs in reading order;
   double-click selects a word; Ctrl+A the page. The selection is drawn over the page image
-  (tag `sel`; the image is not re-rendered) as stippled canvas rectangles on X11 and as
-  translucent photo image items on Aqua (task 10.10, `Tint`, `::safepdf::tint`). Ctrl+C or the
+  (tag `sel`; the image is not re-rendered) as one translucent light-blue band per line on
+  both platforms (task 10.18, `Select.selBands`: full line height, consecutive lines of a
+  paragraph touching; photo image items, `Tint`, `::safepdf::tint` of task 10.10). Ctrl+C or the
   context menu (right button) copies `Select.rangeText` to the clipboard (`clipboard append`,
   the text passed as one quoted word).
 * **Search** (Ctrl+F opens the find bar; Enter/F3 next, Shift+Enter/Shift+F3 previous, Escape
@@ -406,8 +407,9 @@ structure State where
   query : Array Char := #[]
   /-- The current search hit: page and index among that page's hits. -/
   hit : Option (Nat × Nat) := none
-  /-- Selection and search hits are stippled fills (X11); `false` on Aqua, which has no
-  stipples: translucent photo fills (`::safepdf::tint`, task 10.10). -/
+  /-- Search hits are stippled fills (X11); `false` on Aqua, which has no stipples:
+  translucent photo fills (`::safepdf::tint`, task 10.10). The selection is a photo fill on
+  both (task 10.18). -/
   stipple : Bool := true
   /-- Smoke-test output directory (`SAFEPDF_VIEWER_SMOKE`). -/
   smokeDir : Option String := none
@@ -2359,9 +2361,10 @@ def overlaySlots (s : State) : List Slot :=
 
 /-- Redraws the overlays of the pages on screen (`overlaySlots`): the marks' canvas items
 (`drawMarks`), all search hits (tag `hit`, the current one in orange), the selection (tag
-`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. Hits and the
-selection are `Tint` fills: stippled rectangles on X11, translucent photos on Aqua (task 10.10;
-photos no item shows any more are deleted, `::safepdf::tintGc`). -/
+`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. Hits are `Tint`
+fills: stippled rectangles on X11, translucent photos on Aqua (task 10.10; photos no item shows
+any more are deleted, `::safepdf::tintGc`). The selection is a translucent photo band per line
+on both platforms (`Select.PageIndex.bands`, task 10.18). -/
 def drawOverlay (st : IO.Ref State) : IO Unit := do
   discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
   st.modify ({ · with bubble := none, pickerAt := none })
@@ -2386,11 +2389,18 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
           if let some (a, b) := hits[i]? then
             let t := if s.hit == some (pg, i) then Tint.cur else Tint.hit
             for b in Select.rangeBoxes ix.cells a b do rect sl b t "hit"
+  -- The selection: one translucent band per line on both platforms (task 10.18,
+  -- `Select.selBands`), edges rounded to the nearest pixel so that joined bands share a pixel
+  -- edge (no gap, no doubly tinted overlap).
   if let some (p, a, b) := s.sel then
     if let some sl := slotOf s p then
       if let .ok ix ← pageIndex st p then
-        for b in Select.rangeBoxes ix.cells a b do rect sl b Tint.sel "sel"
-  if !s.stipple then discard <| run ["::safepdf::tintGc"]
+        for b in ix.bands a b do
+          let (x0, y0, x1, y1) := sl.rect b
+          let r (v : Rat) : String := toString (v + 1 / 2).floor
+          discard <| run (["::safepdf::tint", ".c", r x0, r y0, r x1, r y1] ++
+            [Tint.sel.rgb, Tint.sel.alphaHex, "sel"])
+  discard <| run ["::safepdf::tintGc"]
   -- The free-text editor follows zoom, rotation and scrolling (task 9.9).
   if let some fe := s.ftEdit then
     if let some sl := slotOf s fe.page then
@@ -9446,6 +9456,36 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   out := out.push s!"sel-ink: {← probe inkPt}"
   out := out.push s!"sel-paper: {← probe (centre hello)}"
   out := out.push s!"ms-sel: {← timeMs 5 redraw}"
+  -- 1b. Selection bands (task 10.18): the `sel` items' bounding boxes in drawing order, each
+  -- full line's extent (rounded as `drawOverlay`), then a selection from the middle of line 3
+  -- to the middle of line 5 (runs 2–4 after the heading) with the canvas x of its start and
+  -- end glyphs and a probe in the paper between lines 3 and 4.
+  let px (v : Rat) : String := toString (v + 1 / 2).floor
+  let bandsNow : IO String := do
+    let ids := ((← run [".c", "find", "withtag", "sel"]).splitOn " ").filter (!·.isEmpty)
+    let mut bs : Array String := #[]
+    for id in ids do bs := bs.push (",".intercalate ((← run [".c", "bbox", id]).splitOn " "))
+    return ";".intercalate bs.toList
+  let runs := (Select.lineRuns ix.cells 0 (ix.cells.size - 1)).toArray
+  let s1 ← st.get
+  if let some sl := slotOf s1 s1.page then
+    let lineX := runs.toList.map fun (_, _, b) =>
+      let (x0, _, x1, _) := sl.rect b
+      s!"{px x0},{px x1}"
+    out := out.push s!"sel-bands: {← bandsNow}"
+    out := out.push s!"sel-lines: {";".intercalate lineX}"
+    if let (some (_, i2, b2), some (_, _, b3), some (_, i4, _)) := (runs[2]?, runs[3]?, runs[4]?) then
+      let (a, b) := (i2 + 22, i4 + 22)
+      st.modify ({ · with sel := some (s1.page, a, b) })
+      redraw
+      let cx (i : Nat) (hi : Bool) : String := match ix.cells[i]? with
+        | some c => let (x0, _, x1, _) := sl.rect c.box; px (if hi then x1 else x0)
+        | none => "?"
+      out := out.push s!"sel3-bands: {← bandsNow}"
+      out := out.push s!"sel3-ends: {cx a false},{cx b true}"
+      -- In the paper gap above line 3, a quarter of the way down from line 2's glyph boxes.
+      out := out.push s!"sel3-gap: {← probe ⟨(b3.llx + b3.urx) / 2, b3.ury + (b2.lly - b3.ury) / 4⟩}"
+      out := out.push s!"sel3-text: {(Select.rangeText ix.cells a b).length}"
   -- 2. Search `safe`: the first hit (current, orange) lies over the marker.
   st.modify ({ · with sel := none })
   sendEvent ".c" "<Control-Key-f>"
