@@ -13,7 +13,7 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   marks —, Import annotations… / Export annotations… — XFDF, task 9.11 —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
   selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
   entries Highlight tool and Show all highlights: task 9.8; Find…), View
-  (Outline, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
+  (Sidebar, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
   two radio groups after PDF.js: Page / Vertical Scrolling, No / Odd / Even Spreads), Go (previous/next/first/last
   page, Go to page…, Back, Forward). The viewer builds the Tk menus from this list
   (`Viewer.buildMenus`) and keeps every entry's `-state` in step with `Cmd.enabled`
@@ -72,7 +72,8 @@ inductive Cmd where
   | hlTool
   /-- Show or hide all highlights (task 9.8, the pop-over's "Show all"). -/
   | showAll
-  /-- Show/hide the outline panel. -/
+  /-- Show/hide the sidebar (outline, thumbnails, …; task 9.r9: every document has
+  thumbnails, so it works without an outline too). -/
   | outline
   /-- Zoom in one step. -/
   | zoomIn
@@ -139,7 +140,7 @@ def Cmd.label : Cmd → String
   | .deleteMark => "Delete mark"
   | .hlTool => "Highlight tool"
   | .showAll => "Show all highlights"
-  | .outline => "Outline"
+  | .outline => "Sidebar"
   | .zoomIn => "Zoom in"
   | .zoomOut => "Zoom out"
   | .actualSize => "Actual size"
@@ -422,7 +423,7 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .copy | .highlight => c.hasDoc && c.hasSel
   | .deleteMark => c.hasDoc && c.hasMark
   | .save => c.hasDoc && c.dirty
-  | .outline => c.hasDoc && c.hasOutline
+  | .outline => c.hasDoc
   | .prevPage | .firstPage => c.hasDoc && c.page > 0 && !c.onFirst
   | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages && !c.onLast
   | .back => c.hasDoc && c.canBack
@@ -463,7 +464,7 @@ structure Menu where
 /-- Tk path of the menubar. -/
 def barPath : String := ".menubar"
 
-/-- Tcl variable that mirrors whether the outline panel is shown (View → Outline check). -/
+/-- Tcl variable that mirrors whether the sidebar is shown (View → Sidebar check). -/
 def outlineVar : String := "::safepdf::outlineOn"
 
 /-- Tcl variable holding the scroll mode (`View.ScrollMode.key`; the View menu's and the
@@ -610,7 +611,7 @@ def Platform.keyText (p : Platform) (s : String) : String :=
 #guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit]
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3 }
   !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c &&
-  Cmd.lastPage.enabled c && !Cmd.copy.enabled c && !Cmd.outline.enabled c &&
+  Cmd.lastPage.enabled c && !Cmd.copy.enabled c && Cmd.outline.enabled c &&
   !Cmd.back.enabled c && Cmd.zoomIn.enabled c && !Cmd.highlight.enabled c &&
   Cmd.addNote.enabled c && !Cmd.deleteMark.enabled c && Cmd.hlTool.enabled c &&
   Cmd.showAll.enabled c

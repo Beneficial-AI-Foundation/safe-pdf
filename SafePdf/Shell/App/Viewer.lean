@@ -22,8 +22,9 @@ import SafePdf.Shell.Fonts
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
 (File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
 `Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar and
-an outline sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
-`Toolbar.layout` and `Sidebar.rows`: sidebar toggle, page arrows, page field, zoom −/+ and
+a sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
+`Toolbar.layout` and `Sidebar.rows`; since task 9.r9 with view buttons for its panels
+(`Sidebar.panels`): the outline and lazily rendered page thumbnails, `thumbView`): sidebar toggle, page arrows, page field, zoom −/+ and
 drop-down, the Highlight tool (task 9.4) and disabled placeholders for the other annotation
 tools, `»` overflow menu; the design reference is
 cited in `docs/viewer.md`, nothing of PDF.js is copied), a scrollable canvas showing the
@@ -99,8 +100,8 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   scrolled into view; the status line says `"q": hit k/n on page p` (k of the n hits of that
   page) or `"q": not found`.
 * **Navigation** (task 8.2d, pure logic in `Links`). The outline (`Nav.outline`) fills a
-  tree (a text widget, task 9.7) in the left pane of a paned window (shown when the document has an outline;
-  F9, the Outline button or the context menu toggle it); clicking an item jumps to its
+  tree (a text widget, task 9.7) in the left pane of a paned window (the sidebar, opened as the
+  page mode says, `Sidebar.onLoad`; F9, the sidebar button or the context menu toggle it); clicking an item jumps to its
   destination page, scrolled to the destination's position (`/XYZ`, `/FitH`, `/FitR`, … left/top
   mapped with `Geom.toScreen`, C2). Links (`Links.pageLinks`, read per page on first use):
   over a link the cursor is a hand and the status line shows the target (`go to page …`, or
@@ -388,8 +389,35 @@ structure State where
   labels : Array String := #[]
   /-- Outline entries of the open document (outline row `oK` is entry `K`). -/
   outline : Array Links.Entry := #[]
-  /-- Whether the outline panel is shown. -/
+  /-- Whether the sidebar is shown (task 9.r9: with the panel `panel`; the name is from the
+  time it only held the outline). -/
   outlineShown : Bool := false
+  /-- The sidebar panel shown, or the last one shown while the sidebar is closed (task 9.r9). -/
+  panel : Sidebar.Panel := .outline
+  /-- The panel buttons last shown (`Sidebar.buttons` keys; `none`: not applied yet). -/
+  panelButtons : Option (List String) := none
+  /-- Thumbnail layout (task 9.r9, `Sidebar.thumbLayout`) and its height. -/
+  thSlots : Array Sidebar.ThumbSlot := #[]
+  /-- See `thSlots`. -/
+  thHeight : Nat := 0
+  /-- Document generation and user rotation the thumbnails are laid out for (`none`: not
+  laid out). -/
+  thKey : Option (Nat × SafePdf.Core.Doc.Rotation) := none
+  /-- Pages with a thumbnail image (photo `::safepdf::thN`), at most `Sidebar.thumbBudget`. -/
+  thHave : List Nat := []
+  /-- Thumbnail renders running on worker threads (at most `thumbJobs`). -/
+  thJobs : Array Job := #[]
+  /-- The page whose thumbnail is highlighted as the current one. -/
+  thMarked : Option Nat := none
+  /-- The keyboard selection in the thumbnails (Up/Down; Return goes there). -/
+  thSel : Option Nat := none
+  /-- Thumbnails rendered for the open document (smoke tests: lazy rendering). -/
+  thRendered : Nat := 0
+  /-- When the document was opened (`IO.monoNanosNow`) and how long after that the first
+  thumbnail was shown (ns; the `thumbperf` measurement). -/
+  thOpenNs : Nat := 0
+  /-- See `thOpenNs`. -/
+  thFirstNs : Option Nat := none
   /-- Links per page (`none`: not read yet). -/
   links : Array (Option (Array Links.Link)) := #[]
   /-- The link under the mouse pointer: its page and index on that page. -/
@@ -741,7 +769,7 @@ toplevel's bind tag `.`; canvas resizes are debounced and reported as `emit resi
 Colours and sizes follow PDF.js's light theme (`web/viewer.css`: toolbar `#f9f9fa`, 40 px
 high with 32 px round buttons and 16 px icons, separators, field and drop-down borders). -/
 def setupScript : String := "
-namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0 }
+namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0; variable panel outline }
 namespace eval ::safepdf::icon {}
 " ++ resourceGuardScript ++ "
 wm title . safe-pdf
@@ -814,20 +842,40 @@ proc ::safepdf::icon::save {c} {
   $c create line 11.5 14.5 16 19 20.5 14.5 -width 1.6 -capstyle round -joinstyle round -tags inkf
   $c create line 9 19 9 24 23 24 23 19 -width 1.6 -joinstyle round -tags inkf
 }
+# Sidebar view buttons (9.r9): thumbnails, outline, attachments, layers.
+proc ::safepdf::icon::thumbs {c} {
+  ::safepdf::rrect $c 11 7 21 14.5 1.5 -fill {} -outline black -width 1.5 -tags inko
+  ::safepdf::rrect $c 11 17.5 21 25 1.5 -fill {} -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::outline {c} {
+  foreach {x y} {8 10 11 16 11 22} {
+    $c create oval $x [expr {$y - 1.2}] [expr {$x + 2.4}] [expr {$y + 1.2}] -fill black -outline {} -tags inkf
+    $c create line [expr {$x + 5}] $y 24 $y -width 1.5 -capstyle round -tags inkf
+  }
+}
+proc ::safepdf::icon::attach {c} {
+  $c create line 20 12 13.5 18.5 13.5 21 15.5 22.5 17.5 21.5 23 16 23.5 12 21 9 18 9 \\
+    10.5 16.5 10 21 -smooth 1 -width 1.5 -capstyle round -tags inkf
+}
+proc ::safepdf::icon::layers {c} {
+  $c create polygon 16 8 24 12 16 16 8 12 -fill {} -outline black -width 1.5 -joinstyle round -tags inko
+  $c create line 8 16 16 20 24 16 -width 1.5 -joinstyle round -capstyle round -tags inkf
+  $c create line 8 20 16 24 24 20 -width 1.5 -joinstyle round -capstyle round -tags inkf
+}
 proc ::safepdf::icon::more {c} {
   $c create line 10 11 15 16 10 21 -width 1.6 -capstyle round -joinstyle round -tags inkf
   $c create line 17 11 22 16 17 21 -width 1.6 -capstyle round -joinstyle round -tags inkf
 }
 # Toolbar buttons: a 32 px canvas with a round background (hover, pressed, toggled as in
 # PDF.js) and an icon; disabled buttons draw the icon dimmed and ignore clicks. State in
-# ::safepdf::btn(KEY,PATH).
+# ::safepdf::btn(KEY,PATH). The optional bg names the colour behind the button (col(bg)).
 set ::safepdf::tipId {}
-proc ::safepdf::iconButton {w icon tip cmd} {
-  canvas $w -width 32 -height 32 -background $::safepdf::col(bar) -highlightthickness 0 \\
+proc ::safepdf::iconButton {w icon tip cmd {bg bar}} {
+  canvas $w -width 32 -height 32 -background $::safepdf::col($bg) -highlightthickness 0 \\
     -borderwidth 0 -takefocus 0
-  $w create oval 1 1 31 31 -fill $::safepdf::col(bar) -outline {} -tags bg
+  $w create oval 1 1 31 31 -fill $::safepdf::col($bg) -outline {} -tags bg
   ::safepdf::icon::$icon $w
-  foreach {k v} [list st normal tog 0 in 0 down 0 cmd $cmd tip $tip] { set ::safepdf::btn($k,$w) $v }
+  foreach {k v} [list st normal tog 0 in 0 down 0 cmd $cmd tip $tip bg $bg] { set ::safepdf::btn($k,$w) $v }
   bind $w <Enter> {::safepdf::btnEnter %W}
   bind $w <Leave> {::safepdf::btnLeave %W}
   bind $w <ButtonPress-1> {set ::safepdf::btn(down,%W) 1; ::safepdf::btnPaint %W}
@@ -838,7 +886,7 @@ proc ::safepdf::btnPaint {w} {
   upvar #0 ::safepdf::btn b ::safepdf::col c
   set on [expr {$b(st,$w) eq {normal}}]
   if {$on && $b(down,$w) && $b(in,$w)} { set bg $c(press) } elseif {$on && $b(in,$w)} {
-    set bg $c(hover) } elseif {$b(tog,$w)} { set bg $c(toggled) } else { set bg $c(bar) }
+    set bg $c(hover) } elseif {$b(tog,$w)} { set bg $c(toggled) } else { set bg $c($b(bg,$w)) }
   $w itemconfigure bg -fill $bg
   $w itemconfigure paper -fill $bg
   set ink [expr {$on ? $c(ink) : $c(inkOff)}]
@@ -1039,7 +1087,7 @@ proc ::safepdf::postMore {} {
   set x [expr {[winfo rootx .bar.more] + [winfo width .bar.more] - [winfo reqwidth .more]}]
   tk_popup .more $x [expr {[winfo rooty .bar.more] + [winfo height .bar.more] + 2}]
 }
-# The sidebar toggle is shown only when the document has an outline.
+# The sidebar toggle is shown with a document (9.r9: thumbnails need no outline).
 proc ::safepdf::showToggle {on} {
   if {$on} {
     if {![winfo ismapped .bar.sidebar]} {
@@ -1074,7 +1122,78 @@ raise .ol.h; raise .ol.t; raise .ol.s
 # The sidebar scroll bar shows only when the tree does not fit (PDF.js has overlay bars).
 proc ::safepdf::olScroll {a b} {
   .ol.s set $a $b
+  if {$::safepdf::panel ne {outline}} return
   if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.s } else { grid .ol.s }
+}
+# Sidebar panels (9.r9, after PDF.js's sidebar views): a row of view buttons .ol.sw above
+# the panel (made by buildToolbar from Sidebar.panels, shown per content); each panel grids
+# its widgets into row 1 of .ol.p (::safepdf::panelWidgets(KEY)), ::safepdf::showPanel KEY
+# TITLE shows one and runs ::safepdf::panelShown::KEY when it exists (scroll bar state).
+frame .ol.sw -background $::safepdf::col(body)
+pack .ol.sw -in .ol -side top -fill x -pady {0 6} -before .ol.p
+namespace eval ::safepdf::panelShown {}
+set ::safepdf::panelWidgets(outline) {.ol.t .ol.s}
+proc ::safepdf::panelShown::outline {} { ::safepdf::olScroll {*}[.ol.t yview] }
+proc ::safepdf::showPanel {key title} {
+  foreach k [array names ::safepdf::panelWidgets] {
+    if {$k ne $key} { foreach w $::safepdf::panelWidgets($k) { grid remove $w } }
+  }
+  set ::safepdf::panel $key
+  .ol.h configure -text $title
+  foreach w $::safepdf::panelWidgets($key) { grid $w }
+  if {[info procs ::safepdf::panelShown::$key] ne {}} { ::safepdf::panelShown::$key }
+}
+# Thumbnails (9.r9): a canvas whose scroll region is centred on x = 0 (thRegion), one image
+# per page (tags thi thiN, photo ::safepdf::thN) on a white frame (thf thfN) with its page
+# label (thl); the current page has a rounded background (thsel), the keyboard selection a
+# focus ring (thfocus). Every change of the view is reported once per idle moment (thView).
+canvas .ol.th -width 200 -height 10 -background $::safepdf::col(panel) -highlightthickness 0 \\
+  -borderwidth 0 -takefocus 1 -yscrollincrement 20 -confine 1 -yscrollcommand ::safepdf::thScroll
+ttk::scrollbar .ol.ts -orient vertical -command {.ol.th yview}
+grid .ol.th -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.ts -in .ol.p -row 1 -column 1 -sticky ns
+raise .ol.th; raise .ol.ts
+grid remove .ol.th .ol.ts
+set ::safepdf::panelWidgets(thumbnails) {.ol.th .ol.ts}
+set ::safepdf::thH 1
+set ::safepdf::thPending 0
+proc ::safepdf::thRegion {} {
+  set w [winfo width .ol.th]
+  if {$w < 2} { set w [winfo reqwidth .ol.th] }
+  set x0 [expr {-($w / 2)}]
+  .ol.th configure -scrollregion [list $x0 0 [expr {$x0 + $w}] $::safepdf::thH]
+}
+proc ::safepdf::thScroll {a b} {
+  .ol.ts set $a $b
+  if {$::safepdf::panel eq {thumbnails}} {
+    if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.ts } else { grid .ol.ts }
+  }
+  if {!$::safepdf::thPending} {
+    set ::safepdf::thPending 1
+    after idle {set ::safepdf::thPending 0; ::safepdf::emit thView}
+  }
+}
+proc ::safepdf::panelShown::thumbnails {} {
+  ::safepdf::thRegion
+  ::safepdf::thScroll {*}[.ol.th yview]
+}
+bind .ol.th <Configure> {::safepdf::thRegion}
+bind .ol.th <ButtonRelease-1> {focus .ol.th; ::safepdf::emit thClick [%W canvasy %y]}
+bind .ol.th <Key-Up> {::safepdf::emit thKey up; break}
+bind .ol.th <Key-Down> {::safepdf::emit thKey down; break}
+bind .ol.th <Key-Return> {::safepdf::emit thKey go; break}
+bind .ol.th <Key-KP_Enter> {::safepdf::emit thKey go; break}
+bind .ol.th <FocusOut> {::safepdf::emit thBlur}
+bind .ol.th <MouseWheel> {.ol.th yview scroll [expr {%D > 0 ? -2 : 2}] units; break}
+bind .ol.th <Button-4> {.ol.th yview scroll -2 units; break}
+bind .ol.th <Button-5> {.ol.th yview scroll 2 units; break}
+catch {
+  bind .ol.th <TouchpadScroll> {
+    lassign [tk::PreciseScrollDeltas %D] ::safepdf::tdx ::safepdf::tdy
+    lassign [.ol.th yview] ::safepdf::tha ::safepdf::thb
+    .ol.th yview moveto [expr {$::safepdf::tha - $::safepdf::tdy / double(max($::safepdf::thH, 1))}]
+    break
+  }
 }
 .ol.t tag configure hover -background $::safepdf::col(olHover)
 .ol.t tag configure cur -background $::safepdf::col(olCur)
@@ -1302,7 +1421,7 @@ bind . <Alt-Key-Left> {::safepdf::emit back}
 bind . <Alt-Key-Right> {::safepdf::emit forward}
 bind . <F9> {::safepdf::emit outlineToggle}
 .pop add separator
-.pop add command -label {Outline} -accelerator F9 -command {::safepdf::emit outlineToggle}
+.pop add command -label {Sidebar} -accelerator F9 -command {::safepdf::emit outlineToggle}
 .pop add command -label {Back} -accelerator Alt+Left -command {::safepdf::emit back}
 .pop add command -label {Forward} -accelerator Alt+Right -command {::safepdf::emit forward}
 .pop add command -label {Go to page...} -accelerator Ctrl+G -command ::safepdf::showGoto
@@ -2190,7 +2309,7 @@ def place (st : IO.Ref State) (want : List Nat) (j : Job) (r : Except Error Clip
 /-- Schedules a `poll` event while renders are running (task 8.8). -/
 def ensurePoll (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  if !s.jobs.isEmpty && !s.pollQueued then
+  if (!s.jobs.isEmpty || !s.thJobs.isEmpty) && !s.pollQueued then
     st.modify ({ · with pollQueued := true })
     discard <| run ["after", toString pollMs, "::safepdf::emit poll"]
 
@@ -2292,6 +2411,188 @@ def renderMore (st : IO.Ref State) : IO Unit := do
   if shown then drawOverlay st
   ensurePoll st
 
+/-! ## Thumbnails (task 9.r9) -/
+
+/-- Most thumbnail renders running at once (task 9.r9), on top of the page renders' `maxJobs`.
+They start only while the page renders leave a slot free, so the main view goes first. -/
+def thumbJobs : Nat := 2
+
+/-- Tk photo of the thumbnail of page `p`. -/
+def thumbPhoto (p : Nat) : String := s!"::safepdf::th{p}"
+
+/-- Rotated size of page `p` of `doc` in page units (`/Rotate` plus the user rotation). -/
+def pageSizeRot (s : State) (doc : Doc) (p : Nat) : Rat × Rat :=
+  match doc.pages[p]? with
+  | some page => View.boxSize (rotAdd page.rotate s.rot) (Box.ofRect page.cropBox)
+  | none => (0, 0)
+
+/-- The zoom of page `p`'s thumbnail: `Sidebar.thumbW` pixels across its rotated width. -/
+def thumbZoom (s : State) (doc : Doc) (p : Nat) : Rat :=
+  let (pw, _) := pageSizeRot s doc p
+  if pw ≤ 0 then 1 else (Sidebar.thumbW : Rat) / pw
+
+/-- Removes the thumbnail image of page `p` (eviction, task 9.r9). -/
+def dropThumb (st : IO.Ref State) (p : Nat) : IO Unit := do
+  try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+  discard <| run [".ol.th", "delete", s!"thi{p}"]
+  st.modify fun s => { s with thHave := s.thHave.filter (· != p) }
+
+/-- Deletes every thumbnail image and canvas item (a new document, a rotation, Close). Running
+thumbnail renders finish on their own; `thumbPoll` drops their results. -/
+def clearThumbs (st : IO.Ref State) : IO Unit := do
+  for p in (← st.get).thHave do
+    try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+  discard <| run [".ol.th", "delete", "all"]
+  st.modify ({ · with thHave := [], thSlots := #[], thHeight := 0, thKey := none,
+                      thMarked := none, thSel := none })
+
+/-- Lays the thumbnails of the open document out (`Sidebar.thumbLayout`, sizes from each
+page's rotated crop box, `Sidebar.thumbSize`): a white frame (the placeholder until the image
+arrives, tags `thf thfN`) and the page label (the page label when the document has labels,
+else the number; tags `thl thlN`) per page, the scroll region, the view at the top. Nothing is
+rendered here (`thumbView`). -/
+def buildThumbs (st : IO.Ref State) : IO Unit := do
+  clearThumbs st
+  let s ← st.get
+  let some doc := s.doc | return
+  let sizes := (List.range doc.pages.size).map fun p =>
+    let (pw, ph) := pageSizeRot s doc p
+    Sidebar.thumbSize pw ph
+  let (ts, h) := Sidebar.thumbLayout sizes
+  for t in ts do
+    let x0 : Int := -((t.w / 2 : Nat) : Int)
+    discard <| run [".ol.th", "create", "rectangle", toString (x0 - 1), toString ((t.y : Int) - 1),
+      toString (x0 + t.w), toString (t.y + t.h), "-outline", "#c8c8d0", "-fill", "white",
+      "-tags", s!"thf thf{t.page}"]
+    discard <| run [".ol.th", "create", "text", "0", toString (t.y + t.h + 11), "-text",
+      Toolbar.entryText s.labels t.page, "-font", "::safepdf::fBar", "-fill", "#5b5b66",
+      "-tags", s!"thl thl{t.page}"]
+  discard <| run ["set", "::safepdf::thH", toString h]
+  discard <| run ["::safepdf::thRegion"]
+  discard <| run [".ol.th", "yview", "moveto", "0"]
+  st.modify ({ · with thSlots := ts, thHeight := h, thKey := some (s.gen, s.rot) })
+
+/-- The visible band of the thumbnails panel (canvas pixels: top, bottom); `none` while the
+panel is not laid out on screen (so that nothing is rendered for an unmapped panel). -/
+def thumbBand (s : State) : IO (Option (Nat × Nat)) := do
+  let some (a, _) := viewFracs (← run [".ol.th", "yview"]) | return none
+  let some hgt := (← run ["winfo", "height", ".ol.th"]).toNat? | return none
+  if hgt < 2 || (← run ["winfo", "ismapped", ".ol.th"]) != "1" then return none
+  let top := (a * (s.thHeight : Rat) + 1 / 2).floor.toNat
+  return some (top, top + hgt)
+
+/-- Scrolls the thumbnails panel so that slot `t` is fully visible (with a small margin). -/
+def thumbSee (st : IO.Ref State) (t : Sidebar.ThumbSlot) : IO Unit := do
+  let s ← st.get
+  let some (top, bot) ← thumbBand s | return
+  let hgt : Rat := (max s.thHeight 1 : Nat)
+  let y0 := t.y - min t.y 8
+  let y1 := t.bottom + 8
+  if y0 < top then
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine ((y0 : Rat) / hgt)]
+  else if y1 > bot then
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine (((y1 - (bot - top) : Nat) : Rat) / hgt)]
+
+/-- Highlights the current page's thumbnail (a rounded background, tag `thsel`, as PDF.js's
+selected thumbnail) and scrolls it into view (PDF.js `scrollThumbnailIntoView`). -/
+def markThumb (st : IO.Ref State) : IO Unit := do
+  discard <| run [".ol.th", "delete", "thsel"]
+  let s ← st.get
+  st.modify ({ · with thMarked := some s.page })
+  let some t := s.thSlots[s.page]? | return
+  -- Until the panel is on screen it cannot be scrolled: try again after the next event.
+  if (← thumbBand s).isNone then st.modify ({ · with thMarked := none })
+  let x0 : Int := -((t.w / 2 : Nat) : Int) - 6
+  discard <| run ["::safepdf::rrect", ".ol.th", toString x0, toString ((t.y : Int) - 6),
+    toString (x0 + t.w + 12), toString (t.bottom + 2), "5", "-fill", "#d2d2d9", "-outline", "",
+    "-tags", "thsel"]
+  discard <| run [".ol.th", "lower", "thsel"]
+  thumbSee st t
+
+/-- Draws the keyboard selection's focus ring (tag `thfocus`) around thumbnail `p`. -/
+def thumbFocus (st : IO.Ref State) (p : Nat) : IO Unit := do
+  discard <| run [".ol.th", "delete", "thfocus"]
+  let some t := (← st.get).thSlots[p]? | return
+  let x0 : Int := -((t.w / 2 : Nat) : Int) - 4
+  discard <| run ["::safepdf::rrect", ".ol.th", toString x0, toString ((t.y : Int) - 4),
+    toString (x0 + t.w + 8), toString t.bottom, "4", "-fill", "", "-outline", "#0a84ff",
+    "-width", "2", "-tags", "thfocus"]
+  thumbSee st t
+
+/-- Starts rendering the thumbnail `key` on a dedicated worker thread (as `submit`). -/
+def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
+  let s ← st.get
+  let d := s.view.getD doc
+  let subst := s.subst
+  let start ← IO.monoNanosNow
+  let task ← IO.asTask (prio := .dedicated) do
+    let t0 ← IO.monoNanosNow
+    let r ← renderPage d key.page key.zoom key.rot subst
+    let t1 ← IO.monoNanosNow
+    return (r, t1 - t0)
+  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task⟩ }
+
+/-- **Lazy thumbnail rendering** (task 9.r9): for the visible band of the panel
+(`thumbBand`), the visible thumbnails and `Sidebar.thumbMargin` more on each side
+(`Sidebar.thumbsWanted`) are rendered on worker threads — at most `thumbJobs` at once and only
+while the page renders leave a slot free (`maxJobs`) — and thumbnails beyond
+`Sidebar.thumbBudget` are dropped, farthest first (`Sidebar.thumbEvict`). Nothing while the
+panel is hidden. -/
+def thumbView (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if !s.outlineShown || s.panel != .thumbnails || s.thKey != some (s.gen, s.rot) then return
+  let some doc := s.doc | return
+  let some (top, bot) ← thumbBand s | return
+  let want := Sidebar.thumbsWanted s.thSlots top bot Sidebar.thumbMargin
+  let center := (want.head?).getD s.page
+  for p in Sidebar.thumbEvict s.thHave want Sidebar.thumbBudget center do dropThumb st p
+  for p in want do
+    let s ← st.get
+    if s.thHave.contains p then continue
+    let key : View.Key := ⟨s.gen, p, thumbZoom s doc p, s.rot⟩
+    if s.thJobs.any (·.key == key) then continue
+    if s.thJobs.size ≥ thumbJobs || s.jobs.size ≥ maxJobs then break
+    thumbSubmit st doc key
+  ensurePoll st
+
+/-- Takes the finished thumbnail renders (task 9.r9) and shows those still laid out for the
+open document and rotation: the image in photo `::safepdf::thN` on its frame (tags
+`thi thiN`); a page that cannot be rendered keeps its empty frame. Others are dropped. -/
+def thumbPoll (st : IO.Ref State) : IO Unit := do
+  let done ← (← st.get).thJobs.filterM (IO.hasFinished ·.task)
+  for j in done do
+    st.modify fun s => { s with thJobs := s.thJobs.filter (·.key != j.key) }
+    let s ← st.get
+    let p := j.key.page
+    if s.thKey != some (j.key.gen, j.key.rot) || j.key.gen != s.gen || s.thHave.contains p then
+      continue
+    let some t := s.thSlots[p]? | continue
+    match j.task.get with
+    | .ok (.ok img, _) =>
+      discard <| run ["image", "create", "photo", thumbPhoto p]
+      Shim.photoPut (thumbPhoto p) img.w.toUInt32 img.h.toUInt32 img.data
+      let x0 : Int := -((img.w / 2 : Nat) : Int)
+      discard <| run [".ol.th", "create", "image", toString x0, toString t.y, "-anchor", "nw",
+        "-image", thumbPhoto p, "-tags", s!"thi thi{p}"]
+      discard <| run [".ol.th", "raise", s!"thi{p}", s!"thf{p}"]
+    | _ => pure ()
+    let now ← IO.monoNanosNow
+    st.modify fun s => { s with thHave := p :: s.thHave, thRendered := s.thRendered + 1,
+                                thFirstNs := s.thFirstNs <|> some (now - s.thOpenNs) }
+
+/-- Brings the thumbnails panel up to date (task 9.r9; after every event, `syncMenus`): while
+it is shown, lays the thumbnails out again for a new document or rotation and moves the
+current-page highlight with the main view. -/
+def syncThumbs (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || !s.outlineShown || s.panel != .thumbnails then return
+  if s.thKey != some (s.gen, s.rot) then
+    buildThumbs st
+    markThumb st
+    -- Rendered once Tk has laid the panel out (`thumbBand`), after the event that showed it.
+    discard <| run ["after", "idle", "::safepdf::emit thView"]
+  else if s.thMarked != some s.page then markThumb st
+
 /-- Handles `poll` (task 8.8, every `pollMs` while renders run): takes the finished renders
 (`finish`, into the cache), shows those still wanted (`place`), starts more (`renderMore`). -/
 def poll (st : IO.Ref State) : IO Unit := do
@@ -2305,6 +2606,9 @@ def poll (st : IO.Ref State) : IO Unit := do
       if ← place st want j r ns then shown := true
     if shown then drawOverlay st
     if (← st.get).doc.isSome then renderMore st
+  -- Thumbnails (task 9.r9): finished ones shown, more started while page renders leave room.
+  thumbPoll st
+  thumbView st
   ensurePoll st
 
 /-- Renders every missing page now and waits for every running render (smoke tests and
@@ -2525,6 +2829,46 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
   discard <| run [".ol.t", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
   discard <| run ["::safepdf::olSetTri", toString i, Sidebar.triangle true on]
 
+/-! ## Sidebar panels (task 9.r9) -/
+
+/-- What the open document offers the sidebar (task 9.r9: which panel buttons show). -/
+def contentOf (s : State) : Sidebar.Content := { hasOutline := !s.outline.isEmpty }
+
+/-- Shows the switcher buttons of the panels the document has (`Sidebar.buttons`, in order)
+and presses the shown panel's button (PDF.js's toggled view button). -/
+def syncPanelButtons (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let bs := Sidebar.buttons (contentOf s)
+  let keys := bs.map (·.key)
+  if s.panelButtons != some keys then
+    for i in Sidebar.panels do discard <| run ["pack", "forget", i.button]
+    for i in bs do discard <| run ["pack", i.button, "-in", ".ol.sw", "-side", "left", "-padx", "1"]
+    st.modify ({ · with panelButtons := some keys })
+  for i in Sidebar.panels do
+    discard <| run ["::safepdf::btnToggled", i.button, if i.panel == s.panel then "1" else "0"]
+
+/-- Shows panel `p` in the sidebar (task 9.r9, `::safepdf::showPanel`): its widgets, heading
+and pressed button; the thumbnails are laid out and rendered when they become visible
+(`syncThumbs`). -/
+def showPanel (st : IO.Ref State) (p : Sidebar.Panel) : IO Unit := do
+  st.modify ({ · with panel := p })
+  discard <| run ["::safepdf::showPanel", p.info.key, p.info.title]
+  syncPanelButtons st
+  syncThumbs st
+
+/-- Opens the sidebar on panel `p`, or closes it (`none`) (task 9.r9; `showOutline` moves the
+pane). -/
+def showSidebar (st : IO.Ref State) (p : Option Sidebar.Panel) : IO Unit := do
+  if let some q := p then showPanel st q
+  showOutline st p.isSome
+  syncThumbs st
+
+/-- Handles `panel KEY` (a switcher button): shows that panel when the document has it. -/
+def panelClick (st : IO.Ref State) (k : String) : IO Unit := do
+  let s ← st.get
+  let some p := Sidebar.Panel.ofKey k | return
+  if s.doc.isSome && p.available (contentOf s) then showPanel st p
+
 /-! ## Document open settings (task 9.r8) -/
 
 /-- Sets the View menu's and the `»` menu's radio variables, `::safepdf::continuous` and the
@@ -2554,7 +2898,8 @@ def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit :=
   st.modify ({ · with hidden })
 
 /-- Enters or leaves full screen (task 9.r8, `/PageMode /FullScreen`): `wm attributes .
--fullscreen`. Leaving applies the document's `/NonFullScreenPageMode` to the outline. -/
+-fullscreen`. Leaving applies the document's `/NonFullScreenPageMode` to the sidebar (task
+9.r9: UseThumbs opens the thumbnails). -/
 def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
   if on == s.fullScreen then return
@@ -2562,9 +2907,9 @@ def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
   discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
   st.modify ({ · with fullScreen := on })
   if !on && s.doc.isSome then
-    showOutline st (Sidebar.shownOnLoad (some s.afterFullScreen) (!s.outline.isEmpty))
-    if let some p := Core.Doc.OpenSettings.panelMissing (some s.afterFullScreen) then
-      setStatus s!"{p} panel not available yet"
+    showSidebar st (Sidebar.onLoad (some s.afterFullScreen) (contentOf s))
+    if let some note := Sidebar.missingNote (some s.afterFullScreen) (contentOf s) then
+      setStatus note
 
 /-- The view a document without open settings gets (task 9.r8): the default view mode, left
 to right, Automatic Zoom, full window UI, no document title, no notes. -/
@@ -2663,8 +3008,8 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
   syncViewVars (← st.get)
   applyChrome st (pr.hideToolbar, pr.hideMenubar, pr.hideWindowUI)
   let mut notes := o.issues.map (·.message)
-  if let some p := Core.Doc.OpenSettings.panelMissing o.mode then
-    notes := notes ++ [s!"{p} panel not available yet"]
+  if let some note := Sidebar.missingNote o.mode (contentOf (← st.get)) then
+    notes := notes ++ [note]
   if pr.hideToolbar || pr.hideMenubar || pr.hideWindowUI then
     notes := notes ++ [hiddenNote]
   if o.mode == some .fullScreen then
@@ -2701,6 +3046,9 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
     (keepView : Bool := false) : IO Unit := do
   let wasShown := (← st.get).outlineShown
   if !keepView then resetOpenView st
+  clearThumbs st
+  let t0 ← IO.monoNanosNow
+  st.modify ({ · with thRendered := 0, thFirstNs := none, thOpenNs := t0 })
   st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
                               shown := none }
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
@@ -2735,8 +3083,13 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
       else applyOpenSettings st doc
     -- Before anything lays the window out: a `<Configure>` refresh shows the status line.
     st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
-    showOutline st (if keepView then wasShown && !outline.isEmpty
-      else Sidebar.shownOnLoad mode (!outline.isEmpty))
+    -- Task 9.r9: the panel buttons for this document, the sidebar as the page mode says.
+    let s1 ← st.get
+    let content := contentOf s1
+    syncPanelButtons st
+    showSidebar st (if keepView then (if wasShown then some (Sidebar.pick s1.panel content)
+        else none)
+      else Sidebar.onLoad mode content)
     let readCanvas : IO Unit := do
       discard <| run ["update", "idletasks"]
       if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
@@ -3376,6 +3729,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
   discard <| run ["set", Menu.hlToolVar, "0"]
   fillOutline st
   showOutline st false
+  clearThumbs st
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
   setStatus (← keyText "No file. Press Ctrl+O or Open... to choose a PDF.")
@@ -3473,6 +3827,11 @@ def buildToolbar : IO Unit := do
       | .pageField => discard <| run ["::safepdf::pageField"]
       | .zoomBox => discard <| run ["::safepdf::zoomBox"]
       | .viewBox => discard <| run ["::safepdf::viewBox"]
+  -- The sidebar's view buttons (task 9.r9, `Sidebar.panels`; packed per document by
+  -- `syncPanelButtons`).
+  for i in Sidebar.panels do
+    discard <| run ["::safepdf::iconButton", i.button, i.icon, i.tip,
+      s!"::safepdf::emit panel {i.key}", "body"]
   for c in Toolbar.ViewChoice.all do
     discard <| run [".viewmenu", "add", "radiobutton", "-label", c.label, "-value", c.key,
       "-variable", "::safepdf::viewSel",
@@ -3517,12 +3876,13 @@ def syncMenus (st : IO.Ref State) : IO Unit := do
       | .entry p i =>
         discard <| run [p, "entryconfigure", toString i, "-state", if on then "normal" else "disabled"]
       | .button w => discard <| run ["::safepdf::btnState", w, if on then "normal" else "disabled"]
-  let vis := Sidebar.toggleVisible (c.hasDoc && c.hasOutline)
+  let vis := Sidebar.toggleVisible c.hasDoc
   if s.toggleShown != some vis then
     discard <| run ["::safepdf::showToggle", if vis then "1" else "0"]
   let title := s.title
   if title != s.titleShown then discard <| run ["wm", "title", ".", title]
   st.modify ({ · with menuStates := now, toggleShown := some vis, titleShown := title })
+  syncThumbs st
 
 /-! ## Links, jumps, history, go to page (task 8.2d) -/
 
@@ -3569,6 +3929,35 @@ def jumpTo (st : IO.Ref State) (j : Links.Jump) : IO Unit := do
   let here ← curLoc st
   st.modify fun s => { s with history := s.history.push here }
   showAt st j.page (.dest j.left j.top)
+
+/-- Handles `thClick Y` (task 9.r9): a click at canvas y `Y` of the thumbnails panel goes to
+that thumbnail's page (recorded in the history, as PDF.js's thumbnail links). -/
+def thumbClick (st : IO.Ref State) (ys : String) : IO Unit := do
+  let s ← st.get
+  let some y := (ys.splitOn ".").head?.bind (·.toInt?) | return
+  let half : Int := (Sidebar.thumbGap / 2 : Nat)
+  let some t := s.thSlots.find? fun t => (t.y : Int) - half ≤ y && y < (t.bottom : Int) + half
+    | return
+  st.modify ({ · with thSel := none })
+  discard <| run [".ol.th", "delete", "thfocus"]
+  if t.page != s.page then jumpTo st { page := t.page }
+
+/-- Handles `thKey up|down|go` (task 9.r9): Up and Down move the keyboard selection in the
+thumbnails panel (from the current page when there is none; `Sidebar.thumbStep`), Return goes
+to the selected page. -/
+def thumbKey (st : IO.Ref State) (k : String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || s.thSlots.isEmpty then return
+  let cur := s.thSel.getD s.page
+  match k with
+  | "go" =>
+    st.modify ({ · with thSel := none })
+    discard <| run [".ol.th", "delete", "thfocus"]
+    if cur != s.page then jumpTo st { page := cur }
+  | _ =>
+    let p := Sidebar.thumbStep s.thSlots.size cur (k == "down")
+    st.modify ({ · with thSel := some p })
+    thumbFocus st p
 
 /-- Back (`back = true`, Alt+Left) or Forward (Alt+Right) in the history. -/
 def histMove (st : IO.Ref State) (back : Bool) : IO Unit := do
@@ -4671,8 +5060,8 @@ def olItemPos (id : String) : IO (Option (String × String)) := do
   | _ => return none
 
 /-- Smoke steps of the toolbar test (`SAFEPDF_VIEWER_SMOKE_MODE=toolbar`, task 9.7), on any
-document of at least two pages: the toolbar layout, the sidebar (shown with its toggle only
-when the document has an outline; collapsing/expanding a row with children through its
+document of at least two pages: the toolbar layout, the sidebar (open on load only
+when the document has an outline, its toggle always (task 9.r9); collapsing/expanding a row with children through its
 disclosure triangle; the toggle button), the arrows (generated clicks), the page field
 (Enter on a valid page, on an out-of-range number and on text: reverts), paging keys
 updating the field, the zoom drop-down (choices, labels, custom percentages after − / +), the
@@ -6369,7 +6758,7 @@ def smokeOpenSettings (st : IO.Ref State) (dir : String) : IO Unit := do
     let xs := s.slots.toList.take 2 |>.map (fun sl => s!"{sl.place.page}@{sl.place.x}")
     return s!"{name}: view={s.scroll.key},{s.spread.key} vars={← run ["set", Menu.scrollVar]},\
       {← run ["set", Menu.spreadVar]} rtl={s.rtl} zoom={s.zoomSel.label} page={s.page + 1} \
-      outline={s.outlineShown} full={s.fullScreen},{← run ["wm", "attributes", ".", "-fullscreen"]} \
+      outline={s.outlineShown} panel={s.panel.info.key} full={s.fullScreen},{← run ["wm", "attributes", ".", "-fullscreen"]} \
       bar={← run ["winfo", "ismapped", ".bar"]} menu={← run [".", "cget", "-menu"]} \
       ys={← run ["winfo", "ismapped", ".ys"]} geom={← run ["wm", "geometry", "."]} off={off} xs={",".intercalate xs} \
       title={← run ["wm", "title", "."]} status={← run [".status", "cget", "-text"]}"
@@ -7458,6 +7847,187 @@ def smokeNoteClose (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "noteclose.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Waits until the thumbnails panel has rendered every thumbnail it wants (task 9.r9 smoke
+tests): processes Tk events, starts renders (`thumbView`), waits for them (`thumbPoll`). -/
+def thumbSettle (st : IO.Ref State) : IO Unit := do
+  for _ in [0:400] do
+    discard <| run ["update"]
+    thumbView st
+    let js := (← st.get).thJobs
+    if js.isEmpty then break
+    for j in js do discard <| IO.wait j.task
+    thumbPoll st
+  discard <| run ["update"]
+
+/-- `VmRSS` and `VmHWM` of this process in KiB (Linux `/proc/self/status`; `0` elsewhere). -/
+def memKiB : IO (Nat × Nat) := do
+  let txt ← try IO.FS.readFile "/proc/self/status" catch _ => pure ""
+  let field (k : String) : Nat :=
+    match (txt.splitOn "\n").find? (·.startsWith k) with
+    | some l => (((l.drop k.length).toString.trimAscii.toString.splitOn " ").head?.bind (·.toNat?)).getD 0
+    | none => 0
+  return (field "VmRSS:", field "VmHWM:")
+
+/-- One line describing the sidebar for the thumbnails smoke test: shown, panel, the panel
+buttons mapped, the toggle mapped, the heading, thumbnails laid out / rendered / kept, the
+highlighted and selected page, the current page. -/
+def thumbRow (st : IO.Ref State) (name : String) : IO String := do
+  discard <| run ["update"]
+  let s ← st.get
+  let mut btns : List String := []
+  for i in Sidebar.panels do
+    if (← run ["winfo", "ismapped", i.button]) == "1" then btns := btns ++ [i.key]
+  let vis := match ← thumbBand s with
+    | some (top, bot) => Sidebar.thumbsIn s.thSlots top bot
+    | none => []
+  return s!"{name}: shown={s.outlineShown} panel={s.panel.info.key} \
+    buttons={",".intercalate btns} toggle={← run ["winfo", "ismapped", ".bar.sidebar"]} \
+    head={← run [".ol.h", "cget", "-text"]} slots={s.thSlots.size} rendered={s.thRendered} \
+    have={s.thHave.length} visible={vis.length} first-visible={(vis.head?.map (· + 1)).getD 0} \
+    marked={(s.thMarked.map (· + 1)).getD 0} sel={(s.thSel.map (· + 1)).getD 0} \
+    page={s.page + 1} photos={(← run ["image", "names"]).splitOn " " |>.filter (·.startsWith "::safepdf::th") |>.length} \
+    status={← run [".status", "cget", "-text"]}"
+
+/-- Window y in `.ol.th` of the middle of page `p`'s thumbnail, scrolled into view first. -/
+def thumbWinY (st : IO.Ref State) (p : Nat) : IO (Option String) := do
+  let s ← st.get
+  let some t := s.thSlots[p]? | return none
+  thumbSee st t
+  discard <| run ["update"]
+  let some (top, _) ← thumbBand (← st.get) | return none
+  return some (toString ((t.y + t.h / 2 : Nat) - (top : Int)))
+
+/-- Smoke steps of task 9.r9 (`SAFEPDF_VIEWER_SMOKE_MODE=thumbs`), started on
+`th-outline.pdf` (60 pages with an outline, page 5 `/Rotate 90`) next to `th-thumbs.pdf` (60
+pages, `/PageMode /UseThumbs`, no outline) and `th-plain.pdf` (3 pages, nothing). Writes one
+`thumbRow` per step to `thumbs.txt`: opened with the outline and both buttons; the Thumbnails
+button (lazy: only the visible thumbnails and the margin rendered); the rotated page's slot;
+a click on thumbnail 3; the main view at page 40 (highlight follows, scrolled into view);
+Down, Down, Return in the panel; the panel scrolled to the end (at most
+`Sidebar.thumbBudget` kept); a rotation (laid out again); the UseThumbs file (opens with
+thumbnails, no outline button, no note); the plain file (closed, toggle shown) and its
+toggle (thumbnails). -/
+def smokeThumbs (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  settle st
+  out := out.push (← thumbRow st "outline-open")
+  discard <| run ["::safepdf::btnInvoke", ".ol.sw.thumbnails"]
+  thumbSettle st
+  out := out.push (← thumbRow st "thumbs-open")
+  let s ← st.get
+  out := out.push s!"rot-slot: {(s.thSlots[4]?.map fun t => s!"{t.w}x{t.h}").getD "-"} \
+    {(s.thSlots[0]?.map fun t => s!"{t.w}x{t.h}").getD "-"}"
+  -- Click on thumbnail 3.
+  if let some y ← thumbWinY st 2 then
+    sendEvent ".ol.th" "<ButtonRelease-1>" ["-x", "100", "-y", y]
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "click-3")
+  -- The main view goes to page 40: the highlight follows and is scrolled into view.
+  discard <| run ["::safepdf::emit", "goto", "40"]
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "main-40")
+  -- Keyboard: Down, Down, Return.
+  sendEvent ".ol.th" "<Key-Down>"
+  sendEvent ".ol.th" "<Key-Down>"
+  out := out.push (← thumbRow st "keys-down2")
+  sendEvent ".ol.th" "<Key-Return>"
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "keys-return")
+  -- Scroll the panel through the whole document: at most the budget is kept.
+  let mut maxHave := 0
+  for k in [0:11] do
+    discard <| run [".ol.th", "yview", "moveto", fmtFrac ((k : Rat) / 10)]
+    thumbSettle st
+    maxHave := max maxHave (← st.get).thHave.length
+  out := out.push s!"{← thumbRow st "scrolled-end"} max-have={maxHave} budget={Sidebar.thumbBudget}"
+  -- Rotation: laid out again with the rotated sizes.
+  discard <| run ["::safepdf::emit", "rotate", "cw"]
+  settle st
+  thumbSettle st
+  let s ← st.get
+  out := out.push (← thumbRow st "rotated")
+  out := out.push s!"rotated-slots: slot1={(s.thSlots[0]?.map fun t => s!"{t.w}x{t.h}").getD "-"} \
+    slot5={(s.thSlots[4]?.map fun t => s!"{t.w}x{t.h}").getD "-"}"
+  -- A UseThumbs file without an outline opens with the thumbnails.
+  openFile st s!"{base}/th-thumbs.pdf"
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "usethumbs")
+  -- A file with neither: closed, but the toggle shows and opens the thumbnails.
+  openFile st s!"{base}/th-plain.pdf"
+  settle st
+  out := out.push (← thumbRow st "plain")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  thumbSettle st
+  out := out.push (← thumbRow st "plain-toggle")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  out := out.push (← thumbRow st "plain-toggle2")
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "thumbs.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Thumbnail performance (task 9.r9, `SAFEPDF_VIEWER_SMOKE_MODE=thumbperf` on any file):
+reopens the start-up file with the thumbnails panel (as the event loop runs it: Tk events and
+`poll` until the visible thumbnails are shown) and writes `thumbperf.txt`: time to open, to
+the first thumbnail and to every visible one; the longest main-view page change (Next)
+while thumbnails render; then the panel scrolled through the whole document in steps of one
+panel height: total time, most thumbnails kept, thumbnails rendered; memory (VmRSS before,
+after the first screen, VmHWM at the end, KiB). -/
+def smokeThumbPerf (st : IO.Ref State) (dir : String) : IO Unit := do
+  let path := (← st.get).path.getD ""
+  let (rss0, _) ← memKiB
+  let t0 ← IO.monoNanosNow
+  st.modify ({ · with panel := .thumbnails })
+  openFile st path
+  if !(← st.get).outlineShown then showSidebar st (some .thumbnails)
+  if (← st.get).panel != .thumbnails then showPanel st .thumbnails
+  let tOpen ← IO.monoNanosNow
+  -- The event loop: until every visible thumbnail is shown (at most 60 s).
+  let mut tAll := 0
+  for _ in [0:30000] do
+    discard <| run ["update"]
+    let s ← st.get
+    if let some (top, bot) ← thumbBand s then
+      let vis := Sidebar.thumbsIn s.thSlots top bot
+      if !vis.isEmpty && vis.all s.thHave.contains then
+        tAll := (← IO.monoNanosNow) - t0
+        break
+    IO.sleep 2
+  let (rss1, _) ← memKiB
+  -- Page changes of the main view while thumbnails render.
+  let mut worst := 0
+  discard <| run [".ol.th", "yview", "moveto", "0.5"]
+  for _ in [0:5] do
+    let a ← IO.monoNanosNow
+    discard <| run ["::safepdf::emit", "next"]
+    let b ← IO.monoNanosNow
+    worst := max worst (b - a)
+    discard <| run ["update"]
+  -- Scroll the panel through the document.
+  let t1 ← IO.monoNanosNow
+  let s ← st.get
+  let hgt := ((← run ["winfo", "height", ".ol.th"]).toNat?).getD 1
+  let steps := s.thHeight / (max hgt 1) + 1
+  let mut maxHave := 0
+  for k in [0:steps + 1] do
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine ((k : Rat) / (steps : Rat))]
+    thumbSettle st
+    maxHave := max maxHave (← st.get).thHave.length
+  let t2 ← IO.monoNanosNow
+  let (rss2, hwm) ← memKiB
+  let s ← st.get
+  IO.FS.writeFile ((dir : System.FilePath) / "thumbperf.txt")
+    s!"file: {path}\npages: {s.pageCount}\nopen-ms: {formatMs (tOpen - t0)}\n\
+      first-thumb-ms: {(s.thFirstNs.map formatMs).getD "-"}\nvisible-thumbs-ms: {formatMs tAll}\n\
+      worst-next-ms: {formatMs worst}\nscroll-all-ms: {formatMs (t2 - t1)}\nscroll-steps: {steps + 1}\n\
+      max-kept: {maxHave}\nbudget: {Sidebar.thumbBudget}\nrendered: {s.thRendered}\n\
+      rss0-kib: {rss0}\nrss-first-screen-kib: {rss1}\nrss-end-kib: {rss2}\nhwm-kib: {hwm}\n"
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -7537,6 +8107,13 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeOpenSettings st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "opensettings.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "thumbs" || s.smokeMode == "thumbperf" then
+    try
+      if s.smokeMode == "thumbs" then smokeThumbs st dir else smokeThumbPerf st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / s!"{s.smokeMode}.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "noteclose" then
@@ -7690,7 +8267,16 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["hover", x, y] => hover st (intPos x y)
   | ["back"] => histMove st true
   | ["forward"] => histMove st false
-  | ["outlineToggle"] => showOutline st (Sidebar.afterToggle s.outlineShown (!s.outline.isEmpty))
+  | ["outlineToggle"] =>
+    if s.doc.isSome then showSidebar st (Sidebar.afterToggle s.outlineShown s.panel (contentOf s))
+    else showOutline st false
+  | ["panel", k] => panelClick st k
+  | ["thView"] => thumbView st
+  | ["thClick", y] => thumbClick st y
+  | ["thKey", k] => thumbKey st k
+  | ["thBlur"] =>
+    st.modify ({ · with thSel := none })
+    discard <| run [".ol.th", "delete", "thfocus"]
   | ["olToggle", k] => olToggle st k
   | ["pageEntry", txt] => pageEntry st txt
   | ["pageRevert"] => if s.doc.isSome && s.pageCount > 0 then showPageField s
