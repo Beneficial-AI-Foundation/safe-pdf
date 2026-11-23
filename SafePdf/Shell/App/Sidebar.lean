@@ -32,10 +32,12 @@ The Tk-free description of the left sidebar (unverified shell code, total, check
   a nested array with a leading string is a heading (the label, not a checkbox) over its items;
   a nested array without a label nests its items under the row before it (ISO 32000-2
   §8.11.4.3, Table 101: "sub-groups"); a labelled array with nothing left in it is dropped
-  (PDF.js). Groups not listed in `/Order` are not shown (the brief of task 9.r11b; current
-  PDF.js lists them under an italic "Additional Layers" heading instead, `src/core/catalog.js`
-  `parseOrder`). Without `/Order` every group is listed by `/Name` in
-  `/OCGs` order. Names and labels are sanitized for display (`Core.Doc.Attachments.displayText`:
+  (PDF.js). Groups that no row shows (not listed in `/Order`) follow under an italic
+  heading "Additional Layers" (`additionalLabel`), in `/OCGs` order, each with its checkbox —
+  as PDF.js does (`src/core/catalog.js` `parseOrder`, `web/pdf_layer_viewer.js`), whose
+  heading starts collapsed (`LayerRow.italic`, `layerEntries`). (PDF.js also puts there the
+  groups of an unlabelled array, which it drops; here they are nested, so they are shown in
+  place.) Without `/Order` every group is listed by `/Name` in `/OCGs` order. Names and labels are sanitized for display (`Core.Doc.Attachments.displayText`:
   control and bidi characters removed, at most `layerNameMax` characters). Toggling a row
   (`layerToggle`) is `Config.setGroup`: radio-button groups turn the others off, locked groups
   do not change (their checkbox is disabled, `layerLocked`). The tree reuses `rows`.
@@ -261,7 +263,12 @@ structure LayerRow where
   label : String
   /-- The group of the row; `none` for a heading. -/
   group : Option Key := none
+  /-- The "Additional Layers" heading (italic, starts collapsed; PDF.js). -/
+  italic : Bool := false
   deriving DecidableEq, Repr, Inhabited
+
+/-- The heading of the groups not in `/Order` (PDF.js's `pdfjs-additional-layers`). -/
+def additionalLabel : String := "Additional Layers"
 
 /-- A text string (raw bytes) sanitized for the panel. -/
 def layerText (bs : List UInt8) : String :=
@@ -297,12 +304,18 @@ def clampRows : Nat → List LayerRow → List LayerRow
 by name when `/Order` lists nothing. -/
 def layerRows (c : Config) : List LayerRow :=
   if c.order.isEmpty then c.groups.map fun g => { depth := 0, label := layerName c g.key, group := some g.key }
-  else clampRows 0 (orderRows c layerFuel 0 c.order)
+  else
+    let rs := clampRows 0 (orderRows c layerFuel 0 c.order)
+    let shown := rs.filterMap (·.group)
+    let rest := c.groups.filter (!shown.contains ·.key)
+    if rest.isEmpty then rs
+    else rs ++ { depth := 0, label := additionalLabel, italic := true } ::
+      rest.map fun g => { depth := 1, label := layerName c g.key, group := some g.key }
 
 /-- The rows as outline entries (for `rows`, `visibleRows`, `toggle`): every heading starts
-open (PDF.js). -/
+open except "Additional Layers" (PDF.js). -/
 def layerEntries (rs : List LayerRow) : List Links.Entry :=
-  rs.map fun r => ⟨r.label, r.depth, true, .none⟩
+  rs.map fun r => ⟨r.label, r.depth, !r.italic, .none⟩
 
 /-- The checkbox of a row in state `st`: `some on` for a group, `none` for a heading. -/
 def layerChecked (st : State) (r : LayerRow) : Option Bool := r.group.map st.isOn
@@ -450,22 +463,34 @@ private def cfgL : Config :=
     rbGroups := [[(3, 0), (4, 0)]], locked := [(5, 0)] }
 #guard (layerRows cfgL).map (fun r => (r.depth, r.label, r.group.isSome)) ==
   [(0, "Base", true), (0, "Extra", true), (0, "Languages", false), (1, "English", true),
-   (1, "French", true), (0, "(no name)", true), (1, "Lo", true)]
+   (1, "French", true), (0, "(no name)", true), (1, "Lo", true), (0, "Additional Layers", false),
+   (1, "Orphan", true)]
+#guard ((layerRows cfgL).map (·.italic)) == [false, false, false, false, false, false, false, true, false]
 #guard ((layerRows cfgL).map (layerChecked cfgL.initial)) ==
-  [some true, some false, none, some true, some false, some true, some true]
-#guard ((layerRows cfgL).map (layerLocked cfgL)) == [false, false, false, false, false, false, true]
+  [some true, some false, none, some true, some false, some true, some true, none, some true]
+#guard ((layerRows cfgL).map (layerLocked cfgL)) ==
+  [false, false, false, false, false, false, true, false, false]
 -- toggling: Extra on; French on turns English off; the locked group and a heading stay.
 #guard let rs := layerRows cfgL
   let st := cfgL.initial
   (layerToggle cfgL st rs 1).isOn (2, 0) &&
   !(layerToggle cfgL st rs 4).isOn (3, 0) && (layerToggle cfgL st rs 4).isOn (4, 0) &&
-  layerToggle cfgL st rs 6 == st && layerToggle cfgL st rs 2 == st && layerToggle cfgL st rs 99 == st
--- the tree: Languages and the unnamed group have children.
+  layerToggle cfgL st rs 6 == st && layerToggle cfgL st rs 2 == st && layerToggle cfgL st rs 99 == st &&
+  !(layerToggle cfgL st rs 8).isOn (6, 0)
+-- the tree: Languages, the unnamed group and Additional Layers have children; the last starts
+-- closed, so Orphan is not visible at first.
 #guard (rows (layerEntries (layerRows cfgL))).map (·.hasKids) ==
-  [false, false, true, false, false, true, false]
+  [false, false, true, false, false, true, false, true, false]
+#guard let es := layerEntries (layerRows cfgL)
+  visibleRows (rows es) (initialOpen es) == [0, 1, 2, 3, 4, 5, 6, 7]
+-- every group in /Order: no Additional Layers; /Order with no usable entry: all of them there.
+#guard (layerRows { cfgL with groups := cfgL.groups.filter (·.key != (6, 0)) }).length == 7
+#guard (layerRows { cfgL with order := [.node (some [69]) []] }).map (·.depth) ==
+  [0, 1, 1, 1, 1, 1, 1, 1]
 -- no /Order: every group by name; an unlabelled list first is clamped to depth 0.
 #guard (layerRows { cfgL with order := [] }).length == 7
-#guard (layerRows { cfgL with order := [.node none [.group (1, 0)]] }).map (·.depth) == [0]
+#guard (layerRows { cfgL with groups := [g 1 "Base"], order := [.node none [.group (1, 0)]] }).map
+  (·.depth) == [0]
 end LayerChecks
 
 end SafePdf.Shell.App.Sidebar

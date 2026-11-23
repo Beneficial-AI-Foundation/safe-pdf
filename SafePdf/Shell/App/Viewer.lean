@@ -1300,6 +1300,7 @@ proc ::safepdf::askAttachSave {dir file args} {
 ttk::style configure Ly.TCheckbutton -font ::safepdf::fOl -background $::safepdf::col(panel) -foreground $::safepdf::col(text)
 ttk::style map Ly.TCheckbutton -background [list disabled $::safepdf::col(panel) active $::safepdf::col(panel)]
 font create ::safepdf::fLyHead -family $::safepdf::family -size -13 -weight bold
+font create ::safepdf::fLyItal -family $::safepdf::family -size -13 -slant italic
 text .ol.ly -wrap word -width 30 -height 10 -borderwidth 0 -highlightthickness 0 -background $::safepdf::col(panel) -foreground $::safepdf::col(text) -font ::safepdf::fOl -cursor arrow -padx 4 -pady 2 -spacing1 2 -spacing3 2 -state disabled -takefocus 0 -insertwidth 0 -yscrollcommand ::safepdf::lyScroll -selectbackground $::safepdf::col(panel) -inactiveselectbackground {} -exportselection 0
 ttk::scrollbar .ol.ls -orient vertical -command {.ol.ly yview}
 grid .ol.ly -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
@@ -1309,6 +1310,7 @@ grid remove .ol.ly .ol.ls
 set ::safepdf::panelWidgets(layers) {.ol.ly .ol.ls}
 .ol.ly tag configure tri -foreground $::safepdf::col(tri) -font ::safepdf::fTri -offset 1
 .ol.ly tag configure head -font ::safepdf::fLyHead
+.ol.ly tag configure headi -font ::safepdf::fLyItal
 .ol.ly tag configure locked -foreground #8f8f9d
 bindtags .ol.ly [list .ol.ly . all]
 proc ::safepdf::lyScroll {a b} {
@@ -1321,13 +1323,13 @@ proc ::safepdf::lyClear {} {
   foreach w [winfo children .ol.ly] { destroy $w }
   .ol.ly configure -state normal
   .ol.ly delete 1.0 end
-  foreach t [.ol.ly tag names] { if {$t ni {sel tri head}} { .ol.ly tag delete $t } }
+  foreach t [.ol.ly tag names] { if {$t ni {sel tri head headi locked}} { .ol.ly tag delete $t } }
   .ol.ly configure -state disabled
   array unset ::safepdf::ly
 }
 # lyRow K TRI TAGS LABEL KIND LOCKED: appends row K (KIND group: a checkbox and its name, tag
 # gK, which wraps in the panel's width and toggles the checkbox when clicked, as PDF.js's
-# <label>; else a heading) with the disclosure triangle TRI (empty for a leaf) and TAGS.
+# <label>; heading: a bold label; italic: the Additional Layers heading) with the disclosure triangle TRI (empty for a leaf) and TAGS.
 proc ::safepdf::lyRow {k tri tags label kind locked} {
   .ol.ly configure -state normal
   set a [.ol.ly index {end - 1c}]
@@ -1341,7 +1343,7 @@ proc ::safepdf::lyRow {k tri tags label kind locked} {
     .ol.ly window create end -window $w -align center -padx 2
     .ol.ly insert end $label [expr {$locked ? [list g$k locked] : [list g$k]}]
   } else {
-    .ol.ly insert end $label [list head h$k]
+    .ol.ly insert end $label [list [expr {$kind eq {italic} ? {headi} : {head}}] h$k]
   }
   .ol.ly insert end \\n
   foreach t $tags { .ol.ly tag add $t $a {end - 1c} }
@@ -3146,7 +3148,8 @@ def syncLayerVars (s : State) : IO Unit := do
 /-- Fills the layers panel `.ol.ly` from `State.lyRows` (model `Sidebar.layerRows`, tree
 `Sidebar.rows`): one line per row — the disclosure triangle (rows with children), then a
 checkbox (a group; disabled when locked) or the bold label (a heading) — indented by depth,
-tagged with its ancestors as the outline is (`fillOutline`). Every heading starts open. -/
+tagged with its ancestors as the outline is (`fillOutline`). Every heading starts open except
+Additional Layers (`Sidebar.layerEntries`). -/
 def fillLayers (st : IO.Ref State) : IO Unit := do
   discard <| run ["::safepdf::lyClear"]
   let s ← st.get
@@ -3163,13 +3166,18 @@ def fillLayers (st : IO.Ref State) : IO Unit := do
     let tags := [if t.hasKids then s!"d{t.depth}" else s!"l{t.depth}"] ++ t.ancestors.map (s!"u{·}")
     discard <| run ["::safepdf::lyRow", toString t.index,
       Sidebar.triangle t.hasKids (isOpen.getD t.index false), " ".intercalate tags, r.label,
-      if r.group.isSome then "group" else "heading", if Sidebar.layerLocked cfg r then "1" else "0"]
+      if r.group.isSome then "group" else if r.italic then "italic" else "heading",
+      if Sidebar.layerLocked cfg r then "1" else "0"]
   for d in depths do
     let ind := Sidebar.indentPx d
     discard <| run [".ol.ly", "tag", "configure", s!"d{d}", "-lmargin1", toString ind,
       "-lmargin2", toString (ind + triW)]
     discard <| run [".ol.ly", "tag", "configure", s!"l{d}", "-lmargin1", toString (ind + triW),
       "-lmargin2", toString (ind + triW)]
+  -- Headings that start closed (Additional Layers, as PDF.js) elide their rows.
+  for t in tree do
+    if t.hasKids && !isOpen.getD t.index false then
+      discard <| run [".ol.ly", "tag", "configure", s!"u{t.index}", "-elide", "1"]
   discard <| run [".ol.ly", "yview", "moveto", "0"]
   syncLayerVars (← st.get)
 
@@ -8552,12 +8560,13 @@ def smokeAttach (st : IO.Ref State) (dir : String) : IO Unit := do
 /-- Smoke steps of the layers panel (`SAFEPDF_VIEWER_SMOKE_MODE=layers`, task 9.r11b), on the
 generated `oc.pdf` (`/PageMode /UseOC`; one page whose squares and words belong to the groups
 Base (ON), Extra (OFF), Notes (ON), the radio pair English (ON) / French (OFF) under the
-heading "Languages", Locked (locked, ON, nested under Notes), Orphan (ON, not in `/Order`) and
-an OCMD AllOn(Base, Extra)) with `oc-nomode.pdf`, `oc-noorder.pdf` and `plain.pdf` beside it.
+heading "Languages", Locked (locked, ON, nested under Notes), Orphan (ON, not in `/Order`: under
+"Additional Layers", collapsed at first) and an OCMD AllOn(Base, Extra)) with `oc-nomode.pdf`, `oc-noorder.pdf` and `plain.pdf` beside it.
 Writes `layers.txt`: the panel as opened and its rows (as Tk shows them); the page's pixels
 at each square and the search hits of each word; a thumbnail pixel before and after; toggling
 Extra (its square, the OCMD square and its word appear); French (English goes off); the locked
-group (no change); collapsing the heading; a note saved into the file (Ctrl+S, Overwrite) and
+group (no change); Additional Layers opened and Orphan toggled off and on; collapsing the
+heading; a note saved into the file (Ctrl+S, Overwrite) and
 the reopen after the save (state kept); opening the file again (defaults); the other files.
 The smoke script runs it on a copy of `oc.pdf` (`saved.pdf`), so the original stays. -/
 def smokeLayers (st : IO.Ref State) (dir : String) : IO Unit := do
@@ -8649,6 +8658,15 @@ def smokeLayers (st : IO.Ref State) (dir : String) : IO Unit := do
   settle st
   out := out.push s!"locked: {← rowsNow} status={← status}"
   out := out.push s!"px-locked: {← pixels}"
+  -- Additional Layers (the groups not in /Order) starts collapsed; opened, Orphan toggles.
+  let aRow := ((← st.get).lyRows.findIdx? (·.italic)).getD 9999
+  discard <| run ["::safepdf::emit", "lyToggle", toString aRow]
+  out := out.push s!"additional-open: {← rowsNow}"
+  invoke "Orphan"
+  out := out.push s!"orphan-off: {← rowsNow}"
+  out := out.push s!"px-orphan: {← pixels}"
+  invoke "Orphan"
+  out := out.push s!"px-orphan-on: {← pixels}"
   -- Collapsing the heading hides its checkboxes; opening shows them again.
   let hRow := ((← st.get).lyRows.findIdx? (·.group.isNone)).getD 9999
   discard <| run ["::safepdf::emit", "lyToggle", toString hRow]

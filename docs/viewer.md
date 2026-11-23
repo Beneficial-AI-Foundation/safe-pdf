@@ -365,8 +365,11 @@ Tk-free model is in `SafePdf/Shell/App/Sidebar.lean` (`layerRows`, `layerToggle`
   nests its items under the row before it (the spec's sub-groups; PDF.js drops such arrays);
   a labelled array with nothing left in it is dropped (PDF.js). Rows with children have a
   disclosure triangle (open at first; a click on the triangle or the heading closes/opens it).
-  **Groups not listed in `/Order` are not shown** (as the task asked; note: current PDF.js
-  lists them under an italic "Additional Layers" heading, `src/core/catalog.js` `parseOrder`).
+  **Groups not listed in `/Order`** follow under an italic heading **"Additional Layers"**,
+  in `/OCGs` order, each with its checkbox (radio and locked rules as usual), and that heading
+  starts collapsed — as PDF.js (`src/core/catalog.js` `parseOrder`, `web/pdf_layer_viewer.js`).
+  (PDF.js also puts there the groups of an unlabelled array, since it drops those arrays; here
+  they are nested in place, so they are not repeated.)
   Without `/Order` every group of `/OCGs` is listed by name. Names and labels are text
   strings with control and bidi characters removed, at most 200 characters
   (`Attachments.displayText`); an empty name shows `(no name)`.
@@ -1462,14 +1465,16 @@ right-to-left override, Locked (locked, nested under Notes by an unlabelled arra
 (ON, not in `/Order`), and an OCMD `AllOn` of Base and Extra), `oc-nomode.pdf`,
 `oc-noorder.pdf` and `plain.pdf` (`/UseOC` without `/OCProperties`), and runs on a copy
 (`saved.pdf`). It checks: the sidebar opens on the layers with the tree
-`Base ✓, Extra ☐, [Languages], English ✓, French ☐, Notes ✓, Locked ✓ (disabled)` and no
-Orphan, no "not available" note; the page's pixel at each square and the search hits of each
+`Base ✓, Extra ☐, [Languages], English ✓, French ☐, Notes ✓, Locked ✓ (disabled),
+[Additional Layers], Orphan ✓` with Orphan hidden under its collapsed heading, no "not
+available" note; the page's pixel at each square and the search hits of each
 word; a thumbnail pixel; Extra on → its blue square, the OCMD's green one and `bravo`
 findable; French on → English off (pixels, hits); the locked checkbox and the `layer K` event
-change nothing; collapsing the heading unmaps its checkboxes; the thumbnail shows the blue
+change nothing; opening Additional Layers shows Orphan, which toggles off (its square white)
+and on again; collapsing the heading unmaps its checkboxes; the thumbnail shows the blue
 square; a note saved with Ctrl+S (Overwrite) — the reopen keeps the toggled state; opening the
 file again restores the defaults; `oc-nomode.pdf` has the Layers button with the sidebar
-closed, `oc-noorder.pdf` lists all seven groups by name, `plain.pdf` has no Layers button.
+closed, `oc-noorder.pdf` lists all seven groups by name (no Additional Layers heading), `plain.pdf` has no Layers button.
 The shell then checks that the saved file is an incremental update of `oc.pdf` whose appended
 bytes contain no `OCProperties`, `/OCGs`, `/ON`, `/OFF`, catalog or `/OCProperties` object,
 and runs `qpdf --check` on it.

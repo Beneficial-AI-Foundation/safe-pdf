@@ -101,7 +101,8 @@
 #      Save attachment as... writes exactly the decoded bytes, refused targets, UseAttachments
 #      opens the panel, an icon click selects its row, no Attachments button without (9.r10);
 #   1w. layers panel (SAFEPDF_VIEWER_SMOKE_MODE=layers) on generated files with optional
-#      content: /PageMode /UseOC opens it, the tree follows /Order (heading, nesting, locked),
+#      content: /PageMode /UseOC opens it, the tree follows /Order (heading, nesting, locked,
+#      groups not in /Order under "Additional Layers"),
 #      toggling an OFF group paints its content and makes its word findable, a radio member
 #      turns its sibling off, the locked group stays, thumbnails follow, Save keeps the state
 #      and leaves /OCProperties alone, reopening restores the defaults, no Layers button
@@ -2114,7 +2115,8 @@ sys.exit(1 if errs else 0)
 #     generated PDFs (none in the corpus has optional content): oc.pdf (/PageMode /UseOC; one
 #     page whose squares and words are in the groups Base ON, Extra OFF, Notes ON, the radio
 #     pair English ON / French OFF under the UTF-16 heading "Languages" + U+202E, Locked
-#     (locked, ON, nested under Notes by an unlabelled array), Orphan (ON, not in /Order), and
+#     (locked, ON, nested under Notes by an unlabelled array), Orphan (ON, not in /Order:
+#     listed under the collapsed "Additional Layers" heading, as PDF.js), and
 #     an OCMD AllOn(Base, Extra)); oc-nomode.pdf (no page mode: Layers button, sidebar closed),
 #     oc-noorder.pdf (no /Order: every group by name) and plain.pdf (/UseOC without
 #     /OCProperties: no button, no note). The viewer runs on a copy (saved.pdf), adds a note,
@@ -2186,11 +2188,15 @@ def lacks(k, part):
     if part in v.get(k, ""): errs.append("%s = %r has %r" % (k, v.get(k), part))
 if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 white, blue, green, orange, purple = "(255 255 255)", "(0 0 255)", "(0 153 0)", "(255 128 0)", "(128 0 128)"
-want("start", "shown=true panel=layers layersBtn=true list=1 rows=7 title=Layers")
+want("start", "shown=true panel=layers layersBtn=true list=1 rows=9 title=Layers")
 lacks("start", "not available")
-tree = "0:Base:1;0:Extra:0;0:[Languages];1:English:1;1:French:0;0:Notes:1;1:Locked:1:locked"
+tree = "0:Base:1;0:Extra:0;0:[Languages];1:English:1;1:French:0;0:Notes:1;1:Locked:1:locked;0:[Additional Layers];1:Orphan:1:hidden"
 want("rows", tree)
-lacks("rows", "Orphan")
+want("additional-open", ";0:[Additional Layers];1:Orphan:1")
+lacks("additional-open", "Orphan:1:hidden")
+want("orphan-off", "1:Orphan:0")
+want("px-orphan", "orphan=%s" % white)
+want("px-orphan-on", "orphan=(0 128 128)")
 want("px-start", "base=(255 0 0) extra=%s ocmd=%s en=%s fr=%s locked=(77 77 77) orphan=(0 128 128)" % (white, white, orange, white))
 want("text-start", "alpha=1 bravo=0 english=1 french=0 always=1")
 want("thumb-start", "have=true px=%s" % white)
@@ -2216,6 +2222,7 @@ want("text-reopened", "alpha=1 bravo=0 english=1 french=0")
 want("oc-nomode", "shown=false")
 want("oc-nomode", "layersBtn=true")
 want("oc-noorder", "shown=true panel=layers layersBtn=true list=1 rows=7")
+lacks("oc-noorder-rows", "Additional")
 want("oc-noorder-rows", "0:Base:1;0:Extra:0;0:Notes:1;0:English:1;0:French:0;0:Locked:1:locked;0:Orphan:1")
 want("plain", "shown=false")
 want("plain", "layersBtn=false")
