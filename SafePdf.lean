@@ -44,6 +44,7 @@ import SafePdf.Core.Open
 import SafePdf.Core.Doc
 import SafePdf.Core.Doc.Nav
 import SafePdf.Core.Doc.OpenSettings
+import SafePdf.Core.Doc.OptionalContent
 import SafePdf.Spec.Doc
 import SafePdf.Core.Content.GState
 import SafePdf.Core.Content.DisplayList
