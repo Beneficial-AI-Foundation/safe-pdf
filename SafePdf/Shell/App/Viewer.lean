@@ -1566,6 +1566,15 @@ popup form written for it has no appearance of its own. -/
 def drawnMarks (s : State) (p : Nat) : List Marks.Mark :=
   (visibleMarks s p).filter (!s.marks.isSaved ·.id)
 
+/-- Whether the renderer can paint a saved free text (task 9.r5): its appearance stream uses
+the non-embedded standard-14 Helvetica (rule A13), which the renderer paints only with a
+substitute program (`Shell.Fonts.findFiles`, task 7.7). Without one — e.g. macOS without
+Ghostscript's or TeX Gyre's fonts — the appearance draws nothing, so `drawMarks` draws saved
+free text on the canvas like unsaved free text (else it stayed invisible until a double click
+opened its text box). -/
+def State.paintsHelvetica (s : State) : Bool :=
+  (s.subst.get? SafePdf.Core.Font.Std14.helvetica).isSome
+
 /-- `Slot.rect` as a `Bubble.Rect`. -/
 def Slot.rectR (sl : Slot) (b : Box) : Bubble.Rect :=
   let (x0, y0, x1, y1) := sl.rect b
@@ -1593,10 +1602,16 @@ def drawEditorMark (s : State) (sl : Slot) (m : Marks.Mark) (tags : String) : IO
     let lines := t.splitOn "\n"
     let lf := SafePdf.Core.Write.Annots.lineFactor
     let pad := SafePdf.Core.Write.Annots.ftPad
+    -- Task 9.r5: the line's top-left corner (baseline + ascent, in page space) through the
+    -- page transform, and the text turned with the page (Tk's `-angle` is counter-clockwise
+    -- and turns about the anchor), so it also sits right on a rotated page.
+    let ascPage : Rat := (asc : Rat) / (if sl.vp.zoom > 0 then sl.vp.zoom else 1)
+    let angle : String := match sl.vp.rot with
+      | .r0 => "0" | .r90 => "270" | .r180 => "180" | .r270 => "90"
     for (l, i) in lines.zip (List.range lines.length) do
-      let (x, y) := at' ⟨p.x + pad, p.y - pad - (sz : Rat) - (i : Rat) * lf * (sz : Rat)⟩
-      discard <| run [".c", "create", "text", num x, num (y - asc), "-anchor", "nw", "-text", l,
-        "-font", font, "-fill", Marks.rgbHex c, "-tags", s!"{tags} ft"]
+      let (x, y) := at' ⟨p.x + pad, p.y - pad - (sz : Rat) - (i : Rat) * lf * (sz : Rat) + ascPage⟩
+      discard <| run [".c", "create", "text", num x, num y, "-anchor", "nw", "-angle", angle,
+        "-text", l, "-font", font, "-fill", Marks.rgbHex c, "-tags", s!"{tags} ft"]
   | .ink ss w o c =>
     let wpx := max 1 ((w : Rat) * sl.vp.zoom)
     let stip := if s.stipple then stippleOf o else []
@@ -1633,7 +1648,8 @@ def drawMarks (s : State) (sl : Slot) : IO Unit := do
         let (x0, y0, x1, y1) := sl.rect ib
         discard <| run ["::safepdf::noteIcon", ".c", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, m.color.hex, s!"{tags} note"]
-    if !s.marks.isSaved m.id && (s.ftEdit.bind (·.id)) != some m.id then
+    if (!s.marks.isSaved m.id || (m.isFreeText && !s.paintsHelvetica)) &&
+        (s.ftEdit.bind (·.id)) != some m.id then
       drawEditorMark s sl m tags
     if s.markSel == some m.id then
       let boxes := if m.isNote then (m.iconBox bx).toList
@@ -6366,9 +6382,60 @@ def smokeM9 (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "m9.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- The RGB triple at `(x, y)` of a binary PPM (`P6`, maxval 255, single-space/newline
+header as ImageMagick writes it). -/
+def ppmAt (d : ByteArray) (x y : Nat) : Option (Nat × Nat × Nat) := Id.run do
+  -- header: 4 whitespace-separated tokens, then one whitespace byte
+  let mut toks : Array String := #[]
+  let mut cur := ""
+  let mut i := 0
+  while toks.size < 4 && i < d.size && i < 64 do
+    let c := Char.ofNat (d.get! i).toNat
+    if c.isWhitespace then
+      if !cur.isEmpty then toks := toks.push cur; cur := ""
+    else cur := cur.push c
+    i := i + 1
+  let (some w, some _) := ((toks[1]?.bind String.toNat?), (toks[2]?.bind String.toNat?)) |
+    return none
+  if toks[0]? != some "P6" || toks[3]? != some "255" || x ≥ w then return none
+  let o := i + 3 * (y * w + x)
+  if o + 2 < d.size then some ((d.get! o).toNat, (d.get! (o + 1)).toNat, (d.get! (o + 2)).toNat)
+  else none
+
+/-- **What the screen shows** of the free texts `ms` (task 9.r5): an X screenshot of the
+canvas (`import -window ID -depth 8 ppm:…`, ImageMagick; without `-depth 8` it writes 16-bit) — the rendered page and the canvas items
+together, as the user sees them — and the number of red pixels (`m9Red`) on a grid in each
+text box; `none` when `import` is missing or fails. -/
+def screenFtRed (st : IO.Ref State) (dir : String) (ms : List Marks.Mark) : IO (Option Nat) := do
+  discard <| run ["update"]
+  let s ← st.get
+  let some bx := shownBox s | return none
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return none
+  let wid ← run ["winfo", "id", ".c"]
+  let shot := (dir : System.FilePath) / "screen.ppm"
+  let ok ← try
+      let r ← IO.Process.output { cmd := "import", args := #["-window", wid, "-depth", "8", s!"ppm:{shot}"] }
+      pure (r.exitCode == 0)
+    catch _ => pure false
+  if !ok then return none
+  let d ← IO.FS.readBinFile shot
+  let mut n := 0
+  for m in ms do
+    if let some b := m.box then
+      for q in m9Grid b do
+        let (x0, y0, _, _) := canvasRect s bx ⟨q.x, q.y, q.x, q.y⟩
+        let (px, py) := ((x0 - vx).floor, (y0 - vy).floor)
+        if px ≥ 0 && py ≥ 0 then
+          if let some c := ppmAt d px.toNat py.toNat then
+            if m9Red c then n := n + 1
+  return some n
+
 /-- The second half of the M9 run (`SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen`, task 9.6): a fresh
 viewer process on the file `smokeM9` saved into (task 9.r2: the opened file) restores the four marks (equal
-descriptions) and the renderer draws them (pixels), at Page Fit. Results in `m9-reopen.txt`. -/
+descriptions) and the renderer draws them (pixels), at Page Fit; the free text is visible on
+screen before any click (`screenFtRed`, task 9.r5: `screen-text: N subst=… ft-items=…`).
+Results in `m9-reopen.txt`. -/
 def smokeM9Reopen (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["update"]
   discard <| run [".zoommenu", "invoke", "Page Fit"]
@@ -6378,6 +6445,36 @@ def smokeM9Reopen (st : IO.Ref State) (dir : String) : IO Unit := do
   out := out.push s!"restored: {s.marks.marks.size} {s.marks.saved.length} {s.marks.dirty}"
   out := out.push s!"marks: {← m9Marks st}"
   out := out.push s!"pixels: {← m9Pixels st s.marks.marks.toList}"
+  -- task 9.r5: the reopened free text is visible without any click, on screen (page photo
+  -- plus canvas items), with or without a substitute Helvetica
+  let fts := s.marks.marks.toList.filter (·.isFreeText)
+  let red := match ← screenFtRed st dir fts with
+    | some n => toString n | none => "skipped"
+  out := out.push s!"screen-text: {red} subst={s.paintsHelvetica} ft-items={← tagCount "ft"}"
+  -- … and stays visible after a zoom change, a page change and back, a rotation and back,
+  -- and in continuous vertical scrolling
+  let shot (what : String) : IO String := do
+    settle st
+    let n := match ← screenFtRed st dir fts with | some n => toString n | none => "skipped"
+    let ms := (← st.get).marks.marks.toList
+    return s!"{what}={n}/{← m9Pixels st ms}"
+  let mut after : Array String := #[]
+  discard <| run [".zoommenu", "invoke", "Page Width"]
+  after := after.push (← shot "zoom")
+  discard <| run [".menubar.go", "invoke", Menu.Cmd.nextPage.label]
+  settle st
+  discard <| run [".menubar.go", "invoke", Menu.Cmd.prevPage.label]
+  after := after.push (← shot "page")
+  discard <| run [".zoommenu", "invoke", "Page Fit"]
+  rotate st true
+  after := after.push (← shot "rot90")
+  rotate st false
+  after := after.push (← shot "rot0")
+  setViewMode st "scroll" "vertical"
+  after := after.push (← shot "vertical")
+  setViewMode st "scroll" "page"
+  after := after.push (← shot "single")
+  out := out.push s!"screen-after: {" ".intercalate after.toList}"
   out := out.push s!"status: {← run [".status", "cget", "-text"]}"
   IO.FS.writeFile ((dir : System.FilePath) / "m9-reopen.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
