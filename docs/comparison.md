@@ -2,10 +2,9 @@
 
 How safe-pdf's guarantees (Plan.md §4: S1–S8 security, C1–C6 correctness) compare with the
 other formal-methods work on PDF and with the deployed defenses that share our threat model
-(reading a hostile PDF safely). Status date: 2026-11-20 — milestones M0–M5 are proven and
-measured (see progress.md exit criteria for the theorem names); M6 (text similarity), M7
-(pixel faithfulness) and M8 (daily-drivable viewer) are in progress, with the viewer shell
-functional (zoom, selection, search, outline, links, annotations).
+(reading a hostile PDF safely). Status date: 2026-11-23 — milestones M0–M8 met their
+recorded exit criteria, a mix of machine-checked proofs and measurements (see progress.md
+for which is which); M9's remaining clause (Acrobat/Okular validation) is open.
 
 Legend: **proven** = machine-checked proof; **by construction** = follows from the
 architecture or language, no separate proof artifact; **tested** = empirical evidence
@@ -21,9 +20,9 @@ architecture or language, no separate proof artifact; **tested** = empirical evi
 | Resource bounds (S3) | **Proven**: decode bounds (`decodeStream_size_le`), document-wide decode budget, Flate work bound, ops/page bound; 74 decompression-bomb cases rejected with `limitExceeded` | — | — | — | — |
 | No ambient authority (S4) | Core has no `IO` in its type; checked by compiler | n/a (parser study) | n/a | n/a (CLI validator) | n/a (parser library) |
 | Unambiguity (S6) | **Proven**: one winner per object id across incremental updates, newest-revision-wins (`Spec.Unambiguous`, prefix-stability) | — | Validator checks semantics, no unambiguity theorem | Restricted grammar reduces ambiguity (paper argument) | Core program goal — deterministic parsing is a language design property, not a machine-checked theorem about PDF |
-| Malformed files (S7, C4) | Strict path first; repair path proven total + bounded; conservativity by construction (repair runs only when strict fails); result flagged `repaired` | Rejects | Rejects | Strict + relaxed pair (the architecture we adopted), no proofs | Strictness profiles in the driver |
+| Malformed files (S7, C4) | Strict path first; repair path proven total + bounded; strict *precedence* proven (a successful strict open wins) — full C4 equivalence is open: a golden fixture (`repair-diff.pdf`) shows an independent repair scan diverging on a strict-valid file; result flagged `repaired` | Rejects | Rejects | Strict + relaxed pair (the architecture we adopted), no proofs | Strictness profiles in the driver |
 | Spec conformance (C5) | **Proven**: impl ≡ denotational spec for lexer (`LexEquiv`), objects (`ObjEquiv`, round-trip `parseObject_print`), interpreter (`step_iff_exec`, `steps_iff_runOps`) | Spec is the implementation | Spec is the implementation (reference-level) | — | By construction: parser generated from the spec; the *generator* is trusted, not verified |
-| Rendering + text (C2, C3, C6) | C2 coordinate round-trips proven (`toPage_toScreen`); C3 glyph provenance/positions proven (`glyph_provenance`); C6 extracted text = displayed text, one interpreter pass (`pageText_glyphs`); raster faithfulness **tested** vs MuPDF (by design) | — | — | — | — |
+| Rendering + text (C2, C3, C6) | C2 coordinate round-trips proven (`toPage_toScreen`); C3 glyph provenance/positions proven (`glyph_provenance`); C6 same-pass provenance (`pageText_glyphs`, stated with annotations off; invisible OCR text kept by default — provenance, not visibility); raster faithfulness **tested** vs MuPDF (by design) | — | — | — | — |
 | Scripting/forms surface | Excluded by design (no JS, no AcroForm/XFA, no launch actions) | n/a | n/a | Detects/reports | n/a |
 | Encryption | RC4-40/128, AES-128/256 open and decrypt (M4, tested against gov't corpus) | — | — | Partial (detects) | In the driver |
 | Evidence | Machine-checked proofs (axioms: `propext`/`Classical.choice`/`Quot.sound` only) + fuzzing + differential vs qpdf/MuPDF/pdftotext + adversarial suite + corpus dashboard | Coq proofs | ACL2 proofs | Formal grammar on paper, corpus testing | Formal language semantics + red team: the only PDF parser found **free of defects** in SafeDocs red-teaming |
@@ -37,8 +36,8 @@ architecture or language, no separate proof artifact; **tested** = empirical evi
 | Memory safety | Proven environment (Lean, hygiene CI) | Inherited from the JS runtime | — (decades of parser CVEs; mitigated by OSS-Fuzz + process sandbox) | Inherited from containment |
 | Termination / DoS | Proven total; cyclic files rejected in bounded time | — (ad hoc; hangs historically possible — the 2014 cyclic-xref file class) | — (ad hoc limits) | Bounded by sandbox timeouts |
 | Resource bounds | Proven limits, structured `limitExceeded` | Ad hoc | Ad hoc | Sandbox quotas |
-| Compromise containment | Nothing to contain: core cannot do IO by type | Browser origin sandbox | OS process sandbox (Chrome) or none (library use) | **The** guarantee: compromise stays in the container/VM; trusts kernel/container runtime |
-| Fidelity & text | Extracted text provably = displayed text (C6); positions proven (C3) | Text layer is a separate pass from rendering (poisoning mismatch possible) | High fidelity, no guarantees | Lossy: pixels only; text restored by OCR ≠ original text |
+| Compromise containment | Core: nothing to contain (no IO by type); the viewer process (Tk, C shim, bib-lean token) is uncontained today — OS sandboxing is on the roadmap (safety.md) | Browser origin sandbox | OS process sandbox (Chrome) or none (library use) | **The** guarantee: compromise stays in the container/VM; trusts kernel/container runtime |
+| Fidelity & text | Extracted text provably from the rendering pass (C6, annotations off; invisible OCR text kept by default); positions proven (C3) | Text layer is a separate pass from rendering (poisoning mismatch possible) | High fidelity, no guarantees | Lossy: pixels only; text restored by OCR ≠ original text |
 | Scripting/forms | Excluded by design | AcroForm JS executed (sandboxed interpreter) — surface present | Optional JS engines (V8/mujs) — surface present | Stripped by reconstruction |
 | Features | Read-only academic/office corpus (target); no JS/forms/multimedia | Full-featured | Full-featured, fastest | Read-only output |
 | Evidence | Proofs + tests (above) | Massive deployment, fuzzing | Massive deployment, OSS-Fuzz | Audits of the sandbox |
@@ -66,10 +65,11 @@ architecture or language, no separate proof artifact; **tested** = empirical evi
 2. **Proven resource bounds** through the filter stack (decompression bombs rejected by
    theorem, not by luck).
 3. **Proven unambiguity** across incremental updates (anti shadow-attack property).
-4. **Extracted text = rendered text by construction** (C6) — both derive from one interpreter
-   pass; no other viewer offers an anti-text-poisoning guarantee.
-5. A **proven-conservative repair path** — lenient reading without giving up the strict
-   semantics on valid files.
+4. **Same-pass text provenance** (C6) — extracted glyphs derive from the pass that renders;
+   no other viewer ties them together (visibility is separate: invisible OCR text is kept by
+   default).
+5. A **proven-total, bounded repair path** that never overrides a successful strict parse
+   (full conservativity, C4, remains open).
 
 ## Honest gaps (ours)
 

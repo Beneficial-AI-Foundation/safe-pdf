@@ -199,6 +199,13 @@ def Mark.isEditor (m : Mark) : Bool :=
   | .freeText .. | .ink .. => true
   | _ => false
 
+/-- Whether the mark is free text (task 9.r5: the one kind whose saved appearance needs a
+font program to be painted). -/
+def Mark.isFreeText (m : Mark) : Bool :=
+  match m.kind with
+  | .freeText .. => true
+  | _ => false
+
 /-- The note or free text (empty for a highlight and ink). -/
 def Mark.text (m : Mark) : String :=
   match m.kind with
@@ -420,6 +427,29 @@ def Store.removeWithComment (s : Store) (id : Nat) : Store :=
       | none => s.remove id
   | none => s
 
+/-- What closing a note's popup without its Save button does (task 9.r12). -/
+inductive Unsaved where
+  /-- Keep the note as stored; the popup's edits are discarded. -/
+  | keep
+  /-- Save the popup's text into the note (the Save path). -/
+  | save (text : String)
+  /-- Remove the note (the popup's Delete path; a highlight's comment goes, the highlight stays). -/
+  | delete
+  deriving DecidableEq, Repr
+
+/-- Closing the popup of note `id` showing `shown` without its Save button — Escape, Cancel or
+the window's close button (task 9.r12, the human's rule of 2026-11-23). A note whose stored
+text is empty (or white space) is still new: it gets the popup's text when that has more than
+white space, else it is removed. A note with a stored text keeps it (Escape cancels the
+edits, even when the popup was cleared). A missing mark, or one that is not a note: nothing. -/
+def Store.onUnsavedClose (s : Store) (id : Nat) (shown : String) : Unsaved :=
+  match s.find? id with
+  | some m =>
+    if !m.isNote || !m.text.trimAscii.isEmpty then .keep
+    else if shown.trimAscii.isEmpty then .delete
+    else .save shown
+  | none => .keep
+
 /-- Changes the colour of mark `id`. -/
 def Store.recolor (s : Store) (id : Nat) (c : Color) : Store :=
   { s with marks := s.marks.map fun m => if m.id == id then { m with color := c } else m }
@@ -594,6 +624,18 @@ private def sample : Store :=
   ((s.find? 7).bind s.commentOf |>.map (·.id)) == some 3 &&
   ((s.find? 3).map s.isComment) == some true &&
   (((s.setText 3 "").find? 7).bind (s.setText 3 "").commentOf).isNone
+-- Closing a note popup without Save (9.r12): a new note takes the typed text or goes; a note
+-- with a text keeps it; highlights and missing ids are left alone.
+#guard let s := (sample.addNote 0 .yellow "" (.point ⟨1, 1⟩)).1
+  s.onUnsavedClose 5 "" == .delete && s.onUnsavedClose 5 " \n\t " == .delete &&
+  s.onUnsavedClose 5 "typed" == .save "typed" && s.onUnsavedClose 5 " x\n" == .save " x\n"
+#guard sample.onUnsavedClose 2 "" == .keep && sample.onUnsavedClose 2 "other" == .keep
+#guard sample.onUnsavedClose 1 "" == .keep && sample.onUnsavedClose 9 "" == .keep
+#guard ((sample.setText 4 "  ").onUnsavedClose 4 "") == .delete
+-- An empty comment goes with `remove`, its highlight stays (the Delete path, `removeWithComment`).
+#guard let s := Store.load [⟨7, 0, .red, .highlight [q1]⟩, ⟨3, 0, .blue, .note "" (.quads [q1])⟩]
+  s.onUnsavedClose 3 "" == .delete && ((s.removeWithComment 3).marks.map (·.id)) == #[7] &&
+  (s.removeWithComment 3).dirty
 -- `/NM` names.
 #guard ((sample.find? 3).map Mark.nm) == some "safepdf-mark-3"
 #guard idOfNm "safepdf-mark-17" == some 17 && idOfNm "other-17" == none &&

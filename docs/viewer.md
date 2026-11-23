@@ -19,15 +19,19 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export, 9.r8 document open settings, 9.r10 attachments panel, 9.r11b layers panel)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
   PDF.js (see *Toolbar and sidebar* below), a scrollable canvas (scroll bars) with the current
-  page — or, in the other view modes, all pages or two side by side (see *View modes* below;
-  `SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing` sets the initial one) —,
-  a status line (file, page, zoom, rotation, pixel size, render time or "from cache",
-  notes, the view mode when it is not the single page, or the error).
+  pages — a file opens as its own open settings say (see *Document open settings* below),
+  otherwise in continuous vertical scrolling (View → Vertical Scrolling, No Spreads, as PDF.js;
+  task 9.r1) at Automatic Zoom on page 1, or, in the other view modes, one page or two side by side
+  (see *View modes* below; `SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing`
+  sets the one for files without `/PageLayout`) —, a status line (file, page, zoom, rotation, pixel size, render time
+  or "from cache", notes, the view mode when it is not the default, notes about open settings
+  that were not honoured, or the error). Every open starts afresh (task 9.r8): a mode or zoom
+  chosen for one file does not carry over to the next; only the reopen after Save keeps them.
 * Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
@@ -45,7 +49,7 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   (16384) is cropped by the renderer ("cropped" in the status line).
 * **Rotation**: view rotation in 90° steps, combined with each page's `/Rotate`; the window
   centre's page point stays at the centre.
-* **Scrolling** in the single-page view (and the facing view) is page-at-a-time: the canvas
+* **Scrolling** in the single-page view (and the facing view; not the default since 9.r1) is page-at-a-time: the canvas
   holds one page (spread). Scrolling past the bottom (or right) edge with the keys moves to the
   top of the next page; past the top, to the bottom of the previous page. The mouse wheel does
   the same (9.2, below). In the continuous modes the canvas holds the whole document (9.3).
@@ -75,8 +79,28 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 | mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) |
 | `Shift`+wheel | scroll horizontally (stops at the edge) |
 | `Ctrl`+wheel | zoom in/out about the mouse pointer |
-| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks about unsaved marks) |
-| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into `FILE-annotated.pdf` / into a chosen file (9.5c) |
+| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks Save / Don't Save / Cancel about unsaved marks, 9.r2) |
+| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into the opened file (asks before the first overwrite, 9.r2) / into a new file (9.5c) |
+
+**macOS (9.r3): Command instead of Ctrl.** On aqua (`tk windowingsystem` = `aqua`) every Ctrl
+key in this document also works with **⌘** — ⌘O, ⌘S, ⌘⇧S, ⌘W, ⌘Q, ⌘C, ⌘A, ⌘F, ⌘G, ⌘+ / ⌘= /
+⌘−, ⌘0, ⌘+wheel zoom, ⌘Return in the note popup, ⌘Q in the page field, find/go-to bars and
+the text-box editor — and the menus show the macOS accelerators (⌘S, ⇧⌘S, ⌥← for Back; Tk
+draws the `Command-S` labels as glyphs), as do the Save tooltip and the status hints. The
+Ctrl bindings stay. The application menu's Quit (and a quit from the Dock or at logout,
+`::tk::mac::Quit`) runs File → Quit's command. On X11/Windows nothing changes. The mapping
+(key → per-platform Tk sequences and label) is pure Lean in `Menu.lean` (`Menu.Platform`,
+`Menu.Key`, `Cmd.accelOn`, `Menu.platformScript`, checked by `#guard`s for both platforms);
+the viewer installs it right after building the window.
+
+**Icon (9.r3).** The application/window icon is the logo's document mark
+(`docs/branding/icon-{16,32,64,128,256,512}.png`, generated once from
+`docs/branding/safe-pdf.png` by `docs/branding/make-icons.sh`, which also writes
+`SafePdf/Shell/App/Icons.lean`). The PNGs are embedded as base64 (≈ 160 KB) so that an
+installed `viewer` does not need the source tree; `Viewer.setIcon` loads them with
+`image create photo -format png -data` and calls `wm iconphoto . -default` largest first
+(X11: `_NET_WM_ICON` with all six sizes; macOS: the first image becomes the Dock icon of the
+unbundled app).
 
 ## Menubar (9.1)
 
@@ -85,7 +109,7 @@ top of the window, on macOS it is the system menu bar) duplicates the toolbar an
 The model is Tk-free: `SafePdf/Shell/App/Menu.lean` lists the commands (`Menu.Cmd`: label,
 accelerator text, the constant Tcl script that runs it, an enabled rule) and the menus; the
 viewer builds the Tk menus from it (`Viewer.buildMenus`) and after every event sets the
-`-state` of each entry and of the toolbar buttons Prev/Next/Back/Forward/Outline whose rule
+`-state` of each entry and of the toolbar buttons Prev/Next/Back/Forward/Sidebar whose rule
 changed (`Viewer.syncMenus`, over `Toolbar.targets`/`Toolbar.states`: menubar entries, the
 toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the same commands.
 
@@ -93,15 +117,16 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 |---|---|
 | File | Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import annotations…, Export annotations… (XFDF, 9.11), Close (Ctrl+W), Quit (Ctrl+Q) |
 | Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Highlight tool (check, 9.8), Show all highlights (check, 9.8), Find… (Ctrl+F) |
-| View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`), then two radio groups (9.3): Page Scrolling / Vertical Scrolling, No Spreads / Odd Spreads / Even Spreads |
+| View | Sidebar (F9, a check entry showing whether the sidebar is open; *Outline* before 9.r9), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`), then two radio groups (9.3): Page Scrolling / Vertical Scrolling, No Spreads / Odd Spreads / Even Spreads |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
 
 Disabled: everything but Open… and Quit without a document; Save without unsaved marks; Copy and Highlight selection
 without a selection; Delete mark without a selected mark;
-Outline when the document has none; Previous/First on the first page (spread), Next/Last on the
+Previous/First on the first page (spread), Next/Last on the
 last (spread);
-Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
-Outline command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
+Back/Forward with an empty history. The keys stay; a menu accelerator is only a label (also
+on macOS, where the accelerators read ⌘O, ⌘S, … — see Keys). The
+Sidebar command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
 when started without a file).
 
 ## Toolbar and sidebar (9.7)
@@ -115,8 +140,8 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
 `SafePdf/Shell/App/Toolbar.lean` and `SafePdf/Shell/App/Sidebar.lean` (`#guard` checks).
 
 * **Toolbar** (`.bar`, 40 px, background `#f9f9fa`, a 1 px line below; `Toolbar.layout`):
-  * *left*: the sidebar toggle (shown only when the document has an outline; drawn pressed
-    while the sidebar is open), ∧ / ∨ previous / next page (disabled on the first / last page),
+  * *left*: the sidebar toggle (shown with a document — since 9.r9 every document has
+    thumbnails; drawn pressed while the sidebar is open), ∧ / ∨ previous / next page (disabled on the first / last page),
     the page field and its label. The field shows the page number and `of N`, or, when the
     document has page labels, the label and `(k of N)` (as PDF.js). **Enter** jumps to an exact
     label, else a page number `1..N`, else a label ignoring case (`Toolbar.pageEntry`; the jump
@@ -124,6 +149,21 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     text reverts the field to the current page (and says so in the status line); Escape or
     leaving the field reverts it too. The field follows every page change (arrows, keys, wheel,
     links, outline). The entry has its own bind tags, so typing does not trigger viewer keys.
+    Right after `of N`, the **view-mode drop-down** (9.r4, `Toolbar.ViewChoice`): a small
+    rounded button (`.bar.vmode`, 56 × 32 px, the zoom box's border and radius) with an icon
+    of the current mode drawn with canvas items — one page, two stacked pages, two pages side
+    by side, four pages in a grid — and a chevron; its tooltip names the mode. Clicking it
+    opens a menu (`.viewmenu`) with **Single Page**, **Vertical Scrolling** (the start-up
+    default since 9.r1), **Two Pages** and **Two Pages Scrolling** as radio entries: each is a
+    pair of the 9.3 modes (`ViewChoice.modes`: Page / Vertical Scrolling with No Spreads or
+    spreads; a two-page choice keeps Even Spreads when they are on, else takes Odd Spreads)
+    and runs `emit viewMode view KEY`. Whatever changes the mode — this menu, View → Page /
+    Vertical Scrolling and No / Odd / Even Spreads, the same entries of the `»` menu,
+    `SAFEPDF_VIEWER_VIEW` — goes through `Viewer.setViewMode`, which sets the View and `»`
+    menus' variables (`::safepdf::scrollMode`, `::safepdf::spreadMode`) and the drop-down's
+    checked entry and icon (`::safepdf::viewSel` = `ViewChoice.ofModes` of the two), so all
+    three always agree (`ViewChoice.ofModes_modes`, `modes_ofModes`). Disabled (dimmed) with no
+    document.
   * *centre* (centred in the window): − / + (zoom out / in one step, as the keys) and the zoom
     drop-down, a rounded button showing the current choice; clicking it opens a menu with
     Automatic Zoom, Actual Size, Page Fit, Page Width, 50 %, 75 %, 100 %, 125 %, 150 %, 200 %,
@@ -144,28 +184,235 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
     16 px icons in `#3b3b44`, dimmed when disabled (PDF.js: opacity 0.5); a tooltip appears
     after 600 ms; separators are 1 px × 20 px.
-* **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`): a white panel titled
-  *Document outline* on the `#f0f0f4` background. It **opens on load only when the document
-  has an outline**; without one it stays closed and the toggle is hidden (F9 and View → Outline
-  do nothing then). The outline is a text widget drawn as a tree: one row per entry, indented
+* **Opening and closing the sidebar** (9.r4): the canvas changes width with it. Window
+  resizes are reported to Lean 100 ms after the last `<Configure>` (a window drag sends many),
+  so before 9.r4 the canvas showed the old layout in the new width for that time — the page,
+  centred for the old width, sat at the old offset from the canvas's new left edge (on closing
+  it jumped left by the sidebar's width, then back to the centre; "the page flickers to the
+  side", most visible at Page Fit). Now `Viewer.showOutline` calls `::safepdf::resizeSoon`
+  first: for 300 ms the canvas's `<Configure>` binding reports a change of its width at once
+(height-only changes, such as the find bar's, stay debounced). Tk runs
+  that binding while it lays out the panes, before it paints the canvas at its new size, so
+  Lean lays the pages out for the new width (and at a fit zoom renders or takes from the cache
+  the new zoom) before anything is drawn: the page goes straight to its final place, in
+  every view mode. Smoke case 1q samples the page frame's canvas and screen x at every
+  `<Configure>` and every 2 ms and requires just the start and the end value (before the fix:
+  screen x 403 → 117 → 260 on closing, 260 → 531 → 396 on opening).
+* **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`; panels since 9.r9): a row
+  of small **view buttons** (`.ol.sw`, PDF.js's sidebar view buttons *Show Thumbnails*, *Show
+  Document Outline*, *Show Attachments*, *Show Layers*; the shown panel's button drawn
+  pressed) above a white panel with its heading (*Thumbnails*, *Document outline*) on the
+  `#f0f0f4` background. A button shows only when the document has that content
+  (`Sidebar.buttons`: thumbnails always, the outline when there is one; attachments since 9.r10 (see
+  *Attachments panel* below) when the document has some; layers since 9.r11b (see *Layers
+  panel* below) when it has optional content). The sidebar **opens on load as the document's
+  `/PageMode` says** (`Sidebar.onLoad`): `/UseThumbs` → thumbnails, `/UseOutlines` → the
+  outline, `/UseAttachments` → attachments, `/UseOC` → layers (each when the document has
+  that content), `/UseNone` and `/FullScreen` → closed; without a page mode the outline when there is
+  one, else closed. The toggle (F9, View → Sidebar, the toolbar button) works for every
+  document and reopens the last panel chosen while the document has it, else the outline, else
+  the thumbnails (`Sidebar.pick`). The panels are a list in `Sidebar.panels` (key, button path,
+  icon, tooltip, heading); in Tk each panel grids its widgets into row 1 of `.ol.p`
+  (`::safepdf::panelWidgets(KEY)`), `::safepdf::showPanel KEY TITLE` shows one and runs
+  `::safepdf::panelShown::KEY` when it exists — a new panel adds its `Sidebar.panels` entry,
+  its `Sidebar.Content` flag (set in `Viewer.contentOf`) and these two Tcl pieces.
+* **Outline panel**: a text widget drawn as a tree: one row per entry, indented
   20 px per level, long titles wrapped; entries with children have a disclosure triangle (▼
   open, ▶ closed; entries with a positive `/Count` start open); clicking a triangle collapses
   or expands the subtree (`Sidebar.toggle`: the rows of a closed entry's subtree are elided
   through one tag per ancestor), clicking a title jumps to its destination and marks the row;
   rows highlight under the pointer. The scroll bar appears only when the tree does not fit.
+* **Thumbnails panel** (9.r9, after PDF.js's `pdf_thumbnail_viewer.js` / `.thumbnail`; drawn
+  with a Tk canvas `.ol.th`, nothing copied): one image per page, 98 px wide
+  (`Sidebar.thumbW`, PDF.js's `THUMBNAIL_WIDTH`), the height from the page's crop box with
+  its `/Rotate` and the user rotation (`Sidebar.thumbSize`, kept between 8 and 392 px), on a
+  white frame with the page number (or page label) below, in a vertical list
+  (`Sidebar.thumbLayout`). The current page's thumbnail has a rounded grey background and
+  follows the main view (scrolled into view when the page changes, PDF.js's
+  `scrollThumbnailIntoView`). **Click** a thumbnail to go to its page (recorded in the
+  history, as a link); in the focused panel **Up / Down** move a blue focus ring, **Return**
+  goes there. Wheel, Button-4/5 and Tk 9 `<TouchpadScroll>` scroll the panel.
+  **Rendering is lazy and off the critical path**: only the visible thumbnails and 3 more on
+  each side (`Sidebar.thumbsWanted`) are rendered, by the same renderer at the thumbnail's
+  zoom (98 px / page width) on worker threads (`thumbSubmit`, at most 2 at once and only while
+  the page renders leave a slot of `maxJobs` free, so the main view goes first); results come
+  in through the same 15 ms `poll` as the pages. At most 40 thumbnail images are kept
+  (`Sidebar.thumbBudget`, ≈ 50 KB each); beyond that the ones farthest from the view are
+  dropped (`Sidebar.thumbEvict`) and rendered again when scrolled back to. Nothing is rendered
+  while the panel is hidden; a new document or rotation lays them out again. Thumbnails show
+  the page as the file has it (and saved marks being edited, `State.view`); unsaved
+  highlights are not composited into them.
 * **Page area**: background `#f0f0f4`, the page with a 1 px grey border.
 
-Not done (visible differences from the reference): no outline header buttons (thumbnail /
-attachment views, "find current outline item"), no thumbnails; the menubar stays above the
+Not done (visible differences from the reference): no "find current outline item" button;
+the menubar stays above the
 toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
 Add image (stamp) and Print come after M9.
 
-## Wheel scrolling across pages (9.2)
+## Document open settings (9.r8)
+
+ISO 32000-2 §7.7.2, §12.2, §12.3.2; ledger Decision 2026-11-23 "The viewer honours every
+document open setting". `Core.Doc.OpenSettings.read` (pure, total, never fails the document;
+rules O1–O7 in its module doc; suite `open-settings`) reads them, `Viewer.applyOpenSettings`
+applies them on **every open** (start-up, File → Open, Close + Open, bib-lean's reader). A
+file opened later starts again from the defaults (`resetOpenView`: the start-up view mode,
+Automatic Zoom, page 1, outline when there is one, the whole window UI, the file name as title)
+— nothing carries over from the previous file. Changes the user makes (View menu, zoom,
+F9, Escape) win until the next open. **The reopen after Save / Save to library keeps the
+user's current view** (view mode, zoom, outline, page; the document's settings are not
+applied again: they have not changed and the user is mid-work) — `openWith … (keepView :=
+true)`. The window's size and position are the user's and are never reset.
+
+| Setting | What the viewer does |
+|---|---|
+| `/PageLayout /SinglePage` | Single Page (Page Scrolling, No Spreads) |
+| `/OneColumn` | Vertical Scrolling, No Spreads |
+| `/TwoColumnLeft` / `/TwoColumnRight` | Two Pages Scrolling with Odd / Even Spreads |
+| `/TwoPageLeft` / `/TwoPageRight` | Two Pages with Odd / Even Spreads |
+| `/PageMode /UseNone` | sidebar closed |
+| `/UseOutlines` | sidebar open on the outline (when the file has one, else closed) |
+| `/UseThumbs` | sidebar open on the thumbnails (9.r9; every document has them) |
+| `/UseAttachments` | sidebar open on the attachments (9.r10) when the file has attachments; else the outline rule (open with an outline), no note |
+| `/UseOC` | sidebar open on the layers (9.r11b) when the file has optional content; else the outline rule (open with an outline), no note |
+| `/FullScreen` | `wm attributes . -fullscreen 1`, sidebar closed, note "full screen (Escape leaves)"; Escape leaves and applies `/NonFullScreenPageMode` to the sidebar |
+| `/OpenAction` destination or `/S /GoTo` | page, position (`/XYZ` left/top, `/FitH` top, …: the page point at the window's top-left, as links) and zoom: `/XYZ` zoom > 0 → that percentage (clamped to 25–800 %), `null`/0 → Automatic Zoom stays; `/Fit`, `/FitB` → Page Fit; `/FitH`, `/FitBH` → Page Width; `/FitV`, `/FitBV` → Page Fit (best effort: no fit-height zoom; the same for portrait pages in a wide window); `/FitR` → Page Fit with the rectangle's left/top at the top-left (best effort). Named destinations through `/Dests` and `/Names /Dests`. |
+| `/OpenAction` JavaScript, URI, Launch, Named, GoToR, … | **never executed**; note "open action /KIND ignored (not executed)". `/Next` chains are not followed. |
+| `/HideToolbar`, `/HideMenubar`, `/HideWindowUI` | toolbar (`pack forget .bar`), menubar (`. configure -menu {}`), scroll bars (`grid remove .ys .xs`) hidden; note "the document hides parts of the window (Escape shows them)"; **Escape** shows them again (so a document can never lock the user out of the UI; the keys keep working meanwhile) |
+| `/FitWindow` | window sized for the first page at the open zoom (100 % for the fit choices), both pages of a spread, at most 90 % of the screen |
+| `/CenterWindow` | window centred on the screen |
+| `/DisplayDocTitle` | window title from `/Info /Title` (text string, control and bidi characters as spaces, ≤ 500 characters; XMP `dc:title` not read: no XMP parser) |
+| `/Direction /R2L` | spreads mirrored: the first page of a spread on the right (`View.mirrorPlace`); status "…, right to left"; keys and wheel unchanged |
+| `/NonFullScreenPageMode` | the page-mode rule above on leaving full screen |
+| print keys (`PrintScaling`, `Duplex`, `ViewArea`, …) | ignored |
+
+Invalid values (wrong type, unknown name, a destination outside the document or not found)
+leave the default and add a note ("invalid /PageLayout ignored", "open destination … not
+found"); notes stay at the end of the status line until the next open (Escape drops the
+full-screen and hidden-UI ones). Hyperref writes `/PageMode /UseOutlines /OpenAction [p1 /Fit]`
+by default, so most LaTeX papers now open at Page Fit with the outline (checked on
+`arxiv-0704.0001`, `arxiv-1301.3781`, `arxiv-1904.00001`, `arxiv-2006.00001`: page 1 whole at
+73–78 % in the 1200×960 window, outline open; `arxiv-0905.0002` (`/UseNone` + Fit): Page Fit,
+outline closed; `arxiv-2111.00001` (`/DisplayDocTitle true`, no `/Title` in `/Info`): the file
+name stays the title; `arxiv-2209.00001` (`/OneColumn`): Vertical Scrolling, Automatic Zoom).
+
+Unverified: on aqua `. configure -menu {}` leaves Tk's default application menu (the menubar
+cannot disappear on macOS); full screen on aqua uses the native full-screen space; without a
+window manager (Xvfb) `wm attributes . -fullscreen` reads back 0, so the smoke test checks the
+viewer's state only.
+
+## Attachments panel (9.r10)
+
+Files embedded in the PDF (ISO 32000-2 §7.11.4) are listed in a sidebar panel after PDF.js's
+attachments view (`web/pdf_attachment_viewer.js`; nothing copied). The data is read by the
+verified core module `SafePdf/Core/Doc/Attachments.lean` (pure, total, bounded; rules A1–A6
+in its module doc), the panel's Tk-free model is `SafePdf/Shell/App/Attach.lean`.
+
+* **What is listed**: the `/Names /EmbeddedFiles` name tree (walked by `Nav.treeEntries`:
+  visited set, `/Kids` cycles cut) in its order, then the `/FileAttachment` annotations of
+  every page (`/FS`); an annotation whose file specification is already listed adds no row
+  (its page is noted). At most 1024 rows.
+* **A row**: the name — `/UF`, else `/F`, else the name-tree key; decoded as a text string,
+  control characters, bidi overrides/isolates, LRM/RLM and line separators removed, at most
+  200 characters — and the size **known without decoding** (`Attachments.listedSize`:
+  `/Params /Size`, else the stream's `/DL`, else the stored length of an unfiltered stream);
+  `?` for a compressed file of unknown size until it is decoded, `—` for an external file
+  reference (no `/EF`), `error` once decoding failed. **Listing decodes nothing**, so a large
+  attachment never stalls the window. A file is decoded only on demand: when it is saved
+  (the filter chain under the viewer's limits: a decompression bomb is a limit error in the
+  status line and its row), and when its **tooltip** opens (600 ms over a row; a probe under
+  the viewer's limits with the per-stream cap lowered to 16 MB, `Attach.probeLimit`: a larger
+  file shows `> 16 MB` and is decoded only when saved). The tooltip shows the description
+  (`/Desc`), the MIME type (`/Subtype`), creation and modification dates (`/Params`), the page
+  of its annotation, the stored size of a compressed file not decoded yet, and any problem or
+  decoding error. Selecting a row describes it in the status line.
+* **Save attachment as…**: double-click a row, press Return, or right-click (on aqua also
+  Control-click / Button-2) → *Save attachment as…*. The bytes are decoded first (an error is
+  reported, no dialog), then `tk_getSaveFile` (title *Save attachment as*, no `-filetypes`:
+  any type; on aqua the Format pop-up would overflow, 9.r6) starts in the opened file's
+  folder with the **sanitized** name proposed (`Attachments.fileNameOf`: the last path
+  component only, `:*?"<>|` → `_`, no leading dots, ≤ 200 bytes; `../../etc/evil:name.txt` →
+  `evil_name.txt`). Refused with a status message: a folder, **the opened PDF**, a read-only
+  file, a folder that is not writable (`Attach.targetProblem`, the rules of 9.r6). The file is
+  written atomically (`Save.writeAtomic`: temporary file in the same folder, then rename;
+  permissions of a replaced file kept) with exactly the decoded bytes.
+* **Never run**: the viewer has no "open" or "open with" action for attachments; nothing
+  launches, opens or interprets an attachment's bytes.
+* **Icons on the page**: a click inside a file attachment annotation's `/Rect` (drawn by the
+  renderer from its appearance stream when it has one) opens the sidebar on the attachments
+  panel and selects that row; it never opens the file.
+* **Panel switcher** (9.r9's): the *Show Attachments* button shows only when the document
+  has attachments (`Sidebar.Content.hasAttachments`, set in `Viewer.contentOf`); the panel's
+  widgets are `.ol.at` / `.ol.as` (`::safepdf::panelWidgets(attachments)`,
+  `::safepdf::panelShown::attachments` for its scroll bar). `/PageMode /UseAttachments`
+  opens it (`Sidebar.onLoad`); without attachments the outline rule applies, with no note.
+
+Unverified (no Mac here): the secondary click on aqua (Button-2/3, Control-click), the
+`ttk::treeview` look under the aqua theme, and `tk_getSaveFile` on aqua with an
+attachment name.
+
+## Layers panel (9.r11b)
+
+The document's optional content groups (ISO 32000-2 §8.11; read by
+`SafePdf/Core/Doc/OptionalContent.lean`, task 9.r11a) are listed in a sidebar panel after
+PDF.js's layers view (`web/pdf_layer_viewer.js`; drawn with Tk, nothing copied). The panel's
+Tk-free model is in `SafePdf/Shell/App/Sidebar.lean` (`layerRows`, `layerToggle`).
+
+* **The tree** follows the default configuration's `/D /Order`: a group is a row with a
+  **checkbox** showing whether it is ON and its `/Name`; a nested array whose first element is
+  a string is a **heading** (bold, no checkbox) over its items; a nested array without a label
+  nests its items under the row before it (the spec's sub-groups; PDF.js drops such arrays);
+  a labelled array with nothing left in it is dropped (PDF.js). Rows with children have a
+  disclosure triangle (open at first; a click on the triangle or the heading closes/opens it).
+  **Groups not listed in `/Order`** follow under an italic heading **"Additional Layers"**,
+  in `/OCGs` order, each with its checkbox (radio and locked rules as usual), and that heading
+  starts collapsed — as PDF.js (`src/core/catalog.js` `parseOrder`, `web/pdf_layer_viewer.js`).
+  (PDF.js also puts there the groups of an unlabelled array, since it drops those arrays; here
+  they are nested in place, so they are not repeated.)
+  Without `/Order` every group of `/OCGs` is listed by name. Names and labels are text
+  strings with control and bidi characters removed, at most 200 characters
+  (`Attachments.displayText`); an empty name shows `(no name)`.
+* **Toggling** a checkbox (or clicking its name, as PDF.js's `<label>`) is
+  `Config.setGroup`: a group of a radio-button set (`/RBGroups`) turned ON turns the others
+  OFF; a **locked** group (`/Locked`) has a disabled checkbox and a grey name and never
+  changes (the event alone says "layer NAME is locked"). Every checkbox is then set from the
+  new state, and the document is shown again under it (`Viewer.applyLayers`): a new render
+  generation (the render cache and running renders are stale), the **thumbnails** laid out and
+  rendered again when their panel shows (9.r9's cache keyed by the generation), and the
+  **text indexes** dropped — hidden text is neither selectable nor found by search; the
+  selection and the search hit are cleared. The state is passed to the renderer
+  (`renderDocPage … (oc := …)`) and to text extraction (`extractDocPageAnnots … (oc := …)`).
+* **When**: the state is the document's default (`/D`: BaseState, ON, OFF, `/Usage /View
+  /ViewState`) at **every open** (9.r8's rule: nothing carries over); the reopen after Save /
+  Save to library (`keepView`) keeps the state the user set (when the groups are the same).
+  `/PageMode /UseOC` opens the sidebar on the layers (`Sidebar.onLoad`); the *Show Layers*
+  button shows only when the document has optional content with something to list
+  (`Sidebar.Content.hasLayers`).
+* **Saving never writes the layer state**: the panel changes only the viewer's state; Save
+  writes the marks' incremental update and leaves `/OCProperties` (and the catalog) as they
+  are (checked by the smoke test).
+* **Inspector**: the `svg` and `ops` views run under the document's default state too
+  (`Views.Svg.defaultOC`): content in an OFF layer is not drawn in the SVG and its items are
+  not counted (its operators are, in the histogram). There is no way to choose another state
+  there.
+* Tk: a text widget `.ol.ly` (scroll bar `.ol.ls`, `::safepdf::panelWidgets(layers)`) drawn
+  as a tree like the outline; row `K` is either a heading (tag `hK`) or an embedded
+  `ttk::checkbutton .ol.ly.cK` (style `Ly.TCheckbutton`, variable `::safepdf::ly(K)`, event
+  `layer K`) followed by its name (tag `gK`, wraps in the panel); `tK` is the triangle
+  (`lyToggle K`), `uA` every ancestor (a closed ancestor elides the row with its checkbox).
+
+Unverified (no Mac here): the `ttk::checkbutton` look under the aqua theme (its `-background`
+style options are ignored there), and `<TouchpadScroll>` over the panel on aqua (bound like the
+thumbnails', scrolling `.ol.ly` by pixels).
+
+## Wheel scrolling across pages (9.2, 9.r1)
 
 The wheel continues into the next / previous page as the keys do. Pure logic in
-`View.wheelStep` (`#guard` checks), driven by `::safepdf::emit wheel AXIS KIND D`:
+`View.wheelStep` (`#guard` checks, including `View.wheelPages`, a simulated document), driven by
+`::safepdf::emit wheel AXIS KIND D`. Each axis keeps its own state (`View.Wheels`, 9.r1). In the
+continuous modes (the default) the wheel simply scrolls the document; the rules below on page
+edges are for the page scroll modes (single page, facing).
 
 * **Deltas.** `<MouseWheel>` `%D` is in 1/120 notches on Tk ≥ 8.7 (Tk 9 turns X11 wheel
   buttons into `<MouseWheel>`) and on Windows; `<Button-4>`/`<Button-5>` (Tk 8.6 on X11) are
@@ -174,19 +421,38 @@ The wheel continues into the next / previous page as the keys do. Pure logic in
   (as Tk's `scroll 1 units`); smaller deltas (high-resolution wheels, trackpads) accumulate
   their fractions (`View.Wheel.acc`) instead of being rounded to a notch or lost.
 * **Edges.** Within the page the view scrolls and stops exactly at the edge (the rest of that
-  event is dropped). Only further events at the edge push past it; when the push reaches one
-  notch (a quarter of the view for trackpads) the page turns: down → top of the next page,
-  up → bottom of the previous page. A tiny overscroll never turns a page; a pause of 400 ms or
-  a change of direction forgets the push. A page that fits the window (fit page) turns with
-  every notch.
-* **Momentum.** After a trackpad turns the page, trackpad events are ignored until a 400 ms
-  pause, so inertial scrolling does not run through several pages. Wheel notches are not
-  latched.
+  event is dropped, so no part of a page is skipped). Further events at the edge push past it;
+  when the push reaches the threshold (`View.wheelThreshold`) the page turns: down → top of the
+  next page, up → bottom of the previous page. Threshold: one notch for wheels (a tenth of the
+  view); for trackpads a twentieth of the view (the gap between pages), but at least a quarter
+  of the view less what the page scrolls, so a page that fits the window (Page Fit) costs a
+  quarter of a view of finger travel. A tiny overscroll never turns a page; a pause of 400 ms
+  or a change of direction forgets the push.
+* **Flow (9.r1).** No event is ever swallowed: the push beyond the threshold is carried onto
+  the page just turned to, so a swipe, a fast wheel or trackpad momentum flows on into the new
+  page with its next event. 9.2 ignored every trackpad event after a turn until a 400 ms pause
+  (the gesture and its momentum stopped dead on the new page — the human's "when it scrolls to
+  the next page then it stops scrolling"), and shared one state between the axes, so the ±1 px
+  sideways jitter of a vertical swipe (`<TouchpadScroll>` carries both deltas) reset the push
+  and the page never turned at all (reproduced on X11: 3000 generated events stuck on page 1).
+* **Precision.** The wheel's `moveto` uses twelve digits (`Viewer.fmtFracFine`); with six, a
+  one-pixel step in a document taller than 500 000 pixels (vertical modes) rounded back to
+  where it started.
 * **Horizontal** (`Shift`+wheel, trackpad sideways): scrolls and stops at the edge; it never
   turns pages (the `Left`/`Right` keys still do).
-* Not tested here: real macOS trackpad deltas (the smoke test generates Tk 9 `<MouseWheel>`
-  and `<Button-4/5>` events on X11; the `line` and `pixel` kinds are covered by the `#guard`s
-  only).
+* **Smoke** (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, case 1o): bursts of 12 px
+  `<TouchpadScroll>` events with sideways jitter and of third-notch `<MouseWheel>` events, 8 ms
+  apart, through five pages in every view mode at Page Width and in the single page at Page
+  Fit; trace of (event, ms, page, top) in `wheelflow-trace.txt`. On `arxiv-1706.03762.pdf`
+  (882 px view) before 9.r1 the trackpad bursts never left page 1 in the page modes; after,
+  the longest run of events that moved nothing is 3 (single, Page Width), 18 (Page Fit and
+  facing: the quarter-view push), 0 in the continuous modes.
+* **Not verified here (aqua only):** real macOS trackpad and Magic Mouse events. The smoke test
+  generates Tk 9 `<TouchpadScroll>` and `<MouseWheel>` events on X11 (and `xdotool` wheel
+  buttons); whether Tk 9 on macOS delivers momentum as further `<TouchpadScroll>` events, the
+  size of its deltas, the scale of `<MouseWheel>` `%D` for a mouse there, and the feel of the
+  thresholds are not tested; the `line` kind (Tk 8.6 on macOS) is covered by the `#guard`s
+  only.
 
 ## View modes (9.3)
 
@@ -200,8 +466,8 @@ starts).
 
 | Mode | Scroll | Spread | Shows |
 |---|---|---|---|
-| single page (default) | Page Scrolling | No Spreads | one page at a time |
-| continuous | Vertical Scrolling | No Spreads | all pages stacked, 10 px apart (`View.pageGap`) |
+| single page | Page Scrolling | No Spreads | one page at a time |
+| continuous (default, 9.r1) | Vertical Scrolling | No Spreads | all pages stacked, 10 px apart (`View.pageGap`) |
 | facing | Page Scrolling | Odd / Even Spreads | one spread at a time: two pages side by side |
 | continuous facing | Vertical Scrolling | Odd / Even Spreads | all spreads stacked |
 
@@ -233,9 +499,9 @@ starts).
   the facing modes; Previous/First are disabled in the first spread, Next/Last in the last. In
   the continuous modes a jump scrolls the page's top (with the 8 px margin) to the window top;
   the keys PageDown/Space/arrows scroll the whole document, Home/End go to the first/last page.
-* **Wheel**: in the page scroll modes as in 9.2 (a spread turns after a push past the edge); in
-  the continuous modes the wheel simply scrolls the document (`View.wheelStep` without page
-  crossing).
+* **Wheel**: in the page scroll modes as in 9.2/9.r1 (a spread turns after a push past the
+  edge, and the gesture flows on); in the continuous modes the wheel simply scrolls the
+  document (`View.wheelStep` without page crossing).
 * **Rendering and memory**: the current page — in the facing view its whole spread — is
   shown first; the other pages in view and one more place before and after them
   (`View.wantedPages`) follow (`renderMore`, nearest to the current page first). Since 8.8 all
@@ -323,12 +589,24 @@ back from a file with its own id).
   canvas items (tag `mark`) drawn below the selection and search highlights.
 * **Notes**: Add note… (Edit menu: on the selection, else at the window centre; context
   menu: on the selection, else at the right-clicked point) adds a yellow note and opens its
-  popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape). A note shows as a
+  popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape; closing it is
+  described below). A note shows as a
   speech-bubble icon of 20 × 20 page units (the size of a `/Text` annotation icon; it scales
   with the zoom as in PDF.js), its upper-left corner at the point, or right of the first
   quad for a note on text (whose quads get a dashed outline); the icon is kept inside the page.
   The text enters Tk by variable substitution and comes back as one event word, never parsed
   as script.
+* **Closing a note popup without Save** (9.r12) — Escape (also while the cursor is in the
+  text), Cancel or the window's close button — follows one rule (`Marks.Store.onUnsavedClose`):
+  a note that already has a text keeps it and the popup's edits are discarded, even when the
+  popup was cleared; a note without a stored text (new, or saved empty) gets the popup's text
+  when that has more than white space (as Save), and is otherwise **deleted**, through the
+  same path as the popup's Delete: a saved note's removal is an unsaved change (`*` in the
+  title), an empty highlight comment goes and its highlight stays, no icon is left. The same
+  holds for every way the popup opens (Edit → Add note…, the context menu, the bubble's Add
+  comment, a click on a note). Opening another note's popup closes the open one by this rule
+  (reopening the same note keeps its popup and edits); deleting a note (or its highlight)
+  while its popup is open closes the popup.
 * **Selecting, recolouring, deleting**: a click (press and release in place) on a mark selects
   it (icons before highlights, the newest first, except that a highlight wins over its comment
   on its quads (9.8); marks before links) and a note's click
@@ -348,22 +626,71 @@ is drawn per quad (PDF.js outlines the union shape).
 | `Delete` | delete the selected mark |
 | right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
 
-## Saving marks into the PDF (9.5c, 9.5g)
+## Saving marks into the PDF (9.5c, 9.5g, 9.r2, 9.r6)
 
-Tk-free flow in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by `Viewer.save`,
-`saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7: the marks become annotation objects
-appended to the file as an **incremental update**; the original bytes are never modified.
+Tk-free flow and decisions in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by
+`Viewer.save`, `overwriteInto`, `saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7 (S8
+amended by the Decision of 2026-11-23): the marks become annotation objects appended to the
+file as an **incremental update**; the original bytes stay unchanged at the start of the file
+(its first revision).
 
-* **Save** (Ctrl+S, File → Save, the toolbar's Save) writes `DIR/STEM-annotated.pdf` next to
-  the opened file (for an opened `…-annotated.pdf`: that file itself, a further revision).
-  It asks first when that means writing into the opened file, or replacing another existing
-  file — unless this session wrote the file (so repeated saves are silent). Save is enabled
-  only while there are unsaved changes (new marks, saved marks changed or deleted); with none,
-  Ctrl+S says "nothing to save".
+* **Save** (Ctrl+S, File → Save, the toolbar's Save) writes the marks **into the opened file**
+  (9.r2; `Save.route`). Before the first overwrite of a session it asks **Overwrite / Save
+  As… / Cancel** (`Save.overwriteQuestion`: the marks are added to the file itself, its present
+  content is kept unchanged inside it as the first revision; Save As… writes a new file
+  instead); after that (and for a file this session wrote with Save As…) Save is silent. Save
+  is enabled only while there are unsaved changes (new marks, saved marks changed or
+  deleted); with none, Ctrl+S says "nothing to save". A document opened from memory without a
+  library goes to Save As…; a library's document to the library (below).
+* **Overwriting, step by step** (`Viewer.overwriteInto`): (1) the bytes are built and checked
+  (`Save.build`, below) — an encrypted or repaired document is refused here, before any
+  question; (2) a read-only file or a folder we cannot write into is refused with a status
+  message (`Save.writeProblem`; the rename would otherwise replace a read-only file); (3) the
+  file on disk must still hold exactly the bytes the document was opened from (`Save.diskState`:
+  size, then a full comparison) — if another program changed, moved or deleted it, nothing is
+  written and the dialog **File changed on disk** offers Save As… / Cancel; (4) the
+  first-overwrite question; (5) the disk check once more, then `Save.writeAtomic` on the
+  resolved path (a symbolic link stays a link to the updated file): a fresh temporary file
+  `.NAME.safepdf-N.tmp` next to it, read back and compared, given the original's permissions
+  (Tcl `file attributes -permissions`; owner and group are those of the writing user), renamed
+  over the file — a crash leaves the old or the new file, never a partial one; (6) the file is
+  reopened in place on the same page, so the viewer works on the new bytes and a second Save
+  is a further revision.
 * **Save As…** (Ctrl+Shift+S) asks for a file (`tk_getSaveFile`, which confirms replacing an
-  existing file), proposing `STEM-annotated.pdf`; writing over the **opened file** needs an
-  explicit yes (its bytes still stay a prefix of the new file). With no unsaved marks it
-  writes a plain copy.
+  existing file), proposing `STEM-annotated.pdf` in the opened file's folder (its home folder
+  when that folder is gone or not writable, and for a document from memory — 9.r6,
+  `Save.dialogDir`), writes a new file (a file it replaces keeps its permissions) and opens
+  it; choosing the **opened file** needs an explicit yes (after the dialog's own replace
+  question) and then goes through the overwrite steps above. With no unsaved marks it writes
+  a plain copy.
+* **The chosen file is checked** (9.r6, `Viewer.checkTarget`): a name not ending in `.pdf`
+  (any case) gets `.pdf` (`Save.withExt` — Tk's X11 dialog appends `-defaultextension` only
+  to names without a dot, so `3453483.3454032-final` came back bare); if that names an
+  existing file the dialog did not confirm, **Replace it?** is asked. A folder, an existing
+  read-only file (a rename would replace it) and a folder we cannot write into are refused
+  with `cannot save: …` (`Save.targetProblem`); nothing is written, the marks stay unsaved.
+  The temporary file's name cuts `NAME` to 100 bytes (`Save.tmpName`), so a name near the
+  255-byte limit saves. Write errors (disk full, the folder removed meanwhile) appear on one
+  line (`Save.oneLine`) and leave no temporary file.
+* **Dialog options** (`Save.saveDialogOptions`): `-defaultextension .pdf -confirmoverwrite 1`
+  and, on X11/Windows, `-filetypes {{PDF files} {.pdf .PDF}} {{All files} *}`. **On aqua no
+  `-filetypes`**: Tk 9's `tk_getSaveFile` builds its **Format:** accessory view from them with
+  a pop-up 340 pt wide at x = 50 inside a 300 pt view (`macosx/tkMacOSXDialog.c`,
+  `Tk_GetSaveFileObjCmd`, the same in 9.0.x and on Tk's main branch of 2026-11-21), so the
+  pop-up always ran past the panel's right edge (the human's screenshots
+  `docs/viewer-reference/macos-save-as.png`, `macos-export-annotations.png` — even the short
+  `XFDF (.xfdf)` overflows: the labels are not the cause). Without `-filetypes` Tk shows no
+  accessory view and still restricts the panel to the `-defaultextension` type (other types
+  allowed on request). Open… and Import keep their filters (Tk's open panel uses a 240 pt
+  pop-up inside its 300 pt view); they start in the opened file's folder (9.r6; Open… with
+  no document open keeps Tk's choice) and a cancelled Open… says `open cancelled`.
+* **Dialogs**: the three-way questions are `::safepdf::choose` (a modal Tk dialog; the default
+  button has the focus first; Return or keypad Enter presses the **focused** button — 9.r6:
+  it used to run the default even after Tab to Cancel —, Space too, Escape and the close
+  button Cancel; the focus goes back where it was). Button order (`Save.unsavedButtons`,
+  `Save.overwriteButtons`, `Save.changedButtons`): Save / Don't Save / Cancel and Overwrite /
+  Save As… / Cancel left to right on X11 and Windows; on aqua the macOS order — Don't Save
+  (Save As…) leftmost, Cancel, the default rightmost.
 * **What is written** (9.5g: one update with additions, supersessions and removals,
   `Save.edits` → `Annots.writeEdits` → `Incremental.writeUpdate`, writer rule W11): the file's
   own marks are scanned (`Save.scan`: object reference, popup, comment, `/CreationDate`) and
@@ -407,12 +734,21 @@ appended to the file as an **incremental update**; the original bytes are never 
   Save writes from the opened document, not from the preview. A comment written into its
   highlight has no appearance of its own, so its icon is a canvas item. "Show all" off hides
   only unsaved highlights.
-* **Unsaved changes**: the title starts with `* `; Close (Ctrl+W), Quit (Ctrl+Q, File → Quit,
-  the window's close button: `wm protocol WM_DELETE_WINDOW`) and Open… ask Save / Discard /
-  Cancel (a Tk message box: Yes / No / Cancel).
+* **Unsaved changes** (9.r2): the title starts with `* `; every way a document goes away asks
+  **Save / Don't Save / Cancel** (`Viewer.confirmDiscard`, `Save.unsavedQuestion`): Close
+  (Ctrl+W, File → Close), Quit (File → Quit, Ctrl+Q, the window's close button
+  `wm protocol . WM_DELETE_WINDOW`, and on macOS the application menu's Quit / Cmd+Q through
+  `proc ::tk::mac::Quit`) — all quitting goes through the one Tcl proc `::safepdf::quit` —,
+  and Open… (another file). Save saves (into the opened file without a second question, since
+  the prompt says so; to the library in bib-lean mode; through Save As… for a document from
+  memory) and then goes on; Don't Save discards the marks and leaves the file untouched;
+  Cancel, or a Save that fails or is cancelled, keeps the document open (`Save.closeGoesOn`).
+  Nothing is ever saved without this answer.
 * **Errors** (an encrypted document, refused by the writer until 9.5f; a document opened
   through the repair path; a failed check; a write error) appear in the status line as
-  `cannot save to NAME: …`; nothing is written and the marks stay unsaved.
+  `cannot save to NAME: …` (a read-only file or folder: `cannot save: NAME is read-only…`; a
+  file changed on disk: `not saved: NAME changed on disk…`); nothing is written and the marks
+  stay unsaved.
 
 ## Add text and Draw (9.9)
 
@@ -446,7 +782,18 @@ toolbar of `web/viewer.css` `.editorParamsToolbar`; nothing copied). Pure state 
   mode's kind (as PDF.js applies parameters to the selected editor); Delete or the bubble's
   Delete removes it. Saved ones are drawn by the renderer from their appearance streams, so
   an edit of a saved one goes through the preview (9.5g) and Save supersedes its annotation
-  (W11).
+  (W11). **Exception (task 9.r5):** a saved free text's appearance uses the non-embedded
+  standard-14 Helvetica, which the renderer paints only with a substitute font program (7.7,
+  `Shell/Fonts.lean`: URW base-35 or TeX Gyre files). Where none is found — macOS without
+  those fonts, the human's setup in the 2026-11-23 review — the reopened text box was
+  invisible until a double click opened its editor; now `drawMarks` draws saved free text on
+  the canvas like unsaved free text whenever `State.paintsHelvetica` is false (turned with the
+  page rotation via Tk's `-angle`). Smoke: `m9-reopen` reports `screen-text` (red pixels in
+  the text box on an X screenshot of the canvas, before any click) and `screen-after` (after
+  Page Width, a page change, rotation 90° and back, vertical and single page mode); the script
+  runs it with and without substitute fonts. Since task 9.r7 a stock Mac has a substitute
+  Helvetica too (`/System/Library/Fonts/Helvetica.ttc`, `docs/raster.md`), so there the
+  renderer paints saved free text and this canvas fallback is not used.
 * **In the PDF** (rules A12–A15 of `Core/Write/Annots.lean`, as pdf.js
   `FreeTextAnnotation`/`InkAnnotation.createNewDict`): `/FreeText` with `/Contents`, `/DA
   (/Helv SIZE Tf R G B rg)`, `/Rect` = the text box (`freeTextBox`: Helvetica AFM widths,
@@ -480,8 +827,11 @@ XFDF (ISO 19444-1) is interchange only — the marks live in the PDF (9.5c). The
 and writer are `SafePdf/Shell/App/Xfdf.lean` (9.5d; `#guard`s and the suite `xfdf`).
 
 * **File → Export annotations…** (also in the toolbar's `»` menu) asks for a file
-  (`tk_getSaveFile` filtered to `{{XFDF {.xfdf}} {{All files} *}}`, proposing `STEM.xfdf` next
-  to the PDF, `Viewer.xfdfTarget`) and writes every mark of the document — saved or not —
+  (`tk_getSaveFile`, `Save.saveDialogOptions`: filtered to `{{XFDF} {.xfdf .XFDF}} {{All
+  files} *}` except on aqua, proposing `STEM.xfdf` next to the PDF, `Viewer.xfdfTarget`), checks
+  it like Save As… (9.r6: `.xfdf` added when missing — so choosing the opened `NAME.pdf`
+  writes `NAME.pdf.xfdf` instead of replacing the PDF with XML, as it did before; never onto
+  the opened document, a folder or a read-only file) and writes every mark of the document — saved or not —
   through `Save.writeAtomic` (temporary file + rename): `<highlight>` with `coords`,
   `<text>` for notes, page boxes from the document, `date` now, `<f href="NAME.pdf"/>`.
   **A highlight's comment** is written in the standard form, as `<contents>` of the
@@ -516,11 +866,17 @@ with Tk canvas items; colours sampled from the Firefox screenshot
 `#6b45d3`).
 
 * **Float bubble**: after a text selection (mouse-up of a drag, a double click, Ctrl+A) a
-  small rounded bubble with the Highlight icon; its right edge is at the end of the lowest
+  small rounded bubble with the Highlight icon and, after a divider, **Add comment** (9.r4:
+  the toolbar's note icon); its right edge is at the end of the lowest
   selected line and its top 6 px below it (PDF.js `#getLastPoint`,
   `--editor-toolbar-vert-offset`), above the selection when it would leave the scroll region
   at the bottom, and clamped into it (`Bubble.place`). Clicking it highlights in the current
-  colour (Edit → Highlight selection's script, `Bubble.Btn.cmd?`).
+  colour (Edit → Highlight selection's script, `Bubble.Btn.cmd?`). Add comment runs Add
+  note… (the toolbar's Add comment, Edit → Add note…): a note anchored to the selection's
+  quads, its popup opened for typing; the selection and with it the bubble go away. Both
+  buttons show a tooltip (Highlight, Add comment) after 600 ms over them, as toolbar buttons
+  do (each button has a white hit area under its icon, tag `b:NAME`; `Bubble.Btn.tip`). The
+  wider bubble (67 px) is placed and clamped as before (`place_inside` holds for any size).
 * **Edit bubble**: on a selected highlight (after creating it, or a click on it): the colour
   swatch with a chevron, Comment and Delete, separated by dividers. The chevron opens the
   colour picker (five swatches in a column under the button, the highlight's colour ringed;
@@ -551,7 +907,8 @@ with Tk canvas items; colours sampled from the Firefox screenshot
 
 Not done (visible differences from the reference): Tk on X11 draws no antialiasing and no
 real shadow (a 2 px offset grey shape stands in), so the pill-shaped bubble and the round
-swatches have jagged edges; the bubble buttons have no hover background or tooltips; the
+swatches have jagged edges; the bubble buttons have no hover background (tooltips since
+9.r4); the
 pop-over is a rectangle window, so its rounded corners show the canvas colour behind them
 (`#f0f0f4`); the toolbar's toggled Highlight button is grey, not PDF.js's lavender; fonts are
 Tk's default; a comment is a separate note mark anchored to the highlight's quads (PDF.js
@@ -560,7 +917,7 @@ keeps the comment in the highlight annotation), so deleting the highlight leaves
 | Key / mouse | Action |
 |---|---|
 | mouse-up after selecting | float bubble (with the Highlight tool on: highlight at once) |
-| bubble buttons | Highlight; colour ▾ (picker), Comment, Delete |
+| bubble buttons | after a selection: Highlight, Add comment (9.r4); on a highlight: colour ▾ (picker), Comment, Delete |
 | toolbar Highlight without a selection | Highlight tool and pop-over on / off |
 | `Escape` | close the pop-over and the picker, dismiss the bubble (clears the selection and the selected mark) |
 
@@ -617,8 +974,8 @@ data comes from the verified navigation layer `Core.Doc.Nav` (task 4.2: visited 
 outline and name-tree cycles, every walk is bounded by the object count).
 
 * **Outline panel**: a tree in the left pane of a paned window (restyled after PDF.js in 9.7, see above; drag the sash to
-  resize). It opens automatically when the document has an outline; **F9**, the *Outline*
-  button or the right-button menu toggle it. Items come from `Nav.outline` (flat preorder list
+  resize). It opens automatically when the document has an outline (and no page mode says
+  otherwise); **F9**, the sidebar button or the right-button menu toggle the sidebar. Items come from `Nav.outline` (flat preorder list
   with depths; a depth more than one below the previous item is clamped so that every item has
   a parent), titles decoded as PDF text strings (`Links.textString`: UTF-16BE, UTF-8 or
   PDFDocEncoding; control and bidi-override characters become spaces; at most 500
@@ -661,7 +1018,8 @@ outline and name-tree cycles, every walk is bounded by the object count).
 
 | Key / mouse | Action |
 |---|---|
-| `F9` | show / hide the outline panel |
+| `F9` | show / hide the sidebar (outline, thumbnails) |
+| click on a thumbnail; Up / Down + Return in the thumbnails | go to that page |
 | click on an outline item | go to its destination |
 | pointer over a link | hand cursor, target in the status line |
 | click on a link | internal: jump; URI: confirmation dialog (copy the address) |
@@ -679,15 +1037,17 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `c/tk_shim.c` | Tcl interpreter, Tk init, `::safepdf::emit` → Lean callback, `Tk_PhotoPutBlock` from an RGBA `ByteArray`, event loop. Adapted from bib-lean's `c/tk_shim.c`. |
 | `SafePdf/Shell/App/Shim.lean` | `@[extern]` bindings and the exported dispatcher `safepdf_gui_dispatch`. Only the `viewer` executable may import it. |
 | `SafePdf/Shell/App/Tcl.lean`, `TclLemmas.lean` | Tcl scripts as data and the proof that `Tcl.quote` is injection-free (`parseWordStr_quote`, `parseScript_render`, …). Copied from bib-lean `BibLean/Gui/Tcl.lean` + `Tcl/Lemmas.lean`. Built by default (lib `SafePdfApp`). |
-| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, 9.2), view modes (9.3: spreads, paging by spread, page layout, visible and wanted pages, page at a point, scroll positions, fit box; theorems `mem_spreadPages`, `nextPage_spread`, `stack_pairwise`), the LRU page cache. |
+| `SafePdf/Shell/App/View.lean` | Tk-free viewing logic with `#guard` checks: zoom modes/steps/cap, C2 re-anchoring (`reanchor`, `reanchor_self`), Tcl number parsing, wheel scrolling across pages (`wheelStep`, `wheelPages`, 9.2, 9.r1), view modes (9.3: spreads, paging by spread, page layout, visible and wanted pages, page at a point, scroll positions, fit box; theorems `mem_spreadPages`, `nextPage_spread`, `stack_pairwise`), the LRU page cache. |
 | `SafePdf/Shell/App/Select.lean` | Tk-free selection and search logic with `#guard` checks: glyph cells in reading order (`cellsOf`, text equal to `Text.layout`'s), boxes, nearest glyph, drag range, word, copy text, highlight boxes, normalised search with hits mapped back to glyphs (`findAll_sound`). Lib `SafePdfApp`. |
 | `SafePdf/Shell/App/Links.lean` | Tk-free navigation logic with `#guard` checks: PDF text strings, URI display (`uriText_ascii`), destinations and their positions, page links with URIs, topmost link at a point, outline entries and treeview parents, page-label display and Ctrl+G lookup, back/forward history (`History.back_push`). |
 | `SafePdf/Shell/App/Menu.lean` | Tk-free command and menubar model with `#guard` checks: commands (label, accelerator, script, enabled rule), menus, entry indices (task 9.1); mark commands, colour cascades and the context menu's mark entries (task 9.4). |
 | `SafePdf/Shell/App/Marks.lean` | Tk-free model of highlights and notes with `#guard` checks: PDF.js colours, marks with stable ids and `/NM` names, quads and `/QuadPoints`, note icon boxes, the store (add, remove, recolour, edit, restore), hit-testing, the multiply blend into the page image (task 9.4). |
 | `SafePdf/Shell/App/Save.lean` | Tk-free save flow (task 9.5c) with `#guard` checks: marks → `Core.Write.Annots.Mark`, PDF dates, reading our marks back from a document, the read-back check, default target, atomic write. |
-| `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js, placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
-| `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7). |
-| `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows, tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
+| `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js (float bubble: Highlight and Add comment since 9.r4), placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
+| `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7), the view-mode drop-down's choices (`ViewChoice`, theorems `ofModes_modes`, `modes_ofModes`; task 9.r4). |
+| `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; | `SafePdf/Core/Doc/Attachments.lean` | Embedded files (task 9.r10; pure, total, bounded): the `/EmbeddedFiles` tree and `/FileAttachment` annotations, sanitized names and default file names, sizes, MIME types, dates, decoding under the limits; theorems `list_entries_le`, `clean_safe`, `clean_length_le`, `fileNameOf_noSlash`, `decode_size_le`; tests `Tests/Attachments.lean`. |
+| `SafePdf/Shell/App/Attach.lean` | Tk-free attachments-panel model with `#guard` checks: size column, tooltip, status text, refused save targets, the icon under a click (task 9.r10). |
+| `SafePdf/Shell/App/Sidebar.lean` | Tk-free sidebar model with `#guard` checks: the panel list and switcher buttons per content, the panel opened by page mode and by the toggle (9.r8, 9.r9), thumbnail sizes, layout, lazy band, eviction and keyboard steps (9.r9), the layers tree from `/Order`, checkbox states, locked rows and toggling (9.r11b), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
@@ -812,8 +1172,8 @@ back; Shift+wheel scrolls horizontally to the right edge and the page stays.
 The toolbar and sidebar (9.7) run in a fifth variant (`SAFEPDF_VIEWER_SMOKE_MODE=toolbar`,
 `Viewer.smokeToolbar`), once on the three-page labelled PDF with an outline and once on the
 two-page PDF without one. It checks: the packed widgets of the three toolbar groups (the
-sidebar toggle only with an outline); the sidebar open with an outline (panes `.ol .v`, toggle
-drawn pressed) and absent without (`.v`, toggle unmapped); the page field `i` / `(1 of 3)`
+sidebar toggle with any document since 9.r9); the sidebar open with an outline (panes `.ol .v`, toggle
+drawn pressed) and closed without (`.v`, the toggle opens it on the thumbnails); the page field `i` / `(1 of 3)`
 (labels) and `1` / `of 2`; generated clicks on ∨ and ∧ page and stop at the ends (∧ disabled on
 page 1); Enter in the field with the last page number jumps, `999` and `abc` revert to the
 current page, the first page's label jumps back, both jumps are in the history, leaving the
@@ -861,34 +1221,43 @@ carry `-time` and are spaced past Tk's double-click time where two land close to
 Saving (9.5c) runs in the variants `save`, `reopen` and `encrypted` (`Viewer.smokeSave`,
 `smokeReopen`, `smokeEncrypted`; questions and the Save As dialog are answered through
 `::safepdf::autoAnswer` / `::safepdf::autoPath`, the last question is kept in
-`::safepdf::lastAsk`). On a copy of the text PDF: a highlight on `world` and a note make the
-title start with `* ` and enable Save (menu entry and toolbar button); Quit and Ctrl+W
-answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` without a question and
-opens it (2 saved marks, no `*`, Save disabled; the highlight pixels are yellow from the
-renderer, no canvas note icon, the note text restored); a second Ctrl+S writes nothing; the
-saved highlight can be selected; a new highlight on `safe` + Ctrl+S appends
-to the same file (3 marks with distinct ids, read back strictly); Save As writes
-`saveas.pdf`; a new note and Ctrl+W answered No discards it. The `reopen` run on
-`text-annotated.pdf` restores the 3 marks (pixels, a click on the note's place opens its popup
-with the saved text), Save As onto the opened file answered No writes nothing and Yes
-appends, and Quit answered Yes saves one more note before quitting. The script then checks
-`qpdf --check` on the written files, that the original (and each saved revision) is a
-byte-for-byte prefix of the later file (`cmp -n`) and the original unchanged, that the final
-file has 5 revisions and each of its 5 mark annotations once, and that `mutool draw` shows the
-highlight (yellow pixels in the box of `world`). The `edit` run (9.5g, `Viewer.smokeEdit`) on
+`::safepdf::lastAsk`). On a copy of the text PDF (mode 640): a highlight on `world` and a
+note make the title start with `* ` and enable Save (menu entry and toolbar button); Quit,
+Ctrl+W and the window's close button (its `WM_DELETE_WINDOW` script, `::safepdf::quit`)
+answered Cancel keep everything and each asked the unsaved-changes question; Ctrl+S asks the
+first-overwrite question — Cancel writes nothing, Overwrite writes into `text.pdf` itself (its
+original bytes a prefix) and reopens it (2 saved marks, no `*`, Save disabled; the highlight
+pixels are yellow from the renderer, no canvas note icon, the note text restored); a second
+Ctrl+S writes nothing; the saved highlight can be selected; a new highlight on `safe` + Ctrl+S
+appends to the same file without a question (3 marks with distinct ids, read back strictly);
+Save As writes `saveas.pdf`; with a new note, Ctrl+S on a read-only `saveas.pdf` is refused
+and on a `saveas.pdf` changed on disk refused with the changed-on-disk question (file
+unchanged both times); Ctrl+W answered Don't Save closes and leaves `saveas.pdf` byte for byte
+as it was. The `reopen` run on `text.pdf` restores the 3 marks (pixels, a click on the note's
+place opens its popup with the saved text), Save As onto the opened file answered No writes
+nothing and Yes appends, and with one more note Quit answered Cancel keeps the window (the
+question asked) and Quit answered Save saves it before quitting. (Up to 9.5c the smoke's
+"quit did not save" check meant the same: the reopen run's Quit was answered Yes in the
+prompt; there was never a save on quit without the prompt, and 9.r2 keeps it that way.) The
+script then checks `qpdf --check` on the written files, that the original (and each saved
+revision) is a byte-for-byte prefix of the later file (`cmp -n`), that the overwritten file
+kept its mode 640 and no temporary file was left, that the final file has 5 revisions and
+each of its 5 mark annotations once, and that `mutool draw` shows the highlight (yellow
+pixels in the box of `world`). The `edit` run (9.5g, `Viewer.smokeEdit`) on
 a copy of that file deletes the whole-page highlight and the `safe` highlight, recolours the
 `world` highlight green (pixels follow at once from the preview) and gives it a comment, edits
-a note's text, saves into the opened file (4 marks, comment restored with its id, its icon
+a note's text, saves into the opened file (answered Overwrite; 4 marks, comment restored with its id, its icon
 drawn), then a third revision on top (blue, comment deleted: 3 marks); the script checks
 `qpdf --check`, the byte prefixes, no duplicate ids, and that `mutool draw` shows `world`
 green (then blue) and no tint in the box of `safe`. The `encrypted` run (RC4 fixture) saves a
-note: until 9.5f the status line shows the writer's refusal and nothing is written.
+note: until 9.5f the status line shows the writer's refusal before any question and the file
+stays byte for byte unchanged.
 
 Add text and Draw (9.9) run in the variant `editors` (`Viewer.smokeEditors`) on a copy of the
 text PDF with substitute fonts on: the Add text mode and pop-over; a click places a text box,
 typed text + Escape make a free-text mark; a double click edits it and a click elsewhere
 commits; the pop-over's red swatch and size slider (20) restyle it; Draw in blue at thickness
-4: two strokes form one drawing; Ctrl+S writes and reopens `text-annotated.pdf` (both read
+4: two strokes form one drawing; Ctrl+S (Overwrite) writes into and reopens `text.pdf` (both read
 back exactly; text pixels and a blue stroke pixel from the renderer); the text box dragged 50
 units right and saved; Delete and the drawing's bubble Delete remove both, saved (none left,
 white paper). The script checks `qpdf --check`, the byte prefixes, and that `mutool draw`
@@ -924,6 +1293,46 @@ page 3, one up back to 1|2. Even Spreads: page 1 alone, Next → 2|3 (Next disab
 highlight drawn. No Spreads: back to one frame. `SAFEPDF_VIEWER_SMOKE_MODE=scroll` is the
 benchmark above (not run by the script).
 
+The consolidated Phase 9 run (9.6, the M9 clause "a paper reads end-to-end with the wheel in
+every view mode; a highlight and a note survive close/reopen inside the PDF" as an automated
+check) is the variant `m9` (`Viewer.smokeM9`) followed by `m9-reopen` (`Viewer.smokeM9Reopen`,
+a fresh process). It needs no particular words, so the script runs it on two generated fixtures
+(three and four Helvetica pages, so that the last facing spread is once single and once a pair)
+and on real papers: `SAFEPDF_SMOKE_PAPERS` (space-separated paths; empty skips), by default the
+git-ignored `corpus/files/arxiv-1706.03762.pdf` when it exists (copy it from the corpus). The
+run checks: the menubar is attached with File / Edit / View / Go and every command of
+`Menu.Cmd.all` sits at its `Menu.locate` index with its label; the toolbar page box (Enter on
+the last page jumps, `abc` reverts, the first page's label goes back), ∨/∧ and the zoom
+drop-down (Page Width, Page Fit, Automatic Zoom); then, in each of the four view modes chosen
+through the View menu (Page Scrolling + No Spreads, Vertical Scrolling, Page Scrolling + Odd
+Spreads, Vertical Scrolling + Odd Spreads), from Home the wheel alone (`<MouseWheel>` −120 per
+notch, `m9WheelThrough`) until the view shows the bottom of the last spread: every spread is
+passed in order, (spread, view top) never goes back, the page box ends on a page of the last
+spread with its own label, the `yview` ends at 1. At Page Fit on page 1: a drag over the first
+word of five or more letters shows the float bubble, its Highlight makes the highlight (edit
+bubble shown); a note (context menu, top right); Add text with the pop-over's red swatch and
+size 16 (bottom left); Draw with blue, thickness 4, two strokes (bottom right). Ctrl+S (Overwrite) writes
+into the opened copy `FILE.pdf` (4 marks read back strictly), File → Close empties the window, `openFile`
+reopens it from disk: the four marks are restored with equal descriptions (`m9Desc`: kind,
+colour, text, rounded geometry), no canvas items (the renderer draws them all) and coloured
+pixels in the photo for each (yellow highlight and note icon, red text, blue strokes); File →
+Export annotations… writes `m9.xfdf`, every mark is deleted (no coloured pixel left), File →
+Import annotations… brings the same four back (`4 imported`). The fresh process on the saved
+file restores the same four with pixels. The script then checks `qpdf --check`, that the
+original is unchanged and a byte prefix of the saved file, and that `mutool draw` (72 dpi)
+shows each mark in its colour inside its box. On arxiv-1706.03762 (15 pages) the wheel passes
+pages 1…15 in 72 notches (single page, Automatic Zoom), 186 (continuous), spreads 1…8 in 7
+(facing) and 42 (continuous facing); the whole M9 pair runs in about 4 s.
+
+The `wheelflow` case (9.r1, `Viewer.smokeWheelFlow`, script case 1o) runs on the four-page M9
+fixture and the M9 papers, opened **without** `SAFEPDF_VIEWER_VIEW` (every other case of the
+script runs with `SAFEPDF_VIEWER_VIEW=single`, the view it was written for): the file must
+open in Vertical Scrolling, No Spreads (state and both radio variables); then the bursts
+described under *Wheel scrolling across pages* must reach page 5 (or the last page) in every
+view mode without going back, without a run of motionless events longer than the page-turn
+push (none in the continuous modes), and without a step longer than one event plus the
+carried push. About 12 s per file.
+
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
 popup.
@@ -952,6 +1361,284 @@ resources itself (control), lists `winfo interps` (only itself) and tries `send`
 interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A second run with
 `SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`.
 
+The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
+(X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`
+binding, no `::tk::mac::Quit`, Save tooltip `Save (Ctrl+S)`, Ctrl+A selects) and with
+`SAFEPDF_VIEWER_PLATFORM=aqua` (honoured only in smoke mode; it installs the macOS mapping
+on X11, where Tk's `Command` modifier is Meta): `Command-O`/`Command-S`/`Command-Shift-S`/
+`Command-Q`/`Command-+`/`Option-Left` labels, `<Command-Key-s>`, `<Command-Key-S>` and
+`<Shift-Command-Key-s>` bound to Save / Save As, `<Command-Key-q>` on `.` and in the find bar,
+`::tk::mac::Quit` = `::safepdf::emit quit`, tooltip `Save (⌘S)`, and a generated
+`<Command-Key-a>` selects all (status `… (⌘C copies)`). Both runs check the six icon images
+(16–512 px) and, when `xprop`/`xwininfo` are installed, that the toplevel's wrapper carries
+`_NET_WM_ICON` starting with `512, 512`.
+
+The `r4` case (9.r4, `Viewer.smokeR4`, script case 1q) runs in the default view on the text
+PDF, the outline PDF and the M9 papers. The view-mode drop-down: it starts on Vertical
+Scrolling, lists the four modes, sits right after `of N`; each entry, invoked, sets the
+scroll and spread variables of the View and `»` menus and redraws its icon (1, 2, 2 or 4
+page shapes); View → Even Spreads and `»` → Vertical Scrolling move its checked entry; Two
+Pages keeps even spreads. On the text PDF a drag over `world` shows the float bubble with
+`[highlight, comment]` inside the scroll region, its Add comment tooltip shows, and Add
+comment adds exactly one note anchored to the selection's quads with its popup open and the
+bubble gone. With an outline, in Single Page and Vertical Scrolling at Page Fit, the outline
+is closed and opened while `r4Probe` samples the first page frame's canvas and screen x at
+every `<Configure>` of the canvas and every 2 ms for 700 ms; the run of distinct values must
+be just start → end (an intermediate value fails: the flicker). It writes `toolbar.png`,
+`viewmenu.png`, `bubble.png` and `bubble-tip.png` when `import` is installed.
+
+The `opensettings` case (9.r8, `Viewer.smokeOpenSettings`, script case 1s) runs in the
+default view on generated five-page files with an outline, opened one after another with
+`openFile` (File → Open after its dialog), one line per file in `opensettings.txt`: every
+`/PageLayout` (state and View-menu variables; Even Spreads put page 1 alone on the right),
+`/PageMode` UseOutlines / UseNone / UseThumbs (outline open / closed / thumbnails open, no
+note since 9.r9),
+`/OpenAction [p3 /XYZ 0 792 1.5]` (page 3 at 150 %, its top at the window top), then Two Pages
++ Actual Size chosen and the file reopened with `keepView` (both kept), `[p1 /Fit]` + UseOutlines
+(Page Fit, outline), a GoTo to a named destination in a `/Names /Dests` tree (page 4, Page
+Width), JavaScript and URI open actions (page 1, Automatic Zoom, the "ignored (not executed)"
+note), HideToolbar + HideMenubar + HideWindowUI + DisplayDocTitle (toolbar, menubar and
+scroll bars gone, title from `/Info /Title`; Escape brings them back), TwoPageLeft + R2L
+(page 1 right of page 2), FullScreen + `/NonFullScreenPageMode /UseOutlines` (outline closed;
+Escape leaves full screen and opens it), FitWindow + CenterWindow at zoom 0.5 (window
+resized and centred), and last a file without settings: Vertical Scrolling, Automatic Zoom,
+page 1, outline, toolbar, its file name as title.
+
+The `thumbs` case (9.r9, `Viewer.smokeThumbs`, case 1u) runs on generated files, one line
+per step in `thumbs.txt` (`Viewer.thumbRow`: sidebar shown, panel, mapped view buttons,
+toggle, heading, thumbnails laid out / rendered / kept, visible, highlighted, selected, page,
+`::safepdf::thN` photos): `th-outline.pdf` (60 pages, an outline, page 5 `/Rotate 90`) opens
+on the outline with the Thumbnails and Document outline buttons and no thumbnail rendered; the
+Thumbnails button shows 60 frames with only the visible thumbnails plus the 3-page margin
+rendered (9 of 60 in the 1200×960 window); page 5's slot is 98×76 (rotated), page 1's
+98×127; a generated click on thumbnail 3 goes to page 3; Go to page 40 highlights thumbnail
+40 and scrolls it into view; Down, Down move the selection to 42 (the page stays 40), Return
+goes to 42; the panel scrolled to the end in ten steps never keeps more than 40 images (photos
+= kept); Rotate right lays the 60 thumbnails out rotated (page 1 98×76, page 5 98×127);
+`th-thumbs.pdf` (`/PageMode /UseThumbs`, no outline) opens on the thumbnails with only that
+button and no "not available" note; `th-plain.pdf` (3 pages, nothing) opens with the sidebar
+closed but the toggle shown, the toggle opens the thumbnails (3 rendered) and closes them.
+The `thumbperf` case (reported, not checked) reopens the corpus paper
+`arxiv-1706.03762.pdf` when present with the thumbnails panel through the event loop and
+prints the times to open, to the first thumbnail and to every visible one, the slowest Next
+while thumbnails render, a scroll through the whole panel, the most images kept and the
+memory (VmRSS / VmHWM). Measured (Xvfb, this sandbox): 15 pages — open 58 ms, first
+thumbnail 125 ms, all visible 295 ms, whole panel 286 ms, 15 kept, VmHWM 116 MiB (page renders included);
+a 384-page file (`qpdf` concatenation of the corpus's
+two NTSB reports and `arxiv-astro-ph_0603449`; the corpus's largest file has 173 pages) —
+open with the 768 thumbnail items 162 ms, first thumbnail 319 ms, all visible 495 ms, the
+slowest Next while thumbnails render 92 ms, the whole panel scrolled in 72 steps 11.5 s (384
+rendered, never more than 40 kept), VmHWM 154 MiB; `www.ntsb.gov-AAR0701.pdf` (173 pages) —
+first thumbnail 192 ms, all visible 360 ms, VmHWM 82 MiB.
+
+The `noteclose` case (9.r12, `Viewer.smokeNoteClose`, case 1t) runs on the text PDF and
+closes note popups without Save: a new note + Escape generated on the text widget (which has
+the focus) leaves no note and no canvas icon; typed text + Escape keeps the note with that
+text; the same note made saved, reopened by a click, cleared + Escape keeps its text and the
+document clean; an empty saved note reopened + Escape is removed and the title gets `* `; an
+empty comment on a highlight (Edit → Add note… with the highlight selected) is removed, the
+highlight stays; white space only on a selection is removed; the Cancel button and the
+`WM_DELETE_WINDOW` script behave as Escape (empty → removed, typed → saved); Add note… while
+an empty note's popup is open removes that note; Edit → Delete mark with the popup open
+closes it and a stale `noteClose` is ignored.
+
+The `attach` case (9.r10, `Viewer.smokeAttach`, case 1v) generates `att.pdf`
+(`/PageMode /UseAttachments`, an outline, an `/EmbeddedFiles` tree with kids holding a plain
+`hello.txt` with `/Desc` and `/Params`, a FlateDecode `data.bin` without `/Size` and an
+external file specification, and a file attachment annotation on page 2 named
+`../../etc/evil:name.txt` plus a right-to-left override), `outline.pdf` and `noatt.pdf`.
+It checks: the sidebar opens on the attachments panel with its Show Attachments and Show
+Document Outline buttons; the rows before any decoding (`data.bin ?`, `hello.txt 26 B`,
+`external.pdf —`, the hostile name without the override, `16 B`) and the tooltips (data.bin's
+stored size; hello.txt's description, type and dates); the tooltip probe (`attProbe`) turns
+`data.bin` into `10 KB`; Save attachment as… on every row writes exactly the generator's bytes
+(also compared with `pdfdetach -saveall` when installed), proposes `evil_name.txt`, and
+refuses the external file; the opened PDF, a read-only file, a read-only folder and a folder
+are refused and stay unchanged; the switcher and the toggle; a click on the annotation's icon
+(sidebar closed on the outline panel) opens the attachments panel on its row; `outline.pdf`
+has no Attachments button, nor has `noatt.pdf` (its sidebar has the thumbnails only).
+
+The `layers` case (9.r11b, `Viewer.smokeLayers`, case 1w) generates `oc.pdf` (`/PageMode
+/UseOC`, one page whose coloured squares and words belong to the groups Base ON, Extra OFF,
+Notes ON, the radio pair English ON / French OFF under the UTF-16 heading "Languages" with a
+right-to-left override, Locked (locked, nested under Notes by an unlabelled array), Orphan
+(ON, not in `/Order`), and an OCMD `AllOn` of Base and Extra), `oc-nomode.pdf`,
+`oc-noorder.pdf` and `plain.pdf` (`/UseOC` without `/OCProperties`), and runs on a copy
+(`saved.pdf`). It checks: the sidebar opens on the layers with the tree
+`Base ✓, Extra ☐, [Languages], English ✓, French ☐, Notes ✓, Locked ✓ (disabled),
+[Additional Layers], Orphan ✓` with Orphan hidden under its collapsed heading, no "not
+available" note; the page's pixel at each square and the search hits of each
+word; a thumbnail pixel; Extra on → its blue square, the OCMD's green one and `bravo`
+findable; French on → English off (pixels, hits); the locked checkbox and the `layer K` event
+change nothing; opening Additional Layers shows Orphan, which toggles off (its square white)
+and on again; collapsing the heading unmaps its checkboxes; the thumbnail shows the blue
+square; a note saved with Ctrl+S (Overwrite) — the reopen keeps the toggled state; opening the
+file again restores the defaults; `oc-nomode.pdf` has the Layers button with the sidebar
+closed, `oc-noorder.pdf` lists all seven groups by name (no Additional Layers heading), `plain.pdf` has no Layers button.
+The shell then checks that the saved file is an incremental update of `oc.pdf` whose appended
+bytes contain no `OCProperties`, `/OCGs`, `/ON`, `/OFF`, catalog or `/OCProperties` object,
+and runs `qpdf --check` on it.
+
+The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
+alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real
+`::safepdf::choose` dialog driven by generated keys (Return on the default, Tab-focus on
+Cancel + Return → Cancel, Escape, Space on Save As…; focus back on `.c`); Save As… dialog
+options (`-filetypes` only off aqua, `-defaultextension .pdf`, the file's folder, the
+proposed name); a 240-character name; `3453483.3454032-final` → `.pdf` added; `exists` with
+an `exists.pdf` present → Replace? answered No keeps it; a read-only file, a folder and a
+file in a read-only folder refused (the document still unsaved, Save enabled); a name with
+spaces, `$`, brackets, braces, quotes and non-ASCII saved and shown in the title; Export
+onto the opened PDF writes `NAME.pdf.xfdf` (the PDF unchanged), `notes` → `notes.xfdf`; the
+opened file deleted behind the viewer's back → Save asks the "no longer there" question and
+creates nothing. The shell then checks that no `*.tmp` file is left. Disk full was checked
+by hand (a 16 KiB tmpfs: `cannot save to f.pdf: resource exhausted (… no space left on
+device)`, the title keeps `* `, Quit → Save stays open with `quitting cancelled`, no
+temporary file); `ulimit -f` cannot simulate it (SIGXFSZ kills the process).
+
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
 cache keys at `lakefile.lean`).
+
+## M9 evidence (9.6, 9.10)
+
+Recorded 2026-11-20 on the worktree of tasks 9.6/9.10 (base c368bc9), Linux arm64, Xvfb.
+M9 reads: *a paper reads end-to-end with the wheel in every view mode; a highlight and a note
+survive close/reopen inside the PDF (C7 proved; the annotated file opens in
+Acrobat/Okular/pdf.js with the highlights visible, and in our strict parser unchanged);
+side-by-side screenshots of the same paper in our viewer and in Firefox's PDF.js show the same
+toolbar layout (sidebar only with an outline, page box with arrows, centred zoom, tools on the
+right) and the same selection bubble.*
+
+### Wheel end to end, close/reopen (automated: `scripts/viewer-smoke.sh`, case 1n)
+
+The `m9` / `m9-reopen` smoke runs (see "Smoke test" above) on the two fixtures and on
+`arxiv-1706.03762.pdf` (15 pages, an outline) pass:
+
+    wheel-single: seen=1,2,…,15 spreads=15 notches=72 monotone=true field=15 last=true bottom=true
+    wheel-continuous: seen=1,2,…,15 spreads=15 notches=186 monotone=true field=15 last=true bottom=true
+    wheel-facing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=7 monotone=true field=15 last=true bottom=true
+    wheel-cfacing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=42 monotone=true field=15 last=true bottom=true
+    saved: true false 4 4
+    closed: true 0 safe-pdf
+    reopened: true 4 4 false false
+    marks-reopened: highlight 0 yellow 1 | ink 0 2 [5, 5] 4 100 #0060DF | note 0 yellow M9 note ✓ [x] | text 0 M9 text 59 60 16 #D70022
+    pixels-reopened: hl=55 note=30 text=14 ink=10
+    export: exported 4 mark(s) to m9.xfdf
+    removed: 0 hl=0 note=0 text=0 ink=0
+    import: m9.xfdf: 4 imported, 0 already present, 0 skipped
+    (fresh process) restored: 4 4 false; pixels: hl=55 note=30 text=14 ink=10
+    mutool: coloured pixels per mark: {'hl': 371, 'note': 85, 'text': 152, 'ink': 628}
+
+(In facing mode at Automatic Zoom a whole spread fits the window, so one notch per spread.)
+
+### The annotated file in other readers
+
+The file is the `arxiv-1706.03762-annotated.pdf` the `m9` run wrote before 9.r2 (since 9.r2
+Save writes into the opened file: the run's copy `m9-arxiv…/arxiv….pdf` in the smoke's work
+directory, the original being the corpus file) (a highlight on
+`Provided`, a note, the free text `M9 text` in red, a blue two-stroke drawing; 3,533 bytes
+appended to the 2,215,272-byte original).
+
+* **Byte prefix, qpdf**: `cmp -n $(stat -c %s paper.pdf) paper.pdf paper-annotated.pdf` →
+  equal; `qpdf --check paper-annotated.pdf` → "No syntax or stream encoding errors found".
+* **Our strict parser, "unchanged"**: `inspect paper-annotated.pdf` → `open: strict`,
+  `revisions: 2`; `inspect --view resolve` → `5965 ok, 0 error(s)` (original: `5957 ok`).
+  `diff <(inspect --view objects paper.pdf) <(inspect --view objects paper-annotated.pdf)`
+  removes only the old definition of page 1 (`91 0 obj`, superseded by the update: the same
+  dictionary plus `/Annots [5958 0 R 5959 0 R 5960 0 R 5961 0 R]`) and adds the new objects
+  5958–5965; every other object's pretty-printed tree is identical. The general statement is
+  proved (`Spec.Write.c7`, `c7Update`, value level `c7Value'`/`c7ValueAnnots'`) and tested on
+  fixtures, encrypted fixtures and the corpus by `Tests/WriteIncremental.lean` ("every original
+  object … fetches identically", checks `original objects unchanged` / `objects not written
+  unchanged`) and `Tests/WriteAnnots.lean`.
+* **MuPDF**: `mutool draw -r 72 -o p1.png paper-annotated.pdf 1` draws all four marks (yellow
+  highlight, the yellow note icon, the red text, the blue strokes); the smoke script counts
+  their coloured pixels in each mark's box (above).
+* **Poppler** (Okular's PDF backend; Okular itself is not installed — 382 packages): `pdftoppm
+  -r 72 -f 1 -l 1 -png paper-annotated.pdf p` (poppler 25.03.0) draws all four marks the same
+  way.
+* **pdf.js**: Node 20.19.2 and npm from Debian (`sudo apt-get install nodejs npm`, system
+  tools of the sandbox, not project dependencies) and `pdfjs-dist@4.10.38` (published
+  2025-01-01) with its optional `@napi-rs/canvas` 0.1.100, installed with
+  `npm install --ignore-scripts pdfjs-dist@4.10.38` in a scratch directory outside the
+  repository. `node scripts/pdfjs-annots.mjs SCRATCH/node_modules/pdfjs-dist
+  paper-annotated.pdf p1.png` (`getDocument` + `page.getAnnotations()` on every page):
+
+      pdfjs 4.10.38: 15 pages
+      page 1: Highlight id=5958R color=255,255,152 rect=124.7,707.6,167.7,719.6 hasAppearance=true contents="" quads=1
+      page 1: Text id=5959R color=255,255,152 rect=566.7,727.5,586.7,747.5 hasAppearance=true contents="M9 note ✓ [x]"
+      page 1: FreeText id=5960R color=font:215,0,34 size:16 rect=59.4,34.6,115.8,60.2 hasAppearance=true contents="M9 text" textContent=["M9 text"]
+      page 1: Ink id=5961R color=0,96,223 rect=437.5,46.9,525.3,84.6 hasAppearance=true contents="" inkLists=2
+
+  Subtypes, colours (PDF.js yellow `#FFFF98`, red `#D70022`, blue `#0060DF`), contents and
+  geometry are ours; the sorted listing differs from the original file's only by these four
+  lines (the original's 113 `/Link` annotations are listed unchanged). pdf.js does not expose
+  `/NM`. Rendering page 1 through pdf.js (`AnnotationMode.ENABLE`, `standardFontDataUrl` set
+  to pdfjs-dist's `standard_fonts/`) shows all four marks; without `standardFontDataUrl` the
+  free text (non-embedded `/Helv` in its appearance) is not drawn in Node.
+* **Acrobat, Okular (GUI), Firefox's built-in PDF.js**: not available here. **Check for the
+  human**: open `arxiv-1706.03762-annotated.pdf` (re-create it with
+  `scripts/viewer-smoke.sh`, or by hand: highlight, note, Add text, Draw, Save) in Acrobat
+  Reader, Okular and Firefox and confirm the four marks are drawn, the note opens with its
+  text, and the highlight can be selected/edited.
+
+### Side by side with PDF.js (look check)
+
+`docs/viewer-reference/m9-side-by-side.png`: left the human's reference
+(`pdfjs-firefox.png`, 1915 × 938, Firefox PDF.js on Perceus, PLDI '21), right our viewer at
+1900 × 940 on `arxiv-1706.03762.pdf` (the Perceus PDF has no clear licence for the corpus, so
+the paper differs; layout only). Ours was taken with the smoke variant `m9-shot`
+(`Viewer.smokeM9Shot`: Highlight pop-over open, the abstract's first sentence dragged over in
+the tool mode → yellow highlight with its edit bubble; `ready.txt` reports `marks: 1`,
+`bubble: edit`, `popover: 1`, `field: 1 of 15`, `zoom: Automatic Zoom`, `sidebar: true`):
+
+    Xvfb :97 -screen 0 1900x940x24 -nolisten tcp &
+    DISPLAY=:97 SAFEPDF_VIEWER_SMOKE=out SAFEPDF_VIEWER_SMOKE_MODE=m9-shot \
+      SAFEPDF_VIEWER_GEOMETRY=1900x940 .lake/build/bin/viewer corpus/files/arxiv-1706.03762.pdf &
+    # when out/ready.txt exists:
+    DISPLAY=:97 import -window root ours.png
+    convert ref.png ours.png … +append m9-side-by-side.png   # ImageMagick, labels spliced on top
+
+What matches:
+
+* Toolbar layout: sidebar toggle at the far left (shown because there is an outline), ∧ / ∨
+  arrows, the editable page box `1` and `of N`; centred − | + and the `Automatic Zoom`
+  drop-down with its chevron; the tool buttons at the right, then Print, Save and `»`; the
+  active Highlight tool drawn on a round grey-lavender background.
+* Sidebar rule: the outline sidebar is open on load because the document has an outline, with
+  a "Document outline" title and indented, collapsible entries.
+* Highlight pop-over: right-aligned under the Highlight button, "Highlight color" with the same
+  five swatches (yellow selected with a ring, green, blue, pink, red), "Thickness" with a small
+  dot, a slider and a large dot, a divider, "Show all" with an on switch.
+* The highlight: PDF.js yellow multiplied over the text (glyphs stay black), outlined in blue
+  while selected; the edit bubble below it near the end of the selection with colour swatch +
+  chevron, comment and delete icons separated by dividers.
+* Page on a grey background, white paper, the same zoom choice.
+
+What differs:
+
+* We have a native menubar row (File / Edit / View / Go, 31 px) above the toolbar (Plan
+  Phase 9 asks for it); Firefox's own chrome is cropped from the reference.
+* Tool order and set: PDF.js (this Firefox build) shows Comment, Signature, Highlight, Add
+  text, Draw, Add image; we show Highlight, Comment, Add text, Draw, Add image (no Signature
+  tool). Our Print and Add image are disabled (greyed, post-M9); PDF.js's are enabled.
+* Spacing: PDF.js leaves a wider gap between the sidebar toggle and the arrows (arrows at
+  x ≈ 120 vs ours ≈ 63); the toolbars are about as tall (41 vs 40 px) but ours is lighter
+  (`#f9f9fa` vs Firefox's `#ebebef`).
+* Shapes: PDF.js uses rounded corners almost everywhere (page box, zoom pill, pop-over card
+  with a shadow, sidebar card, round slider thumb, pill-shaped edit bubble with a shadow); ours
+  has square or slightly rounded corners, a flat pop-over with a thin border, a square slider
+  thumb and a smaller, flatter bubble.
+* Sidebar: PDF.js's header has a view-switch button (thumbnails/outline, with chevron) and an
+  outline-options button; ours is a plain title. PDF.js expands nested entries (▼) here, ours
+  shows top-level entries with ▸ collapsed; PDF.js's sidebar is ≈ 230 px wide, ours ≈ 270 px.
+* Selection outline: PDF.js traces one dark-indigo outline around the union of the line
+  boxes; ours draws one brighter blue rectangle per line (they overlap at the line join).
+* Fonts and colours: PDF.js uses the system UI font (the reference is from macOS) at a
+  slightly larger size, icons in a purple-grey; ours DejaVu Sans via Tk/Xft, the zoom label
+  bold, icons near-black.
+* Anti-aliasing: the reference is a (HiDPI) browser screenshot with smooth text; our page is
+  drawn by our own rasterizer at 1× with greyscale anti-aliasing (slightly heavier glyph
+  edges), UI text by Xft.
+* The paper differs (Perceus vs Attention Is All You Need), so page content, positions and
+  the page count ("of 16" vs "of 15") are not comparable.

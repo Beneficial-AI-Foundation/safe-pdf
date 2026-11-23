@@ -11,8 +11,9 @@ The Tk-free description of the viewer's toolbar (unverified shell code, total, c
 colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon file is copied
 (icons are drawn with Tk canvas primitives, `docs/viewer.md`).
 
-* **Layout** (`layout`): left — sidebar toggle (shown only when the document has an outline),
-  previous / next page arrows, the page-number field and its "of N" label; centre — zoom out,
+* **Layout** (`layout`): left — sidebar toggle (shown with a document; task 9.r9: thumbnails need no outline),
+  previous / next page arrows, the page-number field and its "of N" label, then the view-mode
+  drop-down (task 9.r4, `ViewChoice`); centre — zoom out,
   zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
   document since task 9.4: with a selection it highlights it in the current colour, without
   one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
@@ -30,6 +31,12 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   label when the document has labels (as PDF.js: "iii" and "(3 of 120)"); Enter jumps to an
   exact label, else a page number, else a label ignoring case (`Links.gotoPage`); anything
   else reverts to the current page.
+* **View-mode drop-down** (`ViewChoice`, task 9.r4): a small rounded button next to the page
+  count with an icon of the current mode and a chevron; its menu offers Single Page, Vertical
+  Scrolling, Two Pages and Two Pages Scrolling (the scroll × spread modes of task 9.3, as the
+  scroll/spread pair `ViewChoice.modes`; a two-page choice keeps Even Spreads when they are
+  on, else uses Odd Spreads). The checked entry is `ViewChoice.ofModes` of the current scroll
+  and spread modes, so it follows the View menu and the `»` menu, and they follow it.
 * **Zoom drop-down** (`ZoomChoice`): Automatic Zoom, Actual Size, Page Fit, Page Width,
   50 %–400 %, showing the current choice; a zoom reached with − / + that is not in the list
   shows as a percentage (PDF.js's custom option). Automatic Zoom is PDF.js's `auto` scale: the
@@ -155,6 +162,82 @@ def ZoomChoice.zoom (c : ZoomChoice) (cw ch : Nat) (scaling pw ph : Rat) : Rat :
 -- Facing (task 9.3): Automatic Zoom fits the width of two portrait pages.
 #guard ZoomChoice.zoomWith .auto 1000 900 (4 / 3) 1224 792 true ==
   View.fitZoom true 1000 900 1224 792
+
+/-! ## View modes (task 9.r4) -/
+
+/-- A choice of the view-mode drop-down next to the page count (PDF.js's scroll × spread
+modes combined as four entries). -/
+inductive ViewChoice where
+  /-- One page at a time (Page Scrolling, No Spreads). -/
+  | single
+  /-- All pages stacked (Vertical Scrolling, No Spreads; the start-up default since 9.r1). -/
+  | vertical
+  /-- Two pages side by side at a time (Page Scrolling with spreads). -/
+  | two
+  /-- Two-page spreads stacked (Vertical Scrolling with spreads). -/
+  | twoScroll
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The entries of the drop-down, top to bottom. -/
+def ViewChoice.all : List ViewChoice := [.single, .vertical, .two, .twoScroll]
+
+/-- Text of the entry (and of the button's tooltip). -/
+def ViewChoice.label : ViewChoice → String
+  | .single => "Single Page"
+  | .vertical => "Vertical Scrolling"
+  | .two => "Two Pages"
+  | .twoScroll => "Two Pages Scrolling"
+
+/-- Value in Tcl (the radio value and the argument of `emit viewMode view KEY`); also the
+icon name `::safepdf::icon::view-KEY`. -/
+def ViewChoice.key : ViewChoice → String
+  | .single => "single"
+  | .vertical => "vertical"
+  | .two => "two"
+  | .twoScroll => "two-scroll"
+
+/-- Parses a `key`. -/
+def ViewChoice.ofKey (s : String) : Option ViewChoice :=
+  ViewChoice.all.find? (·.key == s)
+
+/-- The choice that the scroll and spread modes show. -/
+def ViewChoice.ofModes : View.ScrollMode → View.SpreadMode → ViewChoice
+  | .page, .none => .single
+  | .vertical, .none => .vertical
+  | .page, _ => .two
+  | .vertical, _ => .twoScroll
+
+/-- The scroll and spread modes for choice `c` when the spread mode is `sp` now: a two-page
+choice keeps Even Spreads when they are on, else takes Odd Spreads. -/
+def ViewChoice.modes (c : ViewChoice) (sp : View.SpreadMode) : View.ScrollMode × View.SpreadMode :=
+  let two : View.SpreadMode := if sp == .even then .even else .odd
+  match c with
+  | .single => (.page, .none)
+  | .vertical => (.vertical, .none)
+  | .two => (.page, two)
+  | .twoScroll => (.vertical, two)
+
+/-- Choosing an entry checks that entry (the menus stay in sync). -/
+theorem ViewChoice.ofModes_modes (c : ViewChoice) (sp : View.SpreadMode) :
+    ViewChoice.ofModes (c.modes sp).1 (c.modes sp).2 = c := by
+  cases c <;> cases sp <;> rfl
+
+/-- Choosing the entry that is already checked changes nothing. -/
+theorem ViewChoice.modes_ofModes (sc : View.ScrollMode) (sp : View.SpreadMode) :
+    (ViewChoice.ofModes sc sp).modes sp = (sc, sp) := by
+  cases sc <;> cases sp <;> rfl
+
+#guard ViewChoice.all.map ViewChoice.label ==
+  ["Single Page", "Vertical Scrolling", "Two Pages", "Two Pages Scrolling"]
+#guard ViewChoice.all.all fun c => ViewChoice.ofKey c.key == some c
+#guard ViewChoice.ofKey "x" == none
+-- The default view (9.r1: Vertical Scrolling, no spreads) shows as Vertical Scrolling; the
+-- `SAFEPDF_VIEWER_VIEW` names map to the four entries.
+#guard ViewChoice.ofModes .vertical .none == .vertical
+#guard ["single", "continuous", "facing", "continuous-facing"].filterMap
+  (fun k => (View.viewModeOf k).map fun (a, b) => ViewChoice.ofModes a b) ==
+  [.single, .vertical, .two, .twoScroll]
+#guard ViewChoice.two.modes .even == (.page, .even) && ViewChoice.two.modes .none == (.page, .odd)
 
 /-! ## Page field -/
 
@@ -285,11 +368,12 @@ def Button.enabled (c : Ctx) (b : Button) : Bool :=
   | .tool t => t.enabled c
   | .more => true
 
-/-- Whether the button is shown in `c`: the sidebar toggle only when the document has an
-outline (PDF.js hides the outline view without one); all others always. -/
+/-- Whether the button is shown in `c`: the sidebar toggle only with a document (task 9.r9:
+every document has the thumbnails panel, so an outline is no longer needed); all others
+always. -/
 def Button.visible (c : Ctx) (b : Button) : Bool :=
   match b.act with
-  | .cmd .outline => c.hasDoc && c.hasOutline
+  | .cmd .outline => c.hasDoc
   | _ => true
 
 /-- An item of the toolbar. -/
@@ -302,6 +386,8 @@ inductive Item where
   | pageField
   /-- The zoom drop-down. -/
   | zoomBox
+  /-- The view-mode drop-down (task 9.r4, `ViewChoice`). -/
+  | viewBox
   deriving DecidableEq, Repr, Inhabited
 
 /-- The three groups of the toolbar: Tk path of the frame and the items, left to right. -/
@@ -312,7 +398,8 @@ def layout : List (String × List Item) :=
        .button ⟨".bar.prev", "up", "Previous page", .cmd .prevPage⟩,
        .sep ".bar.s1",
        .button ⟨".bar.next", "down", "Next page", .cmd .nextPage⟩,
-       .pageField]),
+       .pageField,
+       .viewBox]),
     (".bar.m",
       [.button ⟨".bar.zout", "minus", "Zoom out", .cmd .zoomOut⟩,
        .sep ".bar.s2",
@@ -398,9 +485,9 @@ def states (c : Ctx) : List Bool :=
     [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.comment",
      ".bar.text", ".bar.draw", ".bar.more"] &&
   buttons.all (·.visible c)
--- No outline: the toggle is hidden.
+-- No outline: the toggle still shows (thumbnails, task 9.r9).
 #guard let c : Ctx := { hasDoc := true, page := 1, pages := 3 }
-  (buttons.filter (!·.visible c)).map (·.path) == [".bar.sidebar"]
+  buttons.all (·.visible c) && (buttons.filter (·.enabled c)).any (·.path == ".bar.sidebar")
 -- Save follows the unsaved marks.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !(buttons.filter (·.enabled c)).any (·.path == ".bar.save") &&

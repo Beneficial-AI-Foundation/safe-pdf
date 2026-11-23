@@ -329,39 +329,27 @@ def inheritable {σ : Type} (src : Source σ) (k : Name) : Nat → Dict → σ �
         | (.dict pd, s) => inheritable src k f pd s
         | (_, s) => (false, s)
 
-/-! ### Optional content of annotations (task 8.3c; §8.11, MuPDF `pdf_is_ocg_hidden`)
+/-! ### Optional content of annotations (tasks 8.3c, 9.r11a; §8.11)
 
 An annotation whose `/OC` names an optional content group (or membership dictionary) that is
-hidden in the default configuration is not drawn (MuPDF `pdf_process_annot`, usage "View").
-The configuration is read like `pdf_read_ocg` + `pdf_select_layer_config(doc, 0)`: the catalog's
-`/OCProperties`, its `/OCGs` (each initially ON), the configuration `/Configs [0]` if present,
-else `/D` (neither: no optional content at all, as MuPDF's "broken configuration" path);
-`/BaseState /OFF` turns every group off (anything else: on), then `/ON` and `/OFF` (later wins);
-the configuration's `/Intent` is kept.
+hidden is not drawn (as MuPDF `pdf_process_annot` and PDF.js, usage "View"). Since task 9.r11a
+the visibility is the page content's (`Doc.OptionalContent`): the state is the document's
+default configuration `/OCProperties /D` (`Doc.OptionalContent.defaultState`: `/BaseState`,
+`/ON`, `/OFF`, a group's `/Usage /View /ViewState /OFF`), or the state a caller (the layers
+panel) passes to `docAnnots`; membership dictionaries follow §8.11.2.2 (`/VE` first, then `/P`
+over `/OCGs`). Before 9.r11a this followed MuPDF's `pdf_is_ocg_hidden` literally (its
+`/Configs [0]` choice, its `combine` arithmetic for `AllOn`/`AnyOff` arrays, `/VE` always
+visible, group intents); the specification and PDF.js are followed now, so content and
+annotations agree and a layers panel controls both. -/
 
-`ocHidden` follows `pdf_is_ocg_hidden_imp`: no groups described → visible; a name (the
-annotation has no resource dictionary) or nothing → visible; an `/OCG` is hidden when its
-`/Intent` (name, array, or absent = `View`) is not included by the configuration's intent, else
-by `/Usage /View /ViewState` (`/OFF` hidden, `/ON` visible), else by its default state (groups
-are matched by reference, not resolved, as MuPDF); an `/OCMD` with an array `/VE` is visible
-(MuPDF's FIXME), else `/P` (`AllOn`, `AnyOff`, `AllOff`, default `AnyOn`) over `/OCGs` (an array,
-or a single group) with MuPDF's literal `combine` arithmetic, which differs from §8.11.2.2 for
-arrays: `AllOn` is visible when any group is on, `AnyOff` hidden when any group is on
-(pixel-checked against `mutool draw`). Recursion depth is bounded by `maxOCDepth` (MuPDF: a cycle check; a cycle
-or exhausted depth is visible). At most `maxOCGs` groups are read. -/
+/-- Most nesting levels of membership dictionaries followed by default (`Limits.maxOCDepth`). -/
+def maxOCDepth : Nat := ({} : Limits).maxOCDepth
 
-/-- Most `/OCGs` entries read (local cap). -/
-def maxOCGs : Nat := 4096
-
-/-- Most nesting levels of membership dictionaries followed (local cap). -/
-def maxOCDepth : Nat := 32
-
-/-- The default optional-content configuration (`pdf_ocg_descriptor`). -/
+/-- Document-level data read once per page for the annotations: the optional content state and
+the catalog's `/AcroForm /DA`. -/
 structure OCDesc where
-  /-- The `/OCGs` entries (as written: references) with their state (`true` = ON). -/
-  ocgs : List (PdfObject × Bool) := []
-  /-- The configuration's `/Intent`, resolved one level (`null` when absent). -/
-  intent : PdfObject := .null
+  /-- The optional content visibility state (`Doc.OptionalContent.State`). -/
+  state : Doc.OptionalContent.State := {}
   /-- Not optional content, but document-level data read with it (task 8.3e): the bytes of the
   catalog's `/AcroForm /DA` (empty when absent or not a string), the default appearance of a
   FreeText without an inheritable `/DA` (`pdf_annot_default_appearance`). -/
@@ -377,121 +365,25 @@ def resolveOpt {σ : Type} (src : Source σ) (s : σ) : Option PdfObject → Pdf
   | none => (.null, s)
   | some o => Run.resolve src s o
 
-/-- The default configuration from the catalog `cat` (see the section doc), without `acroDA`. -/
-def readOCConfig {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
-  match resolveOpt src s (Dict.get? cat (nm "OCProperties")) with
-  | (.dict prop, s) =>
-    let (groups, s) := match resolveOpt src s (Dict.get? prop (nm "OCGs")) with
-      | (.array xs, s) => (xs.take maxOCGs, s)
-      | (_, s) => ([], s)
-    let (cfg0, s) := match resolveOpt src s (Dict.get? prop (nm "Configs")) with
-      | (.array xs, s) => (xs[0]?, s)
-      | (_, s) => (none, s)
-    match cfg0.or (Dict.get? prop (nm "D")) with
-    | none => ({}, s)
-    | some c =>
-      let (cd, s) := Run.dictOf src s c
-      let (intent, s) := resolveOpt src s (Dict.get? cd (nm "Intent"))
-      let (base, s) := nameOf src s (Dict.get? cd (nm "BaseState"))
-      let keys := fun (s : σ) (k : String) =>
-        match resolveOpt src s (Dict.get? cd (nm k)) with
-        | (.array xs, s) => (xs.filterMap refKey, s)
-        | (_, s) => ([], s)
-      let (onK, s) := keys s "ON"
-      let (offK, s) := keys s "OFF"
-      let st0 := base != some (nm "OFF")
-      let state := fun (o : PdfObject) =>
-        match refKey o with
-        | some k => if offK.contains k then false else if onK.contains k then true else st0
-        | none => st0
-      ({ ocgs := groups.map fun o => (o, state o), intent }, s)
-  | (_, s) => ({}, s)
-
-/-- **Read the document-level data** of the catalog `cat`: the default optional-content
-configuration (`readOCConfig`) and the `/AcroForm /DA` bytes (`pdf_dict_getl(trailer, Root,
-AcroForm, DA)`, `pdf_to_str_buf`: anything but a string is empty). -/
-def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) : OCDesc × σ :=
-  let (oc, s) := readOCConfig src s cat
+/-- **Read the document-level data** of the catalog `cat`: the default optional content state
+(`Doc.OptionalContent.defaultState`) and the `/AcroForm /DA` bytes (`pdf_dict_getl(trailer,
+Root, AcroForm, DA)`, `pdf_to_str_buf`: anything but a string is empty). -/
+def readOC {σ : Type} (src : Source σ) (s : σ) (cat : Dict) (limits : Limits := {}) : OCDesc × σ :=
+  let (st, s) := Doc.OptionalContent.defaultState (Run.resolve src) limits s cat
   let (da, s) := match resolveOpt src s (Dict.get? cat (nm "AcroForm")) with
     | (.dict af, s) => match resolveOpt src s (Dict.get? af (nm "DA")) with
       | (.string b, s) => (b, s)
       | (_, s) => ([], s)
     | (_, s) => ([], s)
-  ({ oc with acroDA := da }, s)
+  ({ state := st, acroDA := da }, s)
 
-/-- `ocg_intents_include`: whether intent `n` is included by the configuration's intent. -/
-def intentIncludes (desc : PdfObject) (n : Name) : Bool :=
-  if n = nm "All" then true else
-  match desc with
-  | .null => n = nm "View"
-  | .name i => i = nm "All" || i = n
-  | .array xs => xs.any fun x => match x with
-    | .name i => i = nm "All" || i = n
-    | _ => n = nm ""
-  | _ => false
-
-/-- The `/P` policy of a membership dictionary as MuPDF's `combine` bits (bit 0: AND, bit 1:
-true means off). -/
-def combineOf (p : Option Name) : Nat :=
-  if p = some (nm "AllOn") then 1 else if p = some (nm "AnyOff") then 2
-  else if p = some (nm "AllOff") then 3 else 0
-
-/-- **Whether optional content `o` is hidden** (usage "View"; see the section doc), following
-membership dictionaries at most `fuel` levels deep. -/
-def ocHidden {σ : Type} (src : Source σ) (desc : OCDesc) : Nat → PdfObject → σ → Bool × σ
-  | 0, _, s => (false, s)
-  | f + 1, o, s =>
-    if desc.ocgs.isEmpty then (false, s) else
-    match o with
-    | .null => (false, s)
-    | .name _ => (false, s)
-    | _ =>
-      match Run.resolve src s o with
-      | (.dict d, s) =>
-        let (ty, s) := nameOf src s (Dict.get? d (nm "Type"))
-        if ty = some (nm "OCG") then
-          let dflt := match refKey o with
-            | some k => match desc.ocgs.find? (fun e => refKey e.1 == some k) with
-              | some e => !e.2
-              | none => false
-            | none => false
-          let (it, s) := resolveOpt src s (Dict.get? d (nm "Intent"))
-          let ok := match it with
-            | .name n => intentIncludes desc.intent n
-            | .array xs => xs.any fun x => match x with
-              | .name n => intentIncludes desc.intent n
-              | _ => intentIncludes desc.intent (nm "")
-            | _ => intentIncludes desc.intent (nm "View")
-          if !ok then (true, s) else
-          match resolveOpt src s (Dict.get? d (nm "Usage")) with
-          | (.dict ud, s) =>
-            let (vd, s) := match Dict.get? ud (nm "View") with
-              | some x => Run.dictOf src s x
-              | none => ([], s)
-            let (es, s) := nameOf src s (Dict.get? vd (nm "ViewState"))
-            if es = some (nm "OFF") then (true, s) else if es = some (nm "ON") then (false, s)
-            else (dflt, s)
-          | (_, s) => (dflt, s)
-        else if ty = some (nm "OCMD") then
-          match resolveOpt src s (Dict.get? d (nm "VE")) with
-          | (.array _, s) => (false, s)
-          | (_, s) =>
-            let (p, s) := nameOf src s (Dict.get? d (nm "P"))
-            let cb := combineOf p
-            let flip := fun (h : Bool) => if cb % 2 == 0 then !h else h
-            let raw := (Dict.get? d (nm "OCGs")).getD .null
-            match Run.resolve src s raw with
-            | (.array xs, s) =>
-              let (on, s) := xs.foldl (fun (acc : Bool × σ) x =>
-                let (h, s) := ocHidden src desc f x acc.2
-                let h := flip h
-                (if cb / 2 % 2 == 1 then acc.1 && h else acc.1 || h, s)) (cb % 2 == 1, s)
-              (!on, s)
-            | (_, s) =>
-              let (h, s) := ocHidden src desc f raw s
-              (!(flip h), s)
-        else (false, s)
-      | (_, s) => (false, s)
+/-- **Whether optional content `o` is hidden** in the state of `desc`
+(`Doc.OptionalContent.visible` with `fuel`): nothing is hidden when no group is known. -/
+def ocHidden {σ : Type} (src : Source σ) (desc : OCDesc) (fuel : Nat) (o : PdfObject) (s : σ) :
+    Bool × σ :=
+  if desc.state.known.isEmpty then (false, s) else
+  let r := Doc.OptionalContent.visible (Run.resolve src) desc.state fuel false s o
+  (!r.1, r.2)
 
 /-- A normalised rectangle from four numbers. -/
 def rectOf (o : PdfObject) : Option RBox :=
@@ -2616,7 +2508,7 @@ def pageAnnots {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (pd page
   let (c, s) := collect src s pd oc rot
   let (roots, s) := apRoots src s c.drawn
   let (fonts, s) := loadAnnotFonts limits src s pageFonts roots
-  let st := runAppearances (Text.textEnv limits src fonts) bud pageRes c.drawn s ()
+  let st := runAppearances (Text.textEnv limits src fonts oc.state) bud pageRes c.drawn s ()
   (⟨st.items, fonts, roots, c, st.warnings, st.ops, st.forms, st.truncated⟩, st.s)
 
 /-- **Bounds of `pageAnnots`**: at most `maxAnnots` annotations drawn, at most `bud.ops`
@@ -2634,10 +2526,14 @@ theorem pageAnnots_bounds {σ : Type} (limits : Limits) (src : Source σ) (s : �
 is the page's font table (`Text.PageText.fonts`), `bud` what is left of the page's operator
 and form budgets. -/
 def docAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (pageFonts : Text.FontTable)
-    (bud : Budget) (budget : Filter.Budget) : AnnotPage × Filter.Budget :=
+    (bud : Budget) (budget : Filter.Budget) (ocs : Option Doc.OptionalContent.State := none) :
+    AnnotPage × Filter.Budget :=
   let src := Text.docSource limits doc
   let (pd, b) := Run.dictOf src budget (.ref page.num page.gen)
-  let (oc, b) := readOC src b doc.catalog
+  let (oc, b) := readOC src b doc.catalog limits
+  let oc := match ocs with
+    | some st => { oc with state := st }
+    | none => oc
   pageAnnots limits src b pd (page.resources.getD []) pageFonts bud oc page.rotate
 
 /-- **The shared budget** (task 8.3b): what the page run `pt` left of `Limits.maxOpsPerPage`
@@ -2654,7 +2550,7 @@ theorem docAnnots_shared_ops (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
   dsimp only [docAnnots]
   generalize Run.dictOf (Text.docSource limits doc) b (.ref page.num page.gen) = r
   obtain ⟨pd, b'⟩ := r
-  generalize readOC (Text.docSource limits doc) b' doc.catalog = q
+  generalize readOC (Text.docSource limits doc) b' doc.catalog limits = q
   obtain ⟨oc, b''⟩ := q
   have := (pageAnnots_bounds limits (Text.docSource limits doc) b'' pd
     (page.resources.getD []) pt.fonts (Budget.after limits pt) oc page.rotate).2.1
@@ -2681,12 +2577,14 @@ theorem withAnnots_glyphs (o : Text.Options) (pt : Text.PageText) (ap : AnnotPag
 run (`Text.extractDocPage`), then the annotations under the shared budget, combined by
 `withAnnots`. -/
 def extractDocPageAnnots (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
-    (budget : Filter.Budget) (o : Text.Options := {}) :
+    (budget : Filter.Budget) (o : Text.Options := {})
+    (oc : Option Doc.OptionalContent.State := none) :
     (Except Error Text.PageText) × Filter.Budget :=
-  match Text.extractDocPage limits doc page budget o with
+  let (st, budget) := Text.ocStateFor limits doc budget oc
+  match Text.extractDocPage limits doc page budget o (some st) with
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
-    let (ap, b) := docAnnots limits doc page pt.fonts (Budget.after limits pt) b
+    let (ap, b) := docAnnots limits doc page pt.fonts (Budget.after limits pt) b (some st)
     (.ok (withAnnots (o.forPage page) pt ap), b)
 
 /-! ## 6. Checks -/

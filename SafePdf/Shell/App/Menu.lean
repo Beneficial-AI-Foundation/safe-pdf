@@ -1,3 +1,5 @@
+import SafePdf.Shell.App.Tcl
+
 /-!
 # Viewer commands and the menubar model (task 9.1; Plan.md §6 Phase 9 "Menu bar", §8 native app, §10 `SafePdf/Shell/`)
 
@@ -11,7 +13,7 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   marks —, Import annotations… / Export annotations… — XFDF, task 9.11 —, Close, Quit; Quit goes through the viewer, which asks about unsaved marks), Edit (Copy, Select all, Highlight
   selection, the Highlight colour cascade, Add note…, Delete mark; marks: task 9.4; the check
   entries Highlight tool and Show all highlights: task 9.8; Find…), View
-  (Outline, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
+  (Sidebar, zoom in/out, actual size, fit page/width, rotate, and the view modes of task 9.3 as
   two radio groups after PDF.js: Page / Vertical Scrolling, No / Odd / Even Spreads), Go (previous/next/first/last
   page, Go to page…, Back, Forward). The viewer builds the Tk menus from this list
   (`Viewer.buildMenus`) and keeps every entry's `-state` in step with `Cmd.enabled`
@@ -23,6 +25,9 @@ and an enabled rule over a small view of the viewer state (`Ctx`).
   (Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+W, Ctrl+Q, Ctrl+C, Ctrl+A, Ctrl+F, F9, `+`, `-`, `0`, `f`, `w`, `r`, `R`,
   PageUp/PageDown, Home/End, Ctrl+G, Alt+Left/Right, `h`, Delete); a menu accelerator is only a
   label in Tk.
+* **Platform keys** (task 9.r3, `Platform`, `Key`, `platformScript`): on macOS every Ctrl
+  binding gets its Command twin and the labels read `Command-S` (drawn ⌘S); on X11/Windows
+  nothing changes.
 * **Context menu** (right button): Copy, Select all, Find…, then the mark entries
   `popupMarks` — Highlight (colour cascade), Add note… (at the clicked point, `Cmd.popScript`),
   Delete mark (task 9.4).
@@ -37,7 +42,8 @@ namespace SafePdf.Shell.App.Menu
 inductive Cmd where
   /-- Open a file (dialog). -/
   | openFile
-  /-- Save the unsaved marks into the PDF (task 9.5c: `FILE-annotated.pdf`). -/
+  /-- Save the unsaved marks into the opened PDF file, which is overwritten after a
+  confirmation (task 9.r2; task 9.5c wrote `FILE-annotated.pdf`). -/
   | save
   /-- Save the document with its marks to a chosen file (task 9.5c). -/
   | saveAs
@@ -66,7 +72,8 @@ inductive Cmd where
   | hlTool
   /-- Show or hide all highlights (task 9.8, the pop-over's "Show all"). -/
   | showAll
-  /-- Show/hide the outline panel. -/
+  /-- Show/hide the sidebar (outline, thumbnails, …; task 9.r9: every document has
+  thumbnails, so it works without an outline too). -/
   | outline
   /-- Zoom in one step. -/
   | zoomIn
@@ -133,7 +140,7 @@ def Cmd.label : Cmd → String
   | .deleteMark => "Delete mark"
   | .hlTool => "Highlight tool"
   | .showAll => "Show all highlights"
-  | .outline => "Outline"
+  | .outline => "Sidebar"
   | .zoomIn => "Zoom in"
   | .zoomOut => "Zoom out"
   | .actualSize => "Actual size"
@@ -154,38 +161,156 @@ def Cmd.label : Cmd → String
   | .back => "Back"
   | .forward => "Forward"
 
-/-- Accelerator text shown in the menu (the key binding itself lives in the setup script). -/
-def Cmd.accel : Cmd → String
-  | .openFile => "Ctrl+O"
-  | .save => "Ctrl+S"
-  | .saveAs => "Ctrl+Shift+S"
-  | .importXfdf | .exportXfdf => ""
-  | .close => "Ctrl+W"
-  | .quit => "Ctrl+Q"
-  | .copy => "Ctrl+C"
-  | .selectAll => "Ctrl+A"
-  | .find => "Ctrl+F"
-  | .highlight => "H"
-  | .addNote => ""
-  | .deleteMark => "Delete"
-  | .hlTool => ""
-  | .showAll => ""
-  | .outline => "F9"
-  | .zoomIn => "+"
-  | .zoomOut => "-"
-  | .actualSize => "0"
-  | .fitPage => "F"
-  | .fitWidth => "W"
-  | .rotateCw => "R"
-  | .rotateCcw => "Shift+R"
-  | .scrollPage | .scrollVertical | .spreadNone | .spreadOdd | .spreadEven => ""
-  | .prevPage => "PageUp"
-  | .nextPage => "PageDown"
-  | .firstPage => "Home"
-  | .lastPage => "End"
-  | .gotoPage => "Ctrl+G"
-  | .back => "Alt+Left"
-  | .forward => "Alt+Right"
+/-! ## Keys per platform (task 9.r3)
+
+On macOS (Tk's `aqua` windowing system) every accelerator uses the Command key: each
+binding with the primary modifier (Control) gets its Command twin, and menu labels take
+Tk's aqua accelerator syntax (`Command-S`, `Command-Shift-S`, `Option-Left`), which Tk's
+aqua menus draw as ⌘S, ⇧⌘S, ⌥←. Elsewhere (X11, Windows) nothing changes: Control
+bindings and `Ctrl+S` labels. A Tk menu's accelerator is only a label on every platform
+(on aqua Tk ignores the key equivalents of its own menus and leaves the keys to the
+bindings, `tkMacOSXMenu.c` `tkMenuItemInvoke:`), so the bindings below are what makes the
+keys work. -/
+
+/-- The windowing system the key mapping is for (`tk windowingsystem`). -/
+inductive Platform where
+  /-- macOS (`aqua`): Command is the accelerator modifier. -/
+  | aqua
+  /-- X11 or Windows (`x11`, `win32`): Control. -/
+  | other
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The platform of a `tk windowingsystem` answer. -/
+def Platform.ofWindowingSystem (ws : String) : Platform :=
+  if ws.trimAscii.toString == "aqua" then .aqua else .other
+
+/-- Tk modifier names that act as the primary accelerator modifier: Control everywhere,
+and Command too on aqua (the Control bindings stay, so nothing a user typed before breaks). -/
+def Platform.primaryMods : Platform → List String
+  | .aqua => ["Control", "Command"]
+  | .other => ["Control"]
+
+/-- A key as the user presses it: modifiers, the Tk keysym and the key's name in labels. -/
+structure Key where
+  /-- With the primary modifier (Ctrl, ⌘ on macOS). -/
+  primary : Bool := false
+  /-- With Shift. -/
+  shift : Bool := false
+  /-- With Alt (Option on macOS). -/
+  alt : Bool := false
+  /-- Tk keysym; a letter in lower case. -/
+  sym : String
+  /-- The key's name in accelerator labels (`O`, `+`, `F9`, `PageUp`, `Left`). -/
+  shown : String
+  deriving DecidableEq, Repr, Inhabited
+
+/-- A one-letter keysym. -/
+def isLetterSym (s : String) : Bool :=
+  s.length == 1 && s.all Char.isAlpha
+
+/-- The accelerator label of a key: `Ctrl+Shift+S`, `Alt+Left` on X11/Windows (as before
+task 9.r3); `Command-Shift-S`, `Option-Left` on aqua (Tk's aqua accelerator modifier
+names, drawn as ⌘ ⇧ ⌥ glyphs). -/
+def Key.label (p : Platform) (k : Key) : String :=
+  match p with
+  | .other =>
+    (if k.primary then "Ctrl+" else "") ++ (if k.shift then "Shift+" else "") ++
+      (if k.alt then "Alt+" else "") ++ k.shown
+  | .aqua =>
+    (if k.primary then "Command-" else "") ++ (if k.shift then "Shift-" else "") ++
+      (if k.alt then "Option-" else "") ++ k.shown
+
+/-- The Tk event sequences of a key with the primary modifier (none for other keys: their
+bindings do not depend on the platform). A shifted letter is bound by its upper-case keysym
+(`<Control-Key-S>`, as before); its Command twin also as `<Shift-Command-Key-s>`, in case
+Tk reports the unshifted keysym with Command held. Tk runs at most one binding per tag for
+an event, so overlapping sequences never run a command twice. -/
+def Key.sequences (p : Platform) (k : Key) : List String :=
+  if !k.primary then [] else
+  let alt := if k.alt then "Alt-" else ""
+  p.primaryMods.flatMap fun m =>
+    if k.shift && isLetterSym k.sym then
+      s!"<{alt}{m}-Key-{k.sym.toUpper}>" ::
+        (if m == "Command" then [s!"<Shift-{alt}{m}-Key-{k.sym}>"] else [])
+    else if k.shift then [s!"<Shift-{alt}{m}-Key-{k.sym}>"]
+    else [s!"<{alt}{m}-Key-{k.sym}>"]
+
+/-- A key with the primary modifier. -/
+def primaryKey (sym shown : String) (shift : Bool := false) : Key :=
+  { primary := true, shift, sym, shown }
+
+/-- A key without modifiers. -/
+def plainKey (sym shown : String) : Key :=
+  { sym, shown }
+
+/-- The key shown as the command's accelerator on X11/Windows (the bindings of the plain
+keys live in `Viewer.setupScript`; a menu accelerator is only a label in Tk). -/
+def Cmd.key : Cmd → Option Key
+  | .openFile => some (primaryKey "o" "O")
+  | .save => some (primaryKey "s" "S")
+  | .saveAs => some (primaryKey "s" "S" (shift := true))
+  | .close => some (primaryKey "w" "W")
+  | .quit => some (primaryKey "q" "Q")
+  | .copy => some (primaryKey "c" "C")
+  | .selectAll => some (primaryKey "a" "A")
+  | .find => some (primaryKey "f" "F")
+  | .gotoPage => some (primaryKey "g" "G")
+  | .highlight => some (plainKey "h" "H")
+  | .deleteMark => some (plainKey "Delete" "Delete")
+  | .outline => some (plainKey "F9" "F9")
+  | .zoomIn => some (plainKey "plus" "+")
+  | .zoomOut => some (plainKey "minus" "-")
+  | .actualSize => some (plainKey "0" "0")
+  | .fitPage => some (plainKey "f" "F")
+  | .fitWidth => some (plainKey "w" "W")
+  | .rotateCw => some (plainKey "r" "R")
+  | .rotateCcw => some { shift := true, sym := "R", shown := "R" }
+  | .prevPage => some (plainKey "Prior" "PageUp")
+  | .nextPage => some (plainKey "Next" "PageDown")
+  | .firstPage => some (plainKey "Home" "Home")
+  | .lastPage => some (plainKey "End" "End")
+  | .back => some { alt := true, sym := "Left", shown := "Left" }
+  | .forward => some { alt := true, sym := "Right", shown := "Right" }
+  | .importXfdf | .exportXfdf | .addNote | .hlTool | .showAll | .scrollPage
+  | .scrollVertical | .spreadNone | .spreadOdd | .spreadEven => none
+
+/-- The key shown on platform `p`: on aqua the zoom commands show their Command form
+(⌘+, ⌘−, ⌘0, the macOS convention; the plain keys still work). -/
+def Cmd.keyOn (p : Platform) (c : Cmd) : Option Key :=
+  match p, c with
+  | .aqua, .zoomIn => some (primaryKey "plus" "+")
+  | .aqua, .zoomOut => some (primaryKey "minus" "-")
+  | .aqua, .actualSize => some (primaryKey "0" "0")
+  | _, c => c.key
+
+/-- Accelerator text shown in the menus on platform `p` (empty: none). -/
+def Cmd.accelOn (p : Platform) (c : Cmd) : String :=
+  ((c.keyOn p).map (Key.label p)).getD ""
+
+/-- Accelerator text on X11/Windows (`accelOn .other`). -/
+def Cmd.accel (c : Cmd) : String :=
+  c.accelOn .other
+
+/-- Every primary-modifier key that runs the command from the main window (bound on the
+toplevel `.`): its accelerator plus alternatives (`=` and keypad `+` zoom in too). -/
+def Cmd.primaryKeys : Cmd → List Key
+  | .zoomIn => [primaryKey "plus" "+", primaryKey "equal" "=", primaryKey "KP_Add" "+"]
+  | .zoomOut => [primaryKey "minus" "-", primaryKey "KP_Subtract" "-"]
+  | .actualSize => [primaryKey "0" "0"]
+  | c => match c.key with
+    | some k => if k.primary then [k] else []
+    | none => []
+
+/-- The quit key, bound also on the text fields that have their own bind tags (the page
+field, the find and go-to bars, the FreeText editor), so that it works while typing. -/
+def quitKey : Key := primaryKey "q" "Q"
+
+/-- Entry widgets of `Viewer.setupScript` with their own bind tags that get the quit key. -/
+def quitEntries : List String := [".bar.pg.e", ".find.e", ".goto.e"]
+
+/-- The fixed entries of the context menu (created in `Viewer.setupScript` with the X11
+labels) whose accelerators follow the platform. -/
+def popAccelCmds : List Cmd := [.copy, .selectAll, .find, .outline, .back, .forward, .gotoPage]
 
 /-- Index of the underlined (mnemonic) character of the label. -/
 def Cmd.underline : Cmd → Nat
@@ -298,7 +423,7 @@ def Cmd.enabled (c : Ctx) : Cmd → Bool
   | .copy | .highlight => c.hasDoc && c.hasSel
   | .deleteMark => c.hasDoc && c.hasMark
   | .save => c.hasDoc && c.dirty
-  | .outline => c.hasDoc && c.hasOutline
+  | .outline => c.hasDoc
   | .prevPage | .firstPage => c.hasDoc && c.page > 0 && !c.onFirst
   | .nextPage | .lastPage => c.hasDoc && c.page + 1 < c.pages && !c.onLast
   | .back => c.hasDoc && c.canBack
@@ -339,7 +464,7 @@ structure Menu where
 /-- Tk path of the menubar. -/
 def barPath : String := ".menubar"
 
-/-- Tcl variable that mirrors whether the outline panel is shown (View → Outline check). -/
+/-- Tcl variable that mirrors whether the sidebar is shown (View → Sidebar check). -/
 def outlineVar : String := "::safepdf::outlineOn"
 
 /-- Tcl variable holding the scroll mode (`View.ScrollMode.key`; the View menu's and the
@@ -430,6 +555,38 @@ def entryStates (c : Ctx) : List Bool :=
 def locate (cmd : Cmd) : Option (String × Nat) :=
   (entryList.find? (·.2.2 == cmd)).map fun (p, i, _) => (p, i)
 
+/-- The Tcl script that installs the platform's primary-modifier bindings (run once after
+`Viewer.setupScript`; every word through `Tcl.quote`): for every command its `primaryKeys`
+on `.`, the quit key on `quitEntries`, the context menu's accelerator labels, the proc
+`::safepdf::primaryBind W KEYSYM SCRIPT` used by widgets created later (FreeText editor,
+note popup), and on aqua Command+wheel zoom and `::tk::mac::Quit` (the hook Tk calls for
+the application menu's Quit item, a quit from the Dock or at logout) running File → Quit's
+script. On X11/Windows the bindings repeat the Control bindings `setupScript` makes. -/
+def platformScript (p : Platform) : String :=
+  let bindAll (tag : String) (k : Key) (script : String) : List (List String) :=
+    (k.sequences p).map fun seq => ["bind", tag, seq, script]
+  let cmds := Cmd.all.flatMap fun c => c.primaryKeys.flatMap fun k => bindAll "." k c.script
+  let quits := quitEntries.flatMap fun w => bindAll w quitKey Cmd.quit.script
+  let pops := popAccelCmds.map fun c =>
+    [popPath, "entryconfigure", c.label, "-accelerator", c.accelOn p]
+  let aqua : List (List String) := match p with
+    | .aqua =>
+      [["bind", ".c", "<Command-MouseWheel>", "::safepdf::wheelZoom %D %x %y; break"],
+       ["namespace", "eval", "::tk::mac", ""],
+       ["proc", "::tk::mac::Quit", "", Cmd.quit.script]]
+    | .other => []
+  let proc := ["proc", "::safepdf::primaryBind", "w key script",
+    "foreach m " ++ Tcl.quote (Tcl.Word.renderList (p.primaryMods.map .lit)) ++
+      " { bind $w <$m-Key-$key> $script }"]
+  Tcl.Script.render (Tcl.Script.ofStrings (cmds ++ quits ++ pops ++ aqua ++ [proc]))
+
+/-- A display text naming keys the X11 way (status messages, tooltips: `Ctrl+O`) in the
+platform's form: on aqua the macOS glyphs (`⌘O`, `⇧⌘S`, `⌥`). -/
+def Platform.keyText (p : Platform) (s : String) : String :=
+  match p with
+  | .other => s
+  | .aqua => ((s.replace "Ctrl+Shift+" "⇧⌘").replace "Ctrl+" "⌘").replace "Alt+" "⌥"
+
 -- Every command is in the menubar exactly once.
 #guard Cmd.all.all fun c => (entryList.filter (·.2.2 == c)).length == 1
 #guard entryList.length == Cmd.all.length
@@ -454,7 +611,7 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
 #guard (Cmd.all.filter (Cmd.enabled {})) == [.openFile, .quit]
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3 }
   !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c &&
-  Cmd.lastPage.enabled c && !Cmd.copy.enabled c && !Cmd.outline.enabled c &&
+  Cmd.lastPage.enabled c && !Cmd.copy.enabled c && Cmd.outline.enabled c &&
   !Cmd.back.enabled c && Cmd.zoomIn.enabled c && !Cmd.highlight.enabled c &&
   Cmd.addNote.enabled c && !Cmd.deleteMark.enabled c && Cmd.hlTool.enabled c &&
   Cmd.showAll.enabled c
@@ -483,5 +640,59 @@ def locate (cmd : Cmd) : Option (String × Nat) :=
   !Cmd.prevPage.enabled c && !Cmd.firstPage.enabled c && Cmd.nextPage.enabled c
 #guard let c : Ctx := { hasDoc := true, page := 2, pages := 4, onLast := true }
   !Cmd.nextPage.enabled c && !Cmd.lastPage.enabled c && Cmd.prevPage.enabled c
+
+-- Keys per platform (task 9.r3). The X11/Windows labels are the ones before 9.r3.
+#guard Cmd.all.map Cmd.accel ==
+  ["Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "", "", "Ctrl+W", "Ctrl+Q", "Ctrl+C", "Ctrl+A", "H", "",
+   "Delete", "", "", "Ctrl+F", "F9", "+", "-", "0", "F", "W", "R", "Shift+R", "", "", "", "",
+   "", "PageUp", "PageDown", "Home", "End", "Ctrl+G", "Alt+Left", "Alt+Right"]
+-- aqua: Command labels (Tk draws them as ⌘S, ⇧⌘S, ⌥←).
+#guard Cmd.save.accelOn .aqua == "Command-S" && Cmd.saveAs.accelOn .aqua == "Command-Shift-S" &&
+  Cmd.openFile.accelOn .aqua == "Command-O" && Cmd.find.accelOn .aqua == "Command-F" &&
+  Cmd.copy.accelOn .aqua == "Command-C" && Cmd.selectAll.accelOn .aqua == "Command-A" &&
+  Cmd.quit.accelOn .aqua == "Command-Q" && Cmd.close.accelOn .aqua == "Command-W" &&
+  Cmd.gotoPage.accelOn .aqua == "Command-G"
+#guard Cmd.zoomIn.accelOn .aqua == "Command-+" && Cmd.zoomOut.accelOn .aqua == "Command--" &&
+  Cmd.actualSize.accelOn .aqua == "Command-0"
+#guard Cmd.back.accelOn .aqua == "Option-Left" && Cmd.rotateCcw.accelOn .aqua == "Shift-R" &&
+  Cmd.outline.accelOn .aqua == "F9" && Cmd.highlight.accelOn .aqua == "H"
+-- No Ctrl label on aqua, no Command label elsewhere.
+#guard Cmd.all.all fun c => !((c.accelOn .aqua).startsWith "Ctrl") &&
+  !((c.accelOn .other).startsWith "Command")
+-- Exactly the commands with Control bindings on `.` in `Viewer.setupScript`.
+#guard (Cmd.all.filter (!·.primaryKeys.isEmpty)) ==
+  [.openFile, .save, .saveAs, .close, .quit, .copy, .selectAll, .find, .zoomIn, .zoomOut,
+   .actualSize, .gotoPage]
+#guard Cmd.all.all fun c => c.primaryKeys.all (·.primary)
+-- Every Control binding stays on aqua and gets a Command twin; none elsewhere.
+#guard Cmd.all.all fun c => c.primaryKeys.all fun k =>
+  (k.sequences .other).all (fun q => (k.sequences .aqua).contains q) &&
+  (k.sequences .aqua).any (fun q => (q.splitOn "Command-").length == 2) &&
+  (k.sequences .other).all (fun q => (q.splitOn "Command").length == 1)
+#guard Cmd.save.primaryKeys.flatMap (Key.sequences .other) == ["<Control-Key-s>"]
+#guard Cmd.save.primaryKeys.flatMap (Key.sequences .aqua) == ["<Control-Key-s>", "<Command-Key-s>"]
+#guard Cmd.saveAs.primaryKeys.flatMap (Key.sequences .other) == ["<Control-Key-S>"]
+#guard Cmd.saveAs.primaryKeys.flatMap (Key.sequences .aqua) ==
+  ["<Control-Key-S>", "<Command-Key-S>", "<Shift-Command-Key-s>"]
+#guard Cmd.zoomIn.primaryKeys.flatMap (Key.sequences .aqua) ==
+  ["<Control-Key-plus>", "<Command-Key-plus>", "<Control-Key-equal>", "<Command-Key-equal>",
+   "<Control-Key-KP_Add>", "<Command-Key-KP_Add>"]
+#guard Cmd.back.primaryKeys.isEmpty && (Cmd.highlight.key.map (Key.sequences .aqua)) == some []
+-- The script binds each command's own script; aqua adds Command+wheel and the Quit hook.
+#guard ((platformScript .other).splitOn "Command").length == 1
+#guard ((platformScript .aqua).splitOn "bind . {<Command-Key-s>} {::safepdf::emit save}").length == 2
+#guard ((platformScript .aqua).splitOn "bind . {<Command-Key-S>} {::safepdf::emit saveAs}").length == 2
+#guard ((platformScript .aqua).splitOn "bind . {<Command-Key-q>} {::safepdf::emit quit}").length == 2
+#guard ((platformScript .aqua).splitOn "bind .find.e {<Command-Key-q>} {::safepdf::emit quit}").length == 2
+#guard ((platformScript .aqua).splitOn "proc ::tk::mac::Quit {} {::safepdf::emit quit}").length == 2
+#guard ((platformScript .aqua).splitOn ".pop entryconfigure Copy -accelerator Command-C").length == 2
+#guard ((platformScript .other).splitOn ".pop entryconfigure Copy -accelerator Ctrl+C").length == 2
+#guard ((platformScript .other).splitOn "{foreach m Control { bind $w").length == 2 &&
+  ((platformScript .aqua).splitOn "{foreach m {Control Command} { bind $w").length == 2
+#guard Platform.ofWindowingSystem "aqua\n" == .aqua && Platform.ofWindowingSystem "x11" == .other &&
+  Platform.ofWindowingSystem "win32" == .other
+#guard Platform.aqua.keyText "Save (Ctrl+S)" == "Save (⌘S)" &&
+  Platform.aqua.keyText "Press Ctrl+Shift+S" == "Press ⇧⌘S" &&
+  Platform.other.keyText "Save (Ctrl+S)" == "Save (Ctrl+S)"
 
 end SafePdf.Shell.App.Menu

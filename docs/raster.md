@@ -33,7 +33,9 @@ substitute MuPDF 1.25.1 would use, **when a substitute program is found on the s
 Nothing is committed: the repository is MIT, the fonts are not (URW base-35: AGPL-3.0 with a
 font exception; TeX Gyre: GUST font licence). Ledger Decisions 2026-11-20 (7.7).
 
-**Where they come from** (`SafePdf/Shell/Fonts.lean`, first file per face wins):
+**Where they come from** (`SafePdf/Shell/Fonts.lean`, first readable candidate per face wins;
+every path is fixed or one level of a sorted directory listing — nothing is searched
+recursively):
 
 1. `SAFEPDF_FONT_DIR` (a directory, or several separated by `:`), with the URW file names
    (`NimbusSans-Regular`, `NimbusSans-Bold`, `NimbusSans-Italic`, `NimbusSans-BoldItalic`,
@@ -42,18 +44,106 @@ font exception; TeX Gyre: GUST font licence). Ledger Decisions 2026-11-20 (7.7).
    `.pfb`, `.pfa`, `.otf` or none;
 2. URW base-35 — Debian/Ubuntu package **`fonts-urw-base35`**:
    `/usr/share/fonts/type1/urw-base35/*.t1`, `/usr/share/fonts/X11/Type1/*.pfb`,
-   `/usr/share/fonts/opentype/urw-base35/*.otf`; Ghostscript's `Resource/Font` (Homebrew
-   `/opt/homebrew/share/ghostscript/Resource/Font`, `/usr/local/…`, `/usr/…`);
-3. TeX Gyre — package **`fonts-texgyre`**: `/usr/share/texmf/fonts/opentype/public/tex-gyre`,
-   `/usr/share/fonts/opentype/texgyre` (Heros, Termes, Cursor; no Symbol or Dingbats).
+   `/usr/share/fonts/opentype/urw-base35/*.otf`; then Ghostscript's `Resource/Font` (URW
+   names, no extension) under `/opt/homebrew/share/ghostscript` (Homebrew, Apple silicon),
+   `/usr/local/share/ghostscript` (Homebrew on Intel, source builds) and
+   `/usr/share/ghostscript`: first the unversioned `Resource/Font`, then each version
+   directory `<ver>/Resource/Font` (Homebrew's layout), newest version first (`10.05.1`
+   before `10.04.0` before `9.56.1`);
+3. TeX Gyre (Heros, Termes, Cursor `.otf`; no Symbol or Dingbats) — `fonts-texgyre`:
+   `/usr/share/texmf/fonts/opentype/public/tex-gyre`, `/usr/share/fonts/opentype/texgyre`;
+   Homebrew `/opt/homebrew/share/fonts`, `/usr/local/share/fonts`; MacTeX
+   `/Library/TeX/Root/texmf-dist/fonts/opentype/public/tex-gyre`, then
+   `/usr/local/texlive/<year>/texmf-dist/fonts/opentype/public/tex-gyre` (newest year first);
+4. the macOS font folders `~/Library/Fonts` then `/Library/Fonts` (where Font Book installs):
+   the URW names (`.otf`, `.t1`, `.pfb`, `.ttf`), then the TeX Gyre names (`.otf`);
+5. **the macOS system fonts** (task 9.r7) — always present on a stock Mac, so this is what
+   the human's Mac uses unless one of the above is installed:
+
+   | Standard 14 | First choice (face by PostScript name) | Then (single `.ttf`) |
+   |---|---|---|
+   | Helvetica, -Bold, -Oblique, -BoldOblique | `/System/Library/Fonts/Helvetica.ttc` faces `Helvetica`, `Helvetica-Bold`, `Helvetica-Oblique`, `Helvetica-BoldOblique` | `Arial.ttf`, `Arial Bold.ttf`, `Arial Italic.ttf`, `Arial Bold Italic.ttf` |
+   | Times-Roman, -Bold, -Italic, -BoldItalic | `/System/Library/Fonts/Times.ttc` faces `Times-Roman`, `Times-Bold`, `Times-Italic`, `Times-BoldItalic` | `Times New Roman.ttf`, `… Bold.ttf`, `… Italic.ttf`, `… Bold Italic.ttf` |
+   | Courier, -Bold, -Oblique, -BoldOblique | `/System/Library/Fonts/Courier.ttc` faces `Courier`, `Courier-Bold`, `Courier-Oblique`, `Courier-BoldOblique` | `Courier New.ttf`, `… Bold.ttf`, `… Italic.ttf`, `… Bold Italic.ttf` |
+   | Symbol | — | `Symbol.ttf`, then `Apple Symbols.ttf` |
+   | ZapfDingbats | — | `ZapfDingbats.ttf` |
+
+   A single `.ttf` is looked for in `/System/Library/Fonts/Supplemental/` (macOS 10.15+),
+   `/Library/Fonts/` (older macOS, Office installs) and `/System/Library/Fonts/`, in that
+   order. In a collection the face is the one whose `name` table PostScript name (name ID 6)
+   is exactly the standard name (`Core.Font.TrueType.faceByPsName?`); a collection without it
+   is skipped, never guessed by index.
 
 `SAFEPDF_SUBST_FONTS=0` disables substitutes (the behaviour before 7.7; used for before/after
-comparisons). A face that is missing, unreadable or does not parse is absent: its text stays
-unpainted, nothing fails. The inspector's `raster` view and the viewer both load the table once
-per process; each face is parsed (Type 1 parser, or the CFF parser on an OpenType file's
-`CFF ` table) the first time a page needs it — inside that page's timed render (≈ 10 ms per
-face). CI needs `apt-get install fonts-urw-base35` for the painting checks of suite
-`raster-subst` (without it they skip).
+comparisons). **`SAFEPDF_SUBST_FONTS=report`** prints on stderr, when the inspector or the
+viewer loads the table, one line per standard-14 name: `subst: Helvetica-Bold <-
+/System/Library/Fonts/Helvetica.ttc #1`, `… (does not parse)` when the chosen face fails to
+parse, or `subst: Symbol <- none (unpainted)`. A face that is missing, unreadable (or over
+32 MB) or does not parse is absent: its text stays unpainted, nothing fails. The inspector's
+`raster` view and the viewer both load the table once per process (a collection file is read
+once for all its faces); each face is parsed (Type 1 parser, the CFF parser on an OpenType
+file's `CFF ` table, or — task 9.r7 — the TrueType parser on a `.ttf` or on one face of a
+`.ttc`, `Font.TrueType.parseAt`) the first time a page needs it, inside that page's timed
+render (≈ 10 ms per face). CI needs `apt-get install fonts-urw-base35` for the painting checks
+of suite `raster-subst` against MuPDF (without it they skip); the collection and macOS-search
+checks of task 9.r7 always run (generated fixtures, below).
+
+**TrueType substitutes and collections** (task 9.r7). A collection (`'ttcf'` header: version,
+`numFonts`, one offset per face; at most 64 faces read) is parsed face by face: each face's
+offset table lies inside the file and its table offsets are absolute, so `parseAt bytes dir`
+is the ordinary TrueType parser started at that face's offset table (`parse` = `parseAt … 0`
+still refuses a collection as an embedded program). A face with CFF outlines (`'OTTO'`) inside
+a collection goes to the CFF parser. Glyph choice for a TrueType substitute: the encoding's
+glyph name in `post` (format 2), else its Unicode value (Adobe Glyph List, then the
+ZapfDingbats list) in a Unicode `cmap`; a code without a usable name: its name in the face's
+standard-14 built-in encoding (`StandardEncoding`, Symbol's, ZapfDingbats'), else the raw code
+in the symbolic `cmap`s ((3,0) with `0xF000`… offsets, (1,0)). Widths are never taken from the
+substitute: standard-14 fonts keep their AFM widths, `/Widths` win as before, and only MuPDF's
+`ft_stretch` case scales glyphs (by the TrueType advance).
+
+**Caveats of the macOS faces** (not verified here: this sandbox has no Apple fonts).
+Apple's `Helvetica.ttc`, `Times.ttc` and `Courier.ttc` are licensed versions of the designs
+the standard 14 are named after, so their advances should agree with the AFM widths we
+position by — and positions never come from the substitute anyway (AFM widths or `/Widths`),
+so lines, columns and table cells stay where they are on Linux. Outlines differ in detail from
+URW Nimbus (MuPDF's bundled clones), so a pixel diff against MuPDF on a Mac is not 0% as it is
+with URW; Apple's Courier is a thinner stroke than Nimbus Mono PS. Arial / Times New Roman /
+Courier New (fallbacks) are metric-compatible but differently drawn. Symbol: Apple's
+`Symbol.ttf` is reached by `post` name, Unicode (Glyph List) or raw code; `Apple Symbols.ttf`
+(last resort) is Unicode-only and may lack some Symbol glyphs (e.g. bracket pieces).
+ZapfDingbats: by Unicode value (`a1` → U+2701, …) or raw code. If a system face uses `post`
+format 2.5/3.0 (no names) the Unicode path still finds the glyphs. Hinting is never run (as
+for every TrueType font here).
+
+**Checking it on a Mac** (source build, Homebrew Tk; no Ghostscript or TeX installed):
+
+1. `SAFEPDF_SUBST_FONTS=report .lake/build/bin/inspect --view raster --json receipts.pdf
+   > /dev/null` — the stderr lines should name `Helvetica.ttc #0…#3`, `Times.ttc`,
+   `Courier.ttc`, and none should say `(does not parse)`; Symbol / ZapfDingbats show which
+   file was taken or `none`. (The same lines appear when starting the viewer with
+   `SAFEPDF_SUBST_FONTS=report`.)
+2. Reopen the receipts PDF in the viewer: the page-1 table text (non-embedded Helvetica and
+   Helvetica-Bold) must be painted, bold headers visibly bolder, columns aligned.
+3. Reopen the M9 paper saved with a FreeText ("Add text") mark: the "M9 text" must be painted
+   by the renderer from its appearance stream (since 9.r5 the canvas draws it itself only when
+   no Helvetica substitute loads, so with a substitute it must still show — before any click,
+   at every zoom and rotation).
+4. Optionally `SAFEPDF_RASTER_DIR=/tmp/r SAFEPDF_RASTER_FORMAT=png …inspect --view raster
+   receipts.pdf` and look at `/tmp/r/page-1.png`; and `SAFEPDF_SUBST_FONTS=0` to confirm the
+   text disappears without substitutes (the old behaviour).
+5. Report the `subst:` lines if any face is `none` or `(does not parse)`.
+
+The fixtures for this (nothing of Apple's is committed): `python3 -I
+Tests/fixtures-subst/make_ttc.py synthetic` writes `Tests/fixtures-subst/mini.ttc` (four box
+faces named Helvetica, Helvetica-Bold — that one with a Macintosh-platform name record —
+Times-Roman, Times-Bold; face `i`'s box `100·(i+1)` units wide) and `mini.ttf`
+(`CourierNewPSMT`); `make_ttc.py merge OUT A.ttf B.ttf …` builds a collection from real
+fonts. Suite `raster-subst` (`runMac`) checks the header, the PostScript names, face parsing,
+the search below a temporary root (`SearchConfig.root`: `System/Library/Fonts/*.ttc`,
+`Supplemental/Courier New.ttf`, a collection without `Courier` skipped; Ghostscript version
+directories newest first; `~/Library/Fonts` before the system fonts), the fixture page painted
+with the macOS faces (Helvetica-Bold darker than Helvetica: the right face), and, when python3
+and DejaVu Sans are installed, the page painted from a collection of DejaVu Sans + Bold.
 
 **Which substitute** (`SafePdf/Core/Raster/Subst.lean`, MuPDF `pdf-font.c`):
 `pdf_clean_font_name`'s exact table (standard names; `Arial`, `ArialMT`, `Arial,Bold`,
@@ -416,6 +506,7 @@ unchanged within noise.
 4. Stroking dominates the vector page (`Stroke.strokeSubs`/`solidSub`/`quadPts`), 128 ms for
    400 paths — in budget, but the next hot spot after 1.
 5. Known, by design: non-embedded fonts draw nothing without substitute fonts on the system
-   (task 7.7; non-embedded CIDFonts always), DCT
+   (task 7.7; on macOS the system's Helvetica/Times/Courier are used since 9.r7; non-embedded
+   CIDFonts always), DCT
    images are placeholders, shared `/Kids` are a cycle, page numbering differs from MuPDF
    after a dangling kid.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7–9.9, 9.11; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6, 9.r8, 9.r9, 9.r10, 9.r11b, 9.r12; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -23,7 +23,7 @@
 #   1g. the toolbar and sidebar after PDF.js (SAFEPDF_VIEWER_SMOKE_MODE=toolbar) on that PDF and
 #      on the two-page one without an outline: page field, arrows, zoom drop-down, overflow
 #      menu, tool states (Highlight enabled since 9.4, the others disabled), sidebar shown/hidden
-#      with its toggle, disclosure triangles (9.7);
+#      with its toggle (also without an outline since 9.r9: thumbnails), disclosure triangles (9.7);
 #   1h. highlights and notes on the text PDF (SAFEPDF_VIEWER_SMOKE_MODE=marks): highlight,
 #      recolour, delete (pixel colours), a note at a point with its popup, marks kept across
 #      zoom, rotation and page changes (9.4);
@@ -34,7 +34,10 @@
 #   1j. saving marks into the PDF (SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen on the saved
 #      file): unsaved indicator, Save / Save As / quit and close prompts, saved marks restored
 #      and selectable, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
-#      shows the highlight (9.5c); then (SAFEPDF_VIEWER_SMOKE_MODE=edit on a copy of the
+#      shows the highlight (9.5c); Save overwrites the opened file after the first-overwrite
+#      question, keeps its mode, refuses a read-only or changed-on-disk file; the
+#      unsaved-changes prompt on Quit, Ctrl+W and the close button (Cancel keeps the window,
+#      Don't Save leaves the file untouched, Save saves) (9.r2); then (SAFEPDF_VIEWER_SMOKE_MODE=edit on a copy of the
 #      result) saved marks recoloured, deleted, commented and edited, saved, reopened, and a
 #      third revision on top; qpdf --check, prefixes, no duplicate ids, mutool shows the new
 #      colour and not the deleted highlight (9.5g);
@@ -60,6 +63,50 @@
 #   1m. non-blocking rendering (SAFEPDF_VIEWER_SMOKE_MODE=async) on a PDF with a slow page 1
 #      (viewer-smoke-pdf.py --slow): placeholder, a timer runs and zoom/End/Home return at once
 #      while it renders, End shows page 2 meanwhile, the old zoom's render is discarded (8.8);
+#   1n. the consolidated Phase 9 / M9 run (SAFEPDF_VIEWER_SMOKE_MODE=m9, then =m9-reopen) on two
+#      generated fixtures and on real papers (SAFEPDF_SMOKE_PAPERS, default the git-ignored
+#      corpus/files/arxiv-1706.03762.pdf when present): menubar, page box, zoom drop-down, the
+#      wheel end to end in all four view modes, bubble highlight + note + Add text + Draw, Save ->
+#      Close -> reopen (pixels), XFDF export/import round trip, a fresh process on the saved file
+#      (free text visible on screen before any click, with and without substitute fonts, 9.r5),
+#      qpdf, byte prefix, mutool (9.6);
+#   1o. wheel flow (SAFEPDF_VIEWER_SMOKE_MODE=wheelflow) on the four-page M9 fixture and the M9
+#      papers: a fresh file opens in Vertical Scrolling; bursts of small trackpad and wheel
+#      deltas cross page boundaries without stalling, going back or jumping in every view mode
+#      (9.r1); every other case runs with SAFEPDF_VIEWER_VIEW=single unless it says otherwise;
+#   1p. platform keys and the icon (SAFEPDF_VIEWER_SMOKE_MODE=keys, as installed and with
+#      SAFEPDF_VIEWER_PLATFORM=aqua): accelerator labels, Command twins of the Ctrl bindings,
+#      ::tk::mac::Quit, the six icon sizes, _NET_WM_ICON when xprop is installed (9.r3);
+#   1q. the review of 2026-11-23 (SAFEPDF_VIEWER_SMOKE_MODE=r4): the view-mode drop-down next to
+#      the page count in sync with the View and » menus, the float bubble's Add comment, no
+#      intermediate page position when the outline closes or opens at Page Fit (9.r4);
+#   1r. the save dialogs (SAFEPDF_VIEWER_SMOKE_MODE=savedlg, as installed and with
+#      SAFEPDF_VIEWER_PLATFORM=aqua): keyboard of the three-way prompt, Save As… / Export
+#      options, extensions, long/odd names, refused targets, a vanished file (9.r6);
+#   1s. document open settings (SAFEPDF_VIEWER_SMOKE_MODE=opensettings) on generated files:
+#      every /PageLayout, /PageMode with an outline, /OpenAction destinations (page 3 at
+#      150 %, Fit, a named one), JavaScript/URI open actions ignored, ViewerPreferences
+#      (hiding, DisplayDocTitle, R2L, FullScreen, FitWindow/CenterWindow), then a file without
+#      settings opens in the defaults again (9.r8);
+#   1t. closing a note popup without Save (SAFEPDF_VIEWER_SMOKE_MODE=noteclose): Escape in the
+#      text widget, Cancel and the window's close button delete an empty new note (no icon
+#      left), save the typed text of a new one, keep a stored text; an empty highlight comment
+#      goes, the highlight stays (9.r12);
+#   1u. the thumbnails panel (SAFEPDF_VIEWER_SMOKE_MODE=thumbs) on generated files: view buttons
+#      per content, lazy rendering, click / keyboard / highlight following the main view, the
+#      image budget, rotation, /PageMode /UseThumbs, the toggle without an outline; and
+#      (=thumbperf, reported only) timings and memory on the corpus paper when present (9.r9);
+#   1v. attachments panel (SAFEPDF_VIEWER_SMOKE_MODE=attach): the panel lists a generated
+#      file's attachments (name tree with kids + file attachment annotation) without decoding,
+#      Save attachment as... writes exactly the decoded bytes, refused targets, UseAttachments
+#      opens the panel, an icon click selects its row, no Attachments button without (9.r10);
+#   1w. layers panel (SAFEPDF_VIEWER_SMOKE_MODE=layers) on generated files with optional
+#      content: /PageMode /UseOC opens it, the tree follows /Order (heading, nesting, locked,
+#      groups not in /Order under "Additional Layers"),
+#      toggling an OFF group paints its content and makes its word findable, a radio member
+#      turns its sibling off, the locked group stays, thumbnails follow, Save keeps the state
+#      and leaves /OCProperties alone, reopening restores the defaults, no Layers button
+#      without optional content (9.r11b);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -91,10 +138,13 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# run_viewer DIR FILE: smoke-mode run with a 60 s timeout.
+# run_viewer DIR FILE: smoke-mode run with a 60 s timeout. Files open in vertical scrolling
+# since 9.r1; the cases written for the single-page view keep it through SAFEPDF_VIEWER_VIEW
+# (set it empty for the real default, as case 1o does).
 run_viewer() {
   mkdir -p "$1"
-  SAFEPDF_VIEWER_SMOKE="$1" timeout 60 "${wrap[@]}" "$viewer" "$2"
+  SAFEPDF_VIEWER_VIEW="${SAFEPDF_VIEWER_VIEW-single}" SAFEPDF_VIEWER_SMOKE="$1" \
+    timeout 60 "${wrap[@]}" "$viewer" "$2"
 }
 
 # ppm_stats FILE: prints "W H NONWHITE" for a binary PPM (P6, maxval 255).
@@ -392,11 +442,11 @@ want = {
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
     "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
-    "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
+    "entries.menubar.view": "Sidebar|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
-                    "Back=disabled,Forward=disabled,Copy=disabled,Outline=normal",
+                    "Back=disabled,Forward=disabled,Copy=disabled,Sidebar=normal",
     "toolbar-prev-page1": "disabled",
     "page-after-next": "2",
     "page-after-last": "3",
@@ -492,7 +542,7 @@ common = {
 want_nav = dict(common, **{
     "pages": "3", "has-outline": "true", "sidebar-shown": "true", "panes": ".ol .v",
     "toggle-mapped": "1",
-    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of " + layout_m + " " + layout_r,
+    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of,.bar.vmode " + layout_m + " " + layout_r,
     "field0": "i", "of0": "(1 of 3)",
     "after-next": "2 ii (2 of 3)", "after-next-prev": "2 ii", "after-prev-at-start": "1 i",
     "entry-last": "3 1", "entry-999": "3 1", "entry-abc": "3 1", "entry-first": "1 i",
@@ -504,8 +554,9 @@ want_nav = dict(common, **{
 })
 want_two = dict(common, **{
     "pages": "2", "has-outline": "false", "sidebar-shown": "false", "panes": ".v",
-    "toggle-mapped": "0",
-    "layout": ".bar.l=.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of " + layout_m + " " + layout_r,
+    "toggle-mapped": "1",
+    "toggle-pressed0": "0", "after-toggle": "true .ol .v 1", "after-toggle2": "false .v",
+    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of,.bar.vmode " + layout_m + " " + layout_r,
     "field0": "1", "of0": "of 2",
     "after-next": "2 2 of 2", "after-next-prev": "1 1", "after-prev-at-start": "1 1",
     "entry-last": "2 2", "entry-999": "2 2", "entry-abc": "2 2", "entry-first": "1 1",
@@ -516,7 +567,7 @@ errs = []
 for name, v, want in (("nav", nav, want_nav), ("two", two, want_two)):
     errs += ["%s %s: %r, expected %r" % (name, k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
     if name == "two":
-        errs += ["two: unexpected %s" % k for k in ("child-visible", "after-toggle") if k in v]
+        errs += ["two: unexpected %s" % k for k in ("child-visible",) if k in v]
     # Zoom: label | radio value | shown percentage.
     zw = {"zoom-page-width": ("Page Width", "page-width", None),
           "zoom-page-fit": ("Page Fit", "page-fit", None),
@@ -666,25 +717,31 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-bubble/bubble.txt" || fail=1
 
-# 1j. Saving marks into the PDF (task 9.5c, SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen) on a
-# copy of the text PDF of 1d: a highlight on "world" and a note make the title start with "* "
-# and enable Save; Quit and Ctrl+W answered Cancel keep them; Ctrl+S writes
-# text-annotated.pdf next to the PDF without a question and opens it (the highlight now drawn
-# by the renderer from its /AP: yellow pixels; the note text restored); a second Ctrl+S has
-# nothing to save; the saved highlight can be selected; a new highlight + Ctrl+S
-# appends to the same file (3 marks, distinct ids); Save As writes saveas.pdf; Ctrl+W with an
-# unsaved note answered No discards it. The reopen run restores the 3 marks (pixels, note popup
-# text), refuses then (after Yes) performs Save As onto the opened file, and Quit answered Yes
-# saves a last note before quitting. Externally: `qpdf --check` on the written files, the
-# original bytes (and the first saved revision) are a byte-for-byte prefix of the later files
-# (`cmp -n`), each mark's annotation object is written exactly once, and `mutool draw` shows the
-# highlight.
+# 1j. Saving marks into the PDF (tasks 9.5c, 9.r2; SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen)
+# on a copy of the text PDF of 1d (mode 640): a highlight on "world" and a note make the title
+# start with "* " and enable Save; Quit, Ctrl+W and the window's close button answered Cancel
+# keep them (the unsaved-changes prompt asked); Ctrl+S asks before the first overwrite —
+# Cancel writes nothing, Overwrite writes the marks into the opened file and reopens it (the
+# highlight now drawn by the renderer from its /AP: yellow pixels; the note text restored); a
+# second Ctrl+S has nothing to save; the saved highlight can be selected; a new highlight +
+# Ctrl+S appends to the same file without a question (3 marks, distinct ids); Save As writes
+# saveas.pdf; with a new note Ctrl+S on a read-only saveas.pdf and on one changed on disk is
+# refused (file unchanged); Ctrl+W answered Don't Save closes and leaves the file untouched.
+# The reopen run restores the 3 marks (pixels, note popup text), refuses then (after Yes)
+# performs Save As onto the opened file, and with a last note Quit answered Cancel keeps the
+# window, Quit answered Save saves it and quits (the save on quit is the prompt's answer —
+# task 9.r2 removed nothing silent here: there never was a save without the prompt).
+# Externally: `qpdf --check` on the written files, the original bytes (and the first saved
+# revision) are a byte-for-byte prefix of the later files (`cmp -n`), each mark's annotation
+# object is written exactly once, the overwritten file kept its mode 640 and no temporary
+# file is left, and `mutool draw` shows the highlight.
 mkdir -p "$work/save" "$work/out-save" "$work/out-reopen"
 cp "$work/text.pdf" "$work/save/text.pdf"
+chmod 640 "$work/save/text.pdf"
 SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=save run_viewer "$work/out-save" "$work/save/text.pdf"
 cat "$work/out-save/save.txt"
-cp "$work/save/text-annotated.pdf" "$work/out-save/after-run1.pdf" 2>/dev/null || true
-SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=reopen run_viewer "$work/out-reopen" "$work/save/text-annotated.pdf"
+cp "$work/save/text.pdf" "$work/out-save/after-run1.pdf" 2>/dev/null || true
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=reopen run_viewer "$work/out-reopen" "$work/save/text.pdf"
 cat "$work/out-reopen/reopen.txt"
 python3 -I -c '
 import sys
@@ -697,7 +754,9 @@ want = {
     "dirty1": "true true normal normal 2",
     "quit-cancel": "1 true true",
     "close-cancel": "true true",
-    "wm-delete": "::safepdf::emit quit",
+    "wm-delete": "::safepdf::quit",
+    "wm-close-cancel": "1 true true true",
+    "overwrite-cancel": "true true true true",
     "saved-path": "true true true",
     "after-save": "2 2 false false disabled",
     "world-after-save": yellow,
@@ -709,7 +768,9 @@ want = {
     "file-marks": "3 3",
     "save-as": "true true 3 false",
     "dirty3": "true true",
-    "close-discard": "true true 3 3",
+    "read-only": "true true true true",
+    "changed-on-disk": "true true true true",
+    "close-discard": "true true 3 3 true",
 }
 want_r = {
     "restored": "3 3 false false true",
@@ -720,33 +781,36 @@ want_r = {
     "overwrite-no": "true true true",
     "overwrite-yes": "true false 4 4 4",
     "dirty2": "true true",
+    "quit-ask": "1 true true",
 }
 errs = ["save %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 errs += ["reopen %s: %r, expected %r" % (k, r.get(k), w) for k, w in want_r.items() if r.get(k) != w]
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-save/save.txt" "$work/out-reopen/reopen.txt" || fail=1
-# The quit in the reopen run saved the last note: 5 marks, each annotation object written once.
+# Quit answered Save in the reopen run saved the last note: 5 marks, each annotation object
+# written once.
 python3 -I -c '
 import sys
 d = open(sys.argv[1], "rb").read()
 n = d.count(b"(safepdf-mark-") + d.count(b"<" + b"safepdf-mark-".hex().upper().encode())  # strings are written in hex
 print("annotated file: %d bytes, %d mark annotations, %d revisions" % (len(d), n, d.count(b"startxref")))
 sys.exit(0 if n == 5 and d.count(b"startxref") == 5 else 1)
-' "$work/save/text-annotated.pdf" || { echo "FAIL: quit did not save, or marks were duplicated" >&2; fail=1; }
-for f in "$work/save/text-annotated.pdf" "$work/out-save/saveas.pdf"; do
+' "$work/save/text.pdf" || { echo "FAIL: Quit answered Save did not save, or marks were duplicated" >&2; fail=1; }
+[ "$(stat -c %a "$work/save/text.pdf")" = 640 ] || { echo "FAIL: the overwritten file lost its mode 640: $(stat -c %a "$work/save/text.pdf")" >&2; fail=1; }
+! ls -A "$work/save" "$work/out-save" | grep -q '\.tmp$' || { echo "FAIL: a temporary file was left behind" >&2; fail=1; }
+for f in "$work/save/text.pdf" "$work/out-save/saveas.pdf"; do
   if command -v qpdf >/dev/null 2>&1; then
     qpdf --check "$f" >/dev/null 2>&1 || { echo "FAIL: qpdf --check $f" >&2; fail=1; }
   else echo "viewer-smoke: qpdf missing, check skipped"; fi
 done
 # S8: the original bytes are a prefix of every written file, each revision of the next one.
-for pair in "save/text.pdf out-save/first.pdf" "out-save/first.pdf out-save/after-run1.pdf" \
-    "out-save/after-run1.pdf save/text-annotated.pdf" "save/text.pdf out-save/saveas.pdf"; do
+for pair in "text.pdf out-save/first.pdf" "out-save/first.pdf out-save/after-run1.pdf" \
+    "out-save/after-run1.pdf save/text.pdf" "text.pdf out-save/saveas.pdf"; do
   set -- $pair
   cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
     || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
 done
-cmp -s "$work/text.pdf" "$work/save/text.pdf" || { echo "FAIL: the original was modified" >&2; fail=1; }
 # Another reader draws the highlight: mutool at 72 dpi, inside the box of "world".
 if command -v mutool >/dev/null 2>&1; then
   mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-save/mutool.ppm" "$work/out-save/saveas.pdf" 1
@@ -776,7 +840,7 @@ sys.exit(0 if n and yel * 3 >= n else 1)
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
 # 1j'. Editing saved marks (task 9.5g, SAFEPDF_VIEWER_SMOKE_MODE=edit) on a copy of the
-# text-annotated.pdf left by the reopen run (5 saved marks): the whole-page highlight and the
+# text.pdf left by the reopen run (5 saved marks): the whole-page highlight and the
 # "safe" highlight are deleted, the "world" highlight recoloured green and commented, a note's
 # text edited; the pages follow at once (preview); Ctrl+S writes one revision into the opened
 # file and reopens it (4 marks: the comment as /Contents + /Popup of the highlight, restored
@@ -784,8 +848,8 @@ else echo "viewer-smoke: mutool missing, check skipped"; fi
 # Externally: qpdf --check, each revision a byte prefix of the next, no duplicate ids, and
 # mutool draws "world" in the new colour and "safe" without a highlight.
 mkdir -p "$work/edit" "$work/out-edit"
-cp "$work/save/text-annotated.pdf" "$work/edit/text-annotated.pdf"
-cp "$work/save/text-annotated.pdf" "$work/out-edit/before.pdf"
+cp "$work/save/text.pdf" "$work/edit/text-annotated.pdf"
+cp "$work/save/text.pdf" "$work/out-edit/before.pdf"
 SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=edit run_viewer "$work/out-edit" "$work/edit/text-annotated.pdf"
 cat "$work/out-edit/edit.txt"
 python3 -I -c '
@@ -867,8 +931,9 @@ sys.exit(0 if ok else 1)
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
 # Encrypted input (SAFEPDF_VIEWER_SMOKE_MODE=encrypted): Ctrl+S with a note must not crash; until
-# task 9.5f the writer's refusal shows in the status line and nothing is written ("refused"),
-# afterwards the file is written ("saved").
+# task 9.5f the writer's refusal shows in the status line before any question (task 9.r2) and
+# nothing is written ("refused": the file byte for byte unchanged), afterwards the opened file
+# is written ("saved").
 mkdir -p "$work/enc" "$work/out-enc"
 cp Tests/adversarial/encrypted/rc4-128.pdf "$work/enc/rc4-128.pdf"
 SAFEPDF_VIEWER_SMOKE_MODE=encrypted run_viewer "$work/out-enc" "$work/enc/rc4-128.pdf"
@@ -876,8 +941,10 @@ cat "$work/out-enc/encrypted.txt"
 grep -qx 'alive: 1' "$work/out-enc/encrypted.txt" && grep -qE '^outcome: (refused|saved)$' "$work/out-enc/encrypted.txt" \
   || { echo "FAIL: saving an encrypted file" >&2; fail=1; }
 if grep -qx 'outcome: refused' "$work/out-enc/encrypted.txt"; then
-  grep -q '^status: cannot save to rc4-128-annotated.pdf: ' "$work/out-enc/encrypted.txt" \
-    && [ ! -e "$work/enc/rc4-128-annotated.pdf" ] || { echo "FAIL: encrypted refusal not shown, or a file was written" >&2; fail=1; }
+  grep -q '^status: cannot save to rc4-128.pdf: ' "$work/out-enc/encrypted.txt" \
+    && grep -qx 'asked: false' "$work/out-enc/encrypted.txt" \
+    && cmp -s Tests/adversarial/encrypted/rc4-128.pdf "$work/enc/rc4-128.pdf" \
+    || { echo "FAIL: encrypted refusal not shown, asked first, or the file was written" >&2; fail=1; }
 fi
 
 # 1j''. XFDF import/export (task 9.11, SAFEPDF_VIEWER_SMOKE_MODE=xfdf, `Viewer.smokeXfdf`) on a
@@ -938,7 +1005,7 @@ sys.exit(1 if errs else 0)
 # turns its mode and pop-over on; a click at (100, 400) opens a text box, typed text + Escape
 # make a free-text mark; a double click edits it, a click elsewhere commits; the pop-over's red
 # swatch and size slider restyle it; Draw: blue, thickness 4, two strokes = one drawing;
-# Ctrl+S writes text-annotated.pdf and reopens it (both marks read back exactly, drawn by the
+# Ctrl+S (Overwrite) writes into text.pdf and reopens it (both marks read back exactly, drawn by the
 # renderer: text pixels, a blue stroke pixel); the text box dragged 50 units right, saved;
 # Delete and the drawing's bubble Delete remove both, saved (none left, white paper).
 # Externally: qpdf --check, the original a prefix of the first save and that of the final
@@ -960,6 +1027,8 @@ want = {
     "deleted": "0 true true", "deleted-saved": "0 false 0 0",
     "after-delete-pixels": "0 255 255 255",
 }
+# task 9.r5: without a substitute Helvetica the saved free text is drawn on the canvas
+if v.get("subst") != "true": want["canvas-after-save"] = "1 0"
 errs = ["editors %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 starts = {"text-added": ("1 text Hello text ", " 10 #000000 1 0"),
           "text-edited": ("text Edited text ✓ ", " 10 #000000 true"),
@@ -977,12 +1046,12 @@ if not (px[2] > 150 and px[0] < 100):
 for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-editors/editors.txt" || fail=1
-for f in "$work/out-editors/editors1.pdf" "$work/editors/text-annotated.pdf"; do
+for f in "$work/out-editors/editors1.pdf" "$work/editors/text.pdf"; do
   if command -v qpdf >/dev/null 2>&1; then
     qpdf --check "$f" >/dev/null 2>&1 || { echo "FAIL: qpdf --check $f" >&2; fail=1; }
   else echo "viewer-smoke: qpdf missing, check skipped"; fi
 done
-for pair in "editors/text.pdf out-editors/editors1.pdf" "out-editors/editors1.pdf editors/text-annotated.pdf"; do
+for pair in "text.pdf out-editors/editors1.pdf" "out-editors/editors1.pdf editors/text.pdf"; do
   set -- $pair
   cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
     || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
@@ -1217,6 +1286,962 @@ need("done" in t, "the run did not finish")
 for e in errs: print("FAIL: async: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-async/async.txt" || fail=1
+
+# 1n. The consolidated Phase 9 / M9 run (task 9.6; SAFEPDF_VIEWER_SMOKE_MODE=m9, then =m9-reopen
+#     in a fresh process; `Viewer.smokeM9`): menubar entries; toolbar page box, arrows and zoom
+#     drop-down; the wheel alone reads the document end to end in single, continuous, facing and
+#     continuous facing mode (every spread passed in order, the page box ends on the last
+#     page's spread, the view at its bottom); the selection bubble's Highlight on the first
+#     five-letter word, a note, Add text (red) and Draw (blue); Ctrl+S, File → Close, reopened
+#     from disk: the four marks equal and drawn by the renderer (pixels); XFDF export, every
+#     mark deleted (no colour left), import brings the same four back; a second process on
+#     the saved file restores them (pixels) and shows the free text on screen before any click,
+#     with and without substitute fonts (task 9.r5); qpdf --check, the original a byte prefix, and
+#     `mutool draw` shows all four. Runs on two generated fixtures (3 and 4 pages: an odd and
+#     an even last spread) and on real papers: SAFEPDF_SMOKE_PAPERS (space-separated paths),
+#     default corpus/files/arxiv-1706.03762.pdf when present (git-ignored; skipped otherwise).
+m9_fixture() {  # m9_fixture OUT NPAGES
+  python3 -I -c '
+import sys
+n = int(sys.argv[2])
+words = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]
+pages = [b"BT /F1 18 Tf 72 700 Td (%s on page %d of the fixture) Tj ET\n" % (words[i % 6].encode(), i + 1)
+         for i in range(n)]
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"%d 0 R" % (3 + 2 * i) for i in range(n)), n)]
+for i, c in enumerate(pages):
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R "
+                b"/Resources << /Font << /F1 %d 0 R >> >> >>" % (4 + 2 * i, 3 + 2 * n))
+    objs.append(b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream")
+objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$1" "$2"
+}
+# m9_case NAME SOURCE: the whole M9 sequence on a copy of SOURCE in $work/m9-NAME.
+m9_case() {
+  local d="$work/m9-$1" src="$2"
+  mkdir -p "$d/out" "$d/out2"
+  cp "$src" "$d/$1.pdf"
+  echo "viewer-smoke: M9 run on $1 ($(basename "$src"))"
+  SAFEPDF_VIEWER_SMOKE_MODE=m9 run_viewer "$d/out" "$d/$1.pdf" || { echo "FAIL: m9 $1: run failed" >&2; fail=1; }
+  if ! cmp -s "$src" "$d/$1.pdf"; then
+    SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen run_viewer "$d/out2" "$d/$1.pdf" \
+      || { echo "FAIL: m9 $1: reopen run failed" >&2; fail=1; }
+    # Task 9.r5: the saved free text must be visible on screen right after opening, before any
+    # click — also without a substitute Helvetica (as on macOS without Ghostscript/TeX Gyre
+    # fonts), where the renderer cannot paint its non-embedded font and the canvas draws it.
+    mkdir -p "$d/out3"
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen run_viewer "$d/out3" "$d/$1.pdf" \
+      || { echo "FAIL: m9 $1: reopen run without substitute fonts failed" >&2; fail=1; }
+    for o in out2 out3; do
+      st=$(sed -n 's/^screen-text: //p' "$d/$o/m9-reopen.txt" 2>/dev/null)
+      echo "viewer-smoke: m9 $1 ($o) screen-text: $st"
+      case "$st" in
+        skipped*) echo "viewer-smoke: ImageMagick import missing, screen check skipped" ;;
+        *) [ "${st%% *}" -ge 3 ] 2>/dev/null \
+             || { echo "FAIL: m9 $1 ($o): reopened free text not visible on screen: $st" >&2; fail=1; } ;;
+      esac
+      # still visible after rotating (90°, back) and in vertical / single page mode (the
+      # Page Width and page-change shots are reported only: the box may be scrolled away)
+      sa=$(sed -n 's/^screen-after: //p' "$d/$o/m9-reopen.txt" 2>/dev/null)
+      echo "viewer-smoke: m9 $1 ($o) screen-after: $sa"
+      for k in rot90 rot0 vertical single; do
+        v=$(printf '%s\n' "$sa" | tr ' ' '\n' | sed -n "s/^$k=\([0-9a-z]*\)\/.*/\1/p")
+        case "$v" in
+          skipped) ;;
+          *) [ "${v:-0}" -ge 3 ] 2>/dev/null \
+               || { echo "FAIL: m9 $1 ($o): free text not visible on screen after $k: $v" >&2; fail=1; } ;;
+        esac
+      done
+    done
+  fi
+  cat "$d/out/m9.txt" "$d/out2/m9-reopen.txt" 2>/dev/null | grep -v '^saved-status' || true
+  python3 -I -c '
+import sys
+def kv(p):
+    try:
+        t = open(p, encoding="utf-8").read()
+    except FileNotFoundError:
+        return {"error": "missing %s" % p}
+    return dict(l.split(": ", 1) for l in t.splitlines() if ": " in l)
+name, v, r = sys.argv[1], kv(sys.argv[2]), kv(sys.argv[3])
+errs = []
+def need(c, msg):
+    if not c: errs.append(msg)
+for x in (v, r):
+    if "error" in x: errs.append("smoke step failed: %s" % x["error"])
+try:
+    n = int(v.get("pages", "0"))
+    need(n >= 2, "pages: %r" % v.get("pages"))
+    want = {"menubar": ".menubar", "menus": "File,Edit,View,Go", "arrow-next": "2", "arrow-prev": "1",
+            "bubble": "float true", "bubble-highlight": "1 edit", "note": "2",
+            "saved": "true false 4 4", "closed": "true 0 safe-pdf", "reopened": "true 4 4 false false",
+            "canvas-items": "0 0 0", "export": "exported 4 mark(s) to m9.xfdf",
+            "removed": "0 hl=0 note=0 text=0 ink=0", "back-to-single": "1 1",
+            "import": "m9.xfdf: 4 imported, 0 already present, 0 skipped"}
+    for k, w in want.items(): need(v.get(k) == w, "%s: %r, expected %r" % (k, v.get(k), w))
+    need(v.get("menu-entries", "").endswith(" bad="), "menu entries: %r" % v.get("menu-entries"))
+    last = v.get("pagebox-last", "").split()
+    need(last[:1] == [str(n)], "page box Enter on the last page: %r" % v.get("pagebox-last"))
+    need(v.get("pagebox-abc", "").split() == last[:2], "page box text did not revert: %r" % v.get("pagebox-abc"))
+    need(v.get("pagebox-first", "").startswith("1 "), "page box back to 1: %r" % v.get("pagebox-first"))
+    for k, lbl in (("zoom-width", "Page Width|"), ("zoom-fit", "Page Fit|"), ("zoom-auto", "Automatic Zoom|")):
+        need(v.get(k, "").startswith(lbl), "%s: %r" % (k, v.get(k)))
+    for mode, spreads in (("single", n), ("continuous", n), ("facing", (n - 1) // 2 + 1), ("cfacing", (n - 1) // 2 + 1)):
+        w = dict(t.split("=", 1) for t in v.get("wheel-" + mode, "").split() if "=" in t)
+        ok = (w.get("seen") == ",".join(str(i) for i in range(1, spreads + 1)) and
+              w.get("spreads") == str(spreads) and w.get("monotone") == "true" and
+              w.get("last") == "true" and w.get("bottom") == "true")
+        need(ok, "the wheel did not read the document end to end in %s mode: %r" % (mode, v.get("wheel-" + mode)))
+    t = v.get("text", "")
+    need(t.startswith("3 text M9 text ") and t.endswith(" 16 #D70022"), "text: %r" % t)
+    dr = v.get("draw", "")
+    need(dr.startswith("4 ink 2 [5, 5] 4 100 ") and dr.endswith(" true"), "draw: %r" % dr)
+    before = v.get("marks-before", "")
+    need(before.count(" | ") == 3, "marks-before: %r" % before)
+    for k, x in (("marks-reopened", v), ("marks-imported", v), ("marks (fresh process)", r)):
+        got = x.get(k.split()[0])
+        need(got == before, "%s differ: %r vs %r" % (k, got, before))
+    need(r.get("restored") == "4 4 false", "fresh process restored: %r" % r.get("restored"))
+    def px(s):
+        return {a: int(b) for a, b in (t.split("=") for t in s.split())}
+    for k, x in (("pixels-reopened", v), ("pixels", r)):
+        p = px(x.get(k, "hl=0 note=0 text=0 ink=0"))
+        need(p["hl"] >= 5 and p["note"] >= 5 and p["text"] >= 3 and p["ink"] >= 3,
+             "%s: a mark is not drawn: %r" % (k, x.get(k)))
+    need(px(v.get("imported-hl", "hl=0"))["hl"] >= 5, "imported highlight not drawn: %r" % v.get("imported-hl"))
+    c = [int(t) for t in v.get("imported-canvas", "0 0 0").split()]
+    need(all(x >= 1 for x in c), "imported note/text/drawing not on the canvas: %r" % c)
+except (KeyError, ValueError, IndexError) as e:
+    errs.append("missing or bad value: %r" % e)
+for e in errs: print("FAIL: m9 %s: %s" % (name, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$1" "$d/out/m9.txt" "$d/out2/m9-reopen.txt" || fail=1
+  # Save wrote into the opened copy (task 9.r2); $src stays the original.
+  cmp -s "$src" "$d/$1.pdf" && { echo "FAIL: m9 $1: nothing saved" >&2; fail=1; return; }
+  if command -v qpdf >/dev/null 2>&1; then
+    qpdf --check "$d/$1.pdf" >/dev/null 2>&1 || { echo "FAIL: m9 $1: qpdf --check" >&2; fail=1; }
+  else echo "viewer-smoke: qpdf missing, check skipped"; fi
+  cmp -n "$(stat -c %s "$src")" "$src" "$d/$1.pdf" \
+    || { echo "FAIL: m9 $1: the original is not a prefix of the saved file" >&2; fail=1; }
+  if command -v mutool >/dev/null 2>&1; then
+    mutool draw -q -r 72 -c rgb -F pnm -o "$d/mutool.ppm" "$d/$1.pdf" 1
+    python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+parts, i = [], 0
+while len(parts) < 4:
+    while d[i:i+1].isspace(): i += 1
+    j = i
+    while not d[j:j+1].isspace(): j += 1
+    parts.append(d[i:j]); i = j
+i += 1
+w, h = int(parts[1]), int(parts[2])
+px = d[i:]
+v = dict(l.split(": ", 1) for l in open(sys.argv[2], encoding="utf-8").read().splitlines() if ": " in l)
+cx0, cy0, cx1, cy1 = (float(t) for t in v["cropbox"].split())
+tests = {"hl": lambda r, g, b: r > 200 and g > 200 and b < 200,
+         "note": lambda r, g, b: r > 200 and g > 200 and b < 200,
+         "text": lambda r, g, b: r > 150 and g < 90 and b < 110,
+         "ink": lambda r, g, b: b > 150 and r < 100}
+need = {"hl": 5, "note": 5, "text": 3, "ink": 3}
+got = {}
+for part in v["boxes"].split(";"):
+    kind, *nums = part.split()
+    x0, y0, x1, y1 = (float(t) for t in nums)
+    n = 0
+    for y in range(max(0, int(cy1 - y1)), min(h, int(cy1 - y0) + 1)):
+        for x in range(max(0, int(x0 - cx0)), min(w, int(x1 - cx0) + 1)):
+            k = 3 * (y * w + x)
+            if tests[kind](px[k], px[k + 1], px[k + 2]): n += 1
+    got[kind] = n
+print("mutool: coloured pixels per mark: %r" % got)
+bad = [k for k in need if got.get(k, 0) < need[k]]
+if bad: print("FAIL: mutool does not show %s" % bad, file=sys.stderr)
+sys.exit(1 if bad else 0)
+' "$d/mutool.ppm" "$d/out/m9.txt" || { echo "FAIL: m9 $1: mutool check" >&2; fail=1; }
+  else echo "viewer-smoke: mutool missing, check skipped"; fi
+}
+m9_fixture "$work/m9three.pdf" 3
+m9_fixture "$work/m9four.pdf" 4
+m9_case three "$work/m9three.pdf"
+m9_case four "$work/m9four.pdf"
+m9papers="${SAFEPDF_SMOKE_PAPERS-corpus/files/arxiv-1706.03762.pdf}"
+for p in $m9papers; do
+  if [ -f "$p" ]; then m9_case "paper-$(basename "$p" .pdf)" "$p"
+  else echo "viewer-smoke: $p missing, M9 paper run skipped"; fi
+done
+
+# 1o. Wheel flow across page boundaries and the default view mode (task 9.r1;
+#     SAFEPDF_VIEWER_SMOKE_MODE=wheelflow, `Viewer.smokeWheelFlow`), on the four-page M9 fixture
+#     and the M9 papers, opened without SAFEPDF_VIEWER_VIEW: the file opens in Vertical
+#     Scrolling without spreads (state and View menu radio variables); then in single,
+#     continuous, facing and continuous facing mode at Page Width, and single at Page Fit, a
+#     trackpad-like burst of 12 px <TouchpadScroll> deltas with +-1 px sideways jitter and a
+#     burst of third-notch <MouseWheel> deltas, 8 ms apart and never pausing, must reach page 5
+#     (or the last page) without going back; the longest run of events that move nothing is at
+#     most the page-turn push (a quarter view of trackpad travel on a page that fits, a notch
+#     for the wheel) and zero in the vertical modes; no step jumps further than one event plus
+#     the push carried onto a new page.
+wheelflow_case() {  # wheelflow_case NAME PDF
+  local d="$work/wheelflow-$1"
+  SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2" \
+    || { echo "FAIL: wheelflow $1: run failed" >&2; fail=1; return; }
+  python3 -I -c '
+import math, sys
+name, path = sys.argv[1], sys.argv[2]
+lines = open(path, encoding="utf-8").read().splitlines()
+errs = []
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+if v.get("default") != "scroll=vertical spread=none radio=vertical none continuous=1":
+    errs.append("a fresh file is not in Vertical Scrolling: %r" % v.get("default"))
+seen = 0
+for l in lines:
+    if not l.startswith("flow-"): continue
+    seen += 1
+    label, rest = l[5:].split(": ", 1)
+    f = dict(t.split("=", 1) for t in rest.split())
+    view = int(f["view"])
+    pad = label.endswith("-pad")
+    vertical = label.startswith("continuous")
+    step = 12 if pad else math.ceil(view / 30) + 1
+    stall_max = 0 if vertical else (math.ceil(view / 4 / 12) + 1 if pad else 3)
+    step_max = step if vertical else 2 * step
+    if f["reached"] != "true": errs.append("%s stopped on page %s after %s events" % (label, f["page"], f["events"]))
+    if f["back"] != "0": errs.append("%s went backwards %s times" % (label, f["back"]))
+    if int(f["max-stall"]) > stall_max: errs.append("%s stalled for %s events (max %d)" % (label, f["max-stall"], stall_max))
+    if int(f["max-step"]) > step_max: errs.append("%s jumped %s px (max %d)" % (label, f["max-step"], step_max))
+    print("wheelflow %s: %s" % (name, l))
+if seen != 10: errs.append("expected 10 bursts, got %d (%r)" % (seen, lines[:3]))
+for e in errs: print("FAIL: wheelflow %s: %s" % (name, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$1" "$d/wheelflow.txt" || fail=1
+}
+wheelflow_case four "$work/m9four.pdf"
+for p in $m9papers; do
+  if [ -f "$p" ]; then wheelflow_case "paper-$(basename "$p" .pdf)" "$p"; fi
+done
+
+# 1p. Platform keys and the icon (task 9.r3, SAFEPDF_VIEWER_SMOKE_MODE=keys, `Viewer.smokeKeys`)
+#     on the text PDF, twice: as installed here (X11: Ctrl labels, no Command binding) and
+#     with SAFEPDF_VIEWER_PLATFORM=aqua (the macOS mapping on X11, where Tk's Command is
+#     Meta): Command-S labels, Command twins of every Ctrl binding (Save, Save As both ways,
+#     Quit also in the find bar), ::tk::mac::Quit = File -> Quit, the Save tooltip as ⌘S,
+#     Command+A selects all. Both: the six embedded icons load at their sizes and, when xprop
+#     is installed, the window carries _NET_WM_ICON starting with the 512 px image.
+for kp in x11 aqua; do
+  if [ "$kp" = aqua ]; then
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=keys SAFEPDF_VIEWER_PLATFORM=aqua \
+      run_viewer "$work/out-keys-$kp" "$work/text.pdf" || true
+  else
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=keys run_viewer "$work/out-keys-$kp" "$work/text.pdf" || true
+  fi
+  cat "$work/out-keys-$kp/keys.txt" 2>/dev/null | cut -c1-160 || true
+  python3 -I -c '
+import sys
+kp, path = sys.argv[1], sys.argv[2]
+try: lines = open(path, encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: keys %s: no keys.txt" % kp, file=sys.stderr); sys.exit(1)
+v = {}
+for l in lines:
+    k, _, r = l.partition(": ")
+    v[k] = r
+errs = []
+def want(k, x):
+    if v.get(k) != x: errs.append("%s = %r, want %r" % (k, v.get(k), x))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for n in (16, 32, 64, 128, 256, 512): want("icon%d" % n, "%dx%d" % (n, n))
+if "net-wm-icon" in v and not v["net-wm-icon"].startswith("_NET_WM_ICON(CARDINAL) = 512, 512"):
+    errs.append("net-wm-icon: %r" % v["net-wm-icon"])
+if kp == "aqua":
+    want("accel-open", "Command-O"); want("accel-save", "Command-S")
+    want("accel-saveas", "Command-Shift-S"); want("accel-quit", "Command-Q")
+    want("accel-zoomin", "Command-+"); want("accel-back", "Option-Left")
+    want("accel-pop-copy", "Command-C"); want("accel-pop-delete", "Delete")
+    want("bind <Control-Key-s>", "[::safepdf::emit save]")
+    want("bind <Command-Key-s>", "[::safepdf::emit save]")
+    want("bind <Command-Key-S>", "[::safepdf::emit saveAs]")
+    want("bind <Shift-Command-Key-s>", "[::safepdf::emit saveAs]")
+    want("bind <Command-Key-q>", "[::safepdf::emit quit]")
+    want("bind <Command-Key-plus>", "[::safepdf::emit zoom in]")
+    want("bind-find", "[::safepdf::emit quit]")
+    want("mac-quit", "[::tk::mac::Quit] [::safepdf::emit quit]")
+    want("save-tip", "Save (⌘S)")
+    if "⌘C copies" not in v.get("status-selectall", ""): errs.append("Command+A: %r" % v.get("status-selectall"))
+else:
+    want("accel-open", "Ctrl+O"); want("accel-save", "Ctrl+S")
+    want("accel-saveas", "Ctrl+Shift+S"); want("accel-quit", "Ctrl+Q")
+    want("accel-zoomin", "+"); want("accel-back", "Alt+Left"); want("accel-pop-copy", "Ctrl+C")
+    want("bind <Control-Key-s>", "[::safepdf::emit save]")
+    want("bind <Control-Key-S>", "[::safepdf::emit saveAs]")
+    for s in ("<Command-Key-s>", "<Command-Key-S>", "<Shift-Command-Key-s>", "<Command-Key-q>"):
+        want("bind " + s, "[]")
+    want("bind-find", "[]")
+    want("mac-quit", "[] []")
+    want("save-tip", "Save (Ctrl+S)")
+    if "Ctrl+C copies" not in v.get("status-selectall", ""): errs.append("Ctrl+A: %r" % v.get("status-selectall"))
+for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
+done
+
+# 1q. Review 2026-11-23 (task 9.r4, SAFEPDF_VIEWER_SMOKE_MODE=r4, `Viewer.smokeR4`), in the
+#     default view (Vertical Scrolling): the toolbar's view-mode drop-down next to the page
+#     count (its four entries, each invoked, scroll/spread variables and icon; the View menu's
+#     Even Spreads and the » menu's Vertical Scrolling followed by it; Two Pages keeps even
+#     spreads); on the text PDF the float bubble has Highlight and Add comment, and Add comment
+#     adds one note anchored to the selection, opens its popup and closes the bubble; on the
+#     outline PDF (and the M9 papers when they have an outline), at Page Fit in Single Page and
+#     Vertical Scrolling, closing and opening the outline moves the page frame straight from
+#     its start to its final position (sampled at every canvas <Configure> and every 2 ms):
+#     no intermediate x, in the canvas or on the screen.
+r4_case() {
+  local name="$1" pdf="$2" d="$work/out-r4-$1"
+  SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=r4 run_viewer "$d" "$pdf" || true
+  python3 -I -c '
+import re, sys
+name, path = sys.argv[1], sys.argv[2]
+try: lines = open(path, encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: r4 %s: no r4.txt" % name, file=sys.stderr); sys.exit(1)
+v = {}
+for l in lines:
+    k, _, r = l.partition(": ")
+    v[k] = r
+errs = []
+def starts(k, x):
+    if not v.get(k, "").startswith(x): errs.append("%s = %r, want %r..." % (k, v.get(k), x))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+starts("view0", "vertical vertical none icon=vertical items=2 on=1")
+if v.get("view-entries") != "Single Page|Vertical Scrolling|Two Pages|Two Pages Scrolling":
+    errs.append("entries %r" % v.get("view-entries"))
+if not v.get("view-left", "").endswith(".bar.next .bar.pg .bar.of .bar.vmode"):
+    errs.append("view-mode button not after the page count: %r" % v.get("view-left"))
+starts("view-tip", "View mode: Vertical Scrolling")
+for k, want in (("single", "single page none icon=single items=1"),
+                ("two", "two page odd icon=two items=2"),
+                ("two-scroll", "two-scroll vertical odd icon=two-scroll items=4"),
+                ("vertical", "vertical vertical none icon=vertical items=2")):
+    starts("view-" + k, want)
+    st = v.get("view-" + k, "").split(" state=")[-1].split(" slots")[0]
+    if st != " ".join(want.split()[1:3]): errs.append("view-%s: state %r" % (k, st))
+starts("menu-even", "two-scroll vertical even icon=two-scroll")
+starts("view-two-even", "two page even icon=two")
+starts("more-vertical", "two-scroll vertical even icon=two-scroll")
+starts("menu-none", "vertical vertical none icon=vertical")
+if name == "text":
+    if "[highlight, comment]" not in v.get("bubble", ""): errs.append("bubble: %r" % v.get("bubble"))
+    if v.get("bubble-in-region") != "true": errs.append("bubble outside the scroll region")
+    if v.get("bubble-bind") != "::safepdf::bubTip b:comment {Add comment}":
+        errs.append("tooltip %r" % v.get("bubble-bind"))
+    if v.get("bubble-tip") != "1 Add comment": errs.append("tooltip shown: %r" % v.get("bubble-tip"))
+    starts("comment", "added=1 note-on-selection=true popup=1 bubble-after=false sel-after=false")
+outl = [k for k in v if k.startswith("outline-")]
+if name == "nav" and len(outl) != 4: errs.append("outline cases: %r" % outl)
+for k in outl:
+    samples = re.findall(r"\{(\w+) (\d+) (\S+) (\S+) (\S+)\}", v[k])
+    want_shown = "shown=true" if "-open-" in k else "shown=false"
+    if not v[k].startswith(want_shown): errs.append("%s: %r" % (k, v[k][:20]))
+    if not any(s[0] == "conf" for s in samples): errs.append("%s: the canvas never changed size" % k)
+    for col, what in ((2, "x"), (4, "screen x")):
+        seq = []
+        for s in samples:
+            if not seq or seq[-1] != s[col]: seq.append(s[col])
+        if len(seq) > 2 or "none" in seq:
+            errs.append("%s: %s went %s (intermediate position)" % (k, what, " -> ".join(seq)))
+        else:
+            print("r4 %s %s: %s %s (%d samples)" % (name, k, what, " -> ".join(seq), len(samples)))
+for e in errs: print("FAIL: r4 %s: %s" % (name, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$name" "$d/r4.txt" || fail=1
+}
+r4_case text "$work/text.pdf"
+r4_case nav "$work/nav.pdf"
+for p in $m9papers; do
+  if [ -f "$p" ]; then r4_case "paper-$(basename "$p" .pdf)" "$p"; fi
+done
+
+# 1r. Save dialogs (task 9.r6, SAFEPDF_VIEWER_SMOKE_MODE=savedlg, `Viewer.smokeSaveDialogs`) on
+#     a copy of the text PDF alone in a folder, as installed and with
+#     SAFEPDF_VIEWER_PLATFORM=aqua: the three-way prompt from the keyboard (Return on the
+#     default, Tab to Cancel + Return cancels, Escape, Space; focus back on the canvas); Save
+#     As… options (-filetypes off aqua only, -defaultextension .pdf, the file's folder); a
+#     240-character name, a dotted name without .pdf (gets it), the extended name of an
+#     existing file (asks; No keeps it), a read-only file, a folder, a read-only folder
+#     (refused, still unsaved, Save enabled), spaces/Tcl metacharacters/quotes/non-ASCII; Export
+#     onto the opened PDF (writes NAME.pdf.xfdf, the PDF unchanged) and without .xfdf; the
+#     opened file deleted behind the viewer's back (asks, creates nothing); no temporary file.
+for sp in x11 aqua; do
+  sd="$work/savedlg-$sp"
+  mkdir -p "$sd"
+  cp "$work/text.pdf" "$sd/text.pdf"
+  if [ "$sp" = aqua ]; then
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=savedlg SAFEPDF_VIEWER_PLATFORM=aqua \
+      run_viewer "$work/out-savedlg-$sp" "$sd/text.pdf" || true
+  else
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=savedlg run_viewer "$work/out-savedlg-$sp" "$sd/text.pdf" || true
+  fi
+  cat "$work/out-savedlg-$sp/savedlg.txt" 2>/dev/null | cut -c1-160 || true
+  python3 -I -c '
+import sys
+sp, path, root = sys.argv[1], sys.argv[2], sys.argv[3] == "0"
+try: lines = open(path, encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: savedlg %s: no savedlg.txt" % sp, file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "choose-return": "overwrite .c", "choose-tab-cancel": "cancel .c",
+    "choose-escape": "cancel .c", "choose-space": "saveas .c",
+    "dialog-dir": "true text-annotated.pdf",
+    "dialog-filetypes": "false true true" if sp == "aqua" else "true false true",
+    "long-name": "true true", "dotted-name": "true true true", "ext-exists": "true true true",
+    "read-only": "true true", "folder": "true", "ro-folder": "true true",
+    "refused-state": "true true normal", "weird-name": "true true true false",
+    "export-onto-pdf": "true true true", "vanished": "true true true",
+}
+if root: want.pop("read-only"); want.pop("ro-folder")  # root writes anyway
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+xe = v.get("export-ext", "")
+if not xe.startswith("true true %s " % ("false" if sp == "aqua" else "true")) or not xe.endswith(".xfdf"):
+    errs.append("export-ext = %r" % xe)
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: savedlg %s: %s" % (sp, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$sp" "$work/out-savedlg-$sp/savedlg.txt" "$(id -u)" || fail=1
+  if find "$sd" -name '*.tmp' | grep -q .; then
+    echo "FAIL: savedlg $sp: a temporary file was left behind: $(find "$sd" -name '*.tmp')" >&2; fail=1
+  fi
+  chmod -R u+w "$sd" 2>/dev/null || true
+done
+
+# 1s. Document open settings (task 9.r8, SAFEPDF_VIEWER_SMOKE_MODE=opensettings,
+#     `Viewer.smokeOpenSettings`), in the real default view: generated five-page PDFs with an
+#     outline, each opened in turn through the File → Open path: every /PageLayout (view mode
+#     and the View menu's variables; TwoColumnRight/TwoPageRight put page 1 alone on the
+#     right), /PageMode UseOutlines / UseNone / UseThumbs (outline open / closed / thumbnails
+#     open, task 9.r9), /OpenAction [page 3 /XYZ 0 792 1.5] (page 3
+#     at 150 %, its top at the window top), the user's Two Pages + Actual Size kept by the
+#     reopen after Save (`keepView`), [p1 /Fit] (Page Fit), a GoTo to a named destination in a
+#     /Names /Dests tree (page 4, Page Width), JavaScript and URI open actions (ignored, noted),
+#     /ViewerPreferences HideToolbar + HideMenubar + HideWindowUI + DisplayDocTitle (window
+#     title from /Info /Title; Escape shows them again), TwoPageLeft + /Direction /R2L (page 1
+#     right of page 2), FullScreen with /NonFullScreenPageMode /UseOutlines (outline closed,
+#     Escape leaves and opens it), FitWindow + CenterWindow at /XYZ zoom 0.5; then a file
+#     without settings opens in Vertical Scrolling, Automatic Zoom, page 1 (nothing carried
+#     over).
+mkdir -p "$work/os"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(cat, title):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R /Outlines 13 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5 /MediaBox [0 0 612 792] >>"}
+    for i in range(5):
+        objs[3 + i] = "<< /Type /Page /Parent 2 0 R /Contents %d 0 R >>" % (8 + i)
+        c = "0.%d g 72 72 %d %d re f" % (2 + i, 100 + 60 * i, 100 + 100 * i)
+        objs[8 + i] = "<< /Length %d >>\nstream\n%s\nendstream" % (len(c), c)
+    objs[13] = "<< /Type /Outlines /First 14 0 R /Last 15 0 R /Count 2 >>"
+    objs[14] = "<< /Title (One) /Parent 13 0 R /Next 15 0 R /Dest [3 0 R /Fit] >>"
+    objs[15] = "<< /Title (Four) /Parent 13 0 R /Prev 14 0 R /Dest [6 0 R /Fit] >>"
+    objs[16] = "<< /Title (%s) >>" % title
+    body, offs = b"%PDF-1.7\n", {}
+    for n in sorted(objs):
+        offs[n] = len(body)
+        body += ("%d 0 obj\n%s\nendobj\n" % (n, objs[n])).encode("latin-1")
+    x = len(body)
+    body += b"xref\n0 17\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % offs[n] for n in range(1, 17))
+    body += ("trailer\n<< /Size 17 /Root 1 0 R /Info 16 0 R >>\nstartxref\n%d\n%%%%EOF\n" % x).encode()
+    return body
+cases = {"none": ""}
+for l in ["SinglePage", "OneColumn", "TwoColumnLeft", "TwoColumnRight", "TwoPageLeft", "TwoPageRight"]:
+    cases["layout-" + l] = "/PageLayout /" + l
+for m in ["UseOutlines", "UseNone", "UseThumbs"]:
+    cases["mode-" + m] = "/PageMode /" + m
+cases["xyz"] = "/OpenAction [5 0 R /XYZ 0 792 1.5]"
+cases["fit"] = "/PageMode /UseOutlines /OpenAction [3 0 R /Fit]"
+cases["named"] = "/OpenAction << /S /GoTo /D (four) >> /Names << /Dests << /Names [(four) [6 0 R /FitH 792]] >> >>"
+cases["js"] = "/OpenAction << /S /JavaScript /JS (app.alert\\(1\\)) >>"
+cases["uri"] = "/OpenAction << /S /URI /URI (https://example.org/) >>"
+cases["prefs"] = "/ViewerPreferences << /HideToolbar true /HideMenubar true /HideWindowUI true /DisplayDocTitle true >>"
+cases["window"] = "/OpenAction [3 0 R /XYZ null null 0.5] /ViewerPreferences << /FitWindow true /CenterWindow true >>"
+cases["r2l"] = "/PageLayout /TwoPageLeft /ViewerPreferences << /Direction /R2L >>"
+cases["full"] = "/PageMode /FullScreen /ViewerPreferences << /NonFullScreenPageMode /UseOutlines >>"
+for name, cat in cases.items():
+    open("%s/%s.pdf" % (out, name), "wb").write(pdf(cat, "Open Settings Test" if name == "prefs" else "unused"))
+' "$work/os"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=opensettings \
+  run_viewer "$work/out-os" "$work/os/none.pdf" || true
+python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: opensettings: no opensettings.txt", file=sys.stderr); sys.exit(1)
+rows = {}
+for l in lines:
+    name, _, rest = l.partition(": ")
+    head, _, status = rest.partition(" status=")
+    d = dict(p.split("=", 1) for p in re.split(r" (?=[a-z]+=)", head) if "=" in p)
+    d["status"] = status
+    rows[name] = d
+errs = []
+def want(name, **kv):
+    r = rows.get(name)
+    if r is None: errs.append("%s: missing" % name); return
+    for k, v in kv.items():
+        k = k.rstrip("_")
+        if r.get(k) != v: errs.append("%s: %s = %r, want %r" % (name, k, r.get(k), v))
+def has(name, k, part):
+    if part not in rows.get(name, {}).get(k, ""): errs.append("%s: %s lacks %r" % (name, k, part))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+default = dict(view="vertical,none", vars="vertical,none", rtl="false", zoom="Automatic Zoom",
+               page="1", outline="true", bar="1", menu=".menubar", ys="1")
+want("start", **default)
+for l, v in [("SinglePage", "page,none"), ("OneColumn", "vertical,none"),
+             ("TwoColumnLeft", "vertical,odd"), ("TwoColumnRight", "vertical,even"),
+             ("TwoPageLeft", "page,odd"), ("TwoPageRight", "page,even")]:
+    want("layout-" + l, view=v, vars=v, zoom="Automatic Zoom", page="1")
+for l in ["TwoColumnRight", "TwoPageRight"]:
+    if not rows.get("layout-" + l, {}).get("xs", "").startswith("0@237"):
+        errs.append("%s: page 1 not alone on the right: %r" % (l, rows.get("layout-" + l, {}).get("xs")))
+want("mode-UseOutlines", outline="true"); want("mode-UseNone", outline="false")
+want("mode-UseThumbs", outline="true", panel="thumbnails")
+if "not available" in rows.get("mode-UseThumbs", {}).get("status", ""): errs.append("mode-UseThumbs: note left")
+want("mode-UseOutlines", panel="outline"); want("full-escape", panel="outline")
+want("xyz", page="3", zoom="150%", off="0", view="vertical,none")
+want("xyz-user", view="page,odd", zoom="Actual Size")
+want("xyz-keep", view="page,odd", zoom="Actual Size")
+want("fit", zoom="Page Fit", page="1", outline="true")
+want("named", page="4", zoom="Page Width", off="0")
+want("js", page="1", zoom="Automatic Zoom"); has("js", "status", "open action /JavaScript ignored (not executed)")
+want("uri", page="1"); has("uri", "status", "open action /URI ignored (not executed)")
+want("prefs", bar="0", menu="", ys="0"); has("prefs", "title", "Open Settings Test - page 1/5 - safe-pdf")
+has("prefs", "status", "Escape shows them")
+want("prefs-escape", bar="1", menu=".menubar", ys="1")
+want("r2l", view="page,odd", rtl="true")
+m = re.match(r"0@(\d+),1@(\d+)$", rows.get("r2l", {}).get("xs", ""))
+if not m or int(m.group(1)) <= int(m.group(2)): errs.append("r2l: page 1 not right of page 2: %r" % rows.get("r2l", {}).get("xs"))
+want("full", full="true,0", outline="false"); has("full", "status", "full screen (Escape leaves)")
+want("full-escape", full="false,0", outline="true")
+want("window", zoom="50%")
+if rows.get("window", {}).get("geom", "").startswith("1200x960"): errs.append("window: FitWindow did not resize")
+want("none", **default); has("none", "title", "none.pdf - page 1/5")
+for n in ["start", "layout-OneColumn", "xyz", "js", "prefs", "r2l", "full", "window", "none"]:
+    r = rows.get(n, {})
+    print("opensettings %s: %s %s %s p%s outline=%s full=%s bar=%s rtl=%s" % (n, r.get("view"), r.get("zoom"), r.get("geom"), r.get("page"), r.get("outline"), r.get("full"), r.get("bar"), r.get("rtl")))
+for e in errs: print("FAIL: opensettings %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-os/opensettings.txt" || fail=1
+
+# 1t. Closing a note popup without Save (task 9.r12, SAFEPDF_VIEWER_SMOKE_MODE=noteclose,
+#     `Viewer.smokeNoteClose`) on the text PDF: a new note + Escape (focus in the text widget)
+#     -> no note, no icon; a new note + typed text + Escape -> kept with the typed text; that
+#     note saved, reopened by a click, cleared + Escape -> kept with its text, still saved; an
+#     empty saved note reopened + Escape -> removed, an unsaved change (`*`); an empty
+#     highlight comment + Escape -> the comment goes, the highlight stays; white space only
+#     on a selection -> removed; Cancel and the window's close button as Escape; Add note…
+#     while an empty note's popup is open removes that note; a note deleted while its popup
+#     is open closes the popup, a stale close is ignored.
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=noteclose run_viewer "$work/out-noteclose" "$work/text.pdf" || true
+cat "$work/out-noteclose/noteclose.txt" 2>/dev/null | cut -c1-160 || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: noteclose: no noteclose.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "menu-open": "notes=1 icons=true popup=1  focus=.note.t",
+    "menu-esc": "notes=0 icons=false popup=0 ",
+    "typed-esc": "notes=1 icons=true popup=0 typed text",
+    "saved-clear-esc": "notes=1 icons=false popup=0 typed text shown=typed text dirty=false star=false",
+    "saved-empty-before": "notes=2 icons=false popup=0  star=false",
+    "saved-empty-open": "1",
+    "saved-empty-esc": "notes=1 icons=false popup=0 <gone> dirty=true star=true",
+    "comment-open": "1 anchored=true",
+    "comment-esc": "notes=1 icons=false popup=0 <gone> highlight=true",
+    "selection-blank-esc": "notes=1 icons=false popup=0 <gone>",
+    "cancel-empty": "notes=1 icons=false popup=0 <gone>",
+    "cancel-typed": "notes=2 icons=true popup=0 via cancel",
+    "wm-empty": "notes=2 icons=true popup=0 <gone>",
+    "wm-typed": "notes=3 icons=true popup=0 via close",
+    "switch": "notes=4 icons=true popup=1 <gone> other=true for=true",
+    "switch-esc": "notes=3 icons=true popup=0 <gone>",
+    "deleted-open": "notes=3 icons=true popup=0 <gone>",
+    "stale-close": "notes=3 icons=true popup=0 ",
+    "texts": "[typed text, via cancel, via close]",
+}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: noteclose: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-noteclose/noteclose.txt" || fail=1
+
+# 1u. Thumbnails panel (task 9.r9, SAFEPDF_VIEWER_SMOKE_MODE=thumbs, `Viewer.smokeThumbs`) on
+#     generated files: th-outline.pdf (60 pages, an outline, page 5 /Rotate 90) opens with the
+#     outline and both view buttons (Thumbnails, Document outline); the Thumbnails button shows
+#     the panel with only the visible thumbnails and the margin rendered (lazy); a click on
+#     thumbnail 3 goes to page 3; Go to page 40 moves the highlight (scrolled into view); Down,
+#     Down, Return in the panel go to page 42; the panel scrolled to the end keeps at most the
+#     budget of images; a rotation lays the thumbnails out rotated; th-thumbs.pdf
+#     (/PageMode /UseThumbs, no outline) opens with the thumbnails, only the Thumbnails button,
+#     no "not available" note; th-plain.pdf (3 pages, nothing) opens closed with the sidebar
+#     toggle shown, and the toggle opens the thumbnails.
+mkdir -p "$work/th"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(n, cat, outline, rot=()):
+    kids = " ".join("%d 0 R" % (10 + 2 * i) for i in range(n))
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R %s%s >>" % ("/Outlines 3 0 R " if outline else "", cat),
+            2: "<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 612 792] >>" % (kids, n)}
+    if outline:
+        objs[3] = "<< /Type /Outlines /First 4 0 R /Last 5 0 R /Count 2 >>"
+        objs[4] = "<< /Title (Start) /Parent 3 0 R /Next 5 0 R /Dest [10 0 R /Fit] >>"
+        objs[5] = "<< /Title (Middle) /Parent 3 0 R /Prev 4 0 R /Dest [%d 0 R /Fit] >>" % (10 + 2 * (n // 2))
+    for i in range(n):
+        r = " /Rotate 90" if i in rot else ""
+        objs[10 + 2 * i] = "<< /Type /Page /Parent 2 0 R /Contents %d 0 R%s >>" % (11 + 2 * i, r)
+        c = "0.%d g 72 %d 300 200 re f 0 0 1 rg 400 600 100 100 re f" % (1 + i % 8, 72 + 8 * i)
+        objs[11 + 2 * i] = "<< /Length %d >>\nstream\n%s\nendstream" % (len(c), c)
+    body, offs = b"%PDF-1.7\n", {}
+    for k in sorted(objs):
+        offs[k] = len(body)
+        body += ("%d 0 obj\n%s\nendobj\n" % (k, objs[k])).encode("latin-1")
+    x, size = len(body), max(objs) + 1
+    body += ("xref\n0 %d\n" % size).encode()
+    for k in range(size):
+        body += (b"%010d 00000 n \n" % offs[k]) if k in offs else b"0000000000 65535 f \n"
+    body += ("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, x)).encode()
+    return body
+open(out + "/th-outline.pdf", "wb").write(pdf(60, "", True, rot=(4,)))
+open(out + "/th-thumbs.pdf", "wb").write(pdf(60, "/PageMode /UseThumbs", False))
+open(out + "/th-plain.pdf", "wb").write(pdf(3, "", False))
+' "$work/th"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=thumbs \
+  run_viewer "$work/out-th" "$work/th/th-outline.pdf" || true
+cut -c1-220 "$work/out-th/thumbs.txt" 2>/dev/null || true
+python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: thumbs: no thumbs.txt", file=sys.stderr); sys.exit(1)
+rows = {}
+for l in lines:
+    name, _, rest = l.partition(": ")
+    head, _, status = rest.partition(" status=")
+    d = dict(p.split("=", 1) for p in re.split(r" (?=[a-z0-9-]+=)", head) if "=" in p)
+    d["status"] = status
+    d["raw"] = rest
+    rows[name] = d
+errs = []
+def want(name, **kv):
+    r = rows.get(name)
+    if r is None: errs.append("%s: missing" % name); return
+    for k, v in kv.items():
+        k = k.replace("_", "-")
+        if r.get(k) != v: errs.append("%s: %s = %r, want %r" % (name, k, r.get(k), v))
+def num(name, k): return int(rows.get(name, {}).get(k, "-1"))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+want("outline-open", shown="true", panel="outline", buttons="thumbnails,outline", toggle="1",
+     head="Document outline", rendered="0")
+want("thumbs-open", shown="true", panel="thumbnails", buttons="thumbnails,outline", head="Thumbnails",
+     slots="60", marked="1")
+vis, ren = num("thumbs-open", "visible"), num("thumbs-open", "rendered")
+if not (0 < vis and 0 < ren <= vis + 2 * 3 and ren < 60):
+    errs.append("thumbs-open: not lazy: visible=%d rendered=%d" % (vis, ren))
+if rows.get("rot-slot", {}).get("raw") != "98x76 98x127": errs.append("rot-slot: %r" % rows.get("rot-slot", {}).get("raw"))
+want("click-3", page="3", marked="3")
+want("main-40", page="40", marked="40")
+f = num("main-40", "first-visible")
+if not (f <= 40 < f + num("main-40", "visible")): errs.append("main-40: thumbnail 40 not in view (first %d)" % f)
+want("keys-down2", page="40", sel="42")
+want("keys-return", page="42", marked="42", sel="0")
+if num("scrolled-end", "max-have") > 40 or num("scrolled-end", "have") > 40:
+    errs.append("scrolled-end: over the budget: %r" % rows.get("scrolled-end", {}).get("raw"))
+if num("scrolled-end", "photos") != num("scrolled-end", "have"):
+    errs.append("scrolled-end: photos %d != kept %d" % (num("scrolled-end", "photos"), num("scrolled-end", "have")))
+want("rotated", slots="60", marked="42"); want("rotated-slots", slot1="98x76", slot5="98x127")
+want("usethumbs", shown="true", panel="thumbnails", buttons="thumbnails", toggle="1", head="Thumbnails", page="1")
+if "not available" in rows.get("usethumbs", {}).get("status", "x not available"): errs.append("usethumbs: note %r" % rows.get("usethumbs", {}).get("status"))
+if not (0 < num("usethumbs", "rendered") < 60): errs.append("usethumbs: rendered %d" % num("usethumbs", "rendered"))
+want("plain", shown="false", buttons="", toggle="1")
+want("plain-toggle", shown="true", panel="thumbnails", buttons="thumbnails", rendered="3", have="3")
+want("plain-toggle2", shown="false")
+for e in errs: print("FAIL: thumbs %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-th/thumbs.txt" || fail=1
+# Performance (task 9.r9, SAFEPDF_VIEWER_SMOKE_MODE=thumbperf), reported only: the
+# git-ignored corpus paper when present.
+for f in corpus/files/arxiv-1706.03762.pdf; do
+  [ -f "$f" ] || continue
+  SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=thumbperf run_viewer "$work/out-thperf" "$f" || true
+  tr '\n' ' ' < "$work/out-thperf/thumbperf.txt" 2>/dev/null | sed 's/^/thumbperf: /'; echo
+done
+
+# 1v. Attachments panel (task 9.r10, SAFEPDF_VIEWER_SMOKE_MODE=attach, `Viewer.smokeAttach`)
+#     on generated PDFs: att.pdf (/PageMode /UseAttachments, an outline, /EmbeddedFiles tree
+#     with kids: hello.txt (plain, /Desc, /Params) and data.bin (FlateDecode, no /Size), an
+#     external file specification, a file attachment annotation on page 2 whose /UF is
+#     "../../etc/evil:name.txt" with a right-to-left override) opens on the attachments panel
+#     with both switcher buttons; Save attachment as... writes exactly the decoded bytes of
+#     every embedded file (compared with the generator's payloads and with pdfdetach when
+#     installed), proposes the sanitized name (evil_name.txt), refuses the external one, the
+#     opened PDF (unchanged), a read-only file (unchanged), a read-only folder and a folder;
+#     listing decodes nothing (data.bin: "?" until its tooltip probe); a click on the
+#     annotation's icon opens the panel on its row; outline.pdf and noatt.pdf (no
+#     attachments) have no Show Attachments button.
+mkdir -p "$work/att" "$work/out-att"
+python3 -I -c '
+import sys, zlib
+out = sys.argv[1]
+hello = b"Hello from an attachment.\n"
+data = bytes(range(256)) * 40
+evil = b"note \xe2\x9c\x93 inside\n"
+def pdf(cat, pages, extra):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 612 792] >>" % (
+                " ".join("%d 0 R" % (3 + i) for i in range(len(pages))), len(pages))}
+    for i, annots in enumerate(pages):
+        objs[3 + i] = "<< /Type /Page /Parent 2 0 R /Contents 9 0 R %s >>" % annots
+    c = "0.6 g 72 600 300 100 re f"
+    objs[9] = "<< /Length %d >>\nstream\n%s\nendstream" % (len(c), c)
+    objs.update(extra)
+    n = max(objs) + 1
+    body, offs = b"%PDF-1.7\n", {}
+    for k in sorted(objs):
+        offs[k] = len(body)
+        v = objs[k]
+        if isinstance(v, str): v = v.encode("latin-1")
+        body += b"%d 0 obj\n" % k + v + b"\nendobj\n"
+    x = len(body)
+    body += b"xref\n0 %d\n0000000000 65535 f \n" % n
+    body += b"".join((b"%010d 00000 n \n" % offs[k]) if k in offs else b"0000000000 65535 f \n" for k in range(1, n))
+    body += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n, x)
+    return body
+def stream(d, raw):
+    return b"<< " + d.encode() + b" /Length %d >>\nstream\n" % len(raw) + raw + b"\nendstream"
+outline = {20: "<< /Type /Outlines /First 21 0 R /Last 21 0 R /Count 1 >>",
+           21: "<< /Title (Start) /Parent 20 0 R /Dest [3 0 R /Fit] >>"}
+uf = "".join("%04X" % ord(ch) for ch in "../../etc/evil:name.txt‮")
+att = {10: "<< /Kids [11 0 R 12 0 R] >>",
+       11: "<< /Limits [(data.bin) (hello.txt)] /Names [(data.bin) 14 0 R (hello.txt) 13 0 R] >>",
+       12: "<< /Limits [(z) (z)] /Names [(z) 15 0 R] >>",
+       13: "<< /Type /Filespec /F (hello.txt) /UF (hello.txt) /Desc (A greeting) /EF << /F 16 0 R >> >>",
+       14: "<< /Type /Filespec /F (data.bin) /EF << /F 17 0 R >> >>",
+       15: "<< /Type /Filespec /F (external.pdf) >>",
+       16: stream("/Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size %d /CreationDate (D:20251123101500Z) /ModDate (D:20251124) >>" % len(hello), hello),
+       17: stream("/Type /EmbeddedFile /Filter /FlateDecode", zlib.compress(data)),
+       18: "<< /Type /Annot /Subtype /FileAttachment /Rect [400 600 430 640] /FS 19 0 R /Contents (attached) /AP << /N 22 0 R >> >>",
+       19: "<< /Type /Filespec /F (evil.txt) /UF <FEFF" + uf + "> /EF << /F 23 0 R >> >>",
+       22: stream("/Type /XObject /Subtype /Form /BBox [0 0 30 40]", b"0 0 1 rg 0 0 30 40 re f"),
+       23: stream("/Type /EmbeddedFile", evil)}
+att.update(outline)
+open(out + "/att.pdf", "wb").write(pdf("/PageMode /UseAttachments /Outlines 20 0 R /Names << /EmbeddedFiles 10 0 R >>", ["", "/Annots [18 0 R]"], att))
+open(out + "/outline.pdf", "wb").write(pdf("/Outlines 20 0 R", ["", ""], outline))
+open(out + "/noatt.pdf", "wb").write(pdf("", ["", ""], {}))
+for n, b in [("hello", hello), ("data", data), ("evil", evil)]:
+    open("%s/%s.expect" % (out, n), "wb").write(b)
+' "$work/att"
+cp "$work/att/att.pdf" "$work/att/att.orig"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=attach \
+  run_viewer "$work/out-att" "$work/att/att.pdf" || true
+cut -c1-200 "$work/out-att/attach.txt" 2>/dev/null || true
+if command -v pdfdetach >/dev/null 2>&1; then
+  mkdir -p "$work/att/detach"
+  pdfdetach -saveall -o "$work/att/detach" "$work/att/att.pdf" >/dev/null 2>&1 || true
+fi
+python3 -I -c '
+import os, sys
+att, outd = sys.argv[1], sys.argv[2]
+try: lines = open(outd + "/attach.txt", encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: attach: no attach.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def want(k, part):
+    if part not in v.get(k, ""): errs.append("%s = %r lacks %r" % (k, v.get(k), part))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+want("start", "shown=true panel=attachments outlineBtn=1 attBtn=1 list=1 toggle=1 atts=4")
+want("rows", "data.bin|?;hello.txt|26 B;external.pdf|\u2014;../../etc/evil:name.txt|16 B")
+want("tip0", "Stored: ")
+want("tip0", "(compressed)")
+want("probed", "data.bin|10 KB;hello.txt|26 B")
+want("tip1", "A greeting / Type: text/plain / Created: 2025-11-23 10:15 / Modified: 2025-11-24")
+read = lambda p: open(p, "rb").read()
+expect = {0: "data", 1: "hello", 3: "evil"}
+for k, n in expect.items():
+    want("save-%d" % k, "saved attachment")
+    p = "%s/save-%d.bin" % (outd, k)
+    if not os.path.exists(p) or read(p) != read("%s/%s.expect" % (att, n)):
+        errs.append("save-%d: bytes differ from %s" % (k, n))
+want("save-3", "proposed=evil_name.txt")
+want("save-1", "proposed=hello.txt")
+want("save-2", "cannot save attachment external.pdf: not embedded")
+if os.path.exists(outd + "/save-2.bin"): errs.append("save-2: external file written")
+want("refused-pdf", "is the opened document")
+want("refused-ro", "is read-only")
+want("refused-rodir", "is not writable")
+want("refused-folder", "is a folder")
+if read(att + "/att.pdf") != read(att + "/att.orig"): errs.append("the opened PDF changed")
+if read(outd + "/ro.bin") != b"read-only\n": errs.append("the read-only file changed")
+if os.path.exists(outd + "/rodir/x.bin"): errs.append("written into the read-only folder")
+want("select-a1", "attachment hello.txt (26 B)")
+want("menu", "Save attachment as…")
+want("switch-outline", "shown=true panel=outline outlineBtn=1 attBtn=1")
+want("switch-outline", "list=0")
+want("switch-attachments", "panel=attachments outlineBtn=1 attBtn=1")
+want("switch-attachments", "list=1")
+want("toggle-off", "shown=false panel=attachments")
+want("toggle-on", "shown=true panel=attachments")
+want("icon", "shown=true panel=attachments")
+want("icon", "sel=a3 entry=3")
+want("outline", "shown=true panel=outline outlineBtn=1 attBtn=0 list=0 toggle=1 atts=0")
+want("noatt", "shown=false")
+want("noatt", "attBtn=0 list=0 toggle=1 atts=0")
+d = att + "/detach"
+if os.path.isdir(d):
+    for k, name in [(0, "data.bin"), (1, "hello.txt")]:
+        p = os.path.join(d, name)
+        if os.path.exists(p) and read(p) != read("%s/save-%d.bin" % (outd, k)):
+            errs.append("save-%d differs from pdfdetach" % k)
+for e in errs: print("FAIL: attach: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/att" "$work/out-att" || fail=1
+
+# 1w. Layers panel (task 9.r11b, SAFEPDF_VIEWER_SMOKE_MODE=layers, `Viewer.smokeLayers`) on
+#     generated PDFs (none in the corpus has optional content): oc.pdf (/PageMode /UseOC; one
+#     page whose squares and words are in the groups Base ON, Extra OFF, Notes ON, the radio
+#     pair English ON / French OFF under the UTF-16 heading "Languages" + U+202E, Locked
+#     (locked, ON, nested under Notes by an unlabelled array), Orphan (ON, not in /Order:
+#     listed under the collapsed "Additional Layers" heading, as PDF.js), and
+#     an OCMD AllOn(Base, Extra)); oc-nomode.pdf (no page mode: Layers button, sidebar closed),
+#     oc-noorder.pdf (no /Order: every group by name) and plain.pdf (/UseOC without
+#     /OCProperties: no button, no note). The viewer runs on a copy (saved.pdf), adds a note,
+#     saves it (incremental update) and opens it again.
+mkdir -p "$work/oc" "$work/out-oc"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(objs):
+    n = max(objs) + 1
+    body, offs = b"%PDF-1.7\n", {}
+    for k in sorted(objs):
+        offs[k] = len(body)
+        v = objs[k]
+        if isinstance(v, str): v = v.encode("latin-1")
+        body += b"%d 0 obj\n" % k + v + b"\nendobj\n"
+    x = len(body)
+    body += b"xref\n0 %d\n0000000000 65535 f \n" % n
+    body += b"".join((b"%010d 00000 n \n" % offs[k]) if k in offs else b"0000000000 65535 f \n" for k in range(1, n))
+    body += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n, x)
+    return body
+def sq(tag, rgb, x, y, word=None):
+    s = "/OC /%s BDC %s rg %d %d 100 100 re f" % (tag, rgb, x, y)
+    if word: s += " BT /F1 20 Tf %d %d Td (%s) Tj ET" % (x, y - 30, word)
+    return s + " EMC\n"
+c = (sq("oa", "1 0 0", 50, 600, "alpha") + sq("ob", "0 0 1", 200, 600, "bravo") +
+     sq("om", "0 0.6 0", 350, 600) + sq("oe", "1 0.5 0", 50, 400, "english") +
+     sq("of", "0.5 0 0.5", 200, 400, "french") + sq("ol", "0.3 0.3 0.3", 350, 400) +
+     sq("on", "0 0.5 0.5", 50, 200) + "0 g BT /F1 20 Tf 50 120 Td (always visible) Tj ET\n")
+label = "<FEFF" + "".join("%04X" % ord(ch) for ch in "Languages‮") + ">"
+def doc(cat, props):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+            3: "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> "
+               "/Properties << /oa 10 0 R /ob 11 0 R /om 20 0 R /oe 13 0 R /of 14 0 R /ol 15 0 R /on 16 0 R >> >> >>",
+            4: "<< /Length %d >>\nstream\n%sendstream" % (len(c), c),
+            5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            20: "<< /Type /OCMD /OCGs [10 0 R 11 0 R] /P /AllOn >>"}
+    for k, nm in [(10, "Base"), (11, "Extra"), (12, "Notes"), (13, "English"), (14, "French"),
+                  (15, "Locked"), (16, "Orphan")]:
+        objs[k] = "<< /Type /OCG /Name (%s) >>" % nm
+    if props is not None:
+        objs[1] = objs[1][:-3] + " /OCProperties 21 0 R >>"
+        objs[21] = props
+    return pdf(objs)
+ocgs = "/OCGs [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R]"
+d = "/Name (Default) /OFF [11 0 R 14 0 R] /RBGroups [[13 0 R 14 0 R]] /Locked [15 0 R]"
+order = "/Order [10 0 R 11 0 R [%s 13 0 R 14 0 R] 12 0 R [15 0 R]]" % label
+props = "<< %s /D << %s %s >> >>" % (ocgs, d, order)
+open(out + "/oc.pdf", "wb").write(doc("/PageMode /UseOC", props))
+open(out + "/oc-nomode.pdf", "wb").write(doc("", props))
+open(out + "/oc-noorder.pdf", "wb").write(doc("/PageMode /UseOC", "<< %s /D << %s >> >>" % (ocgs, d)))
+open(out + "/plain.pdf", "wb").write(doc("/PageMode /UseOC", None))
+ ' "$work/oc"
+cp "$work/oc/oc.pdf" "$work/oc/saved.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=layers \
+  run_viewer "$work/out-oc" "$work/oc/saved.pdf" || true
+cut -c1-200 "$work/out-oc/layers.txt" 2>/dev/null || true
+python3 -I -c '
+import sys
+ocd, outd = sys.argv[1], sys.argv[2]
+try: lines = open(outd + "/layers.txt", encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: layers: no layers.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def want(k, part):
+    if part not in v.get(k, ""): errs.append("%s = %r lacks %r" % (k, v.get(k), part))
+def lacks(k, part):
+    if part in v.get(k, ""): errs.append("%s = %r has %r" % (k, v.get(k), part))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+white, blue, green, orange, purple = "(255 255 255)", "(0 0 255)", "(0 153 0)", "(255 128 0)", "(128 0 128)"
+want("start", "shown=true panel=layers layersBtn=true list=1 rows=9 title=Layers")
+lacks("start", "not available")
+tree = "0:Base:1;0:Extra:0;0:[Languages];1:English:1;1:French:0;0:Notes:1;1:Locked:1:locked;0:[Additional Layers];1:Orphan:1:hidden"
+want("rows", tree)
+want("additional-open", ";0:[Additional Layers];1:Orphan:1")
+lacks("additional-open", "Orphan:1:hidden")
+want("orphan-off", "1:Orphan:0")
+want("px-orphan", "orphan=%s" % white)
+want("px-orphan-on", "orphan=(0 128 128)")
+want("px-start", "base=(255 0 0) extra=%s ocmd=%s en=%s fr=%s locked=(77 77 77) orphan=(0 128 128)" % (white, white, orange, white))
+want("text-start", "alpha=1 bravo=0 english=1 french=0 always=1")
+want("thumb-start", "have=true px=%s" % white)
+want("extra-on", "0:Extra:1;")
+want("px-extra", "extra=%s ocmd=%s" % (blue, green))
+want("text-extra", "bravo=1")
+want("french-on", "1:English:0;1:French:1;")
+want("px-french", "en=%s fr=%s" % (white, purple))
+want("text-french", "english=0 french=1")
+want("locked", "1:Locked:1:locked")
+want("locked", "status=layer Locked is locked")
+want("px-locked", "locked=(77 77 77)")
+want("collapsed", "1:English:0:hidden;1:French:1:hidden;")
+want("expanded", "1:English:0;1:French:1;")
+want("thumb-after", "have=true px=%s" % blue)
+want("saved", "dirty=false status=saved 1 new")
+want("saved-rows", "0:Extra:1;0:[Languages];1:English:0;1:French:1;")
+want("px-saved", "extra=%s ocmd=%s en=%s fr=%s" % (blue, green, white, purple))
+want("reopened", "shown=true panel=layers layersBtn=true")
+want("reopened-rows", tree)
+want("px-reopened", "extra=%s ocmd=%s en=%s fr=%s" % (white, white, orange, white))
+want("text-reopened", "alpha=1 bravo=0 english=1 french=0")
+want("oc-nomode", "shown=false")
+want("oc-nomode", "layersBtn=true")
+want("oc-noorder", "shown=true panel=layers layersBtn=true list=1 rows=7")
+lacks("oc-noorder-rows", "Additional")
+want("oc-noorder-rows", "0:Base:1;0:Extra:0;0:Notes:1;0:English:1;0:French:0;0:Locked:1:locked;0:Orphan:1")
+want("plain", "shown=false")
+want("plain", "layersBtn=false")
+lacks("plain", "not available")
+# Save wrote an incremental update that leaves /OCProperties (and the catalog) alone.
+orig = open(ocd + "/oc.pdf", "rb").read()
+saved = open(ocd + "/saved.pdf", "rb").read()
+if not saved.startswith(orig) or len(saved) <= len(orig):
+    errs.append("saved.pdf is not an incremental update of oc.pdf")
+else:
+    tail = saved[len(orig):]
+    for bad in [b"OCProperties", b"/OCGs", b"/ON", b"/OFF", b"\n1 0 obj", b"\n21 0 obj"]:
+        if bad in tail: errs.append("the update writes %r" % bad)
+for e in errs: print("FAIL: layers: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/oc" "$work/out-oc" || fail=1
+if command -v qpdf >/dev/null 2>&1; then
+  qpdf --check "$work/oc/saved.pdf" >/dev/null 2>&1 || { echo "FAIL: layers: qpdf --check saved.pdf" >&2; fail=1; }
+fi
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"

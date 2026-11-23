@@ -56,13 +56,28 @@ checks and stores.
   note takes its highlight's colour), each written id exactly once, and no deleted id. Only
   then is the file written.
 * **Atomic write** (`writeAtomic`): the bytes go into a new temporary file in the target's
-  directory (`.NAME.safepdf-N.tmp`, created exclusively), which is then renamed over the
-  target; on any error the temporary file is removed and the target is untouched. A file is
-  never truncated in place.
-* **Default target** (`defaultTarget`): `DIR/STEM-annotated.pdf` next to the opened file;
-  for a file whose stem already ends in `-annotated` the file itself (a further revision of
-  it). The viewer asks before writing over the opened file unless it wrote it itself in this
-  session, and before replacing another existing file.
+  directory (`.NAME.safepdf-N.tmp`, `tmpName`: `NAME` cut to 100 bytes, created
+  exclusively), are read back and compared, get the
+  caller's preparation (the viewer copies the replaced file's permissions onto it), and the
+  temporary file is then renamed over the target; on any error the temporary file is removed
+  and the target is untouched. A file is never truncated in place.
+* **Save overwrites the opened file** (task 9.r2, Decision 2026-11-23, Plan.md S8 amended):
+  the pure decisions of the viewer's Save and close paths are here — `route` (library,
+  Save As…, or overwrite with or without the first-overwrite question), `diskState` (the file
+  on disk still holds the bytes we opened, else Save refuses and offers Save As…),
+  `writeProblem` (read-only file or folder: refused before anything is written), the dialog
+  texts (`overwriteQuestion`, `changedQuestion`, `unsavedQuestion`), the button orders
+  (`overwriteButtons`, `unsavedButtons`, `changedButtons`: on aqua the macOS order, the
+  default button rightmost and Don't Save / Save As… leftmost) and what a close does with
+  the answer (`onUnsavedAnswer`, `closeGoesOn`).
+* **The file dialogs** (task 9.r6): `withExt` (a chosen name gets `.pdf`/`.xfdf` unless it
+  already ends so — Tk on X11 adds `-defaultextension` only to names without any dot;
+  `replaceQuestion` when that names an existing file), `targetProblem` (Save As… / Export
+  refuse a folder, a read-only file, an unwritable folder and — Export — the opened
+  document itself), `saveDialogOptions` (no `-filetypes` on aqua: Tk 9's "Format:" pop-up
+  overflows the save panel), `dialogDir` (the opened file's folder, else home), `oneLine`.
+* **Save As… proposal** (`defaultTarget`): `DIR/STEM-annotated.pdf` next to the opened file;
+  for a file whose stem already ends in `-annotated` the file itself.
 * **Reading marks back** (`readMarks`): the annotations of every page's own `/Annots`
   (resolved one level, at most `Annot.maxAnnots` per page) whose `/NM` is
   `safepdf-mark-ID` (`Marks.idOfNm`; our popups `safepdf-mark-ID-popup[-CID]` and everybody
@@ -386,7 +401,7 @@ def verify (box : Nat → Option Box) (want : List Mark) (fresh : List Nat) (got
 
 /-! ## Paths and the atomic write -/
 
-/-- The default file Save writes (see the module doc). -/
+/-- The file Save As… proposes (see the module doc). -/
 def defaultTarget (path : String) : String :=
   let fp : System.FilePath := path
   let stem := fp.fileStem.getD "document"
@@ -402,23 +417,268 @@ def defaultTarget (path : String) : String :=
 #guard defaultTarget "a/b.c.pdf" == "a/b.c-annotated.pdf"
 #guard defaultTarget "/tmp/x/paper-annotated.pdf" == "/tmp/x/paper-annotated.pdf"
 
+/-- The name of the temporary file of a save of `base` (task 9.r6): `.BASE.safepdf-STAMP.tmp`,
+where `BASE` is cut to its first 100 UTF-8 bytes (whole characters) so that the temporary name
+stays within the 255-byte file-name limit of common file systems even when the target's own
+name nearly fills it (a 240-byte name used to fail with "name too long"). -/
+def tmpName (base : String) (stamp : Nat) : String :=
+  s!".{String.ofList (cutBytes 100 base.toList)}.safepdf-{stamp}.tmp"
+where
+  /-- The longest prefix of `cs` of at most `n` UTF-8 bytes. -/
+  cutBytes (n : Nat) : List Char → List Char
+    | [] => []
+    | c :: cs => if c.utf8Size ≤ n then c :: cutBytes (n - c.utf8Size) cs else []
+
+#guard tmpName "a.pdf" 7 == ".a.pdf.safepdf-7.tmp"
+#guard (tmpName (String.ofList (List.replicate 250 'L') ++ ".pdf") 12345678901234).utf8ByteSize ≤ 255
+#guard (tmpName (String.ofList (List.replicate 99 'x') ++ "üü") 1).startsWith
+  (".".append (String.ofList (List.replicate 99 'x') ++ ".safepdf-"))
+
 /-- Writes `bytes` to `path` through a new temporary file in the same directory and a rename
-(never truncating the target in place); the temporary file is removed on failure. -/
-def writeAtomic (path : String) (bytes : ByteArray) : IO Unit := do
+(never truncating the target in place): the temporary file is written, closed, read back and
+compared with `bytes`, then `prepare` runs on it (the viewer copies the replaced file's
+permissions), then it is renamed over `path`. The temporary file is removed on failure. -/
+def writeAtomic (path : String) (bytes : ByteArray)
+    (prepare : System.FilePath → IO Unit := fun _ => pure ()) : IO Unit := do
   let fp : System.FilePath := path
   let dir : System.FilePath := match fp.parent with
     | some d => if d.toString.isEmpty then "." else d
     | none => "."
   let base := fp.fileName.getD "document.pdf"
-  let tmp := dir / s!".{base}.safepdf-{← IO.monoNanosNow}.tmp"
+  let tmp := dir / tmpName base (← IO.monoNanosNow)
   try
-    let h ← IO.FS.Handle.mk tmp .writeNew
-    h.write bytes
-    h.flush
+    IO.FS.withFile tmp .writeNew fun h => do
+      h.write bytes
+      h.flush
+    let back ← IO.FS.readBinFile tmp
+    if back.data != bytes.data then
+      throw (IO.userError s!"the temporary file {tmp} does not read back as written")
+    prepare tmp
     IO.FS.rename tmp fp
   catch e =>
     try IO.FS.removeFile tmp catch _ => pure ()
     throw e
+
+/-! ## Save overwrites the opened file (task 9.r2) -/
+
+/-- What Save does (`route`). -/
+inductive Route where
+  /-- Nothing unsaved: nothing to do. -/
+  | nothing
+  /-- The document belongs to a library (bib-lean): Save to library (`PUT`). -/
+  | library
+  /-- Opened from memory without a library: no file to write into, Save As…. -/
+  | saveAs
+  /-- Write into the opened file; `ask`: first ask Overwrite / Save As… / Cancel. -/
+  | overwrite (ask : Bool)
+  deriving BEq, Repr
+
+/-- **Save's route**: `dirty` (unsaved marks), `library`, `inMemory`, `confirmed` (this
+session already wrote the opened file, or the user agreed to write into it in the
+unsaved-changes prompt, whose text says so). -/
+def route (dirty library inMemory confirmed : Bool) : Route :=
+  if !dirty then .nothing
+  else if library then .library
+  else if inMemory then .saveAs
+  else .overwrite (!confirmed)
+
+#guard route false true true false == .nothing
+#guard route true true false false == .library
+#guard route true false true false == .saveAs
+#guard route true false false false == .overwrite true
+#guard route true false false true == .overwrite false
+
+/-- The opened file on disk compared with the bytes the document was opened from. -/
+inductive DiskState where
+  /-- Still the same bytes. -/
+  | same
+  /-- Different bytes (another program wrote it). -/
+  | changed
+  /-- Gone, or unreadable. -/
+  | missing
+  deriving BEq, Repr
+
+/-- **Whether the file on disk still holds the bytes we opened** (`onDisk`: its content, `none`
+when it cannot be read): sizes first, then a full comparison. -/
+def diskState (opened : ByteArray) (onDisk : Option ByteArray) : DiskState :=
+  match onDisk with
+  | none => .missing
+  | some d => if d.size == opened.size && d.data == opened.data then .same else .changed
+
+#guard diskState "abc".toUTF8 (some "abc".toUTF8) == .same
+#guard diskState "abc".toUTF8 (some "abd".toUTF8) == .changed
+#guard diskState "abc".toUTF8 (some "abc\n".toUTF8) == .changed
+#guard diskState "abc".toUTF8 none == .missing
+
+/-- **Why the opened file `name` cannot be overwritten** (`fileWritable`: the file,
+`dirWritable`: its folder, where the temporary file goes): `none` when it can. Checked before
+anything is written (the rename would otherwise replace a read-only file). -/
+def writeProblem (name : String) (fileWritable dirWritable : Bool) : Option String :=
+  if !fileWritable then some s!"{name} is read-only; use Save As… to write a new file"
+  else if !dirWritable then
+    some s!"the folder of {name} is not writable (the new revision is written next to it \
+      first); use Save As… to write elsewhere"
+  else none
+
+#guard writeProblem "a.pdf" true true == none
+#guard (writeProblem "a.pdf" false true).isSome && (writeProblem "a.pdf" true false).isSome
+
+/-- The first-overwrite question (Overwrite / Save As… / Cancel) for the opened file `name`
+with `n` new or changed marks. -/
+def overwriteQuestion (name : String) (n : Nat) : String :=
+  s!"Save {n} new or changed mark(s) into {name}?\n\nThe marks are added to {name} itself. \
+    Its present content is kept unchanged inside the file as its first revision (its bytes \
+    stay at the start of the file). Save As… writes a new file instead and leaves {name} \
+    as it is."
+
+/-- The question when the opened file `name` changed on disk (`st`; Save As… / Cancel). -/
+def changedQuestion (name : String) (st : DiskState) : String :=
+  let what := if st == .missing then s!"{name} is no longer there (moved, deleted or unreadable)"
+    else s!"{name} was changed on disk by another program since it was opened"
+  s!"{what}. Saving into it would lose that change, so nothing was written.\n\nSave As… \
+    writes the document as opened, with your marks, to a new file."
+
+/-- The unsaved-changes question before `what` (closing, quitting, opening another file) with
+`n` unsaved marks on `name`; `library`: Save goes to the library; `inMemory`: Save asks for a
+file; `into`: Save writes into the opened file for the first time this session (the text says
+so, and no second question follows). -/
+def unsavedQuestion (name what : String) (n : Nat) (library inMemory into : Bool) : String :=
+  let head := s!"{n} mark(s) on {name} are not saved. Save them before {what}?"
+  let tail := if library then
+      "Save sends the annotated file to the library (its annotation list has the marks \
+      already); Don't Save leaves the library's file as it is."
+    else if inMemory then "Save asks for a file; Don't Save discards them."
+    else if into then
+      s!"Save writes them into {name} (its present content is kept inside it as the first \
+        revision); Don't Save discards them and leaves {name} untouched."
+    else s!"Save writes them into {name}; Don't Save discards them and leaves {name} untouched."
+  head ++ "\n\n" ++ tail
+
+#guard (unsavedQuestion "t.pdf" "quitting" 2 false false true).startsWith
+  "2 mark(s) on t.pdf are not saved. Save them before quitting?"
+
+/-- Dialog buttons in display order, left to right (key, label): on aqua the macOS order (the
+default action `dflt` rightmost, the alternative `alt` leftmost, Cancel next to the default),
+elsewhere the default first and Cancel last. -/
+def buttons (aqua : Bool) (dflt alt : String × String) : List (String × String) :=
+  let cancel := ("cancel", "Cancel")
+  if aqua then [alt, cancel, dflt] else [dflt, alt, cancel]
+
+/-- The unsaved-changes buttons: Save / Don't Save / Cancel (aqua: Don't Save, Cancel, Save). -/
+def unsavedButtons (aqua : Bool) : List (String × String) :=
+  buttons aqua ("save", "Save") ("dontsave", "Don't Save")
+
+/-- The first-overwrite buttons: Overwrite / Save As… / Cancel (aqua: Save As…, Cancel,
+Overwrite). -/
+def overwriteButtons (aqua : Bool) : List (String × String) :=
+  buttons aqua ("overwrite", "Overwrite") ("saveas", "Save As…")
+
+/-- The changed-on-disk buttons: Save As… / Cancel (aqua: Cancel, Save As…). -/
+def changedButtons (aqua : Bool) : List (String × String) :=
+  if aqua then [("cancel", "Cancel"), ("saveas", "Save As…")]
+  else [("saveas", "Save As…"), ("cancel", "Cancel")]
+
+#guard (unsavedButtons false).map (·.2) == ["Save", "Don't Save", "Cancel"]
+#guard (unsavedButtons true).map (·.2) == ["Don't Save", "Cancel", "Save"]
+#guard (overwriteButtons false).map (·.1) == ["overwrite", "saveas", "cancel"]
+#guard (overwriteButtons true).map (·.1) == ["saveas", "cancel", "overwrite"]
+
+/-- What closing does with the unsaved-changes answer (a key of `unsavedButtons`; anything
+else, e.g. the dialog's own close button, counts as Cancel): `some true` save first,
+`some false` go on without saving, `none` abort the close. -/
+def onUnsavedAnswer (answer : String) : Option Bool :=
+  if answer == "save" then some true
+  else if answer == "dontsave" then some false
+  else none
+
+#guard onUnsavedAnswer "save" == some true && onUnsavedAnswer "dontsave" == some false &&
+  onUnsavedAnswer "cancel" == none && onUnsavedAnswer "" == none
+
+/-- Whether a close goes on: no unsaved marks (`dirty` false), Don't Save, or a Save that
+succeeded (`saved`); Cancel and a failed Save abort it. -/
+def closeGoesOn (dirty : Bool) (answer : Option Bool) (saved : Bool) : Bool :=
+  !dirty || answer == some false || (answer == some true && saved)
+
+#guard closeGoesOn false none false && closeGoesOn true (some false) false &&
+  closeGoesOn true (some true) true && !closeGoesOn true (some true) false &&
+  !closeGoesOn true none true
+
+/-! ## The file dialogs (task 9.r6) -/
+
+/-- **The chosen name with the file type's extension** `ext` (`pdf`, `xfdf`; task 9.r6): the
+name itself when it already ends in `.ext` (any case), else `name.ext`. Tk's X11 dialog appends
+`-defaultextension` only to a name without any extension, so a dotted name like
+`3453483.3454032-final` (arXiv/ACM file names) came back without `.pdf`. -/
+def withExt (name ext : String) : String :=
+  if name.toLower.endsWith ("." ++ ext.toLower) then name else s!"{name}.{ext}"
+
+#guard withExt "/d/3453483.3454032-final" "pdf" == "/d/3453483.3454032-final.pdf"
+#guard withExt "/d/a.PDF" "pdf" == "/d/a.PDF" && withExt "a.pdf" "pdf" == "a.pdf"
+#guard withExt "notes.XFDF" "xfdf" == "notes.XFDF" && withExt "notes" "xfdf" == "notes.xfdf"
+#guard withExt "a.pdf" "xfdf" == "a.pdf.xfdf"
+
+/-- **Why the chosen file `name` cannot be written** by Save As… or Export (task 9.r6;
+`isDir`: it is a folder; `exists`/`fileWritable`: an existing file and whether it is
+writable; `dirWritable`: its folder; `opened`: it is the opened document, which an export
+must never replace): `none` when it can. A rename would replace a read-only file (9.r2
+gotcha), so that is refused here as Save does for the opened file. -/
+def targetProblem (name : String) (isDir «exists» fileWritable dirWritable opened : Bool) :
+    Option String :=
+  if isDir then some s!"{name} is a folder; choose a file name"
+  else if opened then
+    some s!"{name} is the opened document; annotations are exported to a separate .xfdf file"
+  else if «exists» && !fileWritable then some s!"{name} is read-only; choose another name"
+  else if !dirWritable then some s!"the folder of {name} is not writable; choose another folder"
+  else none
+
+#guard targetProblem "a.pdf" false true true true false == none
+#guard targetProblem "a.pdf" false false false true false == none
+#guard (targetProblem "a" true false false true false).isSome &&
+  (targetProblem "a.pdf" false true false true false).isSome &&
+  (targetProblem "a.pdf" false false false false false).isSome &&
+  (targetProblem "a.pdf" false true true true true).isSome
+
+/-- The question when adding the extension (`withExt`) named an existing file `name` that the
+file dialog did not confirm. -/
+def replaceQuestion (name : String) : String :=
+  s!"{name} already exists. Replace it?"
+
+/-- **The options of a save dialog** (task 9.r6) for files of type `label` with extension
+`ext`, besides `-parent`/`-title`/`-initialdir`/`-initialfile`: `-defaultextension .ext`,
+`-confirmoverwrite 1`, and on X11/Windows `-filetypes` (the type, then all files). **Not on
+aqua**: Tk 9's `tk_getSaveFile` builds its "Format:" accessory view from `-filetypes` with a
+pop-up button 340 pt wide placed at x = 50 inside a 300 pt view (`macosx/tkMacOSXDialog.c`,
+`Tk_GetSaveFileObjCmd`, unchanged up to Tk 9.1), so the pop-up always runs past the panel's
+right edge whatever the labels. Without `-filetypes` Tk shows no accessory view and still
+restricts the panel to `ext` from `-defaultextension` (allowing other types on request). -/
+def saveDialogOptions (aqua : Bool) (label ext : String) : List String :=
+  let base := ["-defaultextension", s!".{ext}", "-confirmoverwrite", "1"]
+  if aqua then base
+  else base ++ ["-filetypes", s!"\{\{{label}} \{.{ext} .{ext.toUpper}}} \{\{All files} *}"]
+
+#guard saveDialogOptions true "PDF files" "pdf" ==
+  ["-defaultextension", ".pdf", "-confirmoverwrite", "1"]
+#guard saveDialogOptions false "PDF files" "pdf" == ["-defaultextension", ".pdf",
+  "-confirmoverwrite", "1", "-filetypes", "{{PDF files} {.pdf .PDF}} {{All files} *}"]
+#guard !(saveDialogOptions true "XFDF" "xfdf").contains "-filetypes"
+
+/-- **The folder a file dialog starts in** (task 9.r6): `dir` (the opened file's folder) when
+`usable` (an existing, writable folder of a file on disk), else the home folder, else `.`. A
+document from memory (bib-lean) has no folder of its own: its "path" is the library's name,
+which said `.` — the viewer process's working directory. -/
+def dialogDir (dir : String) (usable : Bool) (home : Option String) : String :=
+  if usable then dir else (home.filter (!·.isEmpty)).getD "."
+
+#guard dialogDir "/d" true (some "/h") == "/d" && dialogDir "/d" false (some "/h") == "/h"
+#guard dialogDir "." false none == "." && dialogDir "." false (some "") == "."
+
+/-- A message on one line (task 9.r6): an `IO` error's text (`…\n  file: …`) would make the
+one-line status bar two lines tall and shift the page. -/
+def oneLine (s : String) : String :=
+  " ".intercalate ((s.splitOn "\n").map (·.trimAscii.toString) |>.filter (!·.isEmpty))
+
+#guard oneLine "cannot write x: name too long\n  file: /a/b" ==
+  "cannot write x: name too long file: /a/b"
 
 /-! ## Saving -/
 
@@ -549,17 +809,18 @@ def preview (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
 
 /-- **Save**: builds and checks the bytes for the store's changes (`build`), then writes
 them to `target` atomically. -/
-def write (limits : Limits) (doc : Doc.Doc) (store : Store) (target : String) :
+def write (limits : Limits) (doc : Doc.Doc) (store : Store) (target : String)
+    (prepare : System.FilePath → IO Unit := fun _ => pure ()) :
     IO (Except String Outcome) := do
   let date ← nowDate
   match build limits doc store date with
   | .error e => return .error e
   | .ok (bytes, got, n) =>
     try
-      writeAtomic target bytes
+      writeAtomic target bytes prepare
       return .ok { path := target, marks := n,
                    appended := bytes.size - doc.file.bytes.size, size := bytes.size,
                    total := got.length }
-    catch e => return .error s!"cannot write {target}: {e}"
+    catch e => return .error s!"cannot write {target}: {oneLine (toString e)}"
 
 end SafePdf.Shell.App.Save

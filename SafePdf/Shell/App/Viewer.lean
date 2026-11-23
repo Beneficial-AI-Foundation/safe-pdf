@@ -6,10 +6,12 @@ import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Menu
 import SafePdf.Shell.App.Toolbar
 import SafePdf.Shell.App.Sidebar
+import SafePdf.Shell.App.Attach
 import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
 import SafePdf.Shell.App.Xfdf
+import SafePdf.Shell.App.Icons
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
@@ -21,8 +23,10 @@ import SafePdf.Shell.Fonts
 The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window with a menubar
 (File / Edit / View / Go, built from the Tk-free model `Menu.menubar`, entries enabled by
 `Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar and
-an outline sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
-`Toolbar.layout` and `Sidebar.rows`: sidebar toggle, page arrows, page field, zoom −/+ and
+a sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
+`Toolbar.layout` and `Sidebar.rows`; since task 9.r9 with view buttons for its panels
+(`Sidebar.panels`): the outline, lazily rendered page thumbnails (`thumbView`), attachments
+(task 9.r10) and layers (task 9.r11b, `fillLayers`, `layerClick`)): sidebar toggle, page arrows, page field, zoom −/+ and
 drop-down, the Highlight tool (task 9.4) and disabled placeholders for the other annotation
 tools, `»` overflow menu; the design reference is
 cited in `docs/viewer.md`, nothing of PDF.js is copied), a scrollable canvas showing the
@@ -63,11 +67,14 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   they move to the top of the next page; past the top they move to the bottom of the previous
   page (page-at-a-time). The mouse wheel does the same (task 9.2, `wheel`, logic in
   `View.wheelStep`: small deltas accumulate, the page turns only after the view reached the
-  edge and the wheel pushes on past it); Shift+wheel scrolls horizontally without turning
-  pages; Ctrl+wheel zooms about the mouse pointer.
+  edge and the wheel pushes on past it; task 9.r1: each axis has its own state, nothing is
+  swallowed after a turn and the push beyond the threshold flows on into the new page);
+  Shift+wheel scrolls horizontally without turning pages; Ctrl+wheel zooms about the mouse
+  pointer.
 * **View modes** (task 9.3, pure layout in `View`): the View menu and the overflow menu choose
   the scroll mode (Page / Vertical Scrolling) and the spread mode (No / Odd / Even Spreads):
-  single page, continuous, facing, continuous facing. `computeLayout` places the pages
+  single page, continuous, facing, continuous facing. Files open in continuous (Vertical
+  Scrolling, No Spreads; task 9.r1). `computeLayout` places the pages
   (`View.layoutRows`) as `Slot`s; every page on the canvas has a white frame and its own photo
   `::safepdf::pgN`; the current page (its spread in the facing view) is shown first, the
   other pages in view and their neighbours follow (`viewChanged`, `renderMore`, workers and
@@ -95,8 +102,8 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   scrolled into view; the status line says `"q": hit k/n on page p` (k of the n hits of that
   page) or `"q": not found`.
 * **Navigation** (task 8.2d, pure logic in `Links`). The outline (`Nav.outline`) fills a
-  tree (a text widget, task 9.7) in the left pane of a paned window (shown when the document has an outline;
-  F9, the Outline button or the context menu toggle it); clicking an item jumps to its
+  tree (a text widget, task 9.7) in the left pane of a paned window (the sidebar, opened as the
+  page mode says, `Sidebar.onLoad`; F9, the sidebar button or the context menu toggle it); clicking an item jumps to its
   destination page, scrolled to the destination's position (`/XYZ`, `/FitH`, `/FitR`, … left/top
   mapped with `Geom.toScreen`, C2). Links (`Links.pageLinks`, read per page on first use):
   over a link the cursor is a hand and the status line shows the target (`go to page …`, or
@@ -107,6 +114,14 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   (page and scroll fractions) in a back/forward history (Alt+Left/Alt+Right, toolbar). Page
   labels (`Nav.labelTable`) appear in the title, toolbar and status line (`page iii (3/120)`);
   Ctrl+G opens a go-to bar accepting a label or a page number (`Links.gotoPage`).
+* **Attachments** (task 9.r10, data from the verified `Core.Doc.Attachments`, model in
+  `Attach`): the sidebar's attachments panel (`.ol.at`, plugged into 9.r9's switcher) lists
+  the embedded files (name, size known without decoding; description and details as a
+  tooltip). Files are decoded only on demand: Save attachment as… (double-click, Return, the
+  context menu; `saveAttachment` writes the decoded bytes to a file chosen with
+  `tk_getSaveFile`, the opened PDF, read-only files and folders refused, `Save.writeAtomic`)
+  and the tooltip's probe (at most 16 MB, `attProbe`). An attachment is never opened or run.
+  A click on a file attachment annotation's icon selects its row.
 * **Marks** (task 9.4, pure model in `Marks`): highlights of the selection in PDF.js's five
   colours (toolbar Highlight button, `h`, Edit menu, context-menu colour cascade) and notes
   (Add note… on the selection or at the right-clicked point; a popup edits the text), kept in
@@ -116,12 +131,18 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   a mark selects it (a note also opens its popup); Delete or Edit → Delete mark removes it,
   a colour entry recolours it.
 * **Selection bubble and Highlight pop-over** (task 9.8, pure logic in `Bubble`): after a
-  text selection a floating Highlight button at the selection's end; on a selected highlight
+  text selection a floating bubble at the selection's end with Highlight and Add comment (task
+  9.r4: a note anchored to the selection; tooltips on both); on a selected highlight
   the edit bubble (colour swatch with a picker, Comment, Delete), canvas items placed again on
   every redraw (`drawBubble`); the toolbar's Highlight button without a selection toggles the
   Highlight tool and its pop-over `.hlbar` (swatches, thickness slider, "Show all"; `syncTool`,
   `drawPopover`); with the tool on a mouse-up that selects text highlights it at once; Escape
   closes the pop-over and dismisses the bubble.
+* **Review 2026-11-23** (task 9.r4): the toolbar's view-mode drop-down `.bar.vmode` after the
+  page count (`Toolbar.ViewChoice`, kept in sync with the View and `»` menus by
+  `setViewMode` / `showViewChoice`); opening or closing the outline sidebar lays the pages out
+  for the canvas's new width from inside its `<Configure>` binding (`showOutline`,
+  `::safepdf::resizeSoon`), so the page never shows at the old offset (the Page Fit flicker).
 * **Add text and Draw** (task 9.9, PDF.js's FreeText and Ink editors; pure state in
   `Bubble.Ui`/`Bubble.EdPop`, marks in `Marks`): the toolbar's Add text and Draw buttons turn
   their mode on with a parameter pop-over `.edbar` (`drawEdPop`: colour swatches, Font size /
@@ -136,19 +157,27 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   selected one of the mode's kind. Unsaved ones are canvas items (`drawMarks`), saved ones are
   drawn by the renderer from their appearance streams (edits through the preview). Add
   comment adds a note (`addNote`).
-* **Saving** (task 9.5c, Tk-free flow in `Save`): Ctrl+S / File → Save / the toolbar's Save
-  writes the unsaved marks into `FILE-annotated.pdf` as an incremental update (Plan S8/C7),
-  checked by a strict reopen and read-back before an atomic write, then opens that file; Save
-  As… (Ctrl+Shift+S) to a chosen file, writing over the opened file only after an explicit
-  yes. On open our marks (`/NM safepdf-mark-ID`) are restored as saved marks, drawn by the
+* **macOS keys and the icon** (task 9.r3): after the window is built, `Menu.platformScript`
+  gives every Ctrl binding its Command twin on aqua (menu labels `Command-S`, ⌘ in the Save
+  tooltip and status hints via `keyText`, `::tk::mac::Quit` → Quit); `setIcon` sets the
+  embedded `Icons` PNGs with `wm iconphoto . -default`.
+* **Saving** (tasks 9.5c, 9.r2; Tk-free flow and decisions in `Save`): Ctrl+S / File → Save /
+  the toolbar's Save writes the unsaved marks **into the opened file** as an incremental
+  update (Plan S8/C7, Decision 2026-11-23), checked by a strict reopen and read-back, refused
+  when the file changed on disk since it was opened (then Save As… is offered) or is
+  read-only, written to a temporary file next to it and renamed over it (permissions kept),
+  then reopened in place; the first overwrite of a session asks Overwrite / Save As… / Cancel
+  (`overwriteInto`). Save As… (Ctrl+Shift+S) writes a chosen new file, proposing
+  `STEM-annotated.pdf`. On open our marks (`/NM safepdf-mark-ID`) are restored as saved marks, drawn by the
   renderer. Saved marks can be recoloured, deleted and their text edited (task 9.5g): Save
   writes one update with additions, supersessions and removals (writer rule W11); until then
   the pages are rendered from a **preview** (`State.view`, `updatePreview`: the same writer's
   output with only the edits of saved marks, built in memory and reopened strictly), so an
   edit shows at once. A highlight's comment is written into it (`/Contents` + `/Popup`, as
   pdf.js); its icon is drawn by the viewer. The title starts with `* ` while there are
-  unsaved changes; Close, Quit, the window's close button and Open… ask Save / Discard /
-  Cancel. Writer errors go to the status line.
+  unsaved changes; Close, Quit (menu, Ctrl+Q, `::safepdf::quit`, `::tk::mac::Quit` on aqua),
+  the window's close button and Open… ask Save / Don't Save / Cancel (`confirmDiscard`; a
+  failed save or Cancel keeps the document). Writer errors go to the status line.
 * **XFDF** (task 9.11, Tk-free reader/writer in `Xfdf`): File → Import annotations… /
   Export annotations… (also in the `»` menu) with Tk file dialogs filtered to `.xfdf`. Import
   reads the file bounded and total (`Xfdf.readFile`, pages checked against the document),
@@ -370,8 +399,35 @@ structure State where
   labels : Array String := #[]
   /-- Outline entries of the open document (outline row `oK` is entry `K`). -/
   outline : Array Links.Entry := #[]
-  /-- Whether the outline panel is shown. -/
+  /-- Whether the sidebar is shown (task 9.r9: with the panel `panel`; the name is from the
+  time it only held the outline). -/
   outlineShown : Bool := false
+  /-- The sidebar panel shown, or the last one shown while the sidebar is closed (task 9.r9). -/
+  panel : Sidebar.Panel := .outline
+  /-- The panel buttons last shown (`Sidebar.buttons` keys; `none`: not applied yet). -/
+  panelButtons : Option (List String) := none
+  /-- Thumbnail layout (task 9.r9, `Sidebar.thumbLayout`) and its height. -/
+  thSlots : Array Sidebar.ThumbSlot := #[]
+  /-- See `thSlots`. -/
+  thHeight : Nat := 0
+  /-- Document generation and user rotation the thumbnails are laid out for (`none`: not
+  laid out). -/
+  thKey : Option (Nat × SafePdf.Core.Doc.Rotation) := none
+  /-- Pages with a thumbnail image (photo `::safepdf::thN`), at most `Sidebar.thumbBudget`. -/
+  thHave : List Nat := []
+  /-- Thumbnail renders running on worker threads (at most `thumbJobs`). -/
+  thJobs : Array Job := #[]
+  /-- The page whose thumbnail is highlighted as the current one. -/
+  thMarked : Option Nat := none
+  /-- The keyboard selection in the thumbnails (Up/Down; Return goes there). -/
+  thSel : Option Nat := none
+  /-- Thumbnails rendered for the open document (smoke tests: lazy rendering). -/
+  thRendered : Nat := 0
+  /-- When the document was opened (`IO.monoNanosNow`) and how long after that the first
+  thumbnail was shown (ns; the `thumbperf` measurement). -/
+  thOpenNs : Nat := 0
+  /-- See `thOpenNs`. -/
+  thFirstNs : Option Nat := none
   /-- Links per page (`none`: not read yet). -/
   links : Array (Option (Array Links.Link)) := #[]
   /-- The link under the mouse pointer: its page and index on that page. -/
@@ -383,12 +439,31 @@ structure State where
   /-- Enabled states last applied to the menubar entries and toolbar buttons
   (`Menu.entryStates` order; empty: not applied yet). -/
   menuStates : List Bool := []
-  /-- Wheel state: sub-pixel remainder and push past the page edge (task 9.2). -/
-  wheel : View.Wheel := {}
+  /-- Wheel state of each axis: movement owed and push past the page edge (tasks 9.2, 9.r1). -/
+  wheel : View.Wheels := {}
   /-- Rows of the outline tree (task 9.7, `Sidebar.rows`). -/
   olRows : List Sidebar.Row := []
   /-- Which outline rows are open (`Sidebar.toggle`). -/
   olOpen : Array Bool := #[]
+  /-- The document's attachments (task 9.r10, `Core.Doc.Attachments.list`). -/
+  attList : Array Core.Doc.Attachments.Attachment := #[]
+  /-- The file attachment annotations' icons (task 9.r10): page, rectangle, row. -/
+  attIcons : List Core.Doc.Attachments.Icon := []
+  /-- What decoding each attachment gave, once it was decoded (saved or probed). -/
+  attStatus : Array (Option Attach.Probe) := #[]
+  /-- The document's optional content (task 9.r11b, `Core.Doc.OptionalContent.read`); `none`
+  without `/OCProperties` (no Layers panel). -/
+  ocCfg : Option Core.Doc.OptionalContent.Config := none
+  /-- The visibility state the pages, thumbnails and text are made with (task 9.r11b): the
+  document's default (`Config.initial`) at every open, changed by the layers panel; `none`
+  without optional content (the renderer then uses the document's default itself). -/
+  oc : Option Core.Doc.OptionalContent.State := none
+  /-- Rows of the layers panel (`Sidebar.layerRows`; row `K` is `.ol.ly`'s row `K`). -/
+  lyRows : List Sidebar.LayerRow := []
+  /-- The layers tree (`Sidebar.rows` of `Sidebar.layerEntries lyRows`). -/
+  lyTree : List Sidebar.Row := []
+  /-- Which layers tree rows are open (`Sidebar.toggle`). -/
+  lyOpen : Array Bool := #[]
   /-- Whether the sidebar toggle is shown (`none`: not applied yet). -/
   toggleShown : Option Bool := none
   /-- The user's highlights and notes of the open document (task 9.4). -/
@@ -401,10 +476,30 @@ structure State where
   one more on each side) and their render result before the highlights are multiplied in
   (`Marks.composite`), or the render error. -/
   photos : Array (Nat × Except String Clip.Image) := #[]
-  /-- Scroll mode (task 9.3, PDF.js "Page Scrolling" / "Vertical Scrolling"). -/
-  scroll : View.ScrollMode := .page
+  /-- Scroll mode (task 9.3, PDF.js "Page Scrolling" / "Vertical Scrolling"); files open in
+  vertical scrolling (task 9.r1, as in PDF.js). -/
+  scroll : View.ScrollMode := .vertical
   /-- Spread mode (task 9.3, PDF.js "No / Odd / Even Spreads"). -/
   spread : View.SpreadMode := .none
+  /-- The view a file without `/PageLayout` opens in (task 9.r8): Vertical Scrolling without
+  spreads, or what `SAFEPDF_VIEWER_VIEW` asks for at start-up. -/
+  defaultView : View.ScrollMode × View.SpreadMode := (.vertical, .none)
+  /-- Spreads run right to left (task 9.r8, `/ViewerPreferences /Direction /R2L`): the first
+  page of a spread is on the right. -/
+  rtl : Bool := false
+  /-- The window is in full screen (task 9.r8, `/PageMode /FullScreen`); Escape leaves. -/
+  fullScreen : Bool := false
+  /-- The page mode applied on leaving full screen (`/NonFullScreenPageMode`). -/
+  afterFullScreen : Core.Doc.OpenSettings.PageMode := .useNone
+  /-- The document's `/Title` as display text, when `/DisplayDocTitle` asks for it in the
+  window title (task 9.r8). -/
+  docTitle : Option String := none
+  /-- What the document's viewer preferences hide (task 9.r8): toolbar, menubar, scroll bars
+  (`/HideToolbar`, `/HideMenubar`, `/HideWindowUI`); Escape shows them again. -/
+  hidden : Bool × Bool × Bool := (false, false, false)
+  /-- Notes about open settings that were not honoured (task 9.r8), added to the status line
+  until the next open. -/
+  openNote : String := ""
   /-- The laid-out pages (one spread in the page scroll mode, all pages in the vertical ones),
   in page order. -/
   slots : Array Slot := #[]
@@ -529,6 +624,9 @@ def computeLayout (s : State) (doc : Doc) : Array Slot × Nat × Nat :=
     | some vp => SafePdf.Core.Raster.Clip.pageSize limits.maxPageSide vp.zoom vp.rot vp.box
     | none => (0, 0)
   let (ps, rw, rh) := View.layoutRows sizes rows s.canvasW s.canvasH (s.scroll == .page)
+  -- Task 9.r8, `/Direction /R2L`: spreads mirrored, the first page of each on the right (rows
+  -- are centred in the region, so mirroring the region keeps them centred).
+  let ps := if s.rtl && s.spread != .none then ps.map (View.mirrorPlace rw) else ps
   (ps.filterMap fun pl => (vps[pl.page]?.join).map (⟨pl, ·⟩), rw, rh)
 
 /-- The layout key of the state (task 9.3). -/
@@ -561,23 +659,27 @@ def Slot.toPage (sl : Slot) (cx cy : Rat) : Pt :=
 def State.hasPhoto (s : State) (p : Nat) : Bool :=
   s.photos.any (·.1 == p)
 
-/-- What the status line adds for the view mode (nothing in the single-page view). -/
+/-- What the status line adds for the view mode (nothing in the default view, vertical
+scrolling without spreads, task 9.r1). -/
 def modeNote (s : State) : String :=
   let sc := match s.scroll with
-    | .page => ""
-    | .vertical => "vertical scrolling"
+    | .page => "page scrolling"
+    | .vertical => ""
   let sp := match s.spread with
     | .none => ""
     | .odd => "odd spreads"
     | .even => "even spreads"
+  let sp := if s.rtl && s.spread != .none then s!"{sp}, right to left" else sp
   match sc, sp with
   | "", "" => ""
   | a, "" => s!"; {a}"
   | "", b => s!"; {b}"
   | a, b => s!"; {a}, {b}"
 
-#guard modeNote {} == "" && modeNote { scroll := .vertical, spread := .odd } ==
-  "; vertical scrolling, odd spreads"
+#guard modeNote {} == "" && modeNote { scroll := .page, spread := .odd } ==
+  "; page scrolling, odd spreads" && modeNote { spread := .even } == "; even spreads" &&
+  modeNote { spread := .odd, rtl := true } == "; odd spreads, right to left" &&
+  modeNote { rtl := true } == ""
 
 /-- Last path component of a file name (for the window title). -/
 def baseName (path : String) : String :=
@@ -585,12 +687,13 @@ def baseName (path : String) : String :=
 
 /-- Window title: `safe-pdf`, or `NAME - page k/n - safe-pdf`, with `* ` in front while there
 are unsaved marks (task 9.5c); `NAME` is `titleOverride` when set (task 10.1b), else the
-file name. -/
+file name, or the document's `/Title` when its `/DisplayDocTitle` asks for it (task 9.r8,
+`docTitle`). -/
 def State.title (s : State) : String :=
   match s.path, s.doc with
   | some p, some _ =>
     let star := if s.marks.dirty then "* " else ""
-    s!"{star}{s.titleOverride.getD (baseName p)} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
+    s!"{star}{s.titleOverride.getD (s.docTitle.getD (baseName p))} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
   | some p, none => s!"{s.titleOverride.getD (baseName p)} - safe-pdf"
   | none, _ => "safe-pdf"
 
@@ -608,6 +711,22 @@ def num (r : Rat) : String :=
 
 #guard num 12 = "12.00" && num (3 / 2) = "1.50" && num (-1 / 4) = "-0.25"
 #guard fmtFrac (1 / 4) = "0.250000"
+
+/-- A fraction in `[0, 1]` with twelve digits, for the wheel's `moveto` (task 9.r1): Tk rounds
+`moveto` to the nearest pixel, and six digits are off by up to `region / 10⁶` pixels, over
+half a pixel in the vertical modes of a document taller than 500 000 pixels (some 450 pages
+at Page Width), where a one-pixel trackpad step would round back to where it started and the
+wheel would stall. -/
+def fmtFracFine (r : Rat) : String :=
+  let r := max 0 (min 1 r)
+  let n := (r * 1000000000000).floor.toNat
+  s!"{n / 1000000000000}.{padLeft 12 '0' (toString (n % 1000000000000))}"
+
+-- Pixel 400 001 of a 900 000-pixel region: six digits land 0.6 px short (Tk rounds that to
+-- 400 000), twelve digits within 10⁻⁶ px.
+#guard fmtFracFine (1 / 4) = "0.250000000000" && fmtFracFine 1 = "1.000000000000"
+#guard fmtFrac ((400001 : Rat) / 900000) = "0.444445" &&
+  fmtFracFine ((400001 : Rat) / 900000) = "0.444445555555"
 #guard fmtFrac 2 = "1.000000"
 #guard fmtFrac (-1) = "0.000000"
 
@@ -619,6 +738,15 @@ def modeName (c : Toolbar.ZoomChoice) : String := c.statusName
 /-- Evaluates a command built from literal words (every word quoted by `Tcl.quote`). -/
 def run (words : List String) : IO String :=
   Shim.eval (Tcl.Script.render ⟨[Tcl.cmd words]⟩)
+
+/-- The platform the keys are bound and labelled for (task 9.r3; set once at start-up from
+`tk windowingsystem`, `Menu.Platform`). -/
+initialize platformRef : IO.Ref Menu.Platform ← IO.mkRef .other
+
+/-- A constant UI text naming keys the X11 way (`Ctrl+O`) in the platform's form (`⌘O` on
+macOS, `Menu.Platform.keyText`). Only for the viewer's own texts, never document data. -/
+def keyText (s : String) : IO String :=
+  return (← platformRef.get).keyText s
 
 /-- Shows `msg` in the status line. -/
 def setStatus (msg : String) : IO Unit := do
@@ -670,7 +798,7 @@ toplevel's bind tag `.`; canvas resizes are debounced and reported as `emit resi
 Colours and sizes follow PDF.js's light theme (`web/viewer.css`: toolbar `#f9f9fa`, 40 px
 high with 32 px round buttons and 16 px icons, separators, field and drop-down borders). -/
 def setupScript : String := "
-namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0 }
+namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0; variable panel outline }
 namespace eval ::safepdf::icon {}
 " ++ resourceGuardScript ++ "
 wm title . safe-pdf
@@ -743,20 +871,40 @@ proc ::safepdf::icon::save {c} {
   $c create line 11.5 14.5 16 19 20.5 14.5 -width 1.6 -capstyle round -joinstyle round -tags inkf
   $c create line 9 19 9 24 23 24 23 19 -width 1.6 -joinstyle round -tags inkf
 }
+# Sidebar view buttons (9.r9): thumbnails, outline, attachments, layers.
+proc ::safepdf::icon::thumbs {c} {
+  ::safepdf::rrect $c 11 7 21 14.5 1.5 -fill {} -outline black -width 1.5 -tags inko
+  ::safepdf::rrect $c 11 17.5 21 25 1.5 -fill {} -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::outline {c} {
+  foreach {x y} {8 10 11 16 11 22} {
+    $c create oval $x [expr {$y - 1.2}] [expr {$x + 2.4}] [expr {$y + 1.2}] -fill black -outline {} -tags inkf
+    $c create line [expr {$x + 5}] $y 24 $y -width 1.5 -capstyle round -tags inkf
+  }
+}
+proc ::safepdf::icon::attach {c} {
+  $c create line 20 12 13.5 18.5 13.5 21 15.5 22.5 17.5 21.5 23 16 23.5 12 21 9 18 9 \\
+    10.5 16.5 10 21 -smooth 1 -width 1.5 -capstyle round -tags inkf
+}
+proc ::safepdf::icon::layers {c} {
+  $c create polygon 16 8 24 12 16 16 8 12 -fill {} -outline black -width 1.5 -joinstyle round -tags inko
+  $c create line 8 16 16 20 24 16 -width 1.5 -joinstyle round -capstyle round -tags inkf
+  $c create line 8 20 16 24 24 20 -width 1.5 -joinstyle round -capstyle round -tags inkf
+}
 proc ::safepdf::icon::more {c} {
   $c create line 10 11 15 16 10 21 -width 1.6 -capstyle round -joinstyle round -tags inkf
   $c create line 17 11 22 16 17 21 -width 1.6 -capstyle round -joinstyle round -tags inkf
 }
 # Toolbar buttons: a 32 px canvas with a round background (hover, pressed, toggled as in
 # PDF.js) and an icon; disabled buttons draw the icon dimmed and ignore clicks. State in
-# ::safepdf::btn(KEY,PATH).
+# ::safepdf::btn(KEY,PATH). The optional bg names the colour behind the button (col(bg)).
 set ::safepdf::tipId {}
-proc ::safepdf::iconButton {w icon tip cmd} {
-  canvas $w -width 32 -height 32 -background $::safepdf::col(bar) -highlightthickness 0 \\
+proc ::safepdf::iconButton {w icon tip cmd {bg bar}} {
+  canvas $w -width 32 -height 32 -background $::safepdf::col($bg) -highlightthickness 0 \\
     -borderwidth 0 -takefocus 0
-  $w create oval 1 1 31 31 -fill $::safepdf::col(bar) -outline {} -tags bg
+  $w create oval 1 1 31 31 -fill $::safepdf::col($bg) -outline {} -tags bg
   ::safepdf::icon::$icon $w
-  foreach {k v} [list st normal tog 0 in 0 down 0 cmd $cmd tip $tip] { set ::safepdf::btn($k,$w) $v }
+  foreach {k v} [list st normal tog 0 in 0 down 0 cmd $cmd tip $tip bg $bg] { set ::safepdf::btn($k,$w) $v }
   bind $w <Enter> {::safepdf::btnEnter %W}
   bind $w <Leave> {::safepdf::btnLeave %W}
   bind $w <ButtonPress-1> {set ::safepdf::btn(down,%W) 1; ::safepdf::btnPaint %W}
@@ -767,7 +915,7 @@ proc ::safepdf::btnPaint {w} {
   upvar #0 ::safepdf::btn b ::safepdf::col c
   set on [expr {$b(st,$w) eq {normal}}]
   if {$on && $b(down,$w) && $b(in,$w)} { set bg $c(press) } elseif {$on && $b(in,$w)} {
-    set bg $c(hover) } elseif {$b(tog,$w)} { set bg $c(toggled) } else { set bg $c(bar) }
+    set bg $c(hover) } elseif {$b(tog,$w)} { set bg $c(toggled) } else { set bg $c($b(bg,$w)) }
   $w itemconfigure bg -fill $bg
   $w itemconfigure paper -fill $bg
   set ink [expr {$on ? $c(ink) : $c(inkOff)}]
@@ -883,6 +1031,83 @@ proc ::safepdf::zoomShow {label sel on} {
     -fill [expr {$on ? $::safepdf::col(text) : $::safepdf::col(inkOff)}]
   .bar.zoom itemconfigure chev -fill [expr {$on ? $::safepdf::col(ink) : $::safepdf::col(inkOff)}]
 }
+# View-mode drop-down (9.r4) next to the page count: a small rounded button with the icon of
+# the current mode (::safepdf::icon::view-KEY) and a chevron; the menu .viewmenu holds the four
+# modes (radio entries on ::safepdf::viewSel, set by Lean from the scroll and spread modes).
+proc ::safepdf::icon::view-single {c} {
+  $c create rectangle 11 8 21 24 -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::view-vertical {c} {
+  $c create rectangle 11 6 21 14 -outline black -width 1.5 -tags inko
+  $c create rectangle 11 18 21 26 -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::view-two {c} {
+  $c create rectangle 7 9 15 23 -outline black -width 1.5 -tags inko
+  $c create rectangle 17 9 25 23 -outline black -width 1.5 -tags inko
+}
+proc ::safepdf::icon::view-two-scroll {c} {
+  $c create rectangle 8 6 15 14 -outline black -width 1.5 -tags inko
+  $c create rectangle 17 6 24 14 -outline black -width 1.5 -tags inko
+  $c create rectangle 8 18 15 26 -outline black -width 1.5 -tags inko
+  $c create rectangle 17 18 24 26 -outline black -width 1.5 -tags inko
+}
+set ::safepdf::viewSel vertical
+set ::safepdf::viewOn 0
+set ::safepdf::viewShown {}
+proc ::safepdf::viewBox {} {
+  upvar #0 ::safepdf::col c
+  canvas .bar.vmode -width 56 -height 32 -background $c(bar) -highlightthickness 0 \
+    -borderwidth 0 -takefocus 0
+  ::safepdf::rrect .bar.vmode 1 1 55 31 15 -fill $c(field) -outline $c(fieldLine) -tags frame
+  .bar.vmode create line 36 13.5 40.5 18 45 13.5 -width 1.6 -fill $c(ink) -capstyle round \
+    -joinstyle round -tags chev
+  ::safepdf::barPack .bar.vmode .bar.l -padx {2 0}
+  foreach {k v} {in 0 tip {}} { set ::safepdf::btn($k,.bar.vmode) $v }
+  bind .bar.vmode <Enter> {
+    if {$::safepdf::viewOn} {.bar.vmode itemconfigure frame -fill $::safepdf::col(hover)}
+    set ::safepdf::btn(in,.bar.vmode) 1
+    after cancel $::safepdf::tipId
+    set ::safepdf::tipId [after 600 [list ::safepdf::tipShow .bar.vmode]]
+  }
+  bind .bar.vmode <Leave> {
+    .bar.vmode itemconfigure frame -fill $::safepdf::col(field)
+    set ::safepdf::btn(in,.bar.vmode) 0
+    after cancel $::safepdf::tipId
+    destroy .tip
+  }
+  bind .bar.vmode <ButtonPress-1> ::safepdf::postView
+  menu .viewmenu -tearoff 0 -background white -activebackground $c(hover) \
+    -activeforeground $c(text) -foreground $c(text) -font ::safepdf::fBar -relief solid \
+    -borderwidth 1 -activeborderwidth 0 -selectcolor $c(ink)
+}
+proc ::safepdf::postView {} {
+  if {!$::safepdf::viewOn} return
+  after cancel $::safepdf::tipId
+  destroy .tip
+  tk_popup .viewmenu [winfo rootx .bar.vmode] [expr {[winfo rooty .bar.vmode] + [winfo height .bar.vmode] + 2}]
+}
+# Shows mode KEY (tooltip TIP) on the button, enabled or not; the icon is redrawn on change.
+proc ::safepdf::viewShow {key tip on} {
+  set ::safepdf::viewOn $on
+  set ::safepdf::viewSel $key
+  set ::safepdf::btn(tip,.bar.vmode) $tip
+  set w .bar.vmode
+  if {$::safepdf::viewShown ne $key} {
+    set ::safepdf::viewShown $key
+    $w delete vicon
+    ::safepdf::icon::view-$key $w
+    $w addtag vicon withtag inkf
+    $w addtag vicon withtag inko
+    $w dtag inkf inkf
+    $w dtag inko inko
+    $w move vicon 3 0
+  }
+  set ink [expr {$on ? $::safepdf::col(ink) : $::safepdf::col(inkOff)}]
+  foreach i [$w find withtag vicon] {
+    if {[$w type $i] eq {line}} { $w itemconfigure $i -fill $ink } else { $w itemconfigure $i -outline $ink }
+  }
+  $w itemconfigure chev -fill $ink
+}
 # Overflow menu (PDF.js's secondary toolbar), posted under the right edge of the » button.
 menu .more -tearoff 0 -background white -activebackground $::safepdf::col(hover) \\
   -activeforeground $::safepdf::col(text) -foreground $::safepdf::col(text) \\
@@ -891,7 +1116,7 @@ proc ::safepdf::postMore {} {
   set x [expr {[winfo rootx .bar.more] + [winfo width .bar.more] - [winfo reqwidth .more]}]
   tk_popup .more $x [expr {[winfo rooty .bar.more] + [winfo height .bar.more] + 2}]
 }
-# The sidebar toggle is shown only when the document has an outline.
+# The sidebar toggle is shown with a document (9.r9: thumbnails need no outline).
 proc ::safepdf::showToggle {on} {
   if {$on} {
     if {![winfo ismapped .bar.sidebar]} {
@@ -926,7 +1151,251 @@ raise .ol.h; raise .ol.t; raise .ol.s
 # The sidebar scroll bar shows only when the tree does not fit (PDF.js has overlay bars).
 proc ::safepdf::olScroll {a b} {
   .ol.s set $a $b
+  if {$::safepdf::panel ne {outline}} return
   if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.s } else { grid .ol.s }
+}
+# Sidebar panels (9.r9, after PDF.js's sidebar views): a row of view buttons .ol.sw above
+# the panel (made by buildToolbar from Sidebar.panels, shown per content); each panel grids
+# its widgets into row 1 of .ol.p (::safepdf::panelWidgets(KEY)), ::safepdf::showPanel KEY
+# TITLE shows one and runs ::safepdf::panelShown::KEY when it exists (scroll bar state).
+frame .ol.sw -background $::safepdf::col(body)
+pack .ol.sw -in .ol -side top -fill x -pady {0 6} -before .ol.p
+namespace eval ::safepdf::panelShown {}
+set ::safepdf::panelWidgets(outline) {.ol.t .ol.s}
+proc ::safepdf::panelShown::outline {} { ::safepdf::olScroll {*}[.ol.t yview] }
+proc ::safepdf::showPanel {key title} {
+  foreach k [array names ::safepdf::panelWidgets] {
+    if {$k ne $key} { foreach w $::safepdf::panelWidgets($k) { grid remove $w } }
+  }
+  set ::safepdf::panel $key
+  .ol.h configure -text $title
+  foreach w $::safepdf::panelWidgets($key) { grid $w }
+  if {[info procs ::safepdf::panelShown::$key] ne {}} { ::safepdf::panelShown::$key }
+}
+# Thumbnails (9.r9): a canvas whose scroll region is centred on x = 0 (thRegion), one image
+# per page (tags thi thiN, photo ::safepdf::thN) on a white frame (thf thfN) with its page
+# label (thl); the current page has a rounded background (thsel), the keyboard selection a
+# focus ring (thfocus). Every change of the view is reported once per idle moment (thView).
+canvas .ol.th -width 200 -height 10 -background $::safepdf::col(panel) -highlightthickness 0 \\
+  -borderwidth 0 -takefocus 1 -yscrollincrement 20 -confine 1 -yscrollcommand ::safepdf::thScroll
+ttk::scrollbar .ol.ts -orient vertical -command {.ol.th yview}
+grid .ol.th -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.ts -in .ol.p -row 1 -column 1 -sticky ns
+raise .ol.th; raise .ol.ts
+grid remove .ol.th .ol.ts
+set ::safepdf::panelWidgets(thumbnails) {.ol.th .ol.ts}
+set ::safepdf::thH 1
+set ::safepdf::thPending 0
+proc ::safepdf::thRegion {} {
+  set w [winfo width .ol.th]
+  if {$w < 2} { set w [winfo reqwidth .ol.th] }
+  set x0 [expr {-($w / 2)}]
+  .ol.th configure -scrollregion [list $x0 0 [expr {$x0 + $w}] $::safepdf::thH]
+}
+proc ::safepdf::thScroll {a b} {
+  .ol.ts set $a $b
+  if {$::safepdf::panel eq {thumbnails}} {
+    if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.ts } else { grid .ol.ts }
+  }
+  if {!$::safepdf::thPending} {
+    set ::safepdf::thPending 1
+    after idle {set ::safepdf::thPending 0; ::safepdf::emit thView}
+  }
+}
+proc ::safepdf::panelShown::thumbnails {} {
+  ::safepdf::thRegion
+  ::safepdf::thScroll {*}[.ol.th yview]
+}
+bind .ol.th <Configure> {::safepdf::thRegion}
+# Attachments panel (9.r10): the embedded files as a list .ol.at in row 1 of .ol.p (item aN =
+# attachment N: name and size; description and details as a tooltip, ::safepdf::attTip(aN),
+# refreshed by `attProbe N` before it shows). Double-click, Return and the context menu's
+# Save attachment as... save the decoded bytes to a chosen file; nothing here ever opens or
+# runs an attachment.
+ttk::style configure Att.Treeview -font ::safepdf::fOl -background $::safepdf::col(panel) -fieldbackground $::safepdf::col(panel) -foreground $::safepdf::col(text) -borderwidth 0 -rowheight [expr {[font metrics ::safepdf::fOl -linespace] + 10}]
+ttk::treeview .ol.at -style Att.Treeview -columns size -show tree -selectmode browse -height 10 -yscrollcommand ::safepdf::attScroll
+.ol.at column #0 -stretch 1 -width 150 -minwidth 60
+.ol.at column size -stretch 0 -width 70 -anchor e
+ttk::scrollbar .ol.as -orient vertical -command {.ol.at yview}
+grid .ol.at -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.as -in .ol.p -row 1 -column 1 -sticky ns
+raise .ol.at; raise .ol.as
+grid remove .ol.at .ol.as
+set ::safepdf::panelWidgets(attachments) {.ol.at .ol.as}
+proc ::safepdf::attScroll {a b} {
+  .ol.as set $a $b
+  if {$::safepdf::panel ne {attachments}} return
+  if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.as } else { grid .ol.as }
+}
+proc ::safepdf::panelShown::attachments {} { ::safepdf::attScroll {*}[.ol.at yview] }
+menu .attmenu -tearoff 0
+.attmenu add command -label {Save attachment as…} -command ::safepdf::attSaveSel
+proc ::safepdf::attSaveSel {} {
+  set i [lindex [.ol.at selection] 0]
+  if {$i ne {}} { ::safepdf::emit attSave [string range $i 1 end] }
+}
+proc ::safepdf::attMenu {x y rx ry} {
+  set i [.ol.at identify item $x $y]
+  if {$i eq {}} return
+  .ol.at selection set $i
+  .ol.at focus $i
+  tk_popup .attmenu $rx $ry
+}
+set ::safepdf::attHoverItem {}
+proc ::safepdf::attHover {x y} {
+  set i [.ol.at identify item $x $y]
+  if {$i eq $::safepdf::attHoverItem} return
+  set ::safepdf::attHoverItem $i
+  after cancel $::safepdf::tipId
+  destroy .tip
+  if {$i ne {}} { set ::safepdf::tipId [after 600 [list ::safepdf::attTipShow $i]] }
+}
+proc ::safepdf::attTipShow {i} {
+  if {![.ol.at exists $i]} return
+  ::safepdf::emit attProbe [string range $i 1 end]
+  set b [.ol.at bbox $i]
+  if {$b eq {} || ![info exists ::safepdf::attTip($i)] || $::safepdf::attTip($i) eq {}} return
+  destroy .tip
+  toplevel .tip -background $::safepdf::col(fieldLine) -borderwidth 0
+  wm overrideredirect .tip 1
+  label .tip.l -text $::safepdf::attTip($i) -font ::safepdf::fBar -background white -foreground $::safepdf::col(text) -padx 6 -pady 3 -justify left -wraplength 360
+  pack .tip.l -padx 1 -pady 1
+  wm geometry .tip +[expr {[winfo rootx .ol.at] + [lindex $b 0] + 16}]+[expr {[winfo rooty .ol.at] + [lindex $b 1] + [lindex $b 3] + 4}]
+}
+proc ::safepdf::attTipHide {} {
+  set ::safepdf::attHoverItem {}
+  after cancel $::safepdf::tipId
+  destroy .tip
+}
+proc ::safepdf::attClear {} {
+  ::safepdf::attTipHide
+  .ol.at delete [.ol.at children {}]
+  array unset ::safepdf::attTip
+}
+bind .ol.at <Double-Button-1> {if {[.ol.at identify item %x %y] ne {}} ::safepdf::attSaveSel}
+bind .ol.at <Return> ::safepdf::attSaveSel
+bind .ol.at <<TreeviewSelect>> {set ::safepdf::attSel [lindex [.ol.at selection] 0]; if {$::safepdf::attSel ne {}} {::safepdf::emit attSelect [string range $::safepdf::attSel 1 end]}}
+bind .ol.at <Button-3> {::safepdf::attMenu %x %y %X %Y}
+if {[tk windowingsystem] eq {aqua}} {
+  # The secondary click on a Mac: Button-2 or Button-3 (depending on the Tk version) and
+  # Control-click.
+  bind .ol.at <Button-2> {::safepdf::attMenu %x %y %X %Y}
+  bind .ol.at <Control-Button-1> {::safepdf::attMenu %x %y %X %Y; break}
+}
+bind .ol.at <Motion> {::safepdf::attHover %x %y}
+bind .ol.at <Leave> ::safepdf::attTipHide
+# The save dialog of an attachment (no -filetypes: any file type; on aqua the Format pop-up
+# would overflow, 9.r6); ::safepdf::autoPath answers it in smoke mode.
+proc ::safepdf::askAttachSave {dir file args} {
+  set ::safepdf::lastDialog [list $dir $file {*}$args]
+  if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
+  return [tk_getSaveFile -parent . -title {Save attachment as} -initialdir $dir -initialfile $file {*}$args]
+}
+# Layers panel (9.r11b, after PDF.js's layer viewer): a text widget .ol.ly drawn as a tree as
+# the outline is. Row K is a heading (tag hK: an /Order label) or a group with a
+# ttk::checkbutton .ol.ly.cK on ::safepdf::ly(K), disabled when the group is locked; tK is its
+# disclosure triangle, dN/lN the margin of its depth, uA every ancestor A (a closed ancestor
+# elides the row, its checkbox included). A checkbox emits `layer K`; the Lean side then sets
+# every ::safepdf::ly from the new state (radio buttons, locked groups).
+ttk::style configure Ly.TCheckbutton -font ::safepdf::fOl -background $::safepdf::col(panel) -foreground $::safepdf::col(text)
+ttk::style map Ly.TCheckbutton -background [list disabled $::safepdf::col(panel) active $::safepdf::col(panel)]
+font create ::safepdf::fLyHead -family $::safepdf::family -size -13 -weight bold
+font create ::safepdf::fLyItal -family $::safepdf::family -size -13 -slant italic
+text .ol.ly -wrap word -width 30 -height 10 -borderwidth 0 -highlightthickness 0 -background $::safepdf::col(panel) -foreground $::safepdf::col(text) -font ::safepdf::fOl -cursor arrow -padx 4 -pady 2 -spacing1 2 -spacing3 2 -state disabled -takefocus 0 -insertwidth 0 -yscrollcommand ::safepdf::lyScroll -selectbackground $::safepdf::col(panel) -inactiveselectbackground {} -exportselection 0
+ttk::scrollbar .ol.ls -orient vertical -command {.ol.ly yview}
+grid .ol.ly -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.ls -in .ol.p -row 1 -column 1 -sticky ns
+raise .ol.ly; raise .ol.ls
+grid remove .ol.ly .ol.ls
+set ::safepdf::panelWidgets(layers) {.ol.ly .ol.ls}
+.ol.ly tag configure tri -foreground $::safepdf::col(tri) -font ::safepdf::fTri -offset 1
+.ol.ly tag configure head -font ::safepdf::fLyHead
+.ol.ly tag configure headi -font ::safepdf::fLyItal
+.ol.ly tag configure locked -foreground #8f8f9d
+bindtags .ol.ly [list .ol.ly . all]
+proc ::safepdf::lyScroll {a b} {
+  .ol.ls set $a $b
+  if {$::safepdf::panel ne {layers}} return
+  if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.ls } else { grid .ol.ls }
+}
+proc ::safepdf::panelShown::layers {} { ::safepdf::lyScroll {*}[.ol.ly yview] }
+proc ::safepdf::lyClear {} {
+  foreach w [winfo children .ol.ly] { destroy $w }
+  .ol.ly configure -state normal
+  .ol.ly delete 1.0 end
+  foreach t [.ol.ly tag names] { if {$t ni {sel tri head headi locked}} { .ol.ly tag delete $t } }
+  .ol.ly configure -state disabled
+  array unset ::safepdf::ly
+}
+# lyRow K TRI TAGS LABEL KIND LOCKED: appends row K (KIND group: a checkbox and its name, tag
+# gK, which wraps in the panel's width and toggles the checkbox when clicked, as PDF.js's
+# <label>; heading: a bold label; italic: the Additional Layers heading) with the disclosure triangle TRI (empty for a leaf) and TAGS.
+proc ::safepdf::lyRow {k tri tags label kind locked} {
+  .ol.ly configure -state normal
+  set a [.ol.ly index {end - 1c}]
+  if {$tri ne {}} { .ol.ly insert end $tri [list tri t$k] }
+  if {$kind eq {group}} {
+    set ::safepdf::ly($k) 0
+    set w .ol.ly.c$k
+    ttk::checkbutton $w -style Ly.TCheckbutton -variable ::safepdf::ly($k) -takefocus 0 -command [list ::safepdf::emit layer $k]
+    if {$locked} { $w state disabled }
+    bindtags $w [list $w TCheckbutton LyWheel . all]
+    .ol.ly window create end -window $w -align center -padx 2
+    .ol.ly insert end $label [expr {$locked ? [list g$k locked] : [list g$k]}]
+  } else {
+    .ol.ly insert end $label [list [expr {$kind eq {italic} ? {headi} : {head}}] h$k]
+  }
+  .ol.ly insert end \\n
+  foreach t $tags { .ol.ly tag add $t $a {end - 1c} }
+  .ol.ly configure -state disabled
+}
+proc ::safepdf::lySetTri {n tri} {
+  lassign [.ol.ly tag ranges t$n] a b
+  if {$a eq {}} return
+  set tags [.ol.ly tag names $a]
+  .ol.ly configure -state normal
+  .ol.ly delete $a $b
+  .ol.ly insert $a $tri $tags
+  .ol.ly configure -state disabled
+}
+proc ::safepdf::lyClick {x y} {
+  set i [.ol.ly index @$x,$y]
+  set d [.ol.ly dlineinfo $i]
+  if {$d eq {} || $y > [lindex $d 1] + [lindex $d 3]} return
+  foreach t [.ol.ly tag names $i] {
+    if {[regexp {^[th]([0-9]+)$} $t -> n]} { ::safepdf::emit lyToggle $n; return }
+    if {[regexp {^g([0-9]+)$} $t -> n]} { .ol.ly.c$n invoke; return }
+  }
+}
+bind .ol.ly <ButtonRelease-1> {::safepdf::lyClick %x %y}
+foreach w {.ol.ly LyWheel} {
+  bind $w <MouseWheel> {.ol.ly yview scroll [expr {%D > 0 ? -2 : 2}] units; break}
+  bind $w <Button-4> {.ol.ly yview scroll -2 units; break}
+  bind $w <Button-5> {.ol.ly yview scroll 2 units; break}
+  catch {
+    bind $w <TouchpadScroll> {
+      lassign [tk::PreciseScrollDeltas %D] ::safepdf::tdx ::safepdf::tdy
+      if {$::safepdf::tdy != 0} { .ol.ly yview scroll [expr {-int($::safepdf::tdy)}] pixels }
+      break
+    }
+  }
+}
+bind .ol.th <ButtonRelease-1> {focus .ol.th; ::safepdf::emit thClick [%W canvasy %y]}
+bind .ol.th <Key-Up> {::safepdf::emit thKey up; break}
+bind .ol.th <Key-Down> {::safepdf::emit thKey down; break}
+bind .ol.th <Key-Return> {::safepdf::emit thKey go; break}
+bind .ol.th <Key-KP_Enter> {::safepdf::emit thKey go; break}
+bind .ol.th <FocusOut> {::safepdf::emit thBlur}
+bind .ol.th <MouseWheel> {.ol.th yview scroll [expr {%D > 0 ? -2 : 2}] units; break}
+bind .ol.th <Button-4> {.ol.th yview scroll -2 units; break}
+bind .ol.th <Button-5> {.ol.th yview scroll 2 units; break}
+catch {
+  bind .ol.th <TouchpadScroll> {
+    lassign [tk::PreciseScrollDeltas %D] ::safepdf::tdx ::safepdf::tdy
+    lassign [.ol.th yview] ::safepdf::tha ::safepdf::thb
+    .ol.th yview moveto [expr {$::safepdf::tha - $::safepdf::tdy / double(max($::safepdf::thH, 1))}]
+    break
+  }
 }
 .ol.t tag configure hover -background $::safepdf::col(olHover)
 .ol.t tag configure cur -background $::safepdf::col(olCur)
@@ -985,9 +1454,9 @@ ttk::frame .v
 # View modes (9.3): radio variables of the View and overflow menus; in the vertical modes every
 # change of the vertical view (keys, scroll bar, wheel) is reported once per idle moment as
 # `viewChanged` (current page, renders).
-set ::safepdf::scrollMode page
+set ::safepdf::scrollMode vertical
 set ::safepdf::spreadMode none
-set ::safepdf::continuous 0
+set ::safepdf::continuous 1
 set ::safepdf::vcPending 0
 proc ::safepdf::yscroll {a b} {
   .ys set $a $b
@@ -1085,9 +1554,28 @@ bind .c <Control-Button-5> {::safepdf::wheelZoom -1 %x %y; break}
 bind . <Control-o> {::safepdf::emit open}
 bind . <Control-w> {::safepdf::emit close}
 bind . <Control-q> {::safepdf::emit quit}
+# Resizes are debounced (a window drag sends many); for 300 ms after ::safepdf::resizeSoon
+# (the outline sidebar opens or closes, 9.r4) a change of the canvas width is reported at
+# once, from inside the <Configure> binding: Tk calls it while laying out the panes, before
+# the canvas is painted at its new size, so the pages never show at the old layout in the new
+# width. Height-only changes (find bar, go-to bar) stay debounced.
+set ::safepdf::resizeNow 0
+set ::safepdf::resizeNowId {}
+set ::safepdf::confW 0
+proc ::safepdf::resizeSoon {} {
+  set ::safepdf::resizeNow 1
+  after cancel $::safepdf::resizeNowId
+  set ::safepdf::resizeNowId [after 300 {set ::safepdf::resizeNow 0}]
+}
 bind .c <Configure> {
   after cancel $::safepdf::resizeId
-  set ::safepdf::resizeId [after 100 {::safepdf::emit resize [winfo width .c] [winfo height .c]}]
+  set ::safepdf::confW0 $::safepdf::confW
+  set ::safepdf::confW %w
+  if {$::safepdf::resizeNow && %w != $::safepdf::confW0} {
+    ::safepdf::emit resize %w %h
+  } else {
+    set ::safepdf::resizeId [after 100 {::safepdf::emit resize [winfo width .c] [winfo height .c]}]
+  }
 }
 # Selection (8.2c): press/drag/release and double-click on the page, context menu.
 bind .c <ButtonPress-1> {focus .c; ::safepdf::emit press %x %y}
@@ -1135,7 +1623,7 @@ bind . <Alt-Key-Left> {::safepdf::emit back}
 bind . <Alt-Key-Right> {::safepdf::emit forward}
 bind . <F9> {::safepdf::emit outlineToggle}
 .pop add separator
-.pop add command -label {Outline} -accelerator F9 -command {::safepdf::emit outlineToggle}
+.pop add command -label {Sidebar} -accelerator F9 -command {::safepdf::emit outlineToggle}
 .pop add command -label {Back} -accelerator Alt+Left -command {::safepdf::emit back}
 .pop add command -label {Forward} -accelerator Alt+Right -command {::safepdf::emit forward}
 .pop add command -label {Go to page...} -accelerator Ctrl+G -command ::safepdf::showGoto
@@ -1209,10 +1697,69 @@ proc ::safepdf::ask {type title msg} {
   if {$::safepdf::autoAnswer ne {}} { return $::safepdf::autoAnswer }
   return [tk_messageBox -parent . -icon question -type $type -title $title -message $msg]
 }
-proc ::safepdf::askSavePath {dir file} {
+# Three-way questions (9.r2: Overwrite / Save As... / Cancel, Save / Don't Save / Cancel): a
+# modal dialog with the buttons given as key label pairs in display order (Save.*Buttons; on
+# aqua the macOS order), the default key (focused at first; Return presses the focused
+# button) and the cancel key (Escape, the dialog's close button); the focus goes back where it
+# was. Returns the chosen key. Smoke mode: ::safepdf::autoAnswer answers.
+proc ::safepdf::choose {title msg default cancel args} {
+  set ::safepdf::lastAsk $msg
+  if {$::safepdf::autoAnswer ne {}} { return $::safepdf::autoAnswer }
+  set w .choose
+  destroy $w
+  toplevel $w
+  wm withdraw $w
+  wm title $w $title
+  wm transient $w .
+  wm resizable $w 0 0
+  ttk::frame $w.f -padding 14
+  ttk::label $w.f.msg -justify left -wraplength 440 -text $msg
+  ttk::frame $w.f.b
+  set ::safepdf::chooseAnswer {}
+  foreach {key label} $args {
+    ttk::button $w.f.b.$key -text $label -command [list set ::safepdf::chooseAnswer $key]
+    if {$key eq $default} { $w.f.b.$key configure -default active }
+    pack $w.f.b.$key -side left -padx 4
+  }
+  pack $w.f.msg -side top -fill x -pady {0 12}
+  pack $w.f.b -side right
+  pack $w.f -fill both -expand 1
+  wm protocol $w WM_DELETE_WINDOW [list set ::safepdf::chooseAnswer $cancel]
+  bind $w <Escape> [list set ::safepdf::chooseAnswer $cancel]
+  # Return (and keypad Enter) presses the focused button, as in tk_messageBox: after Tab to
+  # Cancel, Return must cancel, not run the default (9.r6); the default has the focus first.
+  bind $w <Return> [list ::safepdf::chooseReturn $w $default]
+  bind $w <KP_Enter> [list ::safepdf::chooseReturn $w $default]
+  ::tk::PlaceWindow $w widget .
+  set old [focus]
+  wm deiconify $w
+  catch {grab $w}
+  focus $w.f.b.$default
+  vwait ::safepdf::chooseAnswer
+  catch {grab release $w}
+  destroy $w
+  if {$old ne {} && [winfo exists $old]} { catch {focus $old} }
+  return $::safepdf::chooseAnswer
+}
+proc ::safepdf::chooseReturn {w default} {
+  set f [focus]
+  if {$f ne {} && [string equal [winfo parent $f] $w.f.b]} { $f invoke } else { $w.f.b.$default invoke }
+}
+# Every way of quitting goes through this one proc (9.r2; task 9.r3's key bindings call it):
+# the viewer asks about unsaved marks and quits only when the answer allows it.
+proc ::safepdf::quit {} { ::safepdf::emit quit }
+if {[tk windowingsystem] eq {aqua}} {
+  # The application menu's Quit and Cmd+Q (Tk calls this; returning without exiting cancels).
+  proc ::tk::mac::Quit {} { ::safepdf::quit }
+}
+# The save dialogs take their type options from Save.saveDialogOptions (9.r6: none of
+# -filetypes on aqua, whose Format: pop-up overflows the panel); the last options are kept in
+# ::safepdf::lastDialog for the smoke test.
+set ::safepdf::lastDialog {}
+proc ::safepdf::askSavePath {dir file args} {
+  set ::safepdf::lastDialog [list $dir $file {*}$args]
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
-  return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file \\
-    -defaultextension .pdf -confirmoverwrite 1 -filetypes {{{PDF files} {.pdf .PDF}} {{All files} *}}]
+  return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file {*}$args]
 }
 # XFDF import/export (9.11): the file dialogs; ::safepdf::autoPath answers them in smoke mode.
 proc ::safepdf::askXfdfOpen {dir} {
@@ -1220,12 +1767,13 @@ proc ::safepdf::askXfdfOpen {dir} {
   return [tk_getOpenFile -parent . -title {Import annotations} -initialdir $dir \\
     -filetypes {{XFDF {.xfdf}} {{All files} *}}]
 }
-proc ::safepdf::askXfdfSave {dir file} {
+proc ::safepdf::askXfdfSave {dir file args} {
+  set ::safepdf::lastDialog [list $dir $file {*}$args]
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
   return [tk_getSaveFile -parent . -title {Export annotations} -initialdir $dir -initialfile $file \\
-    -defaultextension .xfdf -confirmoverwrite 1 -filetypes {{XFDF {.xfdf}} {{All files} *}}]
+    {*}$args]
 }
-wm protocol . WM_DELETE_WINDOW {::safepdf::emit quit}
+wm protocol . WM_DELETE_WINDOW ::safepdf::quit
 bind . <Control-s> {::safepdf::emit save}
 bind . <Control-S> {::safepdf::emit saveAs}
 # Marks (9.4): current highlight colour, the right-clicked point, keys, the note icon and the note popup.
@@ -1253,35 +1801,57 @@ proc ::safepdf::noteIcon {c x0 y0 x1 y1 fill tags} {
 }
 # Note popup: a small window with the note text (inserted by variable substitution, never
 # parsed as script); Save (Ctrl+Return) sends the text back as one word, Delete removes the
-# note, Cancel/Escape closes.
+# note. Closing it without Save — Escape (bound on the toplevel, so it works in the text
+# widget), Cancel or the window's close button — sends the text as `noteClose` and Lean
+# decides (Marks.Store.onUnsavedClose, 9.r12): a note with a stored text keeps it (the edits
+# are discarded); a new note (stored text empty) gets the typed text, or is deleted when the
+# popup is empty or white space only. Opening another note's popup first closes this one
+# the same way; reopening the same note's popup keeps it and its edits.
+set ::safepdf::noteId {}
 proc ::safepdf::noteEdit {id text x y} {
   set w .note
+  if {[winfo exists $w]} {
+    if {$::safepdf::noteId eq $id} { raise $w; focus $w.t; return }
+    ::safepdf::noteDone $::safepdf::noteId close
+  }
   destroy $w
+  set ::safepdf::noteId $id
   toplevel $w -background $::safepdf::col(panel)
   wm title $w Note
   wm transient $w .
   wm geometry $w +$x+$y
+  wm protocol $w WM_DELETE_WINDOW [list ::safepdf::noteDone $id close]
   text $w.t -wrap word -width 36 -height 6 -font ::safepdf::fOl -relief solid -borderwidth 1 \
     -undo 1 -background #ffffe8 -foreground $::safepdf::col(text) -padx 6 -pady 4
   $w.t insert end $text
   ttk::frame $w.b
   ttk::button $w.b.save -text Save -command [list ::safepdf::noteDone $id save]
   ttk::button $w.b.del -text Delete -command [list ::safepdf::noteDone $id delete]
-  ttk::button $w.b.cancel -text Cancel -command [list destroy $w]
+  ttk::button $w.b.cancel -text Cancel -command [list ::safepdf::noteDone $id close]
   pack $w.b.cancel $w.b.save -side right -padx 4 -pady 4
   pack $w.b.del -side left -padx 4 -pady 4
   pack $w.b -side bottom -fill x
   pack $w.t -side top -fill both -expand 1 -padx 6 -pady {6 0}
-  bind $w <Escape> [list destroy $w]
+  bind $w <Escape> [list ::safepdf::noteDone $id close]
   # break: the popup is gone after noteDone, so the Text class binding must not run.
-  bind $w.t <Control-Return> \"[list ::safepdf::noteDone $id save]; break\"
+  ::safepdf::primaryBind $w.t Return \"[list ::safepdf::noteDone $id save]; break\"
   focus $w.t
 }
 proc ::safepdf::noteDone {id what} {
   if {![winfo exists .note]} return
   set t [.note.t get 1.0 {end - 1 chars}]
   destroy .note
-  if {$what eq {save}} { ::safepdf::emit noteSave $id $t } else { ::safepdf::emit noteDelete $id }
+  set ::safepdf::noteId {}
+  switch -- $what {
+    save { ::safepdf::emit noteSave $id $t }
+    delete { ::safepdf::emit noteDelete $id }
+    default { ::safepdf::emit noteClose $id $t }
+  }
+}
+# Note id was deleted elsewhere (Delete key, Edit → Delete mark, its highlight deleted): its
+# open popup goes too (called by Lean's deleteMark).
+proc ::safepdf::noteGone {id} {
+  if {[winfo exists .note] && $::safepdf::noteId eq $id} { destroy .note; set ::safepdf::noteId {} }
 }
 # Selection bubble, colour picker and Highlight pop-over (9.8), after PDF.js's editToolbar,
 # colorPicker and #editorHighlightParamsToolbar; positions come from Bubble.lean. Colours
@@ -1325,6 +1895,28 @@ proc ::safepdf::bubColor {c bx cy hex open tags} {
   $c create line [expr {$bx + 26.5}] [expr {$cy - $d}] [expr {$bx + 30}] [expr {$cy + $d}] [expr {$bx + 33.5}] [expr {$cy - $d}] -fill $::safepdf::col(bubInk) -width 1.3 -capstyle round -joinstyle round -tags $tags
 }
 # A swatch at cx cy of diameter d; the selected one ringed (2 px, 2 px away).
+# Tooltips of the bubble's buttons (9.r4): canvas item tag b:NAME, shown under its button.
+proc ::safepdf::bubTip {tag text} {
+  after cancel $::safepdf::tipId
+  set ::safepdf::tipId [after 600 [list ::safepdf::bubTipShow $tag $text]]
+}
+proc ::safepdf::bubTipShow {tag text} {
+  set b [.c bbox $tag]
+  if {$b eq {}} return
+  destroy .tip
+  toplevel .tip -background $::safepdf::col(fieldLine) -borderwidth 0
+  wm overrideredirect .tip 1
+  label .tip.l -text $text -font ::safepdf::fBar -background white \
+    -foreground $::safepdf::col(text) -padx 6 -pady 3
+  pack .tip.l -padx 1 -pady 1
+  set x [expr {[winfo rootx .c] + round([lindex $b 0] - [.c canvasx 0])}]
+  set y [expr {[winfo rooty .c] + round([lindex $b 3] - [.c canvasy 0]) + 8}]
+  wm geometry .tip +$x+$y
+}
+proc ::safepdf::bubTipHide {} {
+  after cancel $::safepdf::tipId
+  destroy .tip
+}
 proc ::safepdf::swatch {c cx cy d hex sel tags} {
   set r [expr {$d / 2.0}]
   if {$sel} {
@@ -1365,7 +1957,7 @@ proc ::safepdf::ftOpen {x y text px fg} {
   bindtags .c.ft [list .c.ft Text all]
   bind .c.ft <Escape> {::safepdf::emit ftCommit; break}
   bind .c.ft <KeyRelease> ::safepdf::ftFit
-  bind .c.ft <Control-q> {::safepdf::emit quit}
+  ::safepdf::primaryBind .c.ft q {::safepdf::emit quit}
   .c create window $x $y -anchor nw -window .c.ft -tags ftedit
   ::safepdf::ftFit
   focus .c.ft
@@ -1399,7 +1991,9 @@ focus .c
 /-! ## Text index and highlights (task 8.2c) -/
 
 /-- The text index of page `p`: extracted on first use (`Annot.extractDocPageAnnots` with a
-fresh budget, as the text view and the renderer) and cached for the open document. -/
+fresh budget, as the text view and the renderer) and cached for the open document. Content
+hidden by the layers' state (`State.oc`, task 9.r11b) is not in it, so it can be neither
+selected nor found. -/
 def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex) := do
   let s ← st.get
   let some doc := s.doc | return .error "no document"
@@ -1409,7 +2003,7 @@ def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex
     let some page := doc.pages[p]? | return .error "page index out of range"
     let r ← IO.lazyPure fun _ =>
       match (SafePdf.Core.Annot.extractDocPageAnnots limits doc page
-          (SafePdf.Core.Filter.Budget.init limits)).1 with
+          (SafePdf.Core.Filter.Budget.init limits) (oc := s.oc)).1 with
       | .ok pt => .ok (Select.PageIndex.ofText pt)
       | .error e => .error (renderError e)
     let gen := s.gen
@@ -1482,6 +2076,15 @@ popup form written for it has no appearance of its own. -/
 def drawnMarks (s : State) (p : Nat) : List Marks.Mark :=
   (visibleMarks s p).filter (!s.marks.isSaved ·.id)
 
+/-- Whether the renderer can paint a saved free text (task 9.r5): its appearance stream uses
+the non-embedded standard-14 Helvetica (rule A13), which the renderer paints only with a
+substitute program (`Shell.Fonts.findFiles`, task 7.7). Without one — e.g. macOS without
+Ghostscript's or TeX Gyre's fonts — the appearance draws nothing, so `drawMarks` draws saved
+free text on the canvas like unsaved free text (else it stayed invisible until a double click
+opened its text box). -/
+def State.paintsHelvetica (s : State) : Bool :=
+  (s.subst.get? SafePdf.Core.Font.Std14.helvetica).isSome
+
 /-- `Slot.rect` as a `Bubble.Rect`. -/
 def Slot.rectR (sl : Slot) (b : Box) : Bubble.Rect :=
   let (x0, y0, x1, y1) := sl.rect b
@@ -1509,10 +2112,16 @@ def drawEditorMark (s : State) (sl : Slot) (m : Marks.Mark) (tags : String) : IO
     let lines := t.splitOn "\n"
     let lf := SafePdf.Core.Write.Annots.lineFactor
     let pad := SafePdf.Core.Write.Annots.ftPad
+    -- Task 9.r5: the line's top-left corner (baseline + ascent, in page space) through the
+    -- page transform, and the text turned with the page (Tk's `-angle` is counter-clockwise
+    -- and turns about the anchor), so it also sits right on a rotated page.
+    let ascPage : Rat := (asc : Rat) / (if sl.vp.zoom > 0 then sl.vp.zoom else 1)
+    let angle : String := match sl.vp.rot with
+      | .r0 => "0" | .r90 => "270" | .r180 => "180" | .r270 => "90"
     for (l, i) in lines.zip (List.range lines.length) do
-      let (x, y) := at' ⟨p.x + pad, p.y - pad - (sz : Rat) - (i : Rat) * lf * (sz : Rat)⟩
-      discard <| run [".c", "create", "text", num x, num (y - asc), "-anchor", "nw", "-text", l,
-        "-font", font, "-fill", Marks.rgbHex c, "-tags", s!"{tags} ft"]
+      let (x, y) := at' ⟨p.x + pad, p.y - pad - (sz : Rat) - (i : Rat) * lf * (sz : Rat) + ascPage⟩
+      discard <| run [".c", "create", "text", num x, num y, "-anchor", "nw", "-angle", angle,
+        "-text", l, "-font", font, "-fill", Marks.rgbHex c, "-tags", s!"{tags} ft"]
   | .ink ss w o c =>
     let wpx := max 1 ((w : Rat) * sl.vp.zoom)
     let stip := if s.stipple then stippleOf o else []
@@ -1549,7 +2158,8 @@ def drawMarks (s : State) (sl : Slot) : IO Unit := do
         let (x0, y0, x1, y1) := sl.rect ib
         discard <| run ["::safepdf::noteIcon", ".c", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, m.color.hex, s!"{tags} note"]
-    if !s.marks.isSaved m.id && (s.ftEdit.bind (·.id)) != some m.id then
+    if (!s.marks.isSaved m.id || (m.isFreeText && !s.paintsHelvetica)) &&
+        (s.ftEdit.bind (·.id)) != some m.id then
       drawEditorMark s sl m tags
     if s.markSel == some m.id then
       let boxes := if m.isNote then (m.iconBox bx).toList
@@ -1561,7 +2171,8 @@ def drawMarks (s : State) (sl : Slot) : IO Unit := do
           "-outline", "#0060df", "-width", "2", "-tags", s!"{tags} marksel"]
 
 /-- Draws the bubble (canvas items tagged `bub`, task 9.8; `Bubble`): after a text selection
-(not while dragging) the float bubble with the Highlight button, on a selected highlight the
+(not while dragging) the float bubble with the Highlight and Add comment buttons (task 9.r4;
+each button with a hover tooltip, `Bubble.Btn.tip`), on a selected highlight the
 edit bubble (colour swatch and chevron, Comment, Delete) and, when open, its colour picker.
 Placed by `Bubble.place` in canvas coordinates inside the scroll region, on the page of the
 selection or the mark (task 9.3: any laid-out page), so it scrolls with the page; every redraw
@@ -1606,6 +2217,12 @@ def drawBubble (st : IO.Ref State) : IO Unit := do
   for (b, x0, x1) in k.layout do
     let tags := s!"bub b:{b.name}"
     let cx := r.x0 + (x0 + x1) / 2
+    -- The button's area (white, under its icon) carries the hover tooltip (task 9.r4).
+    discard <| run [".c", "create", "rectangle", num (r.x0 + x0), num (r.y0 + Bubble.pad),
+      num (r.x0 + x1), num (r.y1 - Bubble.pad), "-fill", "white", "-outline", "", "-tags", tags]
+    discard <| run [".c", "bind", s!"b:{b.name}", "<Enter>",
+      s!"::safepdf::bubTip b:{b.name} \{{b.tip}}"]
+    discard <| run [".c", "bind", s!"b:{b.name}", "<Leave>", "::safepdf::bubTipHide"]
     match b with
     | .color =>
       let hex := (mark.map (·.color.hex)).getD s.hlColor.hex
@@ -1669,15 +2286,17 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
 /-! ## Rendering -/
 
 /-- Renders page `p` of `doc` at `zoom` and user rotation `rot` with a fresh budget (the
-inspector's `raster` view does the same). -/
+inspector's `raster` view does the same), under the optional content state `oc` (task 9.r11b;
+`none`: the document's default). -/
 def renderPage (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotation)
-    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {}) :
+    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {})
+    (oc : Option Core.Doc.OptionalContent.State := none) :
     IO (Except Error Clip.Image) := do
   match doc.pages[p]? with
   | some page =>
     IO.lazyPure fun _ =>
       (SafePdf.Core.Raster.Glyph.renderDocPage limits doc page zoom rot
-        (SafePdf.Core.Filter.Budget.init limits) (subst := subst)).1
+        (SafePdf.Core.Filter.Budget.init limits) (subst := subst) (oc := oc)).1
   | none => return .error (.malformed 0 "page index out of range")
 
 /-- The cache key of the page in slot `sl`. -/
@@ -1698,10 +2317,11 @@ def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
   if s.jobs.any (·.key == key) then return
   let d := s.view.getD doc
   let subst := s.subst
+  let oc := s.oc
   let start ← IO.monoNanosNow
   let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
-    let r ← renderPage d key.page key.zoom key.rot subst
+    let r ← renderPage d key.page key.zoom key.rot subst oc
     let t1 ← IO.monoNanosNow
     return (r, t1 - t0)
   st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task⟩ }
@@ -1823,7 +2443,7 @@ def showStatus (st : IO.Ref State) (how : String) : IO Unit := do
         s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
       (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
     setStatus s!"{path}: {page}, {pct}% ({modeName s.zoomSel}), \
-      rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}"
+      rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}{s.openNote}"
 
 /-- Shows the current page in the toolbar's page field (`Toolbar.entryText`: the number, or
 the label when the document has labels) and the "of N" label next to it (task 9.7). -/
@@ -1896,7 +2516,7 @@ def place (st : IO.Ref State) (want : List Nat) (j : Job) (r : Except Error Clip
 /-- Schedules a `poll` event while renders are running (task 8.8). -/
 def ensurePoll (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  if !s.jobs.isEmpty && !s.pollQueued then
+  if (!s.jobs.isEmpty || !s.thJobs.isEmpty) && !s.pollQueued then
     st.modify ({ · with pollQueued := true })
     discard <| run ["after", toString pollMs, "::safepdf::emit poll"]
 
@@ -1998,6 +2618,189 @@ def renderMore (st : IO.Ref State) : IO Unit := do
   if shown then drawOverlay st
   ensurePoll st
 
+/-! ## Thumbnails (task 9.r9) -/
+
+/-- Most thumbnail renders running at once (task 9.r9), on top of the page renders' `maxJobs`.
+They start only while the page renders leave a slot free, so the main view goes first. -/
+def thumbJobs : Nat := 2
+
+/-- Tk photo of the thumbnail of page `p`. -/
+def thumbPhoto (p : Nat) : String := s!"::safepdf::th{p}"
+
+/-- Rotated size of page `p` of `doc` in page units (`/Rotate` plus the user rotation). -/
+def pageSizeRot (s : State) (doc : Doc) (p : Nat) : Rat × Rat :=
+  match doc.pages[p]? with
+  | some page => View.boxSize (rotAdd page.rotate s.rot) (Box.ofRect page.cropBox)
+  | none => (0, 0)
+
+/-- The zoom of page `p`'s thumbnail: `Sidebar.thumbW` pixels across its rotated width. -/
+def thumbZoom (s : State) (doc : Doc) (p : Nat) : Rat :=
+  let (pw, _) := pageSizeRot s doc p
+  if pw ≤ 0 then 1 else (Sidebar.thumbW : Rat) / pw
+
+/-- Removes the thumbnail image of page `p` (eviction, task 9.r9). -/
+def dropThumb (st : IO.Ref State) (p : Nat) : IO Unit := do
+  try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+  discard <| run [".ol.th", "delete", s!"thi{p}"]
+  st.modify fun s => { s with thHave := s.thHave.filter (· != p) }
+
+/-- Deletes every thumbnail image and canvas item (a new document, a rotation, Close). Running
+thumbnail renders finish on their own; `thumbPoll` drops their results. -/
+def clearThumbs (st : IO.Ref State) : IO Unit := do
+  for p in (← st.get).thHave do
+    try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+  discard <| run [".ol.th", "delete", "all"]
+  st.modify ({ · with thHave := [], thSlots := #[], thHeight := 0, thKey := none,
+                      thMarked := none, thSel := none })
+
+/-- Lays the thumbnails of the open document out (`Sidebar.thumbLayout`, sizes from each
+page's rotated crop box, `Sidebar.thumbSize`): a white frame (the placeholder until the image
+arrives, tags `thf thfN`) and the page label (the page label when the document has labels,
+else the number; tags `thl thlN`) per page, the scroll region, the view at the top. Nothing is
+rendered here (`thumbView`). -/
+def buildThumbs (st : IO.Ref State) : IO Unit := do
+  clearThumbs st
+  let s ← st.get
+  let some doc := s.doc | return
+  let sizes := (List.range doc.pages.size).map fun p =>
+    let (pw, ph) := pageSizeRot s doc p
+    Sidebar.thumbSize pw ph
+  let (ts, h) := Sidebar.thumbLayout sizes
+  for t in ts do
+    let x0 : Int := -((t.w / 2 : Nat) : Int)
+    discard <| run [".ol.th", "create", "rectangle", toString (x0 - 1), toString ((t.y : Int) - 1),
+      toString (x0 + t.w), toString (t.y + t.h), "-outline", "#c8c8d0", "-fill", "white",
+      "-tags", s!"thf thf{t.page}"]
+    discard <| run [".ol.th", "create", "text", "0", toString (t.y + t.h + 11), "-text",
+      Toolbar.entryText s.labels t.page, "-font", "::safepdf::fBar", "-fill", "#5b5b66",
+      "-tags", s!"thl thl{t.page}"]
+  discard <| run ["set", "::safepdf::thH", toString h]
+  discard <| run ["::safepdf::thRegion"]
+  discard <| run [".ol.th", "yview", "moveto", "0"]
+  st.modify ({ · with thSlots := ts, thHeight := h, thKey := some (s.gen, s.rot) })
+
+/-- The visible band of the thumbnails panel (canvas pixels: top, bottom); `none` while the
+panel is not laid out on screen (so that nothing is rendered for an unmapped panel). -/
+def thumbBand (s : State) : IO (Option (Nat × Nat)) := do
+  let some (a, _) := viewFracs (← run [".ol.th", "yview"]) | return none
+  let some hgt := (← run ["winfo", "height", ".ol.th"]).toNat? | return none
+  if hgt < 2 || (← run ["winfo", "ismapped", ".ol.th"]) != "1" then return none
+  let top := (a * (s.thHeight : Rat) + 1 / 2).floor.toNat
+  return some (top, top + hgt)
+
+/-- Scrolls the thumbnails panel so that slot `t` is fully visible (with a small margin). -/
+def thumbSee (st : IO.Ref State) (t : Sidebar.ThumbSlot) : IO Unit := do
+  let s ← st.get
+  let some (top, bot) ← thumbBand s | return
+  let hgt : Rat := (max s.thHeight 1 : Nat)
+  let y0 := t.y - min t.y 8
+  let y1 := t.bottom + 8
+  if y0 < top then
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine ((y0 : Rat) / hgt)]
+  else if y1 > bot then
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine (((y1 - (bot - top) : Nat) : Rat) / hgt)]
+
+/-- Highlights the current page's thumbnail (a rounded background, tag `thsel`, as PDF.js's
+selected thumbnail) and scrolls it into view (PDF.js `scrollThumbnailIntoView`). -/
+def markThumb (st : IO.Ref State) : IO Unit := do
+  discard <| run [".ol.th", "delete", "thsel"]
+  let s ← st.get
+  st.modify ({ · with thMarked := some s.page })
+  let some t := s.thSlots[s.page]? | return
+  -- Until the panel is on screen it cannot be scrolled: try again after the next event.
+  if (← thumbBand s).isNone then st.modify ({ · with thMarked := none })
+  let x0 : Int := -((t.w / 2 : Nat) : Int) - 6
+  discard <| run ["::safepdf::rrect", ".ol.th", toString x0, toString ((t.y : Int) - 6),
+    toString (x0 + t.w + 12), toString (t.bottom + 2), "5", "-fill", "#d2d2d9", "-outline", "",
+    "-tags", "thsel"]
+  discard <| run [".ol.th", "lower", "thsel"]
+  thumbSee st t
+
+/-- Draws the keyboard selection's focus ring (tag `thfocus`) around thumbnail `p`. -/
+def thumbFocus (st : IO.Ref State) (p : Nat) : IO Unit := do
+  discard <| run [".ol.th", "delete", "thfocus"]
+  let some t := (← st.get).thSlots[p]? | return
+  let x0 : Int := -((t.w / 2 : Nat) : Int) - 4
+  discard <| run ["::safepdf::rrect", ".ol.th", toString x0, toString ((t.y : Int) - 4),
+    toString (x0 + t.w + 8), toString t.bottom, "4", "-fill", "", "-outline", "#0a84ff",
+    "-width", "2", "-tags", "thfocus"]
+  thumbSee st t
+
+/-- Starts rendering the thumbnail `key` on a dedicated worker thread (as `submit`). -/
+def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
+  let s ← st.get
+  let d := s.view.getD doc
+  let subst := s.subst
+  let oc := s.oc
+  let start ← IO.monoNanosNow
+  let task ← IO.asTask (prio := .dedicated) do
+    let t0 ← IO.monoNanosNow
+    let r ← renderPage d key.page key.zoom key.rot subst oc
+    let t1 ← IO.monoNanosNow
+    return (r, t1 - t0)
+  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task⟩ }
+
+/-- **Lazy thumbnail rendering** (task 9.r9): for the visible band of the panel
+(`thumbBand`), the visible thumbnails and `Sidebar.thumbMargin` more on each side
+(`Sidebar.thumbsWanted`) are rendered on worker threads — at most `thumbJobs` at once and only
+while the page renders leave a slot free (`maxJobs`) — and thumbnails beyond
+`Sidebar.thumbBudget` are dropped, farthest first (`Sidebar.thumbEvict`). Nothing while the
+panel is hidden. -/
+def thumbView (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if !s.outlineShown || s.panel != .thumbnails || s.thKey != some (s.gen, s.rot) then return
+  let some doc := s.doc | return
+  let some (top, bot) ← thumbBand s | return
+  let want := Sidebar.thumbsWanted s.thSlots top bot Sidebar.thumbMargin
+  let center := (want.head?).getD s.page
+  for p in Sidebar.thumbEvict s.thHave want Sidebar.thumbBudget center do dropThumb st p
+  for p in want do
+    let s ← st.get
+    if s.thHave.contains p then continue
+    let key : View.Key := ⟨s.gen, p, thumbZoom s doc p, s.rot⟩
+    if s.thJobs.any (·.key == key) then continue
+    if s.thJobs.size ≥ thumbJobs || s.jobs.size ≥ maxJobs then break
+    thumbSubmit st doc key
+  ensurePoll st
+
+/-- Takes the finished thumbnail renders (task 9.r9) and shows those still laid out for the
+open document and rotation: the image in photo `::safepdf::thN` on its frame (tags
+`thi thiN`); a page that cannot be rendered keeps its empty frame. Others are dropped. -/
+def thumbPoll (st : IO.Ref State) : IO Unit := do
+  let done ← (← st.get).thJobs.filterM (IO.hasFinished ·.task)
+  for j in done do
+    st.modify fun s => { s with thJobs := s.thJobs.filter (·.key != j.key) }
+    let s ← st.get
+    let p := j.key.page
+    if s.thKey != some (j.key.gen, j.key.rot) || j.key.gen != s.gen || s.thHave.contains p then
+      continue
+    let some t := s.thSlots[p]? | continue
+    match j.task.get with
+    | .ok (.ok img, _) =>
+      discard <| run ["image", "create", "photo", thumbPhoto p]
+      Shim.photoPut (thumbPhoto p) img.w.toUInt32 img.h.toUInt32 img.data
+      let x0 : Int := -((img.w / 2 : Nat) : Int)
+      discard <| run [".ol.th", "create", "image", toString x0, toString t.y, "-anchor", "nw",
+        "-image", thumbPhoto p, "-tags", s!"thi thi{p}"]
+      discard <| run [".ol.th", "raise", s!"thi{p}", s!"thf{p}"]
+    | _ => pure ()
+    let now ← IO.monoNanosNow
+    st.modify fun s => { s with thHave := p :: s.thHave, thRendered := s.thRendered + 1,
+                                thFirstNs := s.thFirstNs <|> some (now - s.thOpenNs) }
+
+/-- Brings the thumbnails panel up to date (task 9.r9; after every event, `syncMenus`): while
+it is shown, lays the thumbnails out again for a new document or rotation and moves the
+current-page highlight with the main view. -/
+def syncThumbs (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || !s.outlineShown || s.panel != .thumbnails then return
+  if s.thKey != some (s.gen, s.rot) then
+    buildThumbs st
+    markThumb st
+    -- Rendered once Tk has laid the panel out (`thumbBand`), after the event that showed it.
+    discard <| run ["after", "idle", "::safepdf::emit thView"]
+  else if s.thMarked != some s.page then markThumb st
+
 /-- Handles `poll` (task 8.8, every `pollMs` while renders run): takes the finished renders
 (`finish`, into the cache), shows those still wanted (`place`), starts more (`renderMore`). -/
 def poll (st : IO.Ref State) : IO Unit := do
@@ -2011,6 +2814,9 @@ def poll (st : IO.Ref State) : IO Unit := do
       if ← place st want j r ns then shown := true
     if shown then drawOverlay st
     if (← st.get).doc.isSome then renderMore st
+  -- Thumbnails (task 9.r9): finished ones shown, more started while page renders leave room.
+  thumbPoll st
+  thumbView st
   ensurePoll st
 
 /-- Renders every missing page now and waits for every running render (smoke tests and
@@ -2073,6 +2879,12 @@ def applyScroll (st : IO.Ref State) : IO Unit := do
   if s.scroll == .vertical then
     if let some (top, _, _, _) ← viewBand s then st.modify ({ · with ownTop := some top })
 
+/-- Shows the current view mode on the view-mode drop-down (task 9.r4,
+`Toolbar.ViewChoice.ofModes`): its icon, tooltip and checked entry, enabled with a document. -/
+def showViewChoice (s : State) (on : Bool) : IO Unit := do
+  let c := Toolbar.ViewChoice.ofModes s.scroll s.spread
+  discard <| run ["::safepdf::viewShow", c.key, s!"View mode: {c.label}", if on then "1" else "0"]
+
 /-- Updates title, page field, zoom field and (when the layout or the current page changed, or
 a scroll is pending) the page images. A new layout (`layoutKeyOf` changed: document, view
 mode, zoom, rotation, window size, or the spread shown in the page scroll mode) is computed by
@@ -2087,6 +2899,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
   | some _, some doc =>
     showPageField s
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "1"]
+    showViewChoice s true
     if doc.pages.size == 0 then return
     let key := layoutKeyOf s
     let relaid := s.layoutKey != some key
@@ -2125,6 +2938,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
   | _, _ =>
     discard <| run ["::safepdf::setPage", "", "", "0"]
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
+    showViewChoice s false
     discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
     st.modify ({ · with bubble := none, pickerAt := none, slots := #[], layoutKey := none,
                         shown := none })
@@ -2161,13 +2975,19 @@ def prefetch (st : IO.Ref State) : IO Unit := do
 /-! ## Outline panel (task 8.2d) -/
 
 /-- Shows or hides the outline sidebar (the left pane of `.pw`); the sidebar toggle button
-looks pressed while it is shown (PDF.js's `toggled`). -/
+looks pressed while it is shown (PDF.js's `toggled`). The canvas's next width changes are
+reported at once instead of after the 100 ms resize debounce (`::safepdf::resizeSoon`), so
+the pages are laid out for the new width before the canvas is painted at it: at Page Fit the
+page goes straight to its new place (task 9.r4). -/
 def showOutline (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
   -- The View → Outline check entry toggles its variable before it runs the command; set it
   -- back to the panel's real state whatever happens below.
   discard <| run ["set", Menu.outlineVar, if s.outlineShown then "1" else "0"]
   if on == s.outlineShown then return
+  -- The canvas changes width: lay the pages out again as soon as it has its new size, before
+  -- Tk paints it (task 9.r4, `::safepdf::resizeSoon`).
+  discard <| run ["::safepdf::resizeSoon"]
   if on then discard <| run [".pw", "insert", "0", ".ol", "-weight", "0"]
   else discard <| run [".pw", "forget", ".ol"]
   discard <| run ["set", Menu.outlineVar, if on then "1" else "0"]
@@ -2217,10 +3037,384 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
   discard <| run [".ol.t", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
   discard <| run ["::safepdf::olSetTri", toString i, Sidebar.triangle true on]
 
+/-! ## Sidebar panels (task 9.r9) -/
+
+/-- What the open document offers the sidebar (task 9.r9: which panel buttons show). -/
+def contentOf (s : State) : Sidebar.Content :=
+  { hasOutline := !s.outline.isEmpty, hasAttachments := !s.attList.isEmpty,
+    hasLayers := !s.lyRows.isEmpty }
+
+/-- Shows the switcher buttons of the panels the document has (`Sidebar.buttons`, in order)
+and presses the shown panel's button (PDF.js's toggled view button). -/
+def syncPanelButtons (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let bs := Sidebar.buttons (contentOf s)
+  let keys := bs.map (·.key)
+  if s.panelButtons != some keys then
+    for i in Sidebar.panels do discard <| run ["pack", "forget", i.button]
+    for i in bs do discard <| run ["pack", i.button, "-in", ".ol.sw", "-side", "left", "-padx", "1"]
+    st.modify ({ · with panelButtons := some keys })
+  for i in Sidebar.panels do
+    discard <| run ["::safepdf::btnToggled", i.button, if i.panel == s.panel then "1" else "0"]
+
+/-- Shows panel `p` in the sidebar (task 9.r9, `::safepdf::showPanel`): its widgets, heading
+and pressed button; the thumbnails are laid out and rendered when they become visible
+(`syncThumbs`). -/
+def showPanel (st : IO.Ref State) (p : Sidebar.Panel) : IO Unit := do
+  st.modify ({ · with panel := p })
+  discard <| run ["::safepdf::showPanel", p.info.key, p.info.title]
+  syncPanelButtons st
+  syncThumbs st
+
+/-- Opens the sidebar on panel `p`, or closes it (`none`) (task 9.r9; `showOutline` moves the
+pane). -/
+def showSidebar (st : IO.Ref State) (p : Option Sidebar.Panel) : IO Unit := do
+  if let some q := p then showPanel st q
+  showOutline st p.isSome
+  syncThumbs st
+
+/-- Handles `panel KEY` (a switcher button): shows that panel when the document has it. -/
+def panelClick (st : IO.Ref State) (k : String) : IO Unit := do
+  let s ← st.get
+  let some p := Sidebar.Panel.ofKey k | return
+  if s.doc.isSome && p.available (contentOf s) then showPanel st p
+
+/-! ## Attachments panel (task 9.r10) -/
+
+/-- Writes row `i` of the attachments list (`.ol.at` item `aN`): its size column and tooltip
+from what is known (`Attach.sizeColumn`, `Attach.tooltip`). -/
+def attRow (s : State) (i : Nat) : IO Unit := do
+  let some a := s.attList[i]? | return
+  let pr := (s.attStatus[i]?).getD none
+  discard <| run [".ol.at", "set", s!"a{i}", "size", Attach.sizeColumn a pr]
+  discard <| run ["set", s!"::safepdf::attTip(a{i})", Attach.tooltip a pr]
+
+/-- Fills the attachments list `.ol.at` from `State.attList` (model `Attach`): one item `aN`
+per attachment with its name, size column and tooltip. Nothing is decoded here: sizes come
+from `/Params /Size`, `/DL` or an unfiltered stream's length (`Attachments.listedSize`). -/
+def fillAttachments (st : IO.Ref State) : IO Unit := do
+  discard <| run ["::safepdf::attClear"]
+  let s ← st.get
+  for i in [0:s.attList.size] do
+    let some a := s.attList[i]? | continue
+    discard <| run [".ol.at", "insert", "", "end", "-id", s!"a{i}", "-text", a.name]
+    attRow s i
+
+/-- Keeps what decoding attachment `i` gave and updates its row. -/
+def attRecord (st : IO.Ref State) (i : Nat) (pr : Attach.Probe) : IO Unit := do
+  st.modify fun s => { s with attStatus := s.attStatus.modify i (fun _ => some pr) }
+  attRow (← st.get) i
+
+/-- Handles `attProbe N` (its tooltip is about to show): decodes attachment `N` once, under the
+viewer's limits with the per-stream cap lowered to `Attach.probeLimit`, so that hovering never
+decodes more than 16 MB (a larger file is decoded only when saved). -/
+def attProbe (st : IO.Ref State) (i : Nat) : IO Unit := do
+  let s ← st.get
+  let (some doc, some a) := (s.doc, s.attList[i]?) | return
+  if ((s.attStatus[i]?).getD none).isSome || a.stream.isNone then return
+  let lim := { limits with maxDecodedStreamBytes := min limits.maxDecodedStreamBytes Attach.probeLimit }
+  let r ← IO.lazyPure fun _ => (Core.Doc.Attachments.decode doc lim a).map ByteArray.size
+  attRecord st i <| match r with
+    | .ok n => .decoded n
+    | .error (.limitExceeded .decodedStreamBytes) => .large
+    | .error e => .failed (renderError e)
+
+/-- The status line text of attachment `i`. -/
+def attText (s : State) (i : Nat) : Option String :=
+  (s.attList[i]?).map fun a => Attach.selectedText a ((s.attStatus[i]?).getD none)
+
+/-- Selects attachment `i` (a click on its annotation's icon on the page): opens the sidebar
+on the attachments panel, selects and shows its row, describes it in the status line. -/
+def attSelect (st : IO.Ref State) (i : Nat) : IO Unit := do
+  if i ≥ (← st.get).attList.size then return
+  showSidebar st (some .attachments)
+  discard <| run [".ol.at", "selection", "set", s!"a{i}"]
+  discard <| run [".ol.at", "focus", s!"a{i}"]
+  discard <| run [".ol.at", "see", s!"a{i}"]
+  if let some t := attText (← st.get) i then setStatus t
+
+/-! ## Layers panel (task 9.r11b) -/
+
+/-- Sets every checkbox variable of the layers panel (`::safepdf::ly(K)`) from the state
+(`Sidebar.layerChecked`). -/
+def syncLayerVars (s : State) : IO Unit := do
+  let some oc := s.oc | return
+  let mut i := 0
+  for r in s.lyRows do
+    if let some on := Sidebar.layerChecked oc r then
+      discard <| run ["set", s!"::safepdf::ly({i})", if on then "1" else "0"]
+    i := i + 1
+
+/-- Fills the layers panel `.ol.ly` from `State.lyRows` (model `Sidebar.layerRows`, tree
+`Sidebar.rows`): one line per row — the disclosure triangle (rows with children), then a
+checkbox (a group; disabled when locked) or the bold label (a heading) — indented by depth,
+tagged with its ancestors as the outline is (`fillOutline`). Every heading starts open except
+Additional Layers (`Sidebar.layerEntries`). -/
+def fillLayers (st : IO.Ref State) : IO Unit := do
+  discard <| run ["::safepdf::lyClear"]
+  let s ← st.get
+  let rs := s.lyRows
+  let es := Sidebar.layerEntries rs
+  let tree := Sidebar.rows es
+  let isOpen := Sidebar.initialOpen es
+  st.modify ({ · with lyTree := tree, lyOpen := isOpen })
+  let some cfg := s.ocCfg | return
+  let triW := ((← run ["font", "measure", "::safepdf::fTri", Sidebar.triangle true false]).toNat?).getD 14
+  let mut depths : List Nat := []
+  for (t, r) in tree.zip rs do
+    if !depths.contains t.depth then depths := t.depth :: depths
+    let tags := [if t.hasKids then s!"d{t.depth}" else s!"l{t.depth}"] ++ t.ancestors.map (s!"u{·}")
+    discard <| run ["::safepdf::lyRow", toString t.index,
+      Sidebar.triangle t.hasKids (isOpen.getD t.index false), " ".intercalate tags, r.label,
+      if r.group.isSome then "group" else if r.italic then "italic" else "heading",
+      if Sidebar.layerLocked cfg r then "1" else "0"]
+  for d in depths do
+    let ind := Sidebar.indentPx d
+    discard <| run [".ol.ly", "tag", "configure", s!"d{d}", "-lmargin1", toString ind,
+      "-lmargin2", toString (ind + triW)]
+    discard <| run [".ol.ly", "tag", "configure", s!"l{d}", "-lmargin1", toString (ind + triW),
+      "-lmargin2", toString (ind + triW)]
+  -- Headings that start closed (Additional Layers, as PDF.js) elide their rows.
+  for t in tree do
+    if t.hasKids && !isOpen.getD t.index false then
+      discard <| run [".ol.ly", "tag", "configure", s!"u{t.index}", "-elide", "1"]
+  discard <| run [".ol.ly", "yview", "moveto", "0"]
+  syncLayerVars (← st.get)
+
+/-- Handles `lyToggle K`: opens or closes layers row `K` (its disclosure triangle). -/
+def lyToggle (st : IO.Ref State) (k : String) : IO Unit := do
+  let some i := k.toNat? | return
+  let s ← st.get
+  let o := Sidebar.toggle s.lyTree s.lyOpen i
+  if o == s.lyOpen then return
+  st.modify ({ · with lyOpen := o })
+  let on := o.getD i false
+  discard <| run [".ol.ly", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
+  discard <| run ["::safepdf::lySetTri", toString i, Sidebar.triangle true on]
+
+/-- Shows the pages again under the layers' new state (task 9.r11b): a new generation (the
+render cache, running renders and the thumbnails are stale: `syncThumbs` lays them out again
+when the panel shows), the text indexes dropped (hidden text is neither selectable nor
+found), the selection and the search hit cleared. -/
+def applyLayers (st : IO.Ref State) : IO Unit := do
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), shown := none,
+                              texts := Array.replicate s.texts.size none, sel := none,
+                              hit := none, pressPt := none }
+  for (p, _) in (← st.get).photos do dropPhoto st p
+  refresh st
+  syncThumbs st
+
+/-- Handles `layer K` (a click on row `K`'s checkbox): `Sidebar.layerToggle` (radio buttons
+turn the others off; a locked group stays), every checkbox set from the result, the pages
+rendered again (`applyLayers`). -/
+def layerClick (st : IO.Ref State) (k : String) : IO Unit := do
+  let some i := k.toNat? | return
+  let s ← st.get
+  let (some cfg, some oc) := (s.ocCfg, s.oc) | return
+  let oc' := Sidebar.layerToggle cfg oc s.lyRows i
+  st.modify ({ · with oc := some oc' })
+  syncLayerVars (← st.get)
+  if oc' == oc then
+    if let some r := s.lyRows[i]? then
+      if Sidebar.layerLocked cfg r then setStatus s!"layer {r.label} is locked"
+    return
+  applyLayers st
+
+/-- Reads the optional content of the newly opened `doc` (task 9.r11b) and fills the layers
+panel: the state is the document's default (`Config.initial`), except on the reopen after a
+save where the previous state `keep` stays (when the groups are the same). -/
+def loadLayers (st : IO.Ref State) (doc : Doc) (keep : Option Core.Doc.OptionalContent.State) :
+    IO Unit := do
+  let cfg ← IO.lazyPure fun _ =>
+    (Core.Doc.OptionalContent.read (Core.Content.Run.resolve (Core.Text.docSource limits doc))
+      limits (Core.Filter.Budget.init limits) doc.catalog).1
+  let oc := cfg.map fun c =>
+    let d := c.initial
+    match keep with
+    | some k => if k.known == d.known then k else d
+    | none => d
+  st.modify ({ · with ocCfg := cfg, oc, lyRows := (cfg.map Sidebar.layerRows).getD [] })
+  fillLayers st
+
+/-! ## Document open settings (task 9.r8) -/
+
+/-- Sets the View menu's and the `»` menu's radio variables, `::safepdf::continuous` and the
+view-mode drop-down to the state's view mode (as `setViewMode` does). -/
+def syncViewVars (s : State) : IO Unit := do
+  discard <| run ["set", Menu.scrollVar, s.scroll.key]
+  discard <| run ["set", Menu.spreadVar, s.spread.key]
+  discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
+  showViewChoice s s.doc.isSome
+
+/-- Shows or hides the toolbar, the menubar and the scroll bars (task 9.r8,
+`/ViewerPreferences /HideToolbar`, `/HideMenubar`, `/HideWindowUI`; `(false, false, false)`
+shows them all). On aqua the menubar cannot be removed (Tk keeps a default one there). -/
+def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit := do
+  let (tb, mb, ui) := hidden
+  let old := (← st.get).hidden
+  if old == hidden then return
+  if tb != old.1 then
+    if tb then discard <| run ["pack", "forget", ".bar"]
+    else discard <| run ["pack", ".bar", "-side", "top", "-fill", "x", "-before", ".barline"]
+  if mb != old.2.1 then
+    discard <| run [".", "configure", "-menu", if mb then "" else Menu.barPath]
+  if ui != old.2.2 then
+    if ui then discard <| run ["grid", "remove", ".ys", ".xs"]
+    else discard <| run ["grid", ".ys", ".xs"]
+  discard <| run ["::safepdf::resizeSoon"]
+  st.modify ({ · with hidden })
+
+/-- Enters or leaves full screen (task 9.r8, `/PageMode /FullScreen`): `wm attributes .
+-fullscreen`. Leaving applies the document's `/NonFullScreenPageMode` to the sidebar (task
+9.r9: UseThumbs opens the thumbnails). -/
+def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
+  let s ← st.get
+  if on == s.fullScreen then return
+  discard <| run ["::safepdf::resizeSoon"]
+  discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
+  st.modify ({ · with fullScreen := on })
+  if !on && s.doc.isSome then
+    showSidebar st (Sidebar.onLoad (some s.afterFullScreen) (contentOf s))
+
+/-- The view a document without open settings gets (task 9.r8): the default view mode, left
+to right, Automatic Zoom, full window UI, no document title, no notes. -/
+def resetOpenView (st : IO.Ref State) : IO Unit := do
+  setFullScreen st false
+  applyChrome st (false, false, false)
+  st.modify fun s => { s with scroll := s.defaultView.1, spread := s.defaultView.2, rtl := false,
+                              zoomSel := .auto, docTitle := none, openNote := "",
+                              afterFullScreen := .useNone }
+  syncViewVars (← st.get)
+
+/-- The zoom choice for an open destination's zoom (task 9.r8, rule O5 of
+`Core.Doc.OpenSettings`): a percentage clamped to the viewer's 25–800 %; Fit and FitR → Page
+Fit; FitH → Page Width; FitV → Page Fit (best effort: there is no fit-height choice; for a
+portrait page in a landscape window it is the same zoom); `keep` → unchanged. -/
+def zoomChoiceOf (z : Core.Doc.OpenSettings.Zoom) (cur : Toolbar.ZoomChoice) :
+    Toolbar.ZoomChoice :=
+  match z with
+  | .keep => cur
+  | .percent p => .pct (max View.minPct (min View.maxPct p))
+  | .fitPage | .fitHeight => .pageFit
+  | .fitWidth => .pageWidth
+
+#guard zoomChoiceOf (.percent 150) .auto == .pct 150 && zoomChoiceOf (.percent 5) .auto == .pct 25 &&
+  zoomChoiceOf (.percent 6400) .auto == .pct 800 && zoomChoiceOf .keep .auto == .auto &&
+  zoomChoiceOf .fitHeight .auto == .pageFit && zoomChoiceOf .fitWidth .auto == .pageWidth
+
+/-- The view modes of a `/PageLayout` (PDF.js `apiPageLayoutToViewerModes`; Odd Spreads put
+the odd pages on the left, Even Spreads on the right). -/
+def modesOf (l : Core.Doc.OpenSettings.PageLayout) : View.ScrollMode × View.SpreadMode :=
+  (if l.continuous then .vertical else .page,
+   match l.spread with
+   | .none => .none
+   | .oddLeft => .odd
+   | .oddRight => .even)
+
+#guard modesOf .singlePage == (.page, .none) && modesOf .oneColumn == (.vertical, .none) &&
+  modesOf .twoColumnLeft == (.vertical, .odd) && modesOf .twoColumnRight == (.vertical, .even) &&
+  modesOf .twoPageLeft == (.page, .odd) && modesOf .twoPageRight == (.page, .even)
+
+/-- `/FitWindow` (task 9.r8): sizes the window so that the canvas shows page `p` at the zoom
+choice's percentage (100 % for the fit choices), both pages of a spread side by side, at most
+90 % of the screen. -/
+def fitWindow (st : IO.Ref State) (doc : Doc) (p : Nat) : IO Unit := do
+  let s ← st.get
+  let some page := doc.pages[p]? | return
+  let (pw, ph) := View.boxSize (rotAdd page.rotate s.rot) (Box.ofRect page.cropBox)
+  let (fw, fh) := View.fitBox s.spread pw ph
+  let pct := match s.zoomSel with | .pct q => q | _ => 100
+  let z := View.pctZoom pct s.scaling
+  let cw := (fw * z).ceil.toNat + 2 * View.margin + (if s.spread == .none then 0 else View.pageGap)
+  let ch := (fh * z).ceil.toNat + 2 * View.margin
+  let num (w : String) : IO (Option Nat) := return (← run ["winfo", w, "."]).toNat?
+  let (some ww, some wh, some sw, some sh) :=
+    (← num "width", ← num "height", ← num "screenwidth", ← num "screenheight") | return
+  let w := min (sw * 9 / 10) (cw + (ww - s.canvasW))
+  let h := min (sh * 9 / 10) (ch + (wh - s.canvasH))
+  discard <| run ["wm", "geometry", ".", s!"{max w 480}x{max h 240}"]
+
+/-- `/CenterWindow` (task 9.r8): puts the window in the middle of the screen. -/
+def centerWindow : IO Unit := do
+  discard <| run ["update", "idletasks"]
+  let get (w : String) : IO Nat := return ((← run ["winfo", w, "."]).toNat?).getD 0
+  let (ww, wh, sw, sh) := (← get "width", ← get "height", ← get "screenwidth", ← get "screenheight")
+  discard <| run ["wm", "geometry", ".", s!"+{(sw - ww) / 2}+{(sh - wh) / 2}"]
+
+/-- The status note while the document's preferences hide parts of the window. -/
+def hiddenNote : String := "the document hides parts of the window (Escape shows them)"
+
+/-- The status note while the document is shown in full screen. -/
+def fullScreenNote : String := "full screen (Escape leaves)"
+
+/-- **Applies the document's open settings** (task 9.r8, `Core.Doc.OpenSettings.read`) to the
+state `resetOpenView` left: `/PageLayout` → view mode, `/Direction /R2L` → right-to-left
+spreads, `/OpenAction` (a destination or a GoTo action only, never anything else) → page, zoom
+and position, `/DisplayDocTitle` → the window title from `/Title`, the hiding preferences,
+`/FullScreen`. Returns the page mode (for the outline), the viewer preferences (FitWindow and
+CenterWindow are applied by `openWith` once the outline is laid out) and the notes for the
+status line (what was not honoured). -/
+def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
+    IO (Option Core.Doc.OpenSettings.PageMode × Core.Doc.OpenSettings.Prefs × List String) := do
+  let o ← IO.lazyPure fun _ => Core.Doc.OpenSettings.read doc limits
+  let pr := o.prefs
+  if let some l := o.layout then
+    let (sc, sp) := modesOf l
+    st.modify ({ · with scroll := sc, spread := sp })
+  let docTitle := if pr.displayDocTitle then
+      (o.title.map Links.textString).filter (·.any (· != ' ')) else none
+  st.modify fun s => { s with rtl := pr.direction == .r2l, docTitle,
+                              afterFullScreen := pr.nonFullScreen }
+  if let some d := o.dest then
+    if let some j := Links.jumpOf d then
+      let z := Core.Doc.OpenSettings.zoomOf d.fit
+      st.modify fun s => { s with page := j.page, pending := some (.dest j.left j.top),
+                                  zoomSel := zoomChoiceOf z s.zoomSel }
+  syncViewVars (← st.get)
+  applyChrome st (pr.hideToolbar, pr.hideMenubar, pr.hideWindowUI)
+  let mut notes := o.issues.map (·.message)
+  if pr.hideToolbar || pr.hideMenubar || pr.hideWindowUI then
+    notes := notes ++ [hiddenNote]
+  if o.mode == some .fullScreen then
+    setFullScreen st true
+    notes := notes ++ [fullScreenNote]
+  return (o.mode, pr, notes)
+
+/-- Escape's window part (task 9.r8): leaves full screen, else shows what the document's
+viewer preferences hid. Returns whether it did anything. -/
+def escapeWindow (st : IO.Ref State) : IO Bool := do
+  let s ← st.get
+  -- The status notes that told how to get here are done.
+  st.modify fun s => { s with openNote := ((s.openNote.replace s!"; {fullScreenNote}" "").replace
+    s!"; {hiddenNote}" "") }
+  if s.fullScreen then
+    setFullScreen st false
+    return true
+  if s.hidden != (false, false, false) then
+    applyChrome st (false, false, false)
+    setStatus "toolbar, menu bar and scroll bars shown"
+    return true
+  return false
+
 /-- Opens the document `load` gives under the name `path`: builds the page tree, shows page 1.
 A failure (`load`'s message, e.g. `cannot read: …`) ends up in the status line with an empty
-page. Shared by `openFile` and `openBytes`. -/
-def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc)) : IO Unit := do
+page. Shared by `openFile` and `openBytes`.
+
+Task 9.r8: every open starts from the default view (`resetOpenView`: the start-up view mode,
+Automatic Zoom, page 1, full window UI) and applies the document's open settings
+(`applyOpenSettings`), so nothing carries over from the previous file. With `keepView` (the
+reopen after Save / Save to library) the user's view mode, zoom, outline and window stay as
+they were and the document's settings are not applied again. -/
+def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
+    (keepView : Bool := false) : IO Unit := do
+  let wasShown := (← st.get).outlineShown
+  -- Task 9.r11b: the reopen after a save keeps the layers' state.
+  let curOC := (← st.get).oc
+  let prevOC := if keepView then curOC else none
+  if !keepView then resetOpenView st
+  clearThumbs st
+  let t0 ← IO.monoNanosNow
+  st.modify ({ · with thRendered := 0, thFirstNs := none, thOpenNs := t0 })
   st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
                               shown := none }
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
@@ -2228,8 +3422,12 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
                               labels := #[], outline := #[], links := #[], hover := none,
                               history := {}, marks := {}, markSel := none, slots := #[],
                               layoutKey := none, ownTop := none, ftEdit := none,
-                              inkSession := none, inkStroke := none, moveFrom := none }
+                              inkSession := none, inkStroke := none, moveFrom := none,
+                              attList := #[], attIcons := [], attStatus := #[],
+                              ocCfg := none, oc := none, lyRows := [] }
   clearPages st
+  discard <| run ["::safepdf::attClear"]
+  fillLayers st
   discard <| run ["destroy", ".note"]
   discard <| run ["destroy", ".c.ft"]
   discard <| run [".c", "delete", "ftedit", "inkcur"]
@@ -2249,13 +3447,40 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
       (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
     st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
     fillOutline st
-    showOutline st (Sidebar.shownOnLoad (!outline.isEmpty))
+    -- Task 9.r10: the attachments, listed without decoding any.
+    let att ← IO.lazyPure fun _ => Core.Doc.Attachments.list doc limits
+    st.modify ({ · with attList := att.entries.toArray, attIcons := att.icons,
+                        attStatus := Array.replicate att.entries.length none })
+    fillAttachments st
+    -- Task 9.r11b: the layers, in the document's default state (kept on the reopen after a
+    -- save).
+    loadLayers st doc prevOC
+    -- Task 9.r8: the document's open settings, on every open except the reopen after a save
+    -- (`keepView`: the user's view stays, outline included).
+    let (mode, prefs, notes) ← if keepView then pure (none, {}, [])
+      else applyOpenSettings st doc
+    -- Before anything lays the window out: a `<Configure>` refresh shows the status line.
+    st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
+    -- Task 9.r9: the panel buttons for this document, the sidebar as the page mode says.
+    let s1 ← st.get
+    let content := contentOf s1
+    syncPanelButtons st
+    showSidebar st (if keepView then (if wasShown then some (Sidebar.pick s1.panel content)
+        else none)
+      else Sidebar.onLoad mode content)
+    let readCanvas : IO Unit := do
+      discard <| run ["update", "idletasks"]
+      if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
+          (← run ["winfo", "height", ".c"]).toNat?) then
+        if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
     -- Lay the window out again so that the first render uses the canvas size beside the
     -- outline panel.
-    discard <| run ["update", "idletasks"]
-    if let (some w, some h) := ((← run ["winfo", "width", ".c"]).toNat?,
-        (← run ["winfo", "height", ".c"]).toNat?) then
-      if w ≥ 2 && h ≥ 2 then st.modify ({ · with canvasW := w, canvasH := h })
+    readCanvas
+    if !(← st.get).fullScreen then
+      if prefs.fitWindow then
+        fitWindow st doc (← st.get).page
+        readCanvas
+      if prefs.centerWindow then centerWindow
     if doc.pages.size == 0 then
       refresh st
       setStatus s!"{path}: the document has no pages"
@@ -2273,15 +3498,15 @@ def setSaveLabels (library : Bool) : IO Unit := do
     discard <| run [m, "entryconfigure", toString i, "-label",
       if library then "Save to library" else Menu.Cmd.save.label]
   discard <| run ["set", "::safepdf::btn(tip,.bar.save)",
-    if library then "Save to library (Ctrl+S)" else "Save (Ctrl+S)"]
+    ← keyText (if library then "Save to library (Ctrl+S)" else "Save (Ctrl+S)")]
 
 /-- Opens the file `path` (`Inspect.load`: size check against `Limits.maxInputBytes`, then
 `SafePdf.parseWith`). A local file: a library the window had (task 10.1b) is let go, its
 pending posts still go out on their own thread. -/
-def openFile (st : IO.Ref State) (path : String) : IO Unit := do
+def openFile (st : IO.Ref State) (path : String) (keepView : Bool := false) : IO Unit := do
   if (← st.get).library.isSome then setSaveLabels false
   st.modify ({ · with inMemory := false, titleOverride := none, library := none })
-  openWith st path do
+  openWith st path (keepView := keepView) do
     match ← Inspect.load {} path with
     | .error msg => return .error s!"cannot read: {msg}"
     | .ok input =>
@@ -2294,9 +3519,10 @@ HTTP and never writes it to disk): `bytes` through `SafePdf.Api.openBytes` (the 
 limits, the lenient path allowed as for files), shown under the name `name` (the title uses
 `titleOverride` when set). `State.library` and `titleOverride` are kept, so a library reopens
 its saved bytes with this. -/
-def openBytes (st : IO.Ref State) (name : String) (bytes : ByteArray) : IO Unit := do
+def openBytes (st : IO.Ref State) (name : String) (bytes : ByteArray) (keepView : Bool := false) :
+    IO Unit := do
   st.modify ({ · with inMemory := true })
-  openWith st name do
+  openWith st name (keepView := keepView) do
     match SafePdf.Api.openBytes bytes { limits } with
     | .ok d => return .ok d.doc
     | .error e => return .error s!"cannot open: {e.message}"
@@ -2364,7 +3590,9 @@ def zoomChoose (st : IO.Ref State) (key : String) : IO Unit := do
 scroll within the page (small deltas accumulate), or, on the vertical axis after reaching the
 edge and pushing on past it by `View.wheelThreshold`, turn to the top of the next page (spread)
 or the bottom of the previous one, as the keys do. In the vertical modes the wheel only
-scrolls (task 9.3). -/
+scrolls (task 9.3). Task 9.r1: each axis has its own state (`View.Wheels`), no event is
+swallowed after a turn, and the push beyond the threshold stays owed to the new page (kept
+across `goTo`, which resets the wheel); a turn at either end of the document owes nothing. -/
 def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || s.shown.isNone then return
@@ -2382,24 +3610,31 @@ def wheel (st : IO.Ref State) (axis kindS dS : String) : IO Unit := do
   let view := ((b - a) * r + 1 / 2).floor.toNat
   let now ← IO.monoMsNow
   -- In the vertical modes the wheel simply scrolls the whole document (task 9.3).
-  let (w, act) := View.wheelStep s.wheel now (View.wheelPixels kind d view) (kind == .pixel)
-    (isY && s.scroll == .page) top view region (View.wheelThreshold kind view)
+  let (w, act) := View.wheelStep (if isY then s.wheel.y else s.wheel.x) now
+    (View.wheelPixels kind d view) (isY && s.scroll == .page) top view region
+    (View.wheelThreshold kind view (region - view))
+  let save (w : View.Wheel) : IO Unit :=
+    st.modify fun s => { s with wheel := if isY then { s.wheel with y := w } else { s.wheel with x := w } }
   match act with
-  | .none => st.modify ({ · with wheel := w })
+  | .none => save w
   | .scrollTo p =>
-    st.modify ({ · with wheel := w })
+    save w
     -- Tk rounds `moveto` to the nearest pixel, so the fraction p / region lands on p.
     discard <| run [".c", if isY then "yview" else "xview", "moveto",
-      fmtFrac ((p : Rat) / (max region 1 : Nat))]
+      fmtFracFine ((p : Rat) / (max region 1 : Nat))]
     viewChanged st
   | .next =>
     let q := View.nextPage s.spread s.pageCount s.page
-    if q != s.page then goTo st q .top
-    st.modify ({ · with wheel := w })
+    if q != s.page then
+      goTo st q .top
+      save w
+    else save { w with acc := 0 }
   | .prev =>
     let q := View.prevPage s.spread s.page
-    if q != s.page then goTo st q .bottom
-    st.modify ({ · with wheel := w })
+    if q != s.page then
+      goTo st q .bottom
+      save w
+    else save { w with acc := 0 }
 
 /-- Rotates the view by a quarter turn (`cw` or `ccw`), keeping the window centre's page
 point at the centre. -/
@@ -2412,15 +3647,20 @@ def rotate (st : IO.Ref State) (cw : Bool) : IO Unit := do
   refresh st
 
 /-- Handles `viewMode scroll KEY` / `viewMode spread KEY` (task 9.3; View menu and the overflow
-menu's radio entries): switches the scroll mode (`page`, `vertical`) or the spread mode
-(`none`, `odd`, `even`), keeping the current page, shown from its top. The radio variables
-(`Menu.scrollVar`, `Menu.spreadVar`) and `::safepdf::continuous` (which makes key scrolling
-report `viewChanged`) are set to the state whatever happens. -/
+menu's radio entries) and `viewMode view KEY` (task 9.r4, the toolbar's view-mode drop-down,
+`Toolbar.ViewChoice.modes`): switches the scroll mode (`page`, `vertical`), the spread mode
+(`none`, `odd`, `even`) or both, keeping the current page, shown from its top. The radio
+variables (`Menu.scrollVar`, `Menu.spreadVar`, the drop-down's `::safepdf::viewSel` with its
+icon) and `::safepdf::continuous` (which makes key scrolling report `viewChanged`) are set to
+the state whatever happens, so the View menu, the `»` menu and the drop-down agree. -/
 def setViewMode (st : IO.Ref State) (what key : String) : IO Unit := do
   let s ← st.get
   let s' := match what with
     | "scroll" => (View.ScrollMode.ofKey key).map fun m => { s with scroll := m }
     | "spread" => (View.SpreadMode.ofKey key).map fun m => { s with spread := m }
+    | "view" => (Toolbar.ViewChoice.ofKey key).map fun (c : Toolbar.ViewChoice) =>
+      let (sc, sp) := c.modes s.spread
+      { s with scroll := sc, spread := sp }
     | _ => none
   let changed := match s' with
     | some s' => s.doc.isSome && (s'.scroll != s.scroll || s'.spread != s.spread)
@@ -2433,6 +3673,7 @@ def setViewMode (st : IO.Ref State) (what key : String) : IO Unit := do
   discard <| run ["set", Menu.scrollVar, s.scroll.key]
   discard <| run ["set", Menu.spreadVar, s.spread.key]
   discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
+  showViewChoice s s.doc.isSome
   if changed then refresh st
 
 /-! ## Saving (task 9.5c) -/
@@ -2478,30 +3719,116 @@ def isOwn (st : IO.Ref State) (path : String) : IO Bool := do
     if ← samePath f path then return true
   return false
 
-/-- Writes the document with its unsaved marks to `target` (`Save.write`: the incremental
-update, checked by a strict reopen before anything is written, then an atomic rename) and
-opens the written file on the same page. Errors (an encrypted or repaired document, a failed
-check, a write error) go to the status line; returns whether the file was written. -/
+/-- Whether the window runs on aqua (macOS): the dialogs' button order follows it. -/
+def isAqua : IO Bool := return (← run ["tk", "windowingsystem"]) == "aqua"
+
+/-- Asks `msg` in the three-way dialog `::safepdf::choose` titled `title` with `buttons`
+(key, label; display order from `Save.*Buttons`), `dflt` the default key, `cancel` the key of
+Escape and the dialog's close button; smoke mode answers with `::safepdf::autoAnswer`. Returns
+the chosen key. -/
+def choose (title msg dflt : String) (buttons : List (String × String)) : IO String :=
+  run (["::safepdf::choose", title, msg, dflt, "cancel"] ++ buttons.flatMap fun (k, l) => [k, l])
+
+/-- Before the rename of a save (task 9.r2): copies the permissions of `target`, when it exists,
+onto the temporary file `tmp` (Tcl `file attributes -permissions`; Unix only), so an
+overwritten file keeps its mode. A failure aborts the save (the temporary file is removed). -/
+def keepPermissions (target : String) (tmp : System.FilePath) : IO Unit := do
+  if (← run ["set", "::tcl_platform(platform)"]) != "unix" then return
+  if !(← System.FilePath.pathExists target) then return
+  let mode ← run ["file", "attributes", target, "-permissions"]
+  discard <| run ["file", "attributes", tmp.toString, "-permissions", mode]
+
+/-- After a save wrote `o.path`: remembers it as written by this session (a further Save into
+it asks nothing), reopens it on page `page` (the viewer goes on with the new bytes, so a second
+Save works) and reports. -/
+def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := do
+  let own := (← st.get).ownFiles
+  st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
+  -- Task 9.r8: the reopen keeps the user's view (the document's open settings are not
+  -- applied again).
+  openFile st o.path (keepView := true)
+  goTo st page
+  let what := if o.marks == 0 then "a copy (no changed marks)"
+    else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
+      ({o.appended} bytes appended)"
+  setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
+    unchanged at its start"
+
+/-- Writes the document with its unsaved marks to another file `target` (Save As…;
+`Save.write`: the incremental update, checked by a strict reopen before anything is written,
+then an atomic rename keeping the permissions of a file it replaces) and opens the written
+file on the same page. Errors (an encrypted or repaired document, a failed check, a write
+error) go to the status line; returns whether the file was written. -/
 def saveTo (st : IO.Ref State) (target : String) : IO Bool := do
   let s ← st.get
   let some doc := s.doc | return false
   setStatus s!"saving to {target}..."
-  match ← Save.write limits doc s.marks target with
+  match ← Save.write limits doc s.marks target (keepPermissions target) with
   | .error e =>
     setStatus s!"cannot save to {baseName target}: {e}"
     return false
   | .ok o =>
-    let page := s.page
-    let own := (← st.get).ownFiles
-    st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
-    openFile st o.path
-    goTo st page
-    let what := if o.marks == 0 then "a copy (no changed marks)"
-      else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
-        ({o.appended} bytes appended)"
-    setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
-      unchanged at its start"
+    afterWrite st s.page o
     return true
+
+/-- **Save into the opened file** `path` (task 9.r2, Decision 2026-11-23): builds and checks
+the bytes first (`Save.build`: original bytes a prefix, strict reopen, read-back — an
+encrypted or repaired document is refused here, before any question); refuses a read-only
+file or folder (`Save.writeProblem`); refuses when the file on disk no longer holds the bytes
+the document was opened from (`Save.diskState`, checked before the question and again just
+before writing) and then offers Save As…; with `ask` asks Overwrite / Save As… / Cancel; then
+writes atomically (`Save.writeAtomic` to the resolved path, so a symbolic link stays one,
+permissions kept) and reopens in place. Returns `some saved`, or `none` when the user chose
+Save As…. -/
+def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option Bool) := do
+  let s ← st.get
+  let some doc := s.doc | return some false
+  let name := baseName path
+  match Save.build limits doc s.marks (← Save.nowDate) with
+  | .error e =>
+    setStatus s!"cannot save to {name}: {e}"
+    return some false
+  | .ok (bytes, got, n) =>
+    let real ← try pure (← IO.FS.realPath path).toString catch _ => pure path
+    let dir := match (real : System.FilePath).parent with
+      | some d => if d.toString.isEmpty then "." else d.toString
+      | none => "."
+    if ← System.FilePath.pathExists real then
+      let fw := (← run ["file", "writable", real]) == "1"
+      let dw := (← run ["file", "writable", dir]) == "1"
+      if let some p := Save.writeProblem name fw dw then
+        setStatus s!"cannot save: {p}"
+        return some false
+    let disk : IO Save.DiskState := do
+      let d ← try pure (some (← IO.FS.readBinFile real)) catch _ => pure none
+      return Save.diskState doc.file.bytes d
+    let changed (ds : Save.DiskState) : IO (Option Bool) := do
+      let a ← choose "File changed on disk" (Save.changedQuestion name ds) "saveas"
+        (Save.changedButtons (← isAqua))
+      if a == "saveas" then return none
+      setStatus s!"not saved: {name} changed on disk since it was opened; nothing was written \
+        (Save As… writes a new file)"
+      return some false
+    let d0 ← disk
+    if d0 != .same then return ← changed d0
+    if ask then
+      let a ← choose "Save" (Save.overwriteQuestion name s.marks.pending) "overwrite"
+        (Save.overwriteButtons (← isAqua))
+      if a == "saveas" then return none
+      if a != "overwrite" then
+        setStatus "save cancelled"
+        return some false
+    let d1 ← disk
+    if d1 != .same then return ← changed d1
+    setStatus s!"saving to {path}..."
+    try
+      Save.writeAtomic real bytes (keepPermissions real)
+    catch e =>
+      setStatus s!"cannot save to {name}: {Save.oneLine (toString e)}"
+      return some false
+    afterWrite st s.page { path, marks := n, appended := bytes.size - doc.file.bytes.size,
+                           size := bytes.size, total := got.length }
+    return some true
 
 /-- **Save to library** (task 10.1b, Save in bib-lean's reader mode): `Save.build`'s bytes (the
 incremental update, checked by a strict reopen and read-back) go to the library
@@ -2518,7 +3845,7 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
     return false
   | .ok (bytes, got, n) =>
     lib.onSaved bytes
-    openBytes st name bytes
+    openBytes st name bytes (keepView := true)
     goTo st s.page
     marksChanged st
     let appended := bytes.size - doc.file.bytes.size
@@ -2526,109 +3853,158 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
       appended; {got.length} marks in its file)"
     return true
 
-/-- **Save As…** (Ctrl+Shift+S, File → Save As…): asks for a file (`tk_getSaveFile`, which
-confirms replacing an existing file), proposing `Save.defaultTarget`; writing over the opened
-file needs an explicit yes. Writes the unsaved marks (a plain copy when there are none). For a
-library's document (task 10.1b) it writes a local copy and stays on the library's document. -/
-def saveAs (st : IO.Ref State) : IO Bool := do
-  let s ← st.get
-  let (some path, some _) := (s.path, s.doc) | return false
-  let fp : System.FilePath := Save.defaultTarget path
-  let dir := match fp.parent with
-    | some d => if d.toString.isEmpty then "." else d.toString
-    | none => "."
-  let chosen ← run ["::safepdf::askSavePath", dir, fp.fileName.getD "document.pdf"]
-  if chosen.isEmpty then
-    setStatus "save cancelled"
-    return false
-  -- A library's document (task 10.1b): a local copy; the window stays on the library's
-  -- document and its marks stay unsaved there (Save sends them to the library).
-  if s.library.isSome then
-    let some doc := s.doc | return false
-    match ← Save.write limits doc s.marks chosen with
-    | .error e =>
-      setStatus s!"cannot save to {baseName chosen}: {e}"
-      return false
-    | .ok o =>
-      setStatus s!"saved a local copy with {o.total} mark(s) to {o.path}; the library's file \
-        is unchanged (Save to library sends the marks there)"
-      return true
-  if !s.inMemory && (← samePath chosen path) && !(← isOwn st chosen) then
-    let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks are \
-      appended as a new revision; its present bytes stay unchanged at its start."
-    if a != "yes" then
-      setStatus "save cancelled"
-      return false
-  saveTo st chosen
-
-/-- **Save** (Ctrl+S, File → Save, the toolbar's Save): writes the unsaved marks to
-`Save.defaultTarget` (`FILE-annotated.pdf`, or the opened `…-annotated.pdf` itself). Asks before
-writing into the opened file or replacing another existing file, unless this session wrote
-it. Returns whether the marks are saved afterwards. -/
-def save (st : IO.Ref State) : IO Bool := do
-  let s ← st.get
-  let (some path, some doc) := (s.path, s.doc) | return false
-  if !s.marks.dirty then
-    setStatus "no unsaved marks: nothing to save"
-    return true
-  if let some lib := s.library then return ← saveToLibrary st lib path doc
-  -- Opened from memory without a library: there is no file to put the marks next to.
-  if s.inMemory then return ← saveAs st
-  let target := Save.defaultTarget path
-  let n := s.marks.pending
-  if !(← isOwn st target) then
-    if ← samePath target path then
-      let a ← ask "yesno" "Save" s!"Write the {n} new or changed mark(s) into the opened file \
-        {baseName path}? It gets a new revision appended; its present bytes stay unchanged \
-        at its start."
-      if a != "yes" then
-        setStatus "save cancelled"
-        return false
-    else if ← System.FilePath.pathExists target then
-      let a ← ask "yesno" "Save" s!"{baseName target} already exists. Replace it with \
-        {baseName path} and its marks? (Marks only in the existing file are not kept.)"
-      if a != "yes" then
-        setStatus "save cancelled"
-        return false
-  saveTo st target
-
-/-- Before `what` (closing, quitting, opening another file): with unsaved marks asks Save /
-Discard / Cancel (yes / no / cancel). Returns whether to go on. -/
-def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
-  let s ← st.get
-  let (some path, some _) := (s.path, s.doc) | return true
-  if !s.marks.dirty then return true
-  let n := s.marks.pending
-  let msg := if s.library.isSome then
-      s!"{n} mark(s) on {s.titleOverride.getD (baseName path)} are not saved into the \
-        library's file (its annotation list has them already). Save to library before {what}? \
-        (No leaves the file as it is.)"
-    else if s.inMemory then
-      s!"{n} mark(s) on {s.titleOverride.getD (baseName path)} are not saved. Save them to a \
-        file before {what}? (No discards them.)"
-    else s!"{n} mark(s) on {baseName path} are not saved. \
-      Save them to {baseName (Save.defaultTarget path)} before {what}? (No discards them.)"
-  match ← ask "yesnocancel" "Unsaved marks" msg with
-  | "yes" => save st
-  | "no" => return true
-  | _ =>
-    setStatus s!"{what} cancelled: there are unsaved marks"
-    return false
-
-/-! ## XFDF import and export (task 9.11) -/
-
 /-- The directory of `path` for a file dialog (`.` when it has none). -/
 def dirOf (path : String) : String :=
   match (path : System.FilePath).parent with
   | some d => if d.toString.isEmpty then "." else d.toString
   | none => "."
 
+#guard dirOf "paper.pdf" == "." && dirOf "/tmp/x/paper.pdf" == "/tmp/x"
+
+/-- Whether the file dialogs take the aqua form (task 9.r6): the platform the keys were set
+up for (`platformRef`, which the smoke test can force to aqua on X11). -/
+def onAqua : IO Bool := return (← platformRef.get) == .aqua
+
+/-- The folder a file dialog for the document `path` starts in (task 9.r6, `Save.dialogDir`):
+the folder of the opened file when it is one on disk and that folder exists (and, with
+`write`, is writable), else the home folder (a document from memory has no folder). -/
+def dialogDirOf (s : State) (path : String) (write : Bool := true) : IO String := do
+  let dir := dirOf path
+  let mut usable := false
+  if !s.inMemory then
+    let isDir := (← run ["file", "isdirectory", dir]) == "1"
+    let w := (← run ["file", "writable", dir]) == "1"
+    usable := isDir && (w || !write)
+  return Save.dialogDir dir usable (← IO.getEnv "HOME")
+
+/-- The file a Save As… or Export dialog returned, made ready to write (task 9.r6): the
+type's extension `ext` added when missing (`Save.withExt`; when that names an existing file,
+which the dialog did not confirm, the user is asked first), then refused with a status
+message when it is a folder, a read-only file, in a folder that is not writable or —
+`export` — the opened document itself (`Save.targetProblem`). `none`: nothing is written. -/
+def checkTarget (st : IO.Ref State) (chosen ext : String) (isExport : Bool) :
+    IO (Option String) := do
+  let s ← st.get
+  let what := if isExport then "export" else "save"
+  let target := Save.withExt chosen ext
+  let name := baseName target
+  if target != chosen && (← System.FilePath.pathExists target) then
+    if (← ask "yesno" (if isExport then "Export annotations" else "Save As")
+        (Save.replaceQuestion name)) != "yes" then
+      setStatus s!"{what} cancelled"
+      return none
+  let isDir ← System.FilePath.isDir target
+  let ex ← System.FilePath.pathExists target
+  let fw := ex && (← run ["file", "writable", target]) == "1"
+  let dw := (← run ["file", "writable", dirOf target]) == "1"
+  let mut opened := false
+  if isExport && !s.inMemory then
+    if let some pdf := s.path then opened ← samePath target pdf
+  match Save.targetProblem name isDir ex fw dw opened with
+  | some p =>
+    setStatus s!"cannot {what}: {p}"
+    return none
+  | none => return some target
+
+/-- One round of Save As…: asks for a file (`tk_getSaveFile`, which confirms replacing an
+existing file; options `Save.saveDialogOptions`, starting in `dialogDirOf`), proposing
+`Save.defaultTarget` (`STEM-annotated.pdf`), checks it (`checkTarget`: `.pdf` added, folder /
+read-only / unwritable folder refused; task 9.r6) and writes the unsaved marks there (a plain
+copy when there are none). The opened file itself needs an explicit yes
+(unless this session wrote it) and goes through `overwriteInto` (changed-on-disk check);
+`none` when that asks for another file. For a library's document (task 10.1b) it writes a
+local copy and stays on the library's document. -/
+def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
+  let s ← st.get
+  let (some path, some _) := (s.path, s.doc) | return some false
+  let fp : System.FilePath := Save.defaultTarget path
+  let chosen ← run (["::safepdf::askSavePath", ← dialogDirOf s path,
+    fp.fileName.getD "document.pdf"] ++ Save.saveDialogOptions (← onAqua) "PDF files" "pdf")
+  if chosen.isEmpty then
+    setStatus "save cancelled"
+    return some false
+  let some chosen ← checkTarget st chosen "pdf" false | return some false
+  -- A library's document (task 10.1b): a local copy; the window stays on the library's
+  -- document and its marks stay unsaved there (Save sends them to the library).
+  if s.library.isSome then
+    let some doc := s.doc | return some false
+    match ← Save.write limits doc s.marks chosen (keepPermissions chosen) with
+    | .error e =>
+      setStatus s!"cannot save to {baseName chosen}: {e}"
+      return some false
+    | .ok o =>
+      setStatus s!"saved a local copy with {o.total} mark(s) to {o.path}; the library's file \
+        is unchanged (Save to library sends the marks there)"
+      return some true
+  if !s.inMemory && (← samePath chosen path) then
+    if !(← isOwn st chosen) then
+      let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks \
+        are added to it; its present content is kept unchanged inside it as the first revision."
+      if a != "yes" then
+        setStatus "save cancelled"
+        return some false
+    return ← overwriteInto st path (ask := false)
+  return some (← saveTo st chosen)
+
+/-- **Save As…** (Ctrl+Shift+S, File → Save As…): `saveAsOnce`, asked again (at most three
+times) while the chosen file is the opened one and it changed on disk. Returns whether the
+marks were written. -/
+def saveAs (st : IO.Ref State) : IO Bool := do
+  for _ in [0:3] do
+    if let some r ← saveAsOnce st then return r
+  return false
+
+/-- **Save** (Ctrl+S, File → Save, the toolbar's Save; task 9.r2): `Save.route` — nothing to
+do without unsaved marks; a library's document goes to the library; a document opened from
+memory asks for a file (Save As…); otherwise the marks are written **into the opened file**
+(`overwriteInto`), asking Overwrite / Save As… / Cancel before the first overwrite of this
+session (`confirmed`: the unsaved-changes prompt already said so). Returns whether the marks
+are saved afterwards. -/
+def save (st : IO.Ref State) (confirmed : Bool := false) : IO Bool := do
+  let s ← st.get
+  let (some path, some doc) := (s.path, s.doc) | return false
+  match Save.route s.marks.dirty s.library.isSome s.inMemory (confirmed || (← isOwn st path)) with
+  | .nothing =>
+    setStatus "no unsaved marks: nothing to save"
+    return true
+  | .library =>
+    match s.library with
+    | some lib => saveToLibrary st lib path doc
+    | none => return false
+  | .saveAs => saveAs st
+  | .overwrite q =>
+    match ← overwriteInto st path q with
+    | some r => return r
+    | none => saveAs st
+
+/-- **The unsaved-changes prompt** (task 9.r2) before `what` (closing, quitting, opening
+another file — every way a document goes away): with unsaved marks asks Save / Don't Save /
+Cancel (`Save.unsavedQuestion`, `Save.unsavedButtons`: the macOS order on aqua). Save saves
+(into the opened file without a second question, to the library in bib-lean mode, or through
+Save As… for a document from memory); a failed or cancelled save and Cancel abort `what`
+(`Save.closeGoesOn`). Returns whether to go on. Nothing is ever saved without this answer. -/
+def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
+  let s ← st.get
+  let (some path, some _) := (s.path, s.doc) | return true
+  if !s.marks.dirty then return true
+  let name := s.titleOverride.getD (baseName path)
+  let own ← isOwn st path
+  let msg := Save.unsavedQuestion name what s.marks.pending s.library.isSome s.inMemory (!own)
+  let ans := Save.onUnsavedAnswer (← choose "Unsaved marks" msg "save" (Save.unsavedButtons (← isAqua)))
+  let saved ← if ans == some true then save st (confirmed := true) else pure false
+  let go := Save.closeGoesOn true ans saved
+  if !go then
+    if ans.isNone then setStatus s!"{what} cancelled: there are unsaved marks"
+    else setStatus s!"{← run [".status", "cget", "-text"]}; {what} cancelled"
+  return go
+
+/-! ## XFDF import and export (task 9.11) -/
+
 /-- The proposed export file of the PDF `path`: `STEM.xfdf` next to it. -/
 def xfdfTarget (path : String) : String :=
   ((path : System.FilePath).withExtension "xfdf").toString
 
 #guard xfdfTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && xfdfTarget "a.b.PDF" == "a.b.xfdf"
-#guard dirOf "paper.pdf" == "." && dirOf "/tmp/x/paper.pdf" == "/tmp/x"
 
 /-- The status line after an import of `name`: added, already present and skipped counts, and
 the first skipped annotation's reason. -/
@@ -2649,7 +4025,7 @@ def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
   let (some pdf, some _) := (s.path, s.doc) | return
   let path ← match path with
     | some p => pure p
-    | none => run ["::safepdf::askXfdfOpen", dirOf pdf]
+    | none => run ["::safepdf::askXfdfOpen", ← dialogDirOf s pdf (write := false)]
   if path.isEmpty then
     setStatus "import cancelled"
     return
@@ -2666,8 +4042,9 @@ def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
 
 /-- **Export annotations…** (File menu, `»` menu): writes every mark of the store (saved or
 not; `Xfdf.toXfdf`, dated now, `<f href>` the PDF's file name) to `path` (else asks,
-`::safepdf::askXfdfSave`, proposing `xfdfTarget`) through `Save.writeAtomic`. Errors go to the
-status line. -/
+`::safepdf::askXfdfSave`, proposing `xfdfTarget`) through `Save.writeAtomic`, after
+`checkTarget` (`.xfdf` added; never onto the opened PDF, a folder or a read-only file; task
+9.r6), keeping the permissions of a file it replaces. Errors go to the status line. -/
 def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := do
   let s ← st.get
   let (some pdf, some doc) := (s.path, s.doc) | return
@@ -2675,23 +4052,75 @@ def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
     | some p => pure p
     | none =>
       let fp : System.FilePath := xfdfTarget pdf
-      run ["::safepdf::askXfdfSave", dirOf pdf, fp.fileName.getD "annotations.xfdf"]
+      run (["::safepdf::askXfdfSave", ← dialogDirOf s pdf, fp.fileName.getD "annotations.xfdf"]
+        ++ Save.saveDialogOptions (← onAqua) "XFDF" "xfdf")
   if path.isEmpty then
     setStatus "export cancelled"
     return
+  let some path ← checkTarget st path "xfdf" true | return
   let xml := Xfdf.toXfdf s.marks (Save.pageBox doc) (← Save.nowDate) (some (baseName pdf))
   try
-    Save.writeAtomic path xml.toUTF8
+    Save.writeAtomic path xml.toUTF8 (keepPermissions path)
     setStatus s!"exported {s.marks.marks.size} mark(s) to {baseName path}"
-  catch e => setStatus s!"cannot export to {baseName path}: {e}"
+  catch e => setStatus s!"cannot export to {baseName path}: {Save.oneLine (toString e)}"
 
-/-- The `tk_getOpenFile` dialog (after the unsaved-marks question); opens the chosen file
-(nothing when cancelled). -/
+/-- **Save attachment as…** (task 9.r10; double-click, Return or the context menu in the
+attachments panel): decodes attachment `i` (`Core.Doc.Attachments.decode`: the filter chain
+under the viewer's limits; an error is reported and nothing is asked; the result is kept for
+its row), asks for a file (`::safepdf::askAttachSave`: `tk_getSaveFile` without `-filetypes`,
+starting in the opened file's folder with the sanitized `Attachment.fileName`; Tk confirms
+replacing a file), refuses a folder, the opened PDF, a read-only file and an unwritable folder
+(`Attach.targetProblem`, the rules of task 9.r6) and writes exactly the decoded bytes
+atomically (`Save.writeAtomic`). The attachment is never opened, launched or executed. -/
+def saveAttachment (st : IO.Ref State) (i : Nat) : IO Unit := do
+  let s ← st.get
+  let (some doc, some a) := (s.doc, s.attList[i]?) | return
+  if let some p := a.problem then
+    setStatus s!"cannot save attachment {a.name}: {p.message}"
+    return
+  let bytes ← match ← IO.lazyPure fun _ => Core.Doc.Attachments.decode doc limits a with
+    | .ok b =>
+      attRecord st i (.decoded b.size)
+      pure b
+    | .error e =>
+      attRecord st i (.failed (renderError e))
+      setStatus s!"cannot save attachment {a.name}: {renderError e}"
+      return
+  let dir ← dialogDirOf s (s.path.getD "")
+  let chosen ← run ["::safepdf::askAttachSave", dir, a.fileName]
+  if chosen.isEmpty then
+    setStatus "save attachment cancelled"
+    return
+  let name := baseName chosen
+  let isDir ← System.FilePath.isDir chosen
+  let ex ← System.FilePath.pathExists chosen
+  let fw := ex && (← run ["file", "writable", chosen]) == "1"
+  let dw := (← run ["file", "writable", dirOf chosen]) == "1"
+  let opened ← match s.path with
+    | some p => if s.inMemory then pure false else samePath chosen p
+    | none => pure false
+  match Attach.targetProblem name isDir ex fw dw opened with
+  | some p => setStatus s!"cannot save attachment: {p}"
+  | none =>
+    try
+      Save.writeAtomic chosen bytes (keepPermissions chosen)
+      setStatus s!"saved attachment {a.name} ({bytes.size} bytes) to {name}"
+    catch e => setStatus s!"cannot save attachment to {name}: {Save.oneLine (toString e)}"
+
+/-- The `tk_getOpenFile` dialog (after the unsaved-marks question), starting in the opened
+file's folder; opens the chosen file (nothing when cancelled). -/
 def openDialog (st : IO.Ref State) : IO Unit := do
   if !(← confirmDiscard st "opening another file") then return
-  let path ← run ["tk_getOpenFile", "-parent", ".", "-title", "Open PDF", "-filetypes",
-    "{{PDF files} {.pdf .PDF}} {{All files} *}"]
-  if !path.isEmpty then openFile st path
+  let s ← st.get
+  -- Start in the opened file's folder (task 9.r6); without a file Tk's own choice (the last
+  -- folder of this session, else the working directory).
+  let dir ← match s.path with
+    | some p => pure ["-initialdir", ← dialogDirOf s p (write := false)]
+    | none => pure []
+  let path ← run (["tk_getOpenFile", "-parent", ".", "-title", "Open PDF"] ++ dir ++
+    ["-filetypes", "{{PDF files} {.pdf .PDF}} {{All files} *}"])
+  if path.isEmpty then setStatus "open cancelled"
+  else openFile st path
 
 /-! ## Menubar (task 9.1) -/
 
@@ -2713,7 +4142,9 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               ownTop := none,
                               ui := { s.ui with tool := false, popover := false,
                                                 picker := false },
-                              bubble := none, pickerAt := none, bubblePress := false }
+                              bubble := none, pickerAt := none, bubblePress := false,
+                              ocCfg := none, oc := none, lyRows := [] }
+  fillLayers st
   discard <| run ["pack", "forget", ".find", ".goto"]
   discard <| run ["destroy", ".note"]
   discard <| run ["::safepdf::popHide"]
@@ -2721,9 +4152,10 @@ def closeFile (st : IO.Ref State) : IO Unit := do
   discard <| run ["set", Menu.hlToolVar, "0"]
   fillOutline st
   showOutline st false
+  clearThumbs st
   discard <| run [".c", "configure", "-cursor", ""]
   refresh st
-  setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
+  setStatus (← keyText "No file. Press Ctrl+O or Open... to choose a PDF.")
 
 /-- Tk image of the swatch of colour `c` (a 14 px square, task 9.4). -/
 def swatch (c : Marks.Color) : String := s!"::safepdf::sw::{c.name}"
@@ -2737,10 +4169,27 @@ def colorMenu (path : String) : IO Unit := do
       "-compound", "left", "-variable", Menu.colorVar, "-value", c.name,
       "-command", Menu.colorScript]
 
+/-- Sets the application and window icon (task 9.r3): the embedded PNGs of `Icons.all`
+become photo images `::safepdf::iconN` (Tk 9 reads PNG natively) and
+`wm iconphoto . -default` gets them largest first (X11: `_NET_WM_ICON` with every size;
+Windows: the window icons; macOS: the first image becomes the Dock and dialog icon of the
+unbundled app). Embedded rather than read from `docs/branding/` so that an installed
+`viewer` does not need the source tree (about 160 KB of base64 in the binary). A failure
+only leaves Tk's default icon. -/
+def setIcon : IO Unit := do
+  try
+    for (n, d) in Icons.all do
+      discard <| run ["image", "create", "photo", s!"::safepdf::icon{n}", "-format", "png",
+        "-data", d]
+    discard <| run (["wm", "iconphoto", ".", "-default"] ++
+      Icons.all.map fun (n, _) => s!"::safepdf::icon{n}")
+  catch e => IO.eprintln s!"viewer: no icon: {e}"
+
 /-- Builds the menubar `.menubar` from `Menu.menubar` (every word a literal through
 `Tcl.quote`; the `-command` scripts are the model's constants) and attaches it to the main
 window; then the mark entries of the context menu (`Menu.popupMarks`, task 9.4). -/
 def buildMenus : IO Unit := do
+  let plat ← platformRef.get
   for c in Marks.Color.all do
     discard <| run ["image", "create", "photo", swatch c, "-width", "14", "-height", "14"]
     discard <| run [swatch c, "put", "#8f8f9d", "-to", "0", "0", "14", "14"]
@@ -2762,10 +4211,10 @@ def buildMenus : IO Unit := do
           discard <| run [m.path, "add", "radiobutton", "-label", c.label, "-variable", var,
             "-value", val, "-underline", toString c.underline, "-command", c.script]
         | none =>
-          discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accel,
+          discard <| run [m.path, "add", "command", "-label", c.label, "-accelerator", c.accelOn plat,
             "-underline", toString c.underline, "-command", c.script]
       | .check c var =>
-        discard <| run [m.path, "add", "checkbutton", "-label", c.label, "-accelerator", c.accel,
+        discard <| run [m.path, "add", "checkbutton", "-label", c.label, "-accelerator", c.accelOn plat,
           "-underline", toString c.underline, "-variable", var, "-onvalue", "1",
           "-offvalue", "0", "-command", c.script]
   discard <| run [".", "configure", "-menu", Menu.barPath]
@@ -2780,24 +4229,36 @@ def buildMenus : IO Unit := do
         "-menu", path]
     | .cmd c | .check c _ =>
       discard <| run [Menu.popPath, "insert", ix, "command", "-label", c.label,
-        "-accelerator", c.accel, "-command", c.popScript]
+        "-accelerator", c.accelOn plat, "-command", c.popScript]
 
 /-- Builds the toolbar from `Toolbar.layout` (task 9.7): icon buttons (`::safepdf::iconButton`
 with the model's constant icon name, tooltip and script), separators, the page field and the
 zoom drop-down (its menu `.zoommenu` lists `ZoomChoice.presets` as radio entries on
-`::safepdf::zoomSel`), and the overflow menu `.more` (`Toolbar.overflow`). -/
+`::safepdf::zoomSel`), the view-mode drop-down (task 9.r4: `.bar.vmode`, menu `.viewmenu`
+with `ViewChoice.all` as radio entries on `::safepdf::viewSel`), and the overflow menu `.more` (`Toolbar.overflow`). -/
 def buildToolbar : IO Unit := do
+  let plat ← platformRef.get
   for (g, items) in Toolbar.layout do
     for it in items do
       match it with
       | .button b =>
-        discard <| run ["::safepdf::iconButton", b.path, b.icon, b.tip, b.script]
+        discard <| run ["::safepdf::iconButton", b.path, b.icon, plat.keyText b.tip, b.script]
         discard <| run ["::safepdf::barPack", b.path, g, "-padx", "2", "-pady", "4"]
       | .sep w =>
         discard <| run ["::safepdf::vsep", w]
         discard <| run ["::safepdf::barPack", w, g, "-padx", "2"]
       | .pageField => discard <| run ["::safepdf::pageField"]
       | .zoomBox => discard <| run ["::safepdf::zoomBox"]
+      | .viewBox => discard <| run ["::safepdf::viewBox"]
+  -- The sidebar's view buttons (task 9.r9, `Sidebar.panels`; packed per document by
+  -- `syncPanelButtons`).
+  for i in Sidebar.panels do
+    discard <| run ["::safepdf::iconButton", i.button, i.icon, i.tip,
+      s!"::safepdf::emit panel {i.key}", "body"]
+  for c in Toolbar.ViewChoice.all do
+    discard <| run [".viewmenu", "add", "radiobutton", "-label", c.label, "-value", c.key,
+      "-variable", "::safepdf::viewSel",
+      "-command", "::safepdf::emit viewMode view $::safepdf::viewSel"]
   for c in Toolbar.ZoomChoice.presets do
     discard <| run [".zoommenu", "add", "radiobutton", "-label", c.label, "-value", c.key,
       "-variable", "::safepdf::zoomSel",
@@ -2812,7 +4273,7 @@ def buildToolbar : IO Unit := do
           var, "-value", val, "-command", c.script]
       | none =>
         discard <| run [Toolbar.morePath, "add", "command", "-label", c.label, "-accelerator",
-          c.accel, "-command", c.script]
+          c.accelOn plat, "-command", c.script]
 
 /-- The part of the state the enabled rules look at. -/
 def menuCtx (s : State) : Menu.Ctx :=
@@ -2838,12 +4299,13 @@ def syncMenus (st : IO.Ref State) : IO Unit := do
       | .entry p i =>
         discard <| run [p, "entryconfigure", toString i, "-state", if on then "normal" else "disabled"]
       | .button w => discard <| run ["::safepdf::btnState", w, if on then "normal" else "disabled"]
-  let vis := Sidebar.toggleVisible (c.hasDoc && c.hasOutline)
+  let vis := Sidebar.toggleVisible c.hasDoc
   if s.toggleShown != some vis then
     discard <| run ["::safepdf::showToggle", if vis then "1" else "0"]
   let title := s.title
   if title != s.titleShown then discard <| run ["wm", "title", ".", title]
   st.modify ({ · with menuStates := now, toggleShown := some vis, titleShown := title })
+  syncThumbs st
 
 /-! ## Links, jumps, history, go to page (task 8.2d) -/
 
@@ -2890,6 +4352,35 @@ def jumpTo (st : IO.Ref State) (j : Links.Jump) : IO Unit := do
   let here ← curLoc st
   st.modify fun s => { s with history := s.history.push here }
   showAt st j.page (.dest j.left j.top)
+
+/-- Handles `thClick Y` (task 9.r9): a click at canvas y `Y` of the thumbnails panel goes to
+that thumbnail's page (recorded in the history, as PDF.js's thumbnail links). -/
+def thumbClick (st : IO.Ref State) (ys : String) : IO Unit := do
+  let s ← st.get
+  let some y := (ys.splitOn ".").head?.bind (·.toInt?) | return
+  let half : Int := (Sidebar.thumbGap / 2 : Nat)
+  let some t := s.thSlots.find? fun t => (t.y : Int) - half ≤ y && y < (t.bottom : Int) + half
+    | return
+  st.modify ({ · with thSel := none })
+  discard <| run [".ol.th", "delete", "thfocus"]
+  if t.page != s.page then jumpTo st { page := t.page }
+
+/-- Handles `thKey up|down|go` (task 9.r9): Up and Down move the keyboard selection in the
+thumbnails panel (from the current page when there is none; `Sidebar.thumbStep`), Return goes
+to the selected page. -/
+def thumbKey (st : IO.Ref State) (k : String) : IO Unit := do
+  let s ← st.get
+  if s.doc.isNone || s.thSlots.isEmpty then return
+  let cur := s.thSel.getD s.page
+  match k with
+  | "go" =>
+    st.modify ({ · with thSel := none })
+    discard <| run [".ol.th", "delete", "thfocus"]
+    if cur != s.page then jumpTo st { page := cur }
+  | _ =>
+    let p := Sidebar.thumbStep s.thSlots.size cur (k == "down")
+    st.modify ({ · with thSel := some p })
+    thumbFocus st p
 
 /-- Back (`back = true`, Alt+Left) or Forward (Alt+Right) in the history. -/
 def histMove (st : IO.Ref State) (back : Bool) : IO Unit := do
@@ -3240,7 +4731,23 @@ def deleteMark (st : IO.Ref State) (id : Nat) : IO Unit := do
                       markSel := if s.markSel == some id then none else s.markSel })
   marksChanged st
   if !(← updatePreview st) then repaint st
+  -- An open popup of a note that is gone now (the note, or a deleted highlight's comment).
+  if let some nid := (← run ["set", "::safepdf::noteId"]).toNat? then
+    if ((← st.get).marks.find? nid).isNone then discard <| run ["::safepdf::noteGone", toString nid]
   setStatus s!"{markName m} deleted"
+
+/-- Handles `noteClose ID TEXT`: the note popup closed without Save (Escape, Cancel, the
+window's close button; task 9.r12) showing `TEXT`; `Marks.Store.onUnsavedClose` decides
+between keeping the stored text, saving the typed text of a new note, and deleting an empty
+note (the Delete path: a highlight's comment goes, the highlight stays). -/
+def noteClose (st : IO.Ref State) (idS text : String) : IO Unit := do
+  let some id := idS.toNat? | return
+  match (← st.get).marks.onUnsavedClose id text with
+  | .keep => if ((← st.get).marks.find? id).isSome then setStatus "note edits discarded"
+  | .save t => noteSave st idS t
+  | .delete =>
+    deleteMark st id
+    setStatus "empty note removed"
 
 /-- Handles `markDelete`: removes the selected mark. -/
 def markDelete (st : IO.Ref State) : IO Unit := do
@@ -3367,6 +4874,8 @@ def popDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
 /-- Escape (task 9.8): closes the colour picker and the pop-over and dismisses the bubble (the
 text selection and the selected mark are cleared; the tool stays on). -/
 def escape (st : IO.Ref State) : IO Unit := do
+  -- Task 9.r8: full screen ends, parts of the window the document hid come back.
+  discard <| escapeWindow st
   st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none,
                               inkSession := none }
   drawOverlay st
@@ -3390,6 +4899,7 @@ def bubbleClick (st : IO.Ref State) (wx wy : Int) : IO Bool := do
   if let some (k, r) := s.bubble then
     if r.contains cx cy then
       st.modify ({ · with bubblePress := true })
+      discard <| run ["::safepdf::bubTipHide"]
       match Bubble.hit k r cx cy with
       | some .color =>
         st.modify fun s => { s with ui := { s.ui with picker := !s.ui.picker } }
@@ -3644,7 +5154,7 @@ def selStatus (st : IO.Ref State) : IO Unit := do
   let some (p, a, b) := s.sel | return
   if let .ok ix ← pageIndex st p then
     setStatus s!"page {p + 1}: selected {(Select.rangeText ix.cells a b).length} characters \
-      (Ctrl+C copies)"
+      ({← keyText "Ctrl+C"} copies)"
 
 /-- Mouse press at window position `(wx, wy)`: clears the selection and remembers the page
 point where a drag starts. -/
@@ -3696,6 +5206,11 @@ def dragTo (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
     -- Add text mode: a click places a text box (task 9.9).
     if s.ui.editor == .text then
       ftOpenAt st none pg p1 "" s.ui.ftSize s.ui.ftColor
+      return
+    -- A file attachment annotation's icon selects its row in the attachments panel (task
+    -- 9.r10); the attachment is not opened.
+    if let some i := Attach.iconAt s.attIcons pg p1 then
+      attSelect st i
       return
     if let some (_, l) := Links.linkAt (← linksOf st pg) p1 then activate st l.action
     return
@@ -3766,7 +5281,7 @@ def copySel (st : IO.Ref State) : IO Unit := do
       discard <| run ["clipboard", "clear"]
       discard <| run ["clipboard", "append", "--", t]
       setStatus s!"copied {t.length} characters"
-  | none => setStatus "nothing selected (drag over text, double-click a word, or Ctrl+A)"
+  | none => setStatus (← keyText "nothing selected (drag over text, double-click a word, or Ctrl+A)")
 
 /-- Scrolls the current search hit into view (centred on an axis where it is not visible). -/
 def scrollToHit (st : IO.Ref State) : IO Unit := do
@@ -3973,8 +5488,8 @@ def olItemPos (id : String) : IO (Option (String × String)) := do
   | _ => return none
 
 /-- Smoke steps of the toolbar test (`SAFEPDF_VIEWER_SMOKE_MODE=toolbar`, task 9.7), on any
-document of at least two pages: the toolbar layout, the sidebar (shown with its toggle only
-when the document has an outline; collapsing/expanding a row with children through its
+document of at least two pages: the toolbar layout, the sidebar (open on load only
+when the document has an outline, its toggle always (task 9.r9); collapsing/expanding a row with children through its
 disclosure triangle; the toggle button), the arrows (generated clicks), the page field
 (Enter on a valid page, on an out-of-range number and on text: reverts), paging keys
 updating the field, the zoom drop-down (choices, labels, custom percentages after − / +), the
@@ -4754,17 +6269,23 @@ def fileMarks (path : String) : IO String := do
     | .error e => return s!"error {e.message}"
   catch e => return s!"error {e}"
 
-/-- Smoke steps of the save flow (`SAFEPDF_VIEWER_SMOKE_MODE=save`, task 9.5c) on a copy of
-the text PDF of `smokeText` (substitute fonts off): nothing unsaved at first; a highlight on
-`world` and a note at (300, 400) make the title start with `* ` and enable Save; Quit and
-Ctrl+W answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` without a
-question, opens it (2 saved marks, title without `*`, Save disabled), the highlight is now
-drawn by the renderer from its appearance stream (pixels yellow, no canvas note icon) and the
-note text is restored (a copy of the file goes to `first.pdf`); a second Ctrl+S has nothing
-to save (size unchanged); the saved highlight can be selected; a new
-highlight on `safe` + Ctrl+S appends to the same file (3 marks, distinct ids, read back
-strictly); File → Save As… (`autoPath`) writes `saveas.pdf` and opens it; a new note and
-Ctrl+W answered No closes without saving. Results in `save.txt`. -/
+/-- Smoke steps of the save flow (`SAFEPDF_VIEWER_SMOKE_MODE=save`, tasks 9.5c, 9.r2) on a copy
+of the text PDF of `smokeText` (substitute fonts off): nothing unsaved at first; a highlight on
+`world` and a note at (300, 400) make the title start with `* ` and enable Save; Quit, Ctrl+W
+and the window's close button (its `WM_DELETE_WINDOW` script) answered Cancel keep everything
+(the unsaved-changes prompt asked each time); Ctrl+S asks before the first overwrite —
+answered Cancel nothing is written, answered Overwrite the marks are written **into the opened
+file** (its original bytes a prefix of the result), which is reopened (2 saved marks, title
+without `*`, Save disabled), the highlight now drawn by the renderer from its appearance
+stream (pixels yellow, no canvas note icon) and the note text restored (a copy of the file
+goes to `first.pdf`); a second Ctrl+S has nothing to save (size unchanged); the saved
+highlight can be selected; a new highlight on `safe` + Ctrl+S appends to the same file
+without a question (3 marks, distinct ids, read back strictly); File → Save As… (`autoPath`)
+writes `saveas.pdf` and opens it; with a new note, Ctrl+S on a read-only `saveas.pdf` is
+refused (status, file unchanged), and on a `saveas.pdf` changed on disk (bytes appended
+behind the viewer's back) refused with the changed-on-disk question (answered Cancel: file
+unchanged, the note still unsaved); then Ctrl+W answered Don't Save closes without saving
+and leaves `saveas.pdf` byte for byte as it was. Results in `save.txt`. -/
 def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
@@ -4779,7 +6300,7 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   let worldC : Pt := ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩
   out := out.push s!"world-box: {num world.llx} {num world.lly} {num world.urx} {num world.ury}"
   let orig := (← st.get).path.getD ""
-  let target := Save.defaultTarget orig
+  let origBytes ← IO.FS.readBinFile orig
   out := out.push s!"dirty0: {(← st.get).marks.dirty} {← k.star} {← k.menuState .save} {← run ["::safepdf::btnState", ".bar.save"]}"
   -- 1. A highlight and a note.
   let some wpos ← boxWindowPos st world | throw (IO.userError "world not shown")
@@ -4788,7 +6309,7 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
   smokeNoteAt st 300 400 smokeNoteText
   out := out.push s!"dirty1: {(← st.get).marks.dirty} {← k.star} {← k.menuState .save} {← run ["::safepdf::btnState", ".bar.save"]} {(← st.get).marks.marks.size}"
-  -- 2. Quit and Close answered Cancel.
+  -- 2. Quit, Close and the window's close button answered Cancel.
   discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
   discard <| run ["update"]
@@ -4796,55 +6317,86 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-w>"
   out := out.push s!"close-cancel: {(← st.get).doc.isSome} {(← k.lastAsk).startsWith "2 mark(s)"}"
-  out := out.push s!"wm-delete: {← run ["wm", "protocol", ".", "WM_DELETE_WINDOW"]}"
-  -- 3. Ctrl+S: FILE-annotated.pdf, no question, reopened.
-  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  let wmDelete ← run ["wm", "protocol", ".", "WM_DELETE_WINDOW"]
+  out := out.push s!"wm-delete: {wmDelete}"
+  discard <| run ["set", "::safepdf::lastAsk", ""]
+  discard <| Shim.eval wmDelete
+  discard <| run ["update"]
+  out := out.push s!"wm-close-cancel: {← run ["winfo", "exists", "."]} {(← st.get).doc.isSome} {(← st.get).marks.dirty} {(← k.lastAsk).startsWith "2 mark(s) on text.pdf are not saved. Save them before quitting?"}"
+  -- 3. Ctrl+S: the first overwrite asks; Cancel writes nothing, Overwrite writes into the
+  -- opened file and reopens it.
   discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"overwrite-cancel: {(← IO.FS.readBinFile orig).data == origBytes.data} {(← st.get).marks.dirty} {(← k.lastAsk).startsWith "Save 2 new or changed mark(s) into text.pdf?"} {((← k.lastAsk).splitOn "first revision").length == 2}"
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  sendEvent ".c" "<Control-Key-s>"
   let s1 ← st.get
-  out := out.push s!"saved-path: {s1.path == some target} {decide ((← k.size target) > (← k.size orig))} {(← k.lastAsk).isEmpty}"
+  let bytes1 ← IO.FS.readBinFile orig
+  out := out.push s!"saved-path: {s1.path == some orig} {decide (bytes1.size > origBytes.size)} {Save.isPrefix origBytes bytes1}"
   out := out.push s!"after-save: {s1.marks.marks.size} {s1.marks.saved.length} {s1.marks.dirty} {← k.star} {← k.menuState .save}"
   out := out.push s!"world-after-save: {← k.px worldC}"
   out := out.push s!"note-after-save: {(s1.marks.marks.toList.find? (·.isNote)).map (·.text) == some smokeNoteText} {← tagCount "note"}"
   out := out.push s!"status-after-save: {← k.status}"
-  IO.FS.writeBinFile (file "first.pdf") (← IO.FS.readBinFile target)
+  IO.FS.writeBinFile (file "first.pdf") bytes1
   -- 4. Nothing new: nothing written.
-  let size1 ← k.size target
+  let size1 ← k.size orig
   sendEvent ".c" "<Control-Key-s>"
-  out := out.push s!"save-nothing: {(← k.status).startsWith "no unsaved marks"} {size1 == (← k.size target)}"
+  out := out.push s!"save-nothing: {(← k.status).startsWith "no unsaved marks"} {size1 == (← k.size orig)}"
   -- 5. The saved highlight can be selected (its edits are `smokeEdit`'s, task 9.5g).
   k.clickAt wpos
   out := out.push s!"saved-selected: {(← st.get).markSel.isSome}"
   sendKey "Escape"
-  -- 6. A new highlight, saved into the same file (no question, no duplicates).
+  -- 6. A new highlight, saved into the same file (no question, no duplicates). Any question
+  -- would get the answer `unexpected` (= Cancel) and show in lastAsk.
   let some spos ← boxWindowPos st safe | throw (IO.userError "safe not shown")
   for _ in [0:2] do k.clickAt spos
   discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
   out := out.push s!"dirty2: {(← st.get).marks.dirty} {← k.star}"
+  discard <| run ["set", "::safepdf::autoAnswer", "unexpected"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-s>"
   let s2 ← st.get
-  out := out.push s!"second-save: {s2.path == some target} {s2.marks.marks.size} {s2.marks.dirty} {(← k.lastAsk).isEmpty}"
-  out := out.push s!"file-marks: {← fileMarks target}"
+  out := out.push s!"second-save: {s2.path == some orig} {s2.marks.marks.size} {s2.marks.dirty} {(← k.lastAsk).isEmpty}"
+  out := out.push s!"file-marks: {← fileMarks orig}"
   -- 7. Save As (no new marks: a copy).
   discard <| run ["set", "::safepdf::autoPath", file "saveas.pdf"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
   discard <| run ["set", "::safepdf::autoPath", ""]
-  out := out.push s!"save-as: {(← st.get).path == some (file "saveas.pdf")} {(← k.size (file "saveas.pdf")) == (← k.size target)} {(← st.get).marks.marks.size} {(← st.get).marks.dirty}"
-  -- 8. A new note, then Close answered No (discard).
+  out := out.push s!"save-as: {(← st.get).path == some (file "saveas.pdf")} {(← k.size (file "saveas.pdf")) == (← k.size orig)} {(← st.get).marks.marks.size} {(← st.get).marks.dirty}"
+  -- 8. A new note; Ctrl+S on a read-only file is refused.
+  let sa := file "saveas.pdf"
+  let saBytes ← IO.FS.readBinFile sa
   smokeNoteAt st 400 200 "discard me"
   out := out.push s!"dirty3: {(← st.get).marks.dirty} {← k.star}"
-  discard <| run ["set", "::safepdf::autoAnswer", "no"]
+  let mode ← run ["file", "attributes", sa, "-permissions"]
+  discard <| run ["file", "attributes", sa, "-permissions", "0444"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"read-only: {(← k.status).startsWith "cannot save: saveas.pdf is read-only"} {(← IO.FS.readBinFile sa).data == saBytes.data} {(← st.get).marks.dirty} {(← k.lastAsk).isEmpty}"
+  discard <| run ["file", "attributes", sa, "-permissions", mode]
+  -- 9. Changed on disk behind the viewer's back: refused, Save As… offered (Cancel).
+  let tampered := saBytes ++ "% changed by another program\n".toUTF8
+  IO.FS.writeBinFile sa tampered
+  discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"changed-on-disk: {(← k.lastAsk).startsWith "saveas.pdf was changed on disk"} {(← IO.FS.readBinFile sa).data == tampered.data} {(← st.get).marks.dirty} {(← k.status).startsWith "not saved: saveas.pdf changed on disk"}"
+  IO.FS.writeBinFile sa saBytes
+  -- 10. Close answered Don't Save: closed, the file untouched.
+  discard <| run ["set", "::safepdf::autoAnswer", "dontsave"]
   sendEvent ".c" "<Control-Key-w>"
-  out := out.push s!"close-discard: {(← st.get).doc.isNone} {(← k.lastAsk).startsWith "1 mark(s) on saveas.pdf"} {← fileMarks (file "saveas.pdf")}"
+  out := out.push s!"close-discard: {(← st.get).doc.isNone} {(← k.lastAsk).startsWith "1 mark(s) on saveas.pdf"} {← fileMarks sa} {(← IO.FS.readBinFile sa).data == saBytes.data}"
   IO.FS.writeFile (file "save.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
 /-- Smoke steps of reopening a saved file (`SAFEPDF_VIEWER_SMOKE_MODE=reopen`, task 9.5c) on
-the `text-annotated.pdf` of `smokeSave`: its 3 marks are restored (saved, title without `*`),
-the highlight pixels are yellow (renderer), the note has no canvas icon but a click on its
-place opens its popup with the saved text; after a new highlight (select all) Save As onto the
-opened file answered No writes nothing, Yes appends; a further note and Quit answered Yes
-saves into the same file and quits. Results in `reopen.txt` (written before the quit). -/
+the `text.pdf` that `smokeSave` overwrote: its 3 marks are restored (saved, title without
+`*`), the highlight pixels are yellow (renderer), the note has no canvas icon but a click on
+its place opens its popup with the saved text; after a new highlight (select all) Save As onto
+the opened file answered No writes nothing, Yes appends; a further note, Quit answered Cancel
+keeps the window (the unsaved-changes prompt asked, `quit-ask`), and Quit answered Save saves
+into the same file (no further question: this session wrote it) and quits (task 9.r2: the
+save on quit is the prompt's answer, never silent). Results in `reopen.txt` (written before
+the quit). -/
 def smokeReopen (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
@@ -4877,15 +6429,21 @@ def smokeReopen (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["set", "::safepdf::autoPath", path]
   discard <| run ["set", "::safepdf::autoAnswer", "no"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
-  out := out.push s!"overwrite-no: {size0 == (← k.size path)} {(← k.lastAsk).startsWith "Overwrite the opened file text-annotated.pdf?"} {(← st.get).marks.dirty}"
+  out := out.push s!"overwrite-no: {size0 == (← k.size path)} {(← k.lastAsk).startsWith "Overwrite the opened file text.pdf?"} {(← st.get).marks.dirty}"
   discard <| run ["set", "::safepdf::autoAnswer", "yes"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
   discard <| run ["set", "::safepdf::autoPath", ""]
   out := out.push s!"overwrite-yes: {decide ((← k.size path) > size0)} {(← st.get).marks.dirty} {(← st.get).marks.marks.size} {← fileMarks path}"
-  -- One more note; Quit answered Yes saves (no further question: this session wrote it).
+  -- One more note; Quit answered Cancel keeps the window, Save saves (no further question:
+  -- this session wrote the file) and quits.
   smokeNoteAt st 100 100 "before quit"
   out := out.push s!"dirty2: {(← st.get).marks.dirty} {← k.star}"
+  discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
+  discard <| run ["update"]
+  out := out.push s!"quit-ask: {← run ["winfo", "exists", "."]} {(← st.get).marks.dirty} {(← k.lastAsk).startsWith "1 mark(s) on text.pdf are not saved. Save them before quitting?"}"
   IO.FS.writeFile (file "reopen.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["set", "::safepdf::autoAnswer", "save"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
 
 /-- Smoke steps of editing saved marks (`SAFEPDF_VIEWER_SMOKE_MODE=edit`, task 9.5g) on the
@@ -4894,7 +6452,7 @@ the whole page, two notes). A click on `world` selects the whole-page highlight 
 Delete removes it; a click on `world` then selects its highlight, which is recoloured green
 (the pages are rendered from the preview at once: the pixels turn green) and gets a comment
 (the edit bubble's Comment); the `safe` highlight is deleted (white again); the first note's
-text is edited. Ctrl+S (the opened file: answered Yes) writes one update and reopens: 4 marks,
+text is edited. Ctrl+S (the opened file: answered Overwrite) writes one update and reopens: 4 marks,
 nothing unsaved, the comment restored with its id and the highlight's colour, the note text
 and the colours as edited, each id once in the file. Then a second round on top: the world
 highlight back to blue and its comment deleted, Ctrl+S, reopened: 3 marks. Results in
@@ -4957,8 +6515,8 @@ def smokeEdit (st : IO.Ref State) (dir : String) : IO Unit := do
   if let some n := note then noteSave st (toString n.id) "Edited note"
   let s1 ← st.get
   out := out.push s!"pending: {s1.marks.pending} {s1.marks.dirty} {← k.star}"
-  -- 5. Save into the opened file (Yes), reopened.
-  discard <| run ["set", "::safepdf::autoAnswer", "yes"]
+  -- 5. Save into the opened file (Overwrite), reopened.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
   sendEvent ".c" "<Control-Key-s>"
   let s2 ← st.get
   let m2 := s2.marks.marks.toList
@@ -4982,28 +6540,31 @@ def smokeEdit (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["destroy", "."]
 
 /-- Smoke step of saving an encrypted document (`SAFEPDF_VIEWER_SMOKE_MODE=encrypted`, task
-9.5c): a note at (100, 100), then Ctrl+S. Until task 9.5f the writer refuses encrypted files:
-the status line shows its error, nothing is written and the mark stays unsaved; afterwards
-the file is written and the mark saved. Either way the viewer keeps running. Results in
-`encrypted.txt`. -/
+9.5c): a note at (100, 100), then Ctrl+S (answered Overwrite, should it ask). Until task 9.5f
+the writer refuses encrypted files before any question (task 9.r2): the status line shows its
+error, nothing is written and the mark stays unsaved; afterwards the opened file is written and
+the mark saved. Either way the viewer keeps running. Results in `encrypted.txt`. -/
 def smokeEncrypted (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
   discard <| run ["update"]
   let orig := (← st.get).path.getD ""
-  let target := Save.defaultTarget orig
+  let target := orig
+  let size0 ← k.size orig
   smokeNoteAt st 100 100 "encrypted"
   let before := (← st.get).marks.dirty
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-s>"
   let s ← st.get
-  let written ← System.FilePath.pathExists target
+  let written := (← k.size orig) != size0
   let status ← k.status
   let outcome :=
     if !written && s.marks.dirty && status.startsWith "cannot save to" then "refused"
     else if written && !s.marks.dirty && s.path == some target then "saved"
     else "inconsistent"
   IO.FS.writeFile (file "encrypted.txt")
-    s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nstatus: {status}\n"
+    s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nasked: {!(← k.lastAsk).isEmpty}\nstatus: {status}\n"
   discard <| run ["destroy", "."]
 
 /-- Smoke steps of XFDF import/export (`SAFEPDF_VIEWER_SMOKE_MODE=xfdf`, task 9.11) on a copy
@@ -5285,6 +6846,107 @@ def smokeScroll (st : IO.Ref State) (dir : String) : IO Unit := do
       canvas: {s.canvasW}x{s.canvasH}\nstatus: {← run [".status", "cget", "-text"]}\n"
   discard <| run ["destroy", "."]
 
+/-- The current page and the view's top edge in scroll-region pixels (task 9.r1 traces). -/
+def wheelPos (st : IO.Ref State) : IO (Nat × Nat) := do
+  let s ← st.get
+  let some (a, _) := viewFracs (← run [".c", "yview"]) | return (s.page, 0)
+  return (s.page, (a * (s.regionH : Rat) + 1 / 2).floor.toNat)
+
+/-- The `-delta` of a generated `<TouchpadScroll>` event with pixel deltas `dx`, `dy` (Tk 9
+packs them as `dx << 16 | dy & 0xffff`; `tk::PreciseScrollDeltas` unpacks them). -/
+def touchpadDelta (dx dy : Int) : Int :=
+  dx * 65536 + (if dy < 0 then dy + 65536 else dy)
+
+/-- One burst of wheel events for `smokeWheelFlow` (task 9.r1): from the top of page 1 in
+the current view mode, sends `ev i` for `i = 0, 1, …` 8 ms apart with no pause (a trackpad
+gesture or a fast wheel; between events only Tk's event loop runs, as for a user, no settling
+of renders) until the current spread reaches the spread of page `target + 1`, or `maxEv`
+events. Appends `label event ms page top` lines to `trace` and returns a summary line:
+`reached`, `events`, the longest run of events that moved nothing (`max-stall`), moves
+backwards (`back`), the largest move between two events on one page or, in the vertical
+modes, in the document (`max-step`, pixels), and the largest top of a page just turned to in
+the page modes (`turn-top`). -/
+def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : String)
+    (ev : Nat → IO Unit) (target maxEv : Nat) : IO String := do
+  sendKey "Home"
+  settle st
+  let s0 ← st.get
+  let sp := s0.spread
+  let goal := View.spreadOf sp (min target (s0.pageCount - 1))
+  let vertical := s0.scroll == .vertical
+  let t0 ← IO.monoMsNow
+  let (p, y) ← wheelPos st
+  let mut p0 := p
+  let mut y0 := y
+  let mut stall := 0
+  let mut maxStall := 0
+  let mut back := 0
+  let mut maxStep := 0
+  let mut turnTop := 0
+  let mut events := 0
+  for i in [0:maxEv] do
+    if View.spreadOf sp (← st.get).page ≥ goal then break
+    ev i
+    events := i + 1
+    discard <| run ["update"]
+    IO.sleep 8
+    let (p1, y1) ← wheelPos st
+    trace.modify (·.push s!"{label} {i} {(← IO.monoMsNow) - t0} {p1 + 1} {y1}")
+    if p1 == p0 && y1 == y0 then
+      stall := stall + 1
+      maxStall := max maxStall stall
+    else stall := 0
+    if vertical then
+      if y1 < y0 then back := back + 1
+      maxStep := max maxStep (y1 - y0)
+    else if p1 < p0 || (p1 == p0 && y1 < y0) then back := back + 1
+    else if p1 == p0 then maxStep := max maxStep (y1 - y0)
+    else turnTop := max turnTop y1
+    p0 := p1
+    y0 := y1
+  let s ← st.get
+  return s!"flow-{label}: reached={decide (View.spreadOf sp s.page ≥ goal)} page={s.page + 1} \
+    events={events} max-stall={maxStall} back={back} max-step={maxStep} turn-top={turnTop} \
+    view={s.canvasH} ms={(← IO.monoMsNow) - t0}"
+
+/-- Wheel flow across page boundaries (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, task 9.r1): first
+the view mode a freshly opened file is in (`default:`, the state and the View menu's radio
+variables); then, in each of the four view modes at Page Width and in the single-page mode at
+Page Fit, a trackpad-like burst of small `<TouchpadScroll>` deltas (12 px down, with ±1 px
+of sideways jitter, as Tk 9 on macOS delivers them) and a burst of third-notch
+`<MouseWheel>` deltas (high-resolution wheels) from page 1 to page 5 (`flowBurst`). Writes
+`wheelflow.txt` and the per-event trace `wheelflow-trace.txt`. -/
+def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  settle st
+  let s0 ← st.get
+  let mut out : Array String := #[]
+  out := out.push s!"pages: {s0.pageCount}"
+  out := out.push s!"default: scroll={s0.scroll.key} spread={s0.spread.key} \
+    radio={← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} \
+    continuous={← run ["set", "::safepdf::continuous"]}"
+  let trace ← IO.mkRef (#[] : Array String)
+  let pad (i : Nat) : IO Unit :=
+    sendEvent ".c" "<TouchpadScroll>"
+      ["-delta", toString (touchpadDelta ([0, 1, 0, -1].getD (i % 4) 0) (-12)), "-x", "300", "-y", "300"]
+  let fine (_ : Nat) : IO Unit :=
+    sendEvent ".c" "<MouseWheel>" ["-delta", "-40", "-x", "300", "-y", "300"]
+  let cases : List (String × String × String × Toolbar.ZoomChoice) :=
+    [("single", "page", "none", .pageWidth), ("continuous", "vertical", "none", .pageWidth),
+     ("facing", "page", "odd", .pageWidth), ("continuous-facing", "vertical", "odd", .pageWidth),
+     ("single-fit", "page", "none", .pageFit)]
+  for (label, sc, sp, z) in cases do
+    setViewMode st "scroll" sc
+    setViewMode st "spread" sp
+    setMode st z none
+    settle st
+    out := out.push (← flowBurst st trace s!"{label}-pad" pad 4 3000)
+    out := out.push (← flowBurst st trace s!"{label}-fine" fine 4 3000)
+  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") ("\n".intercalate out.toList ++ "\n")
+  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow-trace.txt")
+    ("\n".intercalate (← trace.get).toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of non-blocking rendering (`SAFEPDF_VIEWER_SMOKE_MODE=async`, task 8.8; the
 viewer starts with `syncWaitMs := some 0`, so no event waits for a render) on a two-page PDF
 whose page 1 takes the renderer seconds (`scripts/viewer-smoke-pdf.py --slow`). Step 0 (page 1
@@ -5347,6 +7009,363 @@ def smokeAsync (st : IO.Ref State) (dir : String) : IO Unit := do
     append s!"ticks-end: {← run ["set", "::safepdf::smkTicks"]}"
     append "done"
     discard <| run ["destroy", "."]
+
+/-- Tcl probes of the outline-toggle check of `smokeR4` (task 9.r4): `r4sample WHY` appends
+`{WHY canvas-width x y screen-x}` to `::safepdf::r4log`, where x and y are the canvas-window
+position of the first page frame and screen-x its x on the screen (`none` without one); it runs at every `<Configure>` of the canvas (after
+the viewer's own binding) and every 2 ms while `r4tick` runs. -/
+def r4Probe : String := "
+set ::safepdf::r4log {}
+proc ::safepdf::r4sample {why} {
+  set b [.c bbox pageframe]
+  if {$b eq {}} { set x none; set y none; set sx none } else {
+    set x [expr {round([lindex $b 0] - [.c canvasx 0])}]
+    set y [expr {round([lindex $b 1] - [.c canvasy 0])}]
+    set sx [expr {[winfo rootx .c] + $x}]
+  }
+  lappend ::safepdf::r4log [list $why [winfo width .c] $x $y $sx]
+}
+proc ::safepdf::r4tick {n} {
+  ::safepdf::r4sample tick
+  if {$n > 0} { after 2 [list ::safepdf::r4tick [expr {$n - 1}]] }
+}
+bind .c <Configure> {+::safepdf::r4sample conf}
+proc ::safepdf::r4toggle {} {
+  set ::safepdf::r4log {}
+  ::safepdf::r4sample start
+  ::safepdf::btnInvoke .bar.sidebar
+  ::safepdf::r4tick 200
+  set ::safepdf::r4done 0
+  after 700 {set ::safepdf::r4done 1}
+  vwait ::safepdf::r4done
+  ::safepdf::r4sample end
+  return $::safepdf::r4log
+}
+"
+
+/-- Smoke steps of task 9.r4 (`SAFEPDF_VIEWER_SMOKE_MODE=r4`), on the text PDF (bubble) or the
+outline PDF (sidebar), started in the default view. Writes `r4.txt`:
+* the view-mode drop-down: the default (Vertical Scrolling), each of its four entries
+  invoked (scroll and spread variables, the checked entry, the icon), the View menu's Even
+  Spreads and the `»` menu's Page Scrolling followed by the drop-down, Two Pages keeping Even
+  Spreads; `toolbar.png` / `viewmenu.png` (when `import` is installed);
+* with text: a drag over `world` shows the float bubble with its two buttons
+  (`bubble.png`); its Add comment adds one note anchored to the selection's quads, opens
+  its popup and closes the bubble;
+* with an outline: at Page Fit in Single Page and Vertical Scrolling, the outline closed and
+  opened, each with the page frame's window position sampled at every canvas `<Configure>`
+  and every 2 ms for 700 ms (`r4Probe`); the distinct x positions in order must be just the
+  start and the end. -/
+def smokeR4 (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let shot (name : String) (win : String) : IO Unit := do
+    discard <| run ["update"]
+    try
+      let wid ← if win == "root" then pure "root" else run ["winfo", "id", win]
+      discard <| IO.Process.output { cmd := "import", args := #["-window", wid, "-depth", "8", file name] }
+    catch _ => pure ()
+  let vars : IO String := do
+    return s!"{← run ["set", "::safepdf::viewSel"]} {← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} icon={← run ["set", "::safepdf::viewShown"]} items={(← run [".bar.vmode", "find", "withtag", "vicon"]).splitOn " " |>.length} on={← run ["set", "::safepdf::viewOn"]}"
+  out := out.push s!"view0: {← vars}"
+  out := out.push s!"view-entries: {← run [".viewmenu", "entrycget", "0", "-label"]}|{← run [".viewmenu", "entrycget", "1", "-label"]}|{← run [".viewmenu", "entrycget", "2", "-label"]}|{← run [".viewmenu", "entrycget", "3", "-label"]}"
+  out := out.push s!"view-left: {← run ["pack", "slaves", ".bar.l"]}"
+  out := out.push s!"view-tip: {← run ["set", "::safepdf::btn(tip,.bar.vmode)"]}"
+  for c in Toolbar.ViewChoice.all.reverse ++ [.vertical] do
+    discard <| run [".viewmenu", "invoke", c.label]
+    discard <| run ["update"]
+    let s ← st.get
+    out := out.push s!"view-{c.key}: {← vars} state={s.scroll.key} {s.spread.key} slots={s.slots.size}"
+  let invokeMenu (k : Menu.Cmd) : IO Unit := do
+    if let some (m, i) := Menu.locate k then discard <| run [m, "invoke", toString i]
+    discard <| run ["update"]
+  invokeMenu .spreadEven
+  out := out.push s!"menu-even: {← vars}"
+  discard <| run [".viewmenu", "invoke", "Two Pages"]
+  discard <| run ["update"]
+  out := out.push s!"view-two-even: {← vars}"
+  discard <| run [Toolbar.morePath, "invoke", "Vertical Scrolling"]
+  discard <| run ["update"]
+  out := out.push s!"more-vertical: {← vars}"
+  invokeMenu .spreadNone
+  out := out.push s!"menu-none: {← vars}"
+  shot "toolbar.png" "."
+  discard <| run [".viewmenu", "post", toString ((← run ["winfo", "rootx", ".bar.vmode"]).toNat?.getD 0),
+    toString ((← run ["winfo", "rooty", ".bar.vmode"]).toNat?.getD 0 + 34)]
+  shot "viewmenu.png" "root"
+  discard <| run [".viewmenu", "unpost"]
+  -- (a) The float bubble's Add comment.
+  if let .ok ix ← pageIndex st 0 then
+    if let some (wa, wb) := (ix.hits (Select.normQuery "world"))[0]? then
+      if let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix (wb - 1)) then
+        sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+        sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+        sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+        discard <| run ["update"]
+        let s ← st.get
+        let quads : List Box := match s.sel with
+          | some (_, a, b) => Select.rangeBoxes ix.cells a b
+          | none => []
+        match s.bubble with
+        | some (k, r) =>
+          out := out.push s!"bubble: {repr k} {k.btns.map (·.name)} w={r.x1 - r.x0} items={← tagCount "b:comment"}"
+          out := out.push s!"bubble-in-region: {decide (0 ≤ r.x0 ∧ r.x1 ≤ (s.regionW : Rat) ∧ 0 ≤ r.y0 ∧ r.y1 ≤ (s.regionH : Rat))}"
+          out := out.push s!"bubble-bind: {← run [".c", "bind", "b:comment", "<Enter>"]}"
+          shot "bubble.png" "."
+          discard <| run ["::safepdf::bubTipShow", "b:comment", "Add comment"]
+          out := out.push s!"bubble-tip: {← run ["winfo", "exists", ".tip"]} {← try run [".tip.l", "cget", "-text"] catch _ => pure ""}"
+          shot "bubble-tip.png" "root"
+          discard <| run ["::safepdf::bubTipHide"]
+          let n0 := s.marks.marks.size
+          let some (_, x0, x1) := k.layout.find? (·.1 == .comment) | pure ()
+          let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+          let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+          let bx := toString (r.x0 + (x0 + x1) / 2 - vx).floor
+          let byy := toString ((r.y0 + r.y1) / 2 - vy).floor
+          let t := toString (← IO.monoMsNow)
+          sendEvent ".c" "<ButtonPress-1>" ["-x", bx, "-y", byy, "-time", t]
+          sendEvent ".c" "<ButtonRelease-1>" ["-x", bx, "-y", byy, "-time", t]
+          discard <| run ["update"]
+          let s ← st.get
+          let added := s.marks.marks.toList.drop n0
+          let anchored := added.any fun m => match m.kind with
+            | .note _ (.quads qs) => qs == quads && !qs.isEmpty
+            | _ => false
+          out := out.push s!"comment: added={added.length} note-on-selection={anchored} popup={← run ["winfo", "exists", ".note"]} bubble-after={s.bubble.isSome} sel-after={s.sel.isSome}"
+          if let some m := added.head? then
+            discard <| run ["::safepdf::noteDone", toString m.id, "save"]
+            discard <| run ["update"]
+        | none => out := out.push "bubble: none"
+  -- (c) The outline toggle at Page Fit.
+  if !(← st.get).outline.isEmpty then
+    discard <| Shim.eval r4Probe
+    for c in [Toolbar.ViewChoice.single, .vertical] do
+      discard <| run [".viewmenu", "invoke", c.label]
+      discard <| run [".zoommenu", "invoke", "Page Fit"]
+      discard <| run ["update"]
+      if !(← st.get).outlineShown then
+        discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+        discard <| run ["after", "300", "set ::safepdf::r4w 1"]
+        discard <| run ["vwait", "::safepdf::r4w"]
+      for what in ["close", "open"] do
+        let log ← run ["::safepdf::r4toggle"]
+        out := out.push s!"outline-{what}-{c.key}: shown={(← st.get).outlineShown} {log}"
+  out := out.push "done"
+  IO.FS.writeFile (file "r4.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The fixtures of the open-settings smoke step (task 9.r8), opened one after another from
+the directory of the file the viewer started with (`scripts/viewer-smoke.sh` case 1s writes
+them). -/
+def openSettingsFixtures : List String :=
+  ["layout-SinglePage", "layout-OneColumn", "layout-TwoColumnLeft", "layout-TwoColumnRight",
+   "layout-TwoPageLeft", "layout-TwoPageRight", "mode-UseOutlines", "mode-UseNone",
+   "mode-UseThumbs", "xyz", "fit", "named", "js", "uri", "prefs", "r2l", "full", "window",
+   "none"]
+
+/-- Smoke steps of task 9.r8 (`SAFEPDF_VIEWER_SMOKE_MODE=opensettings`): opens each of
+`openSettingsFixtures` with `openFile` (the File → Open path after its dialog) and writes one
+line per file to `opensettings.txt`: view mode (state and the View menu's variables), right to
+left, zoom choice, page, outline shown, full screen (state and `wm attributes`), toolbar /
+menubar / scroll bar shown, window title, the view top's offset from the current page's top,
+the page frames' x in a spread, and the status line. Escape is pressed after `prefs` (the
+hidden toolbar comes back) and after `full` (full screen ends, the outline opens for
+`/NonFullScreenPageMode /UseOutlines`); `xyz` is reopened with `keepView` after the user
+changed the view (the reopen after Save keeps it); the last file has no settings (nothing
+carries over). -/
+def smokeOpenSettings (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let row (name : String) : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    let off ← match slotOf s s.page, ← viewBand s with
+      | some sl, some (top, _, _, _) => pure s!"{(top : Int) - (sl.place.y : Int)}"
+      | _, _ => pure "-"
+    let xs := s.slots.toList.take 2 |>.map (fun sl => s!"{sl.place.page}@{sl.place.x}")
+    return s!"{name}: view={s.scroll.key},{s.spread.key} vars={← run ["set", Menu.scrollVar]},\
+      {← run ["set", Menu.spreadVar]} rtl={s.rtl} zoom={s.zoomSel.label} page={s.page + 1} \
+      outline={s.outlineShown} panel={s.panel.info.key} full={s.fullScreen},{← run ["wm", "attributes", ".", "-fullscreen"]} \
+      bar={← run ["winfo", "ismapped", ".bar"]} menu={← run [".", "cget", "-menu"]} \
+      ys={← run ["winfo", "ismapped", ".ys"]} geom={← run ["wm", "geometry", "."]} off={off} xs={",".intercalate xs} \
+      title={← run ["wm", "title", "."]} status={← run [".status", "cget", "-text"]}"
+  out := out.push (← row "start")
+  for f in openSettingsFixtures do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push (← row f)
+    if f == "prefs" || f == "full" then
+      sendEvent ".c" "<Key-Escape>"
+      settle st
+      out := out.push (← row s!"{f}-escape")
+    if f == "xyz" then
+      -- The user's changes win until the next open; the reopen after Save keeps them.
+      setViewMode st "view" "two"
+      zoom st "actual" none
+      settle st
+      out := out.push (← row "xyz-user")
+      openFile st s!"{base}/{f}.pdf" (keepView := true)
+      settle st
+      out := out.push (← row "xyz-keep")
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "opensettings.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Smoke step of the platform keys and the icon (`SAFEPDF_VIEWER_SMOKE_MODE=keys`, task
+9.r3), on the text PDF; with `SAFEPDF_VIEWER_PLATFORM=aqua` the aqua mapping is installed
+on X11 (where Tk's `Command` modifier is Meta). Writes `keys.txt`: the platform, menu and
+context-menu accelerators, the bindings of Ctrl/Command+S and Ctrl/Command+Shift+S, the
+quit binding of the find bar and `primaryBind`, `::tk::mac::Quit`, the Save tooltip, the
+status after the primary-modifier Select all key (generated as a Tk event), the icon images'
+sizes and, when `xprop` is installed, the start of the window's `_NET_WM_ICON`. -/
+def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
+  let plat ← platformRef.get
+  let mut out : Array String := #[]
+  out := out.push s!"platform: {repr plat}"
+  let accel (c : Menu.Cmd) : IO String := do
+    let some (m, i) := Menu.locate c | return "?"
+    run [m, "entrycget", toString i, "-accelerator"]
+  out := out.push s!"accel-open: {← accel .openFile}"
+  out := out.push s!"accel-save: {← accel .save}"
+  out := out.push s!"accel-saveas: {← accel .saveAs}"
+  out := out.push s!"accel-quit: {← accel .quit}"
+  out := out.push s!"accel-zoomin: {← accel .zoomIn}"
+  out := out.push s!"accel-back: {← accel .back}"
+  out := out.push s!"accel-pop-copy: {← run [Menu.popPath, "entrycget", "Copy", "-accelerator"]}"
+  out := out.push s!"accel-pop-delete: {← run [Menu.popPath, "entrycget", "Delete mark", "-accelerator"]}"
+  for seq in ["<Control-Key-s>", "<Command-Key-s>", "<Control-Key-S>", "<Command-Key-S>",
+      "<Shift-Command-Key-s>", "<Command-Key-q>", "<Command-Key-plus>"] do
+    out := out.push s!"bind {seq}: [{← run ["bind", ".", seq]}]"
+  out := out.push s!"bind-find: [{← run ["bind", ".find.e", "<Command-Key-q>"]}]"
+  out := out.push s!"primaryBind: [{← run ["info", "body", "::safepdf::primaryBind"]}]"
+  out := out.push s!"mac-quit: [{← run ["info", "procs", "::tk::mac::Quit"]}] [{←
+    try run ["info", "body", "::tk::mac::Quit"] catch _ => pure ""}]"
+  out := out.push s!"save-tip: {← run ["set", "::safepdf::btn(tip,.bar.save)"]}"
+  let mods := if plat == .aqua then "Command" else "Control"
+  sendEvent ".c" s!"<{mods}-Key-a>"
+  discard <| run ["update"]
+  out := out.push s!"status-selectall: {← run [".status", "cget", "-text"]}"
+  for (n, _) in Icons.all do
+    let img := s!"::safepdf::icon{n}"
+    out := out.push s!"icon{n}: {← run ["image", "width", img]}x{← run ["image", "height", img]}"
+  discard <| run ["update"]
+  -- Tk sets the property on the toplevel's wrapper, the X parent of `winfo id .` (without a
+  -- window manager `wm frame .` is the window itself).
+  if (← run ["auto_execok", "xprop"]) != "" && (← run ["auto_execok", "xwininfo"]) != "" then
+    let r ← try Shim.eval "if {[regexp {Parent window id: (0x[0-9a-f]+)} \
+        [exec xwininfo -children -id [winfo id .] 2>/dev/null] -> p]} \
+        {exec xprop -id $p -f _NET_WM_ICON 32c -len 64 _NET_WM_ICON 2>/dev/null} else {set p {no wrapper}}"
+      catch e => pure s!"error {e}"
+    out := out.push s!"net-wm-icon: {r}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Smoke steps of the save-dialog audit (`SAFEPDF_VIEWER_SMOKE_MODE=savedlg`, task 9.r6) on a
+copy of the text PDF alone in its folder `D` (substitute fonts off; files are answered with
+`::safepdf::autoPath`, questions with `::safepdf::autoAnswer`):
+* the three-way prompt (`::safepdf::choose`, real dialog): Return on the focused default
+  gives it, Tab-focus on Cancel + Return gives Cancel (was: the default), Escape Cancel,
+  Space on Save As… gives it; the focus goes back to `.c` each time;
+* Save As… with a note: the dialog options (`-filetypes` only off aqua) and its folder `D`;
+  a 244-character name is written (the temporary name is cut); a dotted name without `.pdf`
+  gets `.pdf`; one that then names an existing file asks (answered No: untouched); a
+  read-only file, a folder and a file in a read-only folder are refused with their reason,
+  the title keeps `* ` and Save stays enabled; a name with spaces, Tcl metacharacters,
+  quotes and non-ASCII is written and shown in the title;
+* Export annotations…: the opened PDF chosen writes `NAME.pdf.xfdf` beside it (the PDF
+  unchanged; was: the PDF replaced by XML), a name without `.xfdf` gets it;
+* the opened file deleted behind the viewer's back: Save asks with the "no longer there"
+  question (Cancel) and creates nothing.
+Results in `savedlg.txt`; the shell checks them and that no temporary file is left. -/
+def smokeSaveDialogs (st : IO.Ref State) (dir : String) : IO Unit := do
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let orig := (← st.get).path.getD ""
+  let d := dirOf orig
+  let file (name : String) : String := ((d : System.FilePath) / name).toString
+  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  -- 1. The three-way prompt from the keyboard.
+  let chooseWith (keys : String) : IO String := do
+    discard <| run ["focus", "-force", ".c"]
+    discard <| run ["update"]
+    -- Generated keys go to the focus (forced: no window manager); a dialog that ignores them
+    -- answers `timeout` after 3 s instead of hanging the run.
+    discard <| run ["after", "400", keys]
+    discard <| run ["after", "3000", "set ::safepdf::chooseAnswer timeout"]
+    let a ← run ["::safepdf::choose", "Save", "Save 1 mark?", "overwrite", "cancel",
+      "overwrite", "Overwrite", "saveas", "Save As…", "cancel", "Cancel"]
+    discard <| run ["update"]
+    discard <| run ["after", "cancel", "set ::safepdf::chooseAnswer timeout"]
+    return s!"{a} {← run ["focus"]}"
+  let b := ".choose.f.b"
+  out := out.push s!"choose-return: {← chooseWith s!"focus -force {b}.overwrite; update; event generate {b}.overwrite <Key-Return>"}"
+  out := out.push s!"choose-tab-cancel: {← chooseWith s!"focus -force {b}.cancel; update; event generate {b}.cancel <Key-Return>"}"
+  out := out.push s!"choose-escape: {← chooseWith s!"focus -force {b}.overwrite; update; event generate {b}.overwrite <Key-Escape>"}"
+  out := out.push s!"choose-space: {← chooseWith s!"focus -force {b}.saveas; update; event generate {b}.saveas <Key-space>"}"
+  -- 2. Save As… cases.
+  smokeNoteAt st 300 400 "dialog audit"
+  let saveAsTo (p : String) : IO String := do
+    discard <| run ["set", "::safepdf::autoPath", p]
+    discard <| run ["set", "::safepdf::lastAsk", ""]
+    discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
+    discard <| run ["set", "::safepdf::autoPath", ""]
+    k.status
+  let long := String.ofList (List.replicate 240 'L') ++ ".pdf"
+  let st1 ← saveAsTo (file long)
+  let dlg ← run ["set", "::safepdf::lastDialog"]
+  out := out.push s!"dialog-dir: {(← run ["lindex", dlg, "0"]) == d} {← run ["lindex", dlg, "1"]}"
+  out := out.push s!"dialog-filetypes: {(dlg.splitOn "-filetypes").length == 2} {(← onAqua)} {(dlg.splitOn "-defaultextension .pdf").length == 2}"
+  out := out.push s!"long-name: {st1.startsWith "saved"} {decide ((← k.size (file long)) > 0)}"
+  smokeNoteAt st 300 400 "dialog audit 2"
+  let st2 ← saveAsTo (file "3453483.3454032-final")
+  out := out.push s!"dotted-name: {st2.startsWith "saved"} {decide ((← k.size (file "3453483.3454032-final.pdf")) > 0)} {(← k.size (file "3453483.3454032-final")) == 0}"
+  smokeNoteAt st 300 400 "dialog audit 3"
+  IO.FS.writeFile (file "exists.pdf") "keep me\n"
+  discard <| run ["set", "::safepdf::autoAnswer", "no"]
+  let st3 ← saveAsTo (file "exists")
+  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  out := out.push s!"ext-exists: {st3 == "save cancelled"} {(← k.lastAsk) == Save.replaceQuestion "exists.pdf"} {(← IO.FS.readFile (file "exists.pdf")) == "keep me\n"}"
+  IO.FS.writeFile (file "ro.pdf") "read-only\n"
+  discard <| run ["file", "attributes", file "ro.pdf", "-permissions", "0444"]
+  let st4 ← saveAsTo (file "ro.pdf")
+  out := out.push s!"read-only: {st4.startsWith "cannot save: ro.pdf is read-only"} {(← IO.FS.readFile (file "ro.pdf")) == "read-only\n"}"
+  IO.FS.createDirAll (file "folder.pdf")
+  let st5 ← saveAsTo (file "folder.pdf")
+  out := out.push s!"folder: {st5.startsWith "cannot save: folder.pdf is a folder"}"
+  IO.FS.createDirAll (file "rodir")
+  discard <| run ["file", "attributes", file "rodir", "-permissions", "0555"]
+  let st6 ← saveAsTo (file "rodir/x.pdf")
+  discard <| run ["file", "attributes", file "rodir", "-permissions", "0755"]
+  out := out.push s!"ro-folder: {st6.startsWith "cannot save: the folder of x.pdf is not writable"} {(← k.size (file "rodir/x.pdf")) == 0}"
+  out := out.push s!"refused-state: {(← st.get).marks.dirty} {← k.star} {← k.menuState .save}"
+  let weird := "we ird $x [exit 3] {b} \"q\" ü ✓.pdf"
+  let st7 ← saveAsTo (file weird)
+  out := out.push s!"weird-name: {st7.startsWith "saved"} {decide ((← k.size (file weird)) > 0)} {(← run ["wm", "title", "."]).startsWith weird} {(← st.get).marks.dirty}"
+  -- 3. Export annotations….
+  let pdf := (← st.get).path.getD ""
+  let pdfBytes ← IO.FS.readBinFile pdf
+  discard <| run ["set", "::safepdf::autoPath", pdf]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  out := out.push s!"export-onto-pdf: {(← k.status).startsWith "exported"} {(← IO.FS.readBinFile pdf).data == pdfBytes.data} {decide ((← k.size (pdf ++ ".xfdf")) > 0)}"
+  discard <| run ["set", "::safepdf::autoPath", file "notes"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  let xd ← run ["set", "::safepdf::lastDialog"]
+  out := out.push s!"export-ext: {(← k.status).startsWith "exported"} {decide ((← k.size (file "notes.xfdf")) > 0)} {(xd.splitOn "-filetypes").length == 2} {(← run ["lindex", xd, "1"])}"
+  -- 4. The opened file vanished: Save asks, nothing is created.
+  smokeNoteAt st 300 400 "vanished"
+  IO.FS.removeFile pdf
+  discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"vanished: {(← k.lastAsk).startsWith s!"{weird} is no longer there"} {!(← System.FilePath.pathExists pdf)} {(← st.get).marks.dirty}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "savedlg.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["set", "::safepdf::autoAnswer", "dontsave"]
+  discard <| run ["destroy", "."]
 
 /-- Smoke steps of the Tcl lockdown (`SAFEPDF_VIEWER_SMOKE_MODE=lockdown`, task 8.7), run by
 `scripts/viewer-smoke.sh` with `HOME` holding a hostile `~/.Xdefaults` (script-valued
@@ -5460,8 +7479,8 @@ of the text PDF (substitute fonts on, so the saved free text is painted): the to
 text turns the mode on with its pop-over; a click at (100, 400) opens a text box, typed text
 and Escape make a free-text mark (canvas text items); a double click edits it (a click
 elsewhere commits); the pop-over's red swatch and size slider (20) change it; Draw: blue,
-thickness 4, two strokes form one drawing (two canvas lines); Ctrl+S writes and reopens
-`text-annotated.pdf` (both read back, the text box's pixels dark, the stroke blue, drawn by the
+thickness 4, two strokes form one drawing (two canvas lines); Ctrl+S (Overwrite) writes into
+the opened file and reopens it (both read back, the text box's pixels dark, the stroke blue, drawn by the
 renderer); dragging the text box moves it by 50 units (saved, read back moved); Delete removes
 the text box and the drawing's bubble Delete the drawing; Ctrl+S leaves none in the file and
 white paper. Results in `editors.txt` (boxes for the external `mutool` check of
@@ -5544,7 +7563,9 @@ def smokeEditors (st : IO.Ref State) (dir : String) : IO Unit := do
   sendKey "Escape"
   btn ".bar.draw"
   out := out.push s!"modes-off: {(← st.get).ui.editor == .none} {← run ["winfo", "ismapped", ".edbar"]}"
-  -- 5. Save (FILE-annotated.pdf, reopened): both read back, painted by the renderer.
+  -- 5. Save (into the opened file, answered Overwrite; reopened): both read back, painted by
+  -- the renderer.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
   sendEvent ".c" "<Control-Key-s>"
   let s1 ← st.get
   let path := s1.path.getD ""
@@ -5646,6 +7667,1037 @@ def smokeEditorsShot (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile ((dir : System.FilePath) / "ready.txt") "ready\n"
   discard <| run ["after", "20000", "destroy ."]
 
+/-! ### The consolidated Phase 9 / M9 smoke run (task 9.6) -/
+
+/-- `R G B` text as numbers. -/
+def m9Rgb (s : String) : Option (Nat × Nat × Nat) :=
+  match (s.splitOn " ").filterMap String.toNat? with
+  | [r, g, b] => some (r, g, b)
+  | _ => none
+
+/-- A highlight's or note's yellow (`#FFFF98` multiplied over paper, or the note's fill). -/
+def m9Yellow (c : Nat × Nat × Nat) : Bool := c.1 > 200 && c.2.1 > 200 && c.2.2 < 200
+
+/-- The red of the M9 free text (`#D70022`). -/
+def m9Red (c : Nat × Nat × Nat) : Bool := c.1 > 150 && c.2.1 < 90 && c.2.2 < 110
+
+/-- The blue of the M9 drawing (`#0000FF`-ish, PDF.js blue). -/
+def m9Blue (c : Nat × Nat × Nat) : Bool := c.2.2 > 150 && c.1 < 100
+
+/-- How many of the points `ps` (page space, shown page) have a pixel satisfying `pred`. -/
+def m9CountAt (k : SaveKit) (ps : List Pt) (pred : Nat × Nat × Nat → Bool) : IO Nat := do
+  let mut n := 0
+  for q in ps do
+    if let some c := m9Rgb (← k.px q) then
+      if pred c then n := n + 1
+  return n
+
+/-- A 12 × 6 grid of points inside a box. -/
+def m9Grid (b : Box) : List Pt :=
+  (List.range 12).flatMap fun (i : Nat) => (List.range 6).map fun (j : Nat) =>
+    (⟨b.llx + (b.urx - b.llx) * ((i : Rat) + 1) / 13,
+      b.lly + (b.ury - b.lly) * ((j : Rat) + 1) / 7⟩ : Pt)
+
+/-- The coloured pixels of each of the marks `ms` on the shown page, summed per kind:
+`hl=… note=… text=… ink=…` (highlights and notes yellow, the free text red, the drawing blue). -/
+def m9Pixels (st : IO.Ref State) (ms : List Marks.Mark) : IO String := do
+  let k := saveKit st
+  let s ← st.get
+  let some bx := shownBox s | return "no page"
+  let mut hl := 0
+  let mut note := 0
+  let mut text := 0
+  let mut ink := 0
+  for m in ms do
+    match m.kind with
+    | .highlight qs =>
+      hl := hl + (← m9CountAt k (qs.flatMap m9Grid) m9Yellow)
+    | .note .. =>
+      if let some ib := m.iconBox bx then note := note + (← m9CountAt k (m9Grid ib) m9Yellow)
+    | .freeText .. =>
+      if let some b := m.box then text := text + (← m9CountAt k (m9Grid b) m9Red)
+    | .ink ss .. =>
+      ink := ink + (← m9CountAt k ss.flatten m9Blue)
+  return s!"hl={hl} note={note} text={text} ink={ink}"
+
+/-- A mark as a rounded, order-free description (kind, colour, text, rounded geometry), to
+compare marks across save, reopen and an XFDF round trip. -/
+def m9Desc (m : Marks.Mark) : String :=
+  let r (x : Rat) : String := toString x.floor
+  match m.kind with
+  | .highlight qs => s!"highlight {m.page} {m.color.name} {qs.length}"
+  | .note t _ => s!"note {m.page} {m.color.name} {t}"
+  | .freeText t p z c => s!"text {m.page} {t} {r p.x} {r p.y} {z} {Marks.rgbHex c}"
+  | .ink ss w o c => s!"ink {m.page} {ss.length} {ss.map List.length} {w} {o} {Marks.rgbHex c}"
+
+/-- Every mark of the store, described (`m9Desc`), sorted, joined by ` | `. -/
+def m9Marks (st : IO.Ref State) : IO String := do
+  let ds := (← st.get).marks.marks.toList.map m9Desc
+  return " | ".intercalate (ds.toArray.qsort (· < ·)).toList
+
+/-- Page-space boxes of the marks for the script's `mutool` check: one `kind llx lly urx ury`
+per mark (a note's icon box; a drawing's bounding box). -/
+def m9Boxes (st : IO.Ref State) : IO String := do
+  let s ← st.get
+  let some bx := shownBox s | return ""
+  let f (b : Box) : String := s!"{num b.llx} {num b.lly} {num b.urx} {num b.ury}"
+  let parts := s.marks.marks.toList.filterMap fun m =>
+    match m.kind with
+    | .highlight qs => qs.head?.map fun b => s!"hl {f b}"
+    | .note .. => (m.iconBox bx).map fun b => s!"note {f b}"
+    | .freeText .. => m.box.map fun b => s!"text {f b}"
+    | .ink .. => m.box.map fun b => s!"ink {f b}"
+  return ";".intercalate parts
+
+/-- Scrolls the whole document from its first page with generated wheel notches only, in the
+current view mode, until the view shows the bottom of the last spread (task 9.6, M9 "a paper
+reads end to end with the wheel"). Returns a `key: value` line: the 1-based spreads the current
+page passed through, the spread count, notches, whether (spread, view top) never went back,
+the page field and whether it names a page of the last spread, the final `yview`. -/
+def m9WheelThrough (st : IO.Ref State) (label : String) : IO String := do
+  sendKey "Home"
+  settle st
+  let s0 ← st.get
+  let n := s0.pageCount
+  let sp := s0.spread
+  let lastK := View.spreadOf sp (n - 1)
+  let top : IO Rat := do return ((viewFracs (← run [".c", "yview"])).map (·.1)).getD 0
+  let bottomOk : IO Bool := do return ((viewFracs (← run [".c", "yview"])).map (fun f => decide (f.2 ≥ 1))).getD false
+  let mut seen : Array Nat := #[View.spreadOf sp s0.page]
+  let mut notches := 0
+  let mut monotone := true
+  let mut stuck := 0
+  let mut k0 := View.spreadOf sp s0.page
+  let mut t0 ← top
+  for _ in [0:80 * n + 100] do
+    if k0 == lastK && (← bottomOk) then break
+    sendEvent ".c" "<MouseWheel>" ["-delta", "-120", "-x", "300", "-y", "300"]
+    notches := notches + 1
+    settle st
+    let k1 := View.spreadOf sp (← st.get).page
+    let t1 ← top
+    if k1 < k0 || (k1 == k0 && t1 < t0) || (s0.scroll == .vertical && t1 < t0) then
+      monotone := false
+    if k1 == k0 && t1 == t0 then stuck := stuck + 1 else stuck := 0
+    if stuck ≥ 3 then break
+    if seen.back? != some k1 then seen := seen.push k1
+    k0 := k1
+    t0 := t1
+  let s ← st.get
+  let field ← run ["set", "::safepdf::pageText"]
+  let fieldOk := field == Toolbar.entryText s.labels s.page &&
+    (View.spreadPages sp n lastK).contains s.page
+  return s!"wheel-{label}: seen={",".intercalate (seen.toList.map (toString ∘ (· + 1)))} \
+    spreads={View.spreadCount sp n} notches={notches} monotone={monotone} field={field} \
+    last={fieldOk} bottom={← bottomOk}"
+
+/-- **The consolidated Phase 9 smoke run** (`SAFEPDF_VIEWER_SMOKE_MODE=m9`, task 9.6), on any
+document with text on page 1 (the generated fixtures and real corpus papers): the menubar
+(every command at its place with its label); the toolbar page box (Enter on the last page,
+text reverts, back to 1), its arrows and the zoom drop-down (Page Width, Page Fit, Automatic
+Zoom); the wheel alone through the whole document in each of the four view modes (single page,
+continuous, facing, continuous facing; `m9WheelThrough`); then, at Page Fit on page 1: a drag
+over the first word of five letters or more, the float bubble's Highlight; a note in the top
+right corner; an Add text box (red, size 16) and a Draw drawing (blue, thickness 4, two strokes)
+near the bottom; Ctrl+S (`FILE-annotated.pdf`, reopened), File → Close, reopened from disk
+(`openFile`): the four marks restored equal (`m9Desc`) and drawn by the renderer (`m9Pixels`);
+File → Export annotations… (`m9.xfdf`), every mark deleted (no coloured pixels left), the file
+imported again (the same four marks). Results in `m9.txt`; the window is closed without saving
+the import. -/
+def smokeM9 (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let s0 ← st.get
+  let n := s0.pageCount
+  out := out.push s!"pages: {n}"
+  out := out.push s!"outline: {!s0.outline.isEmpty} {s0.outlineShown}"
+  -- 1. Menubar: attached, four menus, every command at its place with its label.
+  out := out.push s!"menubar: {← run [".", "cget", "-menu"]}"
+  let mut menus : Array String := #[]
+  let mn := (← run [".menubar", "index", "end"]).toNat?.getD 0
+  for i in [0:mn + 1] do menus := menus.push (← run [".menubar", "entrycget", toString i, "-label"])
+  out := out.push s!"menus: {",".intercalate menus.toList}"
+  let mut bad : Array String := #[]
+  for c in Menu.Cmd.all do
+    match Menu.locate c with
+    | some (m, i) =>
+      let l ← try run [m, "entrycget", toString i, "-label"] catch _ => pure "?"
+      if l != c.label then bad := bad.push c.label
+    | none => bad := bad.push c.label
+  out := out.push s!"menu-entries: {Menu.Cmd.all.length} bad={",".intercalate bad.toList}"
+  -- 2. Toolbar: page box, arrows, zoom drop-down.
+  let page : IO Nat := return (← st.get).page + 1
+  let field : IO String := run ["set", "::safepdf::pageText"]
+  let enter (txt : String) : IO Unit := do
+    sendEvent ".bar.pg.e" "<FocusIn>"
+    discard <| run ["set", "::safepdf::pageText", txt]
+    sendEvent ".bar.pg.e" "<Key-Return>"
+    settle st
+  let click (w : String) : IO Unit := do
+    sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+    sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+    settle st
+  enter (Toolbar.entryText s0.labels (n - 1))
+  out := out.push s!"pagebox-last: {← page} {← field} {← run [".bar.of", "cget", "-text"]}"
+  enter "abc"
+  out := out.push s!"pagebox-abc: {← page} {← field}"
+  enter (Toolbar.entryText s0.labels 0)
+  out := out.push s!"pagebox-first: {← page} {← field}"
+  click ".bar.next"
+  out := out.push s!"arrow-next: {← page}"
+  click ".bar.prev"
+  out := out.push s!"arrow-prev: {← page}"
+  let zoomNow : IO String := do
+    let s ← st.get
+    return s!"{← run [".bar.zoom", "itemcget", "label", "-text"]}|{View.zoomPct s.shownZoom s.scaling}"
+  let choose (lbl : String) : IO Unit := do
+    discard <| run [".zoommenu", "invoke", lbl]
+    settle st
+  choose "Page Width"
+  out := out.push s!"zoom-width: {← zoomNow}"
+  choose "Page Fit"
+  out := out.push s!"zoom-fit: {← zoomNow}"
+  choose "Automatic Zoom"
+  out := out.push s!"zoom-auto: {← zoomNow}"
+  -- 3. The wheel through the whole document in every view mode (View menu entries).
+  let invoke (c : Menu.Cmd) : IO Unit := do
+    let some (m, _) := Menu.locate c | return
+    discard <| run [m, "invoke", c.label]
+    settle st
+  invoke .scrollPage; invoke .spreadNone
+  out := out.push (← m9WheelThrough st "single")
+  invoke .scrollVertical
+  out := out.push (← m9WheelThrough st "continuous")
+  invoke .scrollPage; invoke .spreadOdd
+  out := out.push (← m9WheelThrough st "facing")
+  invoke .scrollVertical
+  out := out.push (← m9WheelThrough st "cfacing")
+  invoke .scrollPage; invoke .spreadNone
+  invoke .firstPage
+  choose "Page Fit"
+  out := out.push s!"back-to-single: {← page} {(← st.get).slots.size}"
+  -- 4. Selection bubble → highlight on the first word of five letters or more.
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text on page 1")
+  let some bx := shownBox (← st.get) | throw (IO.userError "page 1 not shown")
+  let word : Option (Nat × Nat) := Id.run do
+    for i in [0:ix.cells.size] do
+      let (a, b) := Select.wordAt ix.cells i
+      if a == i && b ≥ a + 4 &&
+          (ix.cells.extract a (b + 1)).all (fun c => c.text.all Char.isAlpha && c.text.length == 1) then
+        return some (a, b)
+    return none
+  let some (wa, wb) := word | throw (IO.userError "no word of five letters on page 1")
+  out := out.push s!"word: {String.join ((ix.cells.extract wa (wb + 1)).toList.map (·.text))}"
+  if let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix wb) then
+    sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+    sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    discard <| run ["update"]
+  let bubbleKind : IO String := return match (← st.get).bubble with
+    | some (.float, _) => "float"
+    | some (.edit, _) => "edit"
+    | some (.editor, _) => "editor"
+    | none => "none"
+  out := out.push s!"bubble: {← bubbleKind} {(← st.get).sel.isSome}"
+  if let some (kd, r) := (← st.get).bubble then
+    if let some (_, x0, x1) := kd.layout.find? (·.1 == .highlight) then
+      let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+      let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+      let w := (toString (r.x0 + (x0 + x1) / 2 - vx).floor, toString ((r.y0 + r.y1) / 2 - vy).floor)
+      let t := toString (← IO.monoMsNow)
+      sendEvent ".c" "<ButtonPress-1>" ["-x", w.1, "-y", w.2, "-time", t]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", w.1, "-y", w.2, "-time", t]
+      discard <| run ["update"]
+  out := out.push s!"bubble-highlight: {(← st.get).marks.marks.size} {← bubbleKind}"
+  sendKey "Escape"
+  -- 5. A note in the top right corner.
+  smokeNoteAt st (bx.urx - 45) (bx.ury - 45) "M9 note ✓ [x]"
+  discard <| run ["destroy", ".note"]
+  out := out.push s!"note: {(← st.get).marks.marks.size}"
+  -- 6. Add text (red, 16) near the bottom left; Draw (blue, 4) near the bottom right.
+  let winAt (x y : Rat) : IO (String × String) := do
+    let some pos ← boxWindowPos st ⟨x, y, x, y⟩ | throw (IO.userError "page not shown")
+    return pos
+  let edAt (x y : Rat) : IO Unit := do
+    sendEvent ".edbar" "<ButtonPress-1>" ["-x", toString x.floor, "-y", toString y.floor]
+    sendEvent ".edbar" "<ButtonRelease-1>" ["-x", toString x.floor, "-y", toString y.floor]
+  click ".bar.text"
+  discard <| run ["update"]
+  edAt (Bubble.EdPop.swatchX 1) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.fontSize.thumbX 16) (Bubble.EdPop.ctrlY 1)
+  let tp ← winAt (bx.llx + 60) (bx.lly + 60)
+  sendEvent ".c" "<ButtonPress-1>" ["-x", tp.1, "-y", tp.2]
+  sendEvent ".c" "<ButtonRelease-1>" ["-x", tp.1, "-y", tp.2]
+  discard <| run ["update"]
+  discard <| run [".c.ft", "insert", "end", "M9 text"]
+  discard <| run ["update"]
+  sendEvent ".c.ft" "<Key-Escape>"
+  out := out.push s!"text: {(← st.get).marks.marks.size} {editorDesc ((← st.get).marks.marks.toList.find? isFt)}"
+  click ".bar.draw"
+  discard <| run ["update"]
+  edAt (Bubble.EdPop.swatchX 2) (Bubble.EdPop.ctrlY 0)
+  edAt (Bubble.EdPop.thickness.thumbX 4) (Bubble.EdPop.ctrlY 1)
+  for y in [(bx.lly + 70 : Rat), bx.lly + 50] do
+    let ws ← [(0 : Rat), 20, 40, 60, 80].mapM fun dx => winAt (bx.urx - 170 + dx) (y + dx / 8)
+    if let some w0 := ws.head? then
+      sendEvent ".c" "<ButtonPress-1>" ["-x", w0.1, "-y", w0.2]
+    for w in ws.drop 1 do sendEvent ".c" "<Motion>" ["-x", w.1, "-y", w.2, "-state", "256"]
+    if let some wl := ws.getLast? then
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", wl.1, "-y", wl.2, "-state", "256"]
+  sendKey "Escape"
+  click ".bar.draw"
+  out := out.push s!"draw: {(← st.get).marks.marks.size} {editorDesc ((← st.get).marks.marks.toList.find? isInk)} {(← st.get).ui.editor == .none}"
+  let before ← m9Marks st
+  out := out.push s!"marks-before: {before}"
+  -- 7. Save (Ctrl+S), close, reopen from disk.
+  let target := (← st.get).path.getD ""
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  sendEvent ".c" "<Control-Key-s>"
+  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  settle st
+  out := out.push s!"saved: {(← st.get).path == some target} {(← st.get).marks.dirty} {← fileMarks target}"
+  out := out.push s!"saved-status: {← k.status}"
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.close.label]
+  out := out.push s!"closed: {(← st.get).doc.isNone} {(← st.get).marks.marks.size} {← run ["wm", "title", "."]}"
+  openFile st target
+  choose "Page Fit"
+  let s1 ← st.get
+  out := out.push s!"reopened: {s1.path == some target} {s1.marks.marks.size} {s1.marks.saved.length} {s1.marks.dirty} {← k.star}"
+  out := out.push s!"marks-reopened: {← m9Marks st}"
+  out := out.push s!"canvas-items: {← tagCount "note"} {← tagCount "ft"} {← tagCount "ink"}"
+  let saved := s1.marks.marks.toList
+  out := out.push s!"pixels-reopened: {← m9Pixels st saved}"
+  out := out.push s!"boxes: {← m9Boxes st}"
+  out := out.push s!"cropbox: {match shownBox s1 with
+    | some b => s!"{num b.llx} {num b.lly} {num b.urx} {num b.ury}" | none => "none"}"
+  -- 8. XFDF: export, delete every mark, import.
+  discard <| run ["set", "::safepdf::autoPath", file "m9.xfdf"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  out := out.push s!"export: {← k.status}"
+  for m in saved do deleteMark st m.id
+  settle st
+  out := out.push s!"removed: {(← st.get).marks.marks.size} {← m9Pixels st saved}"
+  discard <| run ["set", "::safepdf::autoPath", file "m9.xfdf"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.importXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  settle st
+  out := out.push s!"import: {← k.status}"
+  out := out.push s!"marks-imported: {← m9Marks st}"
+  out := out.push s!"imported-hl: {← m9Pixels st ((← st.get).marks.marks.toList.filter (!·.isNote))}"
+  out := out.push s!"imported-canvas: {← tagCount "note"} {← tagCount "ft"} {← tagCount "ink"}"
+  IO.FS.writeFile (file "m9.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The RGB triple at `(x, y)` of a binary PPM (`P6`, maxval 255, single-space/newline
+header as ImageMagick writes it). -/
+def ppmAt (d : ByteArray) (x y : Nat) : Option (Nat × Nat × Nat) := Id.run do
+  -- header: 4 whitespace-separated tokens, then one whitespace byte
+  let mut toks : Array String := #[]
+  let mut cur := ""
+  let mut i := 0
+  while toks.size < 4 && i < d.size && i < 64 do
+    let c := Char.ofNat (d.get! i).toNat
+    if c.isWhitespace then
+      if !cur.isEmpty then toks := toks.push cur; cur := ""
+    else cur := cur.push c
+    i := i + 1
+  let (some w, some _) := ((toks[1]?.bind String.toNat?), (toks[2]?.bind String.toNat?)) |
+    return none
+  if toks[0]? != some "P6" || toks[3]? != some "255" || x ≥ w then return none
+  let o := i + 3 * (y * w + x)
+  if o + 2 < d.size then some ((d.get! o).toNat, (d.get! (o + 1)).toNat, (d.get! (o + 2)).toNat)
+  else none
+
+/-- **What the screen shows** of the free texts `ms` (task 9.r5): an X screenshot of the
+canvas (`import -window ID -depth 8 ppm:…`, ImageMagick; without `-depth 8` it writes 16-bit) — the rendered page and the canvas items
+together, as the user sees them — and the number of red pixels (`m9Red`) on a grid in each
+text box; `none` when `import` is missing or fails. -/
+def screenFtRed (st : IO.Ref State) (dir : String) (ms : List Marks.Mark) : IO (Option Nat) := do
+  discard <| run ["update"]
+  let s ← st.get
+  let some bx := shownBox s | return none
+  let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+    View.parseDecimal (← run [".c", "canvasy", "0"])) | return none
+  let wid ← run ["winfo", "id", ".c"]
+  let shot := (dir : System.FilePath) / "screen.ppm"
+  let ok ← try
+      let r ← IO.Process.output { cmd := "import", args := #["-window", wid, "-depth", "8", s!"ppm:{shot}"] }
+      pure (r.exitCode == 0)
+    catch _ => pure false
+  if !ok then return none
+  let d ← IO.FS.readBinFile shot
+  let mut n := 0
+  for m in ms do
+    if let some b := m.box then
+      for q in m9Grid b do
+        let (x0, y0, _, _) := canvasRect s bx ⟨q.x, q.y, q.x, q.y⟩
+        let (px, py) := ((x0 - vx).floor, (y0 - vy).floor)
+        if px ≥ 0 && py ≥ 0 then
+          if let some c := ppmAt d px.toNat py.toNat then
+            if m9Red c then n := n + 1
+  return some n
+
+/-- The second half of the M9 run (`SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen`, task 9.6): a fresh
+viewer process on the file `smokeM9` saved into (task 9.r2: the opened file) restores the four marks (equal
+descriptions) and the renderer draws them (pixels), at Page Fit; the free text is visible on
+screen before any click (`screenFtRed`, task 9.r5: `screen-text: N subst=… ft-items=…`).
+Results in `m9-reopen.txt`. -/
+def smokeM9Reopen (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  discard <| run [".zoommenu", "invoke", "Page Fit"]
+  settle st
+  let s ← st.get
+  let mut out : Array String := #[]
+  out := out.push s!"restored: {s.marks.marks.size} {s.marks.saved.length} {s.marks.dirty}"
+  out := out.push s!"marks: {← m9Marks st}"
+  out := out.push s!"pixels: {← m9Pixels st s.marks.marks.toList}"
+  -- task 9.r5: the reopened free text is visible without any click, on screen (page photo
+  -- plus canvas items), with or without a substitute Helvetica
+  let fts := s.marks.marks.toList.filter (·.isFreeText)
+  let red := match ← screenFtRed st dir fts with
+    | some n => toString n | none => "skipped"
+  out := out.push s!"screen-text: {red} subst={s.paintsHelvetica} ft-items={← tagCount "ft"}"
+  -- … and stays visible after a zoom change, a page change and back, a rotation and back,
+  -- and in continuous vertical scrolling
+  let shot (what : String) : IO String := do
+    settle st
+    let n := match ← screenFtRed st dir fts with | some n => toString n | none => "skipped"
+    let ms := (← st.get).marks.marks.toList
+    return s!"{what}={n}/{← m9Pixels st ms}"
+  let mut after : Array String := #[]
+  discard <| run [".zoommenu", "invoke", "Page Width"]
+  after := after.push (← shot "zoom")
+  discard <| run [".menubar.go", "invoke", Menu.Cmd.nextPage.label]
+  settle st
+  discard <| run [".menubar.go", "invoke", Menu.Cmd.prevPage.label]
+  after := after.push (← shot "page")
+  discard <| run [".zoommenu", "invoke", "Page Fit"]
+  rotate st true
+  after := after.push (← shot "rot90")
+  rotate st false
+  after := after.push (← shot "rot0")
+  setViewMode st "scroll" "vertical"
+  after := after.push (← shot "vertical")
+  setViewMode st "scroll" "page"
+  after := after.push (← shot "single")
+  out := out.push s!"screen-after: {" ".intercalate after.toList}"
+  out := out.push s!"status: {← run [".status", "cget", "-text"]}"
+  IO.FS.writeFile ((dir : System.FilePath) / "m9-reopen.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The M9 look-check set-up (`SAFEPDF_VIEWER_SMOKE_MODE=m9-shot`, task 9.10), in the state of
+the human's PDF.js reference screenshot (`docs/viewer-reference/pdfjs-firefox.png`): page 1 at
+Automatic Zoom with the outline sidebar as opened on load, the toolbar's Highlight pop-over open
+(tool on, yellow), the first sentence of the abstract (`SAFEPDF_VIEWER_SHOT_FROM` …
+`SAFEPDF_VIEWER_SHOT_TO`, default the first sentence of arxiv-1706.03762's abstract) dragged
+over in the tool mode, so it is highlighted in yellow and shows its edit bubble. Writes
+`ready.txt` (or `error: …`) and stays up 20 s for the screenshot, then closes. -/
+def smokeM9Shot (st : IO.Ref State) (dir : String) : IO Unit := do
+  discard <| run ["update"]
+  settle st
+  let fromQ := (← IO.getEnv "SAFEPDF_VIEWER_SHOT_FROM").getD "The dominant sequence"
+  let toQ := (← IO.getEnv "SAFEPDF_VIEWER_SHOT_TO").getD "and a decoder."
+  sendEvent ".bar.highlight" "<ButtonPress-1>" ["-x", "16", "-y", "16"]
+  sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text on page 1")
+  let some (a, _) := (ix.hits (Select.normQuery fromQ))[0]? | throw (IO.userError s!"{fromQ} not found")
+  let some (_, b) := (ix.hits (Select.normQuery toQ))[0]? | throw (IO.userError s!"{toQ} not found")
+  let (some p0, some p1) := (← cellWindowPos st ix a, ← cellWindowPos st ix b) |
+    throw (IO.userError "sentence not shown")
+  sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+  sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+  sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+  discard <| run ["update"]
+  settle st
+  discard <| run ["update"]
+  let s ← st.get
+  let kind := match s.bubble with
+    | some (.float, _) => "float" | some (.edit, _) => "edit" | some (.editor, _) => "editor"
+    | none => "none"
+  IO.FS.writeFile ((dir : System.FilePath) / "ready.txt")
+    s!"ready\nmarks: {s.marks.marks.size}\nbubble: {kind}\npopover: {← run ["winfo", "ismapped", ".hlbar"]}\n\
+      field: {← run ["set", "::safepdf::pageText"]} {← run [".bar.of", "cget", "-text"]}\n\
+      zoom: {← run [".bar.zoom", "itemcget", "label", "-text"]}\nsidebar: {s.outlineShown}\n"
+  discard <| run ["after", "20000", "destroy ."]
+
+/-- Smoke steps of closing a note popup without Save (`SAFEPDF_VIEWER_SMOKE_MODE=noteclose`,
+task 9.r12, script case 1t) on the text PDF of `smokeText`. Each line of `noteclose.txt` gives
+the notes left (`notes=`), whether a note icon is on the canvas (`icons=`), whether the popup
+is open (`popup=`) and the case's note text or state:
+`menu-esc` (Edit → Add note…, Escape in the text widget: removed, no icon),
+`typed-esc` (context menu, typed text, Escape: kept with the text), `saved-clear-esc` (that
+note made saved, reopened by a click on its icon, cleared, Escape: kept, still saved),
+`saved-empty-esc` (an empty saved note, reopened by a click: removed, the title gets `*`),
+`comment-esc` (Edit → Add note… on a selected highlight, Escape: the comment goes, the
+highlight stays), `selection-blank-esc` (a note on the selection with white space only:
+removed), `cancel-empty` / `cancel-typed` (the Cancel button), `wm-empty` / `wm-typed` (the
+window's close button, its `WM_DELETE_WINDOW` script), `switch` (Add note… while an empty
+note's popup is open removes that note), `deleted-open` (the note deleted while its popup is
+open: the popup goes; a stale `noteClose` is ignored). -/
+def smokeNoteClose (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let notes : IO (List Marks.Mark) := return (← st.get).marks.marks.toList.filter (·.isNote)
+  let popup : IO String := run ["winfo", "exists", ".note"]
+  let state (what : String) : IO String := do
+    discard <| run ["update"]
+    let ns ← notes
+    return s!"notes={ns.length} icons={decide ((← tagCount "note") > 0)} popup={← popup} {what}"
+  let esc : IO Unit := do
+    sendEvent ".note.t" "<Key-Escape>"
+    discard <| run ["update"]
+  let typeText (t : String) : IO Unit := do
+    discard <| run [".note.t", "insert", "end", t]
+  let menuNote : IO Unit := do
+    discard <| run [".menubar.edit", "invoke", Menu.Cmd.addNote.label]
+    discard <| run ["update", "idletasks"]
+  let ctxNote (x y : Rat) : IO Unit := do
+    let some npos ← boxWindowPos st ⟨x, y, x, y⟩ | return
+    sendEvent ".c" "<ButtonPress-3>" ["-x", npos.1, "-y", npos.2]
+    discard <| run [Menu.popPath, "invoke", Menu.Cmd.addNote.label]
+    discard <| run ["update", "idletasks"]
+  let clickNote (id : Nat) : IO Unit := do
+    let s ← st.get
+    let some bx := shownBox s | return
+    let some m := s.marks.find? id | return
+    let some ib := m.iconBox bx | return
+    let some pos ← boxWindowPos st ib | return
+    k.clickAt pos
+    discard <| run ["update", "idletasks"]
+  let markSaved : IO Unit := do
+    st.modify fun s => { s with marks := Marks.Store.load s.marks.marks.toList }
+    repaint st
+    syncMenus st
+  let dragSel (q : String) : IO Unit := do
+    let some (wa, wb) := (ix.hits (Select.normQuery q))[0]? | return
+    let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix (wb - 1)) | return
+    sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+    sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    discard <| run ["update"]
+  let textOf (id : Option Nat) : IO String := do
+    return (((← st.get).marks.find? (id.getD 0)).map (·.text)).getD "<gone>"
+  let newest : IO (Option Nat) := return ((← notes).getLast?.map (·.id))
+  -- 1. A new note (Edit → Add note…, nothing selected) + Escape in the text widget.
+  menuNote
+  out := out.push s!"menu-open: {← state ""} focus={← run ["focus"]}"
+  esc
+  out := out.push s!"menu-esc: {← state ""}"
+  -- 2. A new note (context menu) with typed text + Escape: the text is saved.
+  ctxNote 300 400
+  typeText "typed text"
+  esc
+  let typed ← newest
+  out := out.push s!"typed-esc: {← state (← textOf typed)}"
+  -- 3. That note saved in the file; reopened by a click on its icon, cleared, Escape.
+  markSaved
+  clickNote (typed.getD 0)
+  let shown ← try run [".note.t", "get", "1.0", "end - 1 chars"] catch _ => pure "<none>"
+  discard <| run [".note.t", "delete", "1.0", "end"]
+  esc
+  out := out.push s!"saved-clear-esc: {← state (← textOf typed)} shown={shown} dirty={(← st.get).marks.dirty} star={← k.star}"
+  -- 4. An empty saved note (Save with no text, then saved in the file), reopened, Escape.
+  ctxNote 100 100
+  discard <| run [".note.b.save", "invoke"]
+  let empty ← newest
+  markSaved
+  out := out.push s!"saved-empty-before: {← state (← textOf empty)} star={← k.star}"
+  clickNote (empty.getD 0)
+  out := out.push s!"saved-empty-open: {← popup}"
+  esc
+  out := out.push s!"saved-empty-esc: {← state (← textOf empty)} dirty={(← st.get).marks.dirty} star={← k.star}"
+  -- 5. The comment of a highlight: highlight `world`, Add note… on it, Escape.
+  dragSel "world"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  let hl := (← st.get).markSel
+  menuNote
+  let cmt ← newest
+  let anchored := ((← st.get).marks.find? (cmt.getD 0)).map (·.quads) ==
+    ((← st.get).marks.find? (hl.getD 0)).map (·.quads)
+  out := out.push s!"comment-open: {← popup} anchored={anchored}"
+  esc
+  out := out.push s!"comment-esc: {← state (← textOf cmt)} highlight={((← st.get).marks.find? (hl.getD 0)).isSome}"
+  -- 6. A note on the selection (as the bubble's Add comment) with white space only.
+  dragSel "safe"
+  menuNote
+  let onSel ← newest
+  typeText "  \n\t "
+  esc
+  out := out.push s!"selection-blank-esc: {← state (← textOf onSel)}"
+  -- 7. The Cancel button.
+  menuNote
+  let c1 ← newest
+  discard <| run [".note.b.cancel", "invoke"]
+  out := out.push s!"cancel-empty: {← state (← textOf c1)}"
+  menuNote
+  let c2 ← newest
+  typeText "via cancel"
+  discard <| run [".note.b.cancel", "invoke"]
+  out := out.push s!"cancel-typed: {← state (← textOf c2)}"
+  -- 8. The window's close button.
+  let wmClose : IO Unit := do
+    discard <| run ["uplevel", "#0", ← run ["wm", "protocol", ".note", "WM_DELETE_WINDOW"]]
+    discard <| run ["update"]
+  menuNote
+  let w1 ← newest
+  wmClose
+  out := out.push s!"wm-empty: {← state (← textOf w1)}"
+  menuNote
+  let w2 ← newest
+  typeText "via close"
+  wmClose
+  out := out.push s!"wm-typed: {← state (← textOf w2)}"
+  -- 9. Add note… while an empty note's popup is open: the first note goes.
+  ctxNote 200 200
+  let a ← newest
+  menuNote
+  let b ← newest
+  out := out.push s!"switch: {← state (← textOf a)} other={a != b} for={(← run ["set", "::safepdf::noteId"]) == toString (b.getD 0)}"
+  esc
+  out := out.push s!"switch-esc: {← state (← textOf b)}"
+  -- 10. The note deleted while its popup is open; then a stale close.
+  menuNote
+  let d ← newest
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.deleteMark.label]
+  out := out.push s!"deleted-open: {← state (← textOf d)}"
+  discard <| run ["::safepdf::emit", "noteClose", toString (d.getD 0), ""]
+  discard <| run ["::safepdf::emit", "noteClose", "999", "x"]
+  out := out.push s!"stale-close: {← state ""}"
+  out := out.push s!"texts: {(← notes).map (·.text)}"
+  out := out.push "done"
+  IO.FS.writeFile (file "noteclose.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Waits until the thumbnails panel has rendered every thumbnail it wants (task 9.r9 smoke
+tests): processes Tk events, starts renders (`thumbView`), waits for them (`thumbPoll`). -/
+def thumbSettle (st : IO.Ref State) : IO Unit := do
+  for _ in [0:400] do
+    discard <| run ["update"]
+    thumbView st
+    let js := (← st.get).thJobs
+    if js.isEmpty then break
+    for j in js do discard <| IO.wait j.task
+    thumbPoll st
+  discard <| run ["update"]
+
+/-- `VmRSS` and `VmHWM` of this process in KiB (Linux `/proc/self/status`; `0` elsewhere). -/
+def memKiB : IO (Nat × Nat) := do
+  let txt ← try IO.FS.readFile "/proc/self/status" catch _ => pure ""
+  let field (k : String) : Nat :=
+    match (txt.splitOn "\n").find? (·.startsWith k) with
+    | some l => (((l.drop k.length).toString.trimAscii.toString.splitOn " ").head?.bind (·.toNat?)).getD 0
+    | none => 0
+  return (field "VmRSS:", field "VmHWM:")
+
+/-- One line describing the sidebar for the thumbnails smoke test: shown, panel, the panel
+buttons mapped, the toggle mapped, the heading, thumbnails laid out / rendered / kept, the
+highlighted and selected page, the current page. -/
+def thumbRow (st : IO.Ref State) (name : String) : IO String := do
+  discard <| run ["update"]
+  let s ← st.get
+  let mut btns : List String := []
+  for i in Sidebar.panels do
+    if (← run ["winfo", "ismapped", i.button]) == "1" then btns := btns ++ [i.key]
+  let vis := match ← thumbBand s with
+    | some (top, bot) => Sidebar.thumbsIn s.thSlots top bot
+    | none => []
+  return s!"{name}: shown={s.outlineShown} panel={s.panel.info.key} \
+    buttons={",".intercalate btns} toggle={← run ["winfo", "ismapped", ".bar.sidebar"]} \
+    head={← run [".ol.h", "cget", "-text"]} slots={s.thSlots.size} rendered={s.thRendered} \
+    have={s.thHave.length} visible={vis.length} first-visible={(vis.head?.map (· + 1)).getD 0} \
+    marked={(s.thMarked.map (· + 1)).getD 0} sel={(s.thSel.map (· + 1)).getD 0} \
+    page={s.page + 1} photos={(← run ["image", "names"]).splitOn " " |>.filter (·.startsWith "::safepdf::th") |>.length} \
+    status={← run [".status", "cget", "-text"]}"
+
+/-- Window y in `.ol.th` of the middle of page `p`'s thumbnail, scrolled into view first. -/
+def thumbWinY (st : IO.Ref State) (p : Nat) : IO (Option String) := do
+  let s ← st.get
+  let some t := s.thSlots[p]? | return none
+  thumbSee st t
+  discard <| run ["update"]
+  let some (top, _) ← thumbBand (← st.get) | return none
+  return some (toString ((t.y + t.h / 2 : Nat) - (top : Int)))
+
+/-- Smoke steps of task 9.r9 (`SAFEPDF_VIEWER_SMOKE_MODE=thumbs`), started on
+`th-outline.pdf` (60 pages with an outline, page 5 `/Rotate 90`) next to `th-thumbs.pdf` (60
+pages, `/PageMode /UseThumbs`, no outline) and `th-plain.pdf` (3 pages, nothing). Writes one
+`thumbRow` per step to `thumbs.txt`: opened with the outline and both buttons; the Thumbnails
+button (lazy: only the visible thumbnails and the margin rendered); the rotated page's slot;
+a click on thumbnail 3; the main view at page 40 (highlight follows, scrolled into view);
+Down, Down, Return in the panel; the panel scrolled to the end (at most
+`Sidebar.thumbBudget` kept); a rotation (laid out again); the UseThumbs file (opens with
+thumbnails, no outline button, no note); the plain file (closed, toggle shown) and its
+toggle (thumbnails). -/
+def smokeThumbs (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  settle st
+  out := out.push (← thumbRow st "outline-open")
+  discard <| run ["::safepdf::btnInvoke", ".ol.sw.thumbnails"]
+  thumbSettle st
+  out := out.push (← thumbRow st "thumbs-open")
+  let s ← st.get
+  out := out.push s!"rot-slot: {(s.thSlots[4]?.map fun t => s!"{t.w}x{t.h}").getD "-"} \
+    {(s.thSlots[0]?.map fun t => s!"{t.w}x{t.h}").getD "-"}"
+  -- Click on thumbnail 3.
+  if let some y ← thumbWinY st 2 then
+    sendEvent ".ol.th" "<ButtonRelease-1>" ["-x", "100", "-y", y]
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "click-3")
+  -- The main view goes to page 40: the highlight follows and is scrolled into view.
+  discard <| run ["::safepdf::emit", "goto", "40"]
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "main-40")
+  -- Keyboard: Down, Down, Return.
+  sendEvent ".ol.th" "<Key-Down>"
+  sendEvent ".ol.th" "<Key-Down>"
+  out := out.push (← thumbRow st "keys-down2")
+  sendEvent ".ol.th" "<Key-Return>"
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "keys-return")
+  -- Scroll the panel through the whole document: at most the budget is kept.
+  let mut maxHave := 0
+  for k in [0:11] do
+    discard <| run [".ol.th", "yview", "moveto", fmtFrac ((k : Rat) / 10)]
+    thumbSettle st
+    maxHave := max maxHave (← st.get).thHave.length
+  out := out.push s!"{← thumbRow st "scrolled-end"} max-have={maxHave} budget={Sidebar.thumbBudget}"
+  -- Rotation: laid out again with the rotated sizes.
+  discard <| run ["::safepdf::emit", "rotate", "cw"]
+  settle st
+  thumbSettle st
+  let s ← st.get
+  out := out.push (← thumbRow st "rotated")
+  out := out.push s!"rotated-slots: slot1={(s.thSlots[0]?.map fun t => s!"{t.w}x{t.h}").getD "-"} \
+    slot5={(s.thSlots[4]?.map fun t => s!"{t.w}x{t.h}").getD "-"}"
+  -- A UseThumbs file without an outline opens with the thumbnails.
+  openFile st s!"{base}/th-thumbs.pdf"
+  settle st
+  thumbSettle st
+  out := out.push (← thumbRow st "usethumbs")
+  -- A file with neither: closed, but the toggle shows and opens the thumbnails.
+  openFile st s!"{base}/th-plain.pdf"
+  settle st
+  out := out.push (← thumbRow st "plain")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  thumbSettle st
+  out := out.push (← thumbRow st "plain-toggle")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  out := out.push (← thumbRow st "plain-toggle2")
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "thumbs.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Thumbnail performance (task 9.r9, `SAFEPDF_VIEWER_SMOKE_MODE=thumbperf` on any file):
+reopens the start-up file with the thumbnails panel (as the event loop runs it: Tk events and
+`poll` until the visible thumbnails are shown) and writes `thumbperf.txt`: time to open, to
+the first thumbnail and to every visible one; the longest main-view page change (Next)
+while thumbnails render; then the panel scrolled through the whole document in steps of one
+panel height: total time, most thumbnails kept, thumbnails rendered; memory (VmRSS before,
+after the first screen, VmHWM at the end, KiB). -/
+def smokeThumbPerf (st : IO.Ref State) (dir : String) : IO Unit := do
+  let path := (← st.get).path.getD ""
+  let (rss0, _) ← memKiB
+  let t0 ← IO.monoNanosNow
+  st.modify ({ · with panel := .thumbnails })
+  openFile st path
+  if !(← st.get).outlineShown then showSidebar st (some .thumbnails)
+  if (← st.get).panel != .thumbnails then showPanel st .thumbnails
+  let tOpen ← IO.monoNanosNow
+  -- The event loop: until every visible thumbnail is shown (at most 60 s).
+  let mut tAll := 0
+  for _ in [0:30000] do
+    discard <| run ["update"]
+    let s ← st.get
+    if let some (top, bot) ← thumbBand s then
+      let vis := Sidebar.thumbsIn s.thSlots top bot
+      if !vis.isEmpty && vis.all s.thHave.contains then
+        tAll := (← IO.monoNanosNow) - t0
+        break
+    IO.sleep 2
+  let (rss1, _) ← memKiB
+  -- Page changes of the main view while thumbnails render.
+  let mut worst := 0
+  discard <| run [".ol.th", "yview", "moveto", "0.5"]
+  for _ in [0:5] do
+    let a ← IO.monoNanosNow
+    discard <| run ["::safepdf::emit", "next"]
+    let b ← IO.monoNanosNow
+    worst := max worst (b - a)
+    discard <| run ["update"]
+  -- Scroll the panel through the document.
+  let t1 ← IO.monoNanosNow
+  let s ← st.get
+  let hgt := ((← run ["winfo", "height", ".ol.th"]).toNat?).getD 1
+  let steps := s.thHeight / (max hgt 1) + 1
+  let mut maxHave := 0
+  for k in [0:steps + 1] do
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine ((k : Rat) / (steps : Rat))]
+    thumbSettle st
+    maxHave := max maxHave (← st.get).thHave.length
+  let t2 ← IO.monoNanosNow
+  let (rss2, hwm) ← memKiB
+  let s ← st.get
+  IO.FS.writeFile ((dir : System.FilePath) / "thumbperf.txt")
+    s!"file: {path}\npages: {s.pageCount}\nopen-ms: {formatMs (tOpen - t0)}\n\
+      first-thumb-ms: {(s.thFirstNs.map formatMs).getD "-"}\nvisible-thumbs-ms: {formatMs tAll}\n\
+      worst-next-ms: {formatMs worst}\nscroll-all-ms: {formatMs (t2 - t1)}\nscroll-steps: {steps + 1}\n\
+      max-kept: {maxHave}\nbudget: {Sidebar.thumbBudget}\nrendered: {s.thRendered}\n\
+      rss0-kib: {rss0}\nrss-first-screen-kib: {rss1}\nrss-end-kib: {rss2}\nhwm-kib: {hwm}\n"
+  discard <| run ["destroy", "."]
+
+/-- Smoke steps of the attachments panel (`SAFEPDF_VIEWER_SMOKE_MODE=attach`, task 9.r10), on
+the generated `att.pdf` (`/PageMode /UseAttachments`, an outline, two files in the
+`/EmbeddedFiles` tree, one external file specification, a file attachment annotation on page
+2) with `outline.pdf` and `noatt.pdf` beside it. Writes `attach.txt`: the panel as opened
+(sidebar, panel, switcher buttons, toggle), the rows before any decoding (name and size
+column) and two tooltips (one probed, `attProbe`); Save attachment as… of every row to
+`save-N.bin` in `DIR` (the dialog answered by `::safepdf::autoPath`; the dialog's proposed
+name); the refused targets (the opened PDF, a read-only file, a read-only folder, a folder);
+the switcher buttons; the sidebar toggle; a click on the annotation's icon (sidebar closed on
+the outline panel before) selects its row; the other two files (no attachments button). -/
+def smokeAttach (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let panelRow (name : String) : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    return s!"{name}: shown={s.outlineShown} panel={s.panel.info.key} \
+      outlineBtn={← run ["winfo", "ismapped", ".ol.sw.outline"]} \
+      attBtn={← run ["winfo", "ismapped", ".ol.sw.attachments"]} \
+      list={← run ["winfo", "ismapped", ".ol.at"]} \
+      toggle={← run ["winfo", "ismapped", ".bar.sidebar"]} atts={s.attList.size}"
+  let status : IO String := run [".status", "cget", "-text"]
+  let rowsNow : IO String := do
+    let items := (← run [".ol.at", "children", ""]).splitOn " " |>.filter (!·.isEmpty)
+    let mut rows : Array String := #[]
+    for i in items do
+      rows := rows.push s!"{← run [".ol.at", "item", i, "-text"]}|{← run [".ol.at", "set", i, "size"]}"
+    return ";".intercalate rows.toList
+  out := out.push (← panelRow "start")
+  out := out.push s!"rows: {← rowsNow}"
+  let tip (i : Nat) : IO String := do
+    return (← run ["set", s!"::safepdf::attTip(a{i})"]).replace "\n" " / "
+  out := out.push s!"tip0: {← tip 0}"
+  out := out.push s!"tip1: {← tip 1}"
+  -- The tooltip's probe decodes data.bin (its size is not in the file).
+  discard <| run ["::safepdf::emit", "attProbe", "0"]
+  out := out.push s!"probed: {← rowsNow} tip0={← tip 0}"
+  -- Save attachment as… for every row.
+  let n := (← st.get).attList.size
+  for k in [0:n] do
+    discard <| run ["set", "::safepdf::lastDialog", ""]
+    discard <| run ["set", "::safepdf::autoPath", s!"{dir}/save-{k}.bin"]
+    discard <| run ["::safepdf::emit", "attSave", toString k]
+    let dlg ← run ["lindex", ← run ["set", "::safepdf::lastDialog"], "1"]
+    out := out.push s!"save-{k}: proposed={dlg} status={← status}"
+  -- Refused targets: the opened PDF, a read-only file, a read-only folder, a folder.
+  let some pdf := (← st.get).path | return
+  IO.FS.writeFile s!"{dir}/ro.bin" "read-only\n"
+  discard <| run ["file", "attributes", s!"{dir}/ro.bin", "-permissions", "0444"]
+  IO.FS.createDirAll s!"{dir}/rodir"
+  discard <| run ["file", "attributes", s!"{dir}/rodir", "-permissions", "0555"]
+  for (nm, target) in [("pdf", pdf), ("ro", s!"{dir}/ro.bin"), ("rodir", s!"{dir}/rodir/x.bin"),
+      ("folder", dir)] do
+    discard <| run ["set", "::safepdf::autoPath", target]
+    discard <| run ["::safepdf::emit", "attSave", "0"]
+    out := out.push s!"refused-{nm}: {← status}"
+  discard <| run ["file", "attributes", s!"{dir}/rodir", "-permissions", "0755"]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  -- The selection's status line and the context menu's entry.
+  discard <| run [".ol.at", "selection", "set", "a1"]
+  discard <| run ["update"]
+  out := out.push s!"select-a1: {← status}"
+  out := out.push s!"menu: {← run [".attmenu", "entrycget", "0", "-label"]}"
+  -- The switcher and the toggle.
+  discard <| run ["::safepdf::btnInvoke", ".ol.sw.outline"]
+  out := out.push (← panelRow "switch-outline")
+  discard <| run ["::safepdf::btnInvoke", ".ol.sw.attachments"]
+  out := out.push (← panelRow "switch-attachments")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  out := out.push (← panelRow "toggle-off")
+  discard <| run ["::safepdf::btnInvoke", ".bar.sidebar"]
+  out := out.push (← panelRow "toggle-on")
+  -- The annotation's icon on page 2: with the sidebar closed on the outline panel, a click on
+  -- it opens the attachments panel and selects its row.
+  showPanel st .outline
+  showSidebar st none
+  let s ← st.get
+  if let some ic := s.attIcons.head? then
+    goTo st ic.page
+    settle st
+    let s ← st.get
+    if let some sl := slotOf s ic.page then
+      let (x0, y0, x1, y1) := sl.rect (Box.ofRect ic.rect)
+      let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+        View.parseDecimal (← run [".c", "canvasy", "0"])) | return
+      let wx := toString ((x0 + x1) / 2 - vx).floor
+      let wy := toString ((y0 + y1) / 2 - vy).floor
+      sendEvent ".c" "<ButtonPress-1>" ["-x", wx, "-y", wy]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", wx, "-y", wy]
+      discard <| run ["update"]
+      out := out.push s!"{← panelRow "icon"} sel={← run [".ol.at", "selection"]} \
+        entry={ic.entry} status={← status}"
+  -- A file with an outline and no attachments; a file with neither.
+  for f in ["outline", "noatt"] do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push (← panelRow f)
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "attach.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Smoke steps of the layers panel (`SAFEPDF_VIEWER_SMOKE_MODE=layers`, task 9.r11b), on the
+generated `oc.pdf` (`/PageMode /UseOC`; one page whose squares and words belong to the groups
+Base (ON), Extra (OFF), Notes (ON), the radio pair English (ON) / French (OFF) under the
+heading "Languages", Locked (locked, ON, nested under Notes), Orphan (ON, not in `/Order`: under
+"Additional Layers", collapsed at first) and an OCMD AllOn(Base, Extra)) with `oc-nomode.pdf`, `oc-noorder.pdf` and `plain.pdf` beside it.
+Writes `layers.txt`: the panel as opened and its rows (as Tk shows them); the page's pixels
+at each square and the search hits of each word; a thumbnail pixel before and after; toggling
+Extra (its square, the OCMD square and its word appear); French (English goes off); the locked
+group (no change); Additional Layers opened and Orphan toggled off and on; collapsing the
+heading; a note saved into the file (Ctrl+S, Overwrite) and
+the reopen after the save (state kept); opening the file again (defaults); the other files.
+The smoke script runs it on a copy of `oc.pdf` (`saved.pdf`), so the original stays. -/
+def smokeLayers (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let status : IO String := run [".status", "cget", "-text"]
+  let panelRow (name : String) : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    return s!"{name}: shown={s.outlineShown} panel={s.panel.info.key} \
+      layersBtn={decide ((← run ["winfo", "manager", ".ol.sw.layers"]) == "pack")} \
+      list={← run ["winfo", "ismapped", ".ol.ly"]} rows={s.lyRows.length} \
+      title={← run [".ol.h", "cget", "-text"]}"
+  let tagText (tag : String) : IO String := do
+    match (← run [".ol.ly", "tag", "ranges", tag]).splitOn " " with
+    | [a, b] => run [".ol.ly", "get", a, b]
+    | _ => pure "?"
+  -- The rows as Tk shows them: depth, label, kind, checkbox value, disabled, mapped.
+  let rowsNow : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    let mut parts : Array String := #[]
+    let mut i := 0
+    for r in s.lyRows do
+      let w := s!".ol.ly.c{i}"
+      if r.group.isSome then
+        let v ← run ["set", s!"::safepdf::ly({i})"]
+        parts := parts.push s!"{r.depth}:{← tagText s!"g{i}"}:{v}\
+          {if (← run [w, "instate", "disabled"]) == "1" then ":locked" else ""}\
+          {if (← run ["winfo", "ismapped", w]) == "1" then "" else ":hidden"}"
+      else
+        parts := parts.push s!"{r.depth}:[{← tagText s!"h{i}"}]"
+      i := i + 1
+    return ";".intercalate parts.toList
+  let rowOf (label : String) : IO Nat := do
+    return ((← st.get).lyRows.findIdx? (·.label == label)).getD 9999
+  let invoke (label : String) : IO Unit := do
+    discard <| run [s!".ol.ly.c{← rowOf label}", "invoke"]
+    settle st
+  -- Square centres (page points) and the pixel colour there.
+  let squares : List (String × Pt) := [("base", ⟨100, 650⟩), ("extra", ⟨250, 650⟩),
+    ("ocmd", ⟨400, 650⟩), ("en", ⟨100, 450⟩), ("fr", ⟨250, 450⟩), ("locked", ⟨400, 450⟩),
+    ("orphan", ⟨100, 250⟩)]
+  let pixels : IO String := do
+    discard <| run ["update"]
+    let mut parts : Array String := #[]
+    for (n, q) in squares do parts := parts.push s!"{n}=({← photoPixel st 0 q})"
+    return " ".intercalate parts.toList
+  let hits : IO String := do
+    match ← pageIndex st 0 with
+    | .ok ix =>
+      let mut parts : Array String := #[]
+      for w in ["alpha", "bravo", "english", "french", "always"] do
+        parts := parts.push s!"{w}={(ix.hits (Select.normQuery w)).size}"
+      return " ".intercalate parts.toList
+    | .error e => return s!"error {e}"
+  -- The thumbnail of page 1 at the Extra square (thumbnail pixels: page point × zoom).
+  let thumbPx : IO String := do
+    discard <| run ["::safepdf::btnInvoke", ".ol.sw.thumbnails"]
+    thumbSettle st
+    let s ← st.get
+    let some doc := s.doc | return "-"
+    let z := thumbZoom s doc 0
+    let x := ((250 : Rat) * z).floor
+    let y := (((792 : Rat) - 650) * z).floor
+    let px ← try run [thumbPhoto 0, "get", toString x, toString y] catch _ => pure "<none>"
+    discard <| run ["::safepdf::btnInvoke", ".ol.sw.layers"]
+    return s!"have={s.thHave.contains 0} px=({px})"
+  settle st
+  out := out.push s!"{← panelRow "start"} status={← status}"
+  out := out.push s!"rows: {← rowsNow}"
+  out := out.push s!"px-start: {← pixels}"
+  out := out.push s!"text-start: {← hits}"
+  out := out.push s!"thumb-start: {← thumbPx}"
+  out := out.push (← panelRow "back")
+  -- Extra on: its square and word, and the OCMD square (AllOn Base, Extra).
+  invoke "Extra"
+  out := out.push s!"extra-on: {← rowsNow}"
+  out := out.push s!"px-extra: {← pixels}"
+  out := out.push s!"text-extra: {← hits}"
+  -- The radio pair: French on turns English off.
+  invoke "French"
+  out := out.push s!"french-on: {← rowsNow}"
+  out := out.push s!"px-french: {← pixels}"
+  out := out.push s!"text-french: {← hits}"
+  -- The locked group: its disabled checkbox does nothing, nor does the event itself.
+  invoke "Locked"
+  discard <| run ["::safepdf::emit", "layer", toString (← rowOf "Locked")]
+  settle st
+  out := out.push s!"locked: {← rowsNow} status={← status}"
+  out := out.push s!"px-locked: {← pixels}"
+  -- Additional Layers (the groups not in /Order) starts collapsed; opened, Orphan toggles.
+  let aRow := ((← st.get).lyRows.findIdx? (·.italic)).getD 9999
+  discard <| run ["::safepdf::emit", "lyToggle", toString aRow]
+  out := out.push s!"additional-open: {← rowsNow}"
+  invoke "Orphan"
+  out := out.push s!"orphan-off: {← rowsNow}"
+  out := out.push s!"px-orphan: {← pixels}"
+  invoke "Orphan"
+  out := out.push s!"px-orphan-on: {← pixels}"
+  -- Collapsing the heading hides its checkboxes; opening shows them again.
+  let hRow := ((← st.get).lyRows.findIdx? (·.group.isNone)).getD 9999
+  discard <| run ["::safepdf::emit", "lyToggle", toString hRow]
+  out := out.push s!"collapsed: {← rowsNow}"
+  discard <| run ["::safepdf::emit", "lyToggle", toString hRow]
+  out := out.push s!"expanded: {← rowsNow}"
+  out := out.push s!"thumb-after: {← thumbPx}"
+  -- A note saved into the file: the reopen after the save keeps the layers' state.
+  smokeNoteAt st 500 100 "layers"
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  sendEvent ".c" "<Control-Key-s>"
+  settle st
+  out := out.push s!"{← panelRow "saved"} dirty={(← st.get).marks.dirty} status={← status}"
+  out := out.push s!"saved-rows: {← rowsNow}"
+  out := out.push s!"px-saved: {← pixels}"
+  -- Opened again: the document's default state.
+  openFile st ((← st.get).path.getD "")
+  settle st
+  out := out.push (← panelRow "reopened")
+  out := out.push s!"reopened-rows: {← rowsNow}"
+  out := out.push s!"px-reopened: {← pixels}"
+  out := out.push s!"text-reopened: {← hits}"
+  for f in ["oc-nomode", "oc-noorder", "plain"] do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push s!"{← panelRow f} status={← status}"
+    out := out.push s!"{f}-rows: {← rowsNow}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "layers.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -5697,10 +8749,65 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "wheelflow" then
+    try smokeWheelFlow st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "async" then
     try smokeAsync st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "async.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "keys" then
+    try smokeKeys st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "r4" then
+    try smokeR4 st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "r4.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "opensettings" then
+    try smokeOpenSettings st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "opensettings.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "thumbs" || s.smokeMode == "thumbperf" then
+    try
+      if s.smokeMode == "thumbs" then smokeThumbs st dir else smokeThumbPerf st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / s!"{s.smokeMode}.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "attach" then
+    try smokeAttach st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "attach.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "layers" then
+    try smokeLayers st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "layers.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "noteclose" then
+    try smokeNoteClose st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "noteclose.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "savedlg" then
+    try smokeSaveDialogs st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "savedlg.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "lockdown" then
@@ -5720,6 +8827,16 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "editors" then smokeEditors st dir else smokeEditorsShot st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "editors.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "m9" || s.smokeMode == "m9-reopen" || s.smokeMode == "m9-shot" then
+    let name := s!"{s.smokeMode}.txt"
+    try
+      if s.smokeMode == "m9" then smokeM9 st dir
+      else if s.smokeMode == "m9-shot" then smokeM9Shot st dir
+      else smokeM9Reopen st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "marks" then
@@ -5832,8 +8949,23 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["hover", x, y] => hover st (intPos x y)
   | ["back"] => histMove st true
   | ["forward"] => histMove st false
-  | ["outlineToggle"] => showOutline st (Sidebar.afterToggle s.outlineShown (!s.outline.isEmpty))
+  | ["outlineToggle"] =>
+    if s.doc.isSome then showSidebar st (Sidebar.afterToggle s.outlineShown s.panel (contentOf s))
+    else showOutline st false
+  | ["panel", k] => panelClick st k
+  | ["attSave", k] => if let some i := k.toNat? then saveAttachment st i
+  | ["attProbe", k] => if let some i := k.toNat? then attProbe st i
+  | ["attSelect", k] =>
+    if let some i := k.toNat? then if let some t := attText s i then setStatus t
+  | ["thView"] => thumbView st
+  | ["thClick", y] => thumbClick st y
+  | ["thKey", k] => thumbKey st k
+  | ["thBlur"] =>
+    st.modify ({ · with thSel := none })
+    discard <| run [".ol.th", "delete", "thfocus"]
   | ["olToggle", k] => olToggle st k
+  | ["layer", k] => layerClick st k
+  | ["lyToggle", k] => lyToggle st k
   | ["pageEntry", txt] => pageEntry st txt
   | ["pageRevert"] => if s.doc.isSome && s.pageCount > 0 then showPageField s
   | ["tool", name] => tool st name
@@ -5843,6 +8975,7 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["note", x, y] => addNote st (intPos x y)
   | ["noteSave", id, text] => noteSave st id text
   | ["noteDelete", id] => if let some id := id.toNat? then deleteMark st id
+  | ["noteClose", id, text] => noteClose st id text
   | ["markDelete"] => markDelete st
   | ["hlTool"] => hlToolToggle st
   | ["showAll"] => toggleShowAll st
@@ -5910,7 +9043,7 @@ Keys: Next/space, Prior/BackSpace scroll by a window (then next/previous page);
 Down/Up/Right/Left scroll; Home/End first/last page; + - zoom in/out; 0 actual size;
 f fit page; w fit width; r/R rotate right/left; Ctrl+wheel zoom; Ctrl+O open; Ctrl+W close;
 View menu: Page/Vertical Scrolling, No/Odd/Even Spreads (continuous and facing pages);
-Ctrl+Q quit. The menubar (File, Edit, View, Go) has every command.
+Ctrl+Q quit (on macOS every Ctrl key is also Command). The menubar (File, Edit, View, Go) has every command.
 Mouse drag selects text, double-click a word; Ctrl+A select page; Ctrl+C copy;
 Ctrl+F find (Enter/F3 next, Shift+F3 previous, Escape close).
 Add text: click to place a text box (Escape or a click elsewhere ends it, double-click
@@ -5923,6 +9056,9 @@ Ctrl+S saves the marks into FILE-annotated.pdf (an incremental update: the origi
 stay unchanged at its start); Ctrl+Shift+S saves to a chosen file; marks saved in a file are
 restored when it is opened; saved marks can be recoloured, deleted and edited (9.5g). Closing or quitting asks about unsaved marks.
 File > Import annotations... / Export annotations... read and write XFDF (STEM.xfdf by default).
+Files open as their /PageLayout, /PageMode, /OpenAction (destinations only; JavaScript and
+other actions are never run) and viewer preferences say; Escape leaves full screen and shows
+a toolbar, menubar or scroll bars the document hid.
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
@@ -5947,8 +9083,9 @@ SAFEPDF_VIEWER_SMOKE_MODE=async: rendering on worker threads, placeholders, stal
 SAFEPDF_VIEWER_DRIVE=1: test hook keeping Tk's send command (scripts/viewer-corpus.sh drives
 the viewer through it); without it other X clients cannot send Tcl to the viewer.
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).
-SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: initial view mode (facing:
-odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads)."
+SAFEPDF_VIEWER_VIEW=single|continuous|facing|continuous-facing: view mode of files without
+/PageLayout (facing: odd spreads; View menu: Page/Vertical Scrolling, No/Odd/Even Spreads).
+SAFEPDF_VIEWER_SMOKE_MODE=opensettings: the document open settings steps (task 9.r8)."
 
 /-- Runs the viewer with `init` run once the window is built (task 10.1b: `viewer --biblean`
 opens its document from memory there, `openBytes`), after the file named in `args`, if any.
@@ -5982,8 +9119,16 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
+    -- Task 9.r3: keys and labels for the platform (Command on macOS), then the icon. The
+    -- smoke run can ask for the aqua mapping on X11 (`SAFEPDF_VIEWER_PLATFORM=aqua`).
+    let forced := smokeDir.isSome && (← IO.getEnv "SAFEPDF_VIEWER_PLATFORM") == some "aqua"
+    let ws ← Shim.eval "tk windowingsystem"
+    let plat := if forced then .aqua else Menu.Platform.ofWindowingSystem ws
+    platformRef.set plat
+    setIcon
     buildMenus
     buildToolbar
+    discard <| Shim.eval (Menu.platformScript plat)
     if let some g ← IO.getEnv "SAFEPDF_VIEWER_GEOMETRY" then
       if let some (w, h) := parseGeometry g then
         discard <| run ["wm", "geometry", ".", s!"{w}x{h}"]
@@ -5991,10 +9136,11 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
     -- The initial view mode (task 9.3).
     if let some v ← IO.getEnv "SAFEPDF_VIEWER_VIEW" then
       if let some (sc, sp) := View.viewModeOf v then
-        st.modify ({ · with scroll := sc, spread := sp })
+        st.modify ({ · with scroll := sc, spread := sp, defaultView := (sc, sp) })
         discard <| run ["set", Menu.scrollVar, sc.key]
         discard <| run ["set", Menu.spreadVar, sp.key]
         discard <| run ["set", "::safepdf::continuous", if sc == .vertical then "1" else "0"]
+    showViewChoice (← st.get) false
     if (← Shim.eval "tk windowingsystem") == "aqua" then st.modify ({ · with stipple := false })
     -- Screen scale (pixels per point), kept in [1/2, 8].
     if let some sc := View.parseDecimal (← Shim.eval "tk scaling") then
@@ -6011,7 +9157,7 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   if let some f := file then guarded (openFile st f)
   guarded (init st)
   if (← st.get).path.isNone then
-    setStatus "No file. Press Ctrl+O or Open... to choose a PDF."
+    setStatus (← keyText "No file. Press Ctrl+O or Open... to choose a PDF.")
     if smokeDir.isNone then discard <| run ["after", "idle", "::safepdf::emit open"]
   guarded (syncMenus st)
   if smokeDir.isSome then discard <| run ["after", "300", "::safepdf::emit smoke"]

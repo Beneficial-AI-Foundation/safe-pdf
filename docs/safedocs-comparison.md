@@ -1,7 +1,8 @@
 # safe-pdf vs. DARPA SafeDocs — the guarantees, side by side
 
-What each effort guarantees, and on what evidence. safe-pdf status as of 2026-11-20
-(milestones M0–M5 ticked in [progress.md](../progress.md); M6–M8 in progress).
+What each effort guarantees, and on what evidence. safe-pdf status as of 2026-11-23
+(milestones M0–M8 met their exit criteria in [progress.md](../progress.md); M9's
+Acrobat/Okular clause is open).
 [Plan.md](../Plan.md) §2 already credits SafeDocs for the subset-first strategy and the
 format-description starting point; this compares the *guarantees*.
 
@@ -11,8 +12,9 @@ data-description language whose compiler generates memory-safe parsers in conven
 languages, applied to ~20 formats. With the
 [PDF Association](https://www.pdfa.org/safedocs-darpa-does-pdf) it built a PDF reference
 parser that was the only parser found free of defects in the program's red-team exercise
-(zero defects in the generated parser; the five defects found were in the hand-written C++
-wrapper driving it — [PLDI 2024](https://dl.acm.org/doi/10.1145/3656410)),
+([PLDI 2024](https://dl.acm.org/doi/10.1145/3656410); secondary accounts attribute the
+defects that were found to the hand-written C++ driver around the generated parser, but we
+could not verify that against the paywalled paper, so it carries no weight here),
 and the [Arlington PDF Model](https://pdfa.org/safedocs-latest-research-into-securing-pdf/),
 a machine-readable model of PDF 2.0 objects.
 

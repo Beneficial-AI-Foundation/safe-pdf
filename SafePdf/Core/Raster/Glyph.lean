@@ -271,7 +271,8 @@ def stretchMatrix (fm : Aff) (sx : Rat) : Aff := if sx = 1 then fm else Aff.scal
 
 /-- **A substitute font's glyph source**: program `p`, the font's encoding `enc`, the PDF
 width table `wt` when the glyphs are stretched (`Subst.widthTable`). Glyphs are keyed by
-`.gid` = the glyph's index in the Type 1 program's glyph array, or the CFF GID. -/
+`.gid` = the glyph's index in the Type 1 program's glyph array, the CFF GID or the TrueType
+glyph index. -/
 def substSource (p : Subst.Program) (enc : Font.Encoding) (wt : Option (List (Nat × Int) × Int)) :
     GlyphSource :=
   match p with
@@ -319,6 +320,31 @@ def substSource (p : Subst.Program) (enc : Font.Encoding) (wt : Option (List (Na
           | .none => fm
         | .name _ => fm
       desc := s!"substitute CFF {f.name}" }
+  | .trueType f be =>
+    -- task 9.r7: by `post` name, else the name's Unicode value (Adobe Glyph List, then the
+    -- ZapfDingbats list) in a Unicode `cmap`; the built-in code: its name in the face's
+    -- standard-14 encoding, else the raw code in the symbolic `cmap`s (§9.6.6.4).
+    let byName := fun (n : String) =>
+      if n == ".notdef" then .none else
+      (f.glyphOfName n).orElse fun _ =>
+        ((Font.TrueType.unicodeOfName n).orElse fun _ => Font.dingbatLookup n).bind
+          f.glyphOfUnicode
+    let codeG := substCodes byName (fun k =>
+      ((be.glyph k).bind byName).orElse fun _ => f.firstOf (Font.TrueType.symbolicLookups k)) enc
+    let fm := ttMatrix f
+    let ws := match wt with
+      | some (t, _) => substWidths f.numGlyphs codeG t
+      | .none => #[]
+    { glyphOf c := (oneByte c).bind fun b => (codeG[b.toNat]?.join).map .gid
+      outline
+        | .gid g => f.glyphOutline g
+        | .name _ => .none
+      matrix
+        | .gid g => match wt with
+          | some (_, dflt) => stretchMatrix fm (stretchOf ws dflt g (f.advanceOfGlyphText g))
+          | .none => fm
+        | .name _ => fm
+      desc := "substitute TrueType" }
 
 /-- **The substitute glyph source of a simple font dictionary** (`Subst.chooseFor`), if the
 font is non-embedded and the table has a program for the chosen face. -/
@@ -1306,17 +1332,24 @@ def pageGeoTable (cfg : Fill.Config) (view : Aff) (items : DisplayList) : Stroke
 
 /-- **Render a page of an opened document**: decode its content, build the display list with
 the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
-`budget` for every decoded stream. -/
+`budget` for every decoded stream. Content hidden by optional content (task 9.r11a; marked
+content, XObjects and annotations with `/OC`) is not painted: under `oc` when given (a layers
+panel's state), else under the document's default configuration (`Text.docOCState`). -/
 def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
     (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config := Fill.Config.ofLimits limits)
-    (subst : Subst.SubstFonts := {}) :
+    (subst : Subst.SubstFonts := {}) (oc : Option Doc.OptionalContent.State := none) :
     (Except Error Clip.Image) × Filter.Budget :=
-  match Text.extractDocPage limits doc page budget with
+  -- Optional content (task 9.r11a): the given visibility state, else the document's default
+  -- configuration; the same state for the page content, the annotations, the tiling cells and
+  -- the Type 3 glyphs.
+  let (ocs, budget) := Text.ocStateFor limits doc budget oc
+  match Text.extractDocPage limits doc page budget {} (some ocs) with
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
     -- Annotation appearance streams (task 8.3), drawn after the page content in MuPDF order.
     -- They share the page's op/form budget (task 8.3b, `Annot.Budget.after`).
     let (ap, b) := Annot.docAnnots limits doc page pt.fonts (Annot.Budget.after limits pt) b
+      (some ocs)
     let items := pt.items ++ ap.items
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD []) 0 subst
     let (srcs, b) := ap.roots.foldl (fun (acc : SourceTable × Filter.Budget) r =>
@@ -1328,7 +1361,7 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- runs, the fonts of the pattern's resources are added (owner = the pattern's object
     -- number, as the runner keys direct fonts), so its text has real advances and outlines.
     let (tls, ft, b, _) := Tiling.loadTilingsWith
-      (fun (ft : FontTable × SourceTable) => Text.textEnv limits (Text.docSource limits doc) ft.1)
+      (fun (ft : FontTable × SourceTable) => Text.textEnv limits (Text.docSource limits doc) ft.1 ocs)
       (fun ft b num res =>
         let (fonts, b) := Annot.loadAnnotFonts limits (Text.docSource limits doc) b ft.1 [(num, res)]
         let (t, b) := loadSources limits (Text.docSource limits doc) b res num subst
@@ -1339,7 +1372,7 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- Type 3 fonts (task 7.3j): the charprocs of every Type 3 font of the page, the
     -- annotations and the tiling cells run once into glyph space, under what the tiling
     -- cells left of the shared op/form budget.
-    let (srcs, b, _, _) := loadType3 (Text.textEnv limits (Text.docSource limits doc) ft.1) b ()
+    let (srcs, b, _, _) := loadType3 (Text.textEnv limits (Text.docSource limits doc) ft.1 ocs) b ()
       tls.budget (page.resources.getD []) ft.2
     -- Images and shadings of the page, of every loaded cell (task 7.3h2) and of every Type 3
     -- glyph (task 7.3j).
