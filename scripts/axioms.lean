@@ -1277,3 +1277,11 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_prefix
 #print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_extract
 #print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_iv_ne
+-- Phase 12, task 12.7a: C4 with free entries (SafePdf/Spec/RepairAgreeFree.lean)
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free_check
+#print axioms SafePdf.Spec.RepairAgreeFree.resolveLengthAux_mono
+#print axioms SafePdf.Spec.RepairAgreeFree.parseIndirectResolved_mono
+#print axioms SafePdf.Spec.RepairAgreeFree.fetchCompressed_mono
+#print axioms SafePdf.Spec.RepairAgreeFree.resolve_agree
+#print axioms SafePdf.Spec.RepairAgreeFree.getObject_agree
