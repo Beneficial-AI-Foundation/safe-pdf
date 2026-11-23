@@ -334,6 +334,37 @@ def Store.addNote (s : Store) (page : Nat) (color : Color) (text : String) (anch
     Store × Nat :=
   s.add page color (.note text anchor)
 
+/-- Whether page point `p` lies inside box `b` (borders included). -/
+def boxHasPt (b : Box) (p : Pt) : Bool :=
+  b.llx ≤ p.x && p.x ≤ b.urx && b.lly ≤ p.y && p.y ≤ b.ury
+
+/-- Where a new note anchors (task 10.17). `sel` are the highlight boxes of the current text
+selection on the page under `click` (empty: none). Without a click (Edit → Add note…, the
+selection bubble's Add comment) a selection is commented on (`.quads sel`); with a click
+(right-click → Add note…) the note goes at the clicked point unless the click is inside the
+selection's boxes, so a note on an empty spot never becomes a comment on far-away text.
+`none`: no selection and no click (the caller picks the window centre). -/
+def noteAnchor (sel : List Box) (click : Option Pt) : Option Anchor :=
+  match click with
+  | none => if sel.isEmpty then none else some (.quads sel)
+  | some p => if sel.any (boxHasPt · p) then some (.quads sel) else some (.point p)
+
+private def isQuads : Option Anchor → Bool
+  | some (.quads _) => true
+  | _ => false
+
+private def isPoint : Option Anchor → Bool
+  | some (.point _) => true
+  | _ => false
+
+#guard isQuads (noteAnchor [⟨0, 0, 10, 10⟩] none)
+#guard (noteAnchor [] none).isNone
+#guard isQuads (noteAnchor [⟨0, 0, 10, 10⟩] (some ⟨5, 5⟩))
+#guard isQuads (noteAnchor [⟨0, 0, 10, 10⟩, ⟨0, 20, 10, 30⟩] (some ⟨10, 25⟩))
+#guard isPoint (noteAnchor [⟨0, 0, 10, 10⟩] (some ⟨50, 50⟩))
+#guard isPoint (noteAnchor [⟨0, 0, 10, 10⟩, ⟨0, 20, 10, 30⟩] (some ⟨5, 15⟩))
+#guard isPoint (noteAnchor [] (some ⟨5, 5⟩))
+
 /-- Puts back a mark read from a file with its own id (task 9.5c): replaces a mark with the
 same id, and keeps `nextId` above every id. -/
 def Store.restore (s : Store) (m : Mark) : Store :=

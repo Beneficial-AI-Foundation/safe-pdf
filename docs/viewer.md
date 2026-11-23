@@ -660,8 +660,13 @@ back from a file with its own id).
   blending into the pixels is the closest match. Notes, the dashed outline of a note's
   anchor text and the selected mark's outline (`#0060df`, PDF.js's selected-editor blue) are
   canvas items (tag `mark`) drawn below the selection and search highlights.
-* **Notes**: Add note… (Edit menu: on the selection, else at the window centre; context
-  menu: on the selection, else at the right-clicked point) adds a yellow note and opens its
+* **Notes**: Add note… (Edit menu, no click position: a comment on the selection if there is
+  one, else on the selected highlight's comment, else a point note at the window centre;
+  context menu: a note at the right-clicked point, unless the click is inside the selection's
+  highlight boxes, which makes it a comment on the selection — a click on an empty spot far
+  from the selection never turns the selection into a comment, task 10.17,
+  `Marks.noteAnchor`; the selection bubble's Add comment has no click position, so it
+  comments on the selection) adds a yellow note and opens its
   popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape; closing it is
   described below). A note shows as a
   speech-bubble icon of 20 × 20 page units (the size of a `/Text` annotation icon; it scales
