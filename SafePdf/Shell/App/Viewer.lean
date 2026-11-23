@@ -136,19 +136,23 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   selected one of the mode's kind. Unsaved ones are canvas items (`drawMarks`), saved ones are
   drawn by the renderer from their appearance streams (edits through the preview). Add
   comment adds a note (`addNote`).
-* **Saving** (task 9.5c, Tk-free flow in `Save`): Ctrl+S / File → Save / the toolbar's Save
-  writes the unsaved marks into `FILE-annotated.pdf` as an incremental update (Plan S8/C7),
-  checked by a strict reopen and read-back before an atomic write, then opens that file; Save
-  As… (Ctrl+Shift+S) to a chosen file, writing over the opened file only after an explicit
-  yes. On open our marks (`/NM safepdf-mark-ID`) are restored as saved marks, drawn by the
+* **Saving** (tasks 9.5c, 9.r2; Tk-free flow and decisions in `Save`): Ctrl+S / File → Save /
+  the toolbar's Save writes the unsaved marks **into the opened file** as an incremental
+  update (Plan S8/C7, Decision 2026-11-23), checked by a strict reopen and read-back, refused
+  when the file changed on disk since it was opened (then Save As… is offered) or is
+  read-only, written to a temporary file next to it and renamed over it (permissions kept),
+  then reopened in place; the first overwrite of a session asks Overwrite / Save As… / Cancel
+  (`overwriteInto`). Save As… (Ctrl+Shift+S) writes a chosen new file, proposing
+  `STEM-annotated.pdf`. On open our marks (`/NM safepdf-mark-ID`) are restored as saved marks, drawn by the
   renderer. Saved marks can be recoloured, deleted and their text edited (task 9.5g): Save
   writes one update with additions, supersessions and removals (writer rule W11); until then
   the pages are rendered from a **preview** (`State.view`, `updatePreview`: the same writer's
   output with only the edits of saved marks, built in memory and reopened strictly), so an
   edit shows at once. A highlight's comment is written into it (`/Contents` + `/Popup`, as
   pdf.js); its icon is drawn by the viewer. The title starts with `* ` while there are
-  unsaved changes; Close, Quit, the window's close button and Open… ask Save / Discard /
-  Cancel. Writer errors go to the status line.
+  unsaved changes; Close, Quit (menu, Ctrl+Q, `::safepdf::quit`, `::tk::mac::Quit` on aqua),
+  the window's close button and Open… ask Save / Don't Save / Cancel (`confirmDiscard`; a
+  failed save or Cancel keeps the document). Writer errors go to the status line.
 * **XFDF** (task 9.11, Tk-free reader/writer in `Xfdf`): File → Import annotations… /
   Export annotations… (also in the `»` menu) with Tk file dialogs filtered to `.xfdf`. Import
   reads the file bounded and total (`Xfdf.readFile`, pages checked against the document),
@@ -1209,6 +1213,51 @@ proc ::safepdf::ask {type title msg} {
   if {$::safepdf::autoAnswer ne {}} { return $::safepdf::autoAnswer }
   return [tk_messageBox -parent . -icon question -type $type -title $title -message $msg]
 }
+# Three-way questions (9.r2: Overwrite / Save As... / Cancel, Save / Don't Save / Cancel): a
+# modal dialog with the buttons given as key label pairs in display order (Save.*Buttons; on
+# aqua the macOS order), the default key (Return; focused) and the cancel key (Escape, the
+# dialog's close button). Returns the chosen key. Smoke mode: ::safepdf::autoAnswer answers.
+proc ::safepdf::choose {title msg default cancel args} {
+  set ::safepdf::lastAsk $msg
+  if {$::safepdf::autoAnswer ne {}} { return $::safepdf::autoAnswer }
+  set w .choose
+  destroy $w
+  toplevel $w
+  wm withdraw $w
+  wm title $w $title
+  wm transient $w .
+  wm resizable $w 0 0
+  ttk::frame $w.f -padding 14
+  ttk::label $w.f.msg -justify left -wraplength 440 -text $msg
+  ttk::frame $w.f.b
+  set ::safepdf::chooseAnswer {}
+  foreach {key label} $args {
+    ttk::button $w.f.b.$key -text $label -command [list set ::safepdf::chooseAnswer $key]
+    if {$key eq $default} { $w.f.b.$key configure -default active }
+    pack $w.f.b.$key -side left -padx 4
+  }
+  pack $w.f.msg -side top -fill x -pady {0 12}
+  pack $w.f.b -side right
+  pack $w.f -fill both -expand 1
+  wm protocol $w WM_DELETE_WINDOW [list set ::safepdf::chooseAnswer $cancel]
+  bind $w <Escape> [list set ::safepdf::chooseAnswer $cancel]
+  bind $w <Return> [list $w.f.b.$default invoke]
+  ::tk::PlaceWindow $w widget .
+  wm deiconify $w
+  catch {grab $w}
+  focus $w.f.b.$default
+  vwait ::safepdf::chooseAnswer
+  catch {grab release $w}
+  destroy $w
+  return $::safepdf::chooseAnswer
+}
+# Every way of quitting goes through this one proc (9.r2; task 9.r3's key bindings call it):
+# the viewer asks about unsaved marks and quits only when the answer allows it.
+proc ::safepdf::quit {} { ::safepdf::emit quit }
+if {[tk windowingsystem] eq {aqua}} {
+  # The application menu's Quit and Cmd+Q (Tk calls this; returning without exiting cancels).
+  proc ::tk::mac::Quit {} { ::safepdf::quit }
+}
 proc ::safepdf::askSavePath {dir file} {
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
   return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file \\
@@ -1225,7 +1274,7 @@ proc ::safepdf::askXfdfSave {dir file} {
   return [tk_getSaveFile -parent . -title {Export annotations} -initialdir $dir -initialfile $file \\
     -defaultextension .xfdf -confirmoverwrite 1 -filetypes {{XFDF {.xfdf}} {{All files} *}}]
 }
-wm protocol . WM_DELETE_WINDOW {::safepdf::emit quit}
+wm protocol . WM_DELETE_WINDOW ::safepdf::quit
 bind . <Control-s> {::safepdf::emit save}
 bind . <Control-S> {::safepdf::emit saveAs}
 # Marks (9.4): current highlight colour, the right-clicked point, keys, the note icon and the note popup.
@@ -2478,30 +2527,114 @@ def isOwn (st : IO.Ref State) (path : String) : IO Bool := do
     if ← samePath f path then return true
   return false
 
-/-- Writes the document with its unsaved marks to `target` (`Save.write`: the incremental
-update, checked by a strict reopen before anything is written, then an atomic rename) and
-opens the written file on the same page. Errors (an encrypted or repaired document, a failed
-check, a write error) go to the status line; returns whether the file was written. -/
+/-- Whether the window runs on aqua (macOS): the dialogs' button order follows it. -/
+def isAqua : IO Bool := return (← run ["tk", "windowingsystem"]) == "aqua"
+
+/-- Asks `msg` in the three-way dialog `::safepdf::choose` titled `title` with `buttons`
+(key, label; display order from `Save.*Buttons`), `dflt` the default key, `cancel` the key of
+Escape and the dialog's close button; smoke mode answers with `::safepdf::autoAnswer`. Returns
+the chosen key. -/
+def choose (title msg dflt : String) (buttons : List (String × String)) : IO String :=
+  run (["::safepdf::choose", title, msg, dflt, "cancel"] ++ buttons.flatMap fun (k, l) => [k, l])
+
+/-- Before the rename of a save (task 9.r2): copies the permissions of `target`, when it exists,
+onto the temporary file `tmp` (Tcl `file attributes -permissions`; Unix only), so an
+overwritten file keeps its mode. A failure aborts the save (the temporary file is removed). -/
+def keepPermissions (target : String) (tmp : System.FilePath) : IO Unit := do
+  if (← run ["set", "::tcl_platform(platform)"]) != "unix" then return
+  if !(← System.FilePath.pathExists target) then return
+  let mode ← run ["file", "attributes", target, "-permissions"]
+  discard <| run ["file", "attributes", tmp.toString, "-permissions", mode]
+
+/-- After a save wrote `o.path`: remembers it as written by this session (a further Save into
+it asks nothing), reopens it on page `page` (the viewer goes on with the new bytes, so a second
+Save works) and reports. -/
+def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := do
+  let own := (← st.get).ownFiles
+  st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
+  openFile st o.path
+  goTo st page
+  let what := if o.marks == 0 then "a copy (no changed marks)"
+    else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
+      ({o.appended} bytes appended)"
+  setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
+    unchanged at its start"
+
+/-- Writes the document with its unsaved marks to another file `target` (Save As…;
+`Save.write`: the incremental update, checked by a strict reopen before anything is written,
+then an atomic rename keeping the permissions of a file it replaces) and opens the written
+file on the same page. Errors (an encrypted or repaired document, a failed check, a write
+error) go to the status line; returns whether the file was written. -/
 def saveTo (st : IO.Ref State) (target : String) : IO Bool := do
   let s ← st.get
   let some doc := s.doc | return false
   setStatus s!"saving to {target}..."
-  match ← Save.write limits doc s.marks target with
+  match ← Save.write limits doc s.marks target (keepPermissions target) with
   | .error e =>
     setStatus s!"cannot save to {baseName target}: {e}"
     return false
   | .ok o =>
-    let page := s.page
-    let own := (← st.get).ownFiles
-    st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
-    openFile st o.path
-    goTo st page
-    let what := if o.marks == 0 then "a copy (no changed marks)"
-      else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
-        ({o.appended} bytes appended)"
-    setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
-      unchanged at its start"
+    afterWrite st s.page o
     return true
+
+/-- **Save into the opened file** `path` (task 9.r2, Decision 2026-11-23): builds and checks
+the bytes first (`Save.build`: original bytes a prefix, strict reopen, read-back — an
+encrypted or repaired document is refused here, before any question); refuses a read-only
+file or folder (`Save.writeProblem`); refuses when the file on disk no longer holds the bytes
+the document was opened from (`Save.diskState`, checked before the question and again just
+before writing) and then offers Save As…; with `ask` asks Overwrite / Save As… / Cancel; then
+writes atomically (`Save.writeAtomic` to the resolved path, so a symbolic link stays one,
+permissions kept) and reopens in place. Returns `some saved`, or `none` when the user chose
+Save As…. -/
+def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option Bool) := do
+  let s ← st.get
+  let some doc := s.doc | return some false
+  let name := baseName path
+  match Save.build limits doc s.marks (← Save.nowDate) with
+  | .error e =>
+    setStatus s!"cannot save to {name}: {e}"
+    return some false
+  | .ok (bytes, got, n) =>
+    let real ← try pure (← IO.FS.realPath path).toString catch _ => pure path
+    let dir := match (real : System.FilePath).parent with
+      | some d => if d.toString.isEmpty then "." else d.toString
+      | none => "."
+    if ← System.FilePath.pathExists real then
+      let fw := (← run ["file", "writable", real]) == "1"
+      let dw := (← run ["file", "writable", dir]) == "1"
+      if let some p := Save.writeProblem name fw dw then
+        setStatus s!"cannot save: {p}"
+        return some false
+    let disk : IO Save.DiskState := do
+      let d ← try pure (some (← IO.FS.readBinFile real)) catch _ => pure none
+      return Save.diskState doc.file.bytes d
+    let changed (ds : Save.DiskState) : IO (Option Bool) := do
+      let a ← choose "File changed on disk" (Save.changedQuestion name ds) "saveas"
+        (Save.changedButtons (← isAqua))
+      if a == "saveas" then return none
+      setStatus s!"not saved: {name} changed on disk since it was opened; nothing was written \
+        (Save As… writes a new file)"
+      return some false
+    let d0 ← disk
+    if d0 != .same then return ← changed d0
+    if ask then
+      let a ← choose "Save" (Save.overwriteQuestion name s.marks.pending) "overwrite"
+        (Save.overwriteButtons (← isAqua))
+      if a == "saveas" then return none
+      if a != "overwrite" then
+        setStatus "save cancelled"
+        return some false
+    let d1 ← disk
+    if d1 != .same then return ← changed d1
+    setStatus s!"saving to {path}..."
+    try
+      Save.writeAtomic real bytes (keepPermissions real)
+    catch e =>
+      setStatus s!"cannot save to {name}: {e}"
+      return some false
+    afterWrite st s.page { path, marks := n, appended := bytes.size - doc.file.bytes.size,
+                           size := bytes.size, total := got.length }
+    return some true
 
 /-- **Save to library** (task 10.1b, Save in bib-lean's reader mode): `Save.build`'s bytes (the
 incremental update, checked by a strict reopen and read-back) go to the library
@@ -2526,13 +2659,15 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
       appended; {got.length} marks in its file)"
     return true
 
-/-- **Save As…** (Ctrl+Shift+S, File → Save As…): asks for a file (`tk_getSaveFile`, which
-confirms replacing an existing file), proposing `Save.defaultTarget`; writing over the opened
-file needs an explicit yes. Writes the unsaved marks (a plain copy when there are none). For a
-library's document (task 10.1b) it writes a local copy and stays on the library's document. -/
-def saveAs (st : IO.Ref State) : IO Bool := do
+/-- One round of Save As…: asks for a file (`tk_getSaveFile`, which confirms replacing an
+existing file), proposing `Save.defaultTarget` (`STEM-annotated.pdf`), and writes the unsaved
+marks there (a plain copy when there are none). The opened file itself needs an explicit yes
+(unless this session wrote it) and goes through `overwriteInto` (changed-on-disk check);
+`none` when that asks for another file. For a library's document (task 10.1b) it writes a
+local copy and stays on the library's document. -/
+def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
   let s ← st.get
-  let (some path, some _) := (s.path, s.doc) | return false
+  let (some path, some _) := (s.path, s.doc) | return some false
   let fp : System.FilePath := Save.defaultTarget path
   let dir := match fp.parent with
     | some d => if d.toString.isEmpty then "." else d.toString
@@ -2540,80 +2675,80 @@ def saveAs (st : IO.Ref State) : IO Bool := do
   let chosen ← run ["::safepdf::askSavePath", dir, fp.fileName.getD "document.pdf"]
   if chosen.isEmpty then
     setStatus "save cancelled"
-    return false
+    return some false
   -- A library's document (task 10.1b): a local copy; the window stays on the library's
   -- document and its marks stay unsaved there (Save sends them to the library).
   if s.library.isSome then
-    let some doc := s.doc | return false
-    match ← Save.write limits doc s.marks chosen with
+    let some doc := s.doc | return some false
+    match ← Save.write limits doc s.marks chosen (keepPermissions chosen) with
     | .error e =>
       setStatus s!"cannot save to {baseName chosen}: {e}"
-      return false
+      return some false
     | .ok o =>
       setStatus s!"saved a local copy with {o.total} mark(s) to {o.path}; the library's file \
         is unchanged (Save to library sends the marks there)"
-      return true
-  if !s.inMemory && (← samePath chosen path) && !(← isOwn st chosen) then
-    let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks are \
-      appended as a new revision; its present bytes stay unchanged at its start."
-    if a != "yes" then
-      setStatus "save cancelled"
-      return false
-  saveTo st chosen
+      return some true
+  if !s.inMemory && (← samePath chosen path) then
+    if !(← isOwn st chosen) then
+      let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks \
+        are added to it; its present content is kept unchanged inside it as the first revision."
+      if a != "yes" then
+        setStatus "save cancelled"
+        return some false
+    return ← overwriteInto st path (ask := false)
+  return some (← saveTo st chosen)
 
-/-- **Save** (Ctrl+S, File → Save, the toolbar's Save): writes the unsaved marks to
-`Save.defaultTarget` (`FILE-annotated.pdf`, or the opened `…-annotated.pdf` itself). Asks before
-writing into the opened file or replacing another existing file, unless this session wrote
-it. Returns whether the marks are saved afterwards. -/
-def save (st : IO.Ref State) : IO Bool := do
+/-- **Save As…** (Ctrl+Shift+S, File → Save As…): `saveAsOnce`, asked again (at most three
+times) while the chosen file is the opened one and it changed on disk. Returns whether the
+marks were written. -/
+def saveAs (st : IO.Ref State) : IO Bool := do
+  for _ in [0:3] do
+    if let some r ← saveAsOnce st then return r
+  return false
+
+/-- **Save** (Ctrl+S, File → Save, the toolbar's Save; task 9.r2): `Save.route` — nothing to
+do without unsaved marks; a library's document goes to the library; a document opened from
+memory asks for a file (Save As…); otherwise the marks are written **into the opened file**
+(`overwriteInto`), asking Overwrite / Save As… / Cancel before the first overwrite of this
+session (`confirmed`: the unsaved-changes prompt already said so). Returns whether the marks
+are saved afterwards. -/
+def save (st : IO.Ref State) (confirmed : Bool := false) : IO Bool := do
   let s ← st.get
   let (some path, some doc) := (s.path, s.doc) | return false
-  if !s.marks.dirty then
+  match Save.route s.marks.dirty s.library.isSome s.inMemory (confirmed || (← isOwn st path)) with
+  | .nothing =>
     setStatus "no unsaved marks: nothing to save"
     return true
-  if let some lib := s.library then return ← saveToLibrary st lib path doc
-  -- Opened from memory without a library: there is no file to put the marks next to.
-  if s.inMemory then return ← saveAs st
-  let target := Save.defaultTarget path
-  let n := s.marks.pending
-  if !(← isOwn st target) then
-    if ← samePath target path then
-      let a ← ask "yesno" "Save" s!"Write the {n} new or changed mark(s) into the opened file \
-        {baseName path}? It gets a new revision appended; its present bytes stay unchanged \
-        at its start."
-      if a != "yes" then
-        setStatus "save cancelled"
-        return false
-    else if ← System.FilePath.pathExists target then
-      let a ← ask "yesno" "Save" s!"{baseName target} already exists. Replace it with \
-        {baseName path} and its marks? (Marks only in the existing file are not kept.)"
-      if a != "yes" then
-        setStatus "save cancelled"
-        return false
-  saveTo st target
+  | .library =>
+    match s.library with
+    | some lib => saveToLibrary st lib path doc
+    | none => return false
+  | .saveAs => saveAs st
+  | .overwrite q =>
+    match ← overwriteInto st path q with
+    | some r => return r
+    | none => saveAs st
 
-/-- Before `what` (closing, quitting, opening another file): with unsaved marks asks Save /
-Discard / Cancel (yes / no / cancel). Returns whether to go on. -/
+/-- **The unsaved-changes prompt** (task 9.r2) before `what` (closing, quitting, opening
+another file — every way a document goes away): with unsaved marks asks Save / Don't Save /
+Cancel (`Save.unsavedQuestion`, `Save.unsavedButtons`: the macOS order on aqua). Save saves
+(into the opened file without a second question, to the library in bib-lean mode, or through
+Save As… for a document from memory); a failed or cancelled save and Cancel abort `what`
+(`Save.closeGoesOn`). Returns whether to go on. Nothing is ever saved without this answer. -/
 def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
   let s ← st.get
   let (some path, some _) := (s.path, s.doc) | return true
   if !s.marks.dirty then return true
-  let n := s.marks.pending
-  let msg := if s.library.isSome then
-      s!"{n} mark(s) on {s.titleOverride.getD (baseName path)} are not saved into the \
-        library's file (its annotation list has them already). Save to library before {what}? \
-        (No leaves the file as it is.)"
-    else if s.inMemory then
-      s!"{n} mark(s) on {s.titleOverride.getD (baseName path)} are not saved. Save them to a \
-        file before {what}? (No discards them.)"
-    else s!"{n} mark(s) on {baseName path} are not saved. \
-      Save them to {baseName (Save.defaultTarget path)} before {what}? (No discards them.)"
-  match ← ask "yesnocancel" "Unsaved marks" msg with
-  | "yes" => save st
-  | "no" => return true
-  | _ =>
-    setStatus s!"{what} cancelled: there are unsaved marks"
-    return false
+  let name := s.titleOverride.getD (baseName path)
+  let own ← isOwn st path
+  let msg := Save.unsavedQuestion name what s.marks.pending s.library.isSome s.inMemory (!own)
+  let ans := Save.onUnsavedAnswer (← choose "Unsaved marks" msg "save" (Save.unsavedButtons (← isAqua)))
+  let saved ← if ans == some true then save st (confirmed := true) else pure false
+  let go := Save.closeGoesOn true ans saved
+  if !go then
+    if ans.isNone then setStatus s!"{what} cancelled: there are unsaved marks"
+    else setStatus s!"{← run [".status", "cget", "-text"]}; {what} cancelled"
+  return go
 
 /-! ## XFDF import and export (task 9.11) -/
 
@@ -4754,17 +4889,23 @@ def fileMarks (path : String) : IO String := do
     | .error e => return s!"error {e.message}"
   catch e => return s!"error {e}"
 
-/-- Smoke steps of the save flow (`SAFEPDF_VIEWER_SMOKE_MODE=save`, task 9.5c) on a copy of
-the text PDF of `smokeText` (substitute fonts off): nothing unsaved at first; a highlight on
-`world` and a note at (300, 400) make the title start with `* ` and enable Save; Quit and
-Ctrl+W answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` without a
-question, opens it (2 saved marks, title without `*`, Save disabled), the highlight is now
-drawn by the renderer from its appearance stream (pixels yellow, no canvas note icon) and the
-note text is restored (a copy of the file goes to `first.pdf`); a second Ctrl+S has nothing
-to save (size unchanged); the saved highlight can be selected; a new
-highlight on `safe` + Ctrl+S appends to the same file (3 marks, distinct ids, read back
-strictly); File → Save As… (`autoPath`) writes `saveas.pdf` and opens it; a new note and
-Ctrl+W answered No closes without saving. Results in `save.txt`. -/
+/-- Smoke steps of the save flow (`SAFEPDF_VIEWER_SMOKE_MODE=save`, tasks 9.5c, 9.r2) on a copy
+of the text PDF of `smokeText` (substitute fonts off): nothing unsaved at first; a highlight on
+`world` and a note at (300, 400) make the title start with `* ` and enable Save; Quit, Ctrl+W
+and the window's close button (its `WM_DELETE_WINDOW` script) answered Cancel keep everything
+(the unsaved-changes prompt asked each time); Ctrl+S asks before the first overwrite —
+answered Cancel nothing is written, answered Overwrite the marks are written **into the opened
+file** (its original bytes a prefix of the result), which is reopened (2 saved marks, title
+without `*`, Save disabled), the highlight now drawn by the renderer from its appearance
+stream (pixels yellow, no canvas note icon) and the note text restored (a copy of the file
+goes to `first.pdf`); a second Ctrl+S has nothing to save (size unchanged); the saved
+highlight can be selected; a new highlight on `safe` + Ctrl+S appends to the same file
+without a question (3 marks, distinct ids, read back strictly); File → Save As… (`autoPath`)
+writes `saveas.pdf` and opens it; with a new note, Ctrl+S on a read-only `saveas.pdf` is
+refused (status, file unchanged), and on a `saveas.pdf` changed on disk (bytes appended
+behind the viewer's back) refused with the changed-on-disk question (answered Cancel: file
+unchanged, the note still unsaved); then Ctrl+W answered Don't Save closes without saving
+and leaves `saveas.pdf` byte for byte as it was. Results in `save.txt`. -/
 def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
@@ -4779,7 +4920,7 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   let worldC : Pt := ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩
   out := out.push s!"world-box: {num world.llx} {num world.lly} {num world.urx} {num world.ury}"
   let orig := (← st.get).path.getD ""
-  let target := Save.defaultTarget orig
+  let origBytes ← IO.FS.readBinFile orig
   out := out.push s!"dirty0: {(← st.get).marks.dirty} {← k.star} {← k.menuState .save} {← run ["::safepdf::btnState", ".bar.save"]}"
   -- 1. A highlight and a note.
   let some wpos ← boxWindowPos st world | throw (IO.userError "world not shown")
@@ -4788,7 +4929,7 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   sendEvent ".bar.highlight" "<ButtonRelease-1>" ["-x", "16", "-y", "16"]
   smokeNoteAt st 300 400 smokeNoteText
   out := out.push s!"dirty1: {(← st.get).marks.dirty} {← k.star} {← k.menuState .save} {← run ["::safepdf::btnState", ".bar.save"]} {(← st.get).marks.marks.size}"
-  -- 2. Quit and Close answered Cancel.
+  -- 2. Quit, Close and the window's close button answered Cancel.
   discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
   discard <| run ["update"]
@@ -4796,55 +4937,86 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-w>"
   out := out.push s!"close-cancel: {(← st.get).doc.isSome} {(← k.lastAsk).startsWith "2 mark(s)"}"
-  out := out.push s!"wm-delete: {← run ["wm", "protocol", ".", "WM_DELETE_WINDOW"]}"
-  -- 3. Ctrl+S: FILE-annotated.pdf, no question, reopened.
-  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  let wmDelete ← run ["wm", "protocol", ".", "WM_DELETE_WINDOW"]
+  out := out.push s!"wm-delete: {wmDelete}"
+  discard <| run ["set", "::safepdf::lastAsk", ""]
+  discard <| Shim.eval wmDelete
+  discard <| run ["update"]
+  out := out.push s!"wm-close-cancel: {← run ["winfo", "exists", "."]} {(← st.get).doc.isSome} {(← st.get).marks.dirty} {(← k.lastAsk).startsWith "2 mark(s) on text.pdf are not saved. Save them before quitting?"}"
+  -- 3. Ctrl+S: the first overwrite asks; Cancel writes nothing, Overwrite writes into the
+  -- opened file and reopens it.
   discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"overwrite-cancel: {(← IO.FS.readBinFile orig).data == origBytes.data} {(← st.get).marks.dirty} {(← k.lastAsk).startsWith "Save 2 new or changed mark(s) into text.pdf?"} {((← k.lastAsk).splitOn "first revision").length == 2}"
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  sendEvent ".c" "<Control-Key-s>"
   let s1 ← st.get
-  out := out.push s!"saved-path: {s1.path == some target} {decide ((← k.size target) > (← k.size orig))} {(← k.lastAsk).isEmpty}"
+  let bytes1 ← IO.FS.readBinFile orig
+  out := out.push s!"saved-path: {s1.path == some orig} {decide (bytes1.size > origBytes.size)} {Save.isPrefix origBytes bytes1}"
   out := out.push s!"after-save: {s1.marks.marks.size} {s1.marks.saved.length} {s1.marks.dirty} {← k.star} {← k.menuState .save}"
   out := out.push s!"world-after-save: {← k.px worldC}"
   out := out.push s!"note-after-save: {(s1.marks.marks.toList.find? (·.isNote)).map (·.text) == some smokeNoteText} {← tagCount "note"}"
   out := out.push s!"status-after-save: {← k.status}"
-  IO.FS.writeBinFile (file "first.pdf") (← IO.FS.readBinFile target)
+  IO.FS.writeBinFile (file "first.pdf") bytes1
   -- 4. Nothing new: nothing written.
-  let size1 ← k.size target
+  let size1 ← k.size orig
   sendEvent ".c" "<Control-Key-s>"
-  out := out.push s!"save-nothing: {(← k.status).startsWith "no unsaved marks"} {size1 == (← k.size target)}"
+  out := out.push s!"save-nothing: {(← k.status).startsWith "no unsaved marks"} {size1 == (← k.size orig)}"
   -- 5. The saved highlight can be selected (its edits are `smokeEdit`'s, task 9.5g).
   k.clickAt wpos
   out := out.push s!"saved-selected: {(← st.get).markSel.isSome}"
   sendKey "Escape"
-  -- 6. A new highlight, saved into the same file (no question, no duplicates).
+  -- 6. A new highlight, saved into the same file (no question, no duplicates). Any question
+  -- would get the answer `unexpected` (= Cancel) and show in lastAsk.
   let some spos ← boxWindowPos st safe | throw (IO.userError "safe not shown")
   for _ in [0:2] do k.clickAt spos
   discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
   out := out.push s!"dirty2: {(← st.get).marks.dirty} {← k.star}"
+  discard <| run ["set", "::safepdf::autoAnswer", "unexpected"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-s>"
   let s2 ← st.get
-  out := out.push s!"second-save: {s2.path == some target} {s2.marks.marks.size} {s2.marks.dirty} {(← k.lastAsk).isEmpty}"
-  out := out.push s!"file-marks: {← fileMarks target}"
+  out := out.push s!"second-save: {s2.path == some orig} {s2.marks.marks.size} {s2.marks.dirty} {(← k.lastAsk).isEmpty}"
+  out := out.push s!"file-marks: {← fileMarks orig}"
   -- 7. Save As (no new marks: a copy).
   discard <| run ["set", "::safepdf::autoPath", file "saveas.pdf"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
   discard <| run ["set", "::safepdf::autoPath", ""]
-  out := out.push s!"save-as: {(← st.get).path == some (file "saveas.pdf")} {(← k.size (file "saveas.pdf")) == (← k.size target)} {(← st.get).marks.marks.size} {(← st.get).marks.dirty}"
-  -- 8. A new note, then Close answered No (discard).
+  out := out.push s!"save-as: {(← st.get).path == some (file "saveas.pdf")} {(← k.size (file "saveas.pdf")) == (← k.size orig)} {(← st.get).marks.marks.size} {(← st.get).marks.dirty}"
+  -- 8. A new note; Ctrl+S on a read-only file is refused.
+  let sa := file "saveas.pdf"
+  let saBytes ← IO.FS.readBinFile sa
   smokeNoteAt st 400 200 "discard me"
   out := out.push s!"dirty3: {(← st.get).marks.dirty} {← k.star}"
-  discard <| run ["set", "::safepdf::autoAnswer", "no"]
+  let mode ← run ["file", "attributes", sa, "-permissions"]
+  discard <| run ["file", "attributes", sa, "-permissions", "0444"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"read-only: {(← k.status).startsWith "cannot save: saveas.pdf is read-only"} {(← IO.FS.readBinFile sa).data == saBytes.data} {(← st.get).marks.dirty} {(← k.lastAsk).isEmpty}"
+  discard <| run ["file", "attributes", sa, "-permissions", mode]
+  -- 9. Changed on disk behind the viewer's back: refused, Save As… offered (Cancel).
+  let tampered := saBytes ++ "% changed by another program\n".toUTF8
+  IO.FS.writeBinFile sa tampered
+  discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"changed-on-disk: {(← k.lastAsk).startsWith "saveas.pdf was changed on disk"} {(← IO.FS.readBinFile sa).data == tampered.data} {(← st.get).marks.dirty} {(← k.status).startsWith "not saved: saveas.pdf changed on disk"}"
+  IO.FS.writeBinFile sa saBytes
+  -- 10. Close answered Don't Save: closed, the file untouched.
+  discard <| run ["set", "::safepdf::autoAnswer", "dontsave"]
   sendEvent ".c" "<Control-Key-w>"
-  out := out.push s!"close-discard: {(← st.get).doc.isNone} {(← k.lastAsk).startsWith "1 mark(s) on saveas.pdf"} {← fileMarks (file "saveas.pdf")}"
+  out := out.push s!"close-discard: {(← st.get).doc.isNone} {(← k.lastAsk).startsWith "1 mark(s) on saveas.pdf"} {← fileMarks sa} {(← IO.FS.readBinFile sa).data == saBytes.data}"
   IO.FS.writeFile (file "save.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
 /-- Smoke steps of reopening a saved file (`SAFEPDF_VIEWER_SMOKE_MODE=reopen`, task 9.5c) on
-the `text-annotated.pdf` of `smokeSave`: its 3 marks are restored (saved, title without `*`),
-the highlight pixels are yellow (renderer), the note has no canvas icon but a click on its
-place opens its popup with the saved text; after a new highlight (select all) Save As onto the
-opened file answered No writes nothing, Yes appends; a further note and Quit answered Yes
-saves into the same file and quits. Results in `reopen.txt` (written before the quit). -/
+the `text.pdf` that `smokeSave` overwrote: its 3 marks are restored (saved, title without
+`*`), the highlight pixels are yellow (renderer), the note has no canvas icon but a click on
+its place opens its popup with the saved text; after a new highlight (select all) Save As onto
+the opened file answered No writes nothing, Yes appends; a further note, Quit answered Cancel
+keeps the window (the unsaved-changes prompt asked, `quit-ask`), and Quit answered Save saves
+into the same file (no further question: this session wrote it) and quits (task 9.r2: the
+save on quit is the prompt's answer, never silent). Results in `reopen.txt` (written before
+the quit). -/
 def smokeReopen (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
@@ -4877,15 +5049,21 @@ def smokeReopen (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["set", "::safepdf::autoPath", path]
   discard <| run ["set", "::safepdf::autoAnswer", "no"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
-  out := out.push s!"overwrite-no: {size0 == (← k.size path)} {(← k.lastAsk).startsWith "Overwrite the opened file text-annotated.pdf?"} {(← st.get).marks.dirty}"
+  out := out.push s!"overwrite-no: {size0 == (← k.size path)} {(← k.lastAsk).startsWith "Overwrite the opened file text.pdf?"} {(← st.get).marks.dirty}"
   discard <| run ["set", "::safepdf::autoAnswer", "yes"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
   discard <| run ["set", "::safepdf::autoPath", ""]
   out := out.push s!"overwrite-yes: {decide ((← k.size path) > size0)} {(← st.get).marks.dirty} {(← st.get).marks.marks.size} {← fileMarks path}"
-  -- One more note; Quit answered Yes saves (no further question: this session wrote it).
+  -- One more note; Quit answered Cancel keeps the window, Save saves (no further question:
+  -- this session wrote the file) and quits.
   smokeNoteAt st 100 100 "before quit"
   out := out.push s!"dirty2: {(← st.get).marks.dirty} {← k.star}"
+  discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
+  discard <| run ["update"]
+  out := out.push s!"quit-ask: {← run ["winfo", "exists", "."]} {(← st.get).marks.dirty} {(← k.lastAsk).startsWith "1 mark(s) on text.pdf are not saved. Save them before quitting?"}"
   IO.FS.writeFile (file "reopen.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["set", "::safepdf::autoAnswer", "save"]
   discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
 
 /-- Smoke steps of editing saved marks (`SAFEPDF_VIEWER_SMOKE_MODE=edit`, task 9.5g) on the
@@ -4894,7 +5072,7 @@ the whole page, two notes). A click on `world` selects the whole-page highlight 
 Delete removes it; a click on `world` then selects its highlight, which is recoloured green
 (the pages are rendered from the preview at once: the pixels turn green) and gets a comment
 (the edit bubble's Comment); the `safe` highlight is deleted (white again); the first note's
-text is edited. Ctrl+S (the opened file: answered Yes) writes one update and reopens: 4 marks,
+text is edited. Ctrl+S (the opened file: answered Overwrite) writes one update and reopens: 4 marks,
 nothing unsaved, the comment restored with its id and the highlight's colour, the note text
 and the colours as edited, each id once in the file. Then a second round on top: the world
 highlight back to blue and its comment deleted, Ctrl+S, reopened: 3 marks. Results in
@@ -4957,8 +5135,8 @@ def smokeEdit (st : IO.Ref State) (dir : String) : IO Unit := do
   if let some n := note then noteSave st (toString n.id) "Edited note"
   let s1 ← st.get
   out := out.push s!"pending: {s1.marks.pending} {s1.marks.dirty} {← k.star}"
-  -- 5. Save into the opened file (Yes), reopened.
-  discard <| run ["set", "::safepdf::autoAnswer", "yes"]
+  -- 5. Save into the opened file (Overwrite), reopened.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
   sendEvent ".c" "<Control-Key-s>"
   let s2 ← st.get
   let m2 := s2.marks.marks.toList
@@ -4982,28 +5160,31 @@ def smokeEdit (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["destroy", "."]
 
 /-- Smoke step of saving an encrypted document (`SAFEPDF_VIEWER_SMOKE_MODE=encrypted`, task
-9.5c): a note at (100, 100), then Ctrl+S. Until task 9.5f the writer refuses encrypted files:
-the status line shows its error, nothing is written and the mark stays unsaved; afterwards
-the file is written and the mark saved. Either way the viewer keeps running. Results in
-`encrypted.txt`. -/
+9.5c): a note at (100, 100), then Ctrl+S (answered Overwrite, should it ask). Until task 9.5f
+the writer refuses encrypted files before any question (task 9.r2): the status line shows its
+error, nothing is written and the mark stays unsaved; afterwards the opened file is written and
+the mark saved. Either way the viewer keeps running. Results in `encrypted.txt`. -/
 def smokeEncrypted (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
   discard <| run ["update"]
   let orig := (← st.get).path.getD ""
-  let target := Save.defaultTarget orig
+  let target := orig
+  let size0 ← k.size orig
   smokeNoteAt st 100 100 "encrypted"
   let before := (← st.get).marks.dirty
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
   sendEvent ".c" "<Control-Key-s>"
   let s ← st.get
-  let written ← System.FilePath.pathExists target
+  let written := (← k.size orig) != size0
   let status ← k.status
   let outcome :=
     if !written && s.marks.dirty && status.startsWith "cannot save to" then "refused"
     else if written && !s.marks.dirty && s.path == some target then "saved"
     else "inconsistent"
   IO.FS.writeFile (file "encrypted.txt")
-    s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nstatus: {status}\n"
+    s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nasked: {!(← k.lastAsk).isEmpty}\nstatus: {status}\n"
   discard <| run ["destroy", "."]
 
 /-- Smoke steps of XFDF import/export (`SAFEPDF_VIEWER_SMOKE_MODE=xfdf`, task 9.11) on a copy
@@ -5460,8 +5641,8 @@ of the text PDF (substitute fonts on, so the saved free text is painted): the to
 text turns the mode on with its pop-over; a click at (100, 400) opens a text box, typed text
 and Escape make a free-text mark (canvas text items); a double click edits it (a click
 elsewhere commits); the pop-over's red swatch and size slider (20) change it; Draw: blue,
-thickness 4, two strokes form one drawing (two canvas lines); Ctrl+S writes and reopens
-`text-annotated.pdf` (both read back, the text box's pixels dark, the stroke blue, drawn by the
+thickness 4, two strokes form one drawing (two canvas lines); Ctrl+S (Overwrite) writes into
+the opened file and reopens it (both read back, the text box's pixels dark, the stroke blue, drawn by the
 renderer); dragging the text box moves it by 50 units (saved, read back moved); Delete removes
 the text box and the drawing's bubble Delete the drawing; Ctrl+S leaves none in the file and
 white paper. Results in `editors.txt` (boxes for the external `mutool` check of
@@ -5544,7 +5725,9 @@ def smokeEditors (st : IO.Ref State) (dir : String) : IO Unit := do
   sendKey "Escape"
   btn ".bar.draw"
   out := out.push s!"modes-off: {(← st.get).ui.editor == .none} {← run ["winfo", "ismapped", ".edbar"]}"
-  -- 5. Save (FILE-annotated.pdf, reopened): both read back, painted by the renderer.
+  -- 5. Save (into the opened file, answered Overwrite; reopened): both read back, painted by
+  -- the renderer.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
   sendEvent ".c" "<Control-Key-s>"
   let s1 ← st.get
   let path := s1.path.getD ""
@@ -5931,9 +6114,10 @@ def smokeM9 (st : IO.Ref State) (dir : String) : IO Unit := do
   let before ← m9Marks st
   out := out.push s!"marks-before: {before}"
   -- 7. Save (Ctrl+S), close, reopen from disk.
-  let orig := (← st.get).path.getD ""
-  let target := Save.defaultTarget orig
+  let target := (← st.get).path.getD ""
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
   sendEvent ".c" "<Control-Key-s>"
+  discard <| run ["set", "::safepdf::autoAnswer", ""]
   settle st
   out := out.push s!"saved: {(← st.get).path == some target} {(← st.get).marks.dirty} {← fileMarks target}"
   out := out.push s!"saved-status: {← k.status}"
@@ -5970,7 +6154,7 @@ def smokeM9 (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["destroy", "."]
 
 /-- The second half of the M9 run (`SAFEPDF_VIEWER_SMOKE_MODE=m9-reopen`, task 9.6): a fresh
-viewer process on the `FILE-annotated.pdf` of `smokeM9` restores the four marks (equal
+viewer process on the file `smokeM9` saved into (task 9.r2: the opened file) restores the four marks (equal
 descriptions) and the renderer draws them (pixels), at Page Fit. Results in `m9-reopen.txt`. -/
 def smokeM9Reopen (st : IO.Ref State) (dir : String) : IO Unit := do
   discard <| run ["update"]
