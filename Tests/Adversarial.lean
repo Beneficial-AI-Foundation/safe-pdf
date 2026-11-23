@@ -11,6 +11,10 @@ For every `Tests/adversarial/*.pdf` the suite runs the Phase 2 entry points:
 
 * `Core.Xref.Chain.loadChain` (the `/Prev` chain),
 * `Repair.repair` and `Repair.scanObjects` (the repair scan),
+* `Core.Open.openFile` (strict, else repair, cycles final), `OpenDoc.getObject` of every
+  scanned object when it opens, and `SafePdf.parse` (task 2.13:
+  the M2 clause "Bogk-style cyclic files all rejected" is checked on these two, the entry
+  points a viewer uses; the cyclic files must fail with `Error.cycle`, not open repaired),
 * `parseIndirectAt` at every `N G obj` offset found by `scanObjects`, and `parseObjectAt`
   at the body of each such object,
 * for `length-*` files, `Core.Xref.Length.parseIndirectResolved` at every such offset, with a
@@ -34,10 +38,11 @@ A deterministic set derived from the cyclic files, all length-preserving unless 
   `startxref` pointed at every xref offset; each `/Prev` blanked out; `%%EOF` deleted;
   truncation at 25/50/75 %. A variant in which `startxref` and every `/Prev` point at an
   xref table (and every table has a `/Prev`) has no terminating revision, so `loadChain`
-  must fail with a "cycle" error; for the others any result is accepted (bounded time only).
+  must fail with an `Error.cycle` "xref /Prev cycle", and so must `openFile` (no repair);
+  for the others any result is accepted (bounded time only).
 * `length-self-ref.pdf`: the `/Length 4 0 R` reference renumbered to `k 0 R` (`k = 1..9`) and
-  `4 1 R`; `parseIndirectResolved` of object 4 must fail with "cyclic /Length" exactly when
-  `k = 4`.
+  `4 1 R`; `parseIndirectResolved` of object 4 must fail with `Error.cycle` "cyclic /Length"
+  exactly when `k = 4`.
 
 Paths are relative to the current directory: run `lake exe tests` from the repo root.
 -/
@@ -62,6 +67,7 @@ def errS : Error → String
   | .malformed o m => s!"malformed@{o}: {m}"
   | .limitExceeded k => s!"limitExceeded {reprStr k}"
   | .unsupported w => s!"unsupported: {w}"
+  | .cycle o w => s!"cycle@{o}: {w}"
 
 /-- An xref entry, compactly. -/
 def entS : XrefEntry → String
@@ -80,6 +86,14 @@ def chainS (revs : List Chain.Revision) : String :=
 /-- Summary of a `repair` result: the entries and the trailer root. -/
 def repairS (r : XrefSection × Trailer) : String :=
   s!"entries={entriesS r.1.entries} root={r.2.root?}"
+
+/-- Summary of an opened document: how it was opened and its size. -/
+def openS (d : Core.Open.OpenDoc) : String :=
+  s!"{if d.repaired then "repaired" else "strict"} revs={d.revisions} objects={d.objectCount}"
+
+/-- Summary of a parsed document. -/
+def docS (d : Document) : String :=
+  s!"{if d.repaired then "repaired" else "strict"} root={d.root}"
 
 /-- Summary of an indirect-object parse. -/
 def indS (r : IndirectObject × Nat) : String :=
@@ -108,6 +122,8 @@ inductive Expect where
   | errMsg (sub : String)
   /-- `Error.limitExceeded` of this kind. -/
   | errLimit (k : LimitKind)
+  /-- `Error.cycle` whose rendering contains this text (task 2.13). -/
+  | errCycle (sub : String)
   /-- Any result: only termination within the time bounds is checked. -/
   | any
 
@@ -118,6 +134,7 @@ def Expect.describe : Expect → String
   | .err => "any error"
   | .errMsg s => s!"error containing \"{s}\""
   | .errLimit k => s!"limitExceeded {reprStr k}"
+  | .errCycle s => s!"cycle error containing \"{s}\""
   | .any => "any result"
 
 /-- Whether a summarised result meets the expectation. -/
@@ -127,6 +144,7 @@ def Expect.accepts : Expect → Except Error String → Bool
   | .err, .error _ => true
   | .errMsg sub, .error e => hasSub (errS e) sub
   | .errLimit k, .error (.limitExceeded k') => k == k'
+  | .errCycle sub, .error e@(.cycle _ _) => hasSub (errS e) sub
   | .any, _ => true
   | _, _ => false
 
@@ -135,47 +153,73 @@ def minimalEntries : String :=
   "0:f0/65535,1:@15/0,2:@64/0,3:@121/0,4:@247/0,5:@334/0"
 
 /-- **The expected-outcomes table**: per file, `(entry point, expectation)`. Entry-point keys
-are `loadChain`, `repair`, `scanObjects`, `parseIndirectAt obj N`, `parseObjectAt obj N` and
+are `loadChain`, `repair`, `scanObjects`, `openFile`, `parse`, `getObject obj N` (through
+the opened document), `parseIndirectAt obj N`, `parseObjectAt obj N` and
 `parseIndirectResolved obj N`. Missing rows mean `Expect.any`. -/
 def expectations : String → List (String × Expect)
   | "minimal-valid.pdf" =>
     [("loadChain", .okEq s!"revs=[404] entries={minimalEntries}"),
      ("repair", .okEq s!"entries={minimalEntries} root=(some (1, 0))"),
+     ("openFile", .okEq "strict revs=1 objects=6"), ("parse", .okEq "strict root=(1, 0)"),
      ("scanObjects",
       .okEq "[(1, (0, 15)), (2, (0, 64)), (3, (0, 121)), (4, (0, 247)), (5, (0, 334))]"),
      ("parseIndirectAt obj 1", .ok), ("parseIndirectAt obj 2", .ok),
      ("parseIndirectAt obj 3", .ok), ("parseIndirectAt obj 4", .ok),
      ("parseIndirectAt obj 5", .ok)]
-  -- the Bogk & Schöpl hang: two tables whose /Prev point at each other
-  -- (the strict path rejects it; the repair scan, being the fallback, recovers the objects)
-  | "xref-prev-cycle.pdf" => [("loadChain", .errMsg "xref /Prev cycle"), ("repair", .ok)]
+  -- the Bogk & Schöpl hang: two tables whose /Prev point at each other. The strict path
+  -- rejects it with a cycle error, which is final (task 2.13, M2): openFile and parse return
+  -- it although the repair scan on its own would recover the objects.
+  | "xref-prev-cycle.pdf" =>
+    [("loadChain", .errCycle "xref /Prev cycle"), ("repair", .ok),
+     ("openFile", .errCycle "xref /Prev cycle"), ("parse", .errCycle "xref /Prev cycle")]
   -- a cycle of length 1
-  | "xref-prev-self.pdf" => [("loadChain", .errMsg "xref /Prev cycle"), ("repair", .ok)]
+  | "xref-prev-self.pdf" =>
+    [("loadChain", .errCycle "xref /Prev cycle"), ("repair", .ok),
+     ("openFile", .errCycle "xref /Prev cycle"), ("parse", .errCycle "xref /Prev cycle")]
   -- the plain object parser does not resolve indirect /Length (error); the resolving one
   -- detects the self-reference
   | "length-self-ref.pdf" =>
     [("loadChain", .ok), ("repair", .ok),
      ("parseIndirectAt obj 4", .err),
-     ("parseIndirectResolved obj 4", .errMsg "cyclic /Length")]
+     ("parseIndirectResolved obj 4", .errCycle "cyclic /Length"),
+     -- the root is sound, so the file opens strictly; the cycle is final where it is met:
+     -- resolving object 4 (the page contents) through the opened document
+     ("openFile", .okEq "strict revs=1 objects=6"), ("parse", .okEq "strict root=(1, 0)"),
+     ("getObject obj 4", .errCycle "cyclic /Length")]
   -- The file's xref stream is structurally valid, so loadChain succeeds since task 2.4a;
   -- the attack is the /Length cycle 4 → 6 (in object stream 5) → stream 5 → 4, which only
-  -- appears when objects are resolved: resolving object 4's /Length must fail.
+  -- appears when objects are resolved: resolving object 4's /Length is a cycle (task 2.14).
+  -- Object 5's own /Length `4 0 R` names a stream, not an integer object: resolving 5 fails
+  -- as malformed ("expected endobj") before any cycle is reached (the stream 4 is never
+  -- parsed as a stream there), so its rows stay `.err`.
   | "length-mutual.pdf" =>
     [("loadChain", .ok), ("repair", .ok),
      ("parseIndirectAt obj 4", .err), ("parseIndirectAt obj 5", .err),
-     ("parseIndirectResolved obj 4", .err)]
-  -- Structure-level attacks for Phases 4/5 (page tree, XObject nesting): for now only
-  -- termination of loadChain/repair within the bounds is checked (no rows needed).
-  | "pages-kids-cycle.pdf" => []
-  | "xobject-recursive.pdf" => []
-  -- xref stream whose entry places object 5 in object stream 5 (task 2.4a rejects it)
+     ("parseIndirectResolved obj 4", .errCycle "cyclic /Length"),
+     ("parseIndirectResolved obj 5", .err),
+     -- opens strictly (the root is sound); the cycle is final where it is met: resolving
+     -- object 4 (the page contents) through the opened document
+     ("openFile", .okEq "strict revs=1 objects=8"), ("parse", .okEq "strict root=(1, 0)"),
+     ("getObject obj 4", .errCycle "cyclic /Length"), ("getObject obj 5", .err)]
+  -- Structure-level attacks for Phases 4/5 (page tree, XObject nesting): the xref and the
+  -- root are sound, so the files open strictly; the cycles are for the page-tree and content
+  -- layers to reject.
+  | "pages-kids-cycle.pdf" =>
+    [("openFile", .okEq "strict revs=1 objects=6"), ("parse", .okEq "strict root=(1, 0)")]
+  | "xobject-recursive.pdf" =>
+    [("openFile", .okEq "strict revs=1 objects=7"), ("parse", .okEq "strict root=(1, 0)")]
+  -- xref stream whose entry places object 5 in object stream 5 (task 2.4a rejects it; a
+  -- cycle error since task 2.13, so openFile and parse do not fall back to repair)
   | "objstm-self-container.pdf" =>
-    [("loadChain", .errMsg "own object stream"), ("repair", .ok)]
+    [("loadChain", .errCycle "own object stream"), ("repair", .ok),
+     ("openFile", .errCycle "own object stream"), ("parse", .errCycle "own object stream")]
   -- the 100,000-deep array must hit the depth limit, not the native stack
   | "deep-nesting.pdf" =>
     [("loadChain", .ok), ("repair", .ok),
      ("parseIndirectAt obj 6", .errLimit .objectDepth),
-     ("parseObjectAt obj 6", .errLimit .objectDepth)]
+     ("parseObjectAt obj 6", .errLimit .objectDepth),
+     ("openFile", .okEq "strict revs=1 objects=7"), ("parse", .okEq "strict root=(1, 0)"),
+     ("getObject obj 6", .errLimit .objectDepth)]
   | _ => []
 
 /-- The files the table is about; each must exist in the corpus. -/
@@ -287,11 +331,21 @@ def runFile (name : String) (bytes : ByteArray) : IO Nat := do
   let chain ← call st name "loadChain" (← ex "loadChain") chainS
     (fun _ => Chain.loadChain lim bytes)
   let rep ← call st name "repair" (← ex "repair") repairS (fun _ => Repair.repair lim bytes)
+  let opened ← call st name "openFile" (← ex "openFile") openS
+    (fun _ => Core.Open.openFile lim bytes)
+  let _ ← call st name "parse" (← ex "parse") docS (fun _ => SafePdf.parse bytes)
   let objs ← call st name "scanObjects" (← ex "scanObjects") (fun l => s!"{l}")
     (fun _ => .ok (Repair.scanObjects lim bytes))
   let objs := match objs with
     | .ok l => l
     | .error _ => []
+  -- object resolution through the opened document (cycles below the root surface here)
+  match opened with
+  | .ok d =>
+    for (n, g, _) in objs do
+      let k := s!"getObject obj {n}"
+      let _ ← call st name k (← ex k) (fun _ => "body") (fun _ => d.getObject lim n g)
+  | .error _ => pure ()
   for (n, _, off) in objs do
     let k := s!"parseIndirectAt obj {n}"
     let _ ← call st name k (← ex k) indS (fun _ => parseIndirectAt lim bytes off)
@@ -334,7 +388,7 @@ def runFile (name : String) (bytes : ByteArray) : IO Nat := do
 structure Variant where
   label : String
   bytes : ByteArray
-  /-- `loadChain` must fail with a `/Prev` cycle error. -/
+  /-- `loadChain` and `openFile` must fail with an `Error.cycle` `/Prev` cycle error. -/
   prevCycle : Bool := false
   /-- Run `parseIndirectResolved` on this object number, and whether it must be a
   "cyclic /Length" error. -/
@@ -433,14 +487,17 @@ def lengthVariants (b : ByteArray) (selfObj : Nat) : List Variant := Id.run do
       | none => pure ()
   return out.reverse
 
-/-- Run `loadChain`, `repair` and (if requested) `parseIndirectResolved` on one variant. -/
+/-- Run `loadChain`, `repair`, `openFile` and (if requested) `parseIndirectResolved` on one
+variant. -/
 def runVariant (st : IO.Ref Acc) (file : String) (v : Variant) : IO Unit := do
   let ctx := s!"{file} [{v.label}]"
   let lim := Limits.default
   let before ← st.get
-  let chain ← call st ctx "loadChain" (if v.prevCycle then .errMsg "xref /Prev cycle" else .any)
+  let chain ← call st ctx "loadChain" (if v.prevCycle then .errCycle "xref /Prev cycle" else .any)
     chainS (fun _ => Chain.loadChain lim v.bytes)
   let _ ← call st ctx "repair" .any repairS (fun _ => Repair.repair lim v.bytes)
+  let _ ← call st ctx "openFile" (if v.prevCycle then .errCycle "xref /Prev cycle" else .any)
+    openS (fun _ => Core.Open.openFile lim v.bytes)
   match v.lengthObj with
   | none => pure ()
   | some (n, cyc) =>
@@ -454,7 +511,7 @@ def runVariant (st : IO.Ref Acc) (file : String) (v : Variant) : IO Unit := do
       match lookup n with
       | some (.inUse off _) =>
         let _ ← call st ctx s!"parseIndirectResolved obj {n}"
-          (if cyc then .errMsg "cyclic /Length" else .any) indS
+          (if cyc then .errCycle "cyclic /Length" else .any) indS
           (fun _ => Length.parseIndirectResolved lookup lim v.bytes fuel off)
       | _ =>
         IO.println s!"  FAIL {ctx}: object {n} not in use in the xref"

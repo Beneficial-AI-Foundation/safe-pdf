@@ -1,0 +1,18 @@
+--- xref
+file:       input
+startxref:  -
+sections:   0 parsed (newest first)
+stopped:    malformed input at byte 576: startxref offset beyond end of input (locating startxref)
+strict:     error: malformed input at byte 576: startxref offset beyond end of input
+--- revisions
+file:       input
+sections:   0 (oldest first; #0 is the newest)
+stopped:    malformed input at byte 576: startxref offset beyond end of input (locating startxref)
+--- repair
+file:       input
+scan:       5 header hit(s), 5 parse attempt(s), 0 failed
+repair:     ok, 5 object(s), /Size 6, /Root 1 0 R, encrypted false
+trailer:    /Size /Root
+validates:  yes (/Root resolves to a dictionary)
+strict:     error: malformed input at byte 576: startxref offset beyond end of input
+diff:       n/a (needs both strict and repaired sections)

@@ -1,0 +1,25 @@
+--- xref
+file:       input
+startxref:  186
+sections:   1 parsed (newest first)
+  #0 offset 186 via startxref: table
+      4 entries (2 in use, 0 compressed, 2 free), highest object 3
+      /Size 4  /Prev -  /Root 1 0 R  /XRefStm -  encrypted false
+      keys: /Size /Root
+strict:     ok, 1 section(s)
+merged:     4 entries (2 in use, 0 compressed, 2 free), highest object 3
+--- revisions
+file:       input
+sections:   1 (oldest first; #0 is the newest)
+  #0 offset 186: table, 4 entries
+      added   4: 0 1 2 3
+--- repair
+file:       input
+scan:       3 header hit(s), 3 parse attempt(s), 0 failed
+repair:     ok, 3 object(s), /Size 4, /Root 1 0 R, encrypted false
+trailer:    /Size /Root
+validates:  yes (/Root resolves to a dictionary)
+strict:     ok, 4 merged entries
+diff:       1 same, 1 offset/generation mismatch(es), 0 only in strict, 1 only in repair, 0 compressed (not scanned), 0 found over compressed
+  mismatch (num strict→repair): 3:120→115
+  only repair (num@offset): 2@58

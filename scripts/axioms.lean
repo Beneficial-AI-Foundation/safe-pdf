@@ -234,3 +234,76 @@ import SafePdf
 #print axioms SafePdf.Core.Open.getObject_depth
 #print axioms SafePdf.Core.Open.getObject_work
 #print axioms SafePdf.Core.Open.getObject_length_calls_le
+
+-- Phase 2, task 2.13: cycles are final (Error.cycle; Open, XrefTerm, ObjStm, Length)
+#print axioms SafePdf.Core.Open.openFile_cycle
+#print axioms SafePdf.Core.Open.openFile_loadChain_cycle
+#print axioms SafePdf.Core.Open.openFile_cycle_not_ok
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_self_cycle
+#print axioms SafePdf.Core.Xref.ObjStm.fetchCompressed_mutual_cycle
+#print axioms SafePdf.Spec.XrefTerm.step_revisited
+#print axioms SafePdf.Spec.XrefTerm.step_error_endless
+#print axioms SafePdf.Spec.XrefTerm.walk_endless
+#print axioms SafePdf.Spec.XrefTerm.loadChain_endless
+#print axioms SafePdf.Spec.XrefTerm.loadChain_endless_cycle
+#print axioms SafePdf.Spec.XrefTerm.openFile_endless
+-- Phase 3, task 3.3: ASCIIHex, ASCII85, RunLength
+#print axioms SafePdf.Core.Filter.Ascii.run_spec
+#print axioms SafePdf.Core.Filter.Ascii.decodeWith_spec
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_spec
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_size_le
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_size_le_input
+#print axioms SafePdf.Core.Filter.Ascii.asciiHexDecode_encode
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_spec
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_size_le
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_size_le_input
+#print axioms SafePdf.Core.Filter.Ascii.ascii85Decode_encode
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_spec
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_size_le
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_size_le_input
+#print axioms SafePdf.Core.Filter.RunLength.runLengthDecode_encode
+#print axioms SafePdf.Core.Filter.RunLength.rlSpec_repeat
+-- Phase 2, task 2.12: prefix stability (SafePdf/Spec/PrefixStable.lean), SameAt discharged,
+-- hybrid update, /Size in the strict open path
+#print axioms SafePdf.Spec.PrefixStable.next_ext
+#print axioms SafePdf.Spec.PrefixStable.parseObjTok_ext
+#print axioms SafePdf.Spec.PrefixStable.parseIndirect_ext
+#print axioms SafePdf.Spec.PrefixStable.parseXrefTable_ext
+#print axioms SafePdf.Spec.PrefixStable.parseXrefStream_ext
+#print axioms SafePdf.Spec.PrefixStable.findStartxref_last
+#print axioms SafePdf.Spec.PrefixStable.parseXrefTable_end_lt
+#print axioms SafePdf.Spec.PrefixStable.parseIndirect_end_lt
+#print axioms SafePdf.Spec.PrefixStable.parseXrefTable_stable
+#print axioms SafePdf.Spec.PrefixStable.parseXrefStream_stable
+#print axioms SafePdf.Spec.PrefixStable.section_stable
+#print axioms SafePdf.Spec.PrefixStable.stream_stable
+#print axioms SafePdf.Spec.Unambiguous.loadChain_parses
+#print axioms SafePdf.Spec.Unambiguous.sameAt_of_extends
+#print axioms SafePdf.Spec.Unambiguous.loadChain_sameAt
+#print axioms SafePdf.Spec.Unambiguous.loadChain_append
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_append
+#print axioms SafePdf.Spec.Unambiguous.loadChain_update_hybrid
+#print axioms SafePdf.Spec.Unambiguous.loadChain_append_hybrid
+#print axioms SafePdf.Spec.Unambiguous.resolveEntry_append_hybrid
+#print axioms SafePdf.Spec.Unambiguous.openFile_lt_size
+#print axioms SafePdf.Core.Open.strictOpen_ok
+#print axioms SafePdf.Core.Open.checkSize_ok
+#print axioms SafePdf.Core.Open.strictOpen_lt_size
+-- Phase 3, task 3.4: LZWDecode (SafePdf/Core/Filter/LZW.lean)
+#print axioms SafePdf.Core.Filter.LZW.lzwDecode_size_le
+#print axioms SafePdf.Core.Filter.LZW.lzwDecode_fuel_enough
+#print axioms SafePdf.Core.Filter.LZW.loop_fuel_irrel
+#print axioms SafePdf.Core.Filter.LZW.codeWidth_ge
+#print axioms SafePdf.Core.Filter.LZW.codeWidth_le
+#print axioms SafePdf.Core.Filter.LZW.addEntry_size_le
+#print axioms SafePdf.Core.Filter.LZW.addEntry_wf
+#print axioms SafePdf.Core.Filter.LZW.addEntry_size_ge
+#print axioms SafePdf.Core.Filter.LZW.addEntry_size_eq
+#print axioms SafePdf.Core.Filter.LZW.expand_ok
+#print axioms SafePdf.Core.Filter.LZW.step_wf
+#print axioms SafePdf.Core.Filter.LZW.init_wf
+
+-- Phase 2, task 2.14: /Length through object streams (SafePdf/Core/Xref/Length.lean;
+-- decoding split into SafePdf/Core/Xref/ObjStmDecode.lean, same names)
+#print axioms SafePdf.Core.Xref.Length.containerLength_calls_le
+#print axioms SafePdf.Core.Xref.Length.resolveLength_container_cycle

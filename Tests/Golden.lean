@@ -43,6 +43,7 @@ def formatError (e : Error) : String :=
     | .malformed off msg => s!"malformed at {off}: {msg}"
     | .limitExceeded k => s!"limitExceeded: {reprStr k}"
     | .unsupported what => s!"unsupported: {what}"
+    | .cycle off what => s!"cycle at {off}: {what}"
   s!"error\n{body}\n"
 
 /-- Renderer for the `header` suite: the result of `SafePdf.parse` (header check, then

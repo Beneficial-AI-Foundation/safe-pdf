@@ -23,7 +23,12 @@ import SafePdf.Core.Xref.Length
 import SafePdf.Repair
 import SafePdf.Core.Filter.Flate
 import SafePdf.Core.Filter.Predictor
+import SafePdf.Core.Filter.Ascii
+import SafePdf.Core.Filter.RunLength
+import SafePdf.Core.Filter.LZW
 import SafePdf.Core.Xref.Stream
+import SafePdf.Core.Xref.ObjStmDecode
 import SafePdf.Core.Xref.ObjStm
 import SafePdf.Spec.Unambiguous
+import SafePdf.Spec.PrefixStable
 import SafePdf.Core.Open
