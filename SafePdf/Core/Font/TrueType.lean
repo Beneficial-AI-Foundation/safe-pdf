@@ -84,8 +84,10 @@ point `arg2`. Hinting instructions are skipped (stored lengths only, never execu
 ## Not covered
 
 Checksums are not verified (real embedded subsets often have wrong ones). `cmap` formats 2,
-8, 10, 13, 14, `post` 2.5, `OS/2`, `name`, `kern`, `vhea`/`vmtx`, TrueType collections and
-CFF-flavoured OpenType are out of scope (CFF is a separate task).
+8, 10, 13, 14, `post` 2.5, `OS/2`, `kern`, `vhea`/`vmtx` and CFF-flavoured OpenType are out
+of scope (CFF is a separate task). TrueType collections (`'ttcf'`) and the PostScript name of
+`name` are read only to pick a substitute face (task 9.r7, `faceByPsName?`, `parseFace`);
+`parse` (embedded programs) still refuses a collection.
 -/
 
 namespace SafePdf.Core.Font.TrueType
@@ -195,13 +197,17 @@ def tagOf (s : String) : Nat := s.toList.foldl (fun a c => a * 256 + c.toNat) 0
 def tagName (t : Nat) : String :=
   String.ofList ((List.range 4).reverse.map fun k => Char.ofNat (t / 256 ^ k % 256))
 
-/-- Directory record `k` (at `12 + 16·k`). -/
-def readRec (b : ByteArray) (k : Nat) : Option TableRec := do
-  let base := 12 + 16 * k
+/-- Directory record `k` of the offset table at byte `dir` (at `dir + 12 + 16·k`; a TrueType
+collection's faces have their offset tables inside the file, task 9.r7). -/
+def readRecAt (b : ByteArray) (dir k : Nat) : Option TableRec := do
+  let base := dir + 12 + 16 * k
   let tag ← u32At b base
   let offset ← u32At b (base + 8)
   let length ← u32At b (base + 12)
   some ⟨tag, offset, length⟩
+
+/-- Directory record `k` of a font whose offset table starts at byte 0. -/
+def readRec (b : ByteArray) (k : Nat) : Option TableRec := readRecAt b 0 k
 
 /-- Whether a record lies inside an input of `size` bytes. -/
 def TableRec.inBounds (r : TableRec) (size : Nat) : Bool := r.offset + r.length ≤ size
@@ -963,19 +969,20 @@ def TTFont.glyphOutline (f : TTFont) (gid : Nat) : Option Outline.Outline :=
 
 /-! ## Parsing -/
 
-/-- Parse an embedded TrueType font program (`/FontFile2` contents, Flate already decoded).
-Fails on a malformed directory, a missing or malformed `head`/`maxp`, or an input over
+/-- Parse the TrueType font whose offset table starts at byte `dir` of `bytes` (table offsets
+are absolute, as in a collection; `dir = 0` for a plain font file). Fails on a malformed
+directory, a missing or malformed `head`/`maxp`, or an input over
 `Limits.maxDecodedStreamBytes`; other problems skip a table or reject a glyph. -/
-def parse (limits : Limits) (bytes : ByteArray) : Except Error TTFont := do
+def parseAt (limits : Limits) (bytes : ByteArray) (dir : Nat) : Except Error TTFont := do
   if limits.maxDecodedStreamBytes < bytes.size then throw (.limitExceeded .decodedStreamBytes)
-  let ver ← need (u32At bytes 0) "truncated header"
+  let ver ← need (u32At bytes dir) "truncated header"
   if ver = 0x4F54544F then throw (.unsupported "OpenType font with CFF outlines ('OTTO')")
   if ver = 0x74746366 then throw (.unsupported "TrueType collection ('ttcf')")
   if ver ≠ 0x00010000 ∧ ver ≠ 0x74727565 then
-    throw (.malformed 0 "TrueType: bad sfnt version")
-  let n ← need (u16At bytes 4) "truncated header"
-  if maxTables < n then throw (.malformed 4 s!"TrueType: more than {maxTables} tables")
-  let recs ← (List.range n).mapM fun k => need (readRec bytes k) "truncated table directory"
+    throw (.malformed dir "TrueType: bad sfnt version")
+  let n ← need (u16At bytes (dir + 4)) "truncated header"
+  if maxTables < n then throw (.malformed (dir + 4) s!"TrueType: more than {maxTables} tables")
+  let recs ← (List.range n).mapM fun k => need (readRecAt bytes dir k) "truncated table directory"
   let outOfBounds := (recs.filter fun r => !r.inBounds bytes.size).map fun r =>
     s!"{tagName r.tag}: past end of font"
   let tbl (s : String) := tableBytes bytes recs (tagOf s)
@@ -1012,6 +1019,103 @@ def parse (limits : Limits) (bytes : ByteArray) : Except Error TTFont := do
     descender := (hhea.bind (i16At · 6)).getD 0
     advances, cmapData, cmaps := cmaps.toArray, names, glyphs, rejected
     skipped := (outOfBounds ++ sk1 ++ sk2 ++ sk3).toArray }
+
+/-- Parse an embedded TrueType font program (`/FontFile2` contents, Flate already decoded):
+`parseAt` with the offset table at byte 0. A collection (`'ttcf'`) is `Error.unsupported`
+here; substitute fonts select a face with `faceOffset?` first (task 9.r7). -/
+def parse (limits : Limits) (bytes : ByteArray) : Except Error TTFont := parseAt limits bytes 0
+
+/-! ## TrueType collections and PostScript names (task 9.r7)
+
+macOS ships its standard fonts as TrueType collections (`/System/Library/Fonts/Helvetica.ttc`,
+`Times.ttc`, `Courier.ttc`). A collection (OpenType spec, "Font Collections") starts with
+`'ttcf'`, a version (`u16` major, `u16` minor), `numFonts : u32` and `numFonts` `u32`
+offsets of the faces' offset tables; every face's table records hold offsets from the start
+of the file, so a face is parsed by `parseAt bytes (faceOffset? bytes i)`. At most
+`maxTtcFaces` faces are read. A face is selected by its PostScript name (`name` table,
+name ID 6: platform 3 UTF-16BE, or platform 1 Roman bytes), read by `psNameAt` from at most
+`maxNameRecords` records and `maxPsNameBytes` bytes. Every read is a bounded `Option` read. -/
+
+/-- Most faces of a collection looked at. -/
+def maxTtcFaces : Nat := 64
+
+/-- Most `name` records scanned. -/
+def maxNameRecords : Nat := 512
+
+/-- Longest PostScript name read (bytes). -/
+def maxPsNameBytes : Nat := 127
+
+/-- Whether `bytes` is a TrueType collection (`'ttcf'`). -/
+def isCollection (bytes : ByteArray) : Bool := u32At bytes 0 == some 0x74746366
+
+/-- The offset-table offsets of a collection's faces (at most `maxTtcFaces`, unreadable entries
+dropped); `[0]` for a single font. -/
+def faceOffsets (bytes : ByteArray) : List Nat :=
+  if isCollection bytes then
+    match u32At bytes 8 with
+    | some n => (List.range (min n maxTtcFaces)).filterMap fun k => u32At bytes (12 + 4 * k)
+    | none => []
+  else [0]
+
+/-- The offset table of face `i` (`0` is the only face of a single font). -/
+def faceOffset? (bytes : ByteArray) (i : Nat) : Option Nat := (faceOffsets bytes)[i]?
+
+/-- `n` big-endian 16-bit units from byte `p` (fewer at the end of the input; fuel `n`). -/
+def u16s (b : ByteArray) (p : Nat) : Nat → List Nat
+  | 0 => []
+  | n + 1 => match u16At b p with
+    | some v => v :: u16s b (p + 2) n
+    | none => []
+
+/-- The bytes `[p, p + n)` as `Nat`s (fuel `n`). -/
+def u8s (b : ByteArray) (p : Nat) : Nat → List Nat
+  | 0 => []
+  | n + 1 => match u8At b p with
+    | some v => v :: u8s b (p + 1) n
+    | none => []
+
+/-- A PostScript name from its raw string: UTF-16BE (platform 0 or 3) or single bytes; only
+printable ASCII is kept (PostScript names are ASCII). -/
+def psString (utf16 : Bool) (b : ByteArray) (p len : Nat) : String :=
+  let len := min len maxPsNameBytes
+  let units := if utf16 then u16s b p (len / 2) else u8s b p len
+  String.ofList ((units.filter fun c => 0x21 ≤ c ∧ c < 0x7F).map Char.ofNat)
+
+/-- **The PostScript name** (name ID 6) of the face whose offset table is at `dir`: the first
+Windows (3, 1) record, else the first Macintosh Roman (1, 0) one, else any Unicode (0, *) one. -/
+def psNameAt (bytes : ByteArray) (dir : Nat) : Option String := do
+  let n ← u16At bytes (dir + 4)
+  let recs := (List.range (min n maxTables)).filterMap (readRecAt bytes dir)
+  let r ← findTable bytes recs (tagOf "name")
+  let count ← u16At bytes (r.offset + 2)
+  let strings ← u16At bytes (r.offset + 4)
+  let entries := (List.range (min count maxNameRecords)).filterMap fun k => do
+    let e := r.offset + 6 + 12 * k
+    let pid ← u16At bytes e
+    let eid ← u16At bytes (e + 2)
+    let nid ← u16At bytes (e + 6)
+    let len ← u16At bytes (e + 8)
+    let off ← u16At bytes (e + 10)
+    if nid == 6 then some (pid, eid, r.offset + strings + off, len) else none
+  let pick (ok : Nat → Nat → Bool) := entries.find? fun (p, e, _, _) => ok p e
+  let (pid, _, p, len) ← (pick fun p e => p == 3 && e == 1).orElse fun _ =>
+    (pick fun p e => p == 1 && e == 0).orElse fun _ => pick fun p _ => p == 0
+  let s := psString (pid != 1) bytes p len
+  if s.isEmpty then none else some s
+
+/-- The PostScript names of a file's faces, in face order (`none` where unreadable). -/
+def facePsNames (bytes : ByteArray) : List (Option String) :=
+  (faceOffsets bytes).map (psNameAt bytes)
+
+/-- **The face of a file with PostScript name `ps`** (its index), if any. -/
+def faceByPsName? (bytes : ByteArray) (ps : String) : Option Nat :=
+  (facePsNames bytes).findIdx? (· == some ps)
+
+/-- Parse face `i` of a collection (or face 0 of a single font). -/
+def parseFace (limits : Limits) (bytes : ByteArray) (i : Nat) : Except Error TTFont :=
+  match faceOffset? bytes i with
+  | some dir => parseAt limits bytes dir
+  | none => throw (.malformed 0 s!"TrueType collection: no face {i}")
 
 /-! ## Tests
 
@@ -1056,6 +1160,26 @@ private def tinyTtf : ByteArray := fromHex
 
 /-- Set byte `i` to `v`; test helper. -/
 private def patch (b : ByteArray) (i : Nat) (v : UInt8) : ByteArray := ⟨b.data.setIfInBounds i v⟩
+
+/-- Big-endian `u32` bytes. -/
+private def be32 (v : Nat) : List UInt8 :=
+  [(v >>> 24) % 256, (v >>> 16) % 256, (v >>> 8) % 256, v % 256].map UInt8.ofNat
+
+/-- `tinyTtf` with each table offset increased by `d` (for placing it inside a collection). -/
+private def shifted (d : Nat) : Option ByteArray := do
+  let n ← u16At tinyTtf 4
+  (List.range n).foldlM (fun b k => do
+    let o ← u32At b (12 + 16 * k + 8)
+    let bs := be32 (o + d)
+    pure ((List.range 4).foldl (fun b i => patch b (12 + 16 * k + 8 + i) (bs[i]?.getD 0)) b))
+    tinyTtf
+
+/-- A two-face collection: header (20 bytes), then `tinyTtf` twice, each shifted to its place. -/
+private def tiny2 : Option ByteArray := do
+  let a ← shifted 20
+  let b ← shifted (20 + 888)
+  pure (⟨("ttcf".toUTF8.toList ++ [0, 1, 0, 0] ++ be32 2 ++ be32 20 ++ be32 (20 + 888)).toArray⟩
+    ++ a ++ b)
 
 /-- `bad-head.ttf`: `head` offset 904, past the end. -/
 private def badHead : ByteArray := patch (patch tinyTtf 54 3) 55 0x88
@@ -1154,6 +1278,18 @@ private def tiny : Option TTFont := (parse Limits.default tinyTtf).toOption
     (patch (patch (patch (patch tinyTtf 0 0x4F) 1 0x54) 2 0x54) 3 0x4F) with
   | .error (.unsupported _) => true | _ => false)
 #guard (parse { maxDecodedStreamBytes := 100 } tinyTtf).toOption.isNone
+-- collections (task 9.r7): `tinyTtf` twice behind a `ttcf` header, offsets shifted
+#guard (tiny2.map fun b => (isCollection b, faceOffsets b, faceOffset? b 2)) ==
+  some (true, [20, 20 + 888], none)
+#guard (tiny2.map fun b => ((parseFace Limits.default b 1).toOption.map fun f =>
+  (f.numGlyphs, f.rejected.size, f.skipped.size, f.glyphOfUnicode 0x41, f.glyphName? 4))) ==
+  some (some (5, 0, 0, some 2, some "A.ss01"))
+#guard (tiny2.map fun b => (parseFace Limits.default b 2).toOption.isNone) == some true
+#guard (tiny2.map fun b => (parse Limits.default b).toOption.isNone) == some true
+#guard (faceOffsets tinyTtf, facePsNames tinyTtf) == ([0], [none])
+#guard ((parseFace Limits.default tinyTtf 0).toOption.map (·.numGlyphs)) == some 5
+#guard psString true ⟨#[0, 0x48, 0, 0x2D, 0x26, 0x3A, 0, 0x42]⟩ 0 8 == "H-B"
+#guard psString false "Times-Roman".toUTF8 0 11 == "Times-Roman"
 -- the cycle check of `outlineAux` holds even without the parse-time pruning
 #guard (tiny.map fun f => (outlineAux f 16 [3] 100 3).isNone) == some true
 #guard (u16At tinyTtf 4, u32At tinyTtf 0, i16At ⟨#[0xFF, 0x9C]⟩ 0, u16At tinyTtf 887) ==

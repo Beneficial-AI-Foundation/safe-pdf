@@ -559,7 +559,7 @@ Helvetica substitute or when the page does not render). -/
 def oursSubst (bytes : ByteArray) (i : Nat) : IO (Option Rgb) := do
   let files ← SafePdf.Shell.Fonts.findFiles
   if !files.any (·.1 == Font.Std14.helvetica) then return none
-  let subst := Raster.Subst.SubstFonts.ofBytes {} (files.map fun (f, _, b) => (f, b))
+  let subst ← SafePdf.Shell.Fonts.loadSubstFonts {}
   match Api.openBytes bytes with
   | .ok d => match d.doc.pages[i]? with
     | some p => match (Raster.Glyph.renderDocPage d.limits d.doc p 2 .r0

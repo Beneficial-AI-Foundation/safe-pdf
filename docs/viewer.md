@@ -532,7 +532,9 @@ toolbar of `web/viewer.css` `.editorParamsToolbar`; nothing copied). Pure state 
   page rotation via Tk's `-angle`). Smoke: `m9-reopen` reports `screen-text` (red pixels in
   the text box on an X screenshot of the canvas, before any click) and `screen-after` (after
   Page Width, a page change, rotation 90° and back, vertical and single page mode); the script
-  runs it with and without substitute fonts.
+  runs it with and without substitute fonts. Since task 9.r7 a stock Mac has a substitute
+  Helvetica too (`/System/Library/Fonts/Helvetica.ttc`, `docs/raster.md`), so there the
+  renderer paints saved free text and this canvas fallback is not used.
 * **In the PDF** (rules A12–A15 of `Core/Write/Annots.lean`, as pdf.js
   `FreeTextAnnotation`/`InkAnnotation.createNewDict`): `/FreeText` with `/Contents`, `/DA
   (/Helv SIZE Tf R G B rg)`, `/Rect` = the text box (`freeTextBox`: Helvetica AFM widths,

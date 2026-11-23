@@ -271,7 +271,8 @@ def stretchMatrix (fm : Aff) (sx : Rat) : Aff := if sx = 1 then fm else Aff.scal
 
 /-- **A substitute font's glyph source**: program `p`, the font's encoding `enc`, the PDF
 width table `wt` when the glyphs are stretched (`Subst.widthTable`). Glyphs are keyed by
-`.gid` = the glyph's index in the Type 1 program's glyph array, or the CFF GID. -/
+`.gid` = the glyph's index in the Type 1 program's glyph array, the CFF GID or the TrueType
+glyph index. -/
 def substSource (p : Subst.Program) (enc : Font.Encoding) (wt : Option (List (Nat × Int) × Int)) :
     GlyphSource :=
   match p with
@@ -319,6 +320,31 @@ def substSource (p : Subst.Program) (enc : Font.Encoding) (wt : Option (List (Na
           | .none => fm
         | .name _ => fm
       desc := s!"substitute CFF {f.name}" }
+  | .trueType f be =>
+    -- task 9.r7: by `post` name, else the name's Unicode value (Adobe Glyph List, then the
+    -- ZapfDingbats list) in a Unicode `cmap`; the built-in code: its name in the face's
+    -- standard-14 encoding, else the raw code in the symbolic `cmap`s (§9.6.6.4).
+    let byName := fun (n : String) =>
+      if n == ".notdef" then .none else
+      (f.glyphOfName n).orElse fun _ =>
+        ((Font.TrueType.unicodeOfName n).orElse fun _ => Font.dingbatLookup n).bind
+          f.glyphOfUnicode
+    let codeG := substCodes byName (fun k =>
+      ((be.glyph k).bind byName).orElse fun _ => f.firstOf (Font.TrueType.symbolicLookups k)) enc
+    let fm := ttMatrix f
+    let ws := match wt with
+      | some (t, _) => substWidths f.numGlyphs codeG t
+      | .none => #[]
+    { glyphOf c := (oneByte c).bind fun b => (codeG[b.toNat]?.join).map .gid
+      outline
+        | .gid g => f.glyphOutline g
+        | .name _ => .none
+      matrix
+        | .gid g => match wt with
+          | some (_, dflt) => stretchMatrix fm (stretchOf ws dflt g (f.advanceOfGlyphText g))
+          | .none => fm
+        | .name _ => fm
+      desc := "substitute TrueType" }
 
 /-- **The substitute glyph source of a simple font dictionary** (`Subst.chooseFor`), if the
 font is non-embedded and the table has a program for the chosen face. -/
