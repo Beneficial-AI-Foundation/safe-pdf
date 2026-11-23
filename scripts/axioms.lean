@@ -1274,3 +1274,6 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Spec.RepairAgree.c4_check
 #print axioms SafePdf.Spec.RepairAgree.entries_eq
 #print axioms SafePdf.Spec.RepairAgree.newestHits_mem_iff
+#print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_prefix
+#print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_extract
+#print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_iv_ne
