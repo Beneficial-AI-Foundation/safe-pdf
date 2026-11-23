@@ -9,6 +9,7 @@ import SafePdf.Shell.App.Sidebar
 import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
+import SafePdf.Shell.App.Xfdf
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
@@ -114,9 +115,23 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   checked by a strict reopen and read-back before an atomic write, then opens that file; Save
   As… (Ctrl+Shift+S) to a chosen file, writing over the opened file only after an explicit
   yes. On open our marks (`/NM safepdf-mark-ID`) are restored as saved marks, drawn by the
-  renderer and read-only (the writer only appends; task 9.5g). The title starts with `* `
-  while marks are unsaved; Close, Quit, the window's close button and Open… ask Save / Discard
-  / Cancel. Writer errors (encrypted file until 9.5f) go to the status line.
+  renderer. Saved marks can be recoloured, deleted and their text edited (task 9.5g): Save
+  writes one update with additions, supersessions and removals (writer rule W11); until then
+  the pages are rendered from a **preview** (`State.view`, `updatePreview`: the same writer's
+  output with only the edits of saved marks, built in memory and reopened strictly), so an
+  edit shows at once. A highlight's comment is written into it (`/Contents` + `/Popup`, as
+  pdf.js); its icon is drawn by the viewer. The title starts with `* ` while there are
+  unsaved changes; Close, Quit, the window's close button and Open… ask Save / Discard /
+  Cancel. Writer errors go to the status line.
+* **XFDF** (task 9.11, Tk-free reader/writer in `Xfdf`): File → Import annotations… /
+  Export annotations… (also in the `»` menu) with Tk file dialogs filtered to `.xfdf`. Import
+  reads the file bounded and total (`Xfdf.readFile`, pages checked against the document),
+  adds the marks not already present as unsaved marks (`Xfdf.importItems`) and reports
+  "N imported, D already present, S skipped"; a refused file (DTD, unknown entity, limits,
+  not XFDF, unreadable) only puts `Xfdf.Error.message` into the status line and changes
+  nothing. Export writes every mark (`Xfdf.toXfdf`, a highlight's comment as `<contents>` of
+  the `<highlight>`) atomically (`Save.writeAtomic`) to the chosen file, `STEM.xfdf` next to
+  the PDF by default.
 * **Errors** (unreadable file, parse error, render error, Tcl error) are shown in the status
   line; the window stays usable. Every event handler catches its own exceptions.
 * **No data in script text.** Every Tcl command that carries data (file names, error messages,
@@ -205,6 +220,9 @@ structure State where
   path : Option String := none
   /-- The opened document (`none`: no file, or it failed to open). -/
   doc : Option Doc := none
+  /-- The document the pages are rendered from while saved marks are edited (task 9.5g:
+  `doc` with those edits applied in memory, `Save.preview`); `none`: `doc` itself. -/
+  view : Option Doc := none
   /-- Document generation, bumped on every open (part of the cache key). -/
   gen : Nat := 0
   /-- Current page, 0-based. -/
@@ -1040,6 +1058,17 @@ proc ::safepdf::askSavePath {dir file} {
   return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file \\
     -defaultextension .pdf -confirmoverwrite 1 -filetypes {{{PDF files} {.pdf .PDF}} {{All files} *}}]
 }
+# XFDF import/export (9.11): the file dialogs; ::safepdf::autoPath answers them in smoke mode.
+proc ::safepdf::askXfdfOpen {dir} {
+  if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
+  return [tk_getOpenFile -parent . -title {Import annotations} -initialdir $dir \\
+    -filetypes {{XFDF {.xfdf}} {{All files} *}}]
+}
+proc ::safepdf::askXfdfSave {dir file} {
+  if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
+  return [tk_getSaveFile -parent . -title {Export annotations} -initialdir $dir -initialfile $file \\
+    -defaultextension .xfdf -confirmoverwrite 1 -filetypes {{XFDF {.xfdf}} {{All files} *}}]
+}
 wm protocol . WM_DELETE_WINDOW {::safepdf::emit quit}
 bind . <Control-s> {::safepdf::emit save}
 bind . <Control-S> {::safepdf::emit saveAs}
@@ -1241,7 +1270,9 @@ def visibleMarks (s : State) (p : Nat) : List Marks.Mark :=
   if s.ui.showAll then ms else ms.filter (·.isNote)
 
 /-- The visible marks of page `p` the viewer draws itself: not the saved ones, which are in the
-file and drawn by the renderer from their appearance streams (task 9.5c). -/
+file and drawn by the renderer from their appearance streams (task 9.5c; after an edit, from
+the preview `State.view`, task 9.5g). A comment's icon is a canvas item (`drawMarks`): the
+popup form written for it has no appearance of its own. -/
 def drawnMarks (s : State) (p : Nat) : List Marks.Mark :=
   (visibleMarks s p).filter (!s.marks.isSaved ·.id)
 
@@ -1264,7 +1295,8 @@ def drawMarks (s : State) (sl : Slot) : IO Unit := do
         discard <| run [".c", "create", "rectangle", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, "-outline", "#c99a00", "-dash", "4 2",
           "-width", "1", "-tags", tags]
-      if let some ib := (if s.marks.isSaved m.id then none else m.iconBox bx) then
+      if let some ib := (if s.marks.isSaved m.id && !s.marks.isComment m then none
+          else m.iconBox bx) then
         let (x0, y0, x1, y1) := sl.rect ib
         discard <| run ["::safepdf::noteIcon", ".c", toString x0.floor, toString y0.floor,
           toString x1.ceil, toString y1.ceil, m.color.hex, s!"{tags} note"]
@@ -1391,7 +1423,7 @@ def fetch (st : IO.Ref State) (doc : Doc) (key : View.Key) :
   | some r => return (r, none)
   | none =>
     let t0 ← IO.monoNanosNow
-    let r ← renderPage doc key.page key.zoom key.rot (← st.get).subst
+    let r ← renderPage ((← st.get).view.getD doc) key.page key.zoom key.rot (← st.get).subst
     let t1 ← IO.monoNanosNow
     st.modify fun s => { s with cache := s.cache.insert key r, renderNs := s.renderNs + (t1 - t0),
                                 renders := s.renders + 1 }
@@ -1772,7 +1804,8 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
 /-- Opens `path`: reads and parses it, builds the page tree, shows page 1. Every failure
 ends up in the status line with an empty page. -/
 def openFile (st : IO.Ref State) (path : String) : IO Unit := do
-  st.modify fun s => { s with path := some path, doc := none, page := 0, shown := none }
+  st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
+                              shown := none }
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
@@ -1953,10 +1986,29 @@ def setViewMode (st : IO.Ref State) (what key : String) : IO Unit := do
 
 /-! ## Saving (task 9.5c) -/
 
-/-- Status text when a saved mark is to be changed (the writer only appends, `Save`). -/
-def savedMsg : String :=
-  "this mark is saved in the PDF; changing or deleting saved marks is not supported yet \
-  (the writer only appends, task 9.5g)"
+/-- After an edit of the marks (task 9.5g): when saved marks changed, renders the pages again
+from the preview (`Save.preview`: the document as the next save writes those edits); else
+from the document itself. On a preview error the pages stay as they are and the status line
+says why (Save would report the same error). Returns whether the preview changed. -/
+def updatePreview (st : IO.Ref State) : IO Bool := do
+  let s ← st.get
+  let some doc := s.doc | return false
+  let had := s.view.isSome
+  let edited := !s.marks.changedSaved.isEmpty || !s.marks.deletedSaved.isEmpty
+  if !edited && !had then return false
+  let date ← Save.nowDate
+  let mut v : Option Doc := none
+  if edited then
+    match ← IO.lazyPure fun _ => Save.preview limits doc s.marks date with
+    | .ok v' => v := v'
+    | .error e =>
+      setStatus s!"cannot show the change of a saved mark: {e}"
+      return false
+  st.modify fun s => { s with view := v, gen := s.gen + 1, cache := ({} : View.Cache),
+                              shown := none }
+  for (p, _) in (← st.get).photos do dropPhoto st p
+  refresh st
+  return true
 
 /-- Asks `msg` in a Tk message box of `type` (`yesno`, `yesnocancel`) titled `title`
 (`::safepdf::ask`; smoke mode answers with `::safepdf::autoAnswer`). Returns `yes`, `no` or
@@ -1993,8 +2045,9 @@ def saveTo (st : IO.Ref State) (target : String) : IO Bool := do
     st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
     openFile st o.path
     goTo st page
-    let what := if o.marks == 0 then "a copy (no new marks)"
-      else s!"{o.marks} new mark(s) as an incremental update ({o.appended} bytes appended)"
+    let what := if o.marks == 0 then "a copy (no changed marks)"
+      else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
+        ({o.appended} bytes appended)"
     setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
       unchanged at its start"
     return true
@@ -2010,10 +2063,10 @@ def save (st : IO.Ref State) : IO Bool := do
     setStatus "no unsaved marks: nothing to save"
     return true
   let target := Save.defaultTarget path
-  let n := s.marks.unsaved.length
+  let n := s.marks.pending
   if !(← isOwn st target) then
     if ← samePath target path then
-      let a ← ask "yesno" "Save" s!"Write the {n} new mark(s) into the opened file \
+      let a ← ask "yesno" "Save" s!"Write the {n} new or changed mark(s) into the opened file \
         {baseName path}? It gets a new revision appended; its present bytes stay unchanged \
         at its start."
       if a != "yes" then
@@ -2055,7 +2108,7 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
   let s ← st.get
   let (some path, some _) := (s.path, s.doc) | return true
   if !s.marks.dirty then return true
-  let n := s.marks.unsaved.length
+  let n := s.marks.pending
   match ← ask "yesnocancel" "Unsaved marks" s!"{n} mark(s) on {baseName path} are not saved. \
       Save them to {baseName (Save.defaultTarget path)} before {what}? (No discards them.)" with
   | "yes" => save st
@@ -2063,6 +2116,75 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
   | _ =>
     setStatus s!"{what} cancelled: there are unsaved marks"
     return false
+
+/-! ## XFDF import and export (task 9.11) -/
+
+/-- The directory of `path` for a file dialog (`.` when it has none). -/
+def dirOf (path : String) : String :=
+  match (path : System.FilePath).parent with
+  | some d => if d.toString.isEmpty then "." else d.toString
+  | none => "."
+
+/-- The proposed export file of the PDF `path`: `STEM.xfdf` next to it. -/
+def xfdfTarget (path : String) : String :=
+  ((path : System.FilePath).withExtension "xfdf").toString
+
+#guard xfdfTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && xfdfTarget "a.b.PDF" == "a.b.xfdf"
+#guard dirOf "paper.pdf" == "." && dirOf "/tmp/x/paper.pdf" == "/tmp/x"
+
+/-- The status line after an import of `name`: added, already present and skipped counts, and
+the first skipped annotation's reason. -/
+def importStatus (name : String) (added dups : Nat) (rep : Xfdf.Report) : String :=
+  let first := match rep.skipped with
+    | k :: _ => s!" (first skipped: <{k.element}>: {k.reason})"
+    | [] => ""
+  s!"{name}: {added} imported, {dups} already present, {rep.skippedCount} skipped{first}"
+
+#guard importStatus "a.xfdf" 3 1 {} == "a.xfdf: 3 imported, 1 already present, 0 skipped"
+
+/-- **Import annotations…** (File menu, `»` menu): reads the XFDF file `path` (else asks for
+one, `::safepdf::askXfdfOpen`) with the document's page count as bound, adds its marks to the
+store as unsaved marks (`Xfdf.importItems`: marks already present are not added again) and
+redraws. A refused or unreadable file only shows its error in the status line. -/
+def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := do
+  let s ← st.get
+  let (some pdf, some _) := (s.path, s.doc) | return
+  let path ← match path with
+    | some p => pure p
+    | none => run ["::safepdf::askXfdfOpen", dirOf pdf]
+  if path.isEmpty then
+    setStatus "import cancelled"
+    return
+  match ← Xfdf.readFile {} path (pages := some s.pageCount) with
+  | .error e => setStatus s!"cannot import {baseName path}: {e}"
+  | .ok rep =>
+    let s ← st.get
+    let (marks, ids, dups) := Xfdf.importItems s.marks rep.items
+    st.modify ({ · with marks })
+    if !ids.isEmpty then
+      if !(← updatePreview st) then repaint st
+    setStatus (importStatus (baseName path) ids.length dups rep)
+
+/-- **Export annotations…** (File menu, `»` menu): writes every mark of the store (saved or
+not; `Xfdf.toXfdf`, dated now, `<f href>` the PDF's file name) to `path` (else asks,
+`::safepdf::askXfdfSave`, proposing `xfdfTarget`) through `Save.writeAtomic`. Errors go to the
+status line. -/
+def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := do
+  let s ← st.get
+  let (some pdf, some doc) := (s.path, s.doc) | return
+  let path ← match path with
+    | some p => pure p
+    | none =>
+      let fp : System.FilePath := xfdfTarget pdf
+      run ["::safepdf::askXfdfSave", dirOf pdf, fp.fileName.getD "annotations.xfdf"]
+  if path.isEmpty then
+    setStatus "export cancelled"
+    return
+  let xml := Xfdf.toXfdf s.marks (Save.pageBox doc) (← Save.nowDate) (some (baseName pdf))
+  try
+    Save.writeAtomic path xml.toUTF8
+    setStatus s!"exported {s.marks.marks.size} mark(s) to {baseName path}"
+  catch e => setStatus s!"cannot export to {baseName path}: {e}"
 
 /-- The `tk_getOpenFile` dialog (after the unsaved-marks question); opens the chosen file
 (nothing when cancelled). -/
@@ -2077,7 +2199,7 @@ def openDialog (st : IO.Ref State) : IO Unit := do
 /-- Closes the document (File → Close, Ctrl+W): the window stays, empty, as after starting
 without a file. -/
 def closeFile (st : IO.Ref State) : IO Unit := do
-  st.modify fun s => { s with path := none, doc := none, page := 0, shown := none,
+  st.modify fun s => { s with path := none, doc := none, view := none, page := 0, shown := none,
                               gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
@@ -2453,11 +2575,9 @@ def highlight (st : IO.Ref State) (color : Option String) : IO Unit := do
   | none =>
     match s.markSel, chosen with
     | some id, some c =>
-      if s.marks.isSaved id then setStatus savedMsg
-      else
-        st.modify ({ · with marks := s.marks.recolor id c })
-        repaint st
-        setStatus s!"mark recoloured: {c.name}"
+      st.modify ({ · with marks := s.marks.recolor id c })
+      if !(← updatePreview st) then repaint st
+      setStatus s!"mark recoloured: {c.name}"
     | _, some c => setStatus s!"highlight colour: {c.name} (select text, then Highlight)"
     | _, none => setStatus "select text first (drag over it or double-click a word), then Highlight"
 
@@ -2524,23 +2644,20 @@ def noteSave (st : IO.Ref State) (idS text : String) : IO Unit := do
   let some id := idS.toNat? | return
   let s ← st.get
   let some m := s.marks.find? id | return
-  if s.marks.isSaved id then
-    setStatus (if m.text == text then "note unchanged" else savedMsg)
+  if m.text == text then
+    setStatus "note unchanged"
     return
   st.modify ({ · with marks := s.marks.setText id text })
-  drawOverlay st
+  if !(← updatePreview st) then drawOverlay st
   setStatus s!"note saved ({text.length} characters)"
 
 /-- Removes mark `id` (Delete, Edit → Delete mark, the note popup's Delete). -/
 def deleteMark (st : IO.Ref State) (id : Nat) : IO Unit := do
   let s ← st.get
   let some m := s.marks.find? id | return
-  if s.marks.isSaved id then
-    setStatus savedMsg
-    return
-  st.modify ({ · with marks := s.marks.remove id,
+  st.modify ({ · with marks := s.marks.removeWithComment id,
                       markSel := if s.markSel == some id then none else s.markSel })
-  repaint st
+  if !(← updatePreview st) then repaint st
   setStatus s!"{markName m} deleted"
 
 /-- Handles `markDelete`: removes the selected mark. -/
@@ -2639,10 +2756,9 @@ def popClick (st : IO.Ref State) (xs ys : String) : IO Unit := do
     let s ← st.get
     match s.markSel.bind s.marks.find? with
     | some m =>
-      if s.marks.isSaved m.id then setStatus savedMsg
-      else if !m.isNote then
+      if !m.isNote then
         st.modify ({ · with marks := s.marks.recolor m.id c })
-        repaint st
+        if !(← updatePreview st) then repaint st
         setStatus s!"highlight recoloured: {c.name}"
       else setStatus s!"highlight colour: {c.name}"
     | none => setStatus s!"highlight colour: {c.name}"
@@ -3795,7 +3911,7 @@ Ctrl+W answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` witho
 question, opens it (2 saved marks, title without `*`, Save disabled), the highlight is now
 drawn by the renderer from its appearance stream (pixels yellow, no canvas note icon) and the
 note text is restored (a copy of the file goes to `first.pdf`); a second Ctrl+S has nothing
-to save (size unchanged); deleting or recolouring the saved highlight is refused; a new
+to save (size unchanged); the saved highlight can be selected; a new
 highlight on `safe` + Ctrl+S appends to the same file (3 marks, distinct ids, read back
 strictly); File → Save As… (`autoPath`) writes `saveas.pdf` and opens it; a new note and
 Ctrl+W answered No closes without saving. Results in `save.txt`. -/
@@ -3846,13 +3962,10 @@ def smokeSave (st : IO.Ref State) (dir : String) : IO Unit := do
   let size1 ← k.size target
   sendEvent ".c" "<Control-Key-s>"
   out := out.push s!"save-nothing: {(← k.status).startsWith "no unsaved marks"} {size1 == (← k.size target)}"
-  -- 5. The saved highlight is read-only.
+  -- 5. The saved highlight can be selected (its edits are `smokeEdit`'s, task 9.5g).
   k.clickAt wpos
   out := out.push s!"saved-selected: {(← st.get).markSel.isSome}"
-  sendKey "Delete"
-  out := out.push s!"saved-delete: {(← st.get).marks.marks.size} {(← k.status).startsWith "this mark is saved"}"
-  discard <| run [".menubar.edit.hl", "invoke", Marks.Color.green.label]
-  out := out.push s!"saved-recolour: {(← k.status).startsWith "this mark is saved"} {← k.px worldC}"
+  sendKey "Escape"
   -- 6. A new highlight, saved into the same file (no question, no duplicates).
   let some spos ← boxWindowPos st safe | throw (IO.userError "safe not shown")
   for _ in [0:2] do k.clickAt spos
@@ -3925,6 +4038,99 @@ def smokeReopen (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "reopen.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run [".menubar.file", "invoke", Menu.Cmd.quit.label]
 
+/-- Smoke steps of editing saved marks (`SAFEPDF_VIEWER_SMOKE_MODE=edit`, task 9.5g) on the
+`text-annotated.pdf` left by `smokeReopen` (5 saved marks: highlights on `world`, `safe` and
+the whole page, two notes). A click on `world` selects the whole-page highlight (the newest),
+Delete removes it; a click on `world` then selects its highlight, which is recoloured green
+(the pages are rendered from the preview at once: the pixels turn green) and gets a comment
+(the edit bubble's Comment); the `safe` highlight is deleted (white again); the first note's
+text is edited. Ctrl+S (the opened file: answered Yes) writes one update and reopens: 4 marks,
+nothing unsaved, the comment restored with its id and the highlight's colour, the note text
+and the colours as edited, each id once in the file. Then a second round on top: the world
+highlight back to blue and its comment deleted, Ctrl+S, reopened: 3 marks. Results in
+`edit.txt` (world/safe boxes for the external `mutool` check). -/
+def smokeEdit (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let boxOf (q : String) : Option Box := do
+    let (a, b) ← (ix.hits (Select.normQuery q))[0]?
+    (Select.rangeBoxes ix.cells a b).head?
+  let (some world, some safe) := (boxOf "world", boxOf "safe") |
+    throw (IO.userError "words not found")
+  let ctr (b : Box) : Pt := ⟨(b.llx + b.urx) / 2, (b.lly + b.ury) / 2⟩
+  -- Tinted (coloured) pixels among 7 × 3 points inside a box: 0 without a highlight.
+  let tinted (b : Box) : IO Nat := do
+    let mut n := 0
+    for i in [1:8] do
+      for j in [1:4] do
+        let q : Pt := ⟨b.llx + (b.urx - b.llx) * i / 8, b.lly + (b.ury - b.lly) * j / 4⟩
+        let cs := ((← k.px q).splitOn " ").filterMap String.toNat?
+        if cs.length == 3 && (cs.foldl max 0) - (cs.foldl min 255) > 40 then n := n + 1
+    return n
+  out := out.push s!"world-box: {num world.llx} {num world.lly} {num world.urx} {num world.ury}"
+  out := out.push s!"safe-box: {num safe.llx} {num safe.lly} {num safe.urx} {num safe.ury}"
+  let path := (← st.get).path.getD ""
+  let s0 ← st.get
+  out := out.push s!"restored: {s0.marks.marks.size} {s0.marks.dirty} {← k.star}"
+  let some wpos ← boxWindowPos st world | throw (IO.userError "world not shown")
+  let some spos ← boxWindowPos st safe | throw (IO.userError "safe not shown")
+  -- 1. The whole-page highlight (newest, on top) is deleted.
+  k.clickAt wpos
+  let selAll := (← st.get).markSel
+  sendKey "Delete"
+  out := out.push s!"del-all: {(← st.get).marks.marks.size} {(← st.get).marks.dirty} {← k.star} {(← st.get).view.isSome} {(selAll.bind (← st.get).marks.find?).isNone}"
+  -- 2. The world highlight: recoloured green, then a comment.
+  discard <| run ["after", "600"]
+  k.clickAt wpos
+  let wid := (← st.get).markSel.getD 0
+  discard <| run [".menubar.edit.hl", "invoke", Marks.Color.green.label]
+  out := out.push s!"recolour: {((← st.get).marks.find? wid).map (·.color.name)} {← k.px (ctr world)}"
+  addNote st none
+  discard <| run ["update", "idletasks"]
+  discard <| run [".note.t", "insert", "end", "Comment ✓ [x]"]
+  discard <| run [".note.b.save", "invoke"]
+  discard <| run ["destroy", ".note"]
+  let cid := ((← st.get).marks.find? wid).bind (← st.get).marks.commentOf |>.map (·.id)
+  out := out.push s!"comment: {cid.isSome} {← tagCount "note"}"
+  -- 3. The safe highlight is deleted.
+  discard <| run ["after", "600"]
+  k.clickAt spos
+  let sid := (← st.get).markSel
+  sendKey "Delete"
+  out := out.push s!"del-safe: {sid.isSome} {decide ((← tinted safe) = 0)}"
+  -- 4. The first note's text is edited.
+  let sN ← st.get
+  let note := sN.marks.marks.toList.find? fun m => m.isNote && !sN.marks.isComment m
+  if let some n := note then noteSave st (toString n.id) "Edited note"
+  let s1 ← st.get
+  out := out.push s!"pending: {s1.marks.pending} {s1.marks.dirty} {← k.star}"
+  -- 5. Save into the opened file (Yes), reopened.
+  discard <| run ["set", "::safepdf::autoAnswer", "yes"]
+  sendEvent ".c" "<Control-Key-s>"
+  let s2 ← st.get
+  let m2 := s2.marks.marks.toList
+  out := out.push s!"saved: {s2.path == some path} {m2.length} {s2.marks.dirty} {← k.star} {s2.view.isNone}"
+  out := out.push s!"after-world: {((s2.marks.find? wid).map (·.color.name))} {← k.px (ctr world)}"
+  out := out.push s!"after-safe: {(sid.bind s2.marks.find?).isNone} {decide ((← tinted safe) = 0)}"
+  out := out.push s!"after-comment: {(cid.bind s2.marks.find?).map (·.text) == some "Comment ✓ [x]"} {((s2.marks.find? wid).bind s2.marks.commentOf).map (·.id) == cid} {decide ((← tagCount "note") > 0)}"
+  out := out.push s!"after-note: {(note.bind fun n => s2.marks.find? n.id).map (·.text) == some "Edited note"}"
+  out := out.push s!"file-marks1: {← fileMarks path}"
+  IO.FS.writeBinFile (file "edit1.pdf") (← IO.FS.readBinFile path)
+  -- 6. A third revision: back to blue, the comment deleted.
+  discard <| run ["after", "600"]
+  k.clickAt wpos
+  discard <| run [".menubar.edit.hl", "invoke", Marks.Color.blue.label]
+  if let some c := cid then deleteMark st c
+  sendEvent ".c" "<Control-Key-s>"
+  let s3 ← st.get
+  out := out.push s!"third: {s3.marks.marks.size} {s3.marks.dirty} {((s3.marks.find? wid).map (·.color.name))} {(cid.bind s3.marks.find?).isNone} {← k.px (ctr world)}"
+  out := out.push s!"file-marks2: {← fileMarks path}"
+  IO.FS.writeFile (file "edit.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke step of saving an encrypted document (`SAFEPDF_VIEWER_SMOKE_MODE=encrypted`, task
 9.5c): a note at (100, 100), then Ctrl+S. Until task 9.5f the writer refuses encrypted files:
 the status line shows its error, nothing is written and the mark stays unsaved; afterwards
@@ -3948,6 +4154,88 @@ def smokeEncrypted (st : IO.Ref State) (dir : String) : IO Unit := do
     else "inconsistent"
   IO.FS.writeFile (file "encrypted.txt")
     s!"dirty-before: {before}\noutcome: {outcome}\nalive: {← run ["winfo", "exists", "."]}\nstatus: {status}\n"
+  discard <| run ["destroy", "."]
+
+/-- Smoke steps of XFDF import/export (`SAFEPDF_VIEWER_SMOKE_MODE=xfdf`, task 9.11) on a copy
+of the text PDF of `smokeText` (substitute fonts off, page 1 white): a yellow highlight on
+`world` with a comment (the edit bubble's Comment) and a note at (300, 400) with
+`smokeNoteText`; File → Export annotations… (`autoPath`) writes `marks.xfdf` (the comment as
+`<contents>` inside the `<highlight>`); every mark is deleted (the `world` pixels white
+again); `importXfdf` of `marks.xfdf` brings the three marks back (pixels yellow, the comment
+still the highlight's, the note text equal, all unsaved) and the status line counts them;
+importing it again adds nothing; the hostile samples copied into `DIR` (`billion-laughs.xfdf`,
+`xxe.xfdf`, `undeclared-entity.xfdf`), a missing file and a non-XFDF file each show an error
+and change nothing; Acrobat's sample imports 3 marks and skips 2. Results in `xfdf.txt`. -/
+def smokeXfdf (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let some world := ((ix.hits (Select.normQuery "world"))[0]?).bind fun (a, b) =>
+      (Select.rangeBoxes ix.cells a b).head? | throw (IO.userError "world not found")
+  let worldC : Pt := ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩
+  let some wpos ← boxWindowPos st world | throw (IO.userError "world not shown")
+  -- A summary of the store: marks, notes, the world highlight's comment text, the plain
+  -- note's text equal to `smokeNoteText`, unsaved.
+  let summary : IO String := do
+    let s ← st.get
+    let ms := s.marks.marks.toList
+    let hl := ms.find? (!·.isNote)
+    let comment := (hl.bind s.marks.commentOf).map (·.text)
+    let note := ms.find? fun m => m.isNote && !s.marks.isComment m
+    let okC := comment == some "Comment ✓ <&>"
+    let okN := (note.map (·.text)) == some smokeNoteText
+    return s!"{ms.length} {(ms.filter (·.isNote)).length} {okC} {okN} {s.marks.dirty}"
+  -- 1. Highlight, comment, note.
+  for _ in [0:2] do k.clickAt wpos
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  sendKey "Escape"
+  discard <| run ["after", "600"]
+  k.clickAt wpos
+  addNote st none
+  discard <| run ["update", "idletasks"]
+  discard <| run [".note.t", "insert", "end", "Comment ✓ <&>"]
+  discard <| run [".note.b.save", "invoke"]
+  discard <| run ["destroy", ".note"]
+  sendKey "Escape"
+  smokeNoteAt st 300 400 smokeNoteText
+  discard <| run ["destroy", ".note"]
+  out := out.push s!"marks: {← summary}"
+  out := out.push s!"world-px: {← k.px worldC}"
+  -- 2. Export through the File menu (the dialog answered by `autoPath`).
+  out := out.push s!"menu-states: {← k.menuState .importXfdf} {← k.menuState .exportXfdf}"
+  discard <| run ["set", "::safepdf::autoPath", file "marks.xfdf"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  out := out.push s!"export-status: {← k.status}"
+  out := out.push s!"export-default: {baseName (xfdfTarget ((← st.get).path.getD ""))}"
+  -- 3. Every mark removed.
+  for m in (← st.get).marks.marks.toList do deleteMark st m.id
+  out := out.push s!"removed: {(← st.get).marks.marks.size} {← k.px worldC}"
+  -- 4. Import: the marks are back.
+  importXfdf st (some (file "marks.xfdf"))
+  out := out.push s!"import-status: {← k.status}"
+  out := out.push s!"imported: {← summary}"
+  out := out.push s!"imported-px: {← k.px worldC} {← k.star}"
+  -- 5. Again: nothing new.
+  importXfdf st (some (file "marks.xfdf"))
+  out := out.push s!"reimport-status: {← k.status}"
+  out := out.push s!"reimported: {← summary}"
+  -- 6. Hostile and broken files: an error, nothing changed.
+  for name in ["billion-laughs.xfdf", "xxe.xfdf", "undeclared-entity.xfdf", "missing.xfdf",
+      "not-xfdf.xfdf"] do
+    let before ← summary
+    importXfdf st (some (file name))
+    let refused := (← k.status).startsWith s!"cannot import {name}: "
+    let same := before == (← summary)
+    out := out.push s!"hostile {name}: {refused} {same} {← run ["winfo", "exists", "."]}"
+    out := out.push s!"hostile-status {name}: {← k.status}"
+  -- 7. Another tool's export (Acrobat style): 3 marks, 2 skipped.
+  importXfdf st (some (file "acrobat.xfdf"))
+  out := out.push s!"acrobat-status: {← k.status}"
+  out := out.push s!"acrobat: {(← st.get).marks.marks.size}"
+  IO.FS.writeFile (file "xfdf.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
 /-- Window position of the centre of a page-space box on page `p` (any laid-out page, task 9.3). -/
@@ -4172,14 +4460,22 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "bubble.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
-  if s.smokeMode == "save" || s.smokeMode == "reopen" || s.smokeMode == "encrypted" then
+  if s.smokeMode == "save" || s.smokeMode == "reopen" || s.smokeMode == "encrypted" ||
+      s.smokeMode == "edit" then
     let name := s!"{s.smokeMode}.txt"
     try
       if s.smokeMode == "save" then smokeSave st dir
       else if s.smokeMode == "reopen" then smokeReopen st dir
+      else if s.smokeMode == "edit" then smokeEdit st dir
       else smokeEncrypted st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "xfdf" then
+    try smokeXfdf st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "xfdf.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "modes" || s.smokeMode == "scroll" then
@@ -4321,6 +4617,8 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["close"] => if ← confirmDiscard st "closing" then closeFile st
   | ["save"] => discard <| save st
   | ["saveAs"] => discard <| saveAs st
+  | ["importXfdf"] => importXfdf st
+  | ["exportXfdf"] => exportXfdf st
   | ["quit"] =>
     if ← confirmDiscard st "quitting" then discard <| run ["after", "0", "destroy ."]
   | ["outline", id] => outlineClick st id
@@ -4378,7 +4676,8 @@ colour/comment/delete bubble; Escape dismisses them; right button: Highlight col
 Add note...; click a mark to select it (a note opens its text), Delete removes it.
 Ctrl+S saves the marks into FILE-annotated.pdf (an incremental update: the original bytes
 stay unchanged at its start); Ctrl+Shift+S saves to a chosen file; marks saved in a file are
-restored when it is opened (read-only for now). Closing or quitting asks about unsaved marks.
+restored when it is opened; saved marks can be recoloured, deleted and edited (9.5g). Closing or quitting asks about unsaved marks.
+File > Import annotations... / Export annotations... read and write XFDF (STEM.xfdf by default).
 F9 outline panel; click a link to follow it (external addresses are only shown and, if
 confirmed, copied); Alt+Left/Alt+Right back/forward; Ctrl+G go to a page number or label.
 SAFEPDF_VIEWER_SMOKE=DIR: scripted smoke test writing images and state into DIR, then exit
@@ -4390,6 +4689,7 @@ SAFEPDF_VIEWER_SMOKE_MODE=marks: the highlight and note steps;
 SAFEPDF_VIEWER_SMOKE_MODE=bubble: the selection bubble and Highlight pop-over steps;
 SAFEPDF_VIEWER_SMOKE_MODE=save / reopen / encrypted: the save flow, reopening the saved file,
 saving an encrypted file).
+SAFEPDF_VIEWER_SMOKE_MODE=xfdf: XFDF export and import (task 9.11);
 SAFEPDF_VIEWER_SMOKE_MODE=modes: the view-mode steps; =scroll: scroll the document through in
 the vertical mode and write timings (a benchmark).
 SAFEPDF_VIEWER_GEOMETRY=WxH: initial window size (default 1200x960).

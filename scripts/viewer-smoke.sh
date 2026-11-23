@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.7, 9.8; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.7, 9.8, 9.11; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -33,8 +33,16 @@
 #      comment, Escape and page change dismiss (9.8);
 #   1j. saving marks into the PDF (SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen on the saved
 #      file): unsaved indicator, Save / Save As / quit and close prompts, saved marks restored
-#      and read-only, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
-#      shows the highlight (9.5c);
+#      and selectable, no duplicates; qpdf --check, original bytes a prefix (cmp -n), mutool
+#      shows the highlight (9.5c); then (SAFEPDF_VIEWER_SMOKE_MODE=edit on a copy of the
+#      result) saved marks recoloured, deleted, commented and edited, saved, reopened, and a
+#      third revision on top; qpdf --check, prefixes, no duplicate ids, mutool shows the new
+#      colour and not the deleted highlight (9.5g);
+#   1j''. XFDF (SAFEPDF_VIEWER_SMOKE_MODE=xfdf) on a copy of the text PDF: highlight + comment +
+#      note, File → Export annotations… (the comment as <contents> inside the <highlight>),
+#      every mark deleted, import brings them back (pixels, texts, status counts), re-import
+#      adds nothing, hostile files (Tests/xfdf/) and broken ones show an error and change
+#      nothing (9.11);
 #   1k. view modes (SAFEPDF_VIEWER_SMOKE_MODE=modes) on a generated three-page text PDF, each mode
 #      chosen through the View menu: continuous (three page frames, the wheel scrolls the
 #      document and the page field follows 1, 2, 3, a highlight on page 2, a search hit on page
@@ -371,7 +379,7 @@ v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().sp
 want = {
     "menubar": ".menubar",
     "cascades": "File|Edit|View|Go",
-    "entries.menubar.file": "Open...|Save|Save As...|Close|Quit",
+    "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
     "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
@@ -462,7 +470,7 @@ common = {
     "zoom-label0": "Automatic Zoom",
     "zoom-sel0": "auto",
     "zoom-menu": "Automatic Zoom|Actual Size|Page Fit|Page Width|50%|75%|100%|125%|150%|200%|300%|400%",
-    "more-menu": "Open...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left|"
+    "more-menu": "Open...|Import annotations...|Export annotations...|Find...|Go to page...|First page|Last page|Rotate right|Rotate left|"
                  "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
     "tools": ".bar.highlight=normal," + ",".join(w + "=disabled" for w in [
@@ -652,7 +660,7 @@ sys.exit(1 if errs else 0)
 # and enable Save; Quit and Ctrl+W answered Cancel keep them; Ctrl+S writes
 # text-annotated.pdf next to the PDF without a question and opens it (the highlight now drawn
 # by the renderer from its /AP: yellow pixels; the note text restored); a second Ctrl+S has
-# nothing to save; the saved highlight cannot be deleted or recoloured; a new highlight + Ctrl+S
+# nothing to save; the saved highlight can be selected; a new highlight + Ctrl+S
 # appends to the same file (3 marks, distinct ids); Save As writes saveas.pdf; Ctrl+W with an
 # unsaved note answered No discards it. The reopen run restores the 3 marks (pixels, note popup
 # text), refuses then (after Yes) performs Save As onto the opened file, and Quit answered Yes
@@ -685,8 +693,6 @@ want = {
     "note-after-save": "true 0",
     "save-nothing": "true true",
     "saved-selected": "true",
-    "saved-delete": "2 true",
-    "saved-recolour": "true " + yellow,
     "dirty2": "true true",
     "second-save": "true 3 false true",
     "file-marks": "3 3",
@@ -758,6 +764,97 @@ sys.exit(0 if n and yel * 3 >= n else 1)
 ' "$work/out-save/mutool.ppm" "$work/out-save/save.txt" || { echo "FAIL: mutool does not show the highlight" >&2; fail=1; }
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
+# 1j'. Editing saved marks (task 9.5g, SAFEPDF_VIEWER_SMOKE_MODE=edit) on a copy of the
+# text-annotated.pdf left by the reopen run (5 saved marks): the whole-page highlight and the
+# "safe" highlight are deleted, the "world" highlight recoloured green and commented, a note's
+# text edited; the pages follow at once (preview); Ctrl+S writes one revision into the opened
+# file and reopens it (4 marks: the comment as /Contents + /Popup of the highlight, restored
+# with its id); a second round (blue, comment deleted) adds a third revision on top (3 marks).
+# Externally: qpdf --check, each revision a byte prefix of the next, no duplicate ids, and
+# mutool draws "world" in the new colour and "safe" without a highlight.
+mkdir -p "$work/edit" "$work/out-edit"
+cp "$work/save/text-annotated.pdf" "$work/edit/text-annotated.pdf"
+cp "$work/save/text-annotated.pdf" "$work/out-edit/before.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=edit run_viewer "$work/out-edit" "$work/edit/text-annotated.pdf"
+cat "$work/out-edit/edit.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+green, blue = "83 255 188", "128 235 255"
+want = {
+    "restored": "5 false false",
+    "del-all": "4 true true true true",
+    "recolour": "(some green) " + green,
+    "comment": "true 5",
+    "del-safe": "true true",
+    "pending": "5 true true",
+    "saved": "true 4 false false true",
+    "after-world": "(some green) " + green,
+    "after-safe": "true true",
+    "after-comment": "true true true",
+    "after-note": "true",
+    "file-marks1": "4 4",
+    "third": "3 false (some blue) true " + blue,
+    "file-marks2": "3 3",
+}
+errs = ["edit %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-edit/edit.txt" || fail=1
+for f in "$work/out-edit/edit1.pdf" "$work/edit/text-annotated.pdf"; do
+  if command -v qpdf >/dev/null 2>&1; then
+    qpdf --check "$f" >/dev/null 2>&1 || { echo "FAIL: qpdf --check $f" >&2; fail=1; }
+  else echo "viewer-smoke: qpdf missing, check skipped"; fi
+done
+for pair in "out-edit/before.pdf out-edit/edit1.pdf" "out-edit/edit1.pdf edit/text-annotated.pdf"; do
+  set -- $pair
+  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+    || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
+done
+if command -v mutool >/dev/null 2>&1; then
+  mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-edit/edit1.ppm" "$work/out-edit/edit1.pdf" 1
+  mutool draw -q -r 72 -c rgb -F pnm -o "$work/out-edit/final.ppm" "$work/edit/text-annotated.pdf" 1
+  python3 -I -c '
+import sys
+def ppm(p):
+    d = open(p, "rb").read()
+    parts, i = [], 0
+    while len(parts) < 4:
+        while d[i:i+1].isspace(): i += 1
+        j = i
+        while not d[j:j+1].isspace(): j += 1
+        parts.append(d[i:j]); i = j
+    return d, i + 1, int(parts[1])
+def box(name):
+    b = [l.split(": ", 1)[1] for l in open(sys.argv[3], encoding="utf-8") if l.startswith(name + ": ")][0]
+    return list(map(float, b.split()))
+def share(p, b, test):
+    d, i, w = ppm(p)
+    x0, y0, x1, y1 = b
+    n = k = 0
+    for y in range(int(792 - y1) + 2, int(792 - y0) - 1):
+        for x in range(int(x0) + 2, int(x1) - 1):
+            o = i + 3 * (y * w + x)
+            n += 1
+            if test(d[o], d[o + 1], d[o + 2]): k += 1
+    return k, n
+green = lambda r, g, b: r < 110 and g > 240 and 170 < b < 205
+blue = lambda r, g, b: 110 < r < 145 and 220 < g < 245 and b > 240
+tinted = lambda r, g, b: max(r, g, b) - min(r, g, b) > 40
+ok = True
+for p, col, cname in ((sys.argv[1], green, "green"), (sys.argv[2], blue, "blue")):
+    name = p.rsplit("/", 1)[-1]
+    k, n = share(p, box("world-box"), col)
+    print("mutool %s: %d/%d %s pixels in the world box" % (name, k, n, cname))
+    ok = ok and n > 0 and k * 3 >= n
+    k, n = share(p, box("safe-box"), tinted)
+    print("mutool %s: %d/%d tinted pixels in the safe box" % (name, k, n))
+    ok = ok and n > 0 and k == 0
+sys.exit(0 if ok else 1)
+' "$work/out-edit/edit1.ppm" "$work/out-edit/final.ppm" "$work/out-edit/edit.txt" \
+    || { echo "FAIL: mutool does not show the edited marks" >&2; fail=1; }
+else echo "viewer-smoke: mutool missing, check skipped"; fi
+
 # Encrypted input (SAFEPDF_VIEWER_SMOKE_MODE=encrypted): Ctrl+S with a note must not crash; until
 # task 9.5f the writer's refusal shows in the status line and nothing is written ("refused"),
 # afterwards the file is written ("saved").
@@ -771,6 +868,59 @@ if grep -qx 'outcome: refused' "$work/out-enc/encrypted.txt"; then
   grep -q '^status: cannot save to rc4-128-annotated.pdf: ' "$work/out-enc/encrypted.txt" \
     && [ ! -e "$work/enc/rc4-128-annotated.pdf" ] || { echo "FAIL: encrypted refusal not shown, or a file was written" >&2; fail=1; }
 fi
+
+# 1j''. XFDF import/export (task 9.11, SAFEPDF_VIEWER_SMOKE_MODE=xfdf, `Viewer.smokeXfdf`) on a
+# copy of the text PDF: a highlight on "world" with a comment and a note are exported through
+# File → Export annotations… (the dialog answered by ::safepdf::autoPath) into marks.xfdf,
+# which must hold the comment in the standard form <highlight …><contents>…</contents><popup …/>
+# and no separate <text> for it; all marks deleted, the import restores them (yellow pixels,
+# comment and note text equal, unsaved) with the status "3 imported, 0 already present, 0
+# skipped"; a second import adds nothing; the hostile samples of Tests/xfdf/, a missing and a
+# non-XFDF file each give "cannot import NAME: …" and leave the marks unchanged.
+mkdir -p "$work/xfdf" "$work/out-xfdf"
+cp "$work/text.pdf" "$work/xfdf/text.pdf"
+for f in billion-laughs xxe undeclared-entity acrobat; do cp "Tests/xfdf/$f.xfdf" "$work/out-xfdf/"; done
+printf '<?xml version="1.0"?>\n<fdf><annots/></fdf>\n' > "$work/out-xfdf/not-xfdf.xfdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=xfdf run_viewer "$work/out-xfdf" "$work/xfdf/text.pdf"
+cat "$work/out-xfdf/xfdf.txt"
+python3 -I -c '
+import re, sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+yellow = "255 255 152"
+want = {
+    "marks": "3 2 true true true",
+    "world-px": yellow,
+    "menu-states": "normal normal",
+    "export-status": "exported 3 mark(s) to marks.xfdf",
+    "export-default": "text.xfdf",
+    "removed": "0 255 255 255",
+    "import-status": "marks.xfdf: 3 imported, 0 already present, 0 skipped",
+    "imported": "3 2 true true true",
+    "imported-px": yellow + " true",
+    "reimport-status": "marks.xfdf: 0 imported, 3 already present, 0 skipped",
+    "reimported": "3 2 true true true",
+    "acrobat": "6",
+}
+for n in ("billion-laughs", "xxe", "undeclared-entity", "missing", "not-xfdf"):
+    want["hostile %s.xfdf" % n] = "true true 1"
+errs = ["xfdf %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+a = v.get("acrobat-status", "")
+if not a.startswith("acrobat.xfdf: 3 imported, 0 already present, 2 skipped"):
+    errs.append("xfdf acrobat-status: %r" % a)
+for n, frag in (("billion-laughs", "document type declarations"), ("xxe", "document type declarations"),
+                ("undeclared-entity", "unknown entity &nbsp;"), ("not-xfdf", "not an XFDF file")):
+    if frag not in v.get("hostile-status %s.xfdf" % n, ""):
+        errs.append("xfdf hostile-status %s: %r" % (n, v.get("hostile-status %s.xfdf" % n)))
+# The exported file: the comment in the standard form, inside its highlight, and nowhere else.
+x = open(sys.argv[2], encoding="utf-8").read()
+if not re.search("<highlight [^>]*name=\"safepdf-mark-1\"[^>]*><contents>Comment ✓ &lt;&amp;&gt;</contents>"
+                 "<popup [^>]*name=\"safepdf-mark-1-popup-2\"[^>]*/></highlight>", x):
+    errs.append("marks.xfdf: no <highlight ...><contents> comment")
+if x.count("<text ") != 1 or "name=\"safepdf-mark-2\"" in x:
+    errs.append("marks.xfdf: the comment is also a separate element")
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-xfdf/xfdf.txt" "$work/out-xfdf/marks.xfdf" || fail=1
 
 # 1k. View modes (task 9.3) on a three-page text PDF (Helvetica, substitute fonts off: white
 # pages): `Alpha` on page 1, `Bravo` on page 2 (y 400), `zebra` on page 3. Every mode through its

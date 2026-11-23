@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.11 XFDF import/export)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -91,7 +91,7 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 
 | Menu | Entries (accelerator) |
 |---|---|
-| File | Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Close (Ctrl+W), Quit (Ctrl+Q) |
+| File | Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import annotations…, Export annotations… (XFDF, 9.11), Close (Ctrl+W), Quit (Ctrl+Q) |
 | Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Highlight tool (check, 9.8), Show all highlights (check, 9.8), Find… (Ctrl+F) |
 | View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`), then two radio groups (9.3): Page Scrolling / Vertical Scrolling, No Spreads / Odd Spreads / Even Spreads |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
@@ -136,7 +136,7 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     Draw, Image, then Print and Save — Save (PDF.js's download icon) is the command File →
     Save since 9.5c, enabled while there are unsaved marks; the others are **disabled
     placeholders** until their tasks land (Comment, Text, Draw 9.9; Print and Image after
-    M9) — and the `»` overflow menu: Open…, Find…, Go to page…, First page, Last
+    M9) — and the `»` overflow menu: Open…, Import annotations…, Export annotations… (9.11), Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
     buttons), then, as in PDF.js's secondary toolbar, the scroll modes (Page Scrolling, Vertical
     Scrolling) and the spread modes (No Spreads, Odd Spreads, Even Spreads) as radio entries on
@@ -319,7 +319,7 @@ is drawn per quad (PDF.js outlines the union shape).
 | `Delete` | delete the selected mark |
 | right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
 
-## Saving marks into the PDF (9.5c)
+## Saving marks into the PDF (9.5c, 9.5g)
 
 Tk-free flow in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by `Viewer.save`,
 `saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7: the marks become annotation objects
@@ -329,43 +329,91 @@ appended to the file as an **incremental update**; the original bytes are never 
   the opened file (for an opened `…-annotated.pdf`: that file itself, a further revision).
   It asks first when that means writing into the opened file, or replacing another existing
   file — unless this session wrote the file (so repeated saves are silent). Save is enabled
-  only while there are unsaved marks; with none, Ctrl+S says "nothing to save".
+  only while there are unsaved changes (new marks, saved marks changed or deleted); with none,
+  Ctrl+S says "nothing to save".
 * **Save As…** (Ctrl+Shift+S) asks for a file (`tk_getSaveFile`, which confirms replacing an
   existing file), proposing `STEM-annotated.pdf`; writing over the **opened file** needs an
   explicit yes (its bytes still stay a prefix of the new file). With no unsaved marks it
   writes a plain copy.
-* **What is written**: only the marks not yet in the file (`Marks.Store.unsaved`), converted
-  to `Core.Write.Annots.Mark` (`Save.toCore`: quads, a note's icon box as `/Rect`, `/C`,
-  `/Contents`, `/NM safepdf-mark-ID`, `/M` = the current UTC time `D:YYYYMMDDHHmmSSZ`; **no
-  author** `/T`, so the login name never ends up in the file) and passed to
-  `Annots.writeMarks`. A highlight's comment (the note on its quads, 9.8) is written as its
-  own `/Text` annotation with `/QuadPoints`.
+* **What is written** (9.5g: one update with additions, supersessions and removals,
+  `Save.edits` → `Annots.writeEdits` → `Incremental.writeUpdate`, writer rule W11): the file's
+  own marks are scanned (`Save.scan`: object reference, popup, comment, `/CreationDate`) and
+  compared with the store. Marks not in the file are **added**; marks whose colour, text or
+  comment changed are **superseded** — their annotation object is written again under its own
+  number and generation (ISO 32000-2 §7.5.6) with a fresh appearance stream and the original
+  `/CreationDate`; annotations of deleted marks are **removed** from their page's `/Annots`
+  (a highlight's popup with it). The old objects stay in the earlier revision. Marks are
+  converted by `Save.toCore` (quads, a note's icon box as `/Rect`, `/C`, `/Contents`,
+  `/NM safepdf-mark-ID`, `/M` = the current UTC time `D:YYYYMMDDHHmmSSZ`; **no author** `/T`,
+  so the login name never ends up in the file). A highlight's comment (the note on its quads
+  with a text, `Store.commentOf`, 9.8) is written **into the highlight** as pdf.js does:
+  `/Contents` + a `/Popup` annotation whose `/NM` is `safepdf-mark-ID-popup-CID` (CID = the
+  comment note's id, so it comes back with the same id). Files saved by 9.5c builds, with the
+  comment as a separate `/Text`, are still read; that `/Text` is removed and the comment moved
+  into the highlight on the next save that touches the highlight or the note.
 * **Checked before anything is written**: the result must start with the original bytes, must
   reopen through the **strict** parser (`Api.openBytes`, repair refused), and reading our
   marks back must give every mark of the store (page, kind, colour, text, geometry within
-  1/500), each new one exactly once. Then the bytes go to a fresh temporary file in the same
+  1/500; a comment takes its highlight's colour), each written one exactly once, and no
+  deleted one. Then the bytes go to a fresh temporary file in the same
   directory, which is renamed over the target (never truncated in place; on failure the
   temporary file is removed). The written file is then opened in place of the old one, on the
   same page (selection, search and history are reset as on any open).
 * **Reopening**: on open, the annotations with `/NM safepdf-mark-ID` are read back
-  (`Save.readMarks`): `/Highlight` → highlight over its `/QuadPoints`, `/Text` → note with
+  (`Save.readMarks`): `/Highlight` → highlight over its `/QuadPoints` (with a non-empty
+  `/Contents` also its comment: a note on the same quads, id from the popup's `/NM` or, for a
+  popup without one, a fresh id after all others), `/Text` → note with
   `/Contents` anchored to its `/QuadPoints` or its `/Rect`'s upper-left corner, colour =
   nearest palette colour to `/C`; they are restored with their ids (`Store.load`) and count as
   saved. Saved marks are **drawn by the renderer** from their appearance streams (so they are
   not multiplied in again and their note icons are not canvas items); they can be selected and
   a note's popup shows its text. Other annotations are only rendered.
-* **Saved marks are read-only for now.** The writer only appends (`writeAnnots` rules W3/W4:
-  new objects, `/Annots` extended); it cannot drop an annotation from a page's `/Annots` or
-  supersede an annotation object by writing its number again. Recolouring, deleting or
-  editing the text of a saved mark is refused with a status message ("this mark is saved in
-  the PDF; …"), never silently lost — follow-up task 9.5g. "Show all" off hides only unsaved
-  highlights.
-* **Unsaved marks**: the title starts with `* `; Close (Ctrl+W), Quit (Ctrl+Q, File → Quit,
+* **Saved marks are editable** (9.5g): recolour (Highlight menu, pop-over swatch, edit
+  bubble), Delete (deleting a highlight also deletes its comment) and note text edits work
+  on them as on new marks and make the document dirty (`Store.changedSaved`,
+  `Store.deletedSaved`, compared with `Store.base`, the marks as in the file). Since saved
+  marks are drawn by the renderer, the pages are then rendered from a **preview**
+  (`State.view`, `Viewer.updatePreview`, `Save.preview`): the opened document with only the
+  edits of saved marks applied by the same writer in memory and reopened strictly; the next
+  Save writes from the opened document, not from the preview. A comment written into its
+  highlight has no appearance of its own, so its icon is a canvas item. "Show all" off hides
+  only unsaved highlights.
+* **Unsaved changes**: the title starts with `* `; Close (Ctrl+W), Quit (Ctrl+Q, File → Quit,
   the window's close button: `wm protocol WM_DELETE_WINDOW`) and Open… ask Save / Discard /
   Cancel (a Tk message box: Yes / No / Cancel).
 * **Errors** (an encrypted document, refused by the writer until 9.5f; a document opened
   through the repair path; a failed check; a write error) appear in the status line as
   `cannot save to NAME: …`; nothing is written and the marks stay unsaved.
+
+## XFDF import and export (9.11)
+
+XFDF (ISO 19444-1) is interchange only — the marks live in the PDF (9.5c). The Tk-free reader
+and writer are `SafePdf/Shell/App/Xfdf.lean` (9.5d; `#guard`s and the suite `xfdf`).
+
+* **File → Export annotations…** (also in the toolbar's `»` menu) asks for a file
+  (`tk_getSaveFile` filtered to `{{XFDF {.xfdf}} {{All files} *}}`, proposing `STEM.xfdf` next
+  to the PDF, `Viewer.xfdfTarget`) and writes every mark of the document — saved or not —
+  through `Save.writeAtomic` (temporary file + rename): `<highlight>` with `coords`,
+  `<text>` for notes, page boxes from the document, `date` now, `<f href="NAME.pdf"/>`.
+  **A highlight's comment** is written in the standard form, as `<contents>` of the
+  `<highlight>` followed by `<popup … name="safepdf-mark-H-popup-C" open="no"/>` (the popup
+  name carries the comment note's id, like the popup's `/NM` in the PDF since 9.5g); like in
+  the PDF, the comment has no colour of its own (its highlight's). Other notes — anchored to a
+  point, empty, or older notes on the same quads — stay `<text>` elements (ours carry a
+  non-standard `coords` attribute with their quads, ignored by other readers). Status:
+  `exported N mark(s) to FILE`; a write error: `cannot export to FILE: …`.
+* **File → Import annotations…** (also in `»`) asks for a file (`tk_getOpenFile`, same
+  filter) and reads it with `Xfdf.readFile` (size checked before reading; no DTD, only the
+  five predefined entities, depth/attribute/length/node limits; pages checked against the
+  document). Highlights (with a `<contents>`/`<contents-richtext>` comment → a comment note on
+  the same quads), and text notes (9.5d's separate comment `<text coords>` included) become
+  **unsaved** marks (`Xfdf.importItems`: a mark equal to one already present is not added
+  again; our ids are kept when never used in this document; the added marks follow in id
+  order), drawn at once; the title gets its `* `. Status: `FILE: N imported, D already
+  present, S skipped` (plus the first skipped element and why: other annotation types,
+  replies, pages not in the document). A refused or unreadable file — billion laughs, XXE, an
+  unknown entity, a non-XFDF root, a missing file — shows `cannot import FILE: <reason>` and
+  changes nothing.
 
 ## Selection bubble and Highlight pop-over (9.8)
 
@@ -687,8 +735,8 @@ Saving (9.5c) runs in the variants `save`, `reopen` and `encrypted` (`Viewer.smo
 title start with `* ` and enable Save (menu entry and toolbar button); Quit and Ctrl+W
 answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` without a question and
 opens it (2 saved marks, no `*`, Save disabled; the highlight pixels are yellow from the
-renderer, no canvas note icon, the note text restored); a second Ctrl+S writes nothing; Delete
-and a recolour of the saved highlight are refused; a new highlight on `safe` + Ctrl+S appends
+renderer, no canvas note icon, the note text restored); a second Ctrl+S writes nothing; the
+saved highlight can be selected; a new highlight on `safe` + Ctrl+S appends
 to the same file (3 marks with distinct ids, read back strictly); Save As writes
 `saveas.pdf`; a new note and Ctrl+W answered No discards it. The `reopen` run on
 `text-annotated.pdf` restores the 3 marks (pixels, a click on the note's place opens its popup
@@ -697,8 +745,27 @@ appends, and Quit answered Yes saves one more note before quitting. The script t
 `qpdf --check` on the written files, that the original (and each saved revision) is a
 byte-for-byte prefix of the later file (`cmp -n`) and the original unchanged, that the final
 file has 5 revisions and each of its 5 mark annotations once, and that `mutool draw` shows the
-highlight (yellow pixels in the box of `world`). The `encrypted` run (RC4 fixture) saves a
+highlight (yellow pixels in the box of `world`). The `edit` run (9.5g, `Viewer.smokeEdit`) on
+a copy of that file deletes the whole-page highlight and the `safe` highlight, recolours the
+`world` highlight green (pixels follow at once from the preview) and gives it a comment, edits
+a note's text, saves into the opened file (4 marks, comment restored with its id, its icon
+drawn), then a third revision on top (blue, comment deleted: 3 marks); the script checks
+`qpdf --check`, the byte prefixes, no duplicate ids, and that `mutool draw` shows `world`
+green (then blue) and no tint in the box of `safe`. The `encrypted` run (RC4 fixture) saves a
 note: until 9.5f the status line shows the writer's refusal and nothing is written.
+
+XFDF (9.11) runs in the variant `xfdf` (`Viewer.smokeXfdf`) on a copy of the text PDF: a
+highlight on `world` with a comment and a note at (300, 400); File → Export annotations…
+(answered by `::safepdf::autoPath`) writes `marks.xfdf`, which the script checks for
+`<highlight … name="safepdf-mark-1" …><contents>Comment ✓ &lt;&amp;&gt;</contents><popup …
+name="safepdf-mark-1-popup-2" …/></highlight>` and a single `<text>` (the note); every mark is
+deleted (white pixels), `importXfdf` with the file's path brings the three marks back (yellow
+pixels, the comment still the highlight's, the note text equal, unsaved, `* ` title) with
+`marks.xfdf: 3 imported, 0 already present, 0 skipped`; a second import gives `0 imported, 3
+already present`; `billion-laughs.xfdf`, `xxe.xfdf`, `undeclared-entity.xfdf` (from
+`Tests/xfdf/`), a missing file and a `<fdf>` file each give `cannot import NAME: …` with the
+reader's message, the marks unchanged and the window alive; Acrobat's sample imports 3 marks
+and skips 2.
 
 The view modes (9.3) run in a variant `SAFEPDF_VIEWER_SMOKE_MODE=modes` (`Viewer.smokeModes`)
 on a generated three-page text PDF (substitute fonts off, so the pages are white): `Alpha` on

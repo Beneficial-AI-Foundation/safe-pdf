@@ -19,7 +19,8 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   Comment, Text, Draw, Image: disabled until task 9.9 lands), Print (disabled, after M9), Save
   (task 9.5c: the command `Menu.Cmd.save`, PDF.js's download icon, enabled with unsaved marks)
   and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
-  Open, and the scroll and spread modes of task 9.3).
+  Open, Import / Export annotations (XFDF, task 9.11), and the scroll and spread modes of
+  task 9.3).
 * **Enabled states** (`targets`, `states`): menubar entries (`Menu.entryList`), toolbar
   buttons and overflow-menu entries all follow `Menu.Cmd.enabled`; the tool buttons follow
   `Tool.enabled`.
@@ -346,10 +347,10 @@ def morePath : String := ".more"
 
 /-- Entries of the overflow menu (`none`: separator): PDF.js's secondary toolbar items that
 the viewer has (first/last page, rotate) plus Find, Go to and Open, which no longer have
-toolbar buttons, and the scroll and spread modes (task 9.3; radio entries, `Menu.Cmd.radio?`).
+toolbar buttons, Import / Export annotations (XFDF, task 9.11), and the scroll and spread modes (task 9.3; radio entries, `Menu.Cmd.radio?`).
 Document properties are not available yet. -/
 def overflow : List (Option Cmd) :=
-  [some .openFile, none, some .find, some .gotoPage, none, some .firstPage, some .lastPage,
+  [some .openFile, some .importXfdf, some .exportXfdf, none, some .find, some .gotoPage, none, some .firstPage, some .lastPage,
    none, some .rotateCw, some .rotateCcw, none, some .scrollPage, some .scrollVertical, none,
    some .spreadNone, some .spreadOdd, some .spreadEven]
 
@@ -403,10 +404,10 @@ def states (c : Ctx) : List Bool :=
   !(buttons.filter (·.enabled c)).any (·.path == ".bar.save") &&
   (buttons.filter (·.enabled { c with dirty := true })).any (·.path == ".bar.save")
 #guard (overflowEntries.map (·.2.label)) ==
-  ["Open...", "Find...", "Go to page...", "First page", "Last page", "Rotate right",
+  ["Open...", "Import annotations...", "Export annotations...", "Find...", "Go to page...", "First page", "Last page", "Rotate right",
    "Rotate left", "Page Scrolling", "Vertical Scrolling", "No Spreads", "Odd Spreads",
    "Even Spreads"]
-#guard overflowEntries.map (·.1) == [0, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 16]
+#guard overflowEntries.map (·.1) == [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18]
 -- Every overflow command is also in the menubar (one vocabulary).
 #guard overflowEntries.all fun (_, k) => (Menu.locate k).isSome
 
