@@ -1250,8 +1250,9 @@ proc ::safepdf::ask {type title msg} {
 }
 # Three-way questions (9.r2: Overwrite / Save As... / Cancel, Save / Don't Save / Cancel): a
 # modal dialog with the buttons given as key label pairs in display order (Save.*Buttons; on
-# aqua the macOS order), the default key (Return; focused) and the cancel key (Escape, the
-# dialog's close button). Returns the chosen key. Smoke mode: ::safepdf::autoAnswer answers.
+# aqua the macOS order), the default key (focused at first; Return presses the focused
+# button) and the cancel key (Escape, the dialog's close button); the focus goes back where it
+# was. Returns the chosen key. Smoke mode: ::safepdf::autoAnswer answers.
 proc ::safepdf::choose {title msg default cancel args} {
   set ::safepdf::lastAsk $msg
   if {$::safepdf::autoAnswer ne {}} { return $::safepdf::autoAnswer }
@@ -1276,15 +1277,24 @@ proc ::safepdf::choose {title msg default cancel args} {
   pack $w.f -fill both -expand 1
   wm protocol $w WM_DELETE_WINDOW [list set ::safepdf::chooseAnswer $cancel]
   bind $w <Escape> [list set ::safepdf::chooseAnswer $cancel]
-  bind $w <Return> [list $w.f.b.$default invoke]
+  # Return (and keypad Enter) presses the focused button, as in tk_messageBox: after Tab to
+  # Cancel, Return must cancel, not run the default (9.r6); the default has the focus first.
+  bind $w <Return> [list ::safepdf::chooseReturn $w $default]
+  bind $w <KP_Enter> [list ::safepdf::chooseReturn $w $default]
   ::tk::PlaceWindow $w widget .
+  set old [focus]
   wm deiconify $w
   catch {grab $w}
   focus $w.f.b.$default
   vwait ::safepdf::chooseAnswer
   catch {grab release $w}
   destroy $w
+  if {$old ne {} && [winfo exists $old]} { catch {focus $old} }
   return $::safepdf::chooseAnswer
+}
+proc ::safepdf::chooseReturn {w default} {
+  set f [focus]
+  if {$f ne {} && [string equal [winfo parent $f] $w.f.b]} { $f invoke } else { $w.f.b.$default invoke }
 }
 # Every way of quitting goes through this one proc (9.r2; task 9.r3's key bindings call it):
 # the viewer asks about unsaved marks and quits only when the answer allows it.
@@ -1293,10 +1303,14 @@ if {[tk windowingsystem] eq {aqua}} {
   # The application menu's Quit and Cmd+Q (Tk calls this; returning without exiting cancels).
   proc ::tk::mac::Quit {} { ::safepdf::quit }
 }
-proc ::safepdf::askSavePath {dir file} {
+# The save dialogs take their type options from Save.saveDialogOptions (9.r6: none of
+# -filetypes on aqua, whose Format: pop-up overflows the panel); the last options are kept in
+# ::safepdf::lastDialog for the smoke test.
+set ::safepdf::lastDialog {}
+proc ::safepdf::askSavePath {dir file args} {
+  set ::safepdf::lastDialog [list $dir $file {*}$args]
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
-  return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file \\
-    -defaultextension .pdf -confirmoverwrite 1 -filetypes {{{PDF files} {.pdf .PDF}} {{All files} *}}]
+  return [tk_getSaveFile -parent . -title {Save As} -initialdir $dir -initialfile $file {*}$args]
 }
 # XFDF import/export (9.11): the file dialogs; ::safepdf::autoPath answers them in smoke mode.
 proc ::safepdf::askXfdfOpen {dir} {
@@ -1304,10 +1318,11 @@ proc ::safepdf::askXfdfOpen {dir} {
   return [tk_getOpenFile -parent . -title {Import annotations} -initialdir $dir \\
     -filetypes {{XFDF {.xfdf}} {{All files} *}}]
 }
-proc ::safepdf::askXfdfSave {dir file} {
+proc ::safepdf::askXfdfSave {dir file args} {
+  set ::safepdf::lastDialog [list $dir $file {*}$args]
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
   return [tk_getSaveFile -parent . -title {Export annotations} -initialdir $dir -initialfile $file \\
-    -defaultextension .xfdf -confirmoverwrite 1 -filetypes {{XFDF {.xfdf}} {{All files} *}}]
+    {*}$args]
 }
 wm protocol . WM_DELETE_WINDOW ::safepdf::quit
 bind . <Control-s> {::safepdf::emit save}
@@ -2690,7 +2705,7 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
     try
       Save.writeAtomic real bytes (keepPermissions real)
     catch e =>
-      setStatus s!"cannot save to {name}: {e}"
+      setStatus s!"cannot save to {name}: {Save.oneLine (toString e)}"
       return some false
     afterWrite st s.page { path, marks := n, appended := bytes.size - doc.file.bytes.size,
                            size := bytes.size, total := got.length }
@@ -2719,9 +2734,64 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
       appended; {got.length} marks in its file)"
     return true
 
+/-- The directory of `path` for a file dialog (`.` when it has none). -/
+def dirOf (path : String) : String :=
+  match (path : System.FilePath).parent with
+  | some d => if d.toString.isEmpty then "." else d.toString
+  | none => "."
+
+#guard dirOf "paper.pdf" == "." && dirOf "/tmp/x/paper.pdf" == "/tmp/x"
+
+/-- Whether the file dialogs take the aqua form (task 9.r6): the platform the keys were set
+up for (`platformRef`, which the smoke test can force to aqua on X11). -/
+def onAqua : IO Bool := return (← platformRef.get) == .aqua
+
+/-- The folder a file dialog for the document `path` starts in (task 9.r6, `Save.dialogDir`):
+the folder of the opened file when it is one on disk and that folder exists (and, with
+`write`, is writable), else the home folder (a document from memory has no folder). -/
+def dialogDirOf (s : State) (path : String) (write : Bool := true) : IO String := do
+  let dir := dirOf path
+  let mut usable := false
+  if !s.inMemory then
+    let isDir := (← run ["file", "isdirectory", dir]) == "1"
+    let w := (← run ["file", "writable", dir]) == "1"
+    usable := isDir && (w || !write)
+  return Save.dialogDir dir usable (← IO.getEnv "HOME")
+
+/-- The file a Save As… or Export dialog returned, made ready to write (task 9.r6): the
+type's extension `ext` added when missing (`Save.withExt`; when that names an existing file,
+which the dialog did not confirm, the user is asked first), then refused with a status
+message when it is a folder, a read-only file, in a folder that is not writable or —
+`export` — the opened document itself (`Save.targetProblem`). `none`: nothing is written. -/
+def checkTarget (st : IO.Ref State) (chosen ext : String) (isExport : Bool) :
+    IO (Option String) := do
+  let s ← st.get
+  let what := if isExport then "export" else "save"
+  let target := Save.withExt chosen ext
+  let name := baseName target
+  if target != chosen && (← System.FilePath.pathExists target) then
+    if (← ask "yesno" (if isExport then "Export annotations" else "Save As")
+        (Save.replaceQuestion name)) != "yes" then
+      setStatus s!"{what} cancelled"
+      return none
+  let isDir ← System.FilePath.isDir target
+  let ex ← System.FilePath.pathExists target
+  let fw := ex && (← run ["file", "writable", target]) == "1"
+  let dw := (← run ["file", "writable", dirOf target]) == "1"
+  let mut opened := false
+  if isExport && !s.inMemory then
+    if let some pdf := s.path then opened ← samePath target pdf
+  match Save.targetProblem name isDir ex fw dw opened with
+  | some p =>
+    setStatus s!"cannot {what}: {p}"
+    return none
+  | none => return some target
+
 /-- One round of Save As…: asks for a file (`tk_getSaveFile`, which confirms replacing an
-existing file), proposing `Save.defaultTarget` (`STEM-annotated.pdf`), and writes the unsaved
-marks there (a plain copy when there are none). The opened file itself needs an explicit yes
+existing file; options `Save.saveDialogOptions`, starting in `dialogDirOf`), proposing
+`Save.defaultTarget` (`STEM-annotated.pdf`), checks it (`checkTarget`: `.pdf` added, folder /
+read-only / unwritable folder refused; task 9.r6) and writes the unsaved marks there (a plain
+copy when there are none). The opened file itself needs an explicit yes
 (unless this session wrote it) and goes through `overwriteInto` (changed-on-disk check);
 `none` when that asks for another file. For a library's document (task 10.1b) it writes a
 local copy and stays on the library's document. -/
@@ -2729,13 +2799,12 @@ def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
   let s ← st.get
   let (some path, some _) := (s.path, s.doc) | return some false
   let fp : System.FilePath := Save.defaultTarget path
-  let dir := match fp.parent with
-    | some d => if d.toString.isEmpty then "." else d.toString
-    | none => "."
-  let chosen ← run ["::safepdf::askSavePath", dir, fp.fileName.getD "document.pdf"]
+  let chosen ← run (["::safepdf::askSavePath", ← dialogDirOf s path,
+    fp.fileName.getD "document.pdf"] ++ Save.saveDialogOptions (← onAqua) "PDF files" "pdf")
   if chosen.isEmpty then
     setStatus "save cancelled"
     return some false
+  let some chosen ← checkTarget st chosen "pdf" false | return some false
   -- A library's document (task 10.1b): a local copy; the window stays on the library's
   -- document and its marks stay unsaved there (Save sends them to the library).
   if s.library.isSome then
@@ -2812,18 +2881,11 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
 
 /-! ## XFDF import and export (task 9.11) -/
 
-/-- The directory of `path` for a file dialog (`.` when it has none). -/
-def dirOf (path : String) : String :=
-  match (path : System.FilePath).parent with
-  | some d => if d.toString.isEmpty then "." else d.toString
-  | none => "."
-
 /-- The proposed export file of the PDF `path`: `STEM.xfdf` next to it. -/
 def xfdfTarget (path : String) : String :=
   ((path : System.FilePath).withExtension "xfdf").toString
 
 #guard xfdfTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && xfdfTarget "a.b.PDF" == "a.b.xfdf"
-#guard dirOf "paper.pdf" == "." && dirOf "/tmp/x/paper.pdf" == "/tmp/x"
 
 /-- The status line after an import of `name`: added, already present and skipped counts, and
 the first skipped annotation's reason. -/
@@ -2844,7 +2906,7 @@ def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
   let (some pdf, some _) := (s.path, s.doc) | return
   let path ← match path with
     | some p => pure p
-    | none => run ["::safepdf::askXfdfOpen", dirOf pdf]
+    | none => run ["::safepdf::askXfdfOpen", ← dialogDirOf s pdf (write := false)]
   if path.isEmpty then
     setStatus "import cancelled"
     return
@@ -2861,8 +2923,9 @@ def importXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
 
 /-- **Export annotations…** (File menu, `»` menu): writes every mark of the store (saved or
 not; `Xfdf.toXfdf`, dated now, `<f href>` the PDF's file name) to `path` (else asks,
-`::safepdf::askXfdfSave`, proposing `xfdfTarget`) through `Save.writeAtomic`. Errors go to the
-status line. -/
+`::safepdf::askXfdfSave`, proposing `xfdfTarget`) through `Save.writeAtomic`, after
+`checkTarget` (`.xfdf` added; never onto the opened PDF, a folder or a read-only file; task
+9.r6), keeping the permissions of a file it replaces. Errors go to the status line. -/
 def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := do
   let s ← st.get
   let (some pdf, some doc) := (s.path, s.doc) | return
@@ -2870,23 +2933,32 @@ def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
     | some p => pure p
     | none =>
       let fp : System.FilePath := xfdfTarget pdf
-      run ["::safepdf::askXfdfSave", dirOf pdf, fp.fileName.getD "annotations.xfdf"]
+      run (["::safepdf::askXfdfSave", ← dialogDirOf s pdf, fp.fileName.getD "annotations.xfdf"]
+        ++ Save.saveDialogOptions (← onAqua) "XFDF" "xfdf")
   if path.isEmpty then
     setStatus "export cancelled"
     return
+  let some path ← checkTarget st path "xfdf" true | return
   let xml := Xfdf.toXfdf s.marks (Save.pageBox doc) (← Save.nowDate) (some (baseName pdf))
   try
-    Save.writeAtomic path xml.toUTF8
+    Save.writeAtomic path xml.toUTF8 (keepPermissions path)
     setStatus s!"exported {s.marks.marks.size} mark(s) to {baseName path}"
-  catch e => setStatus s!"cannot export to {baseName path}: {e}"
+  catch e => setStatus s!"cannot export to {baseName path}: {Save.oneLine (toString e)}"
 
-/-- The `tk_getOpenFile` dialog (after the unsaved-marks question); opens the chosen file
-(nothing when cancelled). -/
+/-- The `tk_getOpenFile` dialog (after the unsaved-marks question), starting in the opened
+file's folder; opens the chosen file (nothing when cancelled). -/
 def openDialog (st : IO.Ref State) : IO Unit := do
   if !(← confirmDiscard st "opening another file") then return
-  let path ← run ["tk_getOpenFile", "-parent", ".", "-title", "Open PDF", "-filetypes",
-    "{{PDF files} {.pdf .PDF}} {{All files} *}"]
-  if !path.isEmpty then openFile st path
+  let s ← st.get
+  -- Start in the opened file's folder (task 9.r6); without a file Tk's own choice (the last
+  -- folder of this session, else the working directory).
+  let dir ← match s.path with
+    | some p => pure ["-initialdir", ← dialogDirOf s p (write := false)]
+    | none => pure []
+  let path ← run (["tk_getOpenFile", "-parent", ".", "-title", "Open PDF"] ++ dir ++
+    ["-filetypes", "{{PDF files} {.pdf .PDF}} {{All files} *}"])
+  if path.isEmpty then setStatus "open cancelled"
+  else openFile st path
 
 /-! ## Menubar (task 9.1) -/
 
@@ -5758,6 +5830,111 @@ def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the save-dialog audit (`SAFEPDF_VIEWER_SMOKE_MODE=savedlg`, task 9.r6) on a
+copy of the text PDF alone in its folder `D` (substitute fonts off; files are answered with
+`::safepdf::autoPath`, questions with `::safepdf::autoAnswer`):
+* the three-way prompt (`::safepdf::choose`, real dialog): Return on the focused default
+  gives it, Tab-focus on Cancel + Return gives Cancel (was: the default), Escape Cancel,
+  Space on Save As… gives it; the focus goes back to `.c` each time;
+* Save As… with a note: the dialog options (`-filetypes` only off aqua) and its folder `D`;
+  a 244-character name is written (the temporary name is cut); a dotted name without `.pdf`
+  gets `.pdf`; one that then names an existing file asks (answered No: untouched); a
+  read-only file, a folder and a file in a read-only folder are refused with their reason,
+  the title keeps `* ` and Save stays enabled; a name with spaces, Tcl metacharacters,
+  quotes and non-ASCII is written and shown in the title;
+* Export annotations…: the opened PDF chosen writes `NAME.pdf.xfdf` beside it (the PDF
+  unchanged; was: the PDF replaced by XML), a name without `.xfdf` gets it;
+* the opened file deleted behind the viewer's back: Save asks with the "no longer there"
+  question (Cancel) and creates nothing.
+Results in `savedlg.txt`; the shell checks them and that no temporary file is left. -/
+def smokeSaveDialogs (st : IO.Ref State) (dir : String) : IO Unit := do
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let orig := (← st.get).path.getD ""
+  let d := dirOf orig
+  let file (name : String) : String := ((d : System.FilePath) / name).toString
+  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  -- 1. The three-way prompt from the keyboard.
+  let chooseWith (keys : String) : IO String := do
+    discard <| run ["focus", "-force", ".c"]
+    discard <| run ["update"]
+    -- Generated keys go to the focus (forced: no window manager); a dialog that ignores them
+    -- answers `timeout` after 3 s instead of hanging the run.
+    discard <| run ["after", "400", keys]
+    discard <| run ["after", "3000", "set ::safepdf::chooseAnswer timeout"]
+    let a ← run ["::safepdf::choose", "Save", "Save 1 mark?", "overwrite", "cancel",
+      "overwrite", "Overwrite", "saveas", "Save As…", "cancel", "Cancel"]
+    discard <| run ["update"]
+    discard <| run ["after", "cancel", "set ::safepdf::chooseAnswer timeout"]
+    return s!"{a} {← run ["focus"]}"
+  let b := ".choose.f.b"
+  out := out.push s!"choose-return: {← chooseWith s!"focus -force {b}.overwrite; update; event generate {b}.overwrite <Key-Return>"}"
+  out := out.push s!"choose-tab-cancel: {← chooseWith s!"focus -force {b}.cancel; update; event generate {b}.cancel <Key-Return>"}"
+  out := out.push s!"choose-escape: {← chooseWith s!"focus -force {b}.overwrite; update; event generate {b}.overwrite <Key-Escape>"}"
+  out := out.push s!"choose-space: {← chooseWith s!"focus -force {b}.saveas; update; event generate {b}.saveas <Key-space>"}"
+  -- 2. Save As… cases.
+  smokeNoteAt st 300 400 "dialog audit"
+  let saveAsTo (p : String) : IO String := do
+    discard <| run ["set", "::safepdf::autoPath", p]
+    discard <| run ["set", "::safepdf::lastAsk", ""]
+    discard <| run [".menubar.file", "invoke", Menu.Cmd.saveAs.label]
+    discard <| run ["set", "::safepdf::autoPath", ""]
+    k.status
+  let long := String.ofList (List.replicate 240 'L') ++ ".pdf"
+  let st1 ← saveAsTo (file long)
+  let dlg ← run ["set", "::safepdf::lastDialog"]
+  out := out.push s!"dialog-dir: {(← run ["lindex", dlg, "0"]) == d} {← run ["lindex", dlg, "1"]}"
+  out := out.push s!"dialog-filetypes: {(dlg.splitOn "-filetypes").length == 2} {(← onAqua)} {(dlg.splitOn "-defaultextension .pdf").length == 2}"
+  out := out.push s!"long-name: {st1.startsWith "saved"} {decide ((← k.size (file long)) > 0)}"
+  smokeNoteAt st 300 400 "dialog audit 2"
+  let st2 ← saveAsTo (file "3453483.3454032-final")
+  out := out.push s!"dotted-name: {st2.startsWith "saved"} {decide ((← k.size (file "3453483.3454032-final.pdf")) > 0)} {(← k.size (file "3453483.3454032-final")) == 0}"
+  smokeNoteAt st 300 400 "dialog audit 3"
+  IO.FS.writeFile (file "exists.pdf") "keep me\n"
+  discard <| run ["set", "::safepdf::autoAnswer", "no"]
+  let st3 ← saveAsTo (file "exists")
+  discard <| run ["set", "::safepdf::autoAnswer", ""]
+  out := out.push s!"ext-exists: {st3 == "save cancelled"} {(← k.lastAsk) == Save.replaceQuestion "exists.pdf"} {(← IO.FS.readFile (file "exists.pdf")) == "keep me\n"}"
+  IO.FS.writeFile (file "ro.pdf") "read-only\n"
+  discard <| run ["file", "attributes", file "ro.pdf", "-permissions", "0444"]
+  let st4 ← saveAsTo (file "ro.pdf")
+  out := out.push s!"read-only: {st4.startsWith "cannot save: ro.pdf is read-only"} {(← IO.FS.readFile (file "ro.pdf")) == "read-only\n"}"
+  IO.FS.createDirAll (file "folder.pdf")
+  let st5 ← saveAsTo (file "folder.pdf")
+  out := out.push s!"folder: {st5.startsWith "cannot save: folder.pdf is a folder"}"
+  IO.FS.createDirAll (file "rodir")
+  discard <| run ["file", "attributes", file "rodir", "-permissions", "0555"]
+  let st6 ← saveAsTo (file "rodir/x.pdf")
+  discard <| run ["file", "attributes", file "rodir", "-permissions", "0755"]
+  out := out.push s!"ro-folder: {st6.startsWith "cannot save: the folder of x.pdf is not writable"} {(← k.size (file "rodir/x.pdf")) == 0}"
+  out := out.push s!"refused-state: {(← st.get).marks.dirty} {← k.star} {← k.menuState .save}"
+  let weird := "we ird $x [exit 3] {b} \"q\" ü ✓.pdf"
+  let st7 ← saveAsTo (file weird)
+  out := out.push s!"weird-name: {st7.startsWith "saved"} {decide ((← k.size (file weird)) > 0)} {(← run ["wm", "title", "."]).startsWith weird} {(← st.get).marks.dirty}"
+  -- 3. Export annotations….
+  let pdf := (← st.get).path.getD ""
+  let pdfBytes ← IO.FS.readBinFile pdf
+  discard <| run ["set", "::safepdf::autoPath", pdf]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  out := out.push s!"export-onto-pdf: {(← k.status).startsWith "exported"} {(← IO.FS.readBinFile pdf).data == pdfBytes.data} {decide ((← k.size (pdf ++ ".xfdf")) > 0)}"
+  discard <| run ["set", "::safepdf::autoPath", file "notes"]
+  discard <| run [".menubar.file", "invoke", Menu.Cmd.exportXfdf.label]
+  discard <| run ["set", "::safepdf::autoPath", ""]
+  let xd ← run ["set", "::safepdf::lastDialog"]
+  out := out.push s!"export-ext: {(← k.status).startsWith "exported"} {decide ((← k.size (file "notes.xfdf")) > 0)} {(xd.splitOn "-filetypes").length == 2} {(← run ["lindex", xd, "1"])}"
+  -- 4. The opened file vanished: Save asks, nothing is created.
+  smokeNoteAt st 300 400 "vanished"
+  IO.FS.removeFile pdf
+  discard <| run ["set", "::safepdf::autoAnswer", "cancel"]
+  discard <| run ["set", "::safepdf::lastAsk", ""]
+  sendEvent ".c" "<Control-Key-s>"
+  out := out.push s!"vanished: {(← k.lastAsk).startsWith s!"{weird} is no longer there"} {!(← System.FilePath.pathExists pdf)} {(← st.get).marks.dirty}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "savedlg.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["set", "::safepdf::autoAnswer", "dontsave"]
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of the Tcl lockdown (`SAFEPDF_VIEWER_SMOKE_MODE=lockdown`, task 8.7), run by
 `scripts/viewer-smoke.sh` with `HOME` holding a hostile `~/.Xdefaults` (script-valued
 resources that would create the file `pwned`) and, on the same display, a second Tk
@@ -6582,6 +6759,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeKeys st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "keys.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "savedlg" then
+    try smokeSaveDialogs st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "savedlg.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "lockdown" then

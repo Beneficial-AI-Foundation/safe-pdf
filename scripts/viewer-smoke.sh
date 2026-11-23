@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r6; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -77,6 +77,9 @@
 #   1p. platform keys and the icon (SAFEPDF_VIEWER_SMOKE_MODE=keys, as installed and with
 #      SAFEPDF_VIEWER_PLATFORM=aqua): accelerator labels, Command twins of the Ctrl bindings,
 #      ::tk::mac::Quit, the six icon sizes, _NET_WM_ICON when xprop is installed (9.r3);
+#   1r. the save dialogs (SAFEPDF_VIEWER_SMOKE_MODE=savedlg, as installed and with
+#      SAFEPDF_VIEWER_PLATFORM=aqua): keyboard of the three-way prompt, Save As… / Export
+#      options, extensions, long/odd names, refused targets, a vanished file (9.r6);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1561,6 +1564,58 @@ else:
 for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
+done
+
+# 1r. Save dialogs (task 9.r6, SAFEPDF_VIEWER_SMOKE_MODE=savedlg, `Viewer.smokeSaveDialogs`) on
+#     a copy of the text PDF alone in a folder, as installed and with
+#     SAFEPDF_VIEWER_PLATFORM=aqua: the three-way prompt from the keyboard (Return on the
+#     default, Tab to Cancel + Return cancels, Escape, Space; focus back on the canvas); Save
+#     As… options (-filetypes off aqua only, -defaultextension .pdf, the file's folder); a
+#     240-character name, a dotted name without .pdf (gets it), the extended name of an
+#     existing file (asks; No keeps it), a read-only file, a folder, a read-only folder
+#     (refused, still unsaved, Save enabled), spaces/Tcl metacharacters/quotes/non-ASCII; Export
+#     onto the opened PDF (writes NAME.pdf.xfdf, the PDF unchanged) and without .xfdf; the
+#     opened file deleted behind the viewer's back (asks, creates nothing); no temporary file.
+for sp in x11 aqua; do
+  sd="$work/savedlg-$sp"
+  mkdir -p "$sd"
+  cp "$work/text.pdf" "$sd/text.pdf"
+  if [ "$sp" = aqua ]; then
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=savedlg SAFEPDF_VIEWER_PLATFORM=aqua \
+      run_viewer "$work/out-savedlg-$sp" "$sd/text.pdf" || true
+  else
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=savedlg run_viewer "$work/out-savedlg-$sp" "$sd/text.pdf" || true
+  fi
+  cat "$work/out-savedlg-$sp/savedlg.txt" 2>/dev/null | cut -c1-160 || true
+  python3 -I -c '
+import sys
+sp, path, root = sys.argv[1], sys.argv[2], sys.argv[3] == "0"
+try: lines = open(path, encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: savedlg %s: no savedlg.txt" % sp, file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "choose-return": "overwrite .c", "choose-tab-cancel": "cancel .c",
+    "choose-escape": "cancel .c", "choose-space": "saveas .c",
+    "dialog-dir": "true text-annotated.pdf",
+    "dialog-filetypes": "false true true" if sp == "aqua" else "true false true",
+    "long-name": "true true", "dotted-name": "true true true", "ext-exists": "true true true",
+    "read-only": "true true", "folder": "true", "ro-folder": "true true",
+    "refused-state": "true true normal", "weird-name": "true true true false",
+    "export-onto-pdf": "true true true", "vanished": "true true true",
+}
+if root: want.pop("read-only"); want.pop("ro-folder")  # root writes anyway
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+xe = v.get("export-ext", "")
+if not xe.startswith("true true %s " % ("false" if sp == "aqua" else "true")) or not xe.endswith(".xfdf"):
+    errs.append("export-ext = %r" % xe)
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: savedlg %s: %s" % (sp, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$sp" "$work/out-savedlg-$sp/savedlg.txt" "$(id -u)" || fail=1
+  if find "$sd" -name '*.tmp' | grep -q .; then
+    echo "FAIL: savedlg $sp: a temporary file was left behind: $(find "$sd" -name '*.tmp')" >&2; fail=1
+  fi
+  chmod -R u+w "$sd" 2>/dev/null || true
 done
 
 # 2. Bad inputs: the viewer must not crash and must report the error.
