@@ -1300,3 +1300,8 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.parseLogged_strictOnly
 #print axioms SafePdf.parseLogged_refused
 #print axioms SafePdf.Api.openBytes_strict_no_repair
+-- Phase 12, task 12.5: invisible-text provenance
+#print axioms SafePdf.Core.Text.runGlyphs_visible
+#print axioms SafePdf.Core.Text.extract_visible
+#print axioms SafePdf.Core.Text.Options.keeps_hiddenWhy
+#print axioms SafePdf.Core.Text.Options.hiddenWhy_isSome_of_invisible
