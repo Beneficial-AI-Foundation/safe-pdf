@@ -27,8 +27,9 @@ type or an unknown name gives the default plus an `Issue` (errors as values, as 
   `UseAttachments`; else `badValue`. `outlineOpen` is the sidebar rule: no mode → open when
   the file has an outline (the viewer's default); UseNone → closed; UseOutlines → open when
   there is an outline; FullScreen → closed (the `/NonFullScreenPageMode` applies on leaving);
-  UseThumbs/UseOC/UseAttachments → the default rule (their panels do not exist yet,
-  `panelMissing` names them for a status note).
+  UseThumbs/UseOC/UseAttachments → the default rule for the outline (UseThumbs and UseOC: their
+  panels do not exist yet, `panelMissing` names them for a status note; UseAttachments: the
+  viewer opens its attachments panel, task 9.r10, `Attachments`).
 * O4. **`/OpenAction`** is honoured **only** as a destination (an explicit array, or a name or
   string naming one through `/Dests` or the `/Names /Dests` tree, `Nav.resolveDest`) or as an
   action dictionary with `/S /GoTo` (its `/D` the same way). Every other action type
@@ -358,10 +359,10 @@ def outlineOpen (mode : Option PageMode) (hasOutline : Bool) : Bool :=
   | some .fullScreen => false
   | some .useThumbs | some .useOC | some .useAttachments => hasOutline
 
-/-- The panel a page mode asks for that the viewer does not have yet (tasks 9.r9–9.r11). -/
+/-- The panel a page mode asks for that the viewer does not have yet (tasks 9.r9, 9.r11; the
+attachments panel exists since task 9.r10). -/
 def panelMissing : Option PageMode → Option String
   | some .useThumbs => some "thumbnails"
-  | some .useAttachments => some "attachments"
   | some .useOC => some "layers"
   | _ => none
 
@@ -459,7 +460,8 @@ theorem zoomOf_percent_bounds (f : Fit) (p : Nat) (h : zoomOf f = .percent p) :
 #guard outlineOpen none true && !outlineOpen none false && !outlineOpen (some .useNone) true &&
   outlineOpen (some .useOutlines) true && !outlineOpen (some .useOutlines) false &&
   !outlineOpen (some .fullScreen) true && outlineOpen (some .useThumbs) true
-#guard panelMissing (some .useOC) == some "layers" && panelMissing (some .useOutlines) == none
+#guard panelMissing (some .useOC) == some "layers" && panelMissing (some .useOutlines) == none &&
+  panelMissing (some .useAttachments) == none
 #guard shownBytes [74, 97, 118, 97, 0] == "Java?"
 
 end SafePdf.Core.Doc.OpenSettings

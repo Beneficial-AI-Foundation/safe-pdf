@@ -18,6 +18,12 @@ The Tk-free description of the left sidebar (unverified shell code, total, check
 * **Collapsing** (`visibleRows`, `toggle`): a row is shown when all its ancestors are open;
   clicking a triangle opens/closes that row. Entries with a positive `/Count` start open
   (`Links.Entry.isOpen`), as in PDF.js.
+* **Panels** (task 9.r10; `Panel`, `available`, `panelOnLoad`, `choose`): the sidebar shows
+  one panel at a time — the outline or the attachments (`Attach`) — and a row of switcher
+  buttons when more than one has content; a panel without content has no button. The
+  sidebar (and its toggle) exists when any panel has content. `/PageMode /UseAttachments`
+  opens the attachments panel (the outline rule when the file has none). A minimal hook: task
+  9.r9 builds the PDF.js switcher (Outline / Thumbnails / Attachments / Layers).
 -/
 
 namespace SafePdf.Shell.App.Sidebar
@@ -28,12 +34,60 @@ def shownOnLoad (mode : Option SafePdf.Core.Doc.OpenSettings.PageMode) (hasOutli
     Bool :=
   SafePdf.Core.Doc.OpenSettings.outlineOpen mode hasOutline
 
-/-- Whether the sidebar toggle button is shown: only with an outline. -/
+/-- Whether the sidebar toggle button is shown: only with an outline (task 9.r10: the viewer
+passes "has an outline or attachments", `available`). -/
 def toggleVisible (hasOutline : Bool) : Bool := hasOutline
 
 /-- The sidebar state after the toggle (button, F9, View → Outline) when it was `shown`: it
 can only open when there is an outline. -/
 def afterToggle (shown hasOutline : Bool) : Bool := hasOutline && !shown
+
+/-! ## Panels (task 9.r10) -/
+
+/-- A sidebar panel. -/
+inductive Panel where
+  /-- The document outline. -/
+  | outline
+  /-- The embedded files. -/
+  | attachments
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The Tcl name of a panel (switcher button `.ol.sw.KEY`). -/
+def Panel.key : Panel → String
+  | .outline => "outline"
+  | .attachments => "attachments"
+
+/-- A panel from its Tcl name. -/
+def Panel.ofKey : String → Option Panel
+  | "outline" => some .outline
+  | "attachments" => some .attachments
+  | _ => none
+
+/-- The panels with content, in switcher order. -/
+def available (hasOutline hasAttachments : Bool) : List Panel :=
+  (if hasOutline then [Panel.outline] else []) ++ (if hasAttachments then [.attachments] else [])
+
+/-- The panel shown on load (`none`: the sidebar stays closed): `/UseAttachments` opens the
+attachments panel when there are attachments; otherwise the outline rule (`shownOnLoad`). -/
+def panelOnLoad (mode : Option SafePdf.Core.Doc.OpenSettings.PageMode)
+    (hasOutline hasAttachments : Bool) : Option Panel :=
+  if mode == some .useAttachments && hasAttachments then some .attachments
+  else if shownOnLoad mode hasOutline then some .outline
+  else none
+
+/-- The panel to show when `want` is asked for: it, when it has content, else the first panel
+with content. -/
+def choose (want : Panel) (avail : List Panel) : Option Panel :=
+  if avail.contains want then some want else avail.head?
+
+#guard available true true == [.outline, .attachments] && available false true == [.attachments]
+#guard panelOnLoad (some .useAttachments) true true == some .attachments
+#guard panelOnLoad (some .useAttachments) true false == some .outline
+#guard panelOnLoad (some .useAttachments) false false == none
+#guard panelOnLoad none false true == none && panelOnLoad none true true == some .outline
+#guard panelOnLoad (some .useNone) true true == none
+#guard choose .attachments [.outline] == some .outline && choose .outline [.attachments] == some .attachments
+#guard choose .outline [] == none && (Panel.ofKey "attachments").map Panel.key == some "attachments"
 
 /-- One row of the outline tree. -/
 structure Row where
