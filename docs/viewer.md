@@ -19,7 +19,7 @@ after installing or moving Tk run `lake -R build viewer` once to reconfigure.
 never compile the shim or link Tk (the shim is a custom `target` attached only to the
 `viewer` executable, not an `extern_lib`, which Lake would link into every executable).
 
-## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export, 9.r8 document open settings, 9.r10 attachments panel)
+## What it does (8.2a skeleton, 8.2b viewing, 8.2c selection and search, 8.2d navigation, 9.1 menubar, 9.2 wheel, 9.3 view modes, 9.4 highlights and notes, 9.5c saving marks into the PDF, 9.5g editing saved marks, 9.7 PDF.js look, 9.8 selection bubble and Highlight pop-over, 9.9 Add text and Draw, 9.11 XFDF import/export, 9.r8 document open settings, 9.r10 attachments panel, 9.r11b layers panel)
 
 * Window (1200×960 by default; `SAFEPDF_VIEWER_GEOMETRY=WxH` sets another size): menubar
   (File, Edit, View, Go; see *Menubar* below), a toolbar and an outline sidebar modelled on
@@ -204,9 +204,11 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   pressed) above a white panel with its heading (*Thumbnails*, *Document outline*) on the
   `#f0f0f4` background. A button shows only when the document has that content
   (`Sidebar.buttons`: thumbnails always, the outline when there is one; attachments since 9.r10 (see
-  *Attachments panel* below) when the document has some; layers come with task 9.r11b). The sidebar **opens on load as the document's
+  *Attachments panel* below) when the document has some; layers since 9.r11b (see *Layers
+  panel* below) when it has optional content). The sidebar **opens on load as the document's
   `/PageMode` says** (`Sidebar.onLoad`): `/UseThumbs` → thumbnails, `/UseOutlines` → the
-  outline, `/UseNone` and `/FullScreen` → closed; without a page mode the outline when there is
+  outline, `/UseAttachments` → attachments, `/UseOC` → layers (each when the document has
+  that content), `/UseNone` and `/FullScreen` → closed; without a page mode the outline when there is
   one, else closed. The toggle (F9, View → Sidebar, the toolbar button) works for every
   document and reopens the last panel chosen while the document has it, else the outline, else
   the thumbnails (`Sidebar.pick`). The panels are a list in `Sidebar.panels` (key, button path,
@@ -273,7 +275,7 @@ true)`. The window's size and position are the user's and are never reset.
 | `/UseOutlines` | sidebar open on the outline (when the file has one, else closed) |
 | `/UseThumbs` | sidebar open on the thumbnails (9.r9; every document has them) |
 | `/UseAttachments` | sidebar open on the attachments (9.r10) when the file has attachments; else the outline rule (open with an outline), no note |
-| `/UseOC` | no such panel yet (task 9.r11b): the outline rule (open with an outline) and the note "layers panel not available yet" (`Sidebar.missingNote`) |
+| `/UseOC` | sidebar open on the layers (9.r11b) when the file has optional content; else the outline rule (open with an outline), no note |
 | `/FullScreen` | `wm attributes . -fullscreen 1`, sidebar closed, note "full screen (Escape leaves)"; Escape leaves and applies `/NonFullScreenPageMode` to the sidebar |
 | `/OpenAction` destination or `/S /GoTo` | page, position (`/XYZ` left/top, `/FitH` top, …: the page point at the window's top-left, as links) and zoom: `/XYZ` zoom > 0 → that percentage (clamped to 25–800 %), `null`/0 → Automatic Zoom stays; `/Fit`, `/FitB` → Page Fit; `/FitH`, `/FitBH` → Page Width; `/FitV`, `/FitBV` → Page Fit (best effort: no fit-height zoom; the same for portrait pages in a wide window); `/FitR` → Page Fit with the rectangle's left/top at the top-left (best effort). Named destinations through `/Dests` and `/Names /Dests`. |
 | `/OpenAction` JavaScript, URI, Launch, Named, GoToR, … | **never executed**; note "open action /KIND ignored (not executed)". `/Next` chains are not followed. |
@@ -349,6 +351,60 @@ in its module doc), the panel's Tk-free model is `SafePdf/Shell/App/Attach.lean`
 Unverified (no Mac here): the secondary click on aqua (Button-2/3, Control-click), the
 `ttk::treeview` look under the aqua theme, and `tk_getSaveFile` on aqua with an
 attachment name.
+
+## Layers panel (9.r11b)
+
+The document's optional content groups (ISO 32000-2 §8.11; read by
+`SafePdf/Core/Doc/OptionalContent.lean`, task 9.r11a) are listed in a sidebar panel after
+PDF.js's layers view (`web/pdf_layer_viewer.js`; drawn with Tk, nothing copied). The panel's
+Tk-free model is in `SafePdf/Shell/App/Sidebar.lean` (`layerRows`, `layerToggle`).
+
+* **The tree** follows the default configuration's `/D /Order`: a group is a row with a
+  **checkbox** showing whether it is ON and its `/Name`; a nested array whose first element is
+  a string is a **heading** (bold, no checkbox) over its items; a nested array without a label
+  nests its items under the row before it (the spec's sub-groups; PDF.js drops such arrays);
+  a labelled array with nothing left in it is dropped (PDF.js). Rows with children have a
+  disclosure triangle (open at first; a click on the triangle or the heading closes/opens it).
+  **Groups not listed in `/Order`** follow under an italic heading **"Additional Layers"**,
+  in `/OCGs` order, each with its checkbox (radio and locked rules as usual), and that heading
+  starts collapsed — as PDF.js (`src/core/catalog.js` `parseOrder`, `web/pdf_layer_viewer.js`).
+  (PDF.js also puts there the groups of an unlabelled array, since it drops those arrays; here
+  they are nested in place, so they are not repeated.)
+  Without `/Order` every group of `/OCGs` is listed by name. Names and labels are text
+  strings with control and bidi characters removed, at most 200 characters
+  (`Attachments.displayText`); an empty name shows `(no name)`.
+* **Toggling** a checkbox (or clicking its name, as PDF.js's `<label>`) is
+  `Config.setGroup`: a group of a radio-button set (`/RBGroups`) turned ON turns the others
+  OFF; a **locked** group (`/Locked`) has a disabled checkbox and a grey name and never
+  changes (the event alone says "layer NAME is locked"). Every checkbox is then set from the
+  new state, and the document is shown again under it (`Viewer.applyLayers`): a new render
+  generation (the render cache and running renders are stale), the **thumbnails** laid out and
+  rendered again when their panel shows (9.r9's cache keyed by the generation), and the
+  **text indexes** dropped — hidden text is neither selectable nor found by search; the
+  selection and the search hit are cleared. The state is passed to the renderer
+  (`renderDocPage … (oc := …)`) and to text extraction (`extractDocPageAnnots … (oc := …)`).
+* **When**: the state is the document's default (`/D`: BaseState, ON, OFF, `/Usage /View
+  /ViewState`) at **every open** (9.r8's rule: nothing carries over); the reopen after Save /
+  Save to library (`keepView`) keeps the state the user set (when the groups are the same).
+  `/PageMode /UseOC` opens the sidebar on the layers (`Sidebar.onLoad`); the *Show Layers*
+  button shows only when the document has optional content with something to list
+  (`Sidebar.Content.hasLayers`).
+* **Saving never writes the layer state**: the panel changes only the viewer's state; Save
+  writes the marks' incremental update and leaves `/OCProperties` (and the catalog) as they
+  are (checked by the smoke test).
+* **Inspector**: the `svg` and `ops` views run under the document's default state too
+  (`Views.Svg.defaultOC`): content in an OFF layer is not drawn in the SVG and its items are
+  not counted (its operators are, in the histogram). There is no way to choose another state
+  there.
+* Tk: a text widget `.ol.ly` (scroll bar `.ol.ls`, `::safepdf::panelWidgets(layers)`) drawn
+  as a tree like the outline; row `K` is either a heading (tag `hK`) or an embedded
+  `ttk::checkbutton .ol.ly.cK` (style `Ly.TCheckbutton`, variable `::safepdf::ly(K)`, event
+  `layer K`) followed by its name (tag `gK`, wraps in the panel); `tK` is the triangle
+  (`lyToggle K`), `uA` every ancestor (a closed ancestor elides the row with its checkbox).
+
+Unverified (no Mac here): the `ttk::checkbutton` look under the aqua theme (its `-background`
+style options are ignored there), and `<TouchpadScroll>` over the panel on aqua (bound like the
+thumbnails', scrolling `.ol.ly` by pixels).
 
 ## Wheel scrolling across pages (9.2, 9.r1)
 
@@ -991,7 +1047,7 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7), the view-mode drop-down's choices (`ViewChoice`, theorems `ofModes_modes`, `modes_ofModes`; task 9.r4). |
 | `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; | `SafePdf/Core/Doc/Attachments.lean` | Embedded files (task 9.r10; pure, total, bounded): the `/EmbeddedFiles` tree and `/FileAttachment` annotations, sanitized names and default file names, sizes, MIME types, dates, decoding under the limits; theorems `list_entries_le`, `clean_safe`, `clean_length_le`, `fileNameOf_noSlash`, `decode_size_le`; tests `Tests/Attachments.lean`. |
 | `SafePdf/Shell/App/Attach.lean` | Tk-free attachments-panel model with `#guard` checks: size column, tooltip, status text, refused save targets, the icon under a click (task 9.r10). |
-| `SafePdf/Shell/App/Sidebar.lean` | Tk-free sidebar model with `#guard` checks: the panel list and switcher buttons per content, the panel opened by page mode and by the toggle (9.r8, 9.r9), thumbnail sizes, layout, lazy band, eviction and keyboard steps (9.r9), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
+| `SafePdf/Shell/App/Sidebar.lean` | Tk-free sidebar model with `#guard` checks: the panel list and switcher buttons per content, the panel opened by page mode and by the toggle (9.r8, 9.r9), thumbnail sizes, layout, lazy band, eviction and keyboard steps (9.r9), the layers tree from `/Order`, checkbox states, locked rows and toggling (9.r11b), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
@@ -1401,6 +1457,27 @@ refuses the external file; the opened PDF, a read-only file, a read-only folder 
 are refused and stay unchanged; the switcher and the toggle; a click on the annotation's icon
 (sidebar closed on the outline panel) opens the attachments panel on its row; `outline.pdf`
 has no Attachments button, nor has `noatt.pdf` (its sidebar has the thumbnails only).
+
+The `layers` case (9.r11b, `Viewer.smokeLayers`, case 1w) generates `oc.pdf` (`/PageMode
+/UseOC`, one page whose coloured squares and words belong to the groups Base ON, Extra OFF,
+Notes ON, the radio pair English ON / French OFF under the UTF-16 heading "Languages" with a
+right-to-left override, Locked (locked, nested under Notes by an unlabelled array), Orphan
+(ON, not in `/Order`), and an OCMD `AllOn` of Base and Extra), `oc-nomode.pdf`,
+`oc-noorder.pdf` and `plain.pdf` (`/UseOC` without `/OCProperties`), and runs on a copy
+(`saved.pdf`). It checks: the sidebar opens on the layers with the tree
+`Base ✓, Extra ☐, [Languages], English ✓, French ☐, Notes ✓, Locked ✓ (disabled),
+[Additional Layers], Orphan ✓` with Orphan hidden under its collapsed heading, no "not
+available" note; the page's pixel at each square and the search hits of each
+word; a thumbnail pixel; Extra on → its blue square, the OCMD's green one and `bravo`
+findable; French on → English off (pixels, hits); the locked checkbox and the `layer K` event
+change nothing; opening Additional Layers shows Orphan, which toggles off (its square white)
+and on again; collapsing the heading unmaps its checkboxes; the thumbnail shows the blue
+square; a note saved with Ctrl+S (Overwrite) — the reopen keeps the toggled state; opening the
+file again restores the defaults; `oc-nomode.pdf` has the Layers button with the sidebar
+closed, `oc-noorder.pdf` lists all seven groups by name (no Additional Layers heading), `plain.pdf` has no Layers button.
+The shell then checks that the saved file is an incremental update of `oc.pdf` whose appended
+bytes contain no `OCProperties`, `/OCGs`, `/ON`, `/OFF`, catalog or `/OCProperties` object,
+and runs `qpdf --check` on it.
 
 The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
 alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real

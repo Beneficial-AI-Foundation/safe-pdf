@@ -25,7 +25,8 @@ The unverified, replaceable shell of the viewer (Plan.md §8): one Tk window wit
 `Menu.Cmd.enabled` and kept in step after every event by `syncMenus`; task 9.1), a toolbar and
 a sidebar imitating PDF.js, Firefox's viewer (task 9.7; built from the Tk-free models
 `Toolbar.layout` and `Sidebar.rows`; since task 9.r9 with view buttons for its panels
-(`Sidebar.panels`): the outline and lazily rendered page thumbnails, `thumbView`): sidebar toggle, page arrows, page field, zoom −/+ and
+(`Sidebar.panels`): the outline, lazily rendered page thumbnails (`thumbView`), attachments
+(task 9.r10) and layers (task 9.r11b, `fillLayers`, `layerClick`)): sidebar toggle, page arrows, page field, zoom −/+ and
 drop-down, the Highlight tool (task 9.4) and disabled placeholders for the other annotation
 tools, `»` overflow menu; the design reference is
 cited in `docs/viewer.md`, nothing of PDF.js is copied), a scrollable canvas showing the
@@ -450,6 +451,19 @@ structure State where
   attIcons : List Core.Doc.Attachments.Icon := []
   /-- What decoding each attachment gave, once it was decoded (saved or probed). -/
   attStatus : Array (Option Attach.Probe) := #[]
+  /-- The document's optional content (task 9.r11b, `Core.Doc.OptionalContent.read`); `none`
+  without `/OCProperties` (no Layers panel). -/
+  ocCfg : Option Core.Doc.OptionalContent.Config := none
+  /-- The visibility state the pages, thumbnails and text are made with (task 9.r11b): the
+  document's default (`Config.initial`) at every open, changed by the layers panel; `none`
+  without optional content (the renderer then uses the document's default itself). -/
+  oc : Option Core.Doc.OptionalContent.State := none
+  /-- Rows of the layers panel (`Sidebar.layerRows`; row `K` is `.ol.ly`'s row `K`). -/
+  lyRows : List Sidebar.LayerRow := []
+  /-- The layers tree (`Sidebar.rows` of `Sidebar.layerEntries lyRows`). -/
+  lyTree : List Sidebar.Row := []
+  /-- Which layers tree rows are open (`Sidebar.toggle`). -/
+  lyOpen : Array Bool := #[]
   /-- Whether the sidebar toggle is shown (`none`: not applied yet). -/
   toggleShown : Option Bool := none
   /-- The user's highlights and notes of the open document (task 9.4). -/
@@ -1277,6 +1291,95 @@ proc ::safepdf::askAttachSave {dir file args} {
   if {$::safepdf::autoPath ne {}} { return $::safepdf::autoPath }
   return [tk_getSaveFile -parent . -title {Save attachment as} -initialdir $dir -initialfile $file {*}$args]
 }
+# Layers panel (9.r11b, after PDF.js's layer viewer): a text widget .ol.ly drawn as a tree as
+# the outline is. Row K is a heading (tag hK: an /Order label) or a group with a
+# ttk::checkbutton .ol.ly.cK on ::safepdf::ly(K), disabled when the group is locked; tK is its
+# disclosure triangle, dN/lN the margin of its depth, uA every ancestor A (a closed ancestor
+# elides the row, its checkbox included). A checkbox emits `layer K`; the Lean side then sets
+# every ::safepdf::ly from the new state (radio buttons, locked groups).
+ttk::style configure Ly.TCheckbutton -font ::safepdf::fOl -background $::safepdf::col(panel) -foreground $::safepdf::col(text)
+ttk::style map Ly.TCheckbutton -background [list disabled $::safepdf::col(panel) active $::safepdf::col(panel)]
+font create ::safepdf::fLyHead -family $::safepdf::family -size -13 -weight bold
+font create ::safepdf::fLyItal -family $::safepdf::family -size -13 -slant italic
+text .ol.ly -wrap word -width 30 -height 10 -borderwidth 0 -highlightthickness 0 -background $::safepdf::col(panel) -foreground $::safepdf::col(text) -font ::safepdf::fOl -cursor arrow -padx 4 -pady 2 -spacing1 2 -spacing3 2 -state disabled -takefocus 0 -insertwidth 0 -yscrollcommand ::safepdf::lyScroll -selectbackground $::safepdf::col(panel) -inactiveselectbackground {} -exportselection 0
+ttk::scrollbar .ol.ls -orient vertical -command {.ol.ly yview}
+grid .ol.ly -in .ol.p -row 1 -column 0 -sticky nsew -padx {4 0} -pady {0 6}
+grid .ol.ls -in .ol.p -row 1 -column 1 -sticky ns
+raise .ol.ly; raise .ol.ls
+grid remove .ol.ly .ol.ls
+set ::safepdf::panelWidgets(layers) {.ol.ly .ol.ls}
+.ol.ly tag configure tri -foreground $::safepdf::col(tri) -font ::safepdf::fTri -offset 1
+.ol.ly tag configure head -font ::safepdf::fLyHead
+.ol.ly tag configure headi -font ::safepdf::fLyItal
+.ol.ly tag configure locked -foreground #8f8f9d
+bindtags .ol.ly [list .ol.ly . all]
+proc ::safepdf::lyScroll {a b} {
+  .ol.ls set $a $b
+  if {$::safepdf::panel ne {layers}} return
+  if {$a <= 0.0 && $b >= 1.0} { grid remove .ol.ls } else { grid .ol.ls }
+}
+proc ::safepdf::panelShown::layers {} { ::safepdf::lyScroll {*}[.ol.ly yview] }
+proc ::safepdf::lyClear {} {
+  foreach w [winfo children .ol.ly] { destroy $w }
+  .ol.ly configure -state normal
+  .ol.ly delete 1.0 end
+  foreach t [.ol.ly tag names] { if {$t ni {sel tri head headi locked}} { .ol.ly tag delete $t } }
+  .ol.ly configure -state disabled
+  array unset ::safepdf::ly
+}
+# lyRow K TRI TAGS LABEL KIND LOCKED: appends row K (KIND group: a checkbox and its name, tag
+# gK, which wraps in the panel's width and toggles the checkbox when clicked, as PDF.js's
+# <label>; heading: a bold label; italic: the Additional Layers heading) with the disclosure triangle TRI (empty for a leaf) and TAGS.
+proc ::safepdf::lyRow {k tri tags label kind locked} {
+  .ol.ly configure -state normal
+  set a [.ol.ly index {end - 1c}]
+  if {$tri ne {}} { .ol.ly insert end $tri [list tri t$k] }
+  if {$kind eq {group}} {
+    set ::safepdf::ly($k) 0
+    set w .ol.ly.c$k
+    ttk::checkbutton $w -style Ly.TCheckbutton -variable ::safepdf::ly($k) -takefocus 0 -command [list ::safepdf::emit layer $k]
+    if {$locked} { $w state disabled }
+    bindtags $w [list $w TCheckbutton LyWheel . all]
+    .ol.ly window create end -window $w -align center -padx 2
+    .ol.ly insert end $label [expr {$locked ? [list g$k locked] : [list g$k]}]
+  } else {
+    .ol.ly insert end $label [list [expr {$kind eq {italic} ? {headi} : {head}}] h$k]
+  }
+  .ol.ly insert end \\n
+  foreach t $tags { .ol.ly tag add $t $a {end - 1c} }
+  .ol.ly configure -state disabled
+}
+proc ::safepdf::lySetTri {n tri} {
+  lassign [.ol.ly tag ranges t$n] a b
+  if {$a eq {}} return
+  set tags [.ol.ly tag names $a]
+  .ol.ly configure -state normal
+  .ol.ly delete $a $b
+  .ol.ly insert $a $tri $tags
+  .ol.ly configure -state disabled
+}
+proc ::safepdf::lyClick {x y} {
+  set i [.ol.ly index @$x,$y]
+  set d [.ol.ly dlineinfo $i]
+  if {$d eq {} || $y > [lindex $d 1] + [lindex $d 3]} return
+  foreach t [.ol.ly tag names $i] {
+    if {[regexp {^[th]([0-9]+)$} $t -> n]} { ::safepdf::emit lyToggle $n; return }
+    if {[regexp {^g([0-9]+)$} $t -> n]} { .ol.ly.c$n invoke; return }
+  }
+}
+bind .ol.ly <ButtonRelease-1> {::safepdf::lyClick %x %y}
+foreach w {.ol.ly LyWheel} {
+  bind $w <MouseWheel> {.ol.ly yview scroll [expr {%D > 0 ? -2 : 2}] units; break}
+  bind $w <Button-4> {.ol.ly yview scroll -2 units; break}
+  bind $w <Button-5> {.ol.ly yview scroll 2 units; break}
+  catch {
+    bind $w <TouchpadScroll> {
+      lassign [tk::PreciseScrollDeltas %D] ::safepdf::tdx ::safepdf::tdy
+      if {$::safepdf::tdy != 0} { .ol.ly yview scroll [expr {-int($::safepdf::tdy)}] pixels }
+      break
+    }
+  }
+}
 bind .ol.th <ButtonRelease-1> {focus .ol.th; ::safepdf::emit thClick [%W canvasy %y]}
 bind .ol.th <Key-Up> {::safepdf::emit thKey up; break}
 bind .ol.th <Key-Down> {::safepdf::emit thKey down; break}
@@ -1888,7 +1991,9 @@ focus .c
 /-! ## Text index and highlights (task 8.2c) -/
 
 /-- The text index of page `p`: extracted on first use (`Annot.extractDocPageAnnots` with a
-fresh budget, as the text view and the renderer) and cached for the open document. -/
+fresh budget, as the text view and the renderer) and cached for the open document. Content
+hidden by the layers' state (`State.oc`, task 9.r11b) is not in it, so it can be neither
+selected nor found. -/
 def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex) := do
   let s ← st.get
   let some doc := s.doc | return .error "no document"
@@ -1898,7 +2003,7 @@ def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex
     let some page := doc.pages[p]? | return .error "page index out of range"
     let r ← IO.lazyPure fun _ =>
       match (SafePdf.Core.Annot.extractDocPageAnnots limits doc page
-          (SafePdf.Core.Filter.Budget.init limits)).1 with
+          (SafePdf.Core.Filter.Budget.init limits) (oc := s.oc)).1 with
       | .ok pt => .ok (Select.PageIndex.ofText pt)
       | .error e => .error (renderError e)
     let gen := s.gen
@@ -2181,15 +2286,17 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
 /-! ## Rendering -/
 
 /-- Renders page `p` of `doc` at `zoom` and user rotation `rot` with a fresh budget (the
-inspector's `raster` view does the same). -/
+inspector's `raster` view does the same), under the optional content state `oc` (task 9.r11b;
+`none`: the document's default). -/
 def renderPage (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotation)
-    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {}) :
+    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {})
+    (oc : Option Core.Doc.OptionalContent.State := none) :
     IO (Except Error Clip.Image) := do
   match doc.pages[p]? with
   | some page =>
     IO.lazyPure fun _ =>
       (SafePdf.Core.Raster.Glyph.renderDocPage limits doc page zoom rot
-        (SafePdf.Core.Filter.Budget.init limits) (subst := subst)).1
+        (SafePdf.Core.Filter.Budget.init limits) (subst := subst) (oc := oc)).1
   | none => return .error (.malformed 0 "page index out of range")
 
 /-- The cache key of the page in slot `sl`. -/
@@ -2210,10 +2317,11 @@ def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
   if s.jobs.any (·.key == key) then return
   let d := s.view.getD doc
   let subst := s.subst
+  let oc := s.oc
   let start ← IO.monoNanosNow
   let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
-    let r ← renderPage d key.page key.zoom key.rot subst
+    let r ← renderPage d key.page key.zoom key.rot subst oc
     let t1 ← IO.monoNanosNow
     return (r, t1 - t0)
   st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task⟩ }
@@ -2623,10 +2731,11 @@ def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
   let s ← st.get
   let d := s.view.getD doc
   let subst := s.subst
+  let oc := s.oc
   let start ← IO.monoNanosNow
   let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
-    let r ← renderPage d key.page key.zoom key.rot subst
+    let r ← renderPage d key.page key.zoom key.rot subst oc
     let t1 ← IO.monoNanosNow
     return (r, t1 - t0)
   st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task⟩ }
@@ -2932,7 +3041,8 @@ def olToggle (st : IO.Ref State) (k : String) : IO Unit := do
 
 /-- What the open document offers the sidebar (task 9.r9: which panel buttons show). -/
 def contentOf (s : State) : Sidebar.Content :=
-  { hasOutline := !s.outline.isEmpty, hasAttachments := !s.attList.isEmpty }
+  { hasOutline := !s.outline.isEmpty, hasAttachments := !s.attList.isEmpty,
+    hasLayers := !s.lyRows.isEmpty }
 
 /-- Shows the switcher buttons of the panels the document has (`Sidebar.buttons`, in order)
 and presses the shown panel's button (PDF.js's toggled view button). -/
@@ -3023,6 +3133,109 @@ def attSelect (st : IO.Ref State) (i : Nat) : IO Unit := do
   discard <| run [".ol.at", "see", s!"a{i}"]
   if let some t := attText (← st.get) i then setStatus t
 
+/-! ## Layers panel (task 9.r11b) -/
+
+/-- Sets every checkbox variable of the layers panel (`::safepdf::ly(K)`) from the state
+(`Sidebar.layerChecked`). -/
+def syncLayerVars (s : State) : IO Unit := do
+  let some oc := s.oc | return
+  let mut i := 0
+  for r in s.lyRows do
+    if let some on := Sidebar.layerChecked oc r then
+      discard <| run ["set", s!"::safepdf::ly({i})", if on then "1" else "0"]
+    i := i + 1
+
+/-- Fills the layers panel `.ol.ly` from `State.lyRows` (model `Sidebar.layerRows`, tree
+`Sidebar.rows`): one line per row — the disclosure triangle (rows with children), then a
+checkbox (a group; disabled when locked) or the bold label (a heading) — indented by depth,
+tagged with its ancestors as the outline is (`fillOutline`). Every heading starts open except
+Additional Layers (`Sidebar.layerEntries`). -/
+def fillLayers (st : IO.Ref State) : IO Unit := do
+  discard <| run ["::safepdf::lyClear"]
+  let s ← st.get
+  let rs := s.lyRows
+  let es := Sidebar.layerEntries rs
+  let tree := Sidebar.rows es
+  let isOpen := Sidebar.initialOpen es
+  st.modify ({ · with lyTree := tree, lyOpen := isOpen })
+  let some cfg := s.ocCfg | return
+  let triW := ((← run ["font", "measure", "::safepdf::fTri", Sidebar.triangle true false]).toNat?).getD 14
+  let mut depths : List Nat := []
+  for (t, r) in tree.zip rs do
+    if !depths.contains t.depth then depths := t.depth :: depths
+    let tags := [if t.hasKids then s!"d{t.depth}" else s!"l{t.depth}"] ++ t.ancestors.map (s!"u{·}")
+    discard <| run ["::safepdf::lyRow", toString t.index,
+      Sidebar.triangle t.hasKids (isOpen.getD t.index false), " ".intercalate tags, r.label,
+      if r.group.isSome then "group" else if r.italic then "italic" else "heading",
+      if Sidebar.layerLocked cfg r then "1" else "0"]
+  for d in depths do
+    let ind := Sidebar.indentPx d
+    discard <| run [".ol.ly", "tag", "configure", s!"d{d}", "-lmargin1", toString ind,
+      "-lmargin2", toString (ind + triW)]
+    discard <| run [".ol.ly", "tag", "configure", s!"l{d}", "-lmargin1", toString (ind + triW),
+      "-lmargin2", toString (ind + triW)]
+  -- Headings that start closed (Additional Layers, as PDF.js) elide their rows.
+  for t in tree do
+    if t.hasKids && !isOpen.getD t.index false then
+      discard <| run [".ol.ly", "tag", "configure", s!"u{t.index}", "-elide", "1"]
+  discard <| run [".ol.ly", "yview", "moveto", "0"]
+  syncLayerVars (← st.get)
+
+/-- Handles `lyToggle K`: opens or closes layers row `K` (its disclosure triangle). -/
+def lyToggle (st : IO.Ref State) (k : String) : IO Unit := do
+  let some i := k.toNat? | return
+  let s ← st.get
+  let o := Sidebar.toggle s.lyTree s.lyOpen i
+  if o == s.lyOpen then return
+  st.modify ({ · with lyOpen := o })
+  let on := o.getD i false
+  discard <| run [".ol.ly", "tag", "configure", s!"u{i}", "-elide", if on then "" else "1"]
+  discard <| run ["::safepdf::lySetTri", toString i, Sidebar.triangle true on]
+
+/-- Shows the pages again under the layers' new state (task 9.r11b): a new generation (the
+render cache, running renders and the thumbnails are stale: `syncThumbs` lays them out again
+when the panel shows), the text indexes dropped (hidden text is neither selectable nor
+found), the selection and the search hit cleared. -/
+def applyLayers (st : IO.Ref State) : IO Unit := do
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), shown := none,
+                              texts := Array.replicate s.texts.size none, sel := none,
+                              hit := none, pressPt := none }
+  for (p, _) in (← st.get).photos do dropPhoto st p
+  refresh st
+  syncThumbs st
+
+/-- Handles `layer K` (a click on row `K`'s checkbox): `Sidebar.layerToggle` (radio buttons
+turn the others off; a locked group stays), every checkbox set from the result, the pages
+rendered again (`applyLayers`). -/
+def layerClick (st : IO.Ref State) (k : String) : IO Unit := do
+  let some i := k.toNat? | return
+  let s ← st.get
+  let (some cfg, some oc) := (s.ocCfg, s.oc) | return
+  let oc' := Sidebar.layerToggle cfg oc s.lyRows i
+  st.modify ({ · with oc := some oc' })
+  syncLayerVars (← st.get)
+  if oc' == oc then
+    if let some r := s.lyRows[i]? then
+      if Sidebar.layerLocked cfg r then setStatus s!"layer {r.label} is locked"
+    return
+  applyLayers st
+
+/-- Reads the optional content of the newly opened `doc` (task 9.r11b) and fills the layers
+panel: the state is the document's default (`Config.initial`), except on the reopen after a
+save where the previous state `keep` stays (when the groups are the same). -/
+def loadLayers (st : IO.Ref State) (doc : Doc) (keep : Option Core.Doc.OptionalContent.State) :
+    IO Unit := do
+  let cfg ← IO.lazyPure fun _ =>
+    (Core.Doc.OptionalContent.read (Core.Content.Run.resolve (Core.Text.docSource limits doc))
+      limits (Core.Filter.Budget.init limits) doc.catalog).1
+  let oc := cfg.map fun c =>
+    let d := c.initial
+    match keep with
+    | some k => if k.known == d.known then k else d
+    | none => d
+  st.modify ({ · with ocCfg := cfg, oc, lyRows := (cfg.map Sidebar.layerRows).getD [] })
+  fillLayers st
+
 /-! ## Document open settings (task 9.r8) -/
 
 /-- Sets the View menu's and the `»` menu's radio variables, `::safepdf::continuous` and the
@@ -3062,8 +3275,6 @@ def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
   st.modify ({ · with fullScreen := on })
   if !on && s.doc.isSome then
     showSidebar st (Sidebar.onLoad (some s.afterFullScreen) (contentOf s))
-    if let some note := Sidebar.missingNote (some s.afterFullScreen) (contentOf s) then
-      setStatus note
 
 /-- The view a document without open settings gets (task 9.r8): the default view mode, left
 to right, Automatic Zoom, full window UI, no document title, no notes. -/
@@ -3162,8 +3373,6 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
   syncViewVars (← st.get)
   applyChrome st (pr.hideToolbar, pr.hideMenubar, pr.hideWindowUI)
   let mut notes := o.issues.map (·.message)
-  if let some note := Sidebar.missingNote o.mode (contentOf (← st.get)) then
-    notes := notes ++ [note]
   if pr.hideToolbar || pr.hideMenubar || pr.hideWindowUI then
     notes := notes ++ [hiddenNote]
   if o.mode == some .fullScreen then
@@ -3199,6 +3408,9 @@ they were and the document's settings are not applied again. -/
 def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
     (keepView : Bool := false) : IO Unit := do
   let wasShown := (← st.get).outlineShown
+  -- Task 9.r11b: the reopen after a save keeps the layers' state.
+  let curOC := (← st.get).oc
+  let prevOC := if keepView then curOC else none
   if !keepView then resetOpenView st
   clearThumbs st
   let t0 ← IO.monoNanosNow
@@ -3211,9 +3423,11 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
                               history := {}, marks := {}, markSel := none, slots := #[],
                               layoutKey := none, ownTop := none, ftEdit := none,
                               inkSession := none, inkStroke := none, moveFrom := none,
-                              attList := #[], attIcons := [], attStatus := #[] }
+                              attList := #[], attIcons := [], attStatus := #[],
+                              ocCfg := none, oc := none, lyRows := [] }
   clearPages st
   discard <| run ["::safepdf::attClear"]
+  fillLayers st
   discard <| run ["destroy", ".note"]
   discard <| run ["destroy", ".c.ft"]
   discard <| run [".c", "delete", "ftedit", "inkcur"]
@@ -3238,6 +3452,9 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
     st.modify ({ · with attList := att.entries.toArray, attIcons := att.icons,
                         attStatus := Array.replicate att.entries.length none })
     fillAttachments st
+    -- Task 9.r11b: the layers, in the document's default state (kept on the reopen after a
+    -- save).
+    loadLayers st doc prevOC
     -- Task 9.r8: the document's open settings, on every open except the reopen after a save
     -- (`keepView`: the user's view stays, outline included).
     let (mode, prefs, notes) ← if keepView then pure (none, {}, [])
@@ -3925,7 +4142,9 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               ownTop := none,
                               ui := { s.ui with tool := false, popover := false,
                                                 picker := false },
-                              bubble := none, pickerAt := none, bubblePress := false }
+                              bubble := none, pickerAt := none, bubblePress := false,
+                              ocCfg := none, oc := none, lyRows := [] }
+  fillLayers st
   discard <| run ["pack", "forget", ".find", ".goto"]
   discard <| run ["destroy", ".note"]
   discard <| run ["::safepdf::popHide"]
@@ -8338,6 +8557,147 @@ def smokeAttach (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile ((dir : System.FilePath) / "attach.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the layers panel (`SAFEPDF_VIEWER_SMOKE_MODE=layers`, task 9.r11b), on the
+generated `oc.pdf` (`/PageMode /UseOC`; one page whose squares and words belong to the groups
+Base (ON), Extra (OFF), Notes (ON), the radio pair English (ON) / French (OFF) under the
+heading "Languages", Locked (locked, ON, nested under Notes), Orphan (ON, not in `/Order`: under
+"Additional Layers", collapsed at first) and an OCMD AllOn(Base, Extra)) with `oc-nomode.pdf`, `oc-noorder.pdf` and `plain.pdf` beside it.
+Writes `layers.txt`: the panel as opened and its rows (as Tk shows them); the page's pixels
+at each square and the search hits of each word; a thumbnail pixel before and after; toggling
+Extra (its square, the OCMD square and its word appear); French (English goes off); the locked
+group (no change); Additional Layers opened and Orphan toggled off and on; collapsing the
+heading; a note saved into the file (Ctrl+S, Overwrite) and
+the reopen after the save (state kept); opening the file again (defaults); the other files.
+The smoke script runs it on a copy of `oc.pdf` (`saved.pdf`), so the original stays. -/
+def smokeLayers (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let status : IO String := run [".status", "cget", "-text"]
+  let panelRow (name : String) : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    return s!"{name}: shown={s.outlineShown} panel={s.panel.info.key} \
+      layersBtn={decide ((← run ["winfo", "manager", ".ol.sw.layers"]) == "pack")} \
+      list={← run ["winfo", "ismapped", ".ol.ly"]} rows={s.lyRows.length} \
+      title={← run [".ol.h", "cget", "-text"]}"
+  let tagText (tag : String) : IO String := do
+    match (← run [".ol.ly", "tag", "ranges", tag]).splitOn " " with
+    | [a, b] => run [".ol.ly", "get", a, b]
+    | _ => pure "?"
+  -- The rows as Tk shows them: depth, label, kind, checkbox value, disabled, mapped.
+  let rowsNow : IO String := do
+    discard <| run ["update"]
+    let s ← st.get
+    let mut parts : Array String := #[]
+    let mut i := 0
+    for r in s.lyRows do
+      let w := s!".ol.ly.c{i}"
+      if r.group.isSome then
+        let v ← run ["set", s!"::safepdf::ly({i})"]
+        parts := parts.push s!"{r.depth}:{← tagText s!"g{i}"}:{v}\
+          {if (← run [w, "instate", "disabled"]) == "1" then ":locked" else ""}\
+          {if (← run ["winfo", "ismapped", w]) == "1" then "" else ":hidden"}"
+      else
+        parts := parts.push s!"{r.depth}:[{← tagText s!"h{i}"}]"
+      i := i + 1
+    return ";".intercalate parts.toList
+  let rowOf (label : String) : IO Nat := do
+    return ((← st.get).lyRows.findIdx? (·.label == label)).getD 9999
+  let invoke (label : String) : IO Unit := do
+    discard <| run [s!".ol.ly.c{← rowOf label}", "invoke"]
+    settle st
+  -- Square centres (page points) and the pixel colour there.
+  let squares : List (String × Pt) := [("base", ⟨100, 650⟩), ("extra", ⟨250, 650⟩),
+    ("ocmd", ⟨400, 650⟩), ("en", ⟨100, 450⟩), ("fr", ⟨250, 450⟩), ("locked", ⟨400, 450⟩),
+    ("orphan", ⟨100, 250⟩)]
+  let pixels : IO String := do
+    discard <| run ["update"]
+    let mut parts : Array String := #[]
+    for (n, q) in squares do parts := parts.push s!"{n}=({← photoPixel st 0 q})"
+    return " ".intercalate parts.toList
+  let hits : IO String := do
+    match ← pageIndex st 0 with
+    | .ok ix =>
+      let mut parts : Array String := #[]
+      for w in ["alpha", "bravo", "english", "french", "always"] do
+        parts := parts.push s!"{w}={(ix.hits (Select.normQuery w)).size}"
+      return " ".intercalate parts.toList
+    | .error e => return s!"error {e}"
+  -- The thumbnail of page 1 at the Extra square (thumbnail pixels: page point × zoom).
+  let thumbPx : IO String := do
+    discard <| run ["::safepdf::btnInvoke", ".ol.sw.thumbnails"]
+    thumbSettle st
+    let s ← st.get
+    let some doc := s.doc | return "-"
+    let z := thumbZoom s doc 0
+    let x := ((250 : Rat) * z).floor
+    let y := (((792 : Rat) - 650) * z).floor
+    let px ← try run [thumbPhoto 0, "get", toString x, toString y] catch _ => pure "<none>"
+    discard <| run ["::safepdf::btnInvoke", ".ol.sw.layers"]
+    return s!"have={s.thHave.contains 0} px=({px})"
+  settle st
+  out := out.push s!"{← panelRow "start"} status={← status}"
+  out := out.push s!"rows: {← rowsNow}"
+  out := out.push s!"px-start: {← pixels}"
+  out := out.push s!"text-start: {← hits}"
+  out := out.push s!"thumb-start: {← thumbPx}"
+  out := out.push (← panelRow "back")
+  -- Extra on: its square and word, and the OCMD square (AllOn Base, Extra).
+  invoke "Extra"
+  out := out.push s!"extra-on: {← rowsNow}"
+  out := out.push s!"px-extra: {← pixels}"
+  out := out.push s!"text-extra: {← hits}"
+  -- The radio pair: French on turns English off.
+  invoke "French"
+  out := out.push s!"french-on: {← rowsNow}"
+  out := out.push s!"px-french: {← pixels}"
+  out := out.push s!"text-french: {← hits}"
+  -- The locked group: its disabled checkbox does nothing, nor does the event itself.
+  invoke "Locked"
+  discard <| run ["::safepdf::emit", "layer", toString (← rowOf "Locked")]
+  settle st
+  out := out.push s!"locked: {← rowsNow} status={← status}"
+  out := out.push s!"px-locked: {← pixels}"
+  -- Additional Layers (the groups not in /Order) starts collapsed; opened, Orphan toggles.
+  let aRow := ((← st.get).lyRows.findIdx? (·.italic)).getD 9999
+  discard <| run ["::safepdf::emit", "lyToggle", toString aRow]
+  out := out.push s!"additional-open: {← rowsNow}"
+  invoke "Orphan"
+  out := out.push s!"orphan-off: {← rowsNow}"
+  out := out.push s!"px-orphan: {← pixels}"
+  invoke "Orphan"
+  out := out.push s!"px-orphan-on: {← pixels}"
+  -- Collapsing the heading hides its checkboxes; opening shows them again.
+  let hRow := ((← st.get).lyRows.findIdx? (·.group.isNone)).getD 9999
+  discard <| run ["::safepdf::emit", "lyToggle", toString hRow]
+  out := out.push s!"collapsed: {← rowsNow}"
+  discard <| run ["::safepdf::emit", "lyToggle", toString hRow]
+  out := out.push s!"expanded: {← rowsNow}"
+  out := out.push s!"thumb-after: {← thumbPx}"
+  -- A note saved into the file: the reopen after the save keeps the layers' state.
+  smokeNoteAt st 500 100 "layers"
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  sendEvent ".c" "<Control-Key-s>"
+  settle st
+  out := out.push s!"{← panelRow "saved"} dirty={(← st.get).marks.dirty} status={← status}"
+  out := out.push s!"saved-rows: {← rowsNow}"
+  out := out.push s!"px-saved: {← pixels}"
+  -- Opened again: the document's default state.
+  openFile st ((← st.get).path.getD "")
+  settle st
+  out := out.push (← panelRow "reopened")
+  out := out.push s!"reopened-rows: {← rowsNow}"
+  out := out.push s!"px-reopened: {← pixels}"
+  out := out.push s!"text-reopened: {← hits}"
+  for f in ["oc-nomode", "oc-noorder", "plain"] do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push s!"{← panelRow f} status={← status}"
+    out := out.push s!"{f}-rows: {← rowsNow}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "layers.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -8430,6 +8790,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeAttach st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "attach.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "layers" then
+    try smokeLayers st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "layers.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "noteclose" then
@@ -8598,6 +8964,8 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
     st.modify ({ · with thSel := none })
     discard <| run [".ol.th", "delete", "thfocus"]
   | ["olToggle", k] => olToggle st k
+  | ["layer", k] => layerClick st k
+  | ["lyToggle", k] => lyToggle st k
   | ["pageEntry", txt] => pageEntry st txt
   | ["pageRevert"] => if s.doc.isSome && s.pageCount > 0 then showPageField s
   | ["tool", name] => tool st name

@@ -1,5 +1,7 @@
 import SafePdf.Shell.App.Links
 import SafePdf.Core.Doc.OpenSettings
+import SafePdf.Core.Doc.OptionalContent
+import SafePdf.Core.Doc.Attachments
 
 /-!
 # Outline sidebar model after PDF.js (task 9.7; Plan.md §6 Phase 9 "Look and feel: imitate PDF.js" — *Sidebar*, §10 `SafePdf/Shell/`)
@@ -24,6 +26,21 @@ The Tk-free description of the left sidebar (unverified shell code, total, check
   its page number below, in a vertical list; only the visible ones and `thumbMargin` more on
   each side are rendered, and at most `thumbBudget` images are kept (the farthest from the view
   go first).
+* **Layers** (`layerRows`, `layerToggle`; task 9.r11b, PDF.js's `web/pdf_layer_viewer.js`):
+  the optional content groups (`Core.Doc.OptionalContent.Config`) as a tree following the
+  default configuration's `/Order` — a group is a row with a checkbox showing whether it is ON;
+  a nested array with a leading string is a heading (the label, not a checkbox) over its items;
+  a nested array without a label nests its items under the row before it (ISO 32000-2
+  §8.11.4.3, Table 101: "sub-groups"); a labelled array with nothing left in it is dropped
+  (PDF.js). Groups that no row shows (not listed in `/Order`) follow under an italic
+  heading "Additional Layers" (`additionalLabel`), in `/OCGs` order, each with its checkbox —
+  as PDF.js does (`src/core/catalog.js` `parseOrder`, `web/pdf_layer_viewer.js`), whose
+  heading starts collapsed (`LayerRow.italic`, `layerEntries`). (PDF.js also puts there the
+  groups of an unlabelled array, which it drops; here they are nested, so they are shown in
+  place.) Without `/Order` every group is listed by `/Name` in `/OCGs` order. Names and labels are sanitized for display (`Core.Doc.Attachments.displayText`:
+  control and bidi characters removed, at most `layerNameMax` characters). Toggling a row
+  (`layerToggle`) is `Config.setGroup`: radio-button groups turn the others off, locked groups
+  do not change (their checkbox is disabled, `layerLocked`). The tree reuses `rows`.
 * **Tree** (`rows`): the outline entries (`Links.Entry`, depths already clamped so that every
   entry has its parent right before it) as rows with their parent, ancestors, whether they
   have children (only those get a disclosure triangle), and their indentation.
@@ -127,15 +144,6 @@ def onLoad (mode : Option PageMode) (c : Content) : Option Panel :=
 def shownOnLoad (mode : Option PageMode) (c : Content) : Bool :=
   (onLoad mode c).isSome
 
-/-- A status note when the page mode asks for a panel the viewer does not offer for this
-document (`OpenSettings.panelMissing`: attachments and layers until tasks 9.r10 / 9.r11b);
-thumbnails always exist, so UseThumbs never gets one. -/
-def missingNote (mode : Option PageMode) (c : Content) : Option String := do
-  let m ← mode
-  let p ← Panel.ofMode m
-  if p.available c then none
-  else (SafePdf.Core.Doc.OpenSettings.panelMissing (some m)).map (s!"{·} panel not available yet")
-
 /-- Whether the sidebar toggle button is shown: with any document (thumbnails, task 9.r9). -/
 def toggleVisible (hasDoc : Bool) : Bool := hasDoc
 
@@ -234,6 +242,100 @@ def thumbStep (n cur : Nat) (down : Bool) : Nat :=
   if n == 0 then 0
   else if down then min (cur + 1) (n - 1) else min (cur - 1) (n - 1)
 
+/-! ### Layers (task 9.r11b) -/
+
+section Layers
+
+open SafePdf.Core.Doc.OptionalContent (Config Key State)
+
+/-- Most characters of a layer name or heading shown. -/
+def layerNameMax : Nat := 200
+
+/-- Nesting levels of `/Order` followed when the panel's rows are built (`Config.order` is
+already bounded by `Limits.maxOCDepth`; deeper levels are cut). -/
+def layerFuel : Nat := 64
+
+/-- One row of the layers panel: a group (with a checkbox) or a heading (an `/Order` label). -/
+structure LayerRow where
+  /-- Nesting depth. -/
+  depth : Nat
+  /-- The text shown: the group's `/Name` or the heading's label, sanitized. -/
+  label : String
+  /-- The group of the row; `none` for a heading. -/
+  group : Option Key := none
+  /-- The "Additional Layers" heading (italic, starts collapsed; PDF.js). -/
+  italic : Bool := false
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The heading of the groups not in `/Order` (PDF.js's `pdfjs-additional-layers`). -/
+def additionalLabel : String := "Additional Layers"
+
+/-- A text string (raw bytes) sanitized for the panel. -/
+def layerText (bs : List UInt8) : String :=
+  SafePdf.Core.Doc.Attachments.displayText layerNameMax bs
+
+/-- The shown name of group `k` of configuration `c` (its `/Name`; `(no name)` when empty). -/
+def layerName (c : Config) (k : Key) : String :=
+  let t := layerText (((c.groups.find? (·.key == k)).map (·.name)).getD [])
+  if t.isEmpty then "(no name)" else t
+
+/-- The rows of `/Order` items `xs` at depth `d` (see the module doc), `fuel` nesting levels
+deep at most. -/
+def orderRows (c : Config) : Nat → Nat → List SafePdf.Core.Doc.OptionalContent.Order →
+    List LayerRow
+  | 0, _, _ => []
+  | f + 1, d, xs => xs.flatMap fun
+    | .group k => [{ depth := d, label := layerName c k, group := some k }]
+    | .node (some l) kids =>
+      let ks := orderRows c f (d + 1) kids
+      if ks.isEmpty then [] else { depth := d, label := layerText l } :: ks
+    | .node none kids => orderRows c f (d + 1) kids
+
+/-- Clamps each row's depth to one more than the previous row's (the first to 0), so that
+every nested row has its parent right before it (an unlabelled array at the start of
+`/Order` has no row to nest under). -/
+def clampRows : Nat → List LayerRow → List LayerRow
+  | _, [] => []
+  | lim, r :: rs =>
+    let d := min r.depth lim
+    { r with depth := d } :: clampRows (d + 1) rs
+
+/-- **The rows of the layers panel** for configuration `c`: `/Order` as a tree, or every group
+by name when `/Order` lists nothing. -/
+def layerRows (c : Config) : List LayerRow :=
+  if c.order.isEmpty then c.groups.map fun g => { depth := 0, label := layerName c g.key, group := some g.key }
+  else
+    let rs := clampRows 0 (orderRows c layerFuel 0 c.order)
+    let shown := rs.filterMap (·.group)
+    let rest := c.groups.filter (!shown.contains ·.key)
+    if rest.isEmpty then rs
+    else rs ++ { depth := 0, label := additionalLabel, italic := true } ::
+      rest.map fun g => { depth := 1, label := layerName c g.key, group := some g.key }
+
+/-- The rows as outline entries (for `rows`, `visibleRows`, `toggle`): every heading starts
+open except "Additional Layers" (PDF.js). -/
+def layerEntries (rs : List LayerRow) : List Links.Entry :=
+  rs.map fun r => ⟨r.label, r.depth, !r.italic, .none⟩
+
+/-- The checkbox of a row in state `st`: `some on` for a group, `none` for a heading. -/
+def layerChecked (st : State) (r : LayerRow) : Option Bool := r.group.map st.isOn
+
+/-- Whether a row's checkbox is disabled: its group is locked (`/D /Locked`). -/
+def layerLocked (c : Config) (r : LayerRow) : Bool :=
+  match r.group with
+  | some k => c.locked.contains k
+  | none => false
+
+/-- **Toggling row `i`** (a click on its checkbox): its group turned to the other state with
+`Config.setGroup` (radio-button groups, locked groups unchanged); a heading or a row out of
+range changes nothing. -/
+def layerToggle (c : Config) (st : State) (rs : List LayerRow) (i : Nat) : State :=
+  match (rs[i]?).bind (·.group) with
+  | some k => c.setGroup st k (!st.isOn k)
+  | none => st
+
+end Layers
+
 /-- One row of the outline tree. -/
 structure Row where
   /-- Index of the entry (text tags `oK` / `tK` of the outline tree in the viewer). -/
@@ -327,10 +429,6 @@ private def mk (d : Nat) (o : Bool) : Links.Entry := ⟨"", d, o, .none⟩
   onLoad (some .useAttachments) { hasAttachments := true } == some .attachments &&
   onLoad (some .useOC) {} == none && onLoad (some .useOC) { hasLayers := true } == some .layers
 #guard shownOnLoad (some .useThumbs) {} && !shownOnLoad none {}
-#guard missingNote (some .useThumbs) {} == none && missingNote none {} == none &&
-  missingNote (some .useOC) {} == some "layers panel not available yet" &&
-  missingNote (some .useAttachments) { hasAttachments := true } == none &&
-  missingNote (some .useOutlines) {} == none
 #guard toggleVisible true && !toggleVisible false
 #guard afterToggle false .outline { hasOutline := true } == some .outline &&
   afterToggle false .outline {} == some .thumbnails &&
@@ -350,5 +448,49 @@ private def mk (d : Nat) (o : Bool) : Links.Entry := ⟨"", d, o, .none⟩
 #guard thumbEvict [1, 2, 3] [1] 5 1 == [] && thumbEvict [0, 1, 2, 3, 9] [1, 2] 3 1 == [9, 3]
 #guard thumbStep 5 0 false == 0 && thumbStep 5 0 true == 1 && thumbStep 5 4 true == 4 &&
   thumbStep 0 3 true == 0 && thumbStep 5 3 false == 2
+-- Layers: /Order with a labelled list, an unlabelled sub-list, an empty labelled list, a
+-- group not in /Order; radio buttons and a locked group.
+section LayerChecks
+open SafePdf.Core.Doc.OptionalContent
+private def g (n : Nat) (nm : String) : Group := { key := (n, 0), name := nm.toUTF8.toList }
+private def cfgL : Config :=
+  { groups := [g 1 "Base", g 2 "Extra", g 3 "English", g 4 "French", { key := (5, 0), name := [0xFE, 0xFF, 0, 76, 0, 111, 0x20, 0x2E] }, g 6 "Orphan",
+               g 7 ""],
+    offList := [(2, 0), (4, 0)],
+    order := [.group (1, 0), .group (2, 0),
+              .node (some "Languages".toUTF8.toList) [.group (3, 0), .group (4, 0)],
+              .group (7, 0), .node none [.group (5, 0)], .node (some [69]) []],
+    rbGroups := [[(3, 0), (4, 0)]], locked := [(5, 0)] }
+#guard (layerRows cfgL).map (fun r => (r.depth, r.label, r.group.isSome)) ==
+  [(0, "Base", true), (0, "Extra", true), (0, "Languages", false), (1, "English", true),
+   (1, "French", true), (0, "(no name)", true), (1, "Lo", true), (0, "Additional Layers", false),
+   (1, "Orphan", true)]
+#guard ((layerRows cfgL).map (·.italic)) == [false, false, false, false, false, false, false, true, false]
+#guard ((layerRows cfgL).map (layerChecked cfgL.initial)) ==
+  [some true, some false, none, some true, some false, some true, some true, none, some true]
+#guard ((layerRows cfgL).map (layerLocked cfgL)) ==
+  [false, false, false, false, false, false, true, false, false]
+-- toggling: Extra on; French on turns English off; the locked group and a heading stay.
+#guard let rs := layerRows cfgL
+  let st := cfgL.initial
+  (layerToggle cfgL st rs 1).isOn (2, 0) &&
+  !(layerToggle cfgL st rs 4).isOn (3, 0) && (layerToggle cfgL st rs 4).isOn (4, 0) &&
+  layerToggle cfgL st rs 6 == st && layerToggle cfgL st rs 2 == st && layerToggle cfgL st rs 99 == st &&
+  !(layerToggle cfgL st rs 8).isOn (6, 0)
+-- the tree: Languages, the unnamed group and Additional Layers have children; the last starts
+-- closed, so Orphan is not visible at first.
+#guard (rows (layerEntries (layerRows cfgL))).map (·.hasKids) ==
+  [false, false, true, false, false, true, false, true, false]
+#guard let es := layerEntries (layerRows cfgL)
+  visibleRows (rows es) (initialOpen es) == [0, 1, 2, 3, 4, 5, 6, 7]
+-- every group in /Order: no Additional Layers; /Order with no usable entry: all of them there.
+#guard (layerRows { cfgL with groups := cfgL.groups.filter (·.key != (6, 0)) }).length == 7
+#guard (layerRows { cfgL with order := [.node (some [69]) []] }).map (·.depth) ==
+  [0, 1, 1, 1, 1, 1, 1, 1]
+-- no /Order: every group by name; an unlabelled list first is clamped to depth 0.
+#guard (layerRows { cfgL with order := [] }).length == 7
+#guard (layerRows { cfgL with groups := [g 1 "Base"], order := [.node none [.group (1, 0)]] }).map
+  (·.depth) == [0]
+end LayerChecks
 
 end SafePdf.Shell.App.Sidebar
