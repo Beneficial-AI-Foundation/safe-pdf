@@ -157,8 +157,6 @@ known_bugs=()
 known_bug() {
   if [ "$platform" = aqua ]; then known_bugs+=("$1|$2"); fi
 }
-known_bug "1i bubble" "Zoom In from a capped Automatic Zoom (124% at tk scaling 1.334) goes to 125% = the same quantised zoom (no change), so + then - ends at 100% and the step positions taken before it are off"
-known_bug "1m async" "the same zoom collision: + from Automatic Zoom (124%) to 125% renders nothing new, so no second render runs and none is discarded"
 known_bug "1s opensettings" "a /PageMode /FullScreen file's status line lacks 'full screen (Escape leaves)' until the next status update (suspected: on Aqua entering full screen renders at once, before openWith stores the note)"
 
 # Pick a display.

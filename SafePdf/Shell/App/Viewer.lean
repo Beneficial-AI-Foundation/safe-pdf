@@ -3610,13 +3610,15 @@ def setMode (st : IO.Ref State) (zoomSel : Toolbar.ZoomChoice) (pos : Option (Na
 drop-down, `Toolbar.ZoomChoice.ofKey`). -/
 def zoom (st : IO.Ref State) (what : String) (pos : Option (Nat × Nat)) : IO Unit := do
   let s ← st.get
-  -- The current percentage: the fixed one, or the one a fit mode came out at (rounded).
+  -- The current effective (quantised) zoom: the fixed percentage's, or the one a fit mode
+  -- came out at. Zoom in/out step on it (task 10.12, `View.stepInZ`/`stepOutZ`): the result
+  -- is always strictly larger/smaller; at the end of the range nothing changes.
   let cur := match s.zoomSel.mode with
-    | some (.scale p) => p
-    | _ => View.zoomPct s.shownZoom s.scaling
+    | some (.scale p) => View.pctZoom p s.scaling
+    | _ => s.shownZoom
   match what with
-  | "in" => setMode st (.pct (View.stepIn cur)) pos
-  | "out" => setMode st (.pct (View.stepOut cur)) pos
+  | "in" => if let some p := View.stepInZ cur s.scaling then setMode st (.pct p) pos
+  | "out" => if let some p := View.stepOutZ cur s.scaling then setMode st (.pct p) pos
   | "actual" => setMode st .actual pos
   | "fitpage" => setMode st .pageFit pos
   | "fitwidth" => setMode st .pageWidth pos

@@ -40,7 +40,10 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   page, fit width, or a fixed percentage of actual size,
   where 100 % = 72 dpi × the screen scale factor (`tk scaling`, pixels per point). Steps
   25, 33, 50, 67, 75, 100, 125, 150, 200, 300, 400, 600, 800 %. Effective zooms are multiples
-  of 1/64 pixel per point. Zooming keeps a point fixed: the page point under the mouse
+  of 1/64 pixel per point. Zoom in/out step on the effective zoom (task 10.12,
+  `View.stepInZ`/`stepOutZ`): to the first step whose quantised zoom is strictly larger, or the
+  last one strictly smaller, and nothing at the end of the range; from a fit mode `+` then `-`
+  ends on the largest step at most the starting zoom (`View.stepOutZ_stepInZ_le`). Zooming keeps a point fixed: the page point under the mouse
   (Ctrl+wheel) or at the window centre (keys, toolbar) is computed with `Geom.toPage` before
   the change and put back under the same window position with `Geom.toScreen` after it
   (C2; `View.reanchor`). Window resizes re-render in the fit modes (debounced 100 ms).
