@@ -261,7 +261,7 @@ established in 8.2). The verified core is untouched.
   prefix of the result and are never modified in place (S8); the writer is a core function
   with the conservativity theorem C7, and the result is validated by opening it with our
   own strict parser before it is written out. Standalone use writes `FILE-annotated.pdf`
-  (or overwrites on request, after the validation); the bib-lean reader mode (Phase 10)
+  (or overwrites on request, after the validation); the bib-lean reader mode (built here, now owned by the bib-lean side)
   sends it through bib-lean's `PUT` route instead, which keeps the previous revision. Other
   viewers (pdf.js, Acrobat, Okular) therefore find the highlights. XFDF (ISO 19444-1)
   remains as an import/export option, no longer the store.
@@ -272,36 +272,14 @@ established in 8.2). The verified core is untouched.
   same toolbar layout (sidebar only with an outline, page box with arrows, centred zoom,
   tools on the right) and the same selection bubble.
 
-### Phase 10 — bib-lean reader mode + viewer polish
+### Phase 10 — Viewer polish
 
-The viewer as the reader of the sibling project bib-lean, through its viewer-neutral reader
-contract (`bib-lean/docs/READER-CONTRACT.md`): bib-lean runs the viewer as a child
-process (`reader = safepdf`) with `--biblean` and the page argument. bib-lean obtains the
-binary by **requiring this repository as a Lake dependency pinned by commit** and building
-the `viewer` target from source (decided 2026-11-20 on the bib-lean side; option 1 of
-three, over a fetch-and-build script and over release binaries): `viewer` therefore stays
-a **non-default target** here, so bib-lean's plain `lake build` never needs Tk, and both
-projects keep Lean v4.36.0 and the Batteries v4.36.0 tag in step, which Lake requires of
-a dependency. Nothing here depends on bib-lean's code. Shell work; the core gains only
-the annotation writer of Phase 9.
-- **Launch** (`--biblean`): the token read from file descriptor 3 (never argv or the
-  environment), `BIBLEAN_SERVER`, `BIBLEAN_ATTACHMENT` and `BIBLEAN_PAGE` from the
-  environment; a small HTTP/1.1 client over loopback (`bib-lean/BibLean/Client/Http.lean`
-  is the model); `GET /api/attachments/{key}/file` into `Api.openBytes`; the title from
-  `GET /api/items/{key}` and its parent.
-- **Annotations both ways**: the stored set loaded from the item route (bib-lean's
-  stored form → marks), the whole set posted as the contract's neutral JSON (kind,
-  pageIndex, rects, text, comment, color, sortIndex, id) after each change and on exit,
-  ids kept so bib-lean's item keys stay stable; and the annotated file (Phase 9 writer)
-  sent through `PUT /api/attachments/{key}/file` so other viewers find the highlights.
-- **Text**: every page's extracted text to `/fulltext`; DOI and arXiv identifiers found
-  on pages 1–2 to `/detected` (bib-lean treats them as proposals).
-- **Conformance**: a headless `--biblean --self-test` that runs the contract's sequence
-  without a window (GET the file, POST two annotations, POST a detection, PUT the
-  re-saved file, exit 0), so bib-lean's `tests/reader/contract.sh` passes with
-  `--reader exec`; a scripted Tk session for the window path; a stub server in our tests
-  so this phase needs no bib-lean checkout to run.
-- **Viewer polish (tier-1 feel fixes, this phase)**:
+(The bib-lean reader mode that used to be this phase was descoped on 2026-11-23 at the
+human's request: the integration will be implemented on the bib-lean side, with safe-pdf
+consumed there as a library / external reader. The `--biblean` code already built here
+(ledger tasks 10.1–10.4, archived) stays in the tree until bib-lean's replacement lands.)
+
+- **Viewer polish (this phase's content)**:
   - The running app presents as **SafePDF** (window title, about); the executable stays
     `viewer` for now.
   - Every transient dismisses on **Escape** and on clicking elsewhere: the tool pop-overs
@@ -314,9 +292,9 @@ the annotation writer of Phase 9.
     by platform; Ctrl stays on Linux.
   - **Aqua highlight rendering**: translucent fills via an overlay image (Tk Aqua has no
     stipples; outline-only highlights read as dated).
-- **M10**: bib-lean's contract script S1–S25 passes against the viewer; a highlight made
-  in the viewer appears in bib-lean's window and is found by its search; the stored file
-  opened in pdf.js shows the same highlight.
+- **M10**: the polish list above lands, smoke-tested — Escape dismissal everywhere,
+  delete/undo on marks, the select tool with its cursors, Cmd keys on macOS, translucent
+  Aqua highlights, and the SafePDF title.
 
 ### Phase 11 — Native macOS shell (Tk stays on Linux)
 
@@ -329,8 +307,6 @@ Tk-free logic layer (View, Select, Links, Marks, Save) serves both shells.
 - Full shell: toolbar/sidebar parity with the PDF.js layout (Phase 9), the selection
   bubble, marks + save flows, Cmd keys, trackpad momentum + pinch zoom, Retina rendering,
   dark mode, native dialogs.
-- The bib-lean reader contract is shell-neutral (loopback HTTP, fd 3) and must keep
-  passing from the native shell.
 - Scripted session for the native shell (accessibility-driven), mirroring the Tk smoke.
 - **M11**: the macOS app passes the M8/M9 corpus and session checks natively (Cmd keys,
   momentum scroll, Retina, dark mode); the Linux Tk build stays green and unchanged.
@@ -343,8 +319,8 @@ even if every current theorem is correct.
   `Api.openFile`, XFDF import and the overwrite comparison; `allowRepair := false` skips
   repair work instead of rejecting a repaired result after parsing.
 - **Restricted, stoppable document worker**: the core plus document-derived font/image
-  processing in a child process the GUI can kill; the GUI brokers file, clipboard, save
-  and bib-lean access; the library token never enters the child. Async rendering lands
+  processing in a child process the GUI can kill; the GUI brokers file, clipboard and save
+  access; no credential enters the child. Async rendering lands
   with it (no UI stalls — page turns block up to ~3 s today).
 - **One budget per user operation**: memory reserved for concurrent page buffers,
   thumbnails and caches before dispatch; a shared work allowance through a search, export
@@ -414,7 +390,9 @@ Proofs show we meet *our* spec; testing shows our spec matches the *world*.
   contract** (2026-11-20): `viewer --biblean` speaks the contract over loopback HTTP with
   the token on file descriptor 3; `viewer` stays a non-default target so a dependent's
   plain `lake build` never needs Tk; the Lean and Batteries pins must stay in step with
-  bib-lean's (Phase 10).
+  bib-lean's (Phase 10). **Descoped 2026-11-23 at the human's request: the integration
+  moves to the bib-lean side; Phase 10 here is viewer polish only. The `--biblean` code
+  stays as-built until bib-lean's replacement lands.**
 
 **Open — revisit at the marked milestone:**
 - *Inflate performance in Lean* (M3): if proven-Lean inflate is too slow on big scanned PDFs,
@@ -470,8 +448,7 @@ safe-pdf/
 
 ## 11. Immediate next steps
 
-1. Tick M10: run bib-lean's contract against a live bib-lean; land the Phase 10 polish
-   tasks (10.5–10.10).
+1. Tick M10: land the Phase 10 polish tasks (10.5–10.10).
 2. Phase 11 spike (11.1): a minimal AppKit shell over `safe-pdf-core`; record the feel
    delta before committing to parity.
 3. Phase 12 first patch (12.1): capped reads + true strict mode.
