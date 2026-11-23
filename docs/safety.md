@@ -2,11 +2,13 @@
 
 What safe-pdf does for safety, how that compares with other projects attacking the same
 problem, and what would raise the degree of safety further. Status date: 2026-11-23 —
-milestones **M0–M8 are proven and measured** (see [progress.md](../progress.md) exit
-criteria for theorem names and numbers); M9 is verified except one external-reader check.
+milestones **M0–M8 met their recorded exit criteria** — a mix of machine-checked proofs and
+measurements (see [progress.md](../progress.md) for which is which); M9's remaining clause
+(Acrobat/Okular validation) is unchecked.
 Companion documents: [comparison.md](comparison.md) (the full side-by-side tables against
 other projects) and [safedocs-comparison.md](safedocs-comparison.md) (the SafeDocs/DaeDaLus
-deep dive).
+deep dive). Revised 2026-11-23 to incorporate corrections from an independent security
+review of commit `1c7927a`.
 
 ## 1. The threat
 
@@ -35,15 +37,15 @@ no panics, no `sorry` — and the properties are machine-checked theorems, not g
 |---|---|---|
 | S1 memory safety | holds | Lean type system; CI hygiene guard; axiom audit (`propext`/`Classical.choice`/`Quot.sound` only) |
 | S2 totality on **any** input | **proven** | `loadChain_terminates` (no fuel); xref `/Prev` cycles, cyclic `/Length`, self-containing object streams, `/Kids` cycles all rejected with `Error.cycle` in < 0.01 ms (M2) |
-| S3 resource bounds | **proven** | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), document-wide decode budget, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3) |
+| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; no bound spans a whole user operation yet (§5) |
 | S4 no ambient authority | holds | the core's type contains no `IO` — compiler-checked |
-| S5 unverified-code isolation | holds (vacuously strong) | no FFI decoders at all: even JPEG is pure Lean in `Quarantine/`, held to core hygiene rules |
-| S6 unambiguity | **proven** | one winner per object id across incremental updates, newest-revision-wins (`Spec.Unambiguous`) — the anti-shadow-attack property |
+| S5 unverified-code isolation | holds (vacuously strong) | no FFI decoders at all: even JPEG is pure Lean in `Quarantine/`, held to core hygiene rules — a source-code boundary, not a process one: everything runs in the viewer process (§5) |
+| S6 unambiguity | **proven** | one winner per object id across incremental updates, newest-revision-wins (`Spec.Unambiguous`) — the *ambiguity* half of shadow attacks: it settles which revision we display; signatures and other viewers' precedence rules are out of scope |
 | S7 local, visible failure | holds | structured `Error` values; page-local failure; `repaired` flag |
 | S8 never modify in place | holds | explicit save emits `bytes ++ update` to a new file (or atomic temp+rename after the user confirms); the original bytes are a prefix |
-| C2/C3/C6 text & geometry | **proven** | coordinate round-trips, glyph provenance, extracted text = displayed text (one interpreter pass) |
+| C2/C3/C6 text & geometry | **proven**, scoped | coordinate round-trips, glyph provenance; C6 (`pageText_glyphs`, stated for page content with annotations off) ties extracted glyphs to the same interpreter pass that renders — a *provenance* theorem: invisible text (`Tr 3`, OCR layers) is kept by default (`includeInvisible`), so search and copy can surface text not visible on the page |
 | C5 spec ↔ implementation | **proven** | lexer, object parser (round-trip `parseObject_print`), interpreter (`step_iff_exec`) each proven ≡ their denotational spec |
-| C7 conservative writes | **proven** | `writeAnnots doc marks = bytes ++ update`; strict re-parse yields every original object unchanged (xref-entry *and* value level: `c7`, `c7Update`, `c7Value'`), annotations = marks; validated by re-opening before anything is written |
+| C7 conservative writes | **proven**, per rule | `writeAnnots doc marks = bytes ++ update`; for the add-only writer the strict re-parse yields every original object unchanged (xref-entry *and* value level: `c7`, `c7Value'`); edit/delete (`c7Update`) supersedes objects by design, and the preserved prefix means a deleted note's text stays recoverable in the file (§4); validated by re-opening before anything is written |
 | Raster faithfulness | tested, not proven (by design) | pixel differential vs MuPDF: 2,435/2,450 corpus pages within threshold (99.39%, M7) |
 
 ### 2.3 Architecture that keeps the proofs meaningful
@@ -79,23 +81,25 @@ Four groups attack the "hostile PDF" problem (full tables in [comparison.md](com
 1. **Formal PDF work** (Bogk & Schöpl, Li et al., Caradoc, SafeDocs/DaeDaLus): parsers or
    validators only, none proving resource bounds, none touching rendering or text. SafeDocs
    is the strongest: generated memory-safe parsers, and its PDF parser was the only one
-   defect-free in red-teaming — but its five red-team defects were in the *hand-written
-   wrapper*, exactly the layer (xref walking, drivers) where our theorems live
-   ([safedocs-comparison.md](safedocs-comparison.md)).
+   found defect-free in red-teaming. The hand-written driver code around generated parsers
+   (xref walking, object streams) is where generation-based guarantees stop — and where our
+   theorems live ([safedocs-comparison.md](safedocs-comparison.md)).
 2. **Memory-safe implementations** (pdf.js): inherits safety from the JS runtime, but no
    totality or bounds (cyclic-xref hangs are ad hoc), and its text layer is a separate pass
-   from rendering — text poisoning is possible by construction; our C6 excludes it.
+   from rendering, so displayed and extracted text can diverge silently; our C6 ties them to
+   one pass — provenance, though not visibility (§2.2).
 3. **Hardened native engines** (MuPDF, pdfium, Poppler): decades of CVEs mitigated by
    fuzzing and process sandboxes; guarantees are empirical only.
 4. **Containment** (Dangerzone, Chrome's pdfium sandbox): assume compromise and contain it.
-   Strong, but lossy (pixels + OCR) and it trusts kernels/containers. We have nothing to
-   contain — the core cannot do IO by type — yet containment composes with our approach
-   (see §5).
+   Chromium's sandbox keeps a full interactive viewer; only Dangerzone's pixel
+   reconstruction is lossy — containment itself is not. Our *core* has nothing to contain
+   (no IO by type), but the viewer process — Tk, the C shim, clipboard, saves, bib-lean's
+   token — does, which is why process isolation composes with our approach (§5).
 
 What no other project provides: machine-checked termination of full xref resolution,
-proven decompression-bomb rejection, proven unambiguity across revisions, extracted text =
-rendered text, a proven-conservative repair path — and now a proven-conservative
-*annotation writer* (C7), where every other editor appends updates on faith.
+proven decompression-bomb rejection, proven unambiguity across revisions, same-pass text
+provenance (C6), a repair path proven total and bounded that never overrides a strict parse
+— and an *annotation writer* with machine-checked conservativity theorems (C7).
 
 ## 4. Residual trust (what a honest attacker model still includes)
 
@@ -108,20 +112,47 @@ rendered text, a proven-conservative repair path — and now a proven-conservati
   testing and `deviations-from-spec.md` are the mitigation, not a proof.
 * **Floats in the rasterizer.** The ℚ model is the proven reference; the compiled float
   path is tested (by design).
-* **Crypto primitives** (RC4, AES, MD5/SHA-2): tested against published vectors, not proven.
+* **Crypto primitives** (RC4, AES, MD5/SHA-2): tested against published vectors, not proven;
+  encrypted updates derive AES IVs deterministically (the pure core has no randomness), so
+  identical plaintext at the same object position can repeat ciphertext across updates.
+* **Invisible text is text**: extraction keeps invisible runs (OCR layers) by default; a
+  search hit can have valid provenance yet be invisible on the rendered page.
+* **Deleted annotations persist**: the C7 byte prefix means prior revisions — a removed
+  note's text included — stay recoverable in the saved file.
 * **Limits configuration**: the S3 theorems are relative to `Limits`; absurd limits would
   weaken them (defaults are measured, e.g. 256 MiB decode budget).
 * **Process**: one project's self-run tests; no independent red team or audit yet.
 
 ## 5. Raising the degree of safety
 
-Ordered roughly by value per effort.
+Ordered roughly by value per effort. The first group is adopted from the independent
+security review; those items protect the user even if every current theorem is correct.
+
+### Fix the boundary gaps first (adopted from the independent review)
+0a. **Capped reads and true strict mode**: `Api.openFile` stats the file and then reads it
+    whole (`readBinFile`), so a growing file allocates before rejection — share the
+    inspector's capped read with the API, XFDF import and the overwrite comparison; and make
+    `allowRepair := false` *skip* repair work instead of rejecting a repaired result after
+    parsing (`repairRefused` rejects post-parse today).
+0b. **A stoppable, restricted document worker**: run the core plus document-derived font and
+    image processing in a child process the GUI can kill; broker file, clipboard, save and
+    bib-lean access in the GUI; keep the library token out of the child.
+0c. **Budget a whole user operation**: reserve memory for concurrent page buffers, thumbnails
+    and caches before dispatch, and carry one shared work allowance through a search, export
+    or render — per-call budgets reset today, so concurrency multiplies them.
+0d. **Fresh IVs for encrypted updates**: supply OS randomness at the shell boundary and pass
+    it into the pure writer; set an explicit policy for legacy RC4 writes.
 
 ### Close the stated proof gaps
-1. **C4 conservativity as a theorem** — today repair-path conservativity holds by
-   construction (repair runs only on strict failure); state and prove it.
-2. **Float error bound for the rasterizer** vs the ℚ model (Plan §4 "if feasible") — turns
-   the largest tested-not-proven area into a bounded one.
+1. **C4 conservativity as a theorem** — proven today is *precedence* (a successful strict
+   open wins, `openBytes_strict`), not equivalence: the golden fixture
+   `Tests/golden/xref/repair-diff.pdf` shows an independent repair scan yielding a different
+   object map on a strict-openable file. A real C4 needs explicit hypotheses about which
+   files and which observations must agree.
+2. **Error bounds for the rasterizer's numeric surfaces** vs the ℚ model (Plan §4 "if
+   feasible") — targeted, not blanket: fill and stroke already run on integer fixed-point
+   with grid-rounding lemmas, so the work is bounding the places floats actually enter
+   (transforms, flattening tolerances).
 3. **Crypto functional correctness** — prove RC4/AES/SHA-2 against executable specs
    (HACL*-style); they are small, pure Lean already. Alternatively adopt a verified
    implementation as differential oracle in CI.
