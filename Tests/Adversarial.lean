@@ -68,6 +68,7 @@ def errS : Error → String
   | .limitExceeded k => s!"limitExceeded {reprStr k}"
   | .unsupported w => s!"unsupported: {w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- An xref entry, compactly. -/
 def entS : XrefEntry → String

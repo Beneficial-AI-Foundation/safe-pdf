@@ -1072,6 +1072,7 @@ private def errS : Error → String
   | .limitExceeded k => s!"limit:{reprStr k}"
   | .unsupported w => s!"unsupported:{w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- Test helper: `loadChain` summarised as the revision offsets, with the call count. -/
 private def lc (b : ByteArray) : Sum String (List Nat) × Nat :=

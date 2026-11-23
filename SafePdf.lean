@@ -34,6 +34,7 @@ import SafePdf.Core.Crypt.Md5
 import SafePdf.Core.Crypt.Sha2
 import SafePdf.Core.Crypt.Rc4
 import SafePdf.Core.Crypt.Aes
+import SafePdf.Core.Crypt
 import SafePdf.Core.Xref.Stream
 import SafePdf.Core.Xref.ObjStmDecode
 import SafePdf.Core.Xref.ObjStm
@@ -43,3 +44,8 @@ import SafePdf.Core.Open
 import SafePdf.Core.Doc
 import SafePdf.Core.Doc.Nav
 import SafePdf.Spec.Doc
+import SafePdf.Core.Content.GState
+import SafePdf.Core.Content.DisplayList
+import SafePdf.Core.Content.Ops
+import SafePdf.Core.Content.Interp
+import SafePdf.Spec.Content

@@ -1,0 +1,5 @@
+{"index": 0, "num": 4, "gen": 0, "mediaBox": [0, 0, 595.276, 841.89], "cropBox": [0, 0, 595.276, 841.89], "mediaBoxDefaulted": false, "rotate": 270, "label": "i", "links": 2}
+{"index": 1, "num": 5, "gen": 0, "mediaBox": [0, 0, 595.276, 841.89], "cropBox": [0, 0, 300.5, 400], "mediaBoxDefaulted": false, "rotate": 180, "label": "ii", "links": 0}
+{"index": 2, "num": 6, "gen": 0, "mediaBox": [0, 0, 595.276, 841.89], "cropBox": [0, 0, 595.276, 841.89], "mediaBoxDefaulted": false, "rotate": 0, "label": "A-5", "links": 0}
+{"index": 3, "num": 7, "gen": 0, "mediaBox": [0, 0, 612, 792], "cropBox": [0, 0, 612, 792], "mediaBoxDefaulted": true, "rotate": 90, "label": "A-6", "links": 0}
+{"summary": {"path": "Tests/golden/pages/tree.pdf", "open": "strict", "pages": 4, "declaredCount": 6, "countMismatch": true, "skippedKids": 1, "mediaBoxDefaulted": 1, "labelRanges": 2, "labelWarnings": 0, "links": 2}}

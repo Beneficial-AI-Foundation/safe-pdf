@@ -38,6 +38,14 @@ inductive Error where
   not try the repair path on it (`Core.Open.openFile_cycle`), since the cyclic file is
   exactly the attack the strict path exists to reject. -/
   | cycle (offset : Nat) (what : String)
+  /-- The document is encrypted and cannot be decrypted (Plan.md §6 Phase 4, ISO 32000-2
+  §7.6; task 4.6): an unsupported security handler or revision, a non-empty user password, a
+  malformed or missing encryption dictionary. `what` says which. Like `cycle`, this error is
+  **final**: `Core.Open.openFile` does not try the repair path on it
+  (`Core.Open.openFile_setup_final`), since a repaired trailer must never open an encrypted
+  file undecrypted (rule E2). Errors of decrypting individual objects (bad padding, short
+  data) are `malformed`, not `encryption`. -/
+  | encryption (what : String)
   deriving Repr, Inhabited
 
 /-- Whether an error is a structural cycle (`Error.cycle`). Classifies by constructor, never
@@ -45,5 +53,15 @@ by message text. -/
 def Error.isCycle : Error → Bool
   | .cycle _ _ => true
   | _ => false
+
+/-- Whether an error is an encryption-setup error (`Error.encryption`). Classifies by
+constructor, never by message text (task 4.6). -/
+def Error.isEncryption : Error → Bool
+  | .encryption _ => true
+  | _ => false
+
+/-- **Final errors**: after these the repair path is not tried (`Core.Open.openFile`, rules
+P5 and E2): a structural cycle (`isCycle`) or an encryption-setup error (`isEncryption`). -/
+def Error.isFinal (e : Error) : Bool := e.isCycle || e.isEncryption
 
 end SafePdf

@@ -15,7 +15,10 @@ The corpus `Tests/adversarial/bombs/` is written by `generate.py` there (see its
   `Core.Open.openFile` (must open strictly), `OpenDoc.getObject 4 0` (the raw stream) and
   `decodeStream` on its dictionary and data;
 * `objstm-bomb.pdf`, `objstm-bomb-root.pdf`, `xref-bomb.pdf`: bombs inside the file structure,
-  run through `Chain.loadChain`, `openFile` and `getObject`.
+  run through `Chain.loadChain`, `openFile` and `getObject`;
+* the same three and `objstm-two.pdf` (two object streams of 768 KiB each) through the
+  document budget (task 4.5): `Chain.loadChainB`, `Open.Session.open`,
+  `Open.Session.getObject`, `Doc.openDocS` (`runSession`).
 
 Every row is checked under two limit sets:
 
@@ -27,8 +30,12 @@ Every call is timed (the result is matched on before the clock is read again) an
 within `boundNs` of its mode. Per-row timing lines are printed in default mode, and in small
 mode with `SAFEPDF_BOMBS_VERBOSE=1`.
 
-`Limits.maxDecodedTotalBytes` (per-document accounting) is not exercised: `decodeStream`
-decodes one stream and does not account across streams (`Core/Filter.lean` header).
+`Limits.maxDecodedTotalBytes` (per-document accounting, task 4.5) is exercised by the
+`Session` rows (`runSession`): each runs with the mode's limits and the default document budget
+(1 GiB: the per-stream limit binds, `limitExceeded .decodedStreamBytes`) and with a budget
+smaller than one bomb (512 KiB, below the per-stream limit of both modes: the document budget
+binds, `limitExceeded .decodedTotalBytes`); `objstm-two.pdf` runs with a 1 MiB budget, which
+one of its object streams fits and the two together do not.
 
 Paths are relative to the current directory: run `lake exe tests` from the repo root.
 -/
@@ -81,6 +88,8 @@ inductive Expect where
   | ok
   /-- `Error.limitExceeded .decodedStreamBytes`. -/
   | limit
+  /-- `Error.limitExceeded .decodedTotalBytes` (the document budget, task 4.5). -/
+  | limitTotal
   /-- `Error.limitExceeded` of any kind, or `Error.unsupported`: a chain of 9 filters exceeds
   `Filter.maxFilters` = 8, which is `unsupported` before task 3.9 and `limitExceeded` after. -/
   | limitOrUnsupported
@@ -91,6 +100,7 @@ def Expect.describe : Expect → String
   | .okSize n => s!"ok, {n} bytes"
   | .ok => "ok"
   | .limit => "limitExceeded decodedStreamBytes"
+  | .limitTotal => "limitExceeded decodedTotalBytes"
   | .limitOrUnsupported => "limitExceeded or unsupported"
 
 /-- An error as one line. -/
@@ -99,12 +109,14 @@ def errS : Error → String
   | .limitExceeded k => s!"limitExceeded {reprStr k}"
   | .unsupported w => s!"unsupported: {w}"
   | .cycle o w => s!"cycle@{o}: {w}"
+  | .encryption w => s!"encryption: {w}"
 
 /-- Whether a result (summarised to a size) meets the expectation. -/
 def Expect.accepts : Expect → Except Error Nat → Bool
   | .okSize n, .ok m => n == m
   | .ok, .ok _ => true
   | .limit, .error (.limitExceeded .decodedStreamBytes) => true
+  | .limitTotal, .error (.limitExceeded .decodedTotalBytes) => true
   | .limitOrUnsupported, .error (.limitExceeded _) => true
   | .limitOrUnsupported, .error (.unsupported _) => true
   | _, _ => false
@@ -280,6 +292,105 @@ def runStructural (mode : Mode) (verbose : Bool) : IO Nat := do
   | .error _ => pure ()
   return f
 
+/-- A budget smaller than one bomb: 512 KiB (below the per-stream limit of both modes). -/
+def tinyBudget : Nat := 512 * 1024
+
+/-- The document-budget rows (task 4.5), with the mode's limits and document budget `total`:
+`expTotal` is the expected error when the budget binds (`.limitTotal` for `tinyBudget`,
+`.limit` for the default budget, where the per-stream limit binds first).
+
+* `xref-bomb.pdf`: `Chain.loadChainB` fails (`expTotal`); `Session.open` falls back to repair
+  and opens the document repaired (the root is a plain object: nothing more to decode).
+* `objstm-bomb.pdf`: `Session.open` opens strictly; `Session.getObject 6 0` fails
+  (`expTotal`).
+* `objstm-bomb-root.pdf`: `Session.open` fails (`expTotal`): the strict root validation fails,
+  the repair path's validation fails the same way (from what is left), the strict error is
+  returned (rule P4).
+* `Doc.ofSession` and `Doc.openDocS` on `objstm-bomb.pdf` (the page tree is plain): the walk
+  succeeds and charges nothing. -/
+def runSessionRows (mode : Mode) (verbose : Bool) (total : Nat) (expTotal : Expect) :
+    IO Nat := do
+  let lim : Limits := { mode.limits with maxDecodedTotalBytes := total }
+  let tag := s!"budget {total}"
+  let mut f := 0
+  -- xref-bomb.pdf
+  let b ← IO.FS.readBinFile (bombDir / "xref-bomb.pdf")
+  let (c, ns) ← timeIt fun _ => (Xref.Chain.loadChainB lim (Filter.Budget.init lim) b).1
+  f := f + (← check mode verbose s!"xref-bomb.pdf loadChainB ({tag})" expTotal (docR c) ns)
+  let (o, ns) ← timeIt fun _ => Open.Session.open lim b
+  f := f + (← check mode verbose s!"xref-bomb.pdf Session.open ({tag})" .ok (docR o) ns)
+  match o with
+  | .ok s =>
+    if !s.doc.repaired then
+      IO.println s!"  FAIL [{mode.name}] xref-bomb.pdf Session.open ({tag}): expected repaired"
+      f := f + 1
+  | .error _ => pure ()
+  -- objstm-bomb.pdf
+  let b ← IO.FS.readBinFile (bombDir / "objstm-bomb.pdf")
+  let (o, ns) ← timeIt fun _ => Open.Session.open lim b
+  f := f + (← check mode verbose s!"objstm-bomb.pdf Session.open ({tag})" .ok (docR o) ns)
+  match o with
+  | .ok s =>
+    if s.doc.repaired then
+      IO.println s!"  FAIL [{mode.name}] objstm-bomb.pdf Session.open ({tag}): opened by repair"
+      f := f + 1
+    let (g, ns) ← timeIt fun _ => (s.getObject lim 6 0).1
+    f := f + (← check mode verbose s!"objstm-bomb.pdf Session.getObject 6 0 ({tag})" expTotal
+      (docR g) ns)
+    -- the page-tree walk in the session decodes nothing (plain objects)
+    let (w, s') := Doc.ofSession s lim
+    if (match w with | .ok _ => false | .error _ => true) || s'.budget != s.budget then
+      IO.println s!"  FAIL [{mode.name}] objstm-bomb.pdf Doc.ofSession ({tag}): expected ok, nothing charged"
+      f := f + 1
+  | .error _ => pure ()
+  let (od, ns) ← timeIt fun _ => Doc.openDocS lim b
+  f := f + (← check mode verbose s!"objstm-bomb.pdf Doc.openDocS ({tag})" .ok (docR od) ns)
+  -- objstm-bomb-root.pdf
+  let b ← IO.FS.readBinFile (bombDir / "objstm-bomb-root.pdf")
+  let (o, ns) ← timeIt fun _ => Open.Session.open lim b
+  f := f + (← check mode verbose s!"objstm-bomb-root.pdf Session.open ({tag})" expTotal
+    (docR o) ns)
+  return f
+
+/-- `objstm-two.pdf` (task 4.5): two object streams of 768 KiB (plus header) each. With a
+1 MiB document budget the first fetch decodes object stream 4 (ok), a second fetch of the same
+object is a cache hit (budget unchanged), and the fetch of object 7 needs object stream 5,
+which no longer fits: `limitExceeded .decodedTotalBytes`. With the default budget both fetches
+succeed. -/
+def runTwo (mode : Mode) (verbose : Bool) : IO Nat := do
+  let b ← IO.FS.readBinFile (bombDir / "objstm-two.pdf")
+  let mut f := 0
+  for (total, exp7) in [(MiB, Expect.limitTotal), (Limits.default.maxDecodedTotalBytes, .ok)] do
+    let lim : Limits := { mode.limits with maxDecodedTotalBytes := total }
+    let tag := s!"budget {total}"
+    let (o, ns) ← timeIt fun _ => Open.Session.open lim b
+    f := f + (← check mode verbose s!"objstm-two.pdf Session.open ({tag})" .ok (docR o) ns)
+    match o with
+    | .ok s0 =>
+      let (g, ns) ← timeIt fun _ => match s0.getObject lim 6 0 with
+        | (.ok _, s1) => .ok s1
+        | (.error e, _) => .error e
+      f := f + (← check mode verbose s!"objstm-two.pdf getObject 6 0 ({tag})" .ok (docR g) ns)
+      match g with
+      | .ok s1 =>
+        let (r6', s2) := s1.getObject lim 6 0
+        if s2.budget != s1.budget || !(match r6' with | .ok _ => true | .error _ => false) then
+          IO.println s!"  FAIL [{mode.name}] objstm-two.pdf getObject 6 0 again ({tag}): not a free cache hit"
+          f := f + 1
+        let (g, ns) ← timeIt fun _ => (s2.getObject lim 7 0).1
+        f := f + (← check mode verbose s!"objstm-two.pdf getObject 7 0 ({tag})" exp7 (docR g) ns)
+      | .error _ => pure ()
+    | .error _ => pure ()
+  return f
+
+/-- The document-budget rows under one mode: the default budget and `tinyBudget`, then
+`objstm-two.pdf`. -/
+def runSession (mode : Mode) (verbose : Bool) : IO Nat := do
+  let mut f ← runSessionRows mode verbose Limits.default.maxDecodedTotalBytes .limit
+  f := f + (← runSessionRows mode verbose tinyBudget .limitTotal)
+  f := f + (← runTwo mode verbose)
+  return f
+
 /-- Run every row under one mode; print a summary line. -/
 def runMode (mode : Mode) (verbose : Bool) : IO Nat := do
   let t0 ← IO.monoNanosNow
@@ -287,8 +398,9 @@ def runMode (mode : Mode) (verbose : Bool) : IO Nat := do
   for n in rawNames do
     f := f + (← runRaw mode verbose n)
   f := f + (← runStructural mode verbose)
+  f := f + (← runSession mode verbose)
   let t1 ← IO.monoNanosNow
-  IO.println s!"  bombs [{mode.name}]: {rawNames.length} raw streams, {rawNames.length - noPdf.length + 3} PDFs, total {fmtMs (t1 - t0)}, {f} failures"
+  IO.println s!"  bombs [{mode.name}]: {rawNames.length} raw streams, {rawNames.length - noPdf.length + 4} PDFs, session rows (budgets 1 GiB, 512 KiB, 1 MiB), total {fmtMs (t1 - t0)}, {f} failures"
   return f
 
 /-! ## Entry point -/

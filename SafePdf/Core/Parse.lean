@@ -9,10 +9,17 @@ import SafePdf.Core.Open
 The single entry point `parse : ByteArray → Except Error Document` that the fuzzer, the
 inspector and later the viewer call. It checks the input size against
 `Limits.maxInputBytes`, looks for the `%PDF-x.y` header (within the first 1024 bytes, version
-recorded), then opens the document with `Core.Open.openFile` (Phase 2, task 2.11: strict xref
-chain, else the repair path, flagged `repaired`; Plan.md §5.4). The `Document` records the
-header data and the opened document (`Core.Open.OpenDoc`), through which objects are
-resolved.
+recorded), then opens the document (Phase 2, task 2.11: strict xref chain, else the repair
+path, flagged `repaired`; Plan.md §5.4). The `Document` records the header data and the
+opened document (`Core.Open.OpenDoc`), through which objects are resolved.
+
+Since task 4.5 the document is opened with `Core.Open.Session.open` (`openFileB` from the full
+`Limits.maxDecodedTotalBytes` budget, Plan.md §4 S3): the xref streams of the chain and the
+object streams decoded while validating the root are charged, and the `Document` keeps the
+resulting `session` (budget left, decoded object streams). Callers that fetch or decode
+afterwards (the inspector views, `Core.Doc.ofSession`) start from that session, so one budget
+covers the open and everything after it. With enough budget left the opened document is
+exactly `Core.Open.openFile`'s (`Core.Open.Session.open_eq`).
 
 Phase 1 adds object-level entry points used by the fuzzer and the golden tests:
 `parseObjectAt` (one direct object, `Core.ObjParse.parseObject`) and `parseIndirectAt`
@@ -39,6 +46,12 @@ structure Document where
   /-- `/Root` of the trailer: the catalog reference `(num, gen)`, validated to resolve to a
   dictionary (`Core.Open.openFile_root`). -/
   root : Nat × Nat
+  /-- The session the document was opened in (task 4.5): the decoded-bytes budget left after
+  opening and the object streams decoded so far. Fetch and decode through it
+  (`Core.Open.Session.getObject`, `Core.Doc.ofSession`, `Core.Doc.decodeStreamS`). -/
+  session : Core.Open.Session
+  /-- The session's document is `doc`. -/
+  session_doc : session.doc = doc
 
 namespace Document
 
@@ -102,7 +115,8 @@ def readVersion (bytes : ByteArray) (i : Nat) : Option (Nat × Nat) :=
 end Parse
 
 /-- Parse `bytes` under explicit resource limits: the input size, the `%PDF-x.y` header,
-then `Core.Open.openFile` (strict, else repaired). -/
+then `Core.Open.Session.open` (strict, else repaired; decodes charged to the document budget,
+task 4.5). -/
 def parseWith (limits : Limits) (bytes : ByteArray) : Except Error Document :=
   if bytes.size > limits.maxInputBytes then
     .error (.limitExceeded .inputBytes)
@@ -110,17 +124,19 @@ def parseWith (limits : Limits) (bytes : ByteArray) : Except Error Document :=
     match Parse.findHeader bytes with
     | none => .error (.malformed 0 "missing %PDF header")
     | some off =>
-      match Core.Open.openFile limits bytes with
+      match Core.Open.Session.open limits bytes with
       | .error e => .error e
-      | .ok d =>
-        match d.trailer.root? with
+      | .ok s =>
+        match s.doc.trailer.root? with
         | none => .error (.malformed 0 "trailer has no /Root")
         | some root =>
           .ok { headerOffset := off
                 version := Parse.readVersion bytes (off + Parse.headerMagic.length)
                 byteLength := bytes.size
-                doc := d
-                root }
+                doc := s.doc
+                root
+                session := s
+                session_doc := rfl }
 
 /-- Parse `bytes` under `Limits.default`. The fuzzing entry point (Plan.md §6 Phase 0). -/
 def parse (bytes : ByteArray) : Except Error Document :=

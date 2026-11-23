@@ -20,18 +20,20 @@ of an array, are replaced by the direct object `getObject` returns (a stream or 
 leaves the reference in place, so `decodeStream` still reports it). Streams that needed this
 are flagged `resolved` and counted in the summary.
 
-**Budget** (task 3.13). Decoding goes through `Core.Filter.decodeStreamB` from a session
-(`Core.Open.Session.ofDoc`: the full `maxDecodedTotalBytes` budget and an empty object-stream
-cache), so every byte a filter stage allocates is charged, intermediate stages and failed
-attempts included (rules B1–B5 of `Core.Filter`); fetches go through
-`Core.Open.Session.getObject`, which charges (and caches) any object-stream decode needed to
-resolve an indirect `/Filter` or `/DecodeParms`. When a stream does not fit the remaining
-budget it is reported as `resource limit exceeded: total decoded size`, and every later stream
-is skipped with the marker `skipped: decoded-bytes budget exhausted` (JSON
-`"skipped": "budget"`); with nothing left, later streams are skipped as well. The decodes
-charged here are therefore bounded by `maxDecodedTotalBytes`. Not charged: the open itself
-(the document comes from `SafePdf.parseWith`, unbudgeted) and object-stream decodes inside an
-indirect `/Length` resolution (`Core.Xref.Length`, see `Core.Open`).
+**Budget** (tasks 3.13, 4.5). Decoding goes through `Core.Filter.decodeStreamB` from the
+session the document was opened in (`SafePdf.Document.session`, from `SafePdf.parseWith` =
+`Core.Open.Session.open`: what is left of `maxDecodedTotalBytes` after opening, and the object
+streams decoded while opening), so every byte a filter stage allocates is charged,
+intermediate stages and failed attempts included (rules B1–B5 of `Core.Filter`); fetches go
+through `Core.Open.Session.getObject`, which charges (and caches) any object-stream decode
+needed to resolve an indirect `/Filter` or `/DecodeParms`, and (task 4.5) the object-stream
+decodes of an indirect `/Length` resolution (`Core.Xref.Length.parseIndirectResolvedB`). When
+a stream does not fit the remaining budget it is reported as `resource limit exceeded: total
+decoded size`, and every later stream is skipped with the marker `skipped: decoded-bytes
+budget exhausted` (JSON `"skipped": "budget"`); with nothing left, later streams are skipped
+as well. The open and the decodes charged here are therefore bounded by
+`maxDecodedTotalBytes` together. (`decodeAll`, used by the golden tests, still starts from a
+fresh session, `Core.Open.Session.ofDoc`.)
 
 **Per stream.** Object number and generation, `/Type` and `/Subtype` when they are names,
 the `/Filter` chain (names), whether `/DecodeParms` is present, the raw length, then the
@@ -184,6 +186,7 @@ def errorKind : Error → String
   | .limitExceeded _ => "limit"
   | .unsupported _ => "unsupported"
   | .cycle _ _ => "cycle"
+  | .encryption _ => "encryption"
 
 /-- An error's text without its byte offset, for grouping. -/
 def errorKey : Error → String
@@ -245,12 +248,11 @@ def entries (doc : Core.Open.OpenDoc) (only : Option Nat) : Array (Nat × XrefEn
   | none => doc.index
   | some n => doc.index.filter (·.1 == n)
 
-/-- Pure run over all entries (no timing): used by the golden tests. The budget starts full
-(`Core.Open.Session.ofDoc`). -/
-def decodeAll (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat := none) :
+/-- Pure run over all entries (no timing) from the session `sess0` (task 4.5). -/
+def decodeAllS (limits : Limits) (sess0 : Core.Open.Session) (only : Option Nat := none) :
     Array Rec × Scan :=
-  let st0 : State := { sess := Core.Open.Session.ofDoc limits doc }
-  let (recs, st) := (entries doc only).foldl (init := ((#[] : Array Rec), st0))
+  let st0 : State := { sess := sess0 }
+  let (recs, st) := (entries sess0.doc only).foldl (init := ((#[] : Array Rec), st0))
     fun (recs, st) (num, e) =>
       match e with
       | .compressed _ _ =>
@@ -266,6 +268,12 @@ def decodeAll (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat := 
           let (r, sess) := decodeBody sess limits st.exhausted num g s
           (recs.push r, st.after r sess)
   (recs, st.scan)
+
+/-- Pure run over all entries (no timing): used by the golden tests. The budget starts full
+(`Core.Open.Session.ofDoc`). -/
+def decodeAll (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat := none) :
+    Array Rec × Scan :=
+  decodeAllS limits (Core.Open.Session.ofDoc limits doc) only
 
 /-! ## Rendering -/
 
@@ -419,13 +427,14 @@ def summaryJson (path : String) (result : Except Error Document) (recs : Array R
 /-- Cap on the hex dump in `--json` with `SAFEPDF_STREAM`: 1 MiB of decoded data. -/
 def hexCap : Nat := 1 <<< 20
 
-/-- Run over all entries with per-stream timing (same logic as `decodeAll`). -/
-def decodeAllTimed (limits : Limits) (doc : Core.Open.OpenDoc) (only : Option Nat) :
+/-- Run over all entries with per-stream timing (same logic as `decodeAllS`), from the session
+`sess0` (the parse's session, task 4.5). -/
+def decodeAllTimed (limits : Limits) (sess0 : Core.Open.Session) (only : Option Nat) :
     IO (Array Rec × Scan × Array Nat) := do
-  let mut st : State := { sess := Core.Open.Session.ofDoc limits doc }
+  let mut st : State := { sess := sess0 }
   let mut recs : Array Rec := #[]
   let mut times : Array Nat := #[]
-  for (num, e) in entries doc only do
+  for (num, e) in entries sess0.doc only do
     match e with
     | .compressed _ _ => st := { st with scan := { st.scan with compressed := st.scan.compressed + 1 } }
     | .free _ _ => pure ()
@@ -462,7 +471,7 @@ def view : View where
           pure none
     let outPath ← if only.isSome then IO.getEnv "SAFEPDF_STREAM_OUT" else pure none
     let (recs, sc, times) ← match i.result with
-      | .ok d => decodeAllTimed cfg.limits d.doc only
+      | .ok d => decodeAllTimed cfg.limits d.session only
       | .error _ => pure (#[], {}, #[])
     -- Dump the selected stream's decoded bytes to a file.
     let mut dumpLine : Option String := none
