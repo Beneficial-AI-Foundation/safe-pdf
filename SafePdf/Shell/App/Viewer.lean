@@ -8997,7 +8997,12 @@ again. Ctrl+S (answered Overwrite) saves the highlight and the note and reopens 
 history is cleared). The saved highlight is selected and deleted with Delete (dirty, white);
 Ctrl+Z restores it (clean again, the saved mark shown from the file: tinted, Save disabled);
 it is recoloured green and Ctrl+S writes that: the reopened file holds both marks, the
-highlight green with its id. Results in `undo.txt`. -/
+highlight green with its id. With the highlight selected, Backspace and Delete typed into the
+find entry and into the note's popup edit their text (marks, selection and page unchanged).
+Each click takes `world`'s position from the current view and carries its own `-time` (task
+10.14: untimed clicks were double clicks on Aqua; the word they selected anchored the note to
+the highlight's quads, making it the comment that Delete removes with the highlight). Results
+in `undo.txt`. -/
 def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : String := ((dir : System.FilePath) / name).toString
   let k := saveKit st
@@ -9023,16 +9028,49 @@ def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
   let redoKey : IO Unit := sendEvent ".c" "<Control-Key-Z>"
   let states : IO String := return s!"{← k.menuState .undo} {← k.menuState .redo}"
   let path := (← st.get).path.getD ""
-  let some wpos ← boxWindowPos st world | throw (IO.userError "world not shown")
+  -- Task 10.14: `world`'s window position is taken from the current view before each click
+  -- (Save reopens the file, which can scroll), scrolled into the window first when it is
+  -- outside; every click carries an explicit `-time` 2 s after the previous one (Tk Aqua counts
+  -- generated clicks without `-time` as double clicks, which select the word under them).
+  let wposNow : IO (String × String) := do
+    settle st
+    let s ← st.get
+    let some bx := shownBox s | throw (IO.userError "world not shown")
+    let (x0, y0, x1, y1) := canvasRect s bx world
+    let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+      View.parseDecimal (← run [".c", "canvasy", "0"])) | throw (IO.userError "no view")
+    if y0 < vy || vy + (s.canvasH : Rat) < y1 then
+      discard <| run [".c", "yview", "moveto",
+        fmtFrac (((y0 + y1) / 2 - (s.canvasH : Rat) / 2) / (s.regionH : Rat))]
+    if x0 < vx || vx + (s.canvasW : Rat) < x1 then
+      discard <| run [".c", "xview", "moveto",
+        fmtFrac (((x0 + x1) / 2 - (s.canvasW : Rat) / 2) / (s.regionW : Rat))]
+    settle st
+    let some p ← boxWindowPos st world | throw (IO.userError "world not shown")
+    return p
+  let clock ← IO.mkRef ((← IO.monoMsNow) % 1000000000)
+  -- `n` press/release pairs 1 ms apart (2: a double click), 2 s after the last click.
+  let clicks (n : Nat) : IO Unit := do
+    let pos ← wposNow
+    clock.modify (· + 2000)
+    for i in [0:n] do
+      let t := toString ((← clock.get) + i)
+      sendEvent ".c" "<ButtonPress-1>" ["-x", pos.1, "-y", pos.2, "-time", t]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", pos.1, "-y", pos.2, "-time", t]
+    discard <| run ["update", "idletasks"]
+  -- The click's selection: (a mark selected, a text selection).
+  let selState : IO String := do
+    let s ← st.get
+    return s!"{s.markSel.isSome} {s.sel.isSome}"
   out := out.push s!"start: {← count} {← shade} {← states}"
   -- 1. Highlight `world`, select it, Backspace removes it.
-  for _ in [0:2] do k.clickAt wpos
+  clicks 2
   discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
   syncMenus st
   out := out.push s!"highlighted: {← count} {← shade} {(← st.get).marks.dirty} {← states}"
-  discard <| run ["after", "600"]
-  k.clickAt wpos
+  clicks 1
   let hid := (← st.get).markSel
+  out := out.push s!"select-click: {← selState}"
   sendKey "BackSpace"
   syncMenus st
   out := out.push s!"backspace: {hid.isSome} {← count} {← shade} {← states}"
@@ -9061,6 +9099,10 @@ def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
     return ((s.marks.marks.toList.find? (·.isNote)).map (·.text)).getD "<none>"
   let nid := ((← st.get).marks.marks.toList.find? (·.isNote)).map (·.id)
   out := out.push s!"note: {nid.isSome} {← noteText} {← states}"
+  -- Anchored at its point, not to a (stale) word selection: that would make it the
+  -- highlight's comment, which Delete on the highlight removes with it (9.5g).
+  let anchorKind (m : Marks.Mark) : String := if m.quads.isEmpty then "point" else "quads"
+  out := out.push s!"note-anchor: {((← st.get).marks.marks.toList.find? (·.isNote)).map anchorKind}"
   if let some n := nid then noteSave st (toString n) "second"
   out := out.push s!"note-edited: {← noteText}"
   undoKey
@@ -9080,8 +9122,8 @@ def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
   let s1 ← st.get
   out := out.push s!"saved: {s1.path == some path} {s1.marks.marks.size} {s1.marks.dirty} {← k.star} {← shade} {← states}"
   -- 6. The saved highlight: Delete, undo (clean again, drawn from the file).
-  discard <| run ["after", "600"]
-  k.clickAt wpos
+  clicks 1
+  out := out.push s!"saved-select: {← selState}"
   let sid := (← st.get).markSel
   let savedSel := sid.any (← st.get).marks.isSaved
   sendKey "Delete"
@@ -9092,14 +9134,34 @@ def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
   let s2 ← st.get
   out := out.push s!"saved-undo: {← count} {s2.marks.dirty} {← k.star} {← shade} {← k.menuState .save} {(sid.bind s2.marks.find?).isSome} {s2.view.isNone}"
   -- 7. Recoloured green and saved: the file holds both marks, the highlight green.
-  discard <| run ["after", "600"]
-  k.clickAt wpos
+  clicks 1
   discard <| run [".menubar.edit.hl", "invoke", Marks.Color.green.label]
   sendEvent ".c" "<Control-Key-s>"
   syncMenus st
   let s3 ← st.get
   out := out.push s!"resaved: {s3.marks.marks.size} {s3.marks.dirty} {((sid.bind s3.marks.find?).map (·.color.name))} {← k.px ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩} {← states}"
   out := out.push s!"file-marks: {← fileMarks path}"
+  -- 8. With the highlight selected, Backspace and Delete typed into the find bar's entry and
+  -- into a note popup's text edit the text there; the marks and the page stay.
+  clicks 1
+  let pg0 := (← st.get).page
+  sendEvent ".c" "<Control-Key-f>"
+  discard <| run ["update"]
+  discard <| run [".find.e", "delete", "0", "end"]
+  discard <| run [".find.e", "insert", "end", "abcd"]
+  discard <| run [".find.e", "icursor", "2"]
+  sendEvent ".find.e" "<Key-BackSpace>"
+  sendEvent ".find.e" "<Key-Delete>"
+  out := out.push s!"find-keys: {← run [".find.e", "get"]} {← count} {← selState} {(← st.get).page == pg0}"
+  sendEvent ".find.e" "<Key-Escape>"
+  if let some n := (← st.get).marks.marks.toList.find? (·.isNote) then
+    openNote st n.id
+    discard <| run ["update"]
+    discard <| run [".note.t", "mark", "set", "insert", "1.2"]
+    sendEvent ".note.t" "<Key-BackSpace>"
+    sendEvent ".note.t" "<Key-Delete>"
+    out := out.push s!"note-keys: {← run [".note.t", "get", "1.0", "end-1c"]} {← count} {(← st.get).page == pg0}"
+    discard <| run ["destroy", ".note"]
   IO.FS.writeFile (file "undo.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 

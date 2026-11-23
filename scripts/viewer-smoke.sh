@@ -2439,7 +2439,11 @@ case_begin "1x undo"
 # (pixels), Ctrl+Shift+Z removes it again, undoing everything is clean (Undo disabled); a
 # note's text edit and creation are undone and redone; after Ctrl+S (Overwrite) the saved
 # highlight is deleted with Delete and restored with Ctrl+Z (clean again, drawn from the
-# file), then recoloured green and saved: the file holds both marks. Externally: qpdf --check.
+# file), then recoloured green and saved: the file holds both marks; with the highlight
+# selected, Backspace and Delete typed into the find entry and a note popup edit their text
+# (marks and page unchanged). Clicks carry -time and take `world`'s position from the current
+# view each time (task 10.14: on Aqua untimed clicks were double clicks selecting the word, so
+# the note became the highlight's comment and went with it). Externally: qpdf --check.
 mkdir -p "$work/undo" "$work/out-undo"
 cp "$work/text.pdf" "$work/undo/text.pdf"
 SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=undo run_viewer "$work/out-undo" "$work/undo/text.pdf"
@@ -2450,6 +2454,7 @@ v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().sp
 want = {
     "start": "0 white disabled disabled",
     "highlighted": "1 tinted true normal disabled",
+    "select-click": "true false",
     "backspace": "true 0 white normal disabled",
     "undo-delete": "1 tinted true normal normal",
     "redo-delete": "0 white normal disabled",
@@ -2457,16 +2462,20 @@ want = {
     "undo-empty": "0 nothing to undo",
     "redo-highlight": "1 tinted normal normal",
     "note": "true first normal disabled",
+    "note-anchor": "(some point)",
     "note-edited": "second",
     "note-undo1": "first",
     "note-undo2": "[]",
     "note-undo3": "<none> 1",
     "note-redo": "first 2 normal normal",
     "saved": "true 2 false false tinted disabled disabled",
+    "saved-select": "true false",
     "saved-delete": "true 1 true true white normal",
     "saved-undo": "2 false false tinted disabled true true",
     "resaved": "2 false (some green) 83 255 188 disabled disabled",
     "file-marks": "2 2",
+    "find-keys": "ad 2 true false true",
+    "note-keys": "fst 2 true",
 }
 errs = ["undo %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 for e in errs: print("FAIL: " + e, file=sys.stderr)
