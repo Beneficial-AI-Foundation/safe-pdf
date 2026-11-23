@@ -115,8 +115,8 @@ def fetchCompressedTrace (pre : Pre) (lookup : Nat → Option XrefEntry) (limits
         ⟨0, 0, .error (if c' = num then
           .cycle 0 s!"object streams {num} and {c} contain each other"
           else .malformed 0 s!"object stream {c} is itself in an object stream")⟩
-      | some (.free _ _) => ⟨0, 0, .error (.malformed 0 s!"object stream {c} is free")⟩
-      | none => ⟨0, 0, .error (.malformed 0 s!"object stream {c} is not in the xref")⟩
+      | some (.free _ _) => ⟨0, 0, .error (.malformed 0 (containerMissingMsg c))⟩
+      | none => ⟨0, 0, .error (.malformed 0 (containerMissingMsg c))⟩
   | _ => ⟨0, 0, .error (.malformed 0 s!"object {num} is not in an object stream")⟩
 
 /-- **Entry point.** Object `num`, stored in an object stream according to `lookup` (rule
@@ -306,8 +306,8 @@ def fetchCompressedB (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : L
         (.error (if c' = num then
           .cycle 0 s!"object streams {num} and {c} contain each other"
           else .malformed 0 s!"object stream {c} is itself in an object stream"), budget, cache)
-      | some (.free _ _) => (.error (.malformed 0 s!"object stream {c} is free"), budget, cache)
-      | none => (.error (.malformed 0 s!"object stream {c} is not in the xref"), budget, cache)
+      | some (.free _ _) => (.error (.malformed 0 (containerMissingMsg c)), budget, cache)
+      | none => (.error (.malformed 0 (containerMissingMsg c)), budget, cache)
   | _ => (.error (.malformed 0 s!"object {num} is not in an object stream"), budget, cache)
 
 /-- `fetchCompressedB` never increases the budget. -/
