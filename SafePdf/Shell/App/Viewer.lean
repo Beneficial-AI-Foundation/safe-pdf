@@ -3484,8 +3484,12 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
   if pr.hideToolbar || pr.hideMenubar || pr.hideWindowUI then
     notes := notes ++ [hiddenNote]
   if o.mode == some .fullScreen then
-    setFullScreen st true
     notes := notes ++ [fullScreenNote]
+    -- Task 10.13: the note is stored before the window enters full screen: on Aqua that
+    -- renders (and rebuilds the status line from `openNote`) at once, so storing it later
+    -- left the old text until the next update. `openWith` stores the same value again.
+    st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
+    setFullScreen st true
   return (o.mode, pr, notes)
 
 /-- Escape's window part (task 9.r8): leaves full screen, else shows what the document's
