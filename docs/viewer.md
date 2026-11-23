@@ -75,8 +75,8 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 | mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) |
 | `Shift`+wheel | scroll horizontally (stops at the edge) |
 | `Ctrl`+wheel | zoom in/out about the mouse pointer |
-| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks about unsaved marks) |
-| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into `FILE-annotated.pdf` / into a chosen file (9.5c) |
+| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks Save / Don't Save / Cancel about unsaved marks, 9.r2) |
+| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into the opened file (asks before the first overwrite, 9.r2) / into a new file (9.5c) |
 
 ## Menubar (9.1)
 
@@ -348,22 +348,45 @@ is drawn per quad (PDF.js outlines the union shape).
 | `Delete` | delete the selected mark |
 | right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
 
-## Saving marks into the PDF (9.5c, 9.5g)
+## Saving marks into the PDF (9.5c, 9.5g, 9.r2)
 
-Tk-free flow in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by `Viewer.save`,
-`saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7: the marks become annotation objects
-appended to the file as an **incremental update**; the original bytes are never modified.
+Tk-free flow and decisions in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by
+`Viewer.save`, `overwriteInto`, `saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7 (S8
+amended by the Decision of 2026-11-23): the marks become annotation objects appended to the
+file as an **incremental update**; the original bytes stay unchanged at the start of the file
+(its first revision).
 
-* **Save** (Ctrl+S, File → Save, the toolbar's Save) writes `DIR/STEM-annotated.pdf` next to
-  the opened file (for an opened `…-annotated.pdf`: that file itself, a further revision).
-  It asks first when that means writing into the opened file, or replacing another existing
-  file — unless this session wrote the file (so repeated saves are silent). Save is enabled
-  only while there are unsaved changes (new marks, saved marks changed or deleted); with none,
-  Ctrl+S says "nothing to save".
+* **Save** (Ctrl+S, File → Save, the toolbar's Save) writes the marks **into the opened file**
+  (9.r2; `Save.route`). Before the first overwrite of a session it asks **Overwrite / Save
+  As… / Cancel** (`Save.overwriteQuestion`: the marks are added to the file itself, its present
+  content is kept unchanged inside it as the first revision; Save As… writes a new file
+  instead); after that (and for a file this session wrote with Save As…) Save is silent. Save
+  is enabled only while there are unsaved changes (new marks, saved marks changed or
+  deleted); with none, Ctrl+S says "nothing to save". A document opened from memory without a
+  library goes to Save As…; a library's document to the library (below).
+* **Overwriting, step by step** (`Viewer.overwriteInto`): (1) the bytes are built and checked
+  (`Save.build`, below) — an encrypted or repaired document is refused here, before any
+  question; (2) a read-only file or a folder we cannot write into is refused with a status
+  message (`Save.writeProblem`; the rename would otherwise replace a read-only file); (3) the
+  file on disk must still hold exactly the bytes the document was opened from (`Save.diskState`:
+  size, then a full comparison) — if another program changed, moved or deleted it, nothing is
+  written and the dialog **File changed on disk** offers Save As… / Cancel; (4) the
+  first-overwrite question; (5) the disk check once more, then `Save.writeAtomic` on the
+  resolved path (a symbolic link stays a link to the updated file): a fresh temporary file
+  `.NAME.safepdf-N.tmp` next to it, read back and compared, given the original's permissions
+  (Tcl `file attributes -permissions`; owner and group are those of the writing user), renamed
+  over the file — a crash leaves the old or the new file, never a partial one; (6) the file is
+  reopened in place on the same page, so the viewer works on the new bytes and a second Save
+  is a further revision.
 * **Save As…** (Ctrl+Shift+S) asks for a file (`tk_getSaveFile`, which confirms replacing an
-  existing file), proposing `STEM-annotated.pdf`; writing over the **opened file** needs an
-  explicit yes (its bytes still stay a prefix of the new file). With no unsaved marks it
-  writes a plain copy.
+  existing file), proposing `STEM-annotated.pdf`, writes a new file (a file it replaces keeps
+  its permissions) and opens it; choosing the **opened file** needs an explicit yes and then
+  goes through the overwrite steps above. With no unsaved marks it writes a plain copy.
+* **Dialogs**: the three-way questions are `::safepdf::choose` (a modal Tk dialog; Return the
+  default button, Escape and its close button Cancel). Button order (`Save.unsavedButtons`,
+  `Save.overwriteButtons`, `Save.changedButtons`): Save / Don't Save / Cancel and Overwrite /
+  Save As… / Cancel left to right on X11 and Windows; on aqua the macOS order — Don't Save
+  (Save As…) leftmost, Cancel, the default rightmost.
 * **What is written** (9.5g: one update with additions, supersessions and removals,
   `Save.edits` → `Annots.writeEdits` → `Incremental.writeUpdate`, writer rule W11): the file's
   own marks are scanned (`Save.scan`: object reference, popup, comment, `/CreationDate`) and
@@ -407,12 +430,21 @@ appended to the file as an **incremental update**; the original bytes are never 
   Save writes from the opened document, not from the preview. A comment written into its
   highlight has no appearance of its own, so its icon is a canvas item. "Show all" off hides
   only unsaved highlights.
-* **Unsaved changes**: the title starts with `* `; Close (Ctrl+W), Quit (Ctrl+Q, File → Quit,
-  the window's close button: `wm protocol WM_DELETE_WINDOW`) and Open… ask Save / Discard /
-  Cancel (a Tk message box: Yes / No / Cancel).
+* **Unsaved changes** (9.r2): the title starts with `* `; every way a document goes away asks
+  **Save / Don't Save / Cancel** (`Viewer.confirmDiscard`, `Save.unsavedQuestion`): Close
+  (Ctrl+W, File → Close), Quit (File → Quit, Ctrl+Q, the window's close button
+  `wm protocol . WM_DELETE_WINDOW`, and on macOS the application menu's Quit / Cmd+Q through
+  `proc ::tk::mac::Quit`) — all quitting goes through the one Tcl proc `::safepdf::quit` —,
+  and Open… (another file). Save saves (into the opened file without a second question, since
+  the prompt says so; to the library in bib-lean mode; through Save As… for a document from
+  memory) and then goes on; Don't Save discards the marks and leaves the file untouched;
+  Cancel, or a Save that fails or is cancelled, keeps the document open (`Save.closeGoesOn`).
+  Nothing is ever saved without this answer.
 * **Errors** (an encrypted document, refused by the writer until 9.5f; a document opened
   through the repair path; a failed check; a write error) appear in the status line as
-  `cannot save to NAME: …`; nothing is written and the marks stay unsaved.
+  `cannot save to NAME: …` (a read-only file or folder: `cannot save: NAME is read-only…`; a
+  file changed on disk: `not saved: NAME changed on disk…`); nothing is written and the marks
+  stay unsaved.
 
 ## Add text and Draw (9.9)
 
@@ -861,34 +893,43 @@ carry `-time` and are spaced past Tk's double-click time where two land close to
 Saving (9.5c) runs in the variants `save`, `reopen` and `encrypted` (`Viewer.smokeSave`,
 `smokeReopen`, `smokeEncrypted`; questions and the Save As dialog are answered through
 `::safepdf::autoAnswer` / `::safepdf::autoPath`, the last question is kept in
-`::safepdf::lastAsk`). On a copy of the text PDF: a highlight on `world` and a note make the
-title start with `* ` and enable Save (menu entry and toolbar button); Quit and Ctrl+W
-answered Cancel keep everything; Ctrl+S writes `text-annotated.pdf` without a question and
-opens it (2 saved marks, no `*`, Save disabled; the highlight pixels are yellow from the
-renderer, no canvas note icon, the note text restored); a second Ctrl+S writes nothing; the
-saved highlight can be selected; a new highlight on `safe` + Ctrl+S appends
-to the same file (3 marks with distinct ids, read back strictly); Save As writes
-`saveas.pdf`; a new note and Ctrl+W answered No discards it. The `reopen` run on
-`text-annotated.pdf` restores the 3 marks (pixels, a click on the note's place opens its popup
-with the saved text), Save As onto the opened file answered No writes nothing and Yes
-appends, and Quit answered Yes saves one more note before quitting. The script then checks
-`qpdf --check` on the written files, that the original (and each saved revision) is a
-byte-for-byte prefix of the later file (`cmp -n`) and the original unchanged, that the final
-file has 5 revisions and each of its 5 mark annotations once, and that `mutool draw` shows the
-highlight (yellow pixels in the box of `world`). The `edit` run (9.5g, `Viewer.smokeEdit`) on
+`::safepdf::lastAsk`). On a copy of the text PDF (mode 640): a highlight on `world` and a
+note make the title start with `* ` and enable Save (menu entry and toolbar button); Quit,
+Ctrl+W and the window's close button (its `WM_DELETE_WINDOW` script, `::safepdf::quit`)
+answered Cancel keep everything and each asked the unsaved-changes question; Ctrl+S asks the
+first-overwrite question — Cancel writes nothing, Overwrite writes into `text.pdf` itself (its
+original bytes a prefix) and reopens it (2 saved marks, no `*`, Save disabled; the highlight
+pixels are yellow from the renderer, no canvas note icon, the note text restored); a second
+Ctrl+S writes nothing; the saved highlight can be selected; a new highlight on `safe` + Ctrl+S
+appends to the same file without a question (3 marks with distinct ids, read back strictly);
+Save As writes `saveas.pdf`; with a new note, Ctrl+S on a read-only `saveas.pdf` is refused
+and on a `saveas.pdf` changed on disk refused with the changed-on-disk question (file
+unchanged both times); Ctrl+W answered Don't Save closes and leaves `saveas.pdf` byte for byte
+as it was. The `reopen` run on `text.pdf` restores the 3 marks (pixels, a click on the note's
+place opens its popup with the saved text), Save As onto the opened file answered No writes
+nothing and Yes appends, and with one more note Quit answered Cancel keeps the window (the
+question asked) and Quit answered Save saves it before quitting. (Up to 9.5c the smoke's
+"quit did not save" check meant the same: the reopen run's Quit was answered Yes in the
+prompt; there was never a save on quit without the prompt, and 9.r2 keeps it that way.) The
+script then checks `qpdf --check` on the written files, that the original (and each saved
+revision) is a byte-for-byte prefix of the later file (`cmp -n`), that the overwritten file
+kept its mode 640 and no temporary file was left, that the final file has 5 revisions and
+each of its 5 mark annotations once, and that `mutool draw` shows the highlight (yellow
+pixels in the box of `world`). The `edit` run (9.5g, `Viewer.smokeEdit`) on
 a copy of that file deletes the whole-page highlight and the `safe` highlight, recolours the
 `world` highlight green (pixels follow at once from the preview) and gives it a comment, edits
-a note's text, saves into the opened file (4 marks, comment restored with its id, its icon
+a note's text, saves into the opened file (answered Overwrite; 4 marks, comment restored with its id, its icon
 drawn), then a third revision on top (blue, comment deleted: 3 marks); the script checks
 `qpdf --check`, the byte prefixes, no duplicate ids, and that `mutool draw` shows `world`
 green (then blue) and no tint in the box of `safe`. The `encrypted` run (RC4 fixture) saves a
-note: until 9.5f the status line shows the writer's refusal and nothing is written.
+note: until 9.5f the status line shows the writer's refusal before any question and the file
+stays byte for byte unchanged.
 
 Add text and Draw (9.9) run in the variant `editors` (`Viewer.smokeEditors`) on a copy of the
 text PDF with substitute fonts on: the Add text mode and pop-over; a click places a text box,
 typed text + Escape make a free-text mark; a double click edits it and a click elsewhere
 commits; the pop-over's red swatch and size slider (20) restyle it; Draw in blue at thickness
-4: two strokes form one drawing; Ctrl+S writes and reopens `text-annotated.pdf` (both read
+4: two strokes form one drawing; Ctrl+S (Overwrite) writes into and reopens `text.pdf` (both read
 back exactly; text pixels and a blue stroke pixel from the renderer); the text box dragged 50
 units right and saved; Delete and the drawing's bubble Delete remove both, saved (none left,
 white paper). The script checks `qpdf --check`, the byte prefixes, and that `mutool draw`
@@ -942,8 +983,8 @@ passed in order, (spread, view top) never goes back, the page box ends on a page
 spread with its own label, the `yview` ends at 1. At Page Fit on page 1: a drag over the first
 word of five or more letters shows the float bubble, its Highlight makes the highlight (edit
 bubble shown); a note (context menu, top right); Add text with the pop-over's red swatch and
-size 16 (bottom left); Draw with blue, thickness 4, two strokes (bottom right). Ctrl+S writes
-`FILE-annotated.pdf` (4 marks read back strictly), File → Close empties the window, `openFile`
+size 16 (bottom left); Draw with blue, thickness 4, two strokes (bottom right). Ctrl+S (Overwrite) writes
+into the opened copy `FILE.pdf` (4 marks read back strictly), File → Close empties the window, `openFile`
 reopens it from disk: the four marks are restored with equal descriptions (`m9Desc`: kind,
 colour, text, rounded geometry), no canvas items (the renderer draws them all) and coloured
 pixels in the photo for each (yellow highlight and note icon, red text, blue strokes); File →
@@ -1021,7 +1062,9 @@ The `m9` / `m9-reopen` smoke runs (see "Smoke test" above) on the two fixtures a
 
 ### The annotated file in other readers
 
-The file is the `arxiv-1706.03762-annotated.pdf` the `m9` run writes (a highlight on
+The file is the `arxiv-1706.03762-annotated.pdf` the `m9` run wrote before 9.r2 (since 9.r2
+Save writes into the opened file: the run's copy `m9-arxiv…/arxiv….pdf` in the smoke's work
+directory, the original being the corpus file) (a highlight on
 `Provided`, a note, the free text `M9 text` in red, a blue two-stroke drawing; 3,533 bytes
 appended to the 2,215,272-byte original).
 

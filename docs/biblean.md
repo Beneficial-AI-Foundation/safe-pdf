@@ -76,8 +76,12 @@ else `--page`). Annotations sync live (task 10.2's `Annots.Sync`, attached to th
   strictly and read back) go to `PUT /api/attachments/{key}/file` — no local file — then the
   window reopens those bytes from memory on the same page and the set is posted again. Save
   As… still writes a local copy (the window stays on the library's document, whose marks stay
-  unsaved there). Close and Quit ask about marks not yet saved into the library's file (they
-  are already in its annotation list);
+  unsaved there). Close, Quit (menu, Ctrl+Q, Cmd+Q on macOS), the window's close button and
+  Open… ask **Save / Don't Save / Cancel** about marks not yet saved into the library's file
+  (they are already in its annotation list; task 9.r2, the same prompt as for local files):
+  Save is Save to library (the `PUT` above, nothing written locally), Don't Save leaves the
+  library's file as it is, Cancel — or a Save that fails — keeps the window open. Nothing is
+  sent to `…/file` without that answer;
 * **on Close** (Ctrl+W) and **after the window closed** pending requests are flushed for at
   most 3 s; when something is still pending (a server that never answers) the process exits
   at once. After the flush the window run always ends through `IO.Process.exit` (task 8.9), so
