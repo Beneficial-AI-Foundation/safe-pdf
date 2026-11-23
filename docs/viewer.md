@@ -1574,6 +1574,21 @@ the 10.6 `dismiss` rows is dropped; 1s expects no full screen (`true,0`, as with
 manager); 1q is skipped (it times out without an active app). Normal (non-smoke) launches are
 unchanged.
 
+**Leak-proofing (10.16).** Setting the policy was not enough: during `Tk_Init` Tk itself calls
+`[NSApp setActivationPolicy:Regular]` and `[NSApp activateIgnoringOtherApps:YES]` (the viewer
+was briefly a Foreground app and sometimes became the front app about a second after launch,
+seen in the `tint` and `edit` cases), every smoke `sendKey`/`sendEvent` (`focus -force`) asks
+for activation again (~1,900 times per run), and with the screen unlocked
+`wm attributes . -fullscreen 1` (1s) put the hidden window into native full screen (a new
+Space). So in background mode the shim (`safepdf_block_activation`, installed before
+`Tk_Init`) overrides, on Tk's `TKApplication`, `setActivationPolicy:` (always Prohibited),
+`activateIgnoringOtherApps:`, `activate` and `unhide:` (no-ops), and on `NSWindow`/`TKWindow`
+`toggleFullScreen:` (no-op). `SAFEPDF_SMOKE_TRACE_ACTIVATION=1` logs every blocked call to
+stderr with a millisecond timestamp. To check a run, sample the front application and the
+viewer's application type (`lsappinfo list`: `type="BackgroundOnly"` expected, never
+`Foreground`) every ~0.2 s while the script runs; a viewer from your checkout that is ever in
+front must be killed by pid (never `pkill -f viewer`: the user may have their own open).
+
 **Foreground mode** (`SAFEPDF_SMOKE_FOREGROUND=1`, for when nobody uses the machine): the
 windows show on screen and the app is activated, and every check runs with the full aqua
 expectations below. macOS does not let a background process take the keyboard focus from the
