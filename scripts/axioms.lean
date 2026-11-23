@@ -1313,3 +1313,6 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Spec.RepairAgreeBytes.hits_eq_headers
 #print axioms SafePdf.Spec.RepairAgreeBytes.hits_sublist_headers
 #print axioms SafePdf.Spec.RepairAgreeBytes.mem_headers
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free_eq
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free_eq_check
+#print axioms SafePdf.Spec.RepairAgreeFree.getObject_eq
