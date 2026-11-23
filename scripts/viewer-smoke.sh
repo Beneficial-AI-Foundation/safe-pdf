@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r3; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -66,6 +66,9 @@
 #      wheel end to end in all four view modes, bubble highlight + note + Add text + Draw, Save ->
 #      Close -> reopen (pixels), XFDF export/import round trip, a fresh process on the saved file,
 #      qpdf, byte prefix, mutool (9.6);
+#   1o. platform keys and the icon (SAFEPDF_VIEWER_SMOKE_MODE=keys, as installed and with
+#      SAFEPDF_VIEWER_PLATFORM=aqua): accelerator labels, Command twins of the Ctrl bindings,
+#      ::tk::mac::Quit, the six icon sizes, _NET_WM_ICON when xprop is installed (9.r3);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -1388,6 +1391,69 @@ m9papers="${SAFEPDF_SMOKE_PAPERS-corpus/files/arxiv-1706.03762.pdf}"
 for p in $m9papers; do
   if [ -f "$p" ]; then m9_case "paper-$(basename "$p" .pdf)" "$p"
   else echo "viewer-smoke: $p missing, M9 paper run skipped"; fi
+done
+
+# 1o. Platform keys and the icon (task 9.r3, SAFEPDF_VIEWER_SMOKE_MODE=keys, `Viewer.smokeKeys`)
+#     on the text PDF, twice: as installed here (X11: Ctrl labels, no Command binding) and
+#     with SAFEPDF_VIEWER_PLATFORM=aqua (the macOS mapping on X11, where Tk's Command is
+#     Meta): Command-S labels, Command twins of every Ctrl binding (Save, Save As both ways,
+#     Quit also in the find bar), ::tk::mac::Quit = File -> Quit, the Save tooltip as ⌘S,
+#     Command+A selects all. Both: the six embedded icons load at their sizes and, when xprop
+#     is installed, the window carries _NET_WM_ICON starting with the 512 px image.
+for kp in x11 aqua; do
+  if [ "$kp" = aqua ]; then
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=keys SAFEPDF_VIEWER_PLATFORM=aqua \
+      run_viewer "$work/out-keys-$kp" "$work/text.pdf" || true
+  else
+    SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=keys run_viewer "$work/out-keys-$kp" "$work/text.pdf" || true
+  fi
+  cat "$work/out-keys-$kp/keys.txt" 2>/dev/null | cut -c1-160 || true
+  python3 -I -c '
+import sys
+kp, path = sys.argv[1], sys.argv[2]
+try: lines = open(path, encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: keys %s: no keys.txt" % kp, file=sys.stderr); sys.exit(1)
+v = {}
+for l in lines:
+    k, _, r = l.partition(": ")
+    v[k] = r
+errs = []
+def want(k, x):
+    if v.get(k) != x: errs.append("%s = %r, want %r" % (k, v.get(k), x))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for n in (16, 32, 64, 128, 256, 512): want("icon%d" % n, "%dx%d" % (n, n))
+if "net-wm-icon" in v and not v["net-wm-icon"].startswith("_NET_WM_ICON(CARDINAL) = 512, 512"):
+    errs.append("net-wm-icon: %r" % v["net-wm-icon"])
+if kp == "aqua":
+    want("accel-open", "Command-O"); want("accel-save", "Command-S")
+    want("accel-saveas", "Command-Shift-S"); want("accel-quit", "Command-Q")
+    want("accel-zoomin", "Command-+"); want("accel-back", "Option-Left")
+    want("accel-pop-copy", "Command-C"); want("accel-pop-delete", "Delete")
+    want("bind <Control-Key-s>", "[::safepdf::emit save]")
+    want("bind <Command-Key-s>", "[::safepdf::emit save]")
+    want("bind <Command-Key-S>", "[::safepdf::emit saveAs]")
+    want("bind <Shift-Command-Key-s>", "[::safepdf::emit saveAs]")
+    want("bind <Command-Key-q>", "[::safepdf::emit quit]")
+    want("bind <Command-Key-plus>", "[::safepdf::emit zoom in]")
+    want("bind-find", "[::safepdf::emit quit]")
+    want("mac-quit", "[::tk::mac::Quit] [::safepdf::emit quit]")
+    want("save-tip", "Save (⌘S)")
+    if "⌘C copies" not in v.get("status-selectall", ""): errs.append("Command+A: %r" % v.get("status-selectall"))
+else:
+    want("accel-open", "Ctrl+O"); want("accel-save", "Ctrl+S")
+    want("accel-saveas", "Ctrl+Shift+S"); want("accel-quit", "Ctrl+Q")
+    want("accel-zoomin", "+"); want("accel-back", "Alt+Left"); want("accel-pop-copy", "Ctrl+C")
+    want("bind <Control-Key-s>", "[::safepdf::emit save]")
+    want("bind <Control-Key-S>", "[::safepdf::emit saveAs]")
+    for s in ("<Command-Key-s>", "<Command-Key-S>", "<Shift-Command-Key-s>", "<Command-Key-q>"):
+        want("bind " + s, "[]")
+    want("bind-find", "[]")
+    want("mac-quit", "[] []")
+    want("save-tip", "Save (Ctrl+S)")
+    if "Ctrl+C copies" not in v.get("status-selectall", ""): errs.append("Ctrl+A: %r" % v.get("status-selectall"))
+for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
 done
 
 # 2. Bad inputs: the viewer must not crash and must report the error.

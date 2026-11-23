@@ -78,6 +78,26 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 | `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks about unsaved marks) |
 | `Ctrl+S` / `Ctrl+Shift+S` | save the marks into `FILE-annotated.pdf` / into a chosen file (9.5c) |
 
+**macOS (9.r3): Command instead of Ctrl.** On aqua (`tk windowingsystem` = `aqua`) every Ctrl
+key in this document also works with **⌘** — ⌘O, ⌘S, ⌘⇧S, ⌘W, ⌘Q, ⌘C, ⌘A, ⌘F, ⌘G, ⌘+ / ⌘= /
+⌘−, ⌘0, ⌘+wheel zoom, ⌘Return in the note popup, ⌘Q in the page field, find/go-to bars and
+the text-box editor — and the menus show the macOS accelerators (⌘S, ⇧⌘S, ⌥← for Back; Tk
+draws the `Command-S` labels as glyphs), as do the Save tooltip and the status hints. The
+Ctrl bindings stay. The application menu's Quit (and a quit from the Dock or at logout,
+`::tk::mac::Quit`) runs File → Quit's command. On X11/Windows nothing changes. The mapping
+(key → per-platform Tk sequences and label) is pure Lean in `Menu.lean` (`Menu.Platform`,
+`Menu.Key`, `Cmd.accelOn`, `Menu.platformScript`, checked by `#guard`s for both platforms);
+the viewer installs it right after building the window.
+
+**Icon (9.r3).** The application/window icon is the logo's document mark
+(`docs/branding/icon-{16,32,64,128,256,512}.png`, generated once from
+`docs/branding/safe-pdf.png` by `docs/branding/make-icons.sh`, which also writes
+`SafePdf/Shell/App/Icons.lean`). The PNGs are embedded as base64 (≈ 160 KB) so that an
+installed `viewer` does not need the source tree; `Viewer.setIcon` loads them with
+`image create photo -format png -data` and calls `wm iconphoto . -default` largest first
+(X11: `_NET_WM_ICON` with all six sizes; macOS: the first image becomes the Dock icon of the
+unbundled app).
+
 ## Menubar (9.1)
 
 A native Tk menubar (`.menubar`, attached with `. configure -menu`; on X11 Tk draws it at the
@@ -100,7 +120,8 @@ Disabled: everything but Open… and Quit without a document; Save without unsav
 without a selection; Delete mark without a selected mark;
 Outline when the document has none; Previous/First on the first page (spread), Next/Last on the
 last (spread);
-Back/Forward with an empty history. The keys stay; a menu accelerator is only a label. The
+Back/Forward with an empty history. The keys stay; a menu accelerator is only a label (also
+on macOS, where the accelerators read ⌘O, ⌘S, … — see Keys). The
 Outline command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
 when started without a file).
 
@@ -982,6 +1003,18 @@ the entries, posts the menu and runs keyboard traversal; the `wish` checks that 
 resources itself (control), lists `winfo interps` (only itself) and tries `send` to every
 interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A second run with
 `SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`.
+
+The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
+(X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`
+binding, no `::tk::mac::Quit`, Save tooltip `Save (Ctrl+S)`, Ctrl+A selects) and with
+`SAFEPDF_VIEWER_PLATFORM=aqua` (honoured only in smoke mode; it installs the macOS mapping
+on X11, where Tk's `Command` modifier is Meta): `Command-O`/`Command-S`/`Command-Shift-S`/
+`Command-Q`/`Command-+`/`Option-Left` labels, `<Command-Key-s>`, `<Command-Key-S>` and
+`<Shift-Command-Key-s>` bound to Save / Save As, `<Command-Key-q>` on `.` and in the find bar,
+`::tk::mac::Quit` = `::safepdf::emit quit`, tooltip `Save (⌘S)`, and a generated
+`<Command-Key-a>` selects all (status `… (⌘C copies)`). Both runs check the six icon images
+(16–512 px) and, when `xprop`/`xwininfo` are installed, that the toplevel's wrapper carries
+`_NET_WM_ICON` starting with `512, 512`.
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
