@@ -32,7 +32,7 @@ Design document: Plan.md
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | [#8](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/8) | merged (2026-11-23) |
 | 8 | `phase-8-shell` | `phase-7-raster` | [#9](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/9) | merged (2026-11-23) |
 | 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | merged (2026-11-23) |
-| 10 | `phase-10-polish` | `origin/main` | [#15](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/15) | awaiting-ci (M10 ticked 2026-11-23; the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from main, where the whole stack #1–#10 merged 2026-11-23) |
+| 10 | `phase-10-polish` | `origin/main` | [#15](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/15) | ready (2026-11-23; M10 ticked; the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from main, where the whole stack #1–#10 merged 2026-11-23) |
 | 11 | `phase-11-macos-shell` | `phase-10-polish` | — | none |
 | 12 | `phase-12-hardening` | `phase-11-macos-shell` | — | none |
 States: none · draft · awaiting-ci · ready (<date>) · changes-requested · merged · closed.
@@ -702,3 +702,4 @@ Exit criterion checked: [ ]
 * 2026-11-23 — wave 57 (phase 10, PR #15): 10.16 (background smoke never activates: shim overrides activation and full screen before `Tk_Init`), 10.5 (SafePDF title, About), 10.8 (Select text tool, cursors), 10.13 (full-screen hint) done; 10.10 and 10.11b closed by full background smoke runs (orchestrator: 33 passed, 3 skipped, 1 failed — 1l → 10.19; watcher 0 alerts); 10.18 (whole-text selection, human), 10.19, 10.20 added; commit "wave 57: 10.16 10.5 10.8 10.13 — leak-free background smoke, SafePDF, select tool, full-screen hint"
 * 2026-11-23 — wave 58 (phase 10, PR #15): 10.18 (whole-text selection bands, human request), 10.17 (note anchoring), 10.19 (lockdown control: unique appname, skip when Aqua send is dead), 10.20 (no menu sync after teardown; smoke fails on Tcl errors) done — every Phase 10 task done; commit "wave 58: 10.18 10.17 10.19 10.20 — selection bands, note anchoring, lockdown control, Tcl errors"
 * 2026-11-23 — phase 10 milestone: M10 ticked (macOS evidence; Linux smoke left to the human)
+* 2026-11-23 — phase 10 milestone: PR #15 marked ready for review (CI green on f132f92)
