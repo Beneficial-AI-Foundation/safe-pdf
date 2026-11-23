@@ -692,6 +692,17 @@ def layoutRows (sizes : Array (Nat × Nat)) (rows : List (List Nat)) (cw ch : Na
       fun ((x, w), p) => ({ page := p, x, y := ry + (rh - (sz p).2) / 2, w, h := (sz p).2 } : Place)
   (places.toArray, regionW, regionH)
 
+/-- The place mirrored in a region of width `rw` (task 9.r8, right-to-left spreads: the
+first page of a spread goes to the right). Places inside the region stay inside it. -/
+def mirrorPlace (rw : Nat) (pl : Place) : Place :=
+  { pl with x := rw - pl.x - pl.w }
+
+-- A spread 0|1 centred in a 1000-pixel region: mirrored, page 1 is on the left.
+#guard let (ps, rw, _) := layoutRows #[(400, 500), (400, 500)] [[0, 1]] 1000 800 false
+  (ps.map (mirrorPlace rw)).toList.map (fun pl => (pl.page, pl.x)) ==
+    (ps.toList.map (fun pl => (pl.page, pl.x))).map (fun (p, x) => (p, 1000 - x - 400)) &&
+  ((ps.map (mirrorPlace rw))[1]?.map (·.x)).getD 0 < ((ps.map (mirrorPlace rw))[0]?.map (·.x)).getD 0
+
 /-- Two places overlap (their rectangles share an interior point). -/
 def Place.overlaps (a b : Place) : Bool :=
   a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h

@@ -1,4 +1,5 @@
 import SafePdf.Shell.App.Links
+import SafePdf.Core.Doc.OpenSettings
 
 /-!
 # Outline sidebar model after PDF.js (task 9.7; Plan.md §6 Phase 9 "Look and feel: imitate PDF.js" — *Sidebar*, §10 `SafePdf/Shell/`)
@@ -7,8 +8,10 @@ The Tk-free description of the left sidebar (unverified shell code, total, check
 `#guard`s). Design reference: PDF.js's sidebar and outline view (Mozilla, Apache-2.0;
 `web/sidebar.js`, `web/viewer.css`), re-created in Tk by `Viewer` — no PDF.js code copied.
 
-* **When it shows** (`shownOnLoad`, `toggleVisible`): the sidebar opens on load only when the
-  document has an outline; without one it stays closed and its toolbar toggle is hidden.
+* **When it shows** (`shownOnLoad`, `toggleVisible`): the sidebar opens on load as the
+  document's `/PageMode` says (task 9.r8, `OpenSettings.outlineOpen`): without a page mode
+  only when the document has an outline, never for `/UseNone` or `/FullScreen`, and never
+  without an outline (its toolbar toggle is then hidden).
 * **Tree** (`rows`): the outline entries (`Links.Entry`, depths already clamped so that every
   entry has its parent right before it) as rows with their parent, ancestors, whether they
   have children (only those get a disclosure triangle), and their indentation.
@@ -19,8 +22,11 @@ The Tk-free description of the left sidebar (unverified shell code, total, check
 
 namespace SafePdf.Shell.App.Sidebar
 
-/-- Whether the sidebar opens when a document is loaded: only with an outline. -/
-def shownOnLoad (hasOutline : Bool) : Bool := hasOutline
+/-- Whether the sidebar opens when a document is loaded (task 9.r8): as its page mode `mode`
+says (`none`: the document sets none), and only with an outline. -/
+def shownOnLoad (mode : Option SafePdf.Core.Doc.OpenSettings.PageMode) (hasOutline : Bool) :
+    Bool :=
+  SafePdf.Core.Doc.OpenSettings.outlineOpen mode hasOutline
 
 /-- Whether the sidebar toggle button is shown: only with an outline. -/
 def toggleVisible (hasOutline : Bool) : Bool := hasOutline
@@ -105,7 +111,10 @@ private def mk (d : Nat) (o : Bool) : Links.Entry := ⟨"", d, o, .none⟩
   -- A leaf does not toggle.
   toggle rs o 2 == o && toggle rs o 99 == o
 #guard triangle true true == "▼  " && triangle true false == "▶  " && triangle false true == ""
-#guard shownOnLoad true && !shownOnLoad false && !toggleVisible false
+#guard shownOnLoad none true && !shownOnLoad none false && !toggleVisible false
+#guard shownOnLoad (some .useOutlines) true && !shownOnLoad (some .useNone) true &&
+  !shownOnLoad (some .useOutlines) false && !shownOnLoad (some .fullScreen) true &&
+  shownOnLoad (some .useThumbs) true && !shownOnLoad (some .useAttachments) false
 #guard afterToggle false true && !afterToggle true true && !afterToggle false false
 
 end SafePdf.Shell.App.Sidebar
