@@ -7663,7 +7663,8 @@ exists, the registered interpreters and the options the resources target (on the
 the overflow menu, the main window and freshly created probe widgets), exercises them
 (typing into the page field, posting the menu, keyboard traversal) and writes `up`; the next
 steps wait (at most 20 s) for the other interpreter's `attacked` file, then write
-`lockdown.txt` and close the window. -/
+`lockdown.txt` and close the window. With `SAFEPDF_VIEWER_DRIVE=1` step 0 also renames the
+application to a unique name and records it (`appname`, task 10.19). -/
 def smokeLockdown (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : System.FilePath := (dir : System.FilePath) / name
   let s ← st.get
@@ -7672,7 +7673,14 @@ def smokeLockdown (st : IO.Ref State) (dir : String) : IO Unit := do
     discard <| run ["update"]
     let get (w o : String) : IO String := do
       try return s!"[{← run [w, "cget", o]}]" catch e => return s!"error {e}"
+    -- Task 10.19: with the drive hook the viewer takes a unique application name and reports
+    -- it, so the control run targets exactly this viewer, not a guessed `tk` (on Aqua
+    -- `winfo interps` also lists stale and foreign interpreters). Without the hook nothing
+    -- registers: `tk appname NAME` would undo `sendOffScript`.
     let mut out : Array String := #[]
+    if (← IO.getEnv "SAFEPDF_VIEWER_DRIVE") == some "1" then
+      discard <| run ["tk", "appname", s!"safepdf-lock-{← IO.Process.getPID}"]
+      out := out.push s!"appname: {← run ["tk", "appname"]}"
     out := out.push s!"send-command: [{← run ["info", "commands", "::send"]}]"
     out := out.push s!"interps: [{← try run ["winfo", "interps"] catch e => pure s!"error {e}"}]"
     out := out.push s!"pg-validate: {← get ".bar.pg.e" "-validate"} {← get ".bar.pg.e" "-validatecommand"}"

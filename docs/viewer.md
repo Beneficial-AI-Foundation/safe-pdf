@@ -1449,7 +1449,13 @@ field, the overflow menu, `.` and fresh probe widgets carry none of the resource
 the entries, posts the menu and runs keyboard traversal; the `wish` checks that it got the
 resources itself (control), lists `winfo interps` (only itself) and tries `send` to every
 interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A second run with
-`SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`.
+`SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`: the viewer then renames itself
+`safepdf-lock-PID` and records it (`appname` in `lockdown.txt`), the `wish` sends to exactly that
+name with `send -async` and the script creates a file `sent` (10.19). On Aqua the lockdown half
+tries only `tk`/`viewer`/`safe-pdf` (`winfo interps` lists every Tk interpreter of the user,
+also other runs'), and when the control fails while a baseline `send` between two plain `wish`
+processes fails too (Tk Aqua delivers no AppleEvents in this session, seen with a locked
+screen), the control is skipped, not failed.
 
 The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
 (X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`
