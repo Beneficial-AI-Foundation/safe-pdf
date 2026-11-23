@@ -1332,17 +1332,24 @@ def pageGeoTable (cfg : Fill.Config) (view : Aff) (items : DisplayList) : Stroke
 
 /-- **Render a page of an opened document**: decode its content, build the display list with
 the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
-`budget` for every decoded stream. -/
+`budget` for every decoded stream. Content hidden by optional content (task 9.r11a; marked
+content, XObjects and annotations with `/OC`) is not painted: under `oc` when given (a layers
+panel's state), else under the document's default configuration (`Text.docOCState`). -/
 def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
     (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config := Fill.Config.ofLimits limits)
-    (subst : Subst.SubstFonts := {}) :
+    (subst : Subst.SubstFonts := {}) (oc : Option Doc.OptionalContent.State := none) :
     (Except Error Clip.Image) × Filter.Budget :=
-  match Text.extractDocPage limits doc page budget with
+  -- Optional content (task 9.r11a): the given visibility state, else the document's default
+  -- configuration; the same state for the page content, the annotations, the tiling cells and
+  -- the Type 3 glyphs.
+  let (ocs, budget) := Text.ocStateFor limits doc budget oc
+  match Text.extractDocPage limits doc page budget {} (some ocs) with
   | (.error e, b) => (.error e, b)
   | (.ok pt, b) =>
     -- Annotation appearance streams (task 8.3), drawn after the page content in MuPDF order.
     -- They share the page's op/form budget (task 8.3b, `Annot.Budget.after`).
     let (ap, b) := Annot.docAnnots limits doc page pt.fonts (Annot.Budget.after limits pt) b
+      (some ocs)
     let items := pt.items ++ ap.items
     let (srcs, b) := loadSources limits (Text.docSource limits doc) b (page.resources.getD []) 0 subst
     let (srcs, b) := ap.roots.foldl (fun (acc : SourceTable × Filter.Budget) r =>
@@ -1354,7 +1361,7 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- runs, the fonts of the pattern's resources are added (owner = the pattern's object
     -- number, as the runner keys direct fonts), so its text has real advances and outlines.
     let (tls, ft, b, _) := Tiling.loadTilingsWith
-      (fun (ft : FontTable × SourceTable) => Text.textEnv limits (Text.docSource limits doc) ft.1)
+      (fun (ft : FontTable × SourceTable) => Text.textEnv limits (Text.docSource limits doc) ft.1 ocs)
       (fun ft b num res =>
         let (fonts, b) := Annot.loadAnnotFonts limits (Text.docSource limits doc) b ft.1 [(num, res)]
         let (t, b) := loadSources limits (Text.docSource limits doc) b res num subst
@@ -1365,7 +1372,7 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     -- Type 3 fonts (task 7.3j): the charprocs of every Type 3 font of the page, the
     -- annotations and the tiling cells run once into glyph space, under what the tiling
     -- cells left of the shared op/form budget.
-    let (srcs, b, _, _) := loadType3 (Text.textEnv limits (Text.docSource limits doc) ft.1) b ()
+    let (srcs, b, _, _) := loadType3 (Text.textEnv limits (Text.docSource limits doc) ft.1 ocs) b ()
       tls.budget (page.resources.getD []) ft.2
     -- Images and shadings of the page, of every loaded cell (task 7.3h2) and of every Type 3
     -- glyph (task 7.3j).

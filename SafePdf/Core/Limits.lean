@@ -134,6 +134,14 @@ structure Limits where
   7.9b; the cached operators are linear in it). A form that does not fit is not cached (no
   error, no `LimitKind`). -/
   maxFormCacheBytes : Nat := 16 <<< 20
+  /-- Maximum number of optional content groups read from `/OCProperties /OCGs` (ISO 32000-2
+  §8.11.4.2, task 9.r11a, `Core.Doc.OptionalContent.read`); further groups are ignored (their
+  content is visible, as an unknown group). Never an error, no `LimitKind`. -/
+  maxOCGroups : Nat := 4096
+  /-- Fuel for optional content visibility (task 9.r11a, `Core.Doc.OptionalContent.visible`):
+  the nesting depth of visibility expressions (`/VE`, §8.11.2.2) and references followed, and
+  of nested `/Order` arrays. Exhausted fuel means visible. Never an error, no `LimitKind`. -/
+  maxOCDepth : Nat := 32
   deriving Repr, Inhabited
 
 namespace Limits

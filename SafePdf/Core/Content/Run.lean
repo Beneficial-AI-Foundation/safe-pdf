@@ -1,4 +1,5 @@
 import SafePdf.Core.Content.Interp
+import SafePdf.Core.Doc.OptionalContent
 
 /-!
 # Content runner with resources: forms, images, ExtGState, colour spaces (task 5.2b)
@@ -33,8 +34,8 @@ never an error (M5: the interpreter never fails).
   source (charged to its budget), tokenized with `Ops.tokenize`, and run nested as
   `q`, `/Matrix cm`, clip to `/BBox` (in form space; one informational `clip` item), the
   form's operators, `Q`: the invoking machine is restored *as a whole* afterwards, so nothing a
-  form does (unbalanced `q`, open text object, pending `W`) leaks out. `/OC` and `/Ref` are
-  ignored.
+  form does (unbalanced `q`, open text object, pending `W`) leaks out. `/Ref` is ignored;
+  `/OC` see "Optional content".
 * **Transparency groups** (task 7.3c, §11.6.6, §8.10.3): a form with `/Group << /S /Transparency
   >>` is bracketed by `groupBegin g` … `groupEnd` instead of the informational `clip` item
   (`g` records `/I`, `/K`, the page-space `/BBox`, and the `ca`, blend mode and soft mask
@@ -104,6 +105,17 @@ never an error (M5: the interpreter never fails).
 * **`BDC` property lists** (task 6.8d, §14.6.2): a `/Properties` resource name is looked up in
   the current frame and handed to `exec` as an inline dictionary (`bdcStep`, `bdcProps`; an
   indirect `/ActualText` value is fetched), so `exec`'s `/ActualText` handling sees both forms.
+* **Optional content** (task 9.r11a, ISO 32000-2 §8.11.3, `Doc.OptionalContent`): the
+  environment carries a visibility state (`Env.oc`; default: no groups, nothing hidden). The
+  runner tracks marked-content nesting per content stream in `Machine.oc` (`ocTrack`: every
+  `BMC`/`BDC` opens a sequence so `EMC`s match, an unbalanced `EMC` is ignored; a
+  `BDC /OC /name` whose `/Properties` entry is hidden (`bdcVisible`) hides everything up to its
+  `EMC`, nested sequences included). While hidden, operators still execute (graphics state,
+  text position, `gs` soft masks: §8.11.3.2 hides painting only), but their items are dropped
+  (`ocKeep`), and `Do` draws nothing (no form expanded, no image); a form or image XObject
+  whose `/OC` is hidden (`dictVisible`) is skipped too. Annotations with `/OC`: `Annot`. With no
+  groups in the state the runner never hides anything (`runOps_oc_visible`, `ocKeep_visible`,
+  `dictVisible_inactive`).
 * **Resource annotation** (task 7.3f): every item a step emits is annotated in the current
   frame (`annotItem`), so consumers resolve resources without the page's resources: an `sh`
   records its `ResRef` (`resRefOf`: the indirect object, or the owner form `num gen` of a
@@ -167,6 +179,10 @@ structure Env (σ ω : Type) where
   (decode through `src`, then `Ops.tokenize`); `runPage` installs the per-page cache
   (`FormCache.env`) over that default. -/
   formCode : σ → Nat → Nat → Stream → (Except Error TokResult) × σ := src.code cfg.limits
+  /-- The optional content visibility state (task 9.r11a, `Doc.OptionalContent.State`): the
+  document's groups and those that are OFF. Content hidden by it is not painted and not
+  extracted. The default (no groups) shows everything, as before optional content existed. -/
+  oc : Doc.OptionalContent.State := {}
 
 /-- The resource context of the content being run. -/
 structure Frame where
@@ -983,6 +999,92 @@ def groupOf {σ : Type} (src : Source σ) (s : σ) (d : Dict) (gs : GState) (bbo
       else (none, s)
     | _ => (none, s)
 
+/-! ## Optional content (task 9.r11a, §8.11.3) -/
+
+/-- Whether optional content `o` (an `/OC` entry, or a `/Properties` entry of `BDC /OC`) is
+visible in the environment's state (`Doc.OptionalContent.isVisible`, objects resolved through
+the source). -/
+def ocVisible {σ ω : Type} (env : Env σ ω) (s : σ) (o : PdfObject) : Bool × σ :=
+  Doc.OptionalContent.isVisible (resolve env.src) env.cfg.limits env.oc s o
+
+/-- Whether the `/OC` entry of dictionary `d` (an XObject) leaves it visible (no entry:
+visible). -/
+def dictVisible {σ ω : Type} (env : Env σ ω) (s : σ) (d : Dict) : Bool × σ :=
+  match Dict.get? d (nm "OC") with
+  | some o => ocVisible env s o
+  | none => (true, s)
+
+/-- Whether a `BDC` with operands `o` opens visible content: `/OC /name BDC` looks `name` up in
+the current frame's `/Properties` (§8.11.3.2; an inline dictionary is accepted too); any
+other tag, a missing resource, or no optional content in the state: visible. -/
+def bdcVisible {σ ω : Type} (env : Env σ ω) (fr : Frame) (s : σ) (o : List PdfObject) :
+    Bool × σ :=
+  if env.oc.known.isEmpty then (true, s) else
+  match lastN 2 o with
+  | some [.name tag, .name p] =>
+    if tag = nm "OC" then
+      match resEntry env.src s fr.res "Properties" p with
+      | (some e, s) => ocVisible env s e
+      | (none, s) => (true, s)
+    else (true, s)
+  | some [.name tag, .dict d] => if tag = nm "OC" then ocVisible env s (.dict d) else (true, s)
+  | _ => (true, s)
+
+/-- **Optional content nesting** after operator `op`: `BMC` opens a visible sequence, `BDC` a
+sequence visible per `bdcVisible`, `EMC` closes one (`OcMarks.push`, `OcMarks.pop`); every
+other operator leaves it. -/
+def ocTrack {σ ω : Type} (env : Env σ ω) (fr : Frame) (oc : OcMarks) (s : σ) (op : Op) :
+    OcMarks × σ :=
+  if op.op = [69, 77, 67] then (oc.pop, s)                -- EMC
+  else if op.op = [66, 77, 67] then (oc.push true, s)     -- BMC
+  else if op.op = [66, 68, 67] then                       -- BDC
+    let r := bdcVisible env fr s op.operands
+    (oc.push r.1, r.2)
+  else (oc, s)
+
+/-- The items an operator emits, kept only when the content is visible both before and after
+it (so the `BDC` opening hidden content and the `EMC` closing it emit nothing either). -/
+def ocKeep (before after : OcMarks) (its : List DisplayItem) : List DisplayItem :=
+  if before.hidden || after.hidden then [] else its
+
+/-- Filtering never adds items. -/
+theorem ocKeep_length_le (before after : OcMarks) (its : List DisplayItem) :
+    (ocKeep before after its).length ≤ its.length := by
+  unfold ocKeep; split <;> simp
+
+/-- With no optional content in the state, `BDC` is always visible and nothing is fetched. -/
+theorem bdcVisible_inactive {σ ω : Type} (env : Env σ ω) (fr : Frame) (s : σ)
+    (o : List PdfObject) (h : env.oc.known = []) : bdcVisible env fr s o = (true, s) := by
+  simp [bdcVisible, h]
+
+/-- With no optional content in the state, `/OC` entries are always visible. -/
+theorem dictVisible_inactive {σ ω : Type} (env : Env σ ω) (s : σ) (d : Dict)
+    (h : env.oc.known = []) : dictVisible env s d = (true, s) := by
+  unfold dictVisible ocVisible
+  split
+  · exact Doc.OptionalContent.isVisible_inactive _ _ _ _ _ h
+  · rfl
+
+/-- With no optional content in the state, tracking never hides anything and touches no
+source state. -/
+theorem ocTrack_inactive {σ ω : Type} (env : Env σ ω) (fr : Frame) (oc : OcMarks) (s : σ)
+    (op : Op) (h : env.oc.known = []) (hv : oc.hiddenAt = none) :
+    (ocTrack env fr oc s op).1.hiddenAt = none ∧ (ocTrack env fr oc s op).2 = s := by
+  unfold ocTrack
+  split
+  · exact ⟨OcMarks.pop_visible oc hv, rfl⟩
+  · split
+    · exact ⟨OcMarks.push_visible oc hv, rfl⟩
+    · split
+      · rw [bdcVisible_inactive env fr s _ h]
+        exact ⟨OcMarks.push_visible oc hv, rfl⟩
+      · exact ⟨hv, rfl⟩
+
+/-- **The filter is the identity while nothing is hidden.** -/
+theorem ocKeep_visible (before after : OcMarks) (its : List DisplayItem)
+    (h1 : before.hiddenAt = none) (h2 : after.hiddenAt = none) : ocKeep before after its = its := by
+  simp [ocKeep, OcMarks.hidden, h1, h2]
+
 /-- What `Do` does, before any nesting. -/
 inductive DoOut (σ : Type) where
   /-- Finished: an optional item (an image), warnings, source state; the machine is
@@ -1030,16 +1132,23 @@ theorem formJob_num {σ ω : Type} {env : Env σ ω} {fr : Frame} {m : Machine} 
 /-- `Do /Name` (`nest`: fuel is left for a form). -/
 def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Machine) (s : σ)
     (op : Op) : DoOut σ :=
+  if m.oc.hidden then .done none 0 s else
   match lastName? op.operands with
   | none => .done none 1 s
   | some name =>
     match xobjectOf env.src s fr.res name with
     | (.missing, s) => .done none 1 s
     | (.ignored, s) => .done none 0 s
-    | (.image n g _, s) =>
-      let f := annotFill env.src s fr m.patFill m.core.gs.fillStyle
-      .done (some (.image (.xobject name n g) m.core.gs.ctm f.1 m.core.gs.clip)) 0 f.2
+    | (.image n g d, s) =>
+      match dictVisible env s d with
+      | (false, s) => .done none 0 s
+      | (true, s) =>
+        let f := annotFill env.src s fr m.patFill m.core.gs.fillStyle
+        .done (some (.image (.xobject name n g) m.core.gs.ctm f.1 m.core.gs.clip)) 0 f.2
     | (.form n g st, s) =>
+      match dictVisible env s st.dict with
+      | (false, s) => .done none 0 s
+      | (true, s) =>
       if fr.visited.contains n then .done none 1 s
       else if nest then
         match env.formCode s n g st with
@@ -1048,7 +1157,7 @@ def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mach
       else .done none 1 s
 
 /-- The machine a form runs in: the given graphics state, everything else fresh. -/
-def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none, {}, {}⟩
+def formMachine (gs : GState) : Machine := ⟨{ gs }, {}, none, {}, {}, {}⟩
 
 /-- The machine a form job runs in: `formMachine` with the invoking machine's pattern
 bookkeeping (task 7.3f). -/
@@ -1234,10 +1343,11 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
     else
       match localStep env fr m s op with
       | (m', its, w, u, s') =>
-        let pb := patBook env.src fr m' s' op
-        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 its
-        ⟨{ m' with patFill := pb.1, patStroke := pb.2.1 }, pushAll items a.1, warnings + w,
-          unsupported + u, ops + 1, forms, truncated, a.2, env.observe obs op w u⟩
+        let t := ocTrack env fr m.oc s' op
+        let pb := patBook env.src fr m' t.2 op
+        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 (ocKeep m.oc t.1 its)
+        ⟨{ m' with patFill := pb.1, patStroke := pb.2.1, oc := t.1 }, pushAll items a.1,
+          warnings + w, unsupported + u, ops + 1, forms, truncated, a.2, env.observe obs op w u⟩
 
 /-- **The runner**, by structural recursion on the nesting fuel: a form invoked at fuel
 `f + 1` runs at fuel `f`; at fuel 0 forms are skipped (warning). -/
@@ -1259,11 +1369,15 @@ theorem doStep_form_fresh {σ ω : Type} {env : Env σ ω} {nest : Bool} {fr : F
   unfold doStep at h
   split at h
   · cases h
+  split at h
+  · cases h
   · split at h
     · cases h
     · cases h
-    · cases h
+    · split at h <;> cases h
     · rename_i n' _ st s1 _
+      split at h
+      · cases h
       by_cases hv : fr.visited.contains n' = true
       · simp only [hv, ↓reduceIte] at h; cases h
       · cases nest
@@ -1480,9 +1594,13 @@ theorem stepR_good {σ ω : Type} (env : Env σ ω)
         revert hb
         rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
         intro hb
-        have hl := annotAll_length env.src fr (patBook env.src fr m' s' op).1
-          (patBook env.src fr m' s' op).2.1 (patBook env.src fr m' s' op).2.2 its
-        simp only [size_pushAll, hl, pendBit, Paint.maxItems] at h hb ⊢
+        have hk := ocKeep_length_le m.oc (ocTrack env fr m.oc s' op).1 its
+        have hl := annotAll_length env.src fr
+          (patBook env.src fr m' (ocTrack env fr m.oc s' op).2 op).1
+          (patBook env.src fr m' (ocTrack env fr m.oc s' op).2 op).2.1
+          (patBook env.src fr m' (ocTrack env fr m.oc s' op).2 op).2.2
+          (ocKeep m.oc (ocTrack env fr m.oc s' op).1 its)
+        simp only [size_pushAll, hl, pendBit, Paint.maxItems] at h hb hk ⊢
         omega
 
 /-- Folding steps keeps `Good`. -/
@@ -1511,6 +1629,76 @@ theorem runOps_good {σ ω : Type} (env : Env σ ω) :
     intro run hrun k' fr' st' ops' h'
     cases hrun
     exact runOps_good env f k' fr' st' ops' h'
+
+/-! ## Optional content without `/OCProperties` (task 9.r11a)
+
+With no optional content group in the state (`env.oc.known = []`, the default and every
+document without `/OCProperties`), nothing is ever hidden: the machine's optional content
+nesting never hides (`runOps_oc_visible`), so the item filter `ocKeep` is the identity at every
+step (`ocKeep_visible`), `Do` is never skipped for being inside hidden content (`doStep`'s
+first test) or for its `/OC` (`dictVisible_inactive`), and no object is fetched for optional
+content (`ocTrack_inactive`, `bdcVisible_inactive`): the runner emits exactly what it emitted
+before optional content was implemented. -/
+
+/-- `gsStep` keeps the optional content nesting. -/
+theorem gsStep_oc {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op : Op) :
+    (gsStep src fr m s op).1.oc = m.oc := by
+  unfold gsStep
+  split
+  · rfl
+  · split
+    · split
+      · rfl
+      · rfl
+    · rfl
+
+/-- **One step hides nothing** when the state has no optional content and nothing was hidden. -/
+theorem stepR_oc_visible {σ ω : Type} (env : Env σ ω)
+    (inner : Option (Frame → St σ ω → Array Op → St σ ω)) (fr : Frame) (st : St σ ω) (op : Op)
+    (h : env.oc.known = []) (hv : st.m.oc.hiddenAt = none) :
+    (stepR env inner fr st op).m.oc.hiddenAt = none := by
+  obtain ⟨m, items, warnings, unsupported, ops, forms, truncated, s, obs⟩ := st
+  simp only at hv
+  unfold stepR
+  by_cases hcap : env.cfg.limits.maxOpsPerPage ≤ ops
+  · simp only [hcap, ↓reduceIte]
+    exact hv
+  · simp only [hcap, ↓reduceIte]
+    by_cases hdo : op.op = [68, 111]
+    · simp only [hdo, ↓reduceIte]
+      repeat (first | exact hv | split)
+    · simp only [hdo, ↓reduceIte]
+      by_cases hgs : op.op = [103, 115]
+      · simp only [hgs, ↓reduceIte]
+        unfold gsR
+        have hp := gsStep_oc env.src fr m s op
+        revert hp
+        rcases gsStep env.src fr m s op with ⟨m1, its, w, u, s1⟩
+        intro hp
+        simp only at hp ⊢
+        repeat (first | (rw [hp]; exact hv) | (simp only [withGs]; rw [hp]; exact hv) | split)
+      · simp only [hgs, ↓reduceIte]
+        rcases localStep env fr m s op with ⟨m', its, w, u, s'⟩
+        exact (ocTrack_inactive env fr m.oc s' op h hv).1
+
+/-- Folding steps hides nothing (no optional content in the state). -/
+theorem foldl_oc_visible {σ ω : Type} (env : Env σ ω)
+    (inner : Option (Frame → St σ ω → Array Op → St σ ω)) (fr : Frame) (h : env.oc.known = []) :
+    ∀ (l : List Op) (st : St σ ω), st.m.oc.hiddenAt = none →
+      (l.foldl (stepR env inner fr) st).m.oc.hiddenAt = none
+  | [], _, hv => hv
+  | op :: rest, st, hv => foldl_oc_visible env inner fr h rest _ (stepR_oc_visible env inner fr st op h hv)
+
+/-- **No `/OCProperties`, no hidden content**: with no optional content group in the state, the
+runner (at every nesting fuel, so in every form) never enters hidden content. -/
+theorem runOps_oc_visible {σ ω : Type} (env : Env σ ω) (h : env.oc.known = []) (fuel : Nat)
+    (fr : Frame) (st : St σ ω) (ops : Array Op) (hv : st.m.oc.hiddenAt = none) :
+    (runOps env fuel fr st ops).m.oc.hiddenAt = none := by
+  cases fuel with
+  | zero =>
+    unfold runOps; rw [← Array.foldl_toList]; exact foldl_oc_visible env none fr h _ st hv
+  | succ f =>
+    unfold runOps; rw [← Array.foldl_toList]; exact foldl_oc_visible env _ fr h _ st hv
 
 /-! ## Per-page form cache (task 7.9b)
 
@@ -1692,7 +1880,7 @@ end FormCache
 budget; the source state paired with a `FormCache`; `formCode` reads through the cache. -/
 def FormCache.env {σ ω : Type} (env : Env σ ω) : Env (σ × FormCache env.src env.cfg.limits) ω :=
   { cfg := env.cfg, src := FormCache.source env.src env.cfg.limits, observe := env.observe,
-    maxForms := env.maxForms, formCode := FormCache.code env.src env.cfg.limits }
+    maxForms := env.maxForms, formCode := FormCache.code env.src env.cfg.limits, oc := env.oc }
 
 end Run
 

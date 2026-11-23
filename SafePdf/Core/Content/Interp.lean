@@ -53,7 +53,8 @@ text showing), §8.9.7 (inline images), §14.6 (marked content), §7.8.2 (`BX`/`
   `BDC` whose inline property list has `/ActualText` emits `actualTextBegin`, its matching
   `EMC` emits `actualTextEnd`. A stray `EMC` is ignored without warning (as MuPDF). Each
   content stream (page, form) starts with no open sequence, so a form cannot close the
-  invoker's sequences.
+  invoker's sequences. Optional content (`/OC`, task 9.r11a) is the runner's (`Machine.oc`,
+  `Run.ocTrack`); `exec` only carries `Machine.oc` along.
 * **XObjects, shadings, inline images**: `Do` emits a placeholder
   `image (.xobject name 0 0)` (5.2b resolves it to an image or expands a form); `sh` a
   `shading` item (resource `.page`, resolved by 5.2b; with the fill snapshot for `ca`, blend
@@ -110,6 +111,49 @@ structure PatState where
   under : Option (Name × Color) := none
   deriving Inhabited
 
+/-- Optional content nesting (task 9.r11a, ISO 32000-2 §8.11.3.2), maintained by the resource
+runner (`Run.ocTrack`), never by `exec`: the number of open marked-content sequences of the
+content stream being run (every `BMC`/`BDC`, whatever its tag, so that `EMC`s match), and the
+depth at which the outermost sequence hidden by optional content was opened (`none`: nothing
+hidden). Content is hidden while `hiddenAt` is set, i.e. when any enclosing sequence is
+hidden. Not saved by `q`/`Q` (marked content and the graphics state stack nest
+independently). -/
+structure OcMarks where
+  /-- Open marked-content sequences. -/
+  depth : Nat := 0
+  /-- Depth (number of sequences open before it) of the outermost hidden sequence. -/
+  hiddenAt : Option Nat := none
+  deriving Inhabited, Repr, DecidableEq
+
+/-- Whether content is currently hidden by optional content. -/
+def OcMarks.hidden (o : OcMarks) : Bool := o.hiddenAt.isSome
+
+/-- Open a sequence that is visible (`vis`) or hidden by optional content. (Written without
+`match`: `Spec.Content` names the auxiliary matchers of `Interp.simple` by number.) -/
+def OcMarks.push (o : OcMarks) (vis : Bool) : OcMarks :=
+  { depth := o.depth + 1,
+    hiddenAt := if o.hiddenAt.isSome || vis then o.hiddenAt else some o.depth }
+
+/-- `EMC`: close the innermost sequence (an unbalanced `EMC` is ignored); closing the outermost
+hidden sequence makes content visible again. -/
+def OcMarks.pop (o : OcMarks) : OcMarks :=
+  if o.depth = 0 then o
+  else
+    { depth := o.depth - 1,
+      hiddenAt := o.hiddenAt.bind fun h => if o.depth - 1 ≤ h then none else some h }
+
+/-- Nothing is hidden after opening a visible sequence into a visible state. -/
+theorem OcMarks.push_visible (o : OcMarks) (h : o.hiddenAt = none) :
+    (o.push true).hiddenAt = none := by
+  simp [OcMarks.push, h]
+
+/-- Nothing becomes hidden by closing a sequence. -/
+theorem OcMarks.pop_visible (o : OcMarks) (h : o.hiddenAt = none) : o.pop.hiddenAt = none := by
+  unfold OcMarks.pop
+  split
+  · exact h
+  · simp [h]
+
 /-- The full interpreter state. -/
 structure Machine where
   /-- Everything but the stack and pending clip. -/
@@ -122,6 +166,8 @@ structure Machine where
   patFill : PatState := {}
   /-- Pattern bookkeeping for stroking (task 7.3f; runner only). -/
   patStroke : PatState := {}
+  /-- Optional content nesting (task 9.r11a; runner only). -/
+  oc : OcMarks := {}
   deriving Inhabited
 
 /-- Interpreter output. -/
@@ -635,7 +681,7 @@ cleared. -/
 def paintStep (m : Machine) (p : Option Paint) (close : Bool) :
     Machine × List DisplayItem × Nat × Nat :=
   match m with
-  | ⟨c0, stack, pending, pf, ps⟩ =>
+  | ⟨c0, stack, pending, pf, ps, oc⟩ =>
     let c := if close then closeCore c0 else c0
     match c with
     | ⟨gs, tm, path, _, _, inText, bx, mk, mo⟩ =>
@@ -649,7 +695,7 @@ def paintStep (m : Machine) (p : Option Paint) (close : Bool) :
         match pending with
         | some r => if empty then gs else { gs with clip := ⟨path, r⟩ :: gs.clip }
         | none => gs
-      (⟨⟨gs', tm, {}, none, none, inText, bx, mk, mo⟩, stack, none, pf, ps⟩, paintItems ++ clipItems,
+      (⟨⟨gs', tm, {}, none, none, inText, bx, mk, mo⟩, stack, none, pf, ps, oc⟩, paintItems ++ clipItems,
         0, 0)
 
 /-- Execute one operator: new machine, emitted items, warnings, unknown-operator count. -/

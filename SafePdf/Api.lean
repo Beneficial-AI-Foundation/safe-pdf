@@ -25,6 +25,7 @@ it inherits. `docs/api.md` is the user guide (Lake `require`, examples, stabilit
 | `Document.pageCount`, `pageInfo` | `Core.Doc.Doc.pages`, `Core.Doc.Nav.pageLabel` | total page access (Phase 4); CropBox ⊆ MediaBox |
 | `pageText` | `Core.Annot.extractDocPageAnnots` / `Core.Text.extractDocPage` | C6 extracted = displayed, C3 text ↔ position (`glyph_provenance`, `glyph_codes`, `pageText_glyphs`) |
 | `renderPage` | `Core.Raster.Glyph.renderDocPage` | total, bounded (`Limits`), RGBA shape (`renderPage_size`) |
+| `optionalContent`, `ocState` | `Core.Doc.OptionalContent.read`, `stateOf` | total, bounded (`Limits.maxOCGroups`, `maxOCDepth`); no `/OCProperties` → nothing hidden (`isVisible_inactive`, `Run.runOps_oc_visible`) |
 | `outline`, `pageLinks`, `pageAnnotations` | `Core.Doc.Nav.outline`, `Nav.targetOf`, `/Annots` | cycle-safe walks (`outline_bounded`) |
 | `toScreen`, `toPage` | `Core.Raster.Geom.toScreenView`/`toPageView` | C2 round trips (`toPage_toScreen`, `toScreen_toPage`) |
 
@@ -349,6 +350,10 @@ structure TextOptions where
   /-- Include the text of annotation appearances (FreeText, form fields …), as the viewer
   and the inspector's text view do. `false`: page content only. -/
   withAnnots : Bool := true
+  /-- Optional content visibility state (task 9.r11a; e.g. a layers panel's): content of the
+  groups it turns OFF is not extracted. `none`: the document's default configuration
+  (`ocState`). -/
+  oc : Option Doc.OptionalContent.State := none
 
 /-- The API view of a core page text. -/
 def PageText.ofCore (o : Text.Options) (pt : Text.PageText) : PageText where
@@ -366,8 +371,8 @@ def PageText.ofCore (o : Text.Options) (pt : Text.PageText) : PageText where
 def pageTextCore (d : Document) (i : Nat) (o : TextOptions := {}) : Except Error Text.PageText := do
   let p ← d.page i
   let b := Filter.Budget.init d.limits
-  let r := if o.withAnnots then (Annot.extractDocPageAnnots d.limits d.doc p b o.layout).1
-    else (Text.extractDocPage d.limits d.doc p b o.layout).1
+  let r := if o.withAnnots then (Annot.extractDocPageAnnots d.limits d.doc p b o.layout o.oc).1
+    else (Text.extractDocPage d.limits d.doc p b o.layout o.oc).1
   match r with
   | .ok pt => .ok pt
   | .error e => .error (.pdf e)
@@ -406,9 +411,12 @@ theorem pageText_glyphs {d : Document} {i : Nat} {o : TextOptions} {t : PageText
       cases r with
       | error e => simp [hdc, Except.map] at h
       | ok parts =>
-        simp only [hdc, Except.map, Except.ok.injEq] at h
+        simp only [hdc] at h
+        generalize Text.ocStateFor d.limits d.doc b o.oc = q at h
+        obtain ⟨st, b'⟩ := q
+        simp only [Except.map, Except.ok.injEq] at h
         subst h
-        exact Text.extractPage_glyphs ..
+        exact Text.extractPage_glyphs _ _ _ _ _ _ _
 
 /-- **C3/C6 provenance** (re-export of `Core.Text.extract_from_items`): every glyph extracted
 from a display list comes from a `glyphRun` item at index `g.item`, and recomputing that
@@ -433,21 +441,23 @@ rotation `rot`, onto its CropBox, white background: the verified full-page rende
 images, shadings, patterns, transparency groups, annotation appearances). Total and bounded
 by `Limits` (decoded bytes, operators, path segments; a side above `Limits.maxPageSide`
 pixels is cropped). Pixel `(x, y)` of the image is screen point `(x, y)` of `toScreen`. -/
-def renderPage (d : Document) (i : Nat) (zoom : Rat) (rot : Rotation := .r0) :
-    Except Error Image :=
+def renderPage (d : Document) (i : Nat) (zoom : Rat) (rot : Rotation := .r0)
+    (oc : Option Doc.OptionalContent.State := none) : Except Error Image :=
   match d.page i with
   | .error e => .error e
   | .ok p =>
     if zoom ≤ 0 then .error (.badZoom zoom)
     else
-      match (Raster.Glyph.renderDocPage d.limits d.doc p zoom rot (Filter.Budget.init d.limits)).1 with
+      match (Raster.Glyph.renderDocPage d.limits d.doc p zoom rot (Filter.Budget.init d.limits)
+          (oc := oc)).1 with
       | .ok img => .ok img
       | .error e => .error (.pdf e)
 
 /-- **RGBA shape**: a rendered page has exactly `4 · w · h` bytes
 (`Core.Raster.Glyph.renderPage_size`). -/
-theorem renderPage_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation} {img : Image}
-    (h : renderPage d i zoom rot = .ok img) : img.data.size = 4 * img.w * img.h := by
+theorem renderPage_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation}
+    {oc : Option Doc.OptionalContent.State} {img : Image}
+    (h : renderPage d i zoom rot oc = .ok img) : img.data.size = 4 * img.w * img.h := by
   unfold renderPage at h
   split at h
   · cases h
@@ -455,7 +465,9 @@ theorem renderPage_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation} {
     split at h
     · cases h
     · unfold Raster.Glyph.renderDocPage at h
-      cases hx : Text.extractDocPage d.limits d.doc p (Filter.Budget.init d.limits) with
+      generalize Text.ocStateFor d.limits d.doc (Filter.Budget.init d.limits) oc = q at h
+      obtain ⟨ocs, b0⟩ := q
+      cases hx : Text.extractDocPage d.limits d.doc p b0 {} (some ocs) with
       | mk r b =>
         cases r with
         | error e => simp [hx] at h
@@ -463,6 +475,23 @@ theorem renderPage_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation} {
           simp only [hx, Except.ok.injEq] at h
           subst h
           exact Raster.Glyph.renderPage_size ..
+
+/-! ## Optional content -/
+
+/-- **The optional content of the document** (task 9.r11a, ISO 32000-2 §8.11): its groups and
+the default configuration `/D` (`/Name`, `/BaseState`, `/ON`, `/OFF`, `/Order`, `/RBGroups`,
+`/Locked`), for a layers panel; `none` when the document has no `/OCProperties` (or no group).
+-/
+def optionalContent (d : Document) : Option Doc.OptionalContent.Config :=
+  (Doc.OptionalContent.read (Content.Run.resolve (Text.docSource d.limits d.doc)) d.limits
+    (Filter.Budget.init d.limits) d.doc.catalog).1
+
+/-- **The default visibility state** (the `/D` configuration; everything visible without
+optional content): what `renderPage` and `pageText` use when no state is given. A layers panel
+changes it (`Doc.OptionalContent.Config.setGroup`) and passes it to `renderPage … (oc := …)`
+and `pageText … { oc := … }`. -/
+def ocState (d : Document) : Doc.OptionalContent.State :=
+  Doc.OptionalContent.stateOf (optionalContent d)
 
 /-! ## Navigation: outline, links, annotations -/
 

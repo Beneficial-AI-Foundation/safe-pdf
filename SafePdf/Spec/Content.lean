@@ -569,7 +569,7 @@ inductive Effect (cfg : Config) : Machine → Op → Machine → List DisplayIte
   | paint {m : Machine} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
       {p : Option Paint} {close : Bool} (hkw : PaintKw kw p close) :
       Effect cfg m ⟨o, kw, off, dat⟩
-        ⟨afterPaint m.pending (closeIf close m.core), m.stack, none, m.patFill, m.patStroke⟩
+        ⟨afterPaint m.pending (closeIf close m.core), m.stack, none, m.patFill, m.patStroke, m.oc⟩
         (paintOutput m.pending p (closeIf close m.core))
   /-- `W`, `W*`: the clip rule is pending until the next painting operator. -/
   | clip {m : Machine} {o : List PdfObject} {kw : List UInt8} {off : Nat} {dat : ByteArray}
@@ -824,9 +824,9 @@ theorem paintItems_eq (p : Paint) (path : Path) (g : GState) :
 /-- The painting step of the impl is `afterPaint` / `paintOutput`. -/
 theorem paintStep_eq (m : Machine) (p : Option Paint) (close : Bool) :
     Interp.paintStep m p close =
-      (⟨afterPaint m.pending (closeIf close m.core), m.stack, none, m.patFill, m.patStroke⟩,
+      (⟨afterPaint m.pending (closeIf close m.core), m.stack, none, m.patFill, m.patStroke, m.oc⟩,
         paintOutput m.pending p (closeIf close m.core), 0, 0) := by
-  obtain ⟨c0, stack, pending, pf, ps⟩ := m
+  obtain ⟨c0, stack, pending, pf, ps, oc⟩ := m
   have hc : (if close = true then Interp.closeCore c0 else c0) = closeIf close c0 := by
     cases close <;> simp [closeIf, closeCore_eq]
   simp only [Interp.paintStep, hc]
