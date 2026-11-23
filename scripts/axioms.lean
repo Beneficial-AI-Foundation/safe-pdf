@@ -1260,3 +1260,8 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Shell.App.View.pctZoom_mono
 #print axioms SafePdf.Shell.App.View.zoomSteps_pairwise
 #print axioms SafePdf.Shell.App.View.stepOutZ_stepInZ_le
+#print axioms SafePdf.Shell.App.Toolbar.Mode.of_default
+#print axioms SafePdf.Shell.App.Toolbar.Mode.of_selectTool
+#print axioms SafePdf.Shell.App.Toolbar.pressed_unique
+#print axioms SafePdf.Shell.App.Toolbar.Mode.of_selectEditor_twice
+#print axioms SafePdf.Shell.App.Toolbar.Mode.of_toolClick_twice
