@@ -610,7 +610,7 @@ import sys
 def load(path):
     return dict(l.split(": ", 1) for l in open(path, encoding="utf-8").read().splitlines() if ": " in l)
 nav, two = load(sys.argv[1]), load(sys.argv[2])
-layout_r = ".bar.r=.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.print,.bar.save,.bar.s4,.bar.more"
+layout_r = ".bar.r=.bar.select,.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.print,.bar.save,.bar.s4,.bar.more"
 layout_m = ".bar.m=.bar.zout,.bar.s2,.bar.zin,.bar.zoom"
 common = {
     "zoom-label0": "Automatic Zoom",
@@ -2635,6 +2635,67 @@ for k in ("ms-sel", "ms-hits", "ms-all", "ms-all-other", "ms-fullpage-photo"):
 for e in errs: print("FAIL: tint: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-tint/tint.txt" "$platform" || fail=1
+
+case_begin "10.8 tools"
+# 10.8. Select-text tool and cursors (SAFEPDF_VIEWER_SMOKE_MODE=tools, `Viewer.smokeTools`, model
+#     `Toolbar.Mode` / `Toolbar.cursorFor`) on a page with "Hello safe world" and a link over
+#     blank paper: Select text is the default tool, pressed; the canvas cursor is the I-beam
+#     over text, the hand over the link, the default arrow on blank paper; Draw unpresses
+#     Select text and shows the crosshair (at once and over text); its button again gives
+#     Select text back; Escape keeps Highlight on, the Select text button ends it; Add text
+#     shows the I-beam over the link.
+python3 -I -c '
+import sys
+c = b"BT /F1 18 Tf 72 700 Td (Hello safe world) Tj ET\n"
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>",
+        b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Type /Annot /Subtype /Link /Rect [72 500 300 540] /Border [0 0 0] /Dest [3 0 R /Fit] >>"]
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$work/tools.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=tools run_viewer "$work/out-tools" "$work/tools.pdf" || true
+cat "$work/out-tools/tools.txt" 2>/dev/null || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: tools: no tools.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "tool0": "select select=1 highlight=0 text=0 draw=0",
+    "select-state": "normal",
+    "cursor-text": "[xterm]",
+    "cursor-link": "[hand2]",
+    "cursor-empty": "[]",
+    "draw-on": "draw select=0 highlight=0 text=0 draw=1",
+    "cursor-draw-still": "[crosshair]",
+    "cursor-draw-text": "[crosshair]",
+    "draw-off": "select select=1 highlight=0 text=0 draw=0",
+    "cursor-after-draw": "[xterm]",
+    "hl-on": "highlight select=0 highlight=1 text=0 draw=0 popover=true",
+    "hl-esc": "highlight select=0 highlight=1 text=0 draw=0 popover=false",
+    "select-btn": "select select=1 highlight=0 text=0 draw=0 popover=false",
+    "select-again": "select select=1 highlight=0 text=0 draw=0",
+    "text-on": "text select=0 highlight=0 text=1 draw=0",
+    "cursor-text-link": "[xterm]",
+    "cursor-select-link": "[hand2]",
+}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: tools: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-tools/tools.txt" || fail=1
 
 # Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
 case_end

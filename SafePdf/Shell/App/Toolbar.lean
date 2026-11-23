@@ -15,7 +15,8 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
 * **Layout** (`layout`): left — sidebar toggle (shown with a document; task 9.r9: thumbnails need no outline),
   previous / next page arrows, the page-number field and its "of N" label, then the view-mode
   drop-down (task 9.r4, `ViewChoice`); centre — zoom out,
-  zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
+  zoom in and the zoom drop-down; right — the annotation tools (Select text, the default
+  tool, task 10.8: `Mode`; Highlight, enabled with a
   document since task 9.4: with a selection it highlights it in the current colour, without
   one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
   Add comment: a note on the selection or at the window centre, `Menu.Cmd.addNote`; Add text
@@ -42,6 +43,10 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   50 %–400 %, showing the current choice; a zoom reached with − / + that is not in the list
   shows as a percentage (PDF.js's custom option). Automatic Zoom is PDF.js's `auto` scale: the
   page width for portrait pages, the whole page for landscape ones, at most 125 %.
+* **Active tool and cursor** (`Mode`, `cursorFor`, task 10.8; Plan.md §6 Phase 10): one of
+  Select text (the default), Highlight, Add text, Draw is active, read off `Bubble.Ui`; its
+  button shows pressed; the page canvas cursor telegraphs what a press does there (I-beam over
+  text, hand over links and marks, crosshair in Draw).
 * **Transients** (`Transient`, task 10.6; Plan.md §6 Phase 10): the note popup, the edit
   bubble's colour picker, the Highlight and Add text / Draw pop-overs, the go-to and find bars.
   One dismissal rule for all of them: Escape closes the topmost open one (`onEscape`); a press
@@ -303,6 +308,8 @@ def pageEntry (labels : Array String) (n cur : Nat) (input : String) : Nat × Bo
 /-- Toolbar buttons that are not (yet) viewer commands: the annotation tools and Print (Save is
 the command `Menu.Cmd.save` since task 9.5c). -/
 inductive Tool where
+  /-- Select text (task 10.8): the default tool, on whenever no other tool is (`Mode`). -/
+  | select
   /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8, `Bubble`). -/
   | highlight
   /-- Add a comment / note (task 9.9: Add note…). -/
@@ -319,6 +326,7 @@ inductive Tool where
 
 /-- Tooltip of a tool button. -/
 def Tool.tip : Tool → String
+  | .select => "Select text"
   | .highlight => "Highlight"
   | .comment => "Add comment"
   | .text => "Add text"
@@ -328,14 +336,15 @@ def Tool.tip : Tool → String
 
 /-- The task that brings the tool (shown when the disabled button is asked for). -/
 def Tool.task : Tool → String
+  | .select => "10.8"
   | .highlight => "9.4"
   | .comment | .text | .draw => "9.9"
   | .image | .print => "after M9"
 
-/-- Whether the tool can be used: Highlight (task 9.4), Add comment, Add text and Draw (task
-9.9) with a document; Add image and Print not yet (after M9). -/
+/-- Whether the tool can be used: Select text (task 10.8), Highlight (task 9.4), Add comment,
+Add text and Draw (task 9.9) with a document; Add image and Print not yet (after M9). -/
 def Tool.enabled (c : Ctx) : Tool → Bool
-  | .highlight | .comment | .text | .draw => c.hasDoc
+  | .select | .highlight | .comment | .text | .draw => c.hasDoc
   | .image | .print => false
 
 /-- What a button does. -/
@@ -414,7 +423,8 @@ def layout : List (String × List Item) :=
        .button ⟨".bar.zin", "plus", "Zoom in", .cmd .zoomIn⟩,
        .zoomBox]),
     (".bar.r",
-      [.button ⟨".bar.highlight", "highlight", Tool.tip .highlight, .tool .highlight⟩,
+      [.button ⟨".bar.select", "select", Tool.tip .select, .tool .select⟩,
+       .button ⟨".bar.highlight", "highlight", Tool.tip .highlight, .tool .highlight⟩,
        .button ⟨".bar.comment", "comment", Tool.tip .comment, .tool .comment⟩,
        .button ⟨".bar.text", "text", Tool.tip .text, .tool .text⟩,
        .button ⟨".bar.draw", "draw", Tool.tip .draw, .tool .draw⟩,
@@ -478,19 +488,19 @@ def states (c : Ctx) : List Bool :=
 
 -- Paths are unique; the tool names map back to their tools.
 #guard (buttons.map (·.path)).eraseDups.length == buttons.length
-#guard buttons.length == 13
-#guard [Tool.highlight, .comment, .text, .draw, .image, .print].all fun t =>
+#guard buttons.length == 14
+#guard [Tool.select, .highlight, .comment, .text, .draw, .image, .print].all fun t =>
   buttons.any fun b => b.act == .tool t && toolOf b.icon == some t
 #guard targets.length == (states {}).length
 #guard targets.eraseDups.length == targets.length
 -- Without a document only Open, Quit and the overflow button work; the sidebar toggle hides.
 #guard (buttons.filter (·.enabled {})).map (·.path) == [".bar.more"]
 #guard (buttons.filter (·.visible {})).length == buttons.length - 1
--- First page of three with an outline: prev disabled, next enabled, of the tools Highlight,
--- Add comment, Add text and Draw (Add image and Print after M9).
+-- First page of three with an outline: prev disabled, next enabled, of the tools Select text,
+-- Highlight, Add comment, Add text and Draw (Add image and Print after M9).
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3, hasOutline := true }
   (buttons.filter (·.enabled c)).map (·.path) ==
-    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.comment",
+    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.select", ".bar.highlight", ".bar.comment",
      ".bar.text", ".bar.draw", ".bar.more"] &&
   buttons.all (·.visible c)
 -- No outline: the toggle still shows (thumbnails, task 9.r9).
@@ -507,6 +517,140 @@ def states (c : Ctx) : List Bool :=
 #guard overflowEntries.map (·.1) == [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18]
 -- Every overflow command is also in the menubar (one vocabulary).
 #guard overflowEntries.all fun (_, k) => (Menu.locate k).isSome
+
+/-! ## The active tool and the pointer cursor (task 10.8) -/
+
+/-- The tool the page responds to (Plan.md §6 Phase 10: "an explicit select-text tool (the
+default)"). It is read off the tool state `Bubble.Ui`, never stored apart from it: Add text
+or Draw when that editor mode is on, else Highlight when the Highlight tool is on, else
+Select text. So exactly one tool is active at any time, and turning another tool off returns
+to Select text (PDF.js: the editor mode buttons toggle, "no editor" is the default). -/
+inductive Mode where
+  /-- Select text (the default): a drag selects text, a click selects a mark or follows a
+  link. -/
+  | select
+  /-- Highlight (task 9.8): a text selection is highlighted on mouse-up. -/
+  | highlight
+  /-- Add text (FreeText, task 9.9): a click places a text box. -/
+  | text
+  /-- Draw (Ink, task 9.9): a drag draws a stroke. -/
+  | draw
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The active tool of tool state `u`. -/
+def Mode.of (u : Bubble.Ui) : Mode :=
+  match u.editor with
+  | .text => .text
+  | .draw => .draw
+  | .none => if u.tool then .highlight else .select
+
+/-- The toolbar tool (`Tool`) of a mode: its button is the one shown pressed. -/
+def Mode.tool : Mode → Tool
+  | .select => .select
+  | .highlight => .highlight
+  | .text => .text
+  | .draw => .draw
+
+/-- The tools that are modes, in toolbar order (their buttons show the active one pressed). -/
+def modeTools : List Tool := [.select, .highlight, .text, .draw]
+
+/-- Whether the button of tool `t` shows pressed in tool state `u`: exactly the active
+mode's. -/
+def pressed (u : Bubble.Ui) (t : Tool) : Bool := (Mode.of u).tool == t
+
+/-- The Select text button: turns the other tools off (with their pop-overs). -/
+def selectTool (u : Bubble.Ui) : Bubble.Ui :=
+  { u with tool := false, popover := false, editor := .none, edPop := false }
+
+/-- What lies under the mouse pointer on the page canvas. -/
+inductive Hit where
+  /-- A glyph box of the page text (`Select.Cell.box`). -/
+  | text
+  /-- A link annotation (`Links.linkAt`). -/
+  | link
+  /-- A mark: a highlight, a note, free text or a drawing (`Marks.Store.hitAt`). -/
+  | mark
+  /-- Nothing of these (the page background, or off the pages). -/
+  | empty
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The hit of a pointer over a mark, a link and text (any of them): the same order a click
+uses (`Viewer.dragTo`: marks lie above links, and links above the text). -/
+def hitOf (mark link text : Bool) : Hit :=
+  if mark then .mark else if link then .link else if text then .text else .empty
+
+/-- The Tk cursor of the page canvas for tool `m` over `h` (`""`: the widget default, the
+platform arrow). The names are Tk's portable ones that Tk Aqua maps to native cursors
+(`xterm` → I-beam, `hand2` → pointing hand, `crosshair` → crosshair):
+
+* Draw: `crosshair` everywhere (a press always starts a stroke; PDF.js shows a pen).
+* A mark (other tools): `hand2` — a click selects it (a text box or drawing is also grabbed
+  and moved), as a link click follows the link. A drag that starts on a highlight still
+  selects the text under it.
+* Add text: `xterm` elsewhere (PDF.js: `--editorFreeText-editing-cursor: text`): a click
+  places a text box, also over a link.
+* Select text and Highlight: `hand2` over a link, `xterm` over text, else the arrow. (PDF.js's
+  free highlight, a crosshair-like pen over non-text in Highlight mode, is not implemented
+  here: the Highlight tool only highlights selected text.) -/
+def cursorFor : Mode → Hit → String
+  | .draw, _ => "crosshair"
+  | _, .mark => "hand2"
+  | .text, _ => "xterm"
+  | _, .link => "hand2"
+  | _, .text => "xterm"
+  | _, .empty => ""
+
+/-- The default tool state has Select text active. -/
+theorem Mode.of_default : Mode.of {} = .select := rfl
+
+/-- The Select text button always makes Select text the active tool. -/
+theorem Mode.of_selectTool (u : Bubble.Ui) : Mode.of (selectTool u) = .select := rfl
+
+/-- Exactly one tool button shows pressed, whatever the tool state. -/
+theorem pressed_unique (u : Bubble.Ui) : (modeTools.filter (pressed u)).length = 1 := by
+  unfold pressed Mode.of
+  cases u.editor <;> (try cases u.tool) <;> decide
+
+/-- Turning Add text or Draw off (its button again) returns to Select text when it was the
+active tool before. -/
+theorem Mode.of_selectEditor_twice (u : Bubble.Ui) (e : Bubble.Editor) (h : Mode.of u = .select) :
+    Mode.of ((u.selectEditor e).selectEditor e) = .select := by
+  unfold Mode.of at h ⊢
+  unfold Bubble.Ui.selectEditor
+  cases hu : u.editor <;> cases e <;> rw [hu] at h <;> simp_all <;> split <;> simp_all
+
+/-- Turning Highlight off (its button again, without a selection) returns to Select text when
+it was the active tool before. -/
+theorem Mode.of_toolClick_twice (u : Bubble.Ui) (h : Mode.of u = .select) :
+    Mode.of ((u.toolClick false).1.toolClick false).1 = .select := by
+  unfold Mode.of at h ⊢
+  unfold Bubble.Ui.toolClick
+  cases hu : u.editor <;> rw [hu] at h <;> simp_all <;> split <;> simp_all
+
+-- Select text is the default and pressed; Highlight, Add text, Draw take over and give back.
+#guard Mode.of {} == .select && modeTools.filter (pressed {}) == [.select]
+#guard Mode.of ({} : Bubble.Ui).toggleTool == .highlight &&
+  Mode.of (({} : Bubble.Ui).selectEditor .draw) == .draw &&
+  Mode.of (({} : Bubble.Ui).selectEditor .text) == .text
+#guard Mode.of ((({} : Bubble.Ui).selectEditor .draw).selectEditor .draw) == .select
+#guard Mode.of (((({} : Bubble.Ui).toolClick false).1).toolClick false).1 == .select
+#guard Mode.of (selectTool (({} : Bubble.Ui).selectEditor .draw)) == .select &&
+  !(selectTool (({} : Bubble.Ui).selectEditor .draw)).edPop &&
+  !(selectTool ({ tool := true, popover := true } : Bubble.Ui)).popover
+-- Escape closes the pop-over and keeps the tool (task 10.6).
+#guard Mode.of ({ editor := .draw, edPop := true } : Bubble.Ui).escape == .draw
+#guard Mode.of ({ tool := true, popover := true } : Bubble.Ui).escape == .highlight
+-- The hit order: mark, link, text.
+#guard hitOf true true true == .mark && hitOf false true true == .link &&
+  hitOf false false true == .text && hitOf false false false == .empty
+-- The cursor table.
+#guard cursorFor .select .text == "xterm" && cursorFor .select .link == "hand2" &&
+  cursorFor .select .mark == "hand2" && cursorFor .select .empty == ""
+#guard cursorFor .highlight .text == "xterm" && cursorFor .highlight .link == "hand2" &&
+  cursorFor .highlight .empty == ""
+#guard [Hit.text, .link, .mark, .empty].all (cursorFor .draw · == "crosshair")
+#guard cursorFor .text .text == "xterm" && cursorFor .text .link == "xterm" &&
+  cursorFor .text .empty == "xterm" && cursorFor .text .mark == "hand2"
 
 /-! ## Transients and their dismissal (task 10.6) -/
 
