@@ -117,7 +117,11 @@
 #   12.5. honest UI for hidden content (SAFEPDF_VIEWER_SMOKE_MODE=honest): copy of a `3 Tr`
 #      line announces its invisible characters, the trusted identity line in document full
 #      screen and with hidden chrome, the revision-retention notice after deleting a saved
-#      mark and saving.
+#      mark and saving;
+#   12.2c. the document worker (SAFEPDF_VIEWER_SMOKE_MODE=worker): pages rendered by the worker
+#      process, no event blocked while a (test-hook) slow render runs, a stalled render killed
+#      after the deadline with the status saying so, a fresh worker for the same document and
+#      for the next file, render times in-process vs through the worker.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
 # natively on Tk Aqua (task 10.11, docs/viewer.md "Smoke test on macOS"). Ends with a summary of
 # the cases passed / skipped / failed. Exit 0 on success.
@@ -128,9 +132,11 @@ repo="$(dirname "$here")"
 cd "$repo"
 
 if [ "${1:-}" != "--no-build" ]; then
-  lake build viewer
+  # Task 12.2c: the viewer renders through the `worker` executable next to it.
+  lake build viewer worker
 fi
 viewer="$repo/.lake/build/bin/viewer"
+[ -x "$repo/.lake/build/bin/worker" ] || echo "viewer-smoke: WARNING: no worker executable; pages render in the viewer process" >&2
 [ -x "$viewer" ] || { echo "viewer-smoke: $viewer not built" >&2; exit 1; }
 
 # Pick the platform (task 10.11): on macOS (Darwin) the viewer runs natively on Tk Aqua, its
@@ -1433,7 +1439,9 @@ case_begin "1m async"
 #     While it renders the window shows the placeholder, a 20 ms Tcl timer keeps firing, a
 #     zoom change returns at once, and End shows the light page 2 (page field 2) while page 1
 #     still renders; the render for the old zoom is discarded (stale) and page 1 finally shows
-#     at the new zoom.
+#     at the new zoom. Since task 12.2c the renders go through the document worker, one at a
+#     time: the old zoom's render is cancelled (the worker killed and restarted), so "during"
+#     may count one render instead of two, and page 2 preempts page 1's render.
 python3 -I "$here/viewer-smoke-pdf.py" --slow 3000 "$work/slow.pdf"
 SAFEPDF_VIEWER_SMOKE_MODE=async run_viewer "$work/out-async" "$work/slow.pdf" \
   || { echo "FAIL: async run failed" >&2; fail=1; }
@@ -1458,7 +1466,7 @@ need(0 <= num("zoom-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v
 need(v.get("after-zoom") == "jobs 2 photo false placeholders 1",
      "after zoom: %r (expected the old and the new render running)" % v.get("after-zoom"))
 need(num("ticks", r"(\d+)") >= 5, "the timer did not run while rendering: %r" % v.get("ticks"))
-need(v.get("during") == "jobs 2 photo false placeholders 1", "during: %r" % v.get("during"))
+need(re.match(r"jobs [12] photo false placeholders 1$", v.get("during", "")), "during: %r" % v.get("during"))
 need(0 <= num("end-event-ms", r"(\d+)") < 250, "End blocked: %r" % v.get("end-event-ms"))
 need(re.match(r"page 2 field 2 photo true slow-jobs [1-9]", v.get("page2", "")),
      "page 2 not shown while page 1 renders: %r" % v.get("page2"))
@@ -2875,6 +2883,65 @@ if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: honest: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-honest/honest.txt" || fail=1
+
+case_begin "12.2c worker"
+# 12.2c. The document worker (SAFEPDF_VIEWER_SMOKE_MODE=worker, `Viewer.smokeWorker`, deadline
+#     SAFEPDF_WORKER_DEADLINE_MS=4000): the two-page PDF's pages come from the worker; render
+#     times in the viewer process and through the worker are printed (reported only);
+#     (a) no-block: workers that sleep 1.5 s before each render (`Worker.TestHooks`), no event
+#     waiting for renders, a 10 ms Tcl heartbeat: the zoom event returns at once, the largest
+#     heartbeat gap stays under 250 ms, the page arrives; (b) kill/restart: workers that sleep
+#     ten minutes: after the deadline the page and the status line say "rendering stopped: the
+#     document took too long", the worker was killed (timeouts counted); (c) the same document
+#     renders again in a fresh worker; (d) the next file (the corpus paper of
+#     SAFEPDF_SMOKE_WORKER_PAPER when present, else the nav PDF of 1e) opens, renders and has
+#     its outline, read by its own worker.
+wpaper="${SAFEPDF_SMOKE_WORKER_PAPER-corpus/files/arxiv-1706.03762.pdf}"
+mkdir -p "$work/out-worker"
+if [ -n "$wpaper" ] && [ -f "$wpaper" ]; then cp "$wpaper" "$work/out-worker/next.pdf"
+else cp "$work/nav.pdf" "$work/out-worker/next.pdf"; fi
+if [ ! -x "$repo/.lake/build/bin/worker" ]; then
+  echo "FAIL: worker: no worker executable" >&2; fail=1
+else
+  SAFEPDF_VIEWER_SMOKE_MODE=worker SAFEPDF_WORKER_DEADLINE_MS=4000 \
+    run_viewer "$work/out-worker" "$work/two.pdf" || { echo "FAIL: worker run failed" >&2; fail=1; }
+  cat "$work/out-worker/worker.txt" 2>/dev/null || true
+  python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: worker: no worker.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def need(cond, msg):
+    if not cond: errs.append(msg)
+def num(k, rx):
+    m = re.search(rx, v.get(k, ""))
+    return int(m.group(1)) if m else -1
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+need(re.match(r"page 1 image \d+x\d+ worker-renders [1-9]", v.get("open", "")), "open: %r" % v.get("open"))
+need(num("open", r"spawns (\d+)") == 1, "open: one worker expected: %r" % v.get("open"))
+need("worker" in v.get("measure-a", ""), "measure-a: %r" % v.get("measure-a"))
+need(0 <= num("a-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v.get("a-event-ms"))
+need(v.get("noblock", "").startswith("image "), "no-block: no page image: %r" % v.get("noblock"))
+need(num("noblock", r"elapsed-ms (\d+)") >= 1500, "no-block: the stall did not happen: %r" % v.get("noblock"))
+need(0 <= num("noblock", r"max-gap-ms (\d+)") < 250, "no-block: the heartbeat stalled: %r" % v.get("noblock"))
+need(0 <= num("b-event-ms", r"(\d+)") < 250, "the zoom event blocked (b): %r" % v.get("b-event-ms"))
+need("error: rendering stopped: the document took too long" in v.get("stalled", ""), "stalled page: %r" % v.get("stalled"))
+need(num("stalled", r"timeouts (\d+)") >= 1, "no timeout counted: %r" % v.get("stalled"))
+need(4000 <= num("stalled", r"elapsed-ms (\d+)") < 30000, "stalled: elapsed: %r" % v.get("stalled"))
+need(0 <= num("stalled", r"max-gap-ms (\d+)") < 250, "stalled: the heartbeat stalled: %r" % v.get("stalled"))
+need("cannot render: rendering stopped: the document took too long" in v.get("stalled-status", ""), "status: %r" % v.get("stalled-status"))
+need(v.get("respawn", "").startswith("image ") and num("respawn", r"spawns (\d+)") > num("stalled", r"spawns (\d+)"),
+     "same document in a fresh worker: %r" % v.get("respawn"))
+need(re.match(r"page 1/\d+ image \d+x\d+ outline [1-9]", v.get("next", "")), "next file: %r" % v.get("next"))
+need(num("next", r"spawns (\d+)") > num("respawn", r"spawns (\d+)"), "next file: no new worker: %r" % v.get("next"))
+need("rendered in" in v.get("next-status", ""), "next status: %r" % v.get("next-status"))
+need("done" in lines, "the run did not finish")
+for k in ["measure-a", "measure-b"]: print("worker: %s: %s" % (k, v.get(k)))
+for e in errs: print("FAIL: worker: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-worker/worker.txt" || fail=1
+fi
 
 # Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
 case_end

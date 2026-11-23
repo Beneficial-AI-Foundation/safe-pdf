@@ -1,5 +1,6 @@
 import SafePdf.Api
 import SafePdf.Shell.Worker.Wire
+import SafePdf.Shell.Worker.TestHooks
 
 /-!
 # The document worker: request handling and loop (task 12.2a)
@@ -128,6 +129,7 @@ def loop (limits : Limits) : IO UInt32 := do
       | .error e =>
         writeAll stdout (Protocol.frameResponse limits (.error .malformed (reprStr e)))
       | .ok req =>
+        TestHooks.beforeRequest req
         let (st', resp) ← answer st req
         st := st'
         writeAll stdout (Protocol.frameResponse limits resp)
