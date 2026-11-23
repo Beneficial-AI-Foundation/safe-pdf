@@ -139,12 +139,21 @@ if [ "$(uname -s)" = Darwin ]; then platform=aqua; fi
 # this platform. A failure outside any case is reported as such.
 cases_pass=(); cases_fail=(); cases_skip=()
 cur_case=""; fail_saved=0
+# Tcl errors (task 10.20): `run_viewer` appends every `Tcl error` line the viewer prints on
+# stdout or stderr to $tcl_log; a case fails when it added any (the lines are printed).
+tcl_log=""; tcl_seen=0
+tcl_count() { if [ -f "$tcl_log" ]; then wc -l < "$tcl_log" | tr -d ' '; else echo 0; fi; }
 case_begin() {
   if [ -n "$cur_case" ]; then case_end; fi
-  cur_case="$1"; fail_saved="$fail"; fail=0
+  cur_case="$1"; fail_saved="$fail"; fail=0; tcl_seen="$(tcl_count)"
 }
 case_end() {
   [ -n "$cur_case" ] || return 0
+  if [ "$(tcl_count)" -gt "$tcl_seen" ]; then
+    echo "FAIL: $cur_case: the viewer printed Tcl errors:" >&2
+    tail -n +"$((tcl_seen + 1))" "$tcl_log" | sed 's/^/  /' >&2
+    fail=1
+  fi
   if [ "$fail" = 0 ]; then cases_pass+=("$cur_case"); else cases_fail+=("$cur_case"); fi
   if [ "$fail_saved" != 0 ]; then fail=1; fi
   cur_case=""; fail_saved=0
@@ -210,6 +219,7 @@ fi
 export SAFEPDF_SMOKE_BG
 
 work="$(mktemp -d)"
+tcl_log="$work/tcl-errors.log"
 if [ -n "${SAFEPDF_SMOKE_KEEP:-}" ]; then
   echo "viewer-smoke: keeping the outputs in $work (SAFEPDF_SMOKE_KEEP)"
 else
@@ -221,8 +231,14 @@ fi
 # (set it empty for the real default, as case 1o does).
 run_viewer() {
   mkdir -p "$1"
+  local o e rc=0
+  o="$(mktemp)"; e="$(mktemp)"
   SAFEPDF_VIEWER_VIEW="${SAFEPDF_VIEWER_VIEW-single}" SAFEPDF_VIEWER_SMOKE="$1" \
-    timeout 60 "${wrap[@]}" "$viewer" "$2"
+    timeout 60 "${wrap[@]}" "$viewer" "$2" >"$o" 2>"$e" || rc=$?
+  cat "$o"; cat "$e" >&2
+  grep -h 'Tcl error' "$o" "$e" >> "$tcl_log" || true
+  rm -f "$o" "$e"
+  return "$rc"
 }
 
 # ppm_stats FILE: prints "W H NONWHITE" for a binary PPM (P6, maxval 255).
