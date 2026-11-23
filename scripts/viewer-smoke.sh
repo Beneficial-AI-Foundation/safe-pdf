@@ -113,7 +113,11 @@
 #      items; the selection is one band per line, joined lines touching (10.18); drawing times
 #      printed;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
-#      status line.
+#      status line;
+#   12.5. honest UI for hidden content (SAFEPDF_VIEWER_SMOKE_MODE=honest): copy of a `3 Tr`
+#      line announces its invisible characters, the trusted identity line in document full
+#      screen and with hidden chrome, the revision-retention notice after deleting a saved
+#      mark and saving.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
 # natively on Tk Aqua (task 10.11, docs/viewer.md "Smoke test on macOS"). Ends with a summary of
 # the cases passed / skipped / failed. Exit 0 on success.
@@ -2811,6 +2815,66 @@ if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: tools: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-tools/tools.txt" || fail=1
+
+case_begin "12.5 honest"
+# 12.5. Honest UI for hidden content (SAFEPDF_VIEWER_SMOKE_MODE=honest, `Viewer.smokeHonest`)
+#     on generated files: select all + copy on a page with a `3 Tr` line copies it and says
+#     how many copied characters the page does not show; the trusted identity line (.ident,
+#     file name and path, drawn by the viewer outside the page) is packed in document full
+#     screen (/PageMode /FullScreen) and while /HideToolbar hides the toolbar, and gone after
+#     Escape and on a plain file; saving a highlight gives no notice, deleting that saved
+#     highlight and saving again gives the revision-retention notice.
+mkdir -p "$work/honest"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(cat, content):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+            3: "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            4: "<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+            5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
+    body, offs = b"%PDF-1.7\n", {}
+    for n in sorted(objs):
+        offs[n] = len(body)
+        body += ("%d 0 obj\n%s\nendobj\n" % (n, objs[n])).encode("latin-1")
+    x = len(body)
+    body += b"xref\n0 6\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % offs[n] for n in range(1, 6))
+    body += ("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % x).encode()
+    return body
+text = "BT /F1 24 Tf 72 700 Td (Visible line) Tj ET BT /F1 24 Tf 3 Tr 72 650 Td (hidden words) Tj ET"
+open(out + "/ocr.pdf", "wb").write(pdf("", text))
+open(out + "/full.pdf", "wb").write(pdf("/PageMode /FullScreen", text))
+open(out + "/prefs.pdf", "wb").write(pdf("/ViewerPreferences << /HideToolbar true >>", text))
+' "$work/honest"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=honest run_viewer "$work/out-honest" "$work/honest/ocr.pdf" || true
+cat "$work/out-honest/honest.txt" 2>/dev/null || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: honest: no honest.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def has(k, *parts):
+    for p in parts:
+        if p not in v.get(k, ""): errs.append("%s lacks %r: %r" % (k, p, v.get(k)))
+def lacks(k, p):
+    if k not in v or p in v[k]: errs.append("%s has %r (or is missing): %r" % (k, p, v.get(k)))
+has("copy", "hidden-in-clipboard=true", "status=copied ", "; the copied text includes 12 characters that are not visible on the page")
+has("plain", "ident= ")
+for f in ["full", "prefs"]:
+    has(f, "ident=pack", "text=SafePDF is showing %s.pdf (" % f, "/%s.pdf) - this line is drawn by SafePDF" % f)
+    has(f + "-escape", "ident= full=false")
+has("full", "full=true", "full screen (Escape leaves)")
+has("prefs", "the document hides parts of the window")
+has("save1", "marks=1 saved=1", "status=saved 1 new, changed or deleted mark(s)")
+lacks("save1", "deleted mark(s) are still")
+has("deleted", "dirty=true deletedSaved=1")
+has("save2", "marks=0", "note: the 1 deleted mark(s) are still in the file" + chr(39) + "s earlier revision (Save only appends an update) and can be recovered from it")
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: honest: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-honest/honest.txt" || fail=1
 
 # Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
 case_end

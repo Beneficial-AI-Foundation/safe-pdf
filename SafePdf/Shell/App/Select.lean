@@ -441,12 +441,32 @@ structure PageIndex where
   hay : Array (Char × Nat)
   /-- The direction (`Line.dir`) of each line, by `Cell.line` (for `selBands`). -/
   lineDirs : Array Nat
+  /-- Task 12.5: whether each cell's glyph is one the page does not paint (`Tr 3`/`Tr 7`,
+  `Glyph.visible` false), by cell index (`cellsHidden`). -/
+  hidden : Array Bool := #[]
   deriving Inhabited
+
+/-- Task 12.5: for each cell of `cellsOf o lines`, in the same order, whether its glyph is not
+painted by the page (`Glyph.visible` false). Glyphs outside the CropBox and glyphs the clip
+hides are not in `lines` at all (`Text.Options.keeps_hiddenWhy`, `Text.unclipped`). -/
+def cellsHidden (o : Options) (lines : Array Line) : Array Bool :=
+  lines.foldl (fun acc l => acc ++ ((Text.lineOrder o l).map fun g => !g.visible).toArray) #[]
 
 /-- The index of an extracted page (default layout options, as the text view). -/
 def PageIndex.ofText (pt : Text.PageText) : PageIndex :=
   let cs := cellsOf {} pt.lines
-  ⟨cs, normChars cs, pt.lines.map (·.dir)⟩
+  { cells := cs, hay := normChars cs, lineDirs := pt.lines.map (·.dir),
+    hidden := cellsHidden {} pt.lines }
+
+/-- Task 12.5: the number of characters of `rangeText ix.cells a b` that come from glyphs the
+page does not paint (separators not counted). -/
+def PageIndex.hiddenChars (ix : PageIndex) (a b : Nat) : Nat :=
+  let lo := min a b
+  let hi := min (max a b) (ix.cells.size - 1)
+  (List.range (hi + 1 - lo)).foldl (fun n k =>
+    match ix.cells[lo + k]?, ix.hidden[lo + k]? with
+    | some c, some true => n + c.text.length
+    | _, _ => n) 0
 
 /-- The selection bands of the cells `a … b` on this page (`selBands`). -/
 def PageIndex.bands (ix : PageIndex) (a b : Nat) : List Box := selBands ix.cells ix.lineDirs a b
@@ -554,5 +574,16 @@ private def paraCells : Array Cell := cellsOf {} (Text.layout {} para).1
   (ix.hits (normQuery "l")).size == 3 && (ix.hits (normQuery "xyz")).size == 0 &&
     (ix.hits (normQuery "  ")).size == 0
 #guard findAll #[('a', 0), ('a', 1), ('a', 2)] #['a', 'a'] == [0, 1]
+-- Task 12.5: invisible (`Tr 3`) glyphs are counted by the copy's hidden-character count.
+private def ocrSample : List Glyph :=
+  sample.take 5 ++ ((sample.drop 5).take 5).map fun g => { g with visible := false }
+private def ocrPT : Text.PageText :=
+  { samplePT with glyphs := ocrSample, shown := ocrSample, lines := (Text.layout {} ocrSample).1 }
+#guard (PageIndex.ofText ocrPT).hidden.size == (PageIndex.ofText ocrPT).cells.size
+#guard (PageIndex.ofText ocrPT).hiddenChars 0 100 == 5
+#guard (PageIndex.ofText ocrPT).hiddenChars 0 4 == 0
+#guard (PageIndex.ofText ocrPT).hiddenChars 7 5 == 3
+#guard (PageIndex.ofText samplePT).hiddenChars 0 100 == 0
+#guard rangeText (PageIndex.ofText ocrPT).cells 0 100 == "Hello World"
 
 end SafePdf.Shell.App.Select

@@ -166,6 +166,15 @@ without `/ActualText` marks the two are equal (`shownItems_eq_extract`).
   origin, width, size (`(runGlyphs fonts g.item r)[g.seq]? = some g`) — and the code bytes of a
   run's glyphs concatenate to the bytes the run showed (no byte dropped or invented). The
   reading-order heuristic is outside the theorem (tested).
+* **Visibility provenance** (task 12.5, Plan.md §6 Phase 12 "Honest UI for degraded/hidden
+  content"; `runGlyphs_visible`, `extract_visible`, `Options.keeps_hiddenWhy`): every glyph's
+  `visible` flag is its run's render mode (`Tr 3`/`Tr 7` paint nothing); `Options.hiddenWhy`
+  says why a glyph is not visibly shown (`outsidePage`: outside the CropBox, never in the text;
+  `renderMode`: in the text under `includeInvisible`), so every hidden glyph the text holds is
+  a flagged render-mode one. `hiddenChars` counts those characters of the text, `hiddenRuns`
+  lists the hidden stretches (the viewer's copy note and the inspector's `hidden` field).
+  Clipped-away glyphs (`unclipped`) and optional content never reach the text; white-on-white
+  or transparent text is not detected.
 -/
 
 namespace SafePdf.Core.Text
@@ -1027,6 +1036,24 @@ theorem runGlyphs_codes (fonts : FontTable) (i : Nat) (r : GlyphRun) :
   | nil => rfl
   | cons x xs ih => simp [List.flatMap_cons, List.flatten_append, SplitKind.codes_flatten, ih]
 
+/-- **Visibility provenance of a run** (task 12.5): every glyph of a run carries the run's own
+render-mode visibility — `visible` is false exactly for the glyphs of a run shown with
+`Tr 3` or `Tr 7`, which paint nothing. -/
+theorem runGlyphs_visible {fonts : FontTable} {i : Nat} {r : GlyphRun} {g : Glyph}
+    (h : g ∈ runGlyphs fonts i r) : g.visible = r.renderMode.paints := by
+  simp only [runGlyphs] at h
+  obtain ⟨j, hj, rfl⟩ := List.mem_mapIdx.mp h
+  rfl
+
+/-- **Visibility provenance** (task 12.5, with C6): every extracted glyph's `visible` flag is
+the render mode of the `glyphRun` item it comes from (`extract_from_items`): text the page
+does not paint is flagged from the graphics state, not guessed afterwards. -/
+theorem extract_visible (fonts : FontTable) (items : List DisplayItem) (g : Glyph)
+    (h : g ∈ extractItems fonts items) :
+    ∃ r clip, items[g.item]? = some (.glyphRun r clip) ∧ g.visible = r.renderMode.paints := by
+  obtain ⟨r, clip, hi, hs⟩ := extract_from_items fonts items g h
+  exact ⟨r, clip, hi, runGlyphs_visible (List.mem_of_getElem? hs)⟩
+
 /-! ## Reading order (heuristic; tested) -/
 
 /-- Layout parameters (per mille of the font size). -/
@@ -1107,6 +1134,61 @@ def Options.keeps (o : Options) (g : Glyph) : Bool :=
     match o.pageBox with
     | some b => !g.offPage b
     | none => true
+
+/-! ### Visibility provenance (task 12.5) -/
+
+/-- Why an extracted glyph is **not visibly shown** on the page although it can be extracted
+(task 12.5, Plan.md §6 Phase 12 "Honest UI for degraded/hidden content"). Glyphs that the
+clip hides entirely (`unclipped`, task 6.8f) and content hidden by optional content (task
+9.r11a) never reach the page text, so they need no flag; white-on-white or fully transparent
+text is not detected. -/
+inductive Hidden where
+  /-- The glyph lies entirely outside the page's visible area (`Options.pageBox`, the CropBox
+  for document pages): layout leaves it out of the text, but it is in `PageText.glyphs` and
+  `PageText.shown`. -/
+  | outsidePage
+  /-- Text rendering mode 3 or 7 (`Tr`, `Glyph.visible` false): the glyph paints nothing, e.g.
+  an OCR layer over a scan. Layout keeps it in the text under `Options.includeInvisible` (the
+  default). -/
+  | renderMode
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A stable key for a `Hidden` reason (the inspector's JSON). -/
+def Hidden.key : Hidden → String
+  | .outsidePage => "outside-cropbox"
+  | .renderMode => "render-mode"
+
+/-- **Why glyph `g` is not visibly shown** under the options `o` (`none`: it is shown): first
+the page box (`outsidePage`; such a glyph is never in the text), then the render mode
+(`renderMode`). -/
+def Options.hiddenWhy (o : Options) (g : Glyph) : Option Hidden :=
+  match o.pageBox with
+  | some b => if g.offPage b then some .outsidePage else if g.visible then none else some .renderMode
+  | none => if g.visible then none else some .renderMode
+
+/-- A glyph shown with an invisible render mode is always flagged. -/
+theorem Options.hiddenWhy_isSome_of_invisible (o : Options) (g : Glyph) (h : g.visible = false) :
+    (o.hiddenWhy g).isSome := by
+  unfold Options.hiddenWhy
+  split <;> (try split) <;> simp_all
+
+/-- **The text holds no unflagged hidden glyph** (task 12.5): every glyph that layout keeps
+for the page text is either shown, or flagged `renderMode` (and only when invisible text is
+kept, `Options.includeInvisible`); a glyph outside the page box never is. So counting the
+`renderMode` glyphs of the text counts everything in it that the page does not show (as far
+as `Hidden` detects). -/
+theorem Options.keeps_hiddenWhy (o : Options) (g : Glyph) (h : o.keeps g = true) :
+    o.hiddenWhy g = none ∨ (o.hiddenWhy g = some .renderMode ∧ o.includeInvisible = true) := by
+  unfold Options.keeps at h
+  unfold Options.hiddenWhy
+  cases hp : o.pageBox with
+  | some b =>
+    rw [hp] at h
+    cases hv : g.visible <;> cases hi : o.includeInvisible <;> cases ho : g.offPage b <;>
+      simp_all
+  | none =>
+    rw [hp] at h
+    cases hv : g.visible <;> cases hi : o.includeInvisible <;> simp_all
 
 /-- A layout frame: the unit vector `(x, y)` of a baseline direction in page space
 (`Glyph.dirX`, `Glyph.dirY`). Lines are measured in the frame of their first glyph. -/
@@ -1309,6 +1391,62 @@ def layout (o : Options) (gs : List Glyph) : Array Line × String :=
   let (text, _) := lines.foldl (fun (acc : String × Option Line) l =>
     (acc.1 ++ lineSep o acc.2 l ++ lineText o l, some l)) ("", none)
   (lines, text)
+
+/-! ### Hidden text in the page text (task 12.5) -/
+
+/-- The number of characters of `lineText o l` that come from glyphs the page does not paint
+(`Glyph.visible` false: `Tr 3`/`Tr 7`), counted exactly as `lineText` builds the line
+(overprinted duplicates contribute nothing). -/
+def lineHiddenChars (o : Options) (l : Line) : Nat :=
+  let (n, _) := (lineOrder o l).foldl (fun (acc : Nat × Option Glyph) g =>
+    let own := if g.visible then 0 else g.text.length
+    match acc.2 with
+    | none => (acc.1 + own, some g)
+    | some p =>
+      match glyphSep o l.frame p g with
+      | none => acc
+      | some _ => (acc.1 + own, some g)) (0, none)
+  n
+
+/-- The number of characters of the page text (`layout o gs`, the `lines`) that the page does
+not paint (`lineHiddenChars`; separators are not counted). By `Options.keeps_hiddenWhy`,
+these are all the characters of the text whose glyphs are not visibly shown. -/
+def hiddenChars (o : Options) (lines : Array Line) : Nat :=
+  lines.foldl (fun n l => n + lineHiddenChars o l) 0
+
+/-- A maximal stretch of consecutive glyphs (content order) of one display item that is not
+visibly shown for one reason (`Options.hiddenWhy`). -/
+structure HiddenRun where
+  /-- Display-list index of the glyphs' item (`Glyph.item`). -/
+  item : Nat
+  /-- Why the glyphs are not shown. -/
+  why : Hidden
+  /-- Their text, concatenated (no separators). -/
+  text : String
+  /-- Number of glyphs. -/
+  glyphs : Nat
+  /-- Whether the page text contains them (`renderMode` glyphs under
+  `Options.includeInvisible`; never `outsidePage` ones, `Options.keeps_hiddenWhy`). -/
+  inText : Bool
+  deriving Repr, Inhabited, DecidableEq
+
+/-- **The hidden runs** of a glyph list (`PageText.shown`) under options `o`: consecutive
+glyphs of one item hidden for one reason are merged, in content order. -/
+def hiddenRuns (o : Options) (gs : List Glyph) : List HiddenRun :=
+  (gs.foldl (fun (acc : List HiddenRun) g =>
+    match o.hiddenWhy g with
+    | none => acc
+    | some w =>
+      match acc with
+      | r :: rest =>
+        if r.item == g.item && r.why == w then
+          { r with text := r.text ++ g.text, glyphs := r.glyphs + 1 } :: rest
+        else
+          { item := g.item, why := w, text := g.text, glyphs := 1,
+            inText := w == .renderMode && o.includeInvisible } :: acc
+      | [] =>
+        [{ item := g.item, why := w, text := g.text, glyphs := 1,
+           inText := w == .renderMode && o.includeInvisible }]) []).reverse
 
 /-! ## `/ActualText` (task 6.8d; heuristic as MuPDF, tested) -/
 
@@ -1666,6 +1804,16 @@ def extractDocPage (limits : Limits) (doc : Doc) (page : Page) (budget : Budget)
       (joinParts parts) b (o.forPage page) st
     (.ok pt, b)
 
+/-- The hidden runs (task 12.5, `hiddenRuns`) of a page extracted by `extractDocPage` with
+options `o`: its shown glyphs under the same options, page box included (`Options.forPage`). -/
+def PageText.hiddenRunsOn (pt : PageText) (page : Page) (o : Options := {}) : List HiddenRun :=
+  hiddenRuns (o.forPage page) pt.shown
+
+/-- The characters of a page's text that the page does not paint (task 12.5, `hiddenChars`
+over its lines, laid out with options `o`). -/
+def PageText.hiddenChars (pt : PageText) (o : Options := {}) : Nat :=
+  Text.hiddenChars o pt.lines
+
 /-! ## Spot checks -/
 
 section Tests
@@ -1747,6 +1895,29 @@ private def hello : ByteArray := page helv "BT /F1 12 Tf 72 700 Td (Hello World)
 #guard txt (page helv "BT /F1 10 Tf 3 Tr 72 700 Td (ocr) Tj ET" [helvObj]) == "ocr"
 #guard txt (page helv "BT /F1 10 Tf 3 Tr 72 700 Td (ocr) Tj ET" [helvObj])
   { includeInvisible := false } == ""
+-- task 12.5: a render-mode-3 glyph is flagged (`visible` false, `hiddenWhy` render mode),
+-- counted among the text's hidden characters and reported as a hidden run; a run above the
+-- CropBox (still `Tr 3`: the text state outlives `ET`) is reported as outside the page first
+-- and is not in the text
+private def ocrPage : ByteArray :=
+  page helv ("BT /F1 10 Tf 72 700 Td (seen) Tj ET BT /F1 10 Tf 3 Tr 72 680 Td (ocr) Tj ET " ++
+    "BT /F1 12 Tf 72 900 Td (Up) Tj ET") [helvObj]
+private def letterBox : Option (Fixed × Fixed × Fixed × Fixed) :=
+  some (Fixed.zero, Fixed.zero, Fixed.ofInt 612, Fixed.ofInt 792)
+#guard ((ext ocrPage).map fun pt => pt.glyphs.map (·.visible)) ==
+  some [true, true, true, true, false, false, false, false, false]
+#guard ((ext ocrPage).map fun pt => pt.glyphs.map ({ pageBox := letterBox } : Options).hiddenWhy) ==
+  some [none, none, none, none, some .renderMode, some .renderMode, some .renderMode,
+    some .outsidePage, some .outsidePage]
+#guard txt ocrPage == "seen\nocr"
+#guard ((ext ocrPage).map (·.hiddenChars)) == some 3
+#guard ((ext ocrPage { includeInvisible := false }).map (·.hiddenChars)) == some 0
+#guard ((ext ocrPage).map fun pt => (hiddenRuns { pageBox := letterBox } pt.shown).map
+  fun r => (r.why, r.text, r.glyphs, r.inText)) ==
+  some [(.renderMode, "ocr", 3, true), (.outsidePage, "Up", 2, false)]
+#guard ((ext ocrPage).map fun pt => (hiddenRuns { pageBox := letterBox, includeInvisible := false }
+  pt.shown).map (·.inText)) == some [false, false]
+#guard ((ext hello).map fun pt => hiddenRuns { pageBox := letterBox } pt.shown) == some []
 -- task 6.8b: glyphs entirely outside the CropBox (here the MediaBox [0 0 612 792]) are left out
 -- of the text one by one ("Edg" past x = 612: MuPDF's FZ_STEXT_CLIP), but kept in `glyphs`
 #guard txt (page helv "BT /F1 12 Tf 72 900 Td (Above) Tj ET BT /F1 12 Tf 72 700 Td (In) Tj ET"
