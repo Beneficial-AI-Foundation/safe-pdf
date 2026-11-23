@@ -34,7 +34,7 @@ Design document: Plan.md
 | 8 | `phase-8-shell` | `phase-7-raster` | [#9](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/9) | merged (2026-11-23) |
 | 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | merged (2026-11-23) |
 | 10 | `phase-10-polish` | `origin/main` | [#15](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/15) | ready (2026-11-23; M10 ticked; the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from main, where the whole stack #1–#10 merged 2026-11-23) |
-| 11 | `phase-11-macos-shell` | `phase-10-polish` | — | none |
+| 11 | `phase-11-macos-shell` | `phase-10-polish` | [#16](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/16) | draft |
 | 12 | `phase-12-hardening` | `phase-11-macos-shell` | — | none |
 States: none · draft · awaiting-ci · ready (<date>) · changes-requested · merged · closed.
 
