@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6, 9.r8, 9.r12; docs/viewer.md). Run from the repo root.
+# Smoke test of the native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.5g, 9.6–9.9, 9.11, 9.r1, 9.r2, 9.r3, 9.r4, 9.r6, 9.r8, 9.r9, 9.r12; docs/viewer.md). Run from the repo root.
 #   scripts/viewer-smoke.sh [--no-build]
 #
 # Builds `viewer` (needs Tcl/Tk development files), then runs it headless in smoke mode
@@ -23,7 +23,7 @@
 #   1g. the toolbar and sidebar after PDF.js (SAFEPDF_VIEWER_SMOKE_MODE=toolbar) on that PDF and
 #      on the two-page one without an outline: page field, arrows, zoom drop-down, overflow
 #      menu, tool states (Highlight enabled since 9.4, the others disabled), sidebar shown/hidden
-#      with its toggle, disclosure triangles (9.7);
+#      with its toggle (also without an outline since 9.r9: thumbnails), disclosure triangles (9.7);
 #   1h. highlights and notes on the text PDF (SAFEPDF_VIEWER_SMOKE_MODE=marks): highlight,
 #      recolour, delete (pixel colours), a note at a point with its popup, marks kept across
 #      zoom, rotation and page changes (9.4);
@@ -92,10 +92,14 @@
 #      text widget, Cancel and the window's close button delete an empty new note (no icon
 #      left), save the typed text of a new one, keep a stored text; an empty highlight comment
 #      goes, the highlight stays (9.r12);
+#   1u. the thumbnails panel (SAFEPDF_VIEWER_SMOKE_MODE=thumbs) on generated files: view buttons
+#      per content, lazy rendering, click / keyboard / highlight following the main view, the
+#      image budget, rotation, /PageMode /UseThumbs, the toggle without an outline; and
+#      (=thumbperf, reported only) timings and memory on the corpus paper when present (9.r9);
 #   1v. attachments panel (SAFEPDF_VIEWER_SMOKE_MODE=attach): the panel lists a generated
-#      file's attachments (name tree with kids + file attachment annotation), Save attachment
-#      as... writes exactly the decoded bytes, refused targets, UseAttachments opens the panel,
-#      an icon click selects its row, no Attachments button without attachments (9.r10);
+#      file's attachments (name tree with kids + file attachment annotation) without decoding,
+#      Save attachment as... writes exactly the decoded bytes, refused targets, UseAttachments
+#      opens the panel, an icon click selects its row, no Attachments button without (9.r10);
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
@@ -431,11 +435,11 @@ want = {
     "cascades": "File|Edit|View|Go",
     "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
     "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
-    "entries.menubar.view": "Outline|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
+    "entries.menubar.view": "Sidebar|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
-                    "Back=disabled,Forward=disabled,Copy=disabled,Outline=normal",
+                    "Back=disabled,Forward=disabled,Copy=disabled,Sidebar=normal",
     "toolbar-prev-page1": "disabled",
     "page-after-next": "2",
     "page-after-last": "3",
@@ -543,8 +547,9 @@ want_nav = dict(common, **{
 })
 want_two = dict(common, **{
     "pages": "2", "has-outline": "false", "sidebar-shown": "false", "panes": ".v",
-    "toggle-mapped": "0",
-    "layout": ".bar.l=.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of,.bar.vmode " + layout_m + " " + layout_r,
+    "toggle-mapped": "1",
+    "toggle-pressed0": "0", "after-toggle": "true .ol .v 1", "after-toggle2": "false .v",
+    "layout": ".bar.l=.bar.sidebar,.bar.s0,.bar.prev,.bar.s1,.bar.next,.bar.pg,.bar.of,.bar.vmode " + layout_m + " " + layout_r,
     "field0": "1", "of0": "of 2",
     "after-next": "2 2 of 2", "after-next-prev": "1 1", "after-prev-at-start": "1 1",
     "entry-last": "2 2", "entry-999": "2 2", "entry-abc": "2 2", "entry-first": "1 1",
@@ -555,7 +560,7 @@ errs = []
 for name, v, want in (("nav", nav, want_nav), ("two", two, want_two)):
     errs += ["%s %s: %r, expected %r" % (name, k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
     if name == "two":
-        errs += ["two: unexpected %s" % k for k in ("child-visible", "after-toggle") if k in v]
+        errs += ["two: unexpected %s" % k for k in ("child-visible",) if k in v]
     # Zoom: label | radio value | shown percentage.
     zw = {"zoom-page-width": ("Page Width", "page-width", None),
           "zoom-page-fit": ("Page Fit", "page-fit", None),
@@ -1713,8 +1718,8 @@ done
 #     `Viewer.smokeOpenSettings`), in the real default view: generated five-page PDFs with an
 #     outline, each opened in turn through the File → Open path: every /PageLayout (view mode
 #     and the View menu's variables; TwoColumnRight/TwoPageRight put page 1 alone on the
-#     right), /PageMode UseOutlines / UseNone / UseThumbs (outline open / closed / open with a
-#     "thumbnails panel not available yet" note), /OpenAction [page 3 /XYZ 0 792 1.5] (page 3
+#     right), /PageMode UseOutlines / UseNone / UseThumbs (outline open / closed / thumbnails
+#     open, task 9.r9), /OpenAction [page 3 /XYZ 0 792 1.5] (page 3
 #     at 150 %, its top at the window top), the user's Two Pages + Actual Size kept by the
 #     reopen after Save (`keepView`), [p1 /Fit] (Page Fit), a GoTo to a named destination in a
 #     /Names /Dests tree (page 4, Page Width), JavaScript and URI open actions (ignored, noted),
@@ -1798,7 +1803,9 @@ for l in ["TwoColumnRight", "TwoPageRight"]:
     if not rows.get("layout-" + l, {}).get("xs", "").startswith("0@237"):
         errs.append("%s: page 1 not alone on the right: %r" % (l, rows.get("layout-" + l, {}).get("xs")))
 want("mode-UseOutlines", outline="true"); want("mode-UseNone", outline="false")
-want("mode-UseThumbs", outline="true"); has("mode-UseThumbs", "status", "thumbnails panel not available yet")
+want("mode-UseThumbs", outline="true", panel="thumbnails")
+if "not available" in rows.get("mode-UseThumbs", {}).get("status", ""): errs.append("mode-UseThumbs: note left")
+want("mode-UseOutlines", panel="outline"); want("full-escape", panel="outline")
 want("xyz", page="3", zoom="150%", off="0", view="vertical,none")
 want("xyz-user", view="page,odd", zoom="Actual Size")
 want("xyz-keep", view="page,odd", zoom="Actual Size")
@@ -1867,6 +1874,107 @@ for e in errs: print("FAIL: noteclose: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-noteclose/noteclose.txt" || fail=1
 
+# 1u. Thumbnails panel (task 9.r9, SAFEPDF_VIEWER_SMOKE_MODE=thumbs, `Viewer.smokeThumbs`) on
+#     generated files: th-outline.pdf (60 pages, an outline, page 5 /Rotate 90) opens with the
+#     outline and both view buttons (Thumbnails, Document outline); the Thumbnails button shows
+#     the panel with only the visible thumbnails and the margin rendered (lazy); a click on
+#     thumbnail 3 goes to page 3; Go to page 40 moves the highlight (scrolled into view); Down,
+#     Down, Return in the panel go to page 42; the panel scrolled to the end keeps at most the
+#     budget of images; a rotation lays the thumbnails out rotated; th-thumbs.pdf
+#     (/PageMode /UseThumbs, no outline) opens with the thumbnails, only the Thumbnails button,
+#     no "not available" note; th-plain.pdf (3 pages, nothing) opens closed with the sidebar
+#     toggle shown, and the toggle opens the thumbnails.
+mkdir -p "$work/th"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(n, cat, outline, rot=()):
+    kids = " ".join("%d 0 R" % (10 + 2 * i) for i in range(n))
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R %s%s >>" % ("/Outlines 3 0 R " if outline else "", cat),
+            2: "<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 612 792] >>" % (kids, n)}
+    if outline:
+        objs[3] = "<< /Type /Outlines /First 4 0 R /Last 5 0 R /Count 2 >>"
+        objs[4] = "<< /Title (Start) /Parent 3 0 R /Next 5 0 R /Dest [10 0 R /Fit] >>"
+        objs[5] = "<< /Title (Middle) /Parent 3 0 R /Prev 4 0 R /Dest [%d 0 R /Fit] >>" % (10 + 2 * (n // 2))
+    for i in range(n):
+        r = " /Rotate 90" if i in rot else ""
+        objs[10 + 2 * i] = "<< /Type /Page /Parent 2 0 R /Contents %d 0 R%s >>" % (11 + 2 * i, r)
+        c = "0.%d g 72 %d 300 200 re f 0 0 1 rg 400 600 100 100 re f" % (1 + i % 8, 72 + 8 * i)
+        objs[11 + 2 * i] = "<< /Length %d >>\nstream\n%s\nendstream" % (len(c), c)
+    body, offs = b"%PDF-1.7\n", {}
+    for k in sorted(objs):
+        offs[k] = len(body)
+        body += ("%d 0 obj\n%s\nendobj\n" % (k, objs[k])).encode("latin-1")
+    x, size = len(body), max(objs) + 1
+    body += ("xref\n0 %d\n" % size).encode()
+    for k in range(size):
+        body += (b"%010d 00000 n \n" % offs[k]) if k in offs else b"0000000000 65535 f \n"
+    body += ("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, x)).encode()
+    return body
+open(out + "/th-outline.pdf", "wb").write(pdf(60, "", True, rot=(4,)))
+open(out + "/th-thumbs.pdf", "wb").write(pdf(60, "/PageMode /UseThumbs", False))
+open(out + "/th-plain.pdf", "wb").write(pdf(3, "", False))
+' "$work/th"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=thumbs \
+  run_viewer "$work/out-th" "$work/th/th-outline.pdf" || true
+cut -c1-220 "$work/out-th/thumbs.txt" 2>/dev/null || true
+python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: thumbs: no thumbs.txt", file=sys.stderr); sys.exit(1)
+rows = {}
+for l in lines:
+    name, _, rest = l.partition(": ")
+    head, _, status = rest.partition(" status=")
+    d = dict(p.split("=", 1) for p in re.split(r" (?=[a-z0-9-]+=)", head) if "=" in p)
+    d["status"] = status
+    d["raw"] = rest
+    rows[name] = d
+errs = []
+def want(name, **kv):
+    r = rows.get(name)
+    if r is None: errs.append("%s: missing" % name); return
+    for k, v in kv.items():
+        k = k.replace("_", "-")
+        if r.get(k) != v: errs.append("%s: %s = %r, want %r" % (name, k, r.get(k), v))
+def num(name, k): return int(rows.get(name, {}).get(k, "-1"))
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+want("outline-open", shown="true", panel="outline", buttons="thumbnails,outline", toggle="1",
+     head="Document outline", rendered="0")
+want("thumbs-open", shown="true", panel="thumbnails", buttons="thumbnails,outline", head="Thumbnails",
+     slots="60", marked="1")
+vis, ren = num("thumbs-open", "visible"), num("thumbs-open", "rendered")
+if not (0 < vis and 0 < ren <= vis + 2 * 3 and ren < 60):
+    errs.append("thumbs-open: not lazy: visible=%d rendered=%d" % (vis, ren))
+if rows.get("rot-slot", {}).get("raw") != "98x76 98x127": errs.append("rot-slot: %r" % rows.get("rot-slot", {}).get("raw"))
+want("click-3", page="3", marked="3")
+want("main-40", page="40", marked="40")
+f = num("main-40", "first-visible")
+if not (f <= 40 < f + num("main-40", "visible")): errs.append("main-40: thumbnail 40 not in view (first %d)" % f)
+want("keys-down2", page="40", sel="42")
+want("keys-return", page="42", marked="42", sel="0")
+if num("scrolled-end", "max-have") > 40 or num("scrolled-end", "have") > 40:
+    errs.append("scrolled-end: over the budget: %r" % rows.get("scrolled-end", {}).get("raw"))
+if num("scrolled-end", "photos") != num("scrolled-end", "have"):
+    errs.append("scrolled-end: photos %d != kept %d" % (num("scrolled-end", "photos"), num("scrolled-end", "have")))
+want("rotated", slots="60", marked="42"); want("rotated-slots", slot1="98x76", slot5="98x127")
+want("usethumbs", shown="true", panel="thumbnails", buttons="thumbnails", toggle="1", head="Thumbnails", page="1")
+if "not available" in rows.get("usethumbs", {}).get("status", "x not available"): errs.append("usethumbs: note %r" % rows.get("usethumbs", {}).get("status"))
+if not (0 < num("usethumbs", "rendered") < 60): errs.append("usethumbs: rendered %d" % num("usethumbs", "rendered"))
+want("plain", shown="false", buttons="", toggle="1")
+want("plain-toggle", shown="true", panel="thumbnails", buttons="thumbnails", rendered="3", have="3")
+want("plain-toggle2", shown="false")
+for e in errs: print("FAIL: thumbs %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-th/thumbs.txt" || fail=1
+# Performance (task 9.r9, SAFEPDF_VIEWER_SMOKE_MODE=thumbperf), reported only: the
+# git-ignored corpus paper when present.
+for f in corpus/files/arxiv-1706.03762.pdf; do
+  [ -f "$f" ] || continue
+  SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=thumbperf run_viewer "$work/out-thperf" "$f" || true
+  tr '\n' ' ' < "$work/out-thperf/thumbperf.txt" 2>/dev/null | sed 's/^/thumbperf: /'; echo
+done
+
 # 1v. Attachments panel (task 9.r10, SAFEPDF_VIEWER_SMOKE_MODE=attach, `Viewer.smokeAttach`)
 #     on generated PDFs: att.pdf (/PageMode /UseAttachments, an outline, /EmbeddedFiles tree
 #     with kids: hello.txt (plain, /Desc, /Params) and data.bin (FlateDecode, no /Size), an
@@ -1876,8 +1984,9 @@ sys.exit(1 if errs else 0)
 #     every embedded file (compared with the generator's payloads and with pdfdetach when
 #     installed), proposes the sanitized name (evil_name.txt), refuses the external one, the
 #     opened PDF (unchanged), a read-only file (unchanged), a read-only folder and a folder;
-#     a click on the annotation's icon opens the panel on its row; outline.pdf (no
-#     attachments) has no Attachments button; noatt.pdf (neither) has no sidebar toggle.
+#     listing decodes nothing (data.bin: "?" until its tooltip probe); a click on the
+#     annotation's icon opens the panel on its row; outline.pdf and noatt.pdf (no
+#     attachments) have no Show Attachments button.
 mkdir -p "$work/att" "$work/out-att"
 python3 -I -c '
 import sys, zlib
@@ -1948,8 +2057,11 @@ errs = []
 def want(k, part):
     if part not in v.get(k, ""): errs.append("%s = %r lacks %r" % (k, v.get(k), part))
 if "done" not in lines: errs.append("not done: %r" % lines[-1:])
-want("start", "shown=true panel=attachments switch=1 outlineBtn=1 attBtn=1 list=1 toggle=1 atts=4")
-want("rows", "data.bin|10 KB;hello.txt|26 B;external.pdf|—;../../etc/evil:name.txt|16 B")
+want("start", "shown=true panel=attachments outlineBtn=1 attBtn=1 list=1 toggle=1 atts=4")
+want("rows", "data.bin|?;hello.txt|26 B;external.pdf|\u2014;../../etc/evil:name.txt|16 B")
+want("tip0", "Stored: ")
+want("tip0", "(compressed)")
+want("probed", "data.bin|10 KB;hello.txt|26 B")
 want("tip1", "A greeting / Type: text/plain / Created: 2025-11-23 10:15 / Modified: 2025-11-24")
 read = lambda p: open(p, "rb").read()
 expect = {0: "data", 1: "hello", 3: "evil"}
@@ -1971,17 +2083,17 @@ if read(outd + "/ro.bin") != b"read-only\n": errs.append("the read-only file cha
 if os.path.exists(outd + "/rodir/x.bin"): errs.append("written into the read-only folder")
 want("select-a1", "attachment hello.txt (26 B)")
 want("menu", "Save attachment as…")
-want("switch-outline", "shown=true panel=outline switch=1")
+want("switch-outline", "shown=true panel=outline outlineBtn=1 attBtn=1")
 want("switch-outline", "list=0")
-want("switch-attachments", "panel=attachments switch=1")
+want("switch-attachments", "panel=attachments outlineBtn=1 attBtn=1")
 want("switch-attachments", "list=1")
 want("toggle-off", "shown=false panel=attachments")
 want("toggle-on", "shown=true panel=attachments")
 want("icon", "shown=true panel=attachments")
 want("icon", "sel=a3 entry=3")
-want("outline", "shown=true panel=outline switch=0 outlineBtn=0 attBtn=0 list=0 toggle=1 atts=0")
+want("outline", "shown=true panel=outline outlineBtn=1 attBtn=0 list=0 toggle=1 atts=0")
 want("noatt", "shown=false")
-want("noatt", "attBtn=0 list=0 toggle=0 atts=0")
+want("noatt", "attBtn=0 list=0 toggle=1 atts=0")
 d = att + "/detach"
 if os.path.isdir(d):
     for k, name in [(0, "data.bin"), (1, "hello.txt")]:

@@ -46,12 +46,15 @@ a stream reference); the bytes are only decoded through the filter pipeline.
   reference to a stream. Its dictionary gives `/Subtype` (a name: the MIME type, sanitized),
   `/Params /Size` (a non-negative integer: the declared size), `/Params /CreationDate` and
   `/ModDate` (dates `D:YYYYMMDDHHmmSS…` shown as `YYYY-MM-DD HH:mm`; anything else sanitized
-  as is). No `/EF`: `Problem.notEmbedded`; `/EF` without a reference: `badEF`; the reference
+  as is), `/DL` and the stored length (`listedSize`: a size known without decoding
+  — `/Params /Size`, else `/DL`, else the stored length of an unfiltered stream). No `/EF`:
+  `Problem.notEmbedded`; `/EF` without a reference: `badEF`; the reference
   is not a stream or cannot be fetched: `notAStream`.
 * A6. **Decoding** (`decode`): the stream through `Doc.decodeStreamOf` (the filter chain under
   `limits`, with a fresh document budget `Budget.init` per call). A decompression bomb is
   `Error.limitExceeded`; a chain ending in an image codec is `unsupported` (an embedded file
-  is bytes, not an image). The size shown is `/Params /Size`, else the decoded length.
+  is bytes, not an image). The viewer lists `listedSize` without decoding and decodes only
+  on demand (saving, a tooltip probe under lower limits).
 
 ## Work bounds
 
@@ -218,6 +221,12 @@ structure Attachment where
   desc : Option String := none
   /-- `/Params /Size`: the declared (decoded) size. -/
   size : Option Nat := none
+  /-- `/DL` of the stream: the decoded length it declares (ISO 32000-2 §7.3.8.2). -/
+  dl : Option Nat := none
+  /-- Bytes stored in the file for the stream (before its filters). -/
+  stored : Option Nat := none
+  /-- Whether the stream has a `/Filter` (else the stored bytes are the file). -/
+  filtered : Bool := false
   /-- `/Subtype` of the stream: the MIME type, sanitized. -/
   mime : Option String := none
   /-- `/Params /CreationDate`. -/
@@ -261,10 +270,10 @@ def strOf : PdfObject → Option (List UInt8)
   | .string s => some s
   | _ => none
 
-/-- The stream dictionary of object `n g`, if it is a stream. -/
-def streamDict (doc : Doc) (limits : Limits) (n g : Nat) : Option Dict :=
+/-- The stream dictionary of object `n g` and its stored data size, if it is a stream. -/
+def streamDict (doc : Doc) (limits : Limits) (n g : Nat) : Option (Dict × Nat) :=
   match doc.file.getObject limits n g with
-  | .ok (.stream s) => some s.dict
+  | .ok (.stream s) => some (s.dict, s.data.size)
   | _ => none
 
 /-- The stream reference of an `/EF` value (rule A5). -/
@@ -281,19 +290,26 @@ def efRef : PdfObject → Except Problem (Nat × Nat)
 def withStream (doc : Doc) (limits : Limits) (e : Attachment) (n g : Nat) : Attachment :=
   match streamDict doc limits n g with
   | none => { e with problem := some .notAStream }
-  | some sd =>
+  | some (sd, stored) =>
+    let nonNeg : PdfObject → Option Nat := fun
+      | .int i => if 0 ≤ i then some i.toNat else none
+      | _ => none
+    let dl := nonNeg (getL doc limits sd "DL")
+    let filtered := match raw sd "Filter" with
+      | none | some .null => false
+      | some (.array []) => false
+      | some _ => true
     let mime := match getL doc limits sd "Subtype" with
       | .name nm => some (displayText 100 nm.bytes)
       | _ => none
     let (size, created, modified) := match getL doc limits sd "Params" with
       | .dict p =>
-        (match getL doc limits p "Size" with
-          | .int i => if 0 ≤ i then some i.toNat else none
-          | _ => none,
+        (nonNeg (getL doc limits p "Size"),
          (strOf (getL doc limits p "CreationDate")).map dateText,
          (strOf (getL doc limits p "ModDate")).map dateText)
       | _ => (none, none, none)
-    { e with stream := some (n, g), mime, size, created, modified }
+    { e with stream := some (n, g), mime, size, created, modified, dl, stored := some stored,
+             filtered }
 
 /-- The entry of a file specification value `fs` (resolved one level), with `key` the
 name-tree key if any (rules A3–A5). `none`: not a file specification (counted). -/
@@ -425,6 +441,11 @@ def decode (doc : Doc) (limits : Limits) (e : Attachment) : Except Error ByteArr
     | .error err => .error err
     | .ok (.data b) => .ok b
     | .ok (.image _ _ _) => .error (.unsupported "an image filter on an embedded file")
+
+/-- The size known without decoding (rule A6): `/Params /Size`, else the stream's `/DL`, else
+the stored length of an unfiltered stream. -/
+def listedSize (e : Attachment) : Option Nat :=
+  e.size.orElse fun _ => e.dl.orElse fun _ => if e.filtered then none else e.stored
 
 /-- The size shown for an entry (rule A6): `/Params /Size`, else the decoded length when it
 decodes. -/

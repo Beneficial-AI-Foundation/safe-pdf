@@ -109,7 +109,7 @@ top of the window, on macOS it is the system menu bar) duplicates the toolbar an
 The model is Tk-free: `SafePdf/Shell/App/Menu.lean` lists the commands (`Menu.Cmd`: label,
 accelerator text, the constant Tcl script that runs it, an enabled rule) and the menus; the
 viewer builds the Tk menus from it (`Viewer.buildMenus`) and after every event sets the
-`-state` of each entry and of the toolbar buttons Prev/Next/Back/Forward/Outline whose rule
+`-state` of each entry and of the toolbar buttons Prev/Next/Back/Forward/Sidebar whose rule
 changed (`Viewer.syncMenus`, over `Toolbar.targets`/`Toolbar.states`: menubar entries, the
 toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the same commands.
 
@@ -117,16 +117,16 @@ toolbar's overflow menu and its buttons). The toolbar (9.7, below) reuses the sa
 |---|---|
 | File | Open… (Ctrl+O), Save (Ctrl+S), Save As… (Ctrl+Shift+S), Import annotations…, Export annotations… (XFDF, 9.11), Close (Ctrl+W), Quit (Ctrl+Q) |
 | Edit | Copy (Ctrl+C), Select all (Ctrl+A), Highlight selection (H), Highlight colour ▸ (five colours), Add note…, Delete mark (Delete), Highlight tool (check, 9.8), Show all highlights (check, 9.8), Find… (Ctrl+F) |
-| View | Outline (F9, a check entry showing whether the panel is open), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`), then two radio groups (9.3): Page Scrolling / Vertical Scrolling, No Spreads / Odd Spreads / Even Spreads |
+| View | Sidebar (F9, a check entry showing whether the sidebar is open; *Outline* before 9.r9), Zoom in (`+`), Zoom out (`-`), Actual size (`0`), Fit page (`f`), Fit width (`w`), Rotate right (`r`), Rotate left (`R`), then two radio groups (9.3): Page Scrolling / Vertical Scrolling, No Spreads / Odd Spreads / Even Spreads |
 | Go | Previous page (PageUp), Next page (PageDown), First page (Home), Last page (End), Go to page… (Ctrl+G), Back (Alt+Left), Forward (Alt+Right) |
 
 Disabled: everything but Open… and Quit without a document; Save without unsaved marks; Copy and Highlight selection
 without a selection; Delete mark without a selected mark;
-Outline when the document has none; Previous/First on the first page (spread), Next/Last on the
+Previous/First on the first page (spread), Next/Last on the
 last (spread);
 Back/Forward with an empty history. The keys stay; a menu accelerator is only a label (also
 on macOS, where the accelerators read ⌘O, ⌘S, … — see Keys). The
-Outline command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
+Sidebar command is also the toolbar's sidebar button (9.7). *Close* empties the window (as
 when started without a file).
 
 ## Toolbar and sidebar (9.7)
@@ -140,8 +140,8 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
 `SafePdf/Shell/App/Toolbar.lean` and `SafePdf/Shell/App/Sidebar.lean` (`#guard` checks).
 
 * **Toolbar** (`.bar`, 40 px, background `#f9f9fa`, a 1 px line below; `Toolbar.layout`):
-  * *left*: the sidebar toggle (shown only when the document has an outline; drawn pressed
-    while the sidebar is open), ∧ / ∨ previous / next page (disabled on the first / last page),
+  * *left*: the sidebar toggle (shown with a document — since 9.r9 every document has
+    thumbnails; drawn pressed while the sidebar is open), ∧ / ∨ previous / next page (disabled on the first / last page),
     the page field and its label. The field shows the page number and `of N`, or, when the
     document has page labels, the label and `(k of N)` (as PDF.js). **Enter** jumps to an exact
     label, else a page number `1..N`, else a label ignoring case (`Toolbar.pageEntry`; the jump
@@ -198,24 +198,52 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   every view mode. Smoke case 1q samples the page frame's canvas and screen x at every
   `<Configure>` and every 2 ms and requires just the start and the end value (before the fix:
   screen x 403 → 117 → 260 on closing, 260 → 531 → 396 on opening).
-* **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`): a white panel titled
-  *Document outline* on the `#f0f0f4` background. It **opens on load when the document has an
-  outline**, unless its `/PageMode` is `/UseNone` or `/FullScreen` (task 9.r8,
-  `Sidebar.shownOnLoad`); without an outline it stays closed and the toggle is hidden (F9 and View → Outline
-  do nothing then). The outline is a text widget drawn as a tree: one row per entry, indented
+* **Sidebar** (`.ol`, the left pane of the paned window, `Sidebar`; panels since 9.r9): a row
+  of small **view buttons** (`.ol.sw`, PDF.js's sidebar view buttons *Show Thumbnails*, *Show
+  Document Outline*, *Show Attachments*, *Show Layers*; the shown panel's button drawn
+  pressed) above a white panel with its heading (*Thumbnails*, *Document outline*) on the
+  `#f0f0f4` background. A button shows only when the document has that content
+  (`Sidebar.buttons`: thumbnails always, the outline when there is one; attachments since 9.r10 (see
+  *Attachments panel* below) when the document has some; layers come with task 9.r11b). The sidebar **opens on load as the document's
+  `/PageMode` says** (`Sidebar.onLoad`): `/UseThumbs` → thumbnails, `/UseOutlines` → the
+  outline, `/UseNone` and `/FullScreen` → closed; without a page mode the outline when there is
+  one, else closed. The toggle (F9, View → Sidebar, the toolbar button) works for every
+  document and reopens the last panel chosen while the document has it, else the outline, else
+  the thumbnails (`Sidebar.pick`). The panels are a list in `Sidebar.panels` (key, button path,
+  icon, tooltip, heading); in Tk each panel grids its widgets into row 1 of `.ol.p`
+  (`::safepdf::panelWidgets(KEY)`), `::safepdf::showPanel KEY TITLE` shows one and runs
+  `::safepdf::panelShown::KEY` when it exists — a new panel adds its `Sidebar.panels` entry,
+  its `Sidebar.Content` flag (set in `Viewer.contentOf`) and these two Tcl pieces.
+* **Outline panel**: a text widget drawn as a tree: one row per entry, indented
   20 px per level, long titles wrapped; entries with children have a disclosure triangle (▼
   open, ▶ closed; entries with a positive `/Count` start open); clicking a triangle collapses
   or expands the subtree (`Sidebar.toggle`: the rows of a closed entry's subtree are elided
   through one tag per ancestor), clicking a title jumps to its destination and marks the row;
   rows highlight under the pointer. The scroll bar appears only when the tree does not fit.
-  Since 9.r10 the sidebar also holds the **attachments panel** (see *Attachments panel*
-  below); the toggle, F9 and View → Outline work when the document has an outline **or**
-  attachments.
+* **Thumbnails panel** (9.r9, after PDF.js's `pdf_thumbnail_viewer.js` / `.thumbnail`; drawn
+  with a Tk canvas `.ol.th`, nothing copied): one image per page, 98 px wide
+  (`Sidebar.thumbW`, PDF.js's `THUMBNAIL_WIDTH`), the height from the page's crop box with
+  its `/Rotate` and the user rotation (`Sidebar.thumbSize`, kept between 8 and 392 px), on a
+  white frame with the page number (or page label) below, in a vertical list
+  (`Sidebar.thumbLayout`). The current page's thumbnail has a rounded grey background and
+  follows the main view (scrolled into view when the page changes, PDF.js's
+  `scrollThumbnailIntoView`). **Click** a thumbnail to go to its page (recorded in the
+  history, as a link); in the focused panel **Up / Down** move a blue focus ring, **Return**
+  goes there. Wheel, Button-4/5 and Tk 9 `<TouchpadScroll>` scroll the panel.
+  **Rendering is lazy and off the critical path**: only the visible thumbnails and 3 more on
+  each side (`Sidebar.thumbsWanted`) are rendered, by the same renderer at the thumbnail's
+  zoom (98 px / page width) on worker threads (`thumbSubmit`, at most 2 at once and only while
+  the page renders leave a slot of `maxJobs` free, so the main view goes first); results come
+  in through the same 15 ms `poll` as the pages. At most 40 thumbnail images are kept
+  (`Sidebar.thumbBudget`, ≈ 50 KB each); beyond that the ones farthest from the view are
+  dropped (`Sidebar.thumbEvict`) and rendered again when scrolled back to. Nothing is rendered
+  while the panel is hidden; a new document or rotation lays them out again. Thumbnails show
+  the page as the file has it (and saved marks being edited, `State.view`); unsaved
+  highlights are not composited into them.
 * **Page area**: background `#f0f0f4`, the page with a 1 px grey border.
 
-Not done (visible differences from the reference): no outline header buttons (thumbnail
-view, "find current outline item"; the attachments panel has plain switcher buttons since
-9.r10), no thumbnails; the menubar stays above the
+Not done (visible differences from the reference): no "find current outline item" button;
+the menubar stays above the
 toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
@@ -241,11 +269,12 @@ true)`. The window's size and position are the user's and are never reset.
 | `/OneColumn` | Vertical Scrolling, No Spreads |
 | `/TwoColumnLeft` / `/TwoColumnRight` | Two Pages Scrolling with Odd / Even Spreads |
 | `/TwoPageLeft` / `/TwoPageRight` | Two Pages with Odd / Even Spreads |
-| `/PageMode /UseNone` | outline closed |
-| `/UseOutlines` | outline open (when the file has one) |
-| `/UseAttachments` | the sidebar opens on the attachments panel (9.r10) when the file has attachments; else the outline rule (open with an outline) |
-| `/UseThumbs`, `/UseOC` | no such panels yet (tasks 9.r9, 9.r11): the outline rule (open with an outline) and the note "thumbnails / layers panel not available yet" |
-| `/FullScreen` | `wm attributes . -fullscreen 1`, outline closed, note "full screen (Escape leaves)"; Escape leaves and applies `/NonFullScreenPageMode` to the outline |
+| `/PageMode /UseNone` | sidebar closed |
+| `/UseOutlines` | sidebar open on the outline (when the file has one, else closed) |
+| `/UseThumbs` | sidebar open on the thumbnails (9.r9; every document has them) |
+| `/UseAttachments` | sidebar open on the attachments (9.r10) when the file has attachments; else the outline rule (open with an outline), no note |
+| `/UseOC` | no such panel yet (task 9.r11b): the outline rule (open with an outline) and the note "layers panel not available yet" (`Sidebar.missingNote`) |
+| `/FullScreen` | `wm attributes . -fullscreen 1`, sidebar closed, note "full screen (Escape leaves)"; Escape leaves and applies `/NonFullScreenPageMode` to the sidebar |
 | `/OpenAction` destination or `/S /GoTo` | page, position (`/XYZ` left/top, `/FitH` top, …: the page point at the window's top-left, as links) and zoom: `/XYZ` zoom > 0 → that percentage (clamped to 25–800 %), `null`/0 → Automatic Zoom stays; `/Fit`, `/FitB` → Page Fit; `/FitH`, `/FitBH` → Page Width; `/FitV`, `/FitBV` → Page Fit (best effort: no fit-height zoom; the same for portrait pages in a wide window); `/FitR` → Page Fit with the rectangle's left/top at the top-left (best effort). Named destinations through `/Dests` and `/Names /Dests`. |
 | `/OpenAction` JavaScript, URI, Launch, Named, GoToR, … | **never executed**; note "open action /KIND ignored (not executed)". `/Next` chains are not followed. |
 | `/HideToolbar`, `/HideMenubar`, `/HideWindowUI` | toolbar (`pack forget .bar`), menubar (`. configure -menu {}`), scroll bars (`grid remove .ys .xs`) hidden; note "the document hides parts of the window (Escape shows them)"; **Escape** shows them again (so a document can never lock the user out of the UI; the keys keep working meanwhile) |
@@ -253,7 +282,7 @@ true)`. The window's size and position are the user's and are never reset.
 | `/CenterWindow` | window centred on the screen |
 | `/DisplayDocTitle` | window title from `/Info /Title` (text string, control and bidi characters as spaces, ≤ 500 characters; XMP `dc:title` not read: no XMP parser) |
 | `/Direction /R2L` | spreads mirrored: the first page of a spread on the right (`View.mirrorPlace`); status "…, right to left"; keys and wheel unchanged |
-| `/NonFullScreenPageMode` | outline rule on leaving full screen |
+| `/NonFullScreenPageMode` | the page-mode rule above on leaving full screen |
 | print keys (`PrintScaling`, `Duplex`, `ViewArea`, …) | ignored |
 
 Invalid values (wrong type, unknown name, a destination outside the document or not found)
@@ -284,13 +313,18 @@ in its module doc), the panel's Tk-free model is `SafePdf/Shell/App/Attach.lean`
   (its page is noted). At most 1024 rows.
 * **A row**: the name — `/UF`, else `/F`, else the name-tree key; decoded as a text string,
   control characters, bidi overrides/isolates, LRM/RLM and line separators removed, at most
-  200 characters — and the size: `/Params /Size`, else the decoded length; `—` for an
-  external file reference (no `/EF`), `error` when the stream does not decode. Every
-  attachment is decoded once when the panel first shows (the filter chain under the viewer's
-  limits: a decompression bomb is a limit error on its row, nothing more). The **tooltip**
-  (600 ms over a row) shows the description (`/Desc`), the MIME type (`/Subtype`), creation and
-  modification dates (`/Params`), the page of its annotation and any problem or decoding
-  error. Selecting a row describes it in the status line.
+  200 characters — and the size **known without decoding** (`Attachments.listedSize`:
+  `/Params /Size`, else the stream's `/DL`, else the stored length of an unfiltered stream);
+  `?` for a compressed file of unknown size until it is decoded, `—` for an external file
+  reference (no `/EF`), `error` once decoding failed. **Listing decodes nothing**, so a large
+  attachment never stalls the window. A file is decoded only on demand: when it is saved
+  (the filter chain under the viewer's limits: a decompression bomb is a limit error in the
+  status line and its row), and when its **tooltip** opens (600 ms over a row; a probe under
+  the viewer's limits with the per-stream cap lowered to 16 MB, `Attach.probeLimit`: a larger
+  file shows `> 16 MB` and is decoded only when saved). The tooltip shows the description
+  (`/Desc`), the MIME type (`/Subtype`), creation and modification dates (`/Params`), the page
+  of its annotation, the stored size of a compressed file not decoded yet, and any problem or
+  decoding error. Selecting a row describes it in the status line.
 * **Save attachment as…**: double-click a row, press Return, or right-click (on aqua also
   Control-click / Button-2) → *Save attachment as…*. The bytes are decoded first (an error is
   reported, no dialog), then `tk_getSaveFile` (title *Save attachment as*, no `-filetypes`:
@@ -306,14 +340,14 @@ in its module doc), the panel's Tk-free model is `SafePdf/Shell/App/Attach.lean`
 * **Icons on the page**: a click inside a file attachment annotation's `/Rect` (drawn by the
   renderer from its appearance stream when it has one) opens the sidebar on the attachments
   panel and selects that row; it never opens the file.
-* **Panels**: with both an outline and attachments the sidebar shows a row of switcher
-  buttons (*Outline*, *Attachments*; `Sidebar.available`); a panel without content has no
-  button, a file with neither has no sidebar toggle. `/PageMode /UseAttachments` opens the
-  attachments panel (`Sidebar.panelOnLoad`). This is a minimal hook: task 9.r9 builds the
-  PDF.js switcher (Outline / Thumbnails / Attachments / Layers).
+* **Panel switcher** (9.r9's): the *Show Attachments* button shows only when the document
+  has attachments (`Sidebar.Content.hasAttachments`, set in `Viewer.contentOf`); the panel's
+  widgets are `.ol.at` / `.ol.as` (`::safepdf::panelWidgets(attachments)`,
+  `::safepdf::panelShown::attachments` for its scroll bar). `/PageMode /UseAttachments`
+  opens it (`Sidebar.onLoad`); without attachments the outline rule applies, with no note.
 
 Unverified (no Mac here): the secondary click on aqua (Button-2/3, Control-click), the
-`ttk::treeview` and Toolbutton look under the aqua theme, and `tk_getSaveFile` on aqua with an
+`ttk::treeview` look under the aqua theme, and `tk_getSaveFile` on aqua with an
 attachment name.
 
 ## Wheel scrolling across pages (9.2, 9.r1)
@@ -884,8 +918,8 @@ data comes from the verified navigation layer `Core.Doc.Nav` (task 4.2: visited 
 outline and name-tree cycles, every walk is bounded by the object count).
 
 * **Outline panel**: a tree in the left pane of a paned window (restyled after PDF.js in 9.7, see above; drag the sash to
-  resize). It opens automatically when the document has an outline; **F9**, the *Outline*
-  button or the right-button menu toggle it. Items come from `Nav.outline` (flat preorder list
+  resize). It opens automatically when the document has an outline (and no page mode says
+  otherwise); **F9**, the sidebar button or the right-button menu toggle the sidebar. Items come from `Nav.outline` (flat preorder list
   with depths; a depth more than one below the previous item is clamped so that every item has
   a parent), titles decoded as PDF text strings (`Links.textString`: UTF-16BE, UTF-8 or
   PDFDocEncoding; control and bidi-override characters become spaces; at most 500
@@ -928,7 +962,8 @@ outline and name-tree cycles, every walk is bounded by the object count).
 
 | Key / mouse | Action |
 |---|---|
-| `F9` | show / hide the outline panel |
+| `F9` | show / hide the sidebar (outline, thumbnails) |
+| click on a thumbnail; Up / Down + Return in the thumbnails | go to that page |
 | click on an outline item | go to its destination |
 | pointer over a link | hand cursor, target in the status line |
 | click on a link | internal: jump; URI: confirmation dialog (copy the address) |
@@ -954,10 +989,9 @@ links. Continuous scrolling: see *View modes (9.3)*.
 | `SafePdf/Shell/App/Save.lean` | Tk-free save flow (task 9.5c) with `#guard` checks: marks → `Core.Write.Annots.Mark`, PDF dates, reading our marks back from a document, the read-back check, default target, atomic write. |
 | `SafePdf/Shell/App/Bubble.lean` | Tk-free selection bubble and Highlight pop-over logic with `#guard` checks: bubble kinds and button layout after PDF.js (float bubble: Highlight and Add comment since 9.r4), placement at the selection's last point with clamping (`place_inside`), hit-testing, the colour picker, the pop-over layout and hits, thickness slider mapping, tool state (task 9.8). |
 | `SafePdf/Shell/App/Toolbar.lean` | Tk-free toolbar model after PDF.js with `#guard` checks: layout of the three groups, buttons and their enabled/visible rules, tools, overflow menu, all enabled-state targets, page-field text and parsing, zoom choices (labels, keys, Automatic Zoom rule) (task 9.7), the view-mode drop-down's choices (`ViewChoice`, theorems `ofModes_modes`, `modes_ofModes`; task 9.r4). |
-| `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; tests `Tests/OpenSettings.lean`. |
-| `SafePdf/Shell/App/Sidebar.lean` | Tk-free outline-sidebar model with `#guard` checks: when it shows (by page mode, 9.r8), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7); the panels with content and the one shown on load (9.r10). |
-| `SafePdf/Core/Doc/Attachments.lean` | Embedded files (task 9.r10; pure, total, bounded): the `/EmbeddedFiles` tree and `/FileAttachment` annotations, sanitized names and default file names, sizes, MIME types, dates, decoding under the limits; theorems `list_entries_le`, `clean_safe`, `clean_length_le`, `fileNameOf_noSlash`, `decode_size_le`; tests `Tests/Attachments.lean`. |
+| `SafePdf/Core/Doc/OpenSettings.lean` | The document's open settings (task 9.r8; pure, total, verified-core rules): `/PageLayout`, `/PageMode`, `/OpenAction` as a destination or GoTo only, `/ViewerPreferences`, `/Info /Title`; the zoom of a fit, the outline rule; theorems `read_dest_page`, `titleOf_le`, `zoomOf_percent_bounds`; | `SafePdf/Core/Doc/Attachments.lean` | Embedded files (task 9.r10; pure, total, bounded): the `/EmbeddedFiles` tree and `/FileAttachment` annotations, sanitized names and default file names, sizes, MIME types, dates, decoding under the limits; theorems `list_entries_le`, `clean_safe`, `clean_length_le`, `fileNameOf_noSlash`, `decode_size_le`; tests `Tests/Attachments.lean`. |
 | `SafePdf/Shell/App/Attach.lean` | Tk-free attachments-panel model with `#guard` checks: size column, tooltip, status text, refused save targets, the icon under a click (task 9.r10). |
+| `SafePdf/Shell/App/Sidebar.lean` | Tk-free sidebar model with `#guard` checks: the panel list and switcher buttons per content, the panel opened by page mode and by the toggle (9.r8, 9.r9), thumbnail sizes, layout, lazy band, eviction and keyboard steps (9.r9), tree rows (parents, ancestors, children), open/closed state, visible rows, triangles, indentation (task 9.7). |
 | `SafePdf/Shell/App/Viewer.lean` | State, menubar, toolbar and sidebar (built from the models), page layout on the canvas (9.3: slots, per-page photos, deferred rendering), scrolling/zoom/rotation/view-mode handlers, prefetch, selection/copy/search handlers and highlights, outline panel, link hover/activation, history, go-to bar, smoke mode. |
 | `SafePdf/Shell/App/Main.lean` | `main` of the `viewer` executable. |
 
@@ -1082,8 +1116,8 @@ back; Shift+wheel scrolls horizontally to the right edge and the page stays.
 The toolbar and sidebar (9.7) run in a fifth variant (`SAFEPDF_VIEWER_SMOKE_MODE=toolbar`,
 `Viewer.smokeToolbar`), once on the three-page labelled PDF with an outline and once on the
 two-page PDF without one. It checks: the packed widgets of the three toolbar groups (the
-sidebar toggle only with an outline); the sidebar open with an outline (panes `.ol .v`, toggle
-drawn pressed) and absent without (`.v`, toggle unmapped); the page field `i` / `(1 of 3)`
+sidebar toggle with any document since 9.r9); the sidebar open with an outline (panes `.ol .v`, toggle
+drawn pressed) and closed without (`.v`, the toggle opens it on the thumbnails); the page field `i` / `(1 of 3)`
 (labels) and `1` / `of 2`; generated clicks on ∨ and ∧ page and stop at the ends (∧ disabled on
 page 1); Enter in the field with the last page number jumps, `999` and `abc` revert to the
 current page, the first page's label jumps back, both jumps are in the history, leaving the
@@ -1301,7 +1335,8 @@ The `opensettings` case (9.r8, `Viewer.smokeOpenSettings`, script case 1s) runs 
 default view on generated five-page files with an outline, opened one after another with
 `openFile` (File → Open after its dialog), one line per file in `opensettings.txt`: every
 `/PageLayout` (state and View-menu variables; Even Spreads put page 1 alone on the right),
-`/PageMode` UseOutlines / UseNone / UseThumbs (outline open / closed / open + note),
+`/PageMode` UseOutlines / UseNone / UseThumbs (outline open / closed / thumbnails open, no
+note since 9.r9),
 `/OpenAction [p3 /XYZ 0 792 1.5]` (page 3 at 150 %, its top at the window top), then Two Pages
 + Actual Size chosen and the file reopened with `keepView` (both kept), `[p1 /Fit]` + UseOutlines
 (Page Fit, outline), a GoTo to a named destination in a `/Names /Dests` tree (page 4, Page
@@ -1312,6 +1347,33 @@ scroll bars gone, title from `/Info /Title`; Escape brings them back), TwoPageLe
 Escape leaves full screen and opens it), FitWindow + CenterWindow at zoom 0.5 (window
 resized and centred), and last a file without settings: Vertical Scrolling, Automatic Zoom,
 page 1, outline, toolbar, its file name as title.
+
+The `thumbs` case (9.r9, `Viewer.smokeThumbs`, case 1u) runs on generated files, one line
+per step in `thumbs.txt` (`Viewer.thumbRow`: sidebar shown, panel, mapped view buttons,
+toggle, heading, thumbnails laid out / rendered / kept, visible, highlighted, selected, page,
+`::safepdf::thN` photos): `th-outline.pdf` (60 pages, an outline, page 5 `/Rotate 90`) opens
+on the outline with the Thumbnails and Document outline buttons and no thumbnail rendered; the
+Thumbnails button shows 60 frames with only the visible thumbnails plus the 3-page margin
+rendered (9 of 60 in the 1200×960 window); page 5's slot is 98×76 (rotated), page 1's
+98×127; a generated click on thumbnail 3 goes to page 3; Go to page 40 highlights thumbnail
+40 and scrolls it into view; Down, Down move the selection to 42 (the page stays 40), Return
+goes to 42; the panel scrolled to the end in ten steps never keeps more than 40 images (photos
+= kept); Rotate right lays the 60 thumbnails out rotated (page 1 98×76, page 5 98×127);
+`th-thumbs.pdf` (`/PageMode /UseThumbs`, no outline) opens on the thumbnails with only that
+button and no "not available" note; `th-plain.pdf` (3 pages, nothing) opens with the sidebar
+closed but the toggle shown, the toggle opens the thumbnails (3 rendered) and closes them.
+The `thumbperf` case (reported, not checked) reopens the corpus paper
+`arxiv-1706.03762.pdf` when present with the thumbnails panel through the event loop and
+prints the times to open, to the first thumbnail and to every visible one, the slowest Next
+while thumbnails render, a scroll through the whole panel, the most images kept and the
+memory (VmRSS / VmHWM). Measured (Xvfb, this sandbox): 15 pages — open 58 ms, first
+thumbnail 125 ms, all visible 295 ms, whole panel 286 ms, 15 kept, VmHWM 116 MiB (page renders included);
+a 384-page file (`qpdf` concatenation of the corpus's
+two NTSB reports and `arxiv-astro-ph_0603449`; the corpus's largest file has 173 pages) —
+open with the 768 thumbnail items 162 ms, first thumbnail 319 ms, all visible 495 ms, the
+slowest Next while thumbnails render 92 ms, the whole panel scrolled in 72 steps 11.5 s (384
+rendered, never more than 40 kept), VmHWM 154 MiB; `www.ntsb.gov-AAR0701.pdf` (173 pages) —
+first thumbnail 192 ms, all visible 360 ms, VmHWM 82 MiB.
 
 The `noteclose` case (9.r12, `Viewer.smokeNoteClose`, case 1t) runs on the text PDF and
 closes note popups without Save: a new note + Escape generated on the text widget (which has
@@ -1329,14 +1391,16 @@ The `attach` case (9.r10, `Viewer.smokeAttach`, case 1v) generates `att.pdf`
 `hello.txt` with `/Desc` and `/Params`, a FlateDecode `data.bin` without `/Size` and an
 external file specification, and a file attachment annotation on page 2 named
 `../../etc/evil:name.txt` plus a right-to-left override), `outline.pdf` and `noatt.pdf`.
-It checks: the sidebar opens on the attachments panel with both switcher buttons; the rows
-(`data.bin 10 KB`, `hello.txt 26 B`, `external.pdf —`, the hostile name without the override,
-`16 B`) and a tooltip; Save attachment as… on every row writes exactly the generator's bytes
+It checks: the sidebar opens on the attachments panel with its Show Attachments and Show
+Document Outline buttons; the rows before any decoding (`data.bin ?`, `hello.txt 26 B`,
+`external.pdf —`, the hostile name without the override, `16 B`) and the tooltips (data.bin's
+stored size; hello.txt's description, type and dates); the tooltip probe (`attProbe`) turns
+`data.bin` into `10 KB`; Save attachment as… on every row writes exactly the generator's bytes
 (also compared with `pdfdetach -saveall` when installed), proposes `evil_name.txt`, and
 refuses the external file; the opened PDF, a read-only file, a read-only folder and a folder
 are refused and stay unchanged; the switcher and the toggle; a click on the annotation's icon
 (sidebar closed on the outline panel) opens the attachments panel on its row; `outline.pdf`
-has no Attachments button, `noatt.pdf` no sidebar toggle.
+has no Attachments button, nor has `noatt.pdf` (its sidebar has the thumbnails only).
 
 The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
 alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real

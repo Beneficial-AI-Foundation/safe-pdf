@@ -98,7 +98,7 @@ def oddPdf : ByteArray := doc1 "/Names << /EmbeddedFiles << /Names [(1) 4 0 R (2
   T "<< /F (bomb) /EF << /F 11 0 R >> >>",                                               -- 7
   T "<< /Subtype /FileAttachment /Rect [0 0 1 1] /FS (plain.txt) >>",                    -- 8
   T "<< /Subtype /Link /Rect [0 0 1 1] >>",                                              -- 9
-  S "/Filter /DCTDecode" "xyz".toUTF8,                                                   -- 10
+  S "/Filter /DCTDecode /DL 7" "xyz".toUTF8,                                                   -- 10
   S "/Filter /FlateDecode /Params << /Size 50000 >>"
     (SafePdf.Core.Filter.Deflate.zlibFixed (String.join (List.replicate 50000 "a")).toUTF8)]  -- 11
 
@@ -167,6 +167,9 @@ def run : IO Nat := do
       (i.rect.llx.mantissa, i.rect.lly.mantissa, i.rect.urx.mantissa, i.rect.ury.mantissa)) ==
       some (10, 10, 30, 40)))
     f := f + (← check "tree: no warnings" (l.warnings == 0 && !l.truncated))
+    f := f + (← check "tree: listed sizes without decoding" (es.map listedSize ==
+      [some 5, none, none, some 5, some 3] && es.map (·.filtered) ==
+      [false, true, false, false, false]))
     return f)
   f := f + (← withDoc "odd" oddPdf fun d => do
     let l := list d L
@@ -178,6 +181,7 @@ def run : IO Nat := do
       [some .badEF, some .notAStream, none, none, some .notEmbedded]))
     f := f + (← check "odd: non-filespec counted" (l.warnings == 1))
     let some img := es[2]? | check "odd: image" false
+    f := f + (← check "odd: /DL listed" (listedSize img == some 7 && img.stored == some 3))
     f := f + (← check "odd: image filter refused" (decode d L img matches .error (.unsupported _)))
     let some bomb := es[3]? | check "odd: bomb" false
     f := f + (← check "odd: bomb decodes under default limits"
@@ -186,6 +190,7 @@ def run : IO Nat := do
     f := f + (← check "odd: bomb is a limit error"
       (decode d small bomb matches .error (.limitExceeded .decodedStreamBytes)))
     f := f + (← check "odd: declared size kept" (shownSize bomb (decode d small bomb) == some 50000))
+    f := f + (← check "odd: /DL-less bomb listed by /Params" (listedSize bomb == some 50000))
     f := f + (← check "odd: string /FS icon" (l.icons.map (·.entry) == [4]))
     return f)
   f := f + (← withDoc "cycle" cyclePdf fun d => do
