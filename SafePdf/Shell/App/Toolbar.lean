@@ -11,7 +11,7 @@ The Tk-free description of the viewer's toolbar (unverified shell code, total, c
 colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon file is copied
 (icons are drawn with Tk canvas primitives, `docs/viewer.md`).
 
-* **Layout** (`layout`): left — sidebar toggle (shown only when the document has an outline),
+* **Layout** (`layout`): left — sidebar toggle (shown with a document; task 9.r9: thumbnails need no outline),
   previous / next page arrows, the page-number field and its "of N" label, then the view-mode
   drop-down (task 9.r4, `ViewChoice`); centre — zoom out,
   zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
@@ -368,11 +368,12 @@ def Button.enabled (c : Ctx) (b : Button) : Bool :=
   | .tool t => t.enabled c
   | .more => true
 
-/-- Whether the button is shown in `c`: the sidebar toggle only when the document has an
-outline (PDF.js hides the outline view without one); all others always. -/
+/-- Whether the button is shown in `c`: the sidebar toggle only with a document (task 9.r9:
+every document has the thumbnails panel, so an outline is no longer needed); all others
+always. -/
 def Button.visible (c : Ctx) (b : Button) : Bool :=
   match b.act with
-  | .cmd .outline => c.hasDoc && c.hasOutline
+  | .cmd .outline => c.hasDoc
   | _ => true
 
 /-- An item of the toolbar. -/
@@ -484,9 +485,9 @@ def states (c : Ctx) : List Bool :=
     [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.comment",
      ".bar.text", ".bar.draw", ".bar.more"] &&
   buttons.all (·.visible c)
--- No outline: the toggle is hidden.
+-- No outline: the toggle still shows (thumbnails, task 9.r9).
 #guard let c : Ctx := { hasDoc := true, page := 1, pages := 3 }
-  (buttons.filter (!·.visible c)).map (·.path) == [".bar.sidebar"]
+  buttons.all (·.visible c) && (buttons.filter (·.enabled c)).any (·.path == ".bar.sidebar")
 -- Save follows the unsaved marks.
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 1 }
   !(buttons.filter (·.enabled c)).any (·.path == ".bar.save") &&
