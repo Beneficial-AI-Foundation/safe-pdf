@@ -160,7 +160,6 @@ known_bugs=()
 known_bug() {
   if [ "$platform" = aqua ]; then known_bugs+=("$1|$2"); fi
 }
-known_bug "1s opensettings" "a /PageMode /FullScreen file's status line lacks 'full screen (Escape leaves)' until the next status update (suspected: on Aqua entering full screen renders at once, before openWith stores the note)"
 
 # Pick a display.
 wrap=()
