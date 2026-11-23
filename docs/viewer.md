@@ -1544,13 +1544,27 @@ temporary file); `ulimit -f` cannot simulate it (SIGXFSZ kills the process).
 ### Smoke test on macOS (10.11)
 
 On macOS (`uname -s` = Darwin) the script runs the viewer natively on Tk Aqua (Homebrew
-`tcl-tk` 9.x): no X server, no `xvfb-run`. Every run shows its window on screen for a few
-seconds (the whole script takes 2–3 minutes). **Leave the machine alone while it runs**: macOS
-does not let a background process take the keyboard focus from the app you are using, and the
-cases that read `focus` (1r's three-way prompt, 1t's note popup), enter full screen (1s) or
-wait for focus-driven events (1q) then fail or time out. A locked screen has the same
-effect (no app gets the focus; the script warns when the front app is `loginwindow`). GNU `stat -c` and `cmp -n` are
-replaced by BSD equivalents on macOS (`file_size`, `file_mode`, `cmp_prefix`).
+`tcl-tk` 9.x): no X server, no `xvfb-run`; the whole script takes 2–3 minutes.
+
+**Background mode (the default).** You can keep working while it runs: in smoke mode on
+macOS the shim (`c/tk_shim.c`, `safepdf_prohibit_activation`) sets the application's
+activation policy to *Prohibited* before and after `Tk_Init` (no Dock icon, no menu bar, never
+the active app) and makes every toplevel transparent (`-alpha 0`) and `.` off screen
+(`+-30000+-30000`). Rendering, photos and `event generate` key/mouse events still work (case 1
+gives the same `state.txt` and `view.txt` as a foreground run), but with no active application
+Tk has no keyboard focus, so: the focus part of 1r's prompt answers, of 1t's `menu-open` and of
+the 10.6 `dismiss` rows is dropped; 1s expects no full screen (`true,0`, as without a window
+manager); 1q is skipped (it times out without an active app). Normal (non-smoke) launches are
+unchanged.
+
+**Foreground mode** (`SAFEPDF_SMOKE_FOREGROUND=1`, for when nobody uses the machine): the
+windows show on screen and the app is activated, and every check runs with the full aqua
+expectations below. macOS does not let a background process take the keyboard focus from the
+app you are using, so the focus-dependent cases (1q, 1r, 1s, 1t) fail or time out if you work
+meanwhile or the screen is locked (the script warns when the front app is `loginwindow`).
+
+GNU `stat -c` and `cmp -n` are replaced by BSD equivalents on macOS (`file_size`, `file_mode`,
+`cmp_prefix`).
 
 What differs on Aqua, and how the script handles it:
 

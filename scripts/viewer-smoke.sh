@@ -168,7 +168,7 @@ if [ "$platform" = aqua ]; then
   echo "viewer-smoke: using Tk Aqua (macOS; the viewer window appears on screen)"
   # A locked screen (front application loginwindow) gives no app the keyboard focus or full
   # screen: the focus-dependent cases (1q, 1r, 1s, 1t) then fail.
-  if command -v lsappinfo >/dev/null 2>&1 \
+  if [ "${SAFEPDF_SMOKE_FOREGROUND:-}" = 1 ] && command -v lsappinfo >/dev/null 2>&1 \
       && lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null | grep -q loginwindow; then
     echo "viewer-smoke: WARNING (aqua): the screen is locked; focus-dependent cases will fail" >&2
   fi
@@ -194,6 +194,18 @@ else
   file_mode() { stat -c %a "$1"; }
   cmp_prefix() { cmp -n "$(file_size "$1")" "$1" "$2"; }
 fi
+
+# Background mode (task 10.11, the macOS default): the shim (c/tk_shim.c) makes a smoke run
+# never activate and keeps its windows invisible and off screen, so the user can keep working.
+# With no active application Tk has no keyboard focus: checks that read the focus are relaxed
+# (the focus part is dropped) and 1q is skipped. SAFEPDF_SMOKE_FOREGROUND=1 runs the old
+# foreground mode (windows on screen, the app activated: leave the machine alone meanwhile).
+SAFEPDF_SMOKE_BG=0
+if [ "$platform" = aqua ] && [ "${SAFEPDF_SMOKE_FOREGROUND:-}" != 1 ]; then
+  SAFEPDF_SMOKE_BG=1
+  echo "viewer-smoke: background mode (windows hidden, never activated; SAFEPDF_SMOKE_FOREGROUND=1 for the foreground run)"
+fi
+export SAFEPDF_SMOKE_BG
 
 work="$(mktemp -d)"
 if [ -n "${SAFEPDF_SMOKE_KEEP:-}" ]; then
@@ -1786,11 +1798,15 @@ for e in errs: print("FAIL: r4 %s: %s" % (name, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$name" "$d/r4.txt" || fail=1
 }
+if [ "$SAFEPDF_SMOKE_BG" = 1 ]; then
+  skip_case "1q r4" "background mode: without an active app the run times out (seen with a locked screen); SAFEPDF_SMOKE_FOREGROUND=1 runs it"
+else
 r4_case text "$work/text.pdf"
 r4_case nav "$work/nav.pdf"
 for p in $m9papers; do
   if [ -f "$p" ]; then r4_case "paper-$(basename "$p" .pdf)" "$p"; fi
 done
+fi
 
 case_begin "1r savedlg"
 # 1r. Save dialogs (task 9.r6, SAFEPDF_VIEWER_SMOKE_MODE=savedlg, `Viewer.smokeSaveDialogs`) on
@@ -1835,6 +1851,10 @@ want = {
     "export-onto-pdf": "true true true", "vanished": "true true true",
 }
 if root: want.pop("read-only"); want.pop("ro-folder")  # root writes anyway
+import os
+if os.environ.get("SAFEPDF_SMOKE_BG") == "1":  # no keyboard focus in background mode
+    for k in ("choose-return", "choose-tab-cancel", "choose-escape", "choose-space"):
+        want[k] = want[k].split()[0]; v[k] = v.get(k, "").split(" ")[0]
 errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 xe = v.get("export-ext", "")
 if not xe.startswith("true true %s " % ("false" if sp == "aqua" else "true")) or not xe.endswith(".xfdf"):
@@ -1966,7 +1986,9 @@ want("r2l", view="page,odd", rtl="true")
 m = re.match(r"0@(\d+),1@(\d+)$", rows.get("r2l", {}).get("xs", ""))
 if not m or int(m.group(1)) <= int(m.group(2)): errs.append("r2l: page 1 not right of page 2: %r" % rows.get("r2l", {}).get("xs"))
 # Without a window manager (Xvfb) `wm attributes . -fullscreen` reads back 0; Tk Aqua has one.
-want("full", full="true,1" if aqua else "true,0", outline="false"); has("full", "status", "full screen (Escape leaves)")
+import os
+fs = "true,1" if aqua and os.environ.get("SAFEPDF_SMOKE_BG") != "1" else "true,0"
+want("full", full=fs, outline="false"); has("full", "status", "full screen (Escape leaves)")
 want("full-escape", full="false,0", outline="true")
 want("window", zoom="50%")
 if rows.get("window", {}).get("geom", "").startswith("1200x960"): errs.append("window: FitWindow did not resize")
@@ -2016,6 +2038,10 @@ want = {
     "stale-close": "notes=3 icons=true popup=0 ",
     "texts": "[typed text, via cancel, via close]",
 }
+import os, re
+if os.environ.get("SAFEPDF_SMOKE_BG") == "1":  # no keyboard focus in background mode
+    nf = lambda s: re.sub(r" ?focus=\S*", "", s)
+    want = {k: nf(w) for k, w in want.items()}; v = {k: nf(x) for k, x in v.items()}
 errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: noteclose: %s" % e, file=sys.stderr)
@@ -2492,6 +2518,10 @@ want = {
     "note-open": "popup=1 notes=2",
     "note-esc": "popup=0 notes=1",
 }
+import os, re
+if os.environ.get("SAFEPDF_SMOKE_BG") == "1":  # no keyboard focus in background mode
+    nf = lambda s: re.sub(r" ?focus=\S*", "", s)
+    want = {k: nf(w) for k, w in want.items()}; v = {k: nf(x) for k, x in v.items()}
 errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: dismiss: %s" % e, file=sys.stderr)

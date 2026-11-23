@@ -53,6 +53,35 @@ extern lean_obj_res safepdf_gui_dispatch(lean_obj_arg args);
 __attribute__((constructor)) static void safepdf_keep_main_thread(void) {
   setenv("LEAN_MAIN_USE_THREAD", "0", 0);
 }
+
+#include <dlfcn.h>
+/* Background smoke mode (task 10.11, macOS only): whether this is a smoke run
+ * (`SAFEPDF_VIEWER_SMOKE` set) without `SAFEPDF_SMOKE_FOREGROUND=1`. Such a run must never
+ * activate the application or show a window over the user's work. */
+static int safepdf_smoke_background(void) {
+  const char *s = getenv("SAFEPDF_VIEWER_SMOKE");
+  const char *f = getenv("SAFEPDF_SMOKE_FOREGROUND");
+  return s != NULL && s[0] != 0 && !(f != NULL && strcmp(f, "1") == 0);
+}
+
+/* `[[TKApplication sharedApplication] setActivationPolicy:policy]` through the Objective-C
+ * runtime (looked up with dlsym: libobjc is already loaded with Tk, so no link flag is
+ * needed). policy 2 = NSApplicationActivationPolicyProhibited: no Dock icon, no menu bar,
+ * never the active application. Called before Tk_Init (creating NSApp as Tk's own class, which
+ * Tk then reuses) and again after it, in case Tk's setup asked for the regular policy. Does
+ * nothing when a symbol or the class is missing. */
+static void safepdf_prohibit_activation(void) {
+  void *(*getClass)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
+  void *(*selName)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
+  void *msgSend = dlsym(RTLD_DEFAULT, "objc_msgSend");
+  if (getClass == NULL || selName == NULL || msgSend == NULL) return;
+  void *cls = getClass("TKApplication");
+  if (cls == NULL) cls = getClass("NSApplication");
+  if (cls == NULL) return;
+  void *app = ((void *(*)(void *, void *))msgSend)(cls, selName("sharedApplication"));
+  if (app == NULL) return;
+  ((signed char (*)(void *, void *, long))msgSend)(app, selName("setActivationPolicy:"), 2L);
+}
 #endif
 
 static Tcl_Interp *interp = NULL;
@@ -102,12 +131,29 @@ LEAN_EXPORT lean_obj_res safepdf_tk_init(b_lean_obj_arg argv0) {
   Tcl_FindExecutable(lean_string_cstr(argv0));
   interp = Tcl_CreateInterp();
   if (interp == NULL) return io_error("Tcl_CreateInterp failed");
+#ifdef __APPLE__
+  int background = safepdf_smoke_background();
+  if (background) safepdf_prohibit_activation();
+#endif
   if (Tcl_Init(interp) != TCL_OK || Tk_Init(interp) != TCL_OK) {
     lean_object *msg = interp_result();
     Tcl_DeleteInterp(interp);
     interp = NULL;
     return lean_io_result_mk_error(lean_mk_io_user_error(msg));
   }
+#ifdef __APPLE__
+  if (background) {
+    safepdf_prohibit_activation();
+    /* Keep every toplevel invisible and off the screen: "." now, later ones when mapped.
+     * Constant script, no data spliced in. */
+    Tcl_EvalEx(interp,
+      "wm attributes . -alpha 0.0\n"
+      "wm geometry . +-30000+-30000\n"
+      "bind all <Map> {+if {[winfo toplevel %W] eq {%W}} {catch {wm attributes %W -alpha 0.0}}}\n",
+      -1, TCL_EVAL_GLOBAL);
+    Tcl_ResetResult(interp);
+  }
+#endif
   return io_ok_unit();
 }
 
