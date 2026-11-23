@@ -19,8 +19,9 @@ and that without substitute programs (`renderDocPage` default) the page stays bl
 With the system fonts (`Shell.Fonts.findFiles`: `SAFEPDF_FONT_DIR`, URW base-35, TeX Gyre)
 every line must be painted inside its band. Task 9.r7 (always run, `runMac`): TrueType
 collections and the macOS search below a temporary root, with generated box fonts; a
-collection of real fonts (DejaVu Sans) when installed. When the faces come from URW base-35 (the
-outlines MuPDF bundles) and `mutool` is installed, the page is compared with
+collection of real fonts (DejaVu Sans) when installed. When every needed face comes from a URW
+base-35 file (`isUrwFile`: the outlines MuPDF bundles; not TeX Gyre, not the macOS system faces,
+whose designs differ — task 10.15) and `mutool` is installed, the page is compared with
 `mutool draw -r 72`: per line, ink within 3% and the ink's column extent within 1 px; and at
 most 0.1% of the page's pixels differ by the `pixels.py` metric (3 × 3 neighbourhood,
 tolerance 32). Without the fonts the suite skips those checks (prints why), without failing.
@@ -134,6 +135,21 @@ def renderWith (bytes : ByteArray) (subst : Subst.SubstFonts) : Option Clip.Imag
       | .error _ => none
     | [] => none
   | .error _ => none
+
+/-- Whether `p` is the URW base-35 file of face `f` (the outlines MuPDF bundles): its name
+without extension is `Shell.Fonts.urwName f` (`NimbusMonoPS-Regular.t1`, Ghostscript's
+extension-less `Resource/Font/NimbusMonoPS-Regular`, …). Decided by the file actually
+chosen (the first face found), never by what it is not: before task 10.15 the test only
+excluded TeX Gyre paths, so the macOS system faces (task 9.r7: Apple's `Courier.ttc`, a
+heavier design than Nimbus Mono PS) were compared with MuPDF's Nimbus outlines and failed. -/
+def isUrwFile (f : Font.Std14) (p : System.FilePath) : Bool :=
+  p.fileStem == some (Shell.Fonts.urwName f)
+
+#guard isUrwFile .courier "/usr/share/fonts/type1/urw-base35/NimbusMonoPS-Regular.t1"
+#guard isUrwFile .courier "/opt/homebrew/share/ghostscript/10.04.0/Resource/Font/NimbusMonoPS-Regular"
+#guard !isUrwFile .courier "/System/Library/Fonts/Courier.ttc"
+#guard !isUrwFile .courier "/usr/share/texmf/fonts/opentype/public/tex-gyre/texgyrecursor-regular.otf"
+#guard !isUrwFile .courier "/usr/share/fonts/type1/urw-base35/NimbusSans-Regular.t1"
 
 /-- `mutool draw -r 72` of page 1 as a PPM, if `mutool` runs. -/
 def mutoolRef (pdf : System.FilePath) : IO (Option Rgb) := do
@@ -344,10 +360,11 @@ def run : IO Nat := do
     if s < 255 * 300 || ext.isNone then
       failures := failures + 1; report s!"line at y={b}: ink {s / 255} px"
   -- 4. against MuPDF, when the faces are URW base-35 (MuPDF's own outlines)
-  let urw := need.all fun f => files.any fun (g, p, _) =>
-    g == f && (p.toString.splitOn "texgyre").length == 1
-  if !urw then
-    IO.println "  raster-subst: faces are not URW base-35; MuPDF comparison skipped"
+  let notUrw := need.filterMap fun f => match files.find? (·.1 == f) with
+    | some (_, p, _) => if isUrwFile f p then none else some s!"{Shell.Fonts.stdName f} <- {p}"
+    | none => some s!"{Shell.Fonts.stdName f} <- none"
+  if !notUrw.isEmpty then
+    IO.println s!"  raster-subst: faces are not URW base-35 ({", ".intercalate notUrw}); MuPDF comparison skipped"
     return failures
   let some ref ← mutoolRef fixture
     | IO.println "  raster-subst: mutool not available; MuPDF comparison skipped"; return failures

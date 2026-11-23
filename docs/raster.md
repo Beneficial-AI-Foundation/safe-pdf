@@ -101,13 +101,21 @@ in the symbolic `cmap`s ((3,0) with `0xF000`… offsets, (1,0)). Widths are neve
 substitute: standard-14 fonts keep their AFM widths, `/Widths` win as before, and only MuPDF's
 `ft_stretch` case scales glyphs (by the TrueType advance).
 
-**Caveats of the macOS faces** (not verified here: this sandbox has no Apple fonts).
+**Caveats of the macOS faces** (measured on macOS 26, MuPDF 1.28.6, task 10.15).
 Apple's `Helvetica.ttc`, `Times.ttc` and `Courier.ttc` are licensed versions of the designs
 the standard 14 are named after, so their advances should agree with the AFM widths we
 position by — and positions never come from the substitute anyway (AFM widths or `/Widths`),
 so lines, columns and table cells stay where they are on Linux. Outlines differ in detail from
 URW Nimbus (MuPDF's bundled clones), so a pixel diff against MuPDF on a Mac is not 0% as it is
-with URW; Apple's Courier is a thinner stroke than Nimbus Mono PS. Arial / Times New Roman /
+with URW. Apple's Courier is a much *heavier* stroke than Nimbus Mono PS: on the fixture
+`Tests/fixtures-subst/subst.pdf` the Courier line (baseline y = 160) has ink 791 px with
+`Courier.ttc` against MuPDF's 556 px with its bundled Nimbus Mono PS, same column extent;
+MuPDF itself, given `Courier.ttc` embedded (`mutool create`, `%%Font F4
+/System/Library/Fonts/Courier.ttc`), paints 801 px — so the difference is the face, not our
+rasteriser. Helvetica / Times lines are within 0–3% (893 vs 871, 643 vs 649). Suite
+`raster-subst` therefore compares with `mutool` only when every needed face is a URW base-35
+file (file name `NimbusSans-Regular…`, `isUrwFile`), and otherwise prints which faces are not
+and skips that comparison. Arial / Times New Roman /
 Courier New (fallbacks) are metric-compatible but differently drawn. Symbol: Apple's
 `Symbol.ttf` is reached by `post` name, Unicode (Glyph List) or raw code; `Apple Symbols.ttf`
 (last resort) is Unicode-only and may lack some Symbol glyphs (e.g. bracket pieces).
