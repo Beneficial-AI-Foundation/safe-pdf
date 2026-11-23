@@ -19,6 +19,8 @@ inductive LimitKind where
   | opsPerPage
   /-- Length of the xref `/Prev` chain (`Limits.maxRevisions`). -/
   | revisions
+  /-- Number of filters in one stream's `/Filter` chain (`Limits.maxFilters`). -/
+  | filters
   deriving Repr, DecidableEq, Inhabited
 
 /-- Errors produced by the verified core. -/

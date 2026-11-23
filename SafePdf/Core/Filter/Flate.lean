@@ -25,7 +25,17 @@ A total, bounded decoder for DEFLATE (RFC 1951) and its zlib wrapper (RFC 1950),
   least significant first, of byte `i / 8`). Reading past the end is an error
   ("truncated"); readers never return a position beyond `input.size * 8`.
 * Huffman codes: canonical tables as in Mark Adler's `puff.c` (`counts[len]` and `symbols`
-  sorted by code), decoded one bit at a time with at most 15 steps (structural recursion).
+  sorted by code). The specification decoder `decodeGo` reads one bit at a time, at most 15
+  steps (structural recursion). The hot path `decodeSym` (task 3.11) first probes a 512-entry
+  lookup table indexed by the next 9 bits (`mkTable`, built for the literal/length and
+  distance codes); each entry is *defined* as the result of the same bit-by-bit loop run on the
+  9-bit index (`tableEntry`, `decodeGoB`), and the `Huffman` structure carries that fact
+  (`table_ok`). Since the loop only depends on the bits it reads, `decodeSym_eq` proves the
+  fast decoder equal to `decodeGo` in every outcome; no canonical-code theory is needed.
+* Performance (task 3.11): compiled `Nat` left shifts and powers go through GMP even for small
+  values, so the hot paths use multiplications by constants and the `twoPow` table instead;
+  Adler-32 is a tail-recursive loop with division-free reductions (`adlerGo`), equal to the
+  RFC fold (`adler32_eq_foldl`). Benchmark: `scripts/bench-flate.sh`.
 * Back-references are copied byte by byte, so overlapping copies (distance < length) work.
 
 ## Measures
@@ -37,11 +47,13 @@ A total, bounded decoder for DEFLATE (RFC 1951) and its zlib wrapper (RFC 1950),
 * `readLengths` (dynamic header): `total - lengths.size`; each code-length symbol adds ≥ 1.
 * Huffman decode (≤ 15 bit steps) and back-reference copy (≤ 258 steps): structural.
 
-Work bound (argued, not mechanised): block-loop iterations ≤ `input.size * 8` (each consumes
-≥ 1 bit); literal/length-loop iterations ≤ `limit + #blocks` (each grows the output, or ends
-a block); back-reference copy steps total ≤ `limit`; each symbol decode is ≤ 15 bit steps
-and every dynamic header is ≤ 316 symbols. So total work is
-O(limit + input.size * 8) with small constants.
+Work bound: mechanised in `SafePdf/Spec/FlateWork.lean` (task 3.8b) with counted twins of
+`decodeGo`/`codes`/`stored`/`readLengths`/`readDynamic`/`blocks` whose first component is
+proved equal to the functions here: in every outcome, `flateDecode` takes at most
+`3360 · input.size + 3 · limits.maxDecodedStreamBytes + 12163` steps
+(`FlateWork.flateDecodeW_steps_le`), and on success `3360 · input.size + 3 · output.size +
+12163` (`FlateWork.flateDecodeW_steps_le_of_ok`); the constants include the cost model of
+the 9-bit lookup tables (task 3.11). The definitions here are unchanged by it.
 
 ## Zlib semantics followed (and deviations)
 
@@ -81,32 +93,157 @@ def truncated (pos : Nat) : Error := .malformed (pos / 8) "flate: truncated inpu
 @[inline] def bitAt (input : ByteArray) (i : Nat) : Option Nat :=
   if h : i / 8 < input.size then some ((input[i / 8].toNat >>> (i % 8)) &&& 1) else none
 
+/-- `2 ^ n` for `n ≤ 24`, as a table. The compiled code of `Nat` left shifts and powers goes
+through GMP even for small values (task 3.11 profile), so the hot path multiplies by constants
+and reads masks from here instead. -/
+def twoPow : Array Nat :=
+  #[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
+    262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216]
+
+/-- `twoPow` holds the powers of two up to `2 ^ 24`. -/
+theorem twoPow_getD {n : Nat} (h : n ≤ 24) : twoPow[n]?.getD 0 = 2 ^ n := by
+  have : ∀ k : Fin 25, twoPow[k.val]?.getD 0 = 2 ^ k.val := by decide
+  exact this ⟨n, by omega⟩
+
 /-- Read `n ≤ 24` bits (least significant first) at bit position `pos`; returns the value and
 `pos + n`. Errors if fewer than `n` bits remain. -/
 def readBits (input : ByteArray) (pos n : Nat) : Except Error (Nat × Nat) :=
   if pos + n ≤ input.size * 8 then
     if n ≤ 24 then
       let i := pos / 8
-      let w := (input[i]?.getD 0).toNat ||| ((input[i + 1]?.getD 0).toNat <<< 8) |||
-        ((input[i + 2]?.getD 0).toNat <<< 16) ||| ((input[i + 3]?.getD 0).toNat <<< 24)
-      .ok ((w >>> (pos % 8)) &&& ((1 <<< n) - 1), pos + n)
+      let w := (input[i]?.getD 0).toNat ||| ((input[i + 1]?.getD 0).toNat * 256) |||
+        ((input[i + 2]?.getD 0).toNat * 65536) ||| ((input[i + 3]?.getD 0).toNat * 16777216)
+      .ok ((w >>> (pos % 8)) % (twoPow[n]?.getD 0), pos + n)
     else .error (.malformed (pos / 8) "flate: internal: readBits width")
   else .error (truncated pos)
 
+/-- The next 9 bits at bit position `pos` (least significant first), read from two bytes; only
+meaningful when `pos + 9 ≤ input.size * 8` (see `peek9_bit`). -/
+@[inline] def peek9 (input : ByteArray) (pos : Nat) : Nat :=
+  let i := pos / 8
+  (((input[i]?.getD 0).toNat ||| (input[i + 1]?.getD 0).toNat * 256) >>> (pos % 8)) % 512
+
+/-- A bit extracted with a shift and a mask is a `testBit`. -/
+theorem shiftRight_and_one (x k : Nat) : (x >>> k) &&& 1 = (x.testBit k).toNat := by
+  rw [Nat.and_one_is_mod, Nat.shiftRight_eq_div_pow, Nat.toNat_testBit]
+
+/-- Bit `t < 9` of the 9-bit window over two bytes `a ||| b * 256` shifted by `r < 8`. -/
+theorem window_bit (a b r t : Nat) (ha : a < 256) (ht : t < 9) :
+    (((a ||| b * 256) >>> r) % 512).testBit t =
+      if r + t < 8 then a.testBit (r + t) else b.testBit (r + t - 8) := by
+  rw [show (512 : Nat) = 2 ^ 9 from rfl, Nat.testBit_mod_two_pow, Nat.testBit_shiftRight,
+    show b * 256 = b <<< 8 by rw [Nat.shiftLeft_eq], Nat.testBit_or, Nat.testBit_shiftLeft]
+  simp only [ht, decide_true, Bool.true_and]
+  split
+  · rename_i h
+    simp only [show ¬ (r + t ≥ 8) by omega, decide_false, Bool.false_and, Bool.or_false]
+  · rename_i h
+    have : a.testBit (r + t) = false :=
+      Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le ha
+        (Nat.pow_le_pow_right (by decide : 0 < 2) (by omega) : 2 ^ 8 ≤ 2 ^ (r + t)))
+    simp only [this, show r + t ≥ 8 by omega, decide_true, Bool.true_and, Bool.false_or]
+
+/-- **Peek correctness**: when 9 bits remain, bit `t < 9` of `peek9` is the input bit at
+`pos + t`. -/
+theorem peek9_bit {input : ByteArray} {pos t : Nat} (hp : pos + 9 ≤ input.size * 8)
+    (ht : t < 9) : bitAt input (pos + t) = some ((peek9 input pos >>> t) &&& 1) := by
+  have h0 : pos / 8 < input.size := by omega
+  have h1 : pos / 8 + 1 < input.size := by omega
+  have hi : (pos + t) / 8 < input.size := by omega
+  unfold bitAt peek9
+  simp only [hi, ↓reduceDIte]
+  rw [getElem?_pos input (pos / 8) h0, getElem?_pos input (pos / 8 + 1) h1]
+  simp only [Option.getD_some, shiftRight_and_one, Option.some.injEq]
+  rw [window_bit _ _ _ _ (UInt8.toNat_lt _) ht]
+  split
+  · rename_i h
+    have e1 : (pos + t) / 8 = pos / 8 := by omega
+    have e2 : (pos + t) % 8 = pos % 8 + t := by omega
+    simp only [e1, e2]
+  · rename_i h
+    have e1 : (pos + t) / 8 = pos / 8 + 1 := by omega
+    have e2 : (pos + t) % 8 = pos % 8 + t - 8 := by omega
+    simp only [e1, e2]
+
 /-! ## Canonical Huffman codes (puff-style) -/
 
+/-- Puff's bit-by-bit canonical decode over an abstract bit source `src` (`none` = no bit),
+on the tables `counts`/`symbols`; `none` on any failure. Used only to fill the lookup table
+(`tableEntry`); `decodeGo` below is the same loop over the input. -/
+def decodeGoB (src : Nat → Option Nat) (counts symbols : Array Nat) :
+    Nat → Nat → Nat → Nat → Nat → Nat → Option (Nat × Nat)
+  | 0, _, _, _, _, _ => none
+  | fuel + 1, len, code, first, index, p =>
+    match src p with
+    | none => none
+    | some b =>
+      let code := code ||| b
+      let count := counts[len]?.getD 0
+      if code < first + count then
+        match symbols[index + (code - first)]? with
+        | some s => some (s, p + 1)
+        | none => none
+      else decodeGoB src counts symbols fuel (len + 1) (code * 2) ((first + count) * 2)
+        (index + count) (p + 1)
+
+/-- On success `decodeGoB` consumes between `1` and `fuel` bits. -/
+theorem decodeGoB_some {src : Nat → Option Nat} {counts symbols : Array Nat} :
+    ∀ {fuel len code first index p s p'},
+      decodeGoB src counts symbols fuel len code first index p = some (s, p') →
+      p < p' ∧ p' ≤ p + fuel
+  | 0, _, _, _, _, _, _, _, h => by simp [decodeGoB] at h
+  | fuel + 1, len, code, first, index, p, s, p', h => by
+    rw [decodeGoB] at h
+    split at h
+    · simp at h
+    · dsimp only at h
+      split at h
+      · split at h
+        · simp only [Option.some.injEq, Prod.mk.injEq] at h; omega
+        · simp at h
+      · have := decodeGoB_some h; omega
+
+/-- The 9-bit source for table index `v`: bit `t < 9` of `v`, nothing beyond. -/
+def src9 (v t : Nat) : Option Nat := if t < 9 then some ((v >>> t) &&& 1) else none
+
+/-- Lookup-table entry for the 9-bit pattern `v`: `s * 16 + k` if the first `k ≤ 9` bits of `v`
+decode to symbol `s`, else `0` (fall back to the bit-by-bit decoder). -/
+def tableEntry (counts symbols : Array Nat) (v : Nat) : Nat :=
+  match decodeGoB (src9 v) counts symbols 9 1 0 0 0 0 with
+  | some (s, k) => s * 16 + k
+  | none => 0
+
+/-- The 512-entry primary lookup table of a code (task 3.11). -/
+def mkTable (counts symbols : Array Nat) : Array Nat :=
+  Array.ofFn (n := 512) fun v => tableEntry counts symbols v.val
+
 /-- A canonical Huffman code: `counts[len]` codes of each length `0..15`, and the symbols
-ordered by code. -/
+ordered by code, with an optional lookup table (`table`, empty or `mkTable counts symbols`)
+whose entries are, by `table_ok`, exactly `tableEntry`. -/
 structure Huffman where
   /-- Number of codes of each length; index 0 counts unused symbols. -/
   counts : Array Nat
   /-- Symbols in canonical code order. -/
   symbols : Array Nat
-  deriving Inhabited
+  /-- Lookup table indexed by the next 9 input bits (see `tableEntry`); may be empty. -/
+  table : Array Nat
+  /-- Every table entry is the `tableEntry` of its index. -/
+  table_ok : ∀ (v : Nat) (hv : v < table.size), table[v] = tableEntry counts symbols v
+
+/-- A code from its tables, with the lookup table (`withTable`) or without. -/
+def Huffman.ofTables (withTable : Bool) (counts symbols : Array Nat) : Huffman :=
+  if withTable then
+    { counts, symbols, table := mkTable counts symbols,
+      table_ok := fun v hv => by simp [mkTable] }
+  else
+    { counts, symbols, table := #[], table_ok := fun v hv => by simp at hv }
+
+instance : Inhabited Huffman := ⟨Huffman.ofTables false #[] #[]⟩
 
 /-- One-bit-at-a-time canonical decode (puff's `decode`). `len` is the current code length,
 `code` the bits read so far, `first` the first code of length `len`, `index` the index of
-that code's symbol. At most `fuel` (= 15) bits are read. -/
+that code's symbol. At most `fuel` (= 15) bits are read. This is the specification of
+`decodeSym`, which uses the lookup table first (`decodeSym_eq`). -/
 def decodeGo (input : ByteArray) (h : Huffman) :
     Nat → Nat → Nat → Nat → Nat → Nat → Except Error (Nat × Nat)
   | 0, _, _, _, _, p => .error (.malformed (p / 8) "flate: invalid Huffman code")
@@ -120,14 +257,93 @@ def decodeGo (input : ByteArray) (h : Huffman) :
         match h.symbols[index + (code - first)]? with
         | some s => .ok (s, p + 1)
         | none => .error (.malformed (p / 8) "flate: internal: Huffman table")
-      else decodeGo input h fuel (len + 1) (code <<< 1) ((first + count) <<< 1)
+      else decodeGo input h fuel (len + 1) (code * 2) ((first + count) * 2)
         (index + count) (p + 1)
 
+/-- **Transfer**: if `decodeGoB` decodes `s` from a source whose bits are input bits (offset
+`p0`), then `decodeGo` with at least as much fuel decodes `s` from the input, consuming the
+same bits. -/
+theorem decodeGoB_decodeGo (input : ByteArray) (h : Huffman) (src : Nat → Option Nat)
+    (p0 : Nat) (hsrc : ∀ t b, src t = some b → bitAt input (p0 + t) = some b) :
+    ∀ {fuel fuel' len code first index j s j'}, fuel ≤ fuel' →
+      decodeGoB src h.counts h.symbols fuel len code first index j = some (s, j') →
+      decodeGo input h fuel' len code first index (p0 + j) = .ok (s, p0 + j')
+  | 0, _, _, _, _, _, _, _, _, _, hr => by simp [decodeGoB] at hr
+  | fuel + 1, fuel', len, code, first, index, j, s, j', hf, hr => by
+    obtain ⟨f, rfl⟩ : ∃ f, fuel' = f + 1 := ⟨fuel' - 1, by omega⟩
+    rw [decodeGoB] at hr
+    rw [decodeGo]
+    rcases hs : src j with _ | b
+    · rw [hs] at hr; simp at hr
+    · rw [hs] at hr
+      rw [hsrc j b hs]
+      dsimp only at hr ⊢
+      by_cases hc : (code ||| b) < first + h.counts[len]?.getD 0
+      · simp only [hc, ↓reduceIte] at hr ⊢
+        rcases hsym : h.symbols[index + ((code ||| b) - first)]? with _ | s'
+        · rw [hsym] at hr; simp at hr
+        · rw [hsym] at hr
+          simp only [Option.some.injEq, Prod.mk.injEq] at hr
+          obtain ⟨rfl, rfl⟩ := hr
+          rfl
+      · simp only [hc, ↓reduceIte] at hr ⊢
+        have := decodeGoB_decodeGo input h src p0 hsrc (fuel' := f) (by omega) hr
+        rw [Nat.add_assoc]
+        exact this
+
 /-- Decode one symbol with code `h` at bit position `pos`; returns the symbol and new
-position. -/
+position. Fast path: when 9 bits remain and the code has a lookup table, one table probe
+gives the symbol and its length; otherwise (long codes, end of input, invalid codes, no table)
+the bit-by-bit `decodeGo`. Equal to `decodeGo` by `decodeSym_eq`. -/
 @[inline] def decodeSym (input : ByteArray) (h : Huffman) (pos : Nat) :
     Except Error (Nat × Nat) :=
-  decodeGo input h 15 1 0 0 0 pos
+  if pos + 9 ≤ input.size * 8 then
+    match h.table[peek9 input pos]? with
+    | some e =>
+      if e % 16 == 0 then decodeGo input h 15 1 0 0 0 pos
+      else .ok (e / 16, pos + e % 16)
+    | none => decodeGo input h 15 1 0 0 0 pos
+  else decodeGo input h 15 1 0 0 0 pos
+
+/-- **Table decoding is bit-by-bit decoding** (task 3.11): the fast `decodeSym` computes
+exactly puff's `decodeGo` with fuel 15, in every outcome. -/
+theorem decodeSym_eq (input : ByteArray) (h : Huffman) (pos : Nat) :
+    decodeSym input h pos = decodeGo input h 15 1 0 0 0 pos := by
+  unfold decodeSym
+  split
+  · rename_i hp
+    rcases he : h.table[peek9 input pos]? with _ | e
+    · rfl
+    · dsimp only
+      split
+      · rfl
+      · rename_i hne
+        rw [Array.getElem?_eq_some_iff] at he
+        obtain ⟨hv, rfl⟩ := he
+        rw [h.table_ok _ hv] at hne ⊢
+        unfold tableEntry at hne ⊢
+        rcases hd : decodeGoB (src9 (peek9 input pos)) h.counts h.symbols 9 1 0 0 0 0 with
+          _ | ⟨s, k⟩
+        · rw [hd] at hne; simp at hne
+        · dsimp only
+          have hk := decodeGoB_some hd
+          have hsrc : ∀ t b, src9 (peek9 input pos) t = some b →
+              bitAt input (pos + t) = some b := by
+            intro t b hb
+            unfold src9 at hb
+            split at hb
+            · rename_i ht
+              simp only [Option.some.injEq] at hb
+              subst hb
+              exact peek9_bit hp ht
+            · simp at hb
+          have := decodeGoB_decodeGo input h _ pos hsrc (fuel' := 15) (by omega) hd
+          simp only [Nat.add_zero] at this
+          rw [this]
+          have e1 : (s * 16 + k) / 16 = s := by omega
+          have e2 : (s * 16 + k) % 16 = k := by omega
+          rw [e1, e2]
+  · rfl
 
 /-- Which kind of code is being built; decides which incomplete codes are accepted. -/
 inductive CodeKind where
@@ -183,7 +399,7 @@ def build (kind : CodeKind) (lengths : Array Nat) : Except Error Huffman :=
           else
             let o := st.1[l]?.getD 0
             (st.1.modify l (· + 1), st.2.setIfInBounds o s)) init
-        .ok { counts, symbols := syms }
+        .ok (Huffman.ofTables (kind == .litOrDist) counts syms)
 
 /-- Code lengths of the fixed literal/length code (RFC 1951 §3.2.6). -/
 def fixedLitLengths : Array Nat :=
@@ -401,12 +617,78 @@ Bytes after the final block are ignored. -/
 def inflate (limit : Nat) (input : ByteArray) : Except Error ByteArray :=
   (inflateAt limit input 0).map (·.1.1)
 
+/-- One Adler-32 step (RFC 1950 §8.2): add byte `x` to the sums `(a, b)`. -/
+def adlerStep (st : Nat × Nat) (x : UInt8) : Nat × Nat :=
+  let a := (st.1 + x.toNat) % 65521
+  (a, (st.2 + a) % 65521)
+
+/-- `x % 65521` for `x < 2 · 65521`, by one conditional subtraction (no division). -/
+@[inline] def mod65521 (x : Nat) : Nat := if x < 65521 then x else x - 65521
+
+/-- `mod65521` is `% 65521` below `2 · 65521`. -/
+theorem mod65521_eq {x : Nat} (h : x < 2 * 65521) : mod65521 x = x % 65521 := by
+  unfold mod65521
+  split <;> omega
+
+/-- The Adler-32 sums `(a, b)` after folding bytes `i, i+1, …` of `data` into `(a, b)`: a
+tail-recursive loop without a pair or a division per byte (task 3.11). For sums below 65521
+it is the left fold of `adlerStep` (`adlerGo_eq_foldl`). -/
+def adlerGo (data : ByteArray) (i a b : Nat) : Nat × Nat :=
+  if h : i < data.size then
+    let a' := mod65521 (a + data[i].toNat)
+    adlerGo data (i + 1) a' (mod65521 (b + a'))
+  else (a, b)
+termination_by data.size - i
+
 /-- Adler-32 checksum (RFC 1950 §8.2). -/
 def adler32 (data : ByteArray) : Nat :=
-  let (a, b) := data.foldl (fun (st : Nat × Nat) x =>
-    let a := (st.1 + x.toNat) % 65521
-    (a, (st.2 + a) % 65521)) (1, 0)
+  let (a, b) := adlerGo data 0 1 0
   b * 65536 + a
+
+/-- The loop `adlerGo` is the left fold of `adlerStep`. -/
+theorem adlerGo_eq_foldl (data : ByteArray) :
+    adlerGo data 0 1 0 = data.foldl adlerStep (1, 0) := by
+  unfold ByteArray.foldl ByteArray.foldlM
+  simp only [Nat.le_refl, ↓reduceDIte]
+  suffices hl : ∀ (n j : Nat) (st : Nat × Nat), data.size - j ≤ n → st.1 < 65521 →
+      st.2 < 65521 → adlerGo data j st.1 st.2 =
+        (ByteArray.foldlM.loop (m := Id) (fun x1 x2 => pure (adlerStep x1 x2)) data data.size
+          (Nat.le_refl _) n j st).run by
+    exact hl (data.size - 0) 0 (1, 0) (by omega) (by decide) (by decide)
+  intro n
+  induction n with
+  | zero =>
+    intro j st hj _ _
+    unfold ByteArray.foldlM.loop adlerGo
+    have : ¬ j < data.size := by omega
+    simp only [this, ↓reduceDIte]
+    rfl
+  | succ n ih =>
+    intro j st hj ha hb
+    unfold ByteArray.foldlM.loop
+    rw [adlerGo]
+    split
+    · rename_i hlt
+      have hx := data[j].toNat_lt
+      have e1 : mod65521 (st.1 + data[j].toNat) = (adlerStep st data[j]).1 := by
+        rw [mod65521_eq (by omega)]; rfl
+      have e2 : mod65521 (st.2 + mod65521 (st.1 + data[j].toNat)) =
+          (adlerStep st data[j]).2 := by
+        rw [e1, mod65521_eq]
+        · rfl
+        · have : (adlerStep st data[j]).1 < 65521 := Nat.mod_lt _ (by decide)
+          omega
+      dsimp only
+      rw [e2, e1]
+      exact ih (j + 1) (adlerStep st data[j]) (by omega) (Nat.mod_lt _ (by decide))
+        (Nat.mod_lt _ (by decide))
+    · rfl
+
+/-- Adler-32 as the left fold of `adlerStep` from `(1, 0)` (its RFC 1950 definition). -/
+theorem adler32_eq_foldl (data : ByteArray) :
+    adler32 data = (let (a, b) := data.foldl adlerStep (1, 0); b * 65536 + a) := by
+  unfold adler32
+  rw [adlerGo_eq_foldl]
 
 /-- Zlib stream (RFC 1950), with the output's size bound in its type; see `zlibDecode`. -/
 def zlibDecodeOut (limit : Nat) (input : ByteArray) (checkAdler : Bool) :

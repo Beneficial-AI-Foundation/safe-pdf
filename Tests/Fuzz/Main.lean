@@ -158,6 +158,9 @@ def collectFiles (dir : System.FilePath) : Nat → IO (Array System.FilePath)
     let mut out := #[]
     for e in (← dir.readDir) do
       if ← e.path.isDir then
+        -- Decompression bombs (task 3.6a) decode up to `maxDecodedStreamBytes` by design and
+        -- would always show up as slow inputs; they have their own suite (`Tests/Bombs.lean`).
+        if e.fileName == "bombs" then continue
         out := out ++ (← collectFiles e.path depth)
       else
         out := out.push e.path

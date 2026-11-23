@@ -43,7 +43,10 @@ A total, bounded decoder for the `/LZWDecode` filter.
   entry, so a corrupted table cannot loop). Expansion builds at most 4096 bytes before the
   limit check.
 * Output is carried as `Out limit := {b : ByteArray // b.size ≤ limit}` as in Flate, so the
-  bound is structural.
+  bound is structural. The buffer is used linearly: `step` hands the output back in every
+  outcome (`Action.done`/`cont`/`stop`) and `loop` never touches the old state after a step,
+  so the buffer's reference count stays 1 and `emit` appends in place (task 3.12: holding
+  `st.out` across `step` made every append copy the whole buffer, quadratic in the output).
 * The main loop `loop` recurses structurally on a fuel argument. `lzwDecode` passes
   `input.size * 8 / 9 + 1`, an explicit **work bound** on the number of codes read: every
   code consumes at least 9 bits. `loop_fuel_irrel` proves this fuel is never what stops the
@@ -59,6 +62,7 @@ Proven here:
   prefix is a valid code below its own entry, is preserved, together with the validity of
   the previous code), and `expand_ok` (on a well-formed table every valid code expands
   without an internal error, to a non-empty string).
+* `step_error` — a step fails only with `limitErr`; invalid codes are `Action.stop`.
 
 Work (argued from the above, not mechanised as a cost model): at most
 `input.size * 8 / 9 + 1` loop iterations; each expands one code in O(length of its string)
@@ -189,12 +193,17 @@ structure State (limit : Nat) where
 def State.WF {limit : Nat} (st : State limit) : Prop :=
   TableWF st.tab ∧ ∀ p, st.prev = some p → ValidCode p (258 + st.tab.size)
 
-/-- The result of one step. -/
+/-- The result of one step. The output is handed back in every outcome, so the caller never
+needs the old state after the step: the buffer stays unshared and appends happen in place
+(task 3.12; keeping `st.out` alive across `step` copied the whole buffer per code). -/
 inductive Action (limit : Nat) where
-  /-- EOD seen. -/
-  | done
+  /-- EOD seen; the output so far. -/
+  | done (out : Out limit)
   /-- Continue with this state. -/
   | cont (st : State limit)
+  /-- An invalid code (or a corrupted table): the error, and the output before this code
+  (kept by lenient mode). -/
+  | stop (e : Error) (out : Out limit)
 
 /-- Append `s` to `out`, or fail with `limitErr` if that would exceed `limit`. -/
 def emit {limit : Nat} (out : Out limit) (s : List UInt8) : Except Error (Out limit) :=
@@ -205,10 +214,11 @@ def emit {limit : Nat} (out : Out limit) (s : List UInt8) : Except Error (Out li
       rw [ByteArray.size_append, hs]; exact h⟩
   else .error limitErr
 
-/-- Process one code read at byte offset `off`. -/
+/-- Process one code read at byte offset `off`. The only `Except.error` is `limitErr` from
+`emit` (`step_error`); every other failure is `Action.stop` carrying the output so far. -/
 def step {limit : Nat} (st : State limit) (code off : Nat) : Except Error (Action limit) :=
   if code = 256 then .ok (.cont { tab := #[], prev := none, out := st.out })
-  else if code = 257 then .ok .done
+  else if code = 257 then .ok (.done st.out)
   else
     match st.prev with
     | none =>
@@ -216,25 +226,39 @@ def step {limit : Nat} (st : State limit) (code off : Nat) : Except Error (Actio
         match emit st.out [code.toUInt8] with
         | .error e => .error e
         | .ok out => .ok (.cont { tab := st.tab, prev := some code, out })
-      else .error (.malformed off s!"lzw: code {code} after a clear is not a literal")
+      else .ok (.stop (.malformed off s!"lzw: code {code} after a clear is not a literal") st.out)
     | some p =>
       if code < 258 + st.tab.size then
         match expand st.tab code [] with
-        | .error e => .error e
-        | .ok [] => .error internalErr
+        | .error e => .ok (.stop e st.out)
+        | .ok [] => .ok (.stop internalErr st.out)
         | .ok (b :: rest) =>
           match emit st.out (b :: rest) with
           | .error e => .error e
           | .ok out => .ok (.cont { tab := addEntry st.tab p b, prev := some code, out })
       else if code = 258 + st.tab.size ∧ 258 + st.tab.size < maxCodes then
         match expand st.tab p [] with
-        | .error e => .error e
-        | .ok [] => .error internalErr
+        | .error e => .ok (.stop e st.out)
+        | .ok [] => .ok (.stop internalErr st.out)
         | .ok (b :: rest) =>
           match emit st.out (b :: rest ++ [b]) with
           | .error e => .error e
           | .ok out => .ok (.cont { tab := addEntry st.tab p b, prev := some code, out })
-      else .error (.malformed off s!"lzw: invalid code {code}")
+      else .ok (.stop (.malformed off s!"lzw: invalid code {code}") st.out)
+
+/-- **Errors of a step are limit errors**: `step` fails (as opposed to returning
+`Action.stop`) only when the output would exceed the limit. So `loop` returning every
+`Except.error` of `step` unchanged, in strict and lenient mode alike, is the documented
+behaviour (exceeding the limit always fails). -/
+theorem step_error {limit : Nat} (st : State limit) (code off : Nat) (e : Error)
+    (h : step st code off = .error e) : e = limitErr := by
+  unfold step at h
+  repeat' split at h
+  all_goals first
+    | (simp only [reduceCtorEq] at h; done)
+    | (simp only [Except.error.injEq] at h; exact h.symm)
+    | skip
+  all_goals (rename_i hemit; unfold emit at hemit; split at hemit <;> simp_all)
 
 /-- Adding a valid prefix keeps the table well-formed. -/
 theorem addEntry_wf (tab : Array Entry) (p : Nat) (b : UInt8) (hwf : TableWF tab)
@@ -342,14 +366,11 @@ def loop (input : ByteArray) (limit : Nat) (early strict : Bool) :
   | fuel + 1, pos, st =>
     if pos + codeWidth early (258 + st.tab.size) ≤ input.size * 8 then
       match step st (codeAt input pos (codeWidth early (258 + st.tab.size))) (pos / 8) with
-      | .ok .done => .ok st.out
+      | .ok (.done out) => .ok out
       | .ok (.cont st') => loop input limit early strict fuel
           (pos + codeWidth early (258 + st.tab.size)) st'
-      | .error e =>
-        if strict then .error e
-        else match e with
-          | .limitExceeded k => .error (.limitExceeded k)
-          | _ => .ok st.out
+      | .ok (.stop e out) => if strict then .error e else .ok out
+      | .error e => .error e
     else .ok st.out
 
 /-- **Work bound is sufficient**: with fuel `f` such that the remaining input bits are fewer
@@ -371,6 +392,7 @@ theorem loop_fuel_irrel (input : ByteArray) (limit : Nat) (early strict : Bool) 
       split
       · rfl
       · apply ih; omega
+      · rfl
       · rfl
     · rfl
 

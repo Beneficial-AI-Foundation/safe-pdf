@@ -1,5 +1,6 @@
 import SafePdf.Core.Xref
 import SafePdf.Core.Xref.Stream
+import SafePdf.Core.Filter.Structural
 
 /-!
 # The `/Prev` chain of incremental updates
@@ -50,6 +51,14 @@ stream counts as a revision.
 
 `walk` also returns the number of section parses (tables and streams) it made, so that
 `Spec.XrefTerm` can state the work bound.
+
+## Budgeted loading (task 3.13)
+
+`loadChainB` is `loadChain` with each xref-stream decode charged against a `Filter.Budget`
+(`parseXrefStreamB`; `loadChainB_le`, `loadChainB_cost`); with at least
+`maxRevisions · decodeAllowance` left it returns exactly `loadChain`'s result
+(`loadChainB_eq`), so the theorems of `Spec.XrefTerm`, `Spec.Unambiguous` and
+`Spec.PrefixStable` about `loadChain` carry over. Section "Budgeted loading" below.
 
 ## Not done here
 
@@ -219,6 +228,743 @@ def loadChainCounted (limits : Limits) (bytes : ByteArray) :
 A cyclic `/Prev` chain is an error (Bogk & Schöpl 2014). -/
 def loadChain (limits : Limits) (bytes : ByteArray) : Except Error (List Revision) :=
   (loadChainCounted limits bytes).1
+
+/-! ## Budgeted loading (task 3.13)
+
+`loadChainB limits budget bytes` is `loadChain` with every cross-reference-stream decode
+charged against the document budget (`Filter.Budget`, rules B1–B5 of `Core.Filter`): the
+section parser `parseSectionB` runs `parseXrefStreamB`, which is `Stream.parseXrefStream`
+(split into `xrefStreamPre`, the decode, and `xrefStreamPost`, `parseXrefStream_split`) with
+the decode done by `Filter.decodeBytesB`. Classic tables decode nothing and are free. The
+walk (`stepB`, `walkB`) is `step`/`walk` with the budget threaded through; it has the same
+checks in the same order, so the same termination measure.
+
+* `loadChainB_le`: the budget never grows.
+* `parseXrefStreamB_cost`: one section parse costs at most `decodeAllowance limits bytes`
+  `= (maxFilters + 1) · (maxDecodedStreamBytes + bytes.size)`.
+* `loadChainB_eq`: **with at least `maxRevisions · decodeAllowance` left, `loadChainB`
+  returns exactly what `loadChain` returns** (so every theorem about `loadChain` applies).
+  With less, it may stop earlier with `Error.limitExceeded .decodedTotalBytes` (or a
+  per-stream error under the lowered cap); that is the point of the budget.
+-/
+
+open SafePdf.Core.Filter (Budget)
+
+/-- The most one structural decode of a stream of `bytes` can charge
+(`Filter.decodeBytesB_cost`; the raw data of a stream lies within the input). -/
+def decodeAllowance (limits : Limits) (bytes : ByteArray) : Nat :=
+  (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + bytes.size)
+
+/-- The stream data of an object parsed by `ObjParse.parseIndirect` lies within the input. -/
+theorem parseIndirect_data_le {limits : Limits} {bytes : ByteArray} {pos : Nat}
+    {io : IndirectObject} {r : Nat} {st : Stream}
+    (h : ObjParse.parseIndirect limits bytes pos = .ok (io, r)) (hs : io.body = .stream st) :
+    st.data.size ≤ bytes.size := by
+  unfold ObjParse.parseIndirect at h
+  split at h
+  · cases h
+  · split at h
+    · rename_i b r' hb
+      cases h
+      unfold ObjParse.parseIndirectBody at hb
+      obtain ⟨_, _, hall⟩ := ObjParse.parseIndirectBodyWith_ok hb
+      obtain ⟨s0, _, hle, _⟩ := hall st hs
+      omega
+    · cases h
+
+/-- What `Stream.parseXrefStream` reads before decoding: the stream dictionary, the raw data,
+the trailer, the widths, the subsections and the entry count. -/
+abbrev XrefStreamHead :=
+  Dict × ByteArray × Trailer × (Nat × Nat × Nat) × List (Nat × Nat) × Nat
+
+/-- The part of `Stream.parseXrefStream` before the decode (XS1–XS4, the `/Index` and object
+count checks), verbatim. -/
+def xrefStreamPre (limits : Limits) (bytes : ByteArray) (off : Nat) :
+    Except Error XrefStreamHead := do
+  if !digitAt bytes off then
+    throw (.malformed off "expected an xref keyword or an xref stream object")
+  let (io, _) ← ObjParse.parseIndirect limits bytes off
+  let st ← match io.body with
+    | .stream st => pure st
+    | .obj _ => throw (.malformed off "xref section is not a stream")
+  let d := st.dict
+  if d.get? Stream.nameType != some (.name Stream.nameXRef) then
+    throw (.malformed off "xref stream without /Type /XRef")
+  let tr ← Trailer.ofDict d off
+  let (w1, w2, w3) ← Stream.widths d off
+  let subs ← Stream.index d tr.size off
+  if subs.any (fun sc => tr.size < sc.1 + sc.2) then
+    throw (.malformed off "xref stream /Index subsection not below /Size")
+  let total := (subs.map Prod.snd).sum
+  if limits.maxObjects < total then throw (.limitExceeded .objects)
+  pure (d, st.data, tr, (w1, w2, w3), subs, total)
+
+/-- The part of `Stream.parseXrefStream` after the decode (XS6–XS8), verbatim. -/
+def xrefStreamPost (bytes : ByteArray) (off : Nat) (h : XrefStreamHead) (data : ByteArray) :
+    Except Error (XrefSection × Trailer) := do
+  let (_, _, tr, (w1, w2, w3), subs, total) := h
+  if data.size != total * (w1 + w2 + w3) then
+    throw (.malformed off s!"xref stream data has {data.size} bytes, expected {total * (w1 + w2 + w3)}")
+  let acc ← Stream.subsections bytes.size tr.size off data ⟨w1, w2, w3⟩ 0 subs []
+  match mkSection acc with
+  | none => throw (.malformed off "duplicate object number in cross-reference stream")
+  | some sec => pure (sec, tr)
+
+/-- **`parseXrefStream` split at its decode**: head, `Stream.decodeData`, tail. -/
+theorem parseXrefStream_split (limits : Limits) (bytes : ByteArray) (off : Nat) :
+    Stream.parseXrefStream limits bytes off =
+      match xrefStreamPre limits bytes off with
+      | .error e => .error e
+      | .ok h =>
+        match Stream.decodeData limits h.1 h.2.1 off with
+        | .error e => .error e
+        | .ok data => xrefStreamPost bytes off h data := by
+  simp only [Stream.parseXrefStream, xrefStreamPre, xrefStreamPost, bind, Except.bind, pure,
+    Except.pure, throw, throwThe, MonadExceptOf.throw]
+  cases hd : digitAt bytes off
+  · simp
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases hp : ObjParse.parseIndirect limits bytes off with
+    | error e => simp
+    | ok p =>
+      obtain ⟨io, r⟩ := p
+      simp only
+      cases hb : io.body with
+      | obj o => simp
+      | stream st =>
+        simp only
+        cases ht : (st.dict.get? Stream.nameType != some (.name Stream.nameXRef))
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          cases htr : Trailer.ofDict st.dict off with
+          | error e => simp
+          | ok tr =>
+            simp only
+            cases hw : Stream.widths st.dict off with
+            | error e => simp
+            | ok w =>
+              obtain ⟨w1, w2, w3⟩ := w
+              simp only
+              cases hi : Stream.index st.dict tr.size off with
+              | error e => simp
+              | ok subs =>
+                simp only
+                cases ha : subs.any (fun sc => decide (tr.size < sc.1 + sc.2))
+                · simp only [Bool.false_eq_true, ↓reduceIte]
+                  by_cases hm : limits.maxObjects < (subs.map Prod.snd).sum
+                  · simp [hm]
+                  · simp only [hm, ↓reduceIte]
+                    cases Stream.decodeData limits st.dict st.data off <;> rfl
+                · simp
+        · simp
+
+/-- The raw data in an xref-stream head lies within the input. -/
+theorem xrefStreamPre_data_le {limits : Limits} {bytes : ByteArray} {off : Nat}
+    {h : XrefStreamHead} (hp : xrefStreamPre limits bytes off = .ok h) :
+    h.2.1.size ≤ bytes.size := by
+  simp only [xrefStreamPre, bind, Except.bind, pure, Except.pure, throw, throwThe,
+    MonadExceptOf.throw] at hp
+  cases hd : digitAt bytes off
+  · simp [hd] at hp
+  · simp only [hd, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hp
+    cases hpi : ObjParse.parseIndirect limits bytes off with
+    | error e => simp [hpi] at hp
+    | ok p =>
+      obtain ⟨io, r⟩ := p
+      simp only [hpi] at hp
+      cases hb : io.body with
+      | obj o => simp [hb] at hp
+      | stream st =>
+        have hle := parseIndirect_data_le hpi hb
+        simp only [hb] at hp
+        repeat' split at hp
+        all_goals first | (cases hp; done) | (cases hp; exact hle) | (simp at hp)
+
+/-- `Stream.decodeData` with the budget (rule XS5 of `Core.Xref.Stream`): no `/Crypt` stage,
+no image codec; the decode is `Filter.decodeBytesB`. -/
+def decodeXrefDataB (limits : Limits) (budget : Budget) (d : Dict) (raw : ByteArray)
+    (at_ : Nat) : (Except Error ByteArray) × Budget :=
+  match Filter.parseChain limits d with
+  | .error e => (.error e, budget)
+  | .ok stages =>
+    if stages.any Filter.Stage.isCrypt then
+      (.error (.malformed at_ "xref stream with a /Crypt filter (xref streams are not encrypted)"),
+        budget)
+    else Filter.decodeBytesB limits budget d raw (.malformed at_ "xref stream with an image filter")
+
+/-- `decodeXrefDataB` never increases the budget. -/
+theorem decodeXrefDataB_le (limits : Limits) (budget : Budget) (d : Dict) (raw : ByteArray)
+    (at_ : Nat) : (decodeXrefDataB limits budget d raw at_).2.remaining ≤ budget.remaining := by
+  unfold decodeXrefDataB
+  split
+  · exact Nat.le_refl _
+  · split
+    · exact Nat.le_refl _
+    · exact Filter.decodeBytesB_le _ _ _ _ _ _
+
+/-- Cost of `decodeXrefDataB`: at most `(maxFilters + 1) · (maxDecodedStreamBytes + raw.size)`. -/
+theorem decodeXrefDataB_cost (limits : Limits) (budget : Budget) (d : Dict) (raw : ByteArray)
+    (at_ : Nat) : budget.remaining ≤ (decodeXrefDataB limits budget d raw at_).2.remaining +
+      (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + raw.size) := by
+  unfold decodeXrefDataB
+  split
+  · exact Nat.le_add_right _ _
+  · split
+    · exact Nat.le_add_right _ _
+    · exact Filter.decodeBytesB_cost _ _ _ _ _ _
+
+/-- Budget large enough ⇒ `decodeXrefDataB` returns what `Stream.decodeData` returns. -/
+theorem decodeXrefDataB_eq {limits : Limits} {budget : Budget} {d : Dict} {raw : ByteArray}
+    {at_ : Nat}
+    (h : (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + raw.size) ≤ budget.remaining) :
+    (decodeXrefDataB limits budget d raw at_).1 = Stream.decodeData limits d raw at_ := by
+  unfold decodeXrefDataB Stream.decodeData
+  cases hp : Filter.parseChain limits d with
+  | error e => rfl
+  | ok stages =>
+    simp only
+    split
+    · rfl
+    · exact Filter.decodeBytesB_eq h
+
+/-- **Budgeted xref stream** (task 3.13): `Stream.parseXrefStream` with its decode charged
+(`decodeXrefDataB`). Returns the budget also on failure. -/
+def parseXrefStreamB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat) :
+    (Except Error (XrefSection × Trailer)) × Budget :=
+  match xrefStreamPre limits bytes off with
+  | .error e => (.error e, budget)
+  | .ok h =>
+    let p := decodeXrefDataB limits budget h.1 h.2.1 off
+    (match p.1 with
+     | .error e => .error e
+     | .ok data => xrefStreamPost bytes off h data, p.2)
+
+/-- `parseXrefStreamB` never increases the budget. -/
+theorem parseXrefStreamB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat) :
+    (parseXrefStreamB limits budget bytes off).2.remaining ≤ budget.remaining := by
+  unfold parseXrefStreamB
+  split
+  · exact Nat.le_refl _
+  · exact decodeXrefDataB_le _ _ _ _ _
+
+/-- **Cost of one xref stream**: at most `decodeAllowance limits bytes`. -/
+theorem parseXrefStreamB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray)
+    (off : Nat) : budget.remaining ≤ (parseXrefStreamB limits budget bytes off).2.remaining +
+      decodeAllowance limits bytes := by
+  unfold parseXrefStreamB
+  split
+  · exact Nat.le_add_right _ _
+  · rename_i h hp
+    have h1 := decodeXrefDataB_cost limits budget h.1 h.2.1 off
+    have h2 := xrefStreamPre_data_le hp
+    have h3 : (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + h.2.1.size) ≤
+        decodeAllowance limits bytes :=
+      Nat.mul_le_mul_left _ (by omega)
+    simp only
+    omega
+
+/-- **Budget large enough ⇒ same xref stream**: with at least `decodeAllowance limits bytes`
+left, `parseXrefStreamB` returns what `Stream.parseXrefStream` returns. -/
+theorem parseXrefStreamB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray} {off : Nat}
+    (h : decodeAllowance limits bytes ≤ budget.remaining) :
+    (parseXrefStreamB limits budget bytes off).1 = Stream.parseXrefStream limits bytes off := by
+  rw [parseXrefStream_split]
+  unfold parseXrefStreamB
+  split
+  · rfl
+  · rename_i hd hp
+    have h2 := xrefStreamPre_data_le hp
+    have h3 : (limits.maxFilters + 1) * (limits.maxDecodedStreamBytes + hd.2.1.size) ≤
+        budget.remaining :=
+      Nat.le_trans (Nat.mul_le_mul_left _ (by omega)) h
+    simp only
+    rw [decodeXrefDataB_eq h3]
+
+/-- `parseSection` with the budget: a classic table is free, an xref stream is
+`parseXrefStreamB`. -/
+def parseSectionB (limits : Limits) (budget : Budget) (bytes : ByteArray) (o : Nat) :
+    (Except Error (XrefSection × Trailer)) × Budget :=
+  if matchAt bytes o kwXref then
+    (match parseXrefTable limits bytes o with
+     | .ok (sec, tr, _) => .ok (sec, tr)
+     | .error e => .error e, budget)
+  else parseXrefStreamB limits budget bytes o
+
+/-- `parseSectionB` never increases the budget. -/
+theorem parseSectionB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (o : Nat) :
+    (parseSectionB limits budget bytes o).2.remaining ≤ budget.remaining := by
+  unfold parseSectionB
+  split
+  · exact Nat.le_refl _
+  · exact parseXrefStreamB_le _ _ _ _
+
+/-- Cost of `parseSectionB`: at most `decodeAllowance limits bytes`. -/
+theorem parseSectionB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (o : Nat) :
+    budget.remaining ≤ (parseSectionB limits budget bytes o).2.remaining +
+      decodeAllowance limits bytes := by
+  unfold parseSectionB
+  split
+  · exact Nat.le_add_right _ _
+  · exact parseXrefStreamB_cost _ _ _ _
+
+/-- Budget large enough ⇒ `parseSectionB` returns what `parseSection` returns. -/
+theorem parseSectionB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray} {o : Nat}
+    (h : decodeAllowance limits bytes ≤ budget.remaining) :
+    (parseSectionB limits budget bytes o).1 = parseSection limits bytes o := by
+  unfold parseSectionB parseSection
+  split
+  · rfl
+  · exact parseXrefStreamB_eq h
+
+/-- `step` with the budget threaded through (same checks, same order; the section parses
+are `parseSectionB` and `parseXrefStreamB`). -/
+def stepB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) :
+    (Except Error (StepOk bytes visited) × Nat) × Budget :=
+  if hoff : off < bytes.size then
+    if hmem : off ∈ visited then ((.error (.cycle off "xref /Prev cycle"), 0), budget)
+    else if limits.maxRevisions ≤ visited.length then
+      ((.error (.limitExceeded .revisions), 0), budget)
+    else
+      match parseSectionB limits budget bytes off with
+      | (.error e, b1) => ((.error e, 1), b1)
+      | (.ok (sec, tr), b1) =>
+        match hybridStm bytes off tr with
+        | none =>
+          ((.ok ⟨[(sec, tr, off)], tr.prev?,
+            by simp only [List.map_cons, List.map_nil, Revision.offset, List.cons_append,
+              List.nil_append, List.nodup_cons]; exact ⟨hmem, hnd⟩,
+            by simp only [List.map_cons, List.map_nil, Revision.offset, List.mem_singleton]
+               intro x hx; subst hx; exact hoff,
+            by simp⟩, 1), b1)
+        | some s =>
+          if hs : s < bytes.size then
+            if hsm : s = off ∨ s ∈ visited then ((.error (.cycle s "xref /XRefStm cycle"), 1), b1)
+            else if limits.maxRevisions ≤ visited.length + 1 then
+              ((.error (.limitExceeded .revisions), 1), b1)
+            else
+              match parseXrefStreamB limits b1 bytes s with
+              | (.error e, b2) => ((.error e, 2), b2)
+              | (.ok (sec2, tr2), b2) =>
+                ((.ok ⟨[(sec, tr, off), (sec2, tr2, s)], tr.prev?, by
+                    simp only [List.map_cons, List.map_nil, Revision.offset, List.cons_append,
+                      List.nil_append, List.nodup_cons, List.mem_cons, not_or]
+                    exact ⟨⟨fun h => hsm (Or.inl h.symm), hmem⟩,
+                      ⟨fun h => hsm (Or.inr h), hnd⟩⟩, by
+                    simp only [List.map_cons, List.map_nil, Revision.offset, List.mem_cons,
+                      List.not_mem_nil, or_false]
+                    intro x hx
+                    rcases hx with rfl | rfl
+                    · exact hoff
+                    · exact hs, by simp⟩, 2), b2)
+          else ((.error (.malformed s "xref /XRefStm offset beyond end of input"), 1), b1)
+  else ((.error (.malformed off "xref /Prev offset beyond end of input"), 0), budget)
+
+/-- `stepB` never increases the budget. -/
+theorem stepB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) :
+    (stepB limits budget bytes off visited hnd).2.remaining ≤ budget.remaining := by
+  unfold stepB
+  have h1 := parseSectionB_le limits budget bytes off
+  split
+  · split
+    · exact Nat.le_refl _
+    · split
+      · exact Nat.le_refl _
+      · rcases hps : parseSectionB limits budget bytes off with ⟨r1, b1⟩
+        rw [hps] at h1
+        simp only at h1
+        rcases r1 with e | ⟨sec, tr⟩
+        · exact h1
+        · simp only
+          rcases hh : hybridStm bytes off tr with _ | s
+          · exact h1
+          · simp only
+            split
+            · split
+              · exact h1
+              · split
+                · exact h1
+                · have h2 := parseXrefStreamB_le limits b1 bytes s
+                  rcases hps2 : parseXrefStreamB limits b1 bytes s with ⟨r2, b2⟩
+                  rw [hps2] at h2
+                  simp only at h2
+                  rcases r2 with e | ⟨sec2, tr2⟩
+                  · exact Nat.le_trans h2 h1
+                  · exact Nat.le_trans h2 h1
+            · exact h1
+  · exact Nat.le_refl _
+
+/-- Arithmetic of the walk's budget invariant: after a charge of at most `K` from at least
+`a · K` (`a ≥ 1`), at least `(a - 1) · K` is left. -/
+theorem budget_step {a K r r' : Nat} (h : a * K ≤ r) (ha : 1 ≤ a) (hc : r ≤ r' + K) :
+    (a - 1) * K ≤ r' := by
+  have : a * K = (a - 1) * K + K := by
+    rw [← Nat.succ_mul, Nat.succ_eq_add_one, Nat.sub_add_cancel ha]
+  omega
+
+/-- **Budget large enough ⇒ same step**, and the walk's budget invariant is kept: with at
+least `(maxRevisions - visited.length) · decodeAllowance` left, `stepB` returns what `step`
+returns, and after a successful step at least
+`(maxRevisions - (visited.length + revs.length)) · decodeAllowance` is left. -/
+theorem stepB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup)
+    (h : (limits.maxRevisions - visited.length) * decodeAllowance limits bytes ≤ budget.remaining) :
+    (stepB limits budget bytes off visited hnd).1 = step limits bytes off visited hnd ∧
+    ∀ so k, (stepB limits budget bytes off visited hnd).1 = (.ok so, k) →
+      (limits.maxRevisions - (visited.length + so.revs.length)) * decodeAllowance limits bytes ≤
+        (stepB limits budget bytes off visited hnd).2.remaining := by
+  have hK0 : ∀ a, 1 ≤ a → a * decodeAllowance limits bytes ≤ budget.remaining →
+      decodeAllowance limits bytes ≤ budget.remaining := fun a ha h' => by
+    have : 1 * decodeAllowance limits bytes ≤ a * decodeAllowance limits bytes :=
+      Nat.mul_le_mul_right _ ha
+    omega
+  unfold stepB step
+  by_cases hoff : off < bytes.size
+  · simp only [hoff, dite_true]
+    by_cases hmem : off ∈ visited
+    · simp [hmem]
+    · simp only [hmem, dite_false]
+      by_cases hrev : limits.maxRevisions ≤ visited.length
+      · simp [hrev]
+      · simp only [hrev, ↓reduceIte]
+        have hK1 := hK0 _ (by omega) h
+        have he1 := parseSectionB_eq (o := off) hK1
+        have hc1 := parseSectionB_cost limits budget bytes off
+        rcases hps : parseSectionB limits budget bytes off with ⟨r1, b1⟩
+        rw [hps] at he1 hc1
+        simp only at he1 hc1
+        subst he1
+        have hb1 := budget_step h (by omega) hc1
+        cases hsec : parseSection limits bytes off with
+        | error e => simp
+        | ok p =>
+          obtain ⟨sec, tr⟩ := p
+          simp only
+          cases hh : hybridStm bytes off tr with
+          | none =>
+            refine ⟨rfl, ?_⟩
+            intro so k hso
+            simp only [Prod.mk.injEq, Except.ok.injEq] at hso
+            obtain ⟨rfl, rfl⟩ := hso
+            simp only [List.length_cons, List.length_nil]
+            have : limits.maxRevisions - (visited.length + (0 + 1)) =
+                limits.maxRevisions - visited.length - 1 := by omega
+            rw [this]; exact hb1
+          | some s =>
+            simp only
+            by_cases hs : s < bytes.size
+            · simp only [hs, dite_true]
+              by_cases hsm : s = off ∨ s ∈ visited
+              · simp [hsm]
+              · simp only [hsm, dite_false]
+                by_cases hrev2 : limits.maxRevisions ≤ visited.length + 1
+                · simp [hrev2]
+                · simp only [hrev2, ↓reduceIte]
+                  have hK2 : decodeAllowance limits bytes ≤ b1.remaining := by
+                    have : 1 * decodeAllowance limits bytes ≤
+                        (limits.maxRevisions - visited.length - 1) *
+                          decodeAllowance limits bytes :=
+                      Nat.mul_le_mul_right _ (by omega)
+                    omega
+                  have he2 := parseXrefStreamB_eq (off := s) hK2
+                  have hc2 := parseXrefStreamB_cost limits b1 bytes s
+                  rcases hps2 : parseXrefStreamB limits b1 bytes s with ⟨r2, b2⟩
+                  rw [hps2] at he2 hc2
+                  simp only at he2 hc2
+                  subst he2
+                  have hb2 := budget_step hb1 (by omega) hc2
+                  cases hst : Stream.parseXrefStream limits bytes s with
+                  | error e => simp
+                  | ok q =>
+                    obtain ⟨sec2, tr2⟩ := q
+                    refine ⟨rfl, ?_⟩
+                    intro so k hso
+                    simp only [Prod.mk.injEq, Except.ok.injEq] at hso
+                    obtain ⟨rfl, rfl⟩ := hso
+                    simp only [List.length_cons, List.length_nil]
+                    have : limits.maxRevisions - (visited.length + (0 + 1 + 1)) =
+                        limits.maxRevisions - visited.length - 1 - 1 := by omega
+                    rw [this]; exact hb2
+            · simp [hs]
+  · simp [hoff]
+
+/-- `walk` with the budget threaded through (`stepB`; same recursion, same measure). -/
+def walkB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (Except Error (List Revision) × Nat) × Budget :=
+  match stepB limits budget bytes off visited hnd with
+  | ((.error e, k), b1) => ((.error e, k), b1)
+  | ((.ok so, k), b1) =>
+    match so.prev? with
+    | none => ((.ok so.revs, k), b1)
+    | some p =>
+      match walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (fun x hx => by
+            rcases List.mem_append.mp hx with hx | hx
+            · exact so.lt x hx
+            · exact hlt x hx) with
+      | ((.error e, k'), b2) => ((.error e, k' + k), b2)
+      | ((.ok rest, k'), b2) => ((.ok (so.revs ++ rest), k' + k), b2)
+termination_by bytes.size - visited.length
+decreasing_by
+  have h1 := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+    rcases List.mem_append.mp hx with hx | hx
+    · exact so.lt x hx
+    · exact hlt x hx)
+  have h2 : 0 < so.revs.length := List.length_pos_iff.mpr so.ne
+  simp only [List.length_append, List.length_map] at h1 ⊢
+  omega
+
+/-- `walkB` never increases the budget. -/
+theorem walkB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (walkB limits budget bytes off visited hnd hlt).2.remaining ≤ budget.remaining := by
+  rw [walkB]
+  have h1 := stepB_le limits budget bytes off visited hnd
+  rcases hs : stepB limits budget bytes off visited hnd with ⟨⟨r1, k⟩, b1⟩
+  rw [hs] at h1
+  simp only at h1
+  rcases r1 with e | so
+  · exact h1
+  · simp only
+    rcases hp : so.prev? with _ | p
+    · exact h1
+    · simp only
+      have h2 := walkB_le limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+        (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact so.lt x hx
+          · exact hlt x hx)
+      rcases hw : walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+        (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact so.lt x hx
+          · exact hlt x hx) with ⟨⟨r2, k'⟩, b2⟩
+      rw [hw] at h2
+      simp only at h2
+      rcases r2 with e | rest
+      · exact Nat.le_trans h2 h1
+      · exact Nat.le_trans h2 h1
+termination_by bytes.size - visited.length
+decreasing_by
+  have h1 := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+    rcases List.mem_append.mp hx with hx | hx
+    · exact so.lt x hx
+    · exact hlt x hx)
+  have h2 : 0 < so.revs.length := List.length_pos_iff.mpr so.ne
+  simp only [List.length_append, List.length_map] at h1 ⊢
+  omega
+
+/-- **Budget large enough ⇒ same walk**: with at least
+`(maxRevisions - visited.length) · decodeAllowance` left, `walkB` returns what `walk`
+returns. -/
+theorem walkB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size)
+    (h : (limits.maxRevisions - visited.length) * decodeAllowance limits bytes ≤ budget.remaining) :
+    (walkB limits budget bytes off visited hnd hlt).1 = walk limits bytes off visited hnd hlt := by
+  rw [walkB, walk]
+  obtain ⟨he, hinv⟩ := stepB_eq limits budget bytes off visited hnd h
+  rcases hs : stepB limits budget bytes off visited hnd with ⟨⟨r1, k⟩, b1⟩
+  rw [hs] at he hinv
+  simp only at he hinv
+  rw [← he]
+  rcases r1 with e | so
+  · rfl
+  · simp only
+    have hb := hinv so k rfl
+    rcases hp : so.prev? with _ | p
+    · rfl
+    · simp only
+      have ih := walkB_eq limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+        (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact so.lt x hx
+          · exact hlt x hx)
+        (by simp only [List.length_append, List.length_map]; rw [Nat.add_comm]; exact hb)
+      rw [← ih]
+      rcases walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+        (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact so.lt x hx
+          · exact hlt x hx) with ⟨⟨r2, k'⟩, b2⟩
+      rcases r2 with e | rest <;> rfl
+termination_by bytes.size - visited.length
+decreasing_by
+  have h1 := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+    rcases List.mem_append.mp hx with hx | hx
+    · exact so.lt x hx
+    · exact hlt x hx)
+  have h2 : 0 < so.revs.length := List.length_pos_iff.mpr so.ne
+  simp only [List.length_append, List.length_map] at h1 ⊢
+  omega
+
+/-- **Entry point** (task 3.13). `loadChain` with every xref-stream decode charged against
+`budget`; returns the charged budget, also on failure. -/
+def loadChainB (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    (Except Error (List Revision)) × Budget :=
+  match findStartxref bytes with
+  | .error e => (.error e, budget)
+  | .ok off =>
+    let p := walkB limits budget bytes off [] List.nodup_nil
+      (fun _ hx => absurd hx List.not_mem_nil)
+    (p.1.1, p.2)
+
+/-- **Budget monotone**: `loadChainB` never increases the budget. -/
+theorem loadChainB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    (loadChainB limits budget bytes).2.remaining ≤ budget.remaining := by
+  unfold loadChainB
+  split
+  · exact Nat.le_refl _
+  · exact walkB_le _ _ _ _ _ _ _
+
+/-- **Budget large enough ⇒ same chain** (task 3.13): with at least
+`maxRevisions · decodeAllowance limits bytes` left, `loadChainB` returns exactly what
+`loadChain` returns, so every theorem about `loadChain` (`Spec.XrefTerm`,
+`Spec.Unambiguous`, `Spec.PrefixStable`) applies to its result. -/
+theorem loadChainB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
+    (h : limits.maxRevisions * decodeAllowance limits bytes ≤ budget.remaining) :
+    (loadChainB limits budget bytes).1 = loadChain limits bytes := by
+  unfold loadChainB loadChain loadChainCounted
+  cases hs : findStartxref bytes with
+  | error e => rfl
+  | ok off =>
+    simp only
+    rw [walkB_eq _ _ _ _ _ _ _ (by simpa using h)]
+
+/-- **Cost of one step**: at most `decodeAllowance` per section parsed; a failed step costs at
+most `(maxRevisions - visited.length) · decodeAllowance`, a successful one at most
+`revs.length · decodeAllowance`, with `visited.length + revs.length ≤ maxRevisions`. -/
+theorem stepB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) :
+    budget.remaining ≤ (stepB limits budget bytes off visited hnd).2.remaining +
+      (limits.maxRevisions - visited.length) * decodeAllowance limits bytes ∧
+    ∀ so k, (stepB limits budget bytes off visited hnd).1 = (.ok so, k) →
+      budget.remaining ≤ (stepB limits budget bytes off visited hnd).2.remaining +
+        so.revs.length * decodeAllowance limits bytes ∧
+      visited.length + so.revs.length ≤ limits.maxRevisions := by
+  have hmulle : ∀ a b K : Nat, a ≤ b → a * K ≤ b * K := fun a b K h => Nat.mul_le_mul_right K h
+  unfold stepB
+  by_cases hoff : off < bytes.size
+  · simp only [hoff, dite_true]
+    by_cases hmem : off ∈ visited
+    · simp [hmem]
+    · simp only [hmem, dite_false]
+      by_cases hrev : limits.maxRevisions ≤ visited.length
+      · simp [hrev]
+      · simp only [hrev, ↓reduceIte]
+        have hc1 := parseSectionB_cost limits budget bytes off
+        have hA := hmulle 1 (limits.maxRevisions - visited.length) (decodeAllowance limits bytes)
+          (by omega)
+        rcases hps : parseSectionB limits budget bytes off with ⟨r1, b1⟩
+        rw [hps] at hc1
+        simp only at hc1
+        rcases r1 with e | ⟨sec, tr⟩
+        · simp only
+          refine ⟨by omega, ?_⟩
+          intro so k hso; cases hso
+        · simp only
+          rcases hh : hybridStm bytes off tr with _ | s
+          · simp only
+            refine ⟨by omega, ?_⟩
+            intro so k hso
+            simp only [Prod.mk.injEq, Except.ok.injEq] at hso
+            obtain ⟨rfl, rfl⟩ := hso
+            simp only [List.length_cons, List.length_nil]
+            omega
+          · simp only
+            by_cases hs : s < bytes.size
+            · simp only [hs, dite_true]
+              by_cases hsm : s = off ∨ s ∈ visited
+              · simp only [hsm, dite_true]
+                refine ⟨by omega, ?_⟩
+                intro so k hso; cases hso
+              · simp only [hsm, dite_false]
+                by_cases hrev2 : limits.maxRevisions ≤ visited.length + 1
+                · simp only [hrev2, ↓reduceIte]
+                  refine ⟨by omega, ?_⟩
+                  intro so k hso; cases hso
+                · simp only [hrev2, ↓reduceIte]
+                  have hB := hmulle 2 (limits.maxRevisions - visited.length)
+                    (decodeAllowance limits bytes) (by omega)
+                  have hc2 := parseXrefStreamB_cost limits b1 bytes s
+                  rcases hps2 : parseXrefStreamB limits b1 bytes s with ⟨r2, b2⟩
+                  rw [hps2] at hc2
+                  simp only at hc2
+                  rcases r2 with e | ⟨sec2, tr2⟩
+                  · simp only
+                    refine ⟨by omega, ?_⟩
+                    intro so k hso; cases hso
+                  · simp only
+                    refine ⟨by omega, ?_⟩
+                    intro so k hso
+                    simp only [Prod.mk.injEq, Except.ok.injEq] at hso
+                    obtain ⟨rfl, rfl⟩ := hso
+                    simp only [List.length_cons, List.length_nil]
+                    omega
+            · simp only [hs, dite_false]
+              refine ⟨by omega, ?_⟩
+              intro so k hso; cases hso
+  · simp [hoff]
+
+/-- **Cost of the walk**: at most `(maxRevisions - visited.length) · decodeAllowance`. -/
+theorem walkB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
+    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    budget.remaining ≤ (walkB limits budget bytes off visited hnd hlt).2.remaining +
+      (limits.maxRevisions - visited.length) * decodeAllowance limits bytes := by
+  rw [walkB]
+  obtain ⟨hc, hok⟩ := stepB_cost limits budget bytes off visited hnd
+  rcases hs : stepB limits budget bytes off visited hnd with ⟨⟨r1, k⟩, b1⟩
+  rw [hs] at hc hok
+  simp only at hc hok
+  rcases r1 with e | so
+  · exact hc
+  · simp only
+    obtain ⟨hc1, hlen⟩ := hok so k rfl
+    have hsplit : so.revs.length * decodeAllowance limits bytes +
+        (limits.maxRevisions - (so.revs.length + visited.length)) * decodeAllowance limits bytes =
+        (limits.maxRevisions - visited.length) * decodeAllowance limits bytes := by
+      rw [← Nat.add_mul]; congr 1; omega
+    have hle1 : so.revs.length * decodeAllowance limits bytes ≤
+        (limits.maxRevisions - visited.length) * decodeAllowance limits bytes :=
+      Nat.mul_le_mul_right _ (by omega)
+    rcases hp : so.prev? with _ | p
+    · simp only; omega
+    · simp only
+      have ih := walkB_cost limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+        (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact so.lt x hx
+          · exact hlt x hx)
+      simp only [List.length_append, List.length_map] at ih
+      rcases hw : walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+        (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact so.lt x hx
+          · exact hlt x hx) with ⟨⟨r2, k'⟩, b2⟩
+      rw [hw] at ih
+      simp only at ih
+      rcases r2 with e | rest <;> (simp only; omega)
+termination_by bytes.size - visited.length
+decreasing_by
+  have h1 := length_le_of_nodup_of_lt so.nodup (fun x hx => by
+    rcases List.mem_append.mp hx with hx | hx
+    · exact so.lt x hx
+    · exact hlt x hx)
+  have h2 : 0 < so.revs.length := List.length_pos_iff.mpr so.ne
+  simp only [List.length_append, List.length_map] at h1 ⊢
+  omega
+
+/-- **Cost of loading the chain**: at most `maxRevisions · decodeAllowance limits bytes`. -/
+theorem loadChainB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    budget.remaining ≤ (loadChainB limits budget bytes).2.remaining +
+      limits.maxRevisions * decodeAllowance limits bytes := by
+  unfold loadChainB
+  split
+  · exact Nat.le_add_right _ _
+  · rename_i off _
+    have := walkB_cost limits budget bytes off [] List.nodup_nil
+      (fun _ hx => absurd hx List.not_mem_nil)
+    simpa using this
 
 /-! ## Merging revisions: newest wins (S6 preview) -/
 
@@ -603,6 +1349,32 @@ private def hybrid : ByteArray := hybridAt minimalValid.size
 #guard lcl { maxRevisions := 1 } hybrid == (.inl "limit:SafePdf.LimitKind.revisions", 1)
 -- no startxref: no parse at all
 #guard lc "%PDF-1.7\n".toUTF8 == (.inl "malformed@9: startxref not found", 0)
+
+/-! ### Budgeted loading (task 3.13) -/
+
+/-- Test helper: `loadChainB` from a budget of `n` bytes, with the budget left. -/
+private def lcb (n : Nat) (b : ByteArray) : Sum String (List Nat) × Nat :=
+  match loadChainB Limits.default ⟨n⟩ b with
+  | (.ok revs, bud) => (.inr (revs.map Revision.offset), bud.remaining)
+  | (.error e, bud) => (.inl (errS e), bud.remaining)
+
+-- Flate + PNG predictor: 20 decoded bytes charged; with a budget of 10 the decode fails with
+-- the total-budget error and is charged its cap (rule B2)
+#guard lcb 1000 flateFile == (.inr [9], 980)
+#guard lcb 10 flateFile == (.inl "limit:SafePdf.LimitKind.decodedTotalBytes", 0)
+-- unfiltered xref streams are charged their data (rule B3); classic tables are free
+#guard lcb 1000 twoStreams == (.inr [93, 9], 992)
+#guard lcb 1000 minimalValid == (.inr [404], 1000)
+#guard lcb 0 minimalValid == (.inr [404], 0)
+#guard lcb 1000 hybrid == (.inr [692, 587, 404], 992)
+#guard lcb 0 hybrid == (.inl "limit:SafePdf.LimitKind.decodedTotalBytes", 0)
+-- a cycle is still a cycle under the budget
+#guard lcb 1000 prevCycle == (.inl "cycle@652: xref /Prev cycle", 1000)
+#guard lcb 1000 streamPrevSelf == (.inl "cycle@9: xref /Prev cycle", 996)
+-- with the full default budget: the revisions loadChain finds
+#guard (match (loadChainB Limits.default (Filter.Budget.init Limits.default) hybrid).1 with
+  | .ok revs => revs.map Revision.offset == [692, 587, 404]
+  | .error _ => false)
 
 end Tests
 
