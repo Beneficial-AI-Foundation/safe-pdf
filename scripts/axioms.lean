@@ -1285,3 +1285,18 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Spec.RepairAgreeFree.fetchCompressed_mono
 #print axioms SafePdf.Spec.RepairAgreeFree.resolve_agree
 #print axioms SafePdf.Spec.RepairAgreeFree.getObject_agree
+-- Phase 12, task 12.1: true strict mode
+#print axioms SafePdf.Core.Open.openFileWith_true
+#print axioms SafePdf.Core.Open.openFileWith_false
+#print axioms SafePdf.Core.Open.openFileLogged_strictOnly
+#print axioms SafePdf.Core.Open.openFileLogged_refused
+#print axioms SafePdf.Core.Open.strictOpen_not_repaired
+#print axioms SafePdf.Core.Open.openFileWith_false_repaired
+#print axioms SafePdf.Core.Open.openFileBLogged_true
+#print axioms SafePdf.Core.Open.openFileBLogged_false
+#print axioms SafePdf.Core.Open.strictOpenB_not_repaired
+#print axioms SafePdf.Core.Open.Session.openLogged_true
+#print axioms SafePdf.Core.Open.Session.openLogged_false
+#print axioms SafePdf.parseLogged_strictOnly
+#print axioms SafePdf.parseLogged_refused
+#print axioms SafePdf.Api.openBytes_strict_no_repair
