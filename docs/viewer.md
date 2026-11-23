@@ -422,7 +422,7 @@ is drawn per quad (PDF.js outlines the union shape).
 | `Delete` | delete the selected mark |
 | right button | menu: … Highlight ▸ colours, Add note…, Delete mark |
 
-## Saving marks into the PDF (9.5c, 9.5g, 9.r2)
+## Saving marks into the PDF (9.5c, 9.5g, 9.r2, 9.r6)
 
 Tk-free flow and decisions in `SafePdf/Shell/App/Save.lean` (`#guard` checks), driven by
 `Viewer.save`, `overwriteInto`, `saveAs`, `saveTo` and `confirmDiscard`. Plan.md S8/C7 (S8
@@ -453,11 +453,37 @@ file as an **incremental update**; the original bytes stay unchanged at the star
   reopened in place on the same page, so the viewer works on the new bytes and a second Save
   is a further revision.
 * **Save As…** (Ctrl+Shift+S) asks for a file (`tk_getSaveFile`, which confirms replacing an
-  existing file), proposing `STEM-annotated.pdf`, writes a new file (a file it replaces keeps
-  its permissions) and opens it; choosing the **opened file** needs an explicit yes and then
-  goes through the overwrite steps above. With no unsaved marks it writes a plain copy.
-* **Dialogs**: the three-way questions are `::safepdf::choose` (a modal Tk dialog; Return the
-  default button, Escape and its close button Cancel). Button order (`Save.unsavedButtons`,
+  existing file), proposing `STEM-annotated.pdf` in the opened file's folder (its home folder
+  when that folder is gone or not writable, and for a document from memory — 9.r6,
+  `Save.dialogDir`), writes a new file (a file it replaces keeps its permissions) and opens
+  it; choosing the **opened file** needs an explicit yes (after the dialog's own replace
+  question) and then goes through the overwrite steps above. With no unsaved marks it writes
+  a plain copy.
+* **The chosen file is checked** (9.r6, `Viewer.checkTarget`): a name not ending in `.pdf`
+  (any case) gets `.pdf` (`Save.withExt` — Tk's X11 dialog appends `-defaultextension` only
+  to names without a dot, so `3453483.3454032-final` came back bare); if that names an
+  existing file the dialog did not confirm, **Replace it?** is asked. A folder, an existing
+  read-only file (a rename would replace it) and a folder we cannot write into are refused
+  with `cannot save: …` (`Save.targetProblem`); nothing is written, the marks stay unsaved.
+  The temporary file's name cuts `NAME` to 100 bytes (`Save.tmpName`), so a name near the
+  255-byte limit saves. Write errors (disk full, the folder removed meanwhile) appear on one
+  line (`Save.oneLine`) and leave no temporary file.
+* **Dialog options** (`Save.saveDialogOptions`): `-defaultextension .pdf -confirmoverwrite 1`
+  and, on X11/Windows, `-filetypes {{PDF files} {.pdf .PDF}} {{All files} *}`. **On aqua no
+  `-filetypes`**: Tk 9's `tk_getSaveFile` builds its **Format:** accessory view from them with
+  a pop-up 340 pt wide at x = 50 inside a 300 pt view (`macosx/tkMacOSXDialog.c`,
+  `Tk_GetSaveFileObjCmd`, the same in 9.0.x and on Tk's main branch of 2026-11-21), so the
+  pop-up always ran past the panel's right edge (the human's screenshots
+  `docs/viewer-reference/macos-save-as.png`, `macos-export-annotations.png` — even the short
+  `XFDF (.xfdf)` overflows: the labels are not the cause). Without `-filetypes` Tk shows no
+  accessory view and still restricts the panel to the `-defaultextension` type (other types
+  allowed on request). Open… and Import keep their filters (Tk's open panel uses a 240 pt
+  pop-up inside its 300 pt view); they start in the opened file's folder (9.r6; Open… with
+  no document open keeps Tk's choice) and a cancelled Open… says `open cancelled`.
+* **Dialogs**: the three-way questions are `::safepdf::choose` (a modal Tk dialog; the default
+  button has the focus first; Return or keypad Enter presses the **focused** button — 9.r6:
+  it used to run the default even after Tab to Cancel —, Space too, Escape and the close
+  button Cancel; the focus goes back where it was). Button order (`Save.unsavedButtons`,
   `Save.overwriteButtons`, `Save.changedButtons`): Save / Don't Save / Cancel and Overwrite /
   Save As… / Cancel left to right on X11 and Windows; on aqua the macOS order — Don't Save
   (Save As…) leftmost, Cancel, the default rightmost.
@@ -597,8 +623,11 @@ XFDF (ISO 19444-1) is interchange only — the marks live in the PDF (9.5c). The
 and writer are `SafePdf/Shell/App/Xfdf.lean` (9.5d; `#guard`s and the suite `xfdf`).
 
 * **File → Export annotations…** (also in the toolbar's `»` menu) asks for a file
-  (`tk_getSaveFile` filtered to `{{XFDF {.xfdf}} {{All files} *}}`, proposing `STEM.xfdf` next
-  to the PDF, `Viewer.xfdfTarget`) and writes every mark of the document — saved or not —
+  (`tk_getSaveFile`, `Save.saveDialogOptions`: filtered to `{{XFDF} {.xfdf .XFDF}} {{All
+  files} *}` except on aqua, proposing `STEM.xfdf` next to the PDF, `Viewer.xfdfTarget`), checks
+  it like Save As… (9.r6: `.xfdf` added when missing — so choosing the opened `NAME.pdf`
+  writes `NAME.pdf.xfdf` instead of replacing the PDF with XML, as it did before; never onto
+  the opened document, a folder or a read-only file) and writes every mark of the document — saved or not —
   through `Save.writeAtomic` (temporary file + rename): `<highlight>` with `coords`,
   `<text>` for notes, page boxes from the document, `date` now, `<f href="NAME.pdf"/>`.
   **A highlight's comment** is written in the standard form, as `<contents>` of the
@@ -1150,6 +1179,22 @@ is closed and opened while `r4Probe` samples the first page frame's canvas and s
 every `<Configure>` of the canvas and every 2 ms for 700 ms; the run of distinct values must
 be just start → end (an intermediate value fails: the flicker). It writes `toolbar.png`,
 `viewmenu.png`, `bubble.png` and `bubble-tip.png` when `import` is installed.
+
+The `savedlg` case (9.r6, `Viewer.smokeSaveDialogs`, case 1r) runs on a copy of the text PDF
+alone in a folder, as installed and with `SAFEPDF_VIEWER_PLATFORM=aqua`: the real
+`::safepdf::choose` dialog driven by generated keys (Return on the default, Tab-focus on
+Cancel + Return → Cancel, Escape, Space on Save As…; focus back on `.c`); Save As… dialog
+options (`-filetypes` only off aqua, `-defaultextension .pdf`, the file's folder, the
+proposed name); a 240-character name; `3453483.3454032-final` → `.pdf` added; `exists` with
+an `exists.pdf` present → Replace? answered No keeps it; a read-only file, a folder and a
+file in a read-only folder refused (the document still unsaved, Save enabled); a name with
+spaces, `$`, brackets, braces, quotes and non-ASCII saved and shown in the title; Export
+onto the opened PDF writes `NAME.pdf.xfdf` (the PDF unchanged), `notes` → `notes.xfdf`; the
+opened file deleted behind the viewer's back → Save asks the "no longer there" question and
+creates nothing. The shell then checks that no `*.tmp` file is left. Disk full was checked
+by hand (a 16 KiB tmpfs: `cannot save to f.pdf: resource exhausted (… no space left on
+device)`, the title keeps `* `, Quit → Save stays open with `quitting cancelled`, no
+temporary file); `ulimit -f` cannot simulate it (SIGXFSZ kills the process).
 
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the

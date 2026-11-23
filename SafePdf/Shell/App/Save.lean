@@ -56,7 +56,8 @@ checks and stores.
   note takes its highlight's colour), each written id exactly once, and no deleted id. Only
   then is the file written.
 * **Atomic write** (`writeAtomic`): the bytes go into a new temporary file in the target's
-  directory (`.NAME.safepdf-N.tmp`, created exclusively), are read back and compared, get the
+  directory (`.NAME.safepdf-N.tmp`, `tmpName`: `NAME` cut to 100 bytes, created
+  exclusively), are read back and compared, get the
   caller's preparation (the viewer copies the replaced file's permissions onto it), and the
   temporary file is then renamed over the target; on any error the temporary file is removed
   and the target is untouched. A file is never truncated in place.
@@ -69,6 +70,12 @@ checks and stores.
   (`overwriteButtons`, `unsavedButtons`, `changedButtons`: on aqua the macOS order, the
   default button rightmost and Don't Save / Save As… leftmost) and what a close does with
   the answer (`onUnsavedAnswer`, `closeGoesOn`).
+* **The file dialogs** (task 9.r6): `withExt` (a chosen name gets `.pdf`/`.xfdf` unless it
+  already ends so — Tk on X11 adds `-defaultextension` only to names without any dot;
+  `replaceQuestion` when that names an existing file), `targetProblem` (Save As… / Export
+  refuse a folder, a read-only file, an unwritable folder and — Export — the opened
+  document itself), `saveDialogOptions` (no `-filetypes` on aqua: Tk 9's "Format:" pop-up
+  overflows the save panel), `dialogDir` (the opened file's folder, else home), `oneLine`.
 * **Save As… proposal** (`defaultTarget`): `DIR/STEM-annotated.pdf` next to the opened file;
   for a file whose stem already ends in `-annotated` the file itself.
 * **Reading marks back** (`readMarks`): the annotations of every page's own `/Annots`
@@ -410,6 +417,23 @@ def defaultTarget (path : String) : String :=
 #guard defaultTarget "a/b.c.pdf" == "a/b.c-annotated.pdf"
 #guard defaultTarget "/tmp/x/paper-annotated.pdf" == "/tmp/x/paper-annotated.pdf"
 
+/-- The name of the temporary file of a save of `base` (task 9.r6): `.BASE.safepdf-STAMP.tmp`,
+where `BASE` is cut to its first 100 UTF-8 bytes (whole characters) so that the temporary name
+stays within the 255-byte file-name limit of common file systems even when the target's own
+name nearly fills it (a 240-byte name used to fail with "name too long"). -/
+def tmpName (base : String) (stamp : Nat) : String :=
+  s!".{String.ofList (cutBytes 100 base.toList)}.safepdf-{stamp}.tmp"
+where
+  /-- The longest prefix of `cs` of at most `n` UTF-8 bytes. -/
+  cutBytes (n : Nat) : List Char → List Char
+    | [] => []
+    | c :: cs => if c.utf8Size ≤ n then c :: cutBytes (n - c.utf8Size) cs else []
+
+#guard tmpName "a.pdf" 7 == ".a.pdf.safepdf-7.tmp"
+#guard (tmpName (String.ofList (List.replicate 250 'L') ++ ".pdf") 12345678901234).utf8ByteSize ≤ 255
+#guard (tmpName (String.ofList (List.replicate 99 'x') ++ "üü") 1).startsWith
+  (".".append (String.ofList (List.replicate 99 'x') ++ ".safepdf-"))
+
 /-- Writes `bytes` to `path` through a new temporary file in the same directory and a rename
 (never truncating the target in place): the temporary file is written, closed, read back and
 compared with `bytes`, then `prepare` runs on it (the viewer copies the replaced file's
@@ -421,7 +445,7 @@ def writeAtomic (path : String) (bytes : ByteArray)
     | some d => if d.toString.isEmpty then "." else d
     | none => "."
   let base := fp.fileName.getD "document.pdf"
-  let tmp := dir / s!".{base}.safepdf-{← IO.monoNanosNow}.tmp"
+  let tmp := dir / tmpName base (← IO.monoNanosNow)
   try
     IO.FS.withFile tmp .writeNew fun h => do
       h.write bytes
@@ -579,6 +603,83 @@ def closeGoesOn (dirty : Bool) (answer : Option Bool) (saved : Bool) : Bool :=
   closeGoesOn true (some true) true && !closeGoesOn true (some true) false &&
   !closeGoesOn true none true
 
+/-! ## The file dialogs (task 9.r6) -/
+
+/-- **The chosen name with the file type's extension** `ext` (`pdf`, `xfdf`; task 9.r6): the
+name itself when it already ends in `.ext` (any case), else `name.ext`. Tk's X11 dialog appends
+`-defaultextension` only to a name without any extension, so a dotted name like
+`3453483.3454032-final` (arXiv/ACM file names) came back without `.pdf`. -/
+def withExt (name ext : String) : String :=
+  if name.toLower.endsWith ("." ++ ext.toLower) then name else s!"{name}.{ext}"
+
+#guard withExt "/d/3453483.3454032-final" "pdf" == "/d/3453483.3454032-final.pdf"
+#guard withExt "/d/a.PDF" "pdf" == "/d/a.PDF" && withExt "a.pdf" "pdf" == "a.pdf"
+#guard withExt "notes.XFDF" "xfdf" == "notes.XFDF" && withExt "notes" "xfdf" == "notes.xfdf"
+#guard withExt "a.pdf" "xfdf" == "a.pdf.xfdf"
+
+/-- **Why the chosen file `name` cannot be written** by Save As… or Export (task 9.r6;
+`isDir`: it is a folder; `exists`/`fileWritable`: an existing file and whether it is
+writable; `dirWritable`: its folder; `opened`: it is the opened document, which an export
+must never replace): `none` when it can. A rename would replace a read-only file (9.r2
+gotcha), so that is refused here as Save does for the opened file. -/
+def targetProblem (name : String) (isDir «exists» fileWritable dirWritable opened : Bool) :
+    Option String :=
+  if isDir then some s!"{name} is a folder; choose a file name"
+  else if opened then
+    some s!"{name} is the opened document; annotations are exported to a separate .xfdf file"
+  else if «exists» && !fileWritable then some s!"{name} is read-only; choose another name"
+  else if !dirWritable then some s!"the folder of {name} is not writable; choose another folder"
+  else none
+
+#guard targetProblem "a.pdf" false true true true false == none
+#guard targetProblem "a.pdf" false false false true false == none
+#guard (targetProblem "a" true false false true false).isSome &&
+  (targetProblem "a.pdf" false true false true false).isSome &&
+  (targetProblem "a.pdf" false false false false false).isSome &&
+  (targetProblem "a.pdf" false true true true true).isSome
+
+/-- The question when adding the extension (`withExt`) named an existing file `name` that the
+file dialog did not confirm. -/
+def replaceQuestion (name : String) : String :=
+  s!"{name} already exists. Replace it?"
+
+/-- **The options of a save dialog** (task 9.r6) for files of type `label` with extension
+`ext`, besides `-parent`/`-title`/`-initialdir`/`-initialfile`: `-defaultextension .ext`,
+`-confirmoverwrite 1`, and on X11/Windows `-filetypes` (the type, then all files). **Not on
+aqua**: Tk 9's `tk_getSaveFile` builds its "Format:" accessory view from `-filetypes` with a
+pop-up button 340 pt wide placed at x = 50 inside a 300 pt view (`macosx/tkMacOSXDialog.c`,
+`Tk_GetSaveFileObjCmd`, unchanged up to Tk 9.1), so the pop-up always runs past the panel's
+right edge whatever the labels. Without `-filetypes` Tk shows no accessory view and still
+restricts the panel to `ext` from `-defaultextension` (allowing other types on request). -/
+def saveDialogOptions (aqua : Bool) (label ext : String) : List String :=
+  let base := ["-defaultextension", s!".{ext}", "-confirmoverwrite", "1"]
+  if aqua then base
+  else base ++ ["-filetypes", s!"\{\{{label}} \{.{ext} .{ext.toUpper}}} \{\{All files} *}"]
+
+#guard saveDialogOptions true "PDF files" "pdf" ==
+  ["-defaultextension", ".pdf", "-confirmoverwrite", "1"]
+#guard saveDialogOptions false "PDF files" "pdf" == ["-defaultextension", ".pdf",
+  "-confirmoverwrite", "1", "-filetypes", "{{PDF files} {.pdf .PDF}} {{All files} *}"]
+#guard !(saveDialogOptions true "XFDF" "xfdf").contains "-filetypes"
+
+/-- **The folder a file dialog starts in** (task 9.r6): `dir` (the opened file's folder) when
+`usable` (an existing, writable folder of a file on disk), else the home folder, else `.`. A
+document from memory (bib-lean) has no folder of its own: its "path" is the library's name,
+which said `.` — the viewer process's working directory. -/
+def dialogDir (dir : String) (usable : Bool) (home : Option String) : String :=
+  if usable then dir else (home.filter (!·.isEmpty)).getD "."
+
+#guard dialogDir "/d" true (some "/h") == "/d" && dialogDir "/d" false (some "/h") == "/h"
+#guard dialogDir "." false none == "." && dialogDir "." false (some "") == "."
+
+/-- A message on one line (task 9.r6): an `IO` error's text (`…\n  file: …`) would make the
+one-line status bar two lines tall and shift the page. -/
+def oneLine (s : String) : String :=
+  " ".intercalate ((s.splitOn "\n").map (·.trimAscii.toString) |>.filter (!·.isEmpty))
+
+#guard oneLine "cannot write x: name too long\n  file: /a/b" ==
+  "cannot write x: name too long file: /a/b"
+
 /-! ## Saving -/
 
 /-- What a save did. -/
@@ -720,6 +821,6 @@ def write (limits : Limits) (doc : Doc.Doc) (store : Store) (target : String)
       return .ok { path := target, marks := n,
                    appended := bytes.size - doc.file.bytes.size, size := bytes.size,
                    total := got.length }
-    catch e => return .error s!"cannot write {target}: {e}"
+    catch e => return .error s!"cannot write {target}: {oneLine (toString e)}"
 
 end SafePdf.Shell.App.Save
