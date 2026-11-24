@@ -1372,3 +1372,11 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Spec.RasterError2.powNat_near
 #print axioms SafePdf.Spec.RasterError2.exp_component_near
 #print axioms SafePdf.Spec.RasterError2.bil_near
+-- Phase 12, task 12.7e: repair rule R6 (object streams)
+#print axioms SafePdf.Repair.r6Raw_bounds
+#print axioms SafePdf.Repair.repair_scan
+#print axioms SafePdf.Repair.repair_entries
+#print axioms SafePdf.Repair.objStmAdds_new
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_sub2
+#print axioms SafePdf.Spec.RepairAgreeExt.resolve_sub2
+#print axioms SafePdf.Spec.RepairAgreeExt.trailerOk_toComp
