@@ -1311,6 +1311,9 @@ if {$vname ne ""} {
   set t1 [clock milliseconds]
   set code [catch {send -async $vname "close \[open $dir/sent w\]; set ::safepdf::lockSent 1"} r]
   puts $f "send-async $vname: $code $r"
+  # X11: an async send stays in Xlib's output buffer until the event loop flushes it, and the
+  # `after 50` poll below never enters it.
+  update idletasks
   while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50 }
   puts $f "sent-file: [file exists $dir/sent] after [expr {[clock milliseconds] - $t1}] ms"
   if {[file exists $dir/sent]} { incr ok }
