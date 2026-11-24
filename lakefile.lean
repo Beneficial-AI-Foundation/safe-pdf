@@ -186,9 +186,10 @@ lean_exe viewer where
 /-! ## macOS AppKit spike (task 11.1; not a default target) -/
 
 /-- The modules of the C API (`macos/README.md`): the first C ABI over the core
-(`SafePdf.Shell.Ffi`, task 11.1) and the marks/save/XFDF exports (`SafePdf.Shell.FfiMarks`,
-task 11.3a3). -/
-def ffiModules : Array Lean.Name := #[`SafePdf.Shell.Ffi, `SafePdf.Shell.FfiMarks]
+(`SafePdf.Shell.Ffi`, task 11.1), the view/chrome logic (`SafePdf.Shell.FfiView`, task 11.3a2)
+and the marks/save/XFDF exports (`SafePdf.Shell.FfiMarks`, task 11.3a3). -/
+def ffiModules : Array Lean.Name :=
+  #[`SafePdf.Shell.Ffi, `SafePdf.Shell.FfiView, `SafePdf.Shell.FfiMarks]
 
 /-- The C API's modules (`ffiModules`). Not a default
 target: `lake build macosFfi` builds it. -/
