@@ -37,7 +37,7 @@ no panics, no `sorry` — and the properties are machine-checked theorems, not g
 |---|---|---|
 | S1 memory safety | holds | Lean type system; CI hygiene guard; axiom audit (`propext`/`Classical.choice`/`Quot.sound` only) |
 | S2 totality on **any** input | **proven** | `loadChain_terminates` (no fuel); xref `/Prev` cycles, cyclic `/Length`, self-containing object streams, `/Kids` cycles all rejected with `Error.cycle` in < 0.01 ms (M2) |
-| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; since 12.3 the viewer's work in flight is reserved in one pool and a search shares one allowance, and the worker has OS memory/CPU fences (§5 item 0c) |
+| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; since 12.3 the viewer's work in flight is reserved in one pool and a search shares one allowance, and the worker has OS memory/CPU fences; since 12.3b the live Tk photos have their own pool, Save and XFDF export reserve their output, a page image is capped at 10 Mpx and each worker request has one decode budget (§5 item 0c) |
 | S4 no ambient authority | holds | the core's type contains no `IO` — compiler-checked |
 | S5 unverified-code isolation | holds (vacuously strong) | no FFI decoders at all: even JPEG is pure Lean in `Quarantine/`, held to core hygiene rules — a source-code boundary, not a process one: everything runs in the viewer process (§5) |
 | S6 unambiguity | **proven** | one winner per object id across incremental updates, newest-revision-wins (`Spec.Unambiguous`) — the *ambiguity* half of shadow attacks: it settles which revision we display; signatures and other viewers' precedence rules are out of scope |
@@ -241,8 +241,18 @@ security review; those items protect the user even if every current theorem is c
     resident memory watchdog on macOS and Linux, plus baseline-relative `RLIMIT_DATA` /
     `RLIMIT_AS` on Linux; §2.4) and a per-request
     `RLIMIT_CPU` next to the 20 s deadline; a CI scenario checks the published RSS ceilings
-    (`docs/viewer.md`, "Budgets and ceilings"). Still open: Tk photos, Save/export and the
-    per-page decode budget inside the worker are outside the pool.
+    (`docs/viewer.md`, "Budgets and ceilings").
+    *Status (task 12.3b):* the live Tk photos (page photos, thumbnails) are reserved in a
+    second pool (352 MiB; a page in view evicts photos of pages not in view, proven to fit
+    afterwards, else is refused with a message; neighbours wait); a page image is capped at
+    10 Mpx, so the interleave scenario's 600–800 % phase stays under the viewer's 1024 MiB
+    (measured 816–931 MiB on macOS; 2.6 GiB before); Save and XFDF export reserve their expected
+    output (original bytes plus the update) in the work pool and are refused cleanly when it
+    does not fit; each worker request makes one `Filter.Budget` and threads it through
+    everything it decodes (no request spans pages; the budget is deliberately not carried
+    across requests, which would break the equality of worker and in-process results).
+    Still open: the open document's bytes and parse are bounded by `maxInputBytes`, not a pool;
+    the allocator's retention of freed memory is measured, not modelled.
 0d. **Fresh IVs for encrypted updates**: supply OS randomness at the shell boundary and pass
     it into the pure writer; set an explicit policy for legacy RC4 writes.
 

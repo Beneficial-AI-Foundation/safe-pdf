@@ -48,8 +48,9 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   (Ctrl+wheel) or at the window centre (keys, toolbar) is computed with `Geom.toPage` before
   the change and put back under the same window position with `Geom.toScreen` after it
   (C2; `View.reanchor`). Window resizes re-render in the fit modes (debounced 100 ms).
-* **Huge zooms are bounded**: a page image above `View.maxViewPixels` (2²⁶ px = 256 MiB RGBA)
-  gets a smaller zoom ("zoom limited" in the status line); a side above `Limits.maxPageSide`
+* **Huge zooms are bounded**: a page image above `Budget.Ceilings.pagePixels` (10 Mpx = 40 MiB
+  RGBA since task 12.3b; `View.maxViewPixels`, 2²⁶ px, before) gets a smaller zoom ("zoom
+  limited to 10 Mpx per page" in the status line; "Budgets and ceilings"); a side above `Limits.maxPageSide`
   (16384) is cropped by the renderer ("cropped" in the status line).
 * **Rotation**: view rotation in 90° steps, combined with each page's `/Rotate`; the window
   centre's page point stays at the centre.
@@ -58,7 +59,8 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   top of the next page; past the top, to the bottom of the previous page. The mouse wheel does
   the same (9.2, below). In the continuous modes the canvas holds the whole document (9.3).
 * **Page cache** (`View.Cache`): render results keyed by (document, page, zoom, rotation), LRU,
-  at most `View.cacheBytes` = 256 MiB of images and `View.cacheEntries` = 64 entries; results
+  at most `Budget.Ceilings.cacheBytes` = 96 MiB of images (256 MiB, `View.cacheBytes`, until task
+  12.3b) and `View.cacheEntries` = 64 entries; results
   above half the budget are not cached. 100 ms after a page is shown, the next page (in the
   facing view: the next spread) is rendered into the cache when it is at most
   `Viewer.prefetchPixels` (2²² px), on a worker thread (8.8). Each page on the canvas has its own Tk photo
@@ -579,7 +581,7 @@ starts).
   its width (and the window less the 10 px gap) in the facing modes, as PDF.js does
   (`View.fitBox`, `#pageWidthScaleFactor` 2), so every spread of a paper shows at the same zoom;
   Automatic Zoom still asks whether the page itself is portrait. Each page is capped at
-  `View.maxViewPixels` separately. A new layout is computed when the document, mode, zoom,
+  `Budget.Ceilings.pagePixels` separately. A new layout is computed when the document, mode, zoom,
   rotation, window size or (page scroll mode) the spread shown changes — never by scrolling in
   the continuous modes; there it keeps the view's place in the current page.
 * **Current page**: in the continuous modes the page under the window centre
@@ -602,7 +604,8 @@ starts).
   rendering runs on worker threads (next section), so no page blocks the window; a page not
   rendered yet shows its white frame with "Rendering…". Photos of pages that leave that set
   are deleted (`image delete`), so Tk holds at most the pages in view plus two; the rendered
-  images stay in the LRU cache (256 MiB, 64 entries) at the current zoom.
+  images stay in the LRU cache (96 MiB since task 12.3b, 64 entries) at the current zoom. Since
+  task 12.3b every photo holds a reservation in the photo pool ("Budgets and ceilings").
 * **Everything per page works in every mode**: positions are mapped through the slot of the
   page under the pointer (`Viewer.pagePointAt`; a drag stays on the page where it started),
   so selection, double click, links and their hover, highlights and notes (drawn on every page
@@ -738,17 +741,21 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   environment stays empty (Lean 4.36's `IO.Process.spawn` crashes the child when
   `inheritEnv := false` comes with a non-empty `env`, and the confined worker refuses one).
 
-## Budgets and ceilings (12.3)
+## Budgets and ceilings (12.3, 12.3b)
 
 **Published ceilings** (the source is `Budget.ceilings` in `SafePdf/Shell/App/Budget.lean`;
 `scripts/interleave.sh` reads its two scenario numbers from there):
 
 | What | Ceiling | Enforced by |
 |---|---|---|
-| Reserved for work in flight (page renders, thumbnails, text and links requests) | **512 MiB** (`poolBytes`), of which images leave **32 MiB** to text (`textReserve`) | `Budget.Pool`: the invariant `used ≤ ceiling` is a field of the structure (`Pool.used_le_ceiling`) |
-| Estimate of one image | `4·w·h` bytes (`imageBytes`; the largest page, 2²⁶ px, is 256 MiB and always fits: `page_fits_pool`) | `Pool.admit` |
+| Reserved for work in flight (page renders, thumbnails, text and links requests; since 12.3b Save and XFDF export) | **192 MiB** (`poolBytes`; 512 MiB in 12.3), of which images leave **32 MiB** to text (`textReserve`) | `Budget.Pool`: the invariant `used ≤ ceiling` is a field of the structure (`Pool.used_le_ceiling`) |
+| Estimate of one image in flight | `8·w·h` bytes (`workBytes`: the reply frame and the decoded image; `4·w·h` in 12.3; the largest page is 80 MiB and always fits: `page_fits_pool`) | `Pool.admit` |
 | Estimate of one text or links request | **2 MiB** (`textBytes`) | `Pool.admit` |
-| Render cache (unchanged, 8.2b) | 256 MiB / 64 entries | `View.Cache` |
+| Estimate of one Save / XFDF export | the original bytes plus a bound on the update (`Save.outputEstimate`) / twice a bound on the XFDF text (`Xfdf.exportEstimate`, `#guard`ed against `toXfdf`) | `Pool.admit` (`Op.output`; room: the whole pool) |
+| One page image in the view | **10 Mpx** (`pagePixels`; 2²⁶ px before 12.3b): a larger zoom is lowered with a status note | `Viewer.viewParamsAt` (`View.capZoom`) |
+| Live Tk photos (page photos on the canvas, thumbnails) | **352 MiB** (`photoPoolBytes`), of which page photos leave **32 MiB** to thumbnails (`thumbReserve`); a photo is estimated at `16·w·h` (`photoBytes`) | a second `Budget.Pool` (`Pool.admitPhoto`, `makeRoom_fits`, `two_pages_fit_photos`, `thumbs_fit_reserve`) |
+| Render cache | **96 MiB** (`cacheBytes`; 256 MiB until 12.3b) / 64 entries | `View.Cache` |
+| The viewer's plan | base 160 MiB (`baseBytes`) + work pool + photo pool + cache = 800 MiB ≤ 1024 MiB | `plan_fits` (`decide`) |
 | One search (Find Next/Previous) | **400 pages** indexed and **60 s**, shared by all pages it visits (`searchPages`, `searchMs`) | `Budget.Allowance` (`spendAll_le`) |
 | Document worker memory | **2048 MiB** (`workerMemMiB`, flag `--mem-limit-mib=`) | Linux: watchdog on private resident memory (`/proc/self/statm`) plus a `RLIMIT_DATA`/`RLIMIT_AS` backstop relative to the startup mappings (12.c1); macOS: `phys_footprint` watchdog (see below) |
 | Document worker CPU time per request | **60 s** (`workerCpuS`, flag `--cpu-limit-s=`), next to the 20 s wall-clock deadline | `RLIMIT_CPU`, re-armed before every request |
@@ -776,12 +783,60 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   status line says `"…": not found in the N pages searched so far (this search's work
   allowance is used up); search again to go on` — the next Find continues past the pages
   indexed (cached) so far. Each page request remains bounded by the worker's deadline and its
-  own `Filter.Budget` (the decode budget still starts fresh per page inside the worker).
-* **Not in the pool (yet):** the Tk photos of the pages in view and the open document's bytes
-  and parse (bounded by `maxInputBytes` and the view's pixel cap, not by the pool), and Save /
-  XFDF export (synchronous, outside the pool; follow-up). Measured: with 600 % zoom on every
-  page of the 15-page Transformer paper the viewer's RSS reached 4.9 GiB on macOS while the
-  pool never exceeded 447 MiB — the photos and the cache, not the work in flight, dominate.
+  own `Filter.Budget` — one per worker request (below).
+* **Live photos (12.3b).** Every Tk photo the viewer keeps holds a reservation in the photo
+  pool from its `put` to its `image delete` (`Viewer.photoAdmit`, `photoUnreserve`): page
+  photos (`showPhoto`, released by `dropPhoto`/`clearPages`) and thumbnails (`thumbPoll`,
+  released by `dropThumb`/`clearThumbs`). The estimate, 16 bytes per pixel, is measured: on
+  macOS 26 with Tk 9 a displayed 3558 × 4604 photo raised the viewer's footprint by 172 MB
+  (≈ 10.5 B/px: Tk's own 32-bit copy and its display buffers), plus the viewer's copy of the
+  image kept for repainting the marks (4 B/px). When a page photo does not fit, a page **in
+  view** evicts the photos of pages not in view, farthest from the current page first
+  (`Budget.Pool.makeRoom`, proven: afterwards it fits, and only a prefix of the candidates is
+  released); if it still does not fit, it is **refused** and its frame says `page N: not
+  shown: its image (W x H px) needs … MiB and the page images in view already hold … of the
+  … MiB for page images; zoom out or scroll`. A **neighbour** (not in view) never evicts: it is
+  deferred (`State.photoDeferred`, left out of `missingPages`, so not rendered again) until a
+  photo is released. Two pages at the pixel cap always fit (`two_pages_fit_photos`), so in the
+  vertical modes the pages in view are never refused; four pages in view at the cap (the
+  facing modes at deep zoom) can be. Tint photos (`::safepdf::tint_*`, at most a dozen
+  box-sized ones) and the icons are not counted.
+* **Pixel cap (12.3b).** A page image has at most 10 Mpx (`pagePixels`). Measured on the
+  Transformer paper at `tk scaling` 1.334 (macOS 26): with 2²⁶ px a 600 % page was 31 Mpx and
+  the viewer's RSS reached 2.6 GiB (4.9 GiB in the run of 12.3), workers 1.2 GiB; with 16 Mpx
+  (PDF.js's `maxCanvasPixels`) 1.39 GiB; with 12 Mpx 1.04 GiB; with 10 Mpx and the 96 MiB
+  cache 816–931 MiB over five runs. So 600 % and 800 % show at 344 % on that screen, with the note `zoom
+  limited to 10 Mpx per page` (a deliberate trade: PDF.js renders larger zooms at a lower
+  resolution and stretches the canvas; Tk photos cannot be stretched without a copy of the
+  full size).
+* **Reply frames (12.3b).** The client reads a reply of up to `Client.presizeMax` (a page at
+  the pixel cap plus 1 MiB) into one buffer of its announced size (`readFrameSized`), instead
+  of growing it by appending (which briefly held up to three times the frame); a longer frame
+  still grows with the data received, so a worker cannot make the viewer allocate more than an
+  honest page reply by announcing a long frame.
+* **Save and XFDF export (12.3b).** Save (`saveTo`, `overwriteInto`, `saveToLibrary`, the
+  library's Save As… copy) reserves `Save.outputEstimate` — the original bytes plus a bound on
+  the update (`Save.updateEstimate`: 64 KiB, and per mark 16 KiB + 8 B per text byte + 96 B
+  per page point, 16 KiB per deleted saved mark) — and XFDF export twice
+  `Xfdf.exportEstimate` (the text and its UTF-8 bytes) in the work pool before building
+  (`Viewer.withOutput`), released afterwards whatever happens. An output larger than the pool
+  is refused (`cannot save to NAME: it needs about N MiB in memory, more than the viewer's
+  192 MiB budget for work in flight`; so a PDF above about 190 MiB cannot be saved with
+  marks); when the renders in flight leave too little, it is refused with "try again when they
+  are done" (Save runs on the GUI thread, so it does not wait).
+* **One decode budget per worker request (12.3b).** `Serve.answer` makes the request's
+  `Filter.Budget` once (`requestBudget`) and threads it through everything the request decodes
+  (`answerDocB`: render, text, selection index). No request covers more than one page, so this
+  is the same as before (`answerDocB_init`, by `rfl`: the worker suite's byte equality with
+  the in-process calls holds unchanged). The budget is deliberately **not** carried across
+  requests: a page's answer would then depend on the requests before it (and no longer equal
+  the in-process render or index, which start fresh), and the protocol would have to carry the
+  remainder. Work across the requests of one user operation is bounded by the search's shared
+  allowance (pages, time), the work pool (memory) and the worker's fences.
+* **Not in a pool:** the open document's bytes and parse (bounded by `maxInputBytes`), the
+  text indexes and links (small, per page), tint photos and icons; the allocator's retention
+  (macOS keeps freed blocks: the RSS after the 75–200 % rounds stays near 550 MiB with
+  ~250 MiB live), which is why the scenario, not the plan alone, is the check.
 * **Worker fences outside Lean's cost model** (`c/worker_sandbox.c`, `Sandbox.fence`, applied
   before confinement): Linux a watchdog thread on private resident memory (resident − shared
   from `/proc/self/statm`, read through a descriptor opened before confinement) with a
@@ -805,6 +860,17 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   Linux) of the viewer and of every worker every 0.2 s. macOS 26 (arm64), 2026-11-23: viewer
   peak 703 MiB, 10 workers (preemption kills and respawns them), worker peak 129 MiB, pool
   peak 22 MiB, nothing waited, lowered or refused, pool empty at the end; 34 s.
+  **Task 12.3b** adds the deep zoom phase (600 % and then 800 %, each scrolled top to bottom in
+  12 steps of 400 ms; the viewer logs its own RSS after each step) and checks the photo pool
+  (peak under its ceiling, `photoMismatch` 0: every page photo and thumbnail reserved at its
+  present size, no reservation without a photo), that the deep zoom ran (24 steps) and was
+  limited, and the viewer's own deep-zoom RSS reading against the ceiling too; a process above
+  three times its ceiling is killed and the run fails. macOS 26 (arm64), 2026-11-23 (12.3b): viewer
+  peak 816–931 MiB over five runs (in one, its own reading in the deep phase was 854 MiB against the sampler's 816), 26–40 workers, worker peak 238 MiB,
+  pool peak 156 MiB of 192, 920 waits (a page at the cap takes most of the pool, so the
+  neighbours' renders wait), photo pool peak 315 MiB of 352, nothing evicted or refused; zoom
+  shown at 344 % ("zoom limited to 10 Mpx per page"). Before 12.3b the same phase peaked at
+  2.6 GiB (viewer) and 1.2 GiB (a worker).
 
 ## Highlights and notes (9.4)
 

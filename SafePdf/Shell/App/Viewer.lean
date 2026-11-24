@@ -43,12 +43,12 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   fresh decoded-bytes budget per page (as the inspector's `raster` view), at the zoom of the
   current `View.Mode` (fit page, fit width, or a percentage of actual size: 100 % = 72 dpi ×
   `tk scaling`) and the user rotation (added to the page's `/Rotate` by the renderer through
-  `rotAdd`). Zoom is capped at `View.maxViewPixels` pixels per page image (status line says
+  `rotAdd`). Zoom is capped at `Budget.Ceilings.pagePixels` (task 12.3b) pixels per page image (status line says
   so); a side above `Limits.maxPageSide` is cropped by the renderer (status line says so).
   Non-embedded fonts are painted with the substitute programs `Shell.Fonts.loadSubstFonts`
   finds at start-up (task 7.7, `docs/raster.md`; `State.subst`).
 * **Page cache** (`View.Cache`): render results keyed by (document generation, page, zoom,
-  rotation), LRU, at most `View.cacheBytes` (256 MiB) of images. After a page is shown the
+  rotation), LRU, at most `Budget.Ceilings.cacheBytes` (96 MiB) of images. After a page is shown the
   next page is prefetched 100 ms later (on a worker, below) when it is at most
   `prefetchPixels` pixels.
 * **Rendering on worker threads** (task 8.8). Every render runs on a dedicated thread
@@ -292,7 +292,7 @@ structure ViewParams where
   rot : SafePdf.Core.Doc.Rotation
   /-- CropBox. -/
   box : Box
-  /-- The zoom was lowered to `View.maxViewPixels`. -/
+  /-- The zoom was lowered to `Budget.Ceilings.pagePixels`. -/
   capped : Bool
   /-- The image is cropped to `Limits.maxPageSide`. -/
   cropped : Bool
@@ -421,8 +421,8 @@ structure State where
   rot : SafePdf.Core.Doc.Rotation := .r0
   /-- Screen scale: pixels per point (`tk scaling`). -/
   scaling : Rat := 4 / 3
-  /-- Rendered pages. -/
-  cache : View.Cache := {}
+  /-- Rendered pages (task 12.3b: at most `Budget.ceilings.cacheBytes`). -/
+  cache : View.Cache := { budget := Budget.ceilings.cacheBytes }
   /-- Substitute programs for non-embedded fonts (task 7.7, `Shell.Fonts`), found at start-up
   and parsed on first use. -/
   subst : SafePdf.Core.Raster.Subst.SubstFonts := {}
@@ -603,6 +603,22 @@ structure State where
   budgetUnreserved : Nat := 0
   /-- See `budgetWaits`. -/
   searchStops : Nat := 0
+  /-- Task 12.3b: the reservations of the live Tk photos (`Budget.Pool`, ceiling
+  `Budget.ceilings.photoPoolBytes`): every page photo and thumbnail holds one
+  (`Budget.photoBytes`) from its `put` until its `image delete`. -/
+  photoPool : Budget.Pool := Budget.Pool.empty Budget.ceilings.photoPoolBytes
+  /-- The photo each ticket of `photoPool` belongs to (its Tk image name). -/
+  photoTix : Array (String × Budget.Ticket) := #[]
+  /-- Most bytes the live photos ever held at once (the interleave scenario's measurement). -/
+  photoPeak : Nat := 0
+  /-- Page photos evicted to make room for a page in view, and page photos refused for lack of
+  room (pages in view: a message in the page frame; neighbours: deferred). -/
+  photoEvicted : Nat := 0
+  /-- See `photoEvicted`. -/
+  photoRefused : Nat := 0
+  /-- Neighbouring pages (not in view) whose photo did not fit: not rendered or shown again
+  until a photo is released (`missingPages` leaves them out). -/
+  photoDeferred : List Nat := []
   /-- A `poll` event is scheduled (`ensurePoll`). -/
   pollQueued : Bool := false
   /-- How long (ms) an event that must show pages now (`showNow`) waits for their renders
@@ -700,12 +716,12 @@ def State.pageCount (s : State) : Nat :=
   | none => 0
 
 /-- View parameters of page `p` of `doc` at the layout zoom `z0` (capped per page at
-`View.maxViewPixels`). -/
+`Budget.Ceilings.pagePixels`, task 12.3b). -/
 def viewParamsAt (s : State) (doc : Doc) (p : Nat) (z0 : Rat) : Option ViewParams :=
   doc.pages[p]?.map fun page =>
     let r := rotAdd page.rotate s.rot
     let bx := Box.ofRect page.cropBox
-    let (z, capped) := View.capZoom View.maxViewPixels z0 r bx
+    let (z, capped) := View.capZoom Budget.ceilings.pagePixels z0 r bx
     ⟨z, r, bx, capped, View.cropped limits.maxPageSide z r bx⟩
 
 /-- The zoom of a layout, chosen (`Toolbar.ZoomChoice.zoomWith`) for page `basis`: its size,
@@ -2338,6 +2354,33 @@ def admit (st : IO.Ref State) (o : Budget.Op) : IO Budget.Outcome := do
   | .refuse => st.modify fun s => { s with budgetRefused := s.budgetRefused + 1 }
   return out
 
+/-- `b` bytes in MiB, rounded up. -/
+def mibOf (b : Nat) : Nat := (b + 1048575) / 1048576
+
+/-- **Reserves an output of `bytes`** (task 12.3b: Save, XFDF export, `Budget.Op.output`) in
+the work pool: its ticket, or why not — larger than the whole pool (refused), or the work in
+flight leaves too little now. -/
+def reserveOutput (st : IO.Ref State) (bytes : Nat) : IO (Except String Budget.Ticket) := do
+  match ← admit st (.output bytes) with
+  | .reserved t _ _ => return .ok t
+  | .refuse =>
+    return .error s!"it needs about {mibOf bytes} MiB in memory, more than the viewer's \
+      {mibOf (← st.get).pool.ceiling} MiB budget for work in flight"
+  | .wait =>
+    let p := (← st.get).pool
+    return .error s!"it needs about {mibOf bytes} MiB in memory and the pages being rendered \
+      hold {mibOf p.used} of the viewer's {mibOf p.ceiling} MiB budget for work in flight; \
+      try again when they are done"
+
+/-- Runs `k` with an output of `bytes` reserved (`reserveOutput`), released afterwards
+whatever happens; `refused` with the reason when it cannot be reserved. -/
+def withOutput {α : Type} (st : IO.Ref State) (bytes : Nat) (refused : String → IO α)
+    (k : IO α) : IO α := do
+  match ← reserveOutput st bytes with
+  | .error m => refused m
+  | .ok t =>
+    try k finally releaseTicket st (some t)
+
 /-- The pixel size of the render `key` of `doc` (the renderer crops at `Limits.maxPageSide`). -/
 def keyPixels (doc : Doc) (key : View.Key) : Nat × Nat :=
   match doc.pages[key.page]? with
@@ -2915,20 +2958,79 @@ def cancelStale (st : IO.Ref State) : IO Unit := do
     if let some id := j.id then
       if j.key.gen != s.gen || j.key.rot != s.rot then ses.cancel id
 
-/-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view). -/
-def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
+/-! ## Live photos (task 12.3b, `Budget.Pool.admitPhoto`) -/
+
+/-- Releases the photo reservation of Tk image `name`; whether it held one. -/
+def photoUnreserve (st : IO.Ref State) (name : String) : IO Bool := do
+  match (← st.get).photoTix.find? (·.1 == name) with
+  | some (_, t) =>
+    st.modify fun s => { s with photoPool := s.photoPool.release t,
+                                photoTix := s.photoTix.filter (·.1 != name) }
+    return true
+  | none => return false
+
+/-- Reserves `bytes` for Tk image `name` in the photo pool (`Budget.Pool.admitPhoto`, after
+releasing `name`'s own reservation), evicting from `cands` (photo names, in eviction order)
+as needed: the names whose reservations were released for it (the caller deletes those
+photos), or `none` when it does not fit (nothing else is released). -/
+def photoAdmit (st : IO.Ref State) (name : String) (bytes : Nat) (thumb : Bool)
+    (cands : List String) : IO (Option (List String)) := do
+  discard <| photoUnreserve st name
+  let s ← st.get
+  let tix := cands.filterMap fun n => (s.photoTix.find? (·.1 == n)).map (·.2)
+  match s.photoPool.admitPhoto Budget.ceilings bytes thumb tix with
+  | some (es, t, q) =>
+    let names := es.filterMap fun e => (s.photoTix.find? (·.2 == e)).map (·.1)
+    let tix := (s.photoTix.filter (fun x => !names.contains x.1)).push (name, t)
+    st.modify fun s => { s with photoPool := q, photoTix := tix,
+                                photoPeak := max s.photoPeak q.used,
+                                photoEvicted := s.photoEvicted + names.length }
+    return some names
+  | none => return none
+
+-- The kept thumbnails are those `Budget.thumbs_fit_reserve` counts (98 px wide).
+#guard Sidebar.thumbBudget ≤ Budget.ceilings.thumbsKept && Sidebar.thumbW == 98
+
+/-- The prefix of the message a page in view shows when its photo was refused. -/
+def photoRefusal : String := "not shown"
+
+/-- The pages in view now (`View.visiblePages` of the canvas's view band). -/
+def inView (s : State) : IO (List Nat) := do
+  let some (a, b) := viewFracs (← run [".c", "yview"]) | return [s.page]
+  let px (f : Rat) : Nat := (f * (s.regionH : Rat) + 1 / 2).floor.toNat
+  return View.visiblePages s.places (px a) (px b)
+
+/-- Removes page `p`'s photo and its canvas items without asking for the deferred pages
+again (`dropPhoto`). -/
+def dropPhotoOnly (st : IO.Ref State) (p : Nat) : IO Unit := do
   discard <| run [".c", "delete", s!"w{p}"]
   if (← st.get).hasPhoto p then
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
     discard <| run [".c", "delete", s!"p{p}", s!"e{p}"]
     st.modify fun s => { s with photos := s.photos.filter (·.1 != p) }
 
-/-- Removes every page photo and page item from the canvas (task 9.3). -/
+/-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view) and
+releases its reservation (task 12.3b). A release may make room: the deferred neighbours and
+the pages in view whose photo was refused are asked for again (their refusal messages go). -/
+def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
+  dropPhotoOnly st p
+  if ← photoUnreserve st (photoOf p) then
+    let ds := (← st.get).photoDeferred
+    st.modify ({ · with photoDeferred := [] })
+    for q in ds do
+      if (← st.get).photos.any fun (r, x) => r == q && (match x with
+          | .error m => m.startsWith photoRefusal
+          | .ok _ => false) then
+        dropPhotoOnly st q
+
+/-- Removes every page photo and page item from the canvas (task 9.3) and releases their
+reservations. -/
 def clearPages (st : IO.Ref State) : IO Unit := do
   for (p, _) in (← st.get).photos do
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
+    discard <| photoUnreserve st (photoOf p)
   discard <| run [".c", "delete", "pageframe", "pimg", "perr", "pwait"]
-  st.modify ({ · with photos := #[] })
+  st.modify ({ · with photos := #[], photoDeferred := [] })
 
 /-- Draws the layout on the canvas (task 9.3): a white page frame with a 1 px grey border per
 slot (tags `pageframe fN`; the placeholder until the page's photo arrives) and the scroll
@@ -2952,6 +3054,40 @@ def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : 
   let s ← st.get
   match res with
   | .ok img =>
+    -- Task 12.3b: the photo's bytes are reserved in the photo pool first. A page in view may
+    -- evict the photos of pages not in view (farthest from the current page first); a
+    -- neighbour may not, and waits (deferred) instead; a page in view that still does not fit
+    -- shows a message.
+    let vis ← inView s
+    let visible := p == s.page || vis.contains p
+    let dist (q : Nat) : Nat := if q ≥ s.page then q - s.page else s.page - q
+    let cands : List Nat := if !visible then [] else
+      ((s.photos.toList.map (·.1)).filter fun q => q != p && q != s.page && !vis.contains q)
+        |>.mergeSort fun a b => dist a ≥ dist b
+    let bytes := Budget.photoBytes img.w img.h
+    match ← photoAdmit st (photoOf p) bytes false (cands.map photoOf) with
+    | none =>
+      st.modify fun s => { s with photoRefused := s.photoRefused + 1,
+                                  photoDeferred := p :: s.photoDeferred.filter (· != p) }
+      dropPhotoOnly st p
+      if visible then
+        let pl := sl.place
+        let s ← st.get
+        let msg := s!"{photoRefusal}: its image ({img.w}x{img.h} px) needs {bytes / 1048576} MiB \
+          and the page images in view already hold {s.photoPool.used / 1048576} of the \
+          {s.photoPool.ceiling / 1048576} MiB for page images; zoom out or scroll"
+        discard <| run [".c", "create", "text", toString (pl.x + pl.w / 2),
+          toString (pl.y + pl.h / 2), "-text", s!"page {p + 1}: {msg}", "-width",
+          toString (max 40 (pl.w - 20)), "-fill", "#5b5b66", "-justify", "center",
+          "-tags", s!"perr e{p}"]
+        discard <| run [".c", "lower", s!"e{p}"]
+        discard <| run [".c", "lower", "pageframe"]
+        st.modify fun s => { s with photos := s.photos.push (p, .error msg) }
+      return
+    | some evicted =>
+      for q in cands do
+        if evicted.contains (photoOf q) then dropPhotoOnly st q
+    let s ← st.get
     if !s.hasPhoto p then
       discard <| run ["image", "create", "photo", photoOf p]
       discard <| run [".c", "create", "image", toString sl.place.x, toString sl.place.y,
@@ -3013,7 +3149,7 @@ def showStatus (st : IO.Ref State) (how : String) : IO Unit := do
       | some (.scale p) => if vp.capped then View.zoomPct vp.zoom s.scaling else p
       | _ => View.zoomPct vp.zoom s.scaling
     let notes := (if vp.capped then
-        s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
+        s!"; zoom limited to {Budget.ceilings.pagePixels / 1048576} Mpx per page" else "") ++
       (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
     setStatus s!"{path}: {page}, {pct}% ({modeName s.zoomSel}), \
       rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}{s.openNote}"
@@ -3045,12 +3181,16 @@ def viewBand (s : State) : IO (Option (Nat × Nat × Nat × Nat)) := do
   return some (px a s.regionH, px b s.regionH, px xa s.regionW, px xb s.regionW)
 
 /-- The pages to show for the view (`View.wantedPages`: visible, and one more each side) that
-have no photo yet, nearest to the current page first. -/
+have no photo yet, nearest to the current page first; neighbours deferred for lack of photo
+room (task 12.3b) are left out until a photo is released. -/
 def missingPages (st : IO.Ref State) : IO (List Nat) := do
   let s ← st.get
   if s.doc.isNone || s.shown.isNone then return []
   let some (top, bot, _, _) ← viewBand s | return []
-  let miss := (View.wantedPages s.places top bot).filter (!s.hasPhoto ·)
+  -- Task 12.3b: neighbours whose photo did not fit wait for a release (`photoDeferred`).
+  let vis := View.visiblePages s.places top bot
+  let miss := (View.wantedPages s.places top bot).filter fun p =>
+    !s.hasPhoto p && (!s.photoDeferred.contains p || vis.contains p || p == s.page)
   let d (p : Nat) : Nat := if p ≥ s.page then p - s.page else s.page - p
   return miss.mergeSort fun a b => d a ≤ d b
 
@@ -3217,6 +3357,7 @@ def thumbZoom (s : State) (doc : Doc) (p : Nat) : Rat :=
 /-- Removes the thumbnail image of page `p` (eviction, task 9.r9). -/
 def dropThumb (st : IO.Ref State) (p : Nat) : IO Unit := do
   try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+  discard <| photoUnreserve st (thumbPhoto p)
   discard <| run [".ol.th", "delete", s!"thi{p}"]
   st.modify fun s => { s with thHave := s.thHave.filter (· != p) }
 
@@ -3225,6 +3366,7 @@ thumbnail renders finish on their own; `thumbPoll` drops their results. -/
 def clearThumbs (st : IO.Ref State) : IO Unit := do
   for p in (← st.get).thHave do
     try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+    discard <| photoUnreserve st (thumbPhoto p)
   discard <| run [".ol.th", "delete", "all"]
   st.modify ({ · with thHave := [], thSlots := #[], thHeight := 0, thKey := none,
                       thMarked := none, thSel := none })
@@ -3356,6 +3498,11 @@ def thumbPoll (st : IO.Ref State) : IO Unit := do
     let some out := j.task.get | continue
     match out with
     | (.ok img, _) =>
+      -- Task 12.3b: a thumbnail reserves its photo in the photo pool (in the thumbnails'
+      -- reserve, which the kept thumbnails always fit: `Budget.thumbs_fit_reserve`).
+      if (← photoAdmit st (thumbPhoto p) (Budget.photoBytes img.w img.h) true []).isNone then
+        st.modify fun s => { s with photoRefused := s.photoRefused + 1 }
+        continue
       discard <| run ["image", "create", "photo", thumbPhoto p]
       Shim.photoPut (thumbPhoto p) img.w.toUInt32 img.h.toUInt32 img.data
       let x0 : Int := -((img.w / 2 : Nat) : Int)
@@ -3783,7 +3930,7 @@ render cache, running renders and the thumbnails are stale: `syncThumbs` lays th
 when the panel shows), the text indexes dropped (hidden text is neither selectable nor
 found), the selection and the search hit cleared. -/
 def applyLayers (st : IO.Ref State) : IO Unit := do
-  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), shown := none,
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache), shown := none,
                               texts := Array.replicate s.texts.size none, sel := none,
                               hit := none, pressPt := none }
   for (p, _) in (← st.get).photos do dropPhoto st p
@@ -4121,7 +4268,7 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
   st.modify ({ · with thRendered := 0, thFirstNs := none, thOpenNs := t0 })
   st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
                               shown := none }
-  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache), pending := some .top,
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
                               history := {}, marks := {}, markSel := none, markHist := {},
@@ -4409,7 +4556,7 @@ def updatePreview (st : IO.Ref State) : IO Bool := do
     | .error e =>
       setStatus s!"cannot show the change of a saved mark: {e}"
       return false
-  st.modify fun s => { s with view := v, gen := s.gen + 1, cache := ({} : View.Cache),
+  st.modify fun s => { s with view := v, gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache),
                               shown := none, srcSerial := s.srcSerial + 1 }
   for (p, _) in (← st.get).photos do dropPhoto st p
   refresh st
@@ -4491,6 +4638,9 @@ error) go to the status line; returns whether the file was written. -/
 def saveTo (st : IO.Ref State) (target : String) : IO Bool := do
   let s ← st.get
   let some doc := s.doc | return false
+  -- Task 12.3b: the output (original bytes plus the update) is reserved in the work pool.
+  withOutput st (Save.outputEstimate doc s.marks)
+    (fun m => do setStatus s!"cannot save to {baseName target}: {m}"; return false) do
   setStatus s!"saving to {target}..."
   match ← Save.write limits doc s.marks target (keepPermissions target) with
   | .error e =>
@@ -4513,6 +4663,9 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
   let s ← st.get
   let some doc := s.doc | return some false
   let name := baseName path
+  -- Task 12.3b: the output (original bytes plus the update) is reserved in the work pool.
+  withOutput st (Save.outputEstimate doc s.marks)
+    (fun m => do setStatus s!"cannot save to {name}: {m}"; return some false) do
   match ← Save.buildNow limits doc s.marks with
   | .error e =>
     setStatus s!"cannot save to {name}: {e}"
@@ -4566,6 +4719,9 @@ nothing is written to disk; then the window reopens those bytes from memory on t
 (`Library.onMarksChanged`, posted after the file). Errors go to the status line. -/
 def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc) : IO Bool := do
   let s ← st.get
+  -- Task 12.3b: the output (original bytes plus the update) is reserved in the work pool.
+  withOutput st (Save.outputEstimate doc s.marks)
+    (fun m => do setStatus s!"cannot save to the library: {m}"; return false) do
   setStatus "saving to the library..."
   match ← Save.buildNow limits doc s.marks with
   | .error e =>
@@ -4657,7 +4813,9 @@ def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
   -- document and its marks stay unsaved there (Save sends them to the library).
   if s.library.isSome then
     let some doc := s.doc | return some false
-    match ← Save.write limits doc s.marks chosen (keepPermissions chosen) with
+    let r ← withOutput st (Save.outputEstimate doc s.marks) (fun m => pure (.error m))
+      (Save.write limits doc s.marks chosen (keepPermissions chosen))
+    match r with
     | .error e =>
       setStatus s!"cannot save to {baseName chosen}: {e}"
       return some false
@@ -4787,6 +4945,9 @@ def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
     setStatus "export cancelled"
     return
   let some path ← checkTarget st path "xfdf" true | return
+  -- Task 12.3b: the text (and its UTF-8 bytes) is reserved in the work pool first.
+  withOutput st (2 * Xfdf.exportEstimate s.marks)
+    (fun m => setStatus s!"cannot export to {baseName path}: {m}") do
   let xml := Xfdf.toXfdf s.marks (Save.pageBox doc) (← Save.nowDate) (some (baseName pdf))
   try
     Save.writeAtomic path xml.toUTF8 (keepPermissions path)
@@ -4863,7 +5024,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
     setSaveLabels false
   st.modify fun s => { s with path := none, inMemory := false, titleOverride := none,
                               library := none, doc := none, view := none, page := 0, shown := none,
-                              gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
+                              gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache), pending := none,
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
                               hover := none, history := {}, toggleShown := none,
@@ -9843,6 +10004,22 @@ def smokeThumbPerf (st : IO.Ref State) (dir : String) : IO Unit := do
       rss0-kib: {rss0}\nrss-first-screen-kib: {rss1}\nrss-end-kib: {rss2}\nhwm-kib: {hwm}\n"
   discard <| run ["destroy", "."]
 
+/-- Task 12.3b: the live photos without a reservation plus the reservations without a live
+photo (expected 0): page photos with an image and kept thumbnails against `photoTix`, and
+each reservation against its Tk image's present size (`Budget.photoBytes`). -/
+def photoMismatch (st : IO.Ref State) : IO Nat := do
+  let s ← st.get
+  let live := (s.photos.toList.filterMap fun (p, r) => match r with
+    | .ok _ => some (photoOf p) | .error _ => none) ++ s.thHave.map thumbPhoto
+  let mut bad := (live.filter fun n => !s.photoTix.any (·.1 == n)).length
+  for (n, t) in s.photoTix do
+    if !live.contains n then bad := bad + 1; continue
+    let w := (← run ["image", "width", n]).toNat?.getD 0
+    let h := (← run ["image", "height", n]).toNat?.getD 0
+    if Budget.photoBytes w h != t.bytes then bad := bad + 1
+  if s.photoPool.used != s.photoTix.foldl (fun a (_, t) => a + t.bytes) 0 then bad := bad + 1
+  return bad
+
 /-- **The interleave scenario** (task 12.3, `SAFEPDF_VIEWER_SMOKE_MODE=interleave`, driven by
 `scripts/interleave.sh`, which samples the resident memory of this process and of its workers
 meanwhile): reopens the start-up file with the thumbnails panel and runs `rounds` rounds of
@@ -9850,11 +10027,16 @@ zoom in `zoomSteps` steps (from 75 % to 200 %), two searches (a frequent word an
 one work allowance), the thumbnails panel scrolled on, two page changes and zoom out as many steps
 — each
 step followed by 250 ms of the event loop, so renders, thumbnails and text requests overlap.
-Then waits for everything in flight and writes `interleave.txt`: the pool's peak and what it
-holds at the end (must be nothing: no reservation leaks), waits, lowered thumbnails, refusals,
-unreserved text requests, stopped searches, renders and worker statistics. -/
+Task 12.3b adds the deep zoom phase: 600 % and then 800 %, each scrolled through the whole
+document in 12 steps of 400 ms (the zoom is limited to `Budget.Ceilings.pagePixels` per page;
+the resident memory after each step is logged). Then waits for everything in flight and writes
+`interleave.txt`: the pool's peak and what it holds at the end (must be nothing: no
+reservation leaks), waits, lowered thumbnails, refusals, unreserved text requests, stopped
+searches, renders and worker statistics; the photo pool's peak, evictions, refusals and
+`photoMismatch` (expected 0), the deep zoom steps, status line and peak. -/
 def smokeInterleave (st : IO.Ref State) (dir : String) (rounds : Nat := 8) (zoomSteps : Nat := 4) :
     IO Unit := do
+  let mut deepSteps := 0
   let path := (← st.get).path.getD ""
   let t0 ← IO.monoNanosNow
   st.modify ({ · with panel := .thumbnails })
@@ -9867,6 +10049,13 @@ def smokeInterleave (st : IO.Ref State) (dir : String) (rounds : Nat := 8) (zoom
     while (← IO.monoMsNow) < stop do
       discard <| run ["update"]
       IO.sleep 5
+  let rssNow : IO Nat := do
+    let (r, _) ← memKiB
+    if r > 0 then return r
+    try
+      let o ← IO.Process.output { cmd := "ps", args := #["-o", "rss=", "-p", toString (← IO.Process.getPID)] }
+      return o.stdout.trimAscii.toString.toNat?.getD 0
+    catch _ => return 0
   let mut log : Array String := #[]
   pump 500
   for r in [0:rounds] do
@@ -9888,7 +10077,26 @@ def smokeInterleave (st : IO.Ref State) (dir : String) (rounds : Nat := 8) (zoom
       discard <| run ["::safepdf::emit", "zoom", "out"]
       pump 250
     let s ← st.get
-    log := log.push s!"round {r}: page {s.page + 1} pool-used {s.pool.used} held {s.pool.held.length} jobs {s.jobs.size} thumbs {s.thJobs.size} status {← run [".status", "cget", "-text"]}"
+    log := log.push s!"round {r}: page {s.page + 1} pool-used {s.pool.used} held {s.pool.held.length} jobs {s.jobs.size} thumbs {s.thJobs.size} rss-kib {← rssNow} photo-pool {s.photoPool.used} cache {s.cache.bytes} status {← run [".status", "cget", "-text"]}"
+  -- Task 12.3b: the deep zoom phase — 600 % and 800 %, scrolled through the document.
+  let mut rssPeak := 0
+  for pct in ["600", "800"] do
+    zoomChoose st pct
+    pump 600
+    for k in [0:12] do
+      discard <| run [".c", "yview", "moveto", fmtFracFine ((k : Rat) / 12)]
+      viewChanged st
+      pump 400
+      let s ← st.get
+      let rss ← rssNow
+      deepSteps := deepSteps + 1
+      rssPeak := max rssPeak rss
+      let px := s.photos.foldl (fun n (_, r) => match r with | .ok i => n + i.w * i.h | _ => n) 0
+      log := log.push s!"zoom {pct} step {k}: page {s.page + 1} photos {s.photos.size} photo-px {px} photo-pool {s.photoPool.used} cache {s.cache.bytes} pool-used {s.pool.used} jobs {s.jobs.size} rss-kib {rss}"
+  log := log.push s!"zoom-status: {← run [".status", "cget", "-text"]}"
+  zoomChoose st "auto"
+  pump 500
+  log := log.push s!"zoom-rss-peak-kib: {rssPeak}"
   -- Everything in flight finishes; then the pool must be empty.
   settle st
   thumbSettle st
@@ -9914,7 +10122,10 @@ def smokeInterleave (st : IO.Ref State) (dir : String) (rounds : Nat := 8) (zoom
     s!"renders: {s.renders}", s!"worker-renders: {s.workerRenders}",
     s!"worker-texts: {s.workerTexts}", s!"thumbs-rendered: {s.thRendered}",
     s!"spawns: {spawns}", s!"timeouts: {timeouts}", s!"kills: {kills}",
-    s!"worker: {s.worker.isSome}", "done"]
+    s!"worker: {s.worker.isSome}", s!"photo-ceiling: {s.photoPool.ceiling}",
+    s!"photo-peak: {s.photoPeak}", s!"photo-used-end: {s.photoPool.used}",
+    s!"photo-evicted: {s.photoEvicted}", s!"photo-refused: {s.photoRefused}",
+    s!"photo-mismatch: {← photoMismatch st}", s!"deep-zoom-steps: {deepSteps}", "done"]
   IO.FS.writeFile ((dir : System.FilePath) / "interleave.txt")
     ("\n".intercalate (log.toList ++ fields) ++ "\n")
   discard <| run ["destroy", "."]

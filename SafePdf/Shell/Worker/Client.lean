@@ -1,4 +1,5 @@
 import SafePdf.Shell.Worker.Wire
+import SafePdf.Shell.App.Budget
 
 /-!
 # Document worker client (task 12.2a)
@@ -99,10 +100,39 @@ def Client.waitExit (c : Client) (timeoutMs : Nat := 5000) : IO (Option UInt32) 
     IO.sleep 1
   c.kill
 
+/-- The largest response payload read into a buffer allocated at once (task 12.3b): an honest
+page image at the viewer's pixel cap (`Budget.Ceilings.pagePixels`, 4 bytes per pixel) plus
+1 MiB. A longer frame (up to the cap) grows with the data actually received (`readExact`), so
+a worker announcing a long frame without sending it never makes the viewer allocate more. -/
+def presizeMax : Nat := 4 * App.Budget.ceilings.pagePixels + (1 <<< 20)
+
+/-- Read exactly `n` bytes from `s` into one buffer of capacity `n` (in chunks of at most
+1 MiB; fewer only at end of input). Growing a buffer by appending (`readExact`) briefly holds
+the old and the doubled one, up to three times the frame; this holds it once. -/
+def readExactSized (s : IO.FS.Stream) (n : Nat) : IO ByteArray := do
+  let mut buf := ByteArray.emptyWithCapacity n
+  while buf.size < n do
+    let chunk ← s.read (min (n - buf.size) (1 <<< 20)).toUSize
+    if chunk.isEmpty then break
+    buf := buf ++ chunk
+  return buf
+
+/-- `readFrame` with payloads up to `presizeMax` read by `readExactSized` (task 12.3b). -/
+def readFrameSized (s : IO.FS.Stream) (cap : Nat) : IO Incoming := do
+  let hdr ← readExact s 4
+  if hdr.size == 0 then return .eof
+  match Protocol.readHeader hdr 0 with
+  | none => return .truncated hdr.size
+  | some len =>
+    if cap < len then return .tooLong len
+    let body ← if len ≤ presizeMax then readExactSized s len else readExact s len
+    if body.size < len then return .truncated (4 + body.size)
+    return .frame body
+
 /-- Read one response frame. -/
 def Client.readResponse (c : Client) : IO (Except ClientError Protocol.Response) := do
   let s := IO.FS.Stream.ofHandle c.child.stdout
-  match ← readFrame s (Protocol.responseCap c.limits) with
+  match ← readFrameSized s (Protocol.responseCap c.limits) with
   | .eof => return .error (.exited "end of output")
   | .truncated n => return .error (.exited s!"end of output inside a frame ({n} bytes)")
   | .tooLong len => return .error (.tooLong len)
