@@ -66,9 +66,13 @@ document built from it is flagged `repaired := true` (S7, by the caller).
   rejected; a container listed as a member of another container is classic, so it stays in
   use and keeps its members; a member that is only compressed is never read as a container
   (only classic containers are, so no container chain). Members of a container that fails
-  to parse or decode are not added (no partial header). The pass does not run for an
-  encrypted trailer: object streams of encrypted files are encrypted as a whole, and the
-  decryption state is built after repair (`Core.Open.repairOpen`); such files keep R1–R5.
+  to parse or decode are not added (no partial header). Each container's stream passes
+  through a pre-pass `pre` (`Xref.ObjStm.Pre`, rule O7) before it is decoded. In `repair` the
+  pass runs only for an unencrypted trailer, with `Pre.id`: object streams of encrypted files
+  are encrypted as a whole, and the decryption state is built after repair. For an encrypted
+  trailer `Core.Open.repairOpen` runs the same pass after `withCrypt`, with the document's
+  decrypting pre-pass (`Core.Open.OpenDoc.withObjStmEnc`, rule E4 there, task 12.7h); the
+  classic entries it was given, the `/Encrypt` object's among them, are never replaced.
   `/Size` is raised to cover the added numbers. The members' own objects are not parsed:
   `Core.Open.OpenDoc.getObject` (`ObjStm.fetchCompressed`) reads them on demand, with the strict
   checks (`findObject` index, container `inUse … 0`, no nesting).
@@ -80,7 +84,9 @@ document built from it is flagged `repaired := true` (S7, by the caller).
   `Filter.Budget.init limits` (`limits.maxDecodedTotalBytes` in total); at most
   `min maxObjects bytes.size + 1` entries in the whole section (the R6 entries fill only the
   room the classic ones leave, lowest numbers first). `r6Raw_bounds`: at most one attempt per
-  classic entry, at most `maxRepairFailures` failures, decode budget never raised.
+  classic entry, at most `maxRepairFailures` failures, decode budget never raised, for every
+  pre-pass (the decrypting one never makes the data longer, `Pre.le`); `withObjStm_length_le`,
+  `withObjStm_entries`, `withObjStm_eq_of_noComp` hold for every pre-pass too.
 
 ## Bounds (S2, S3)
 
@@ -553,18 +559,21 @@ dictionary has `/Type /ObjStm`: `Length.parseIndirectResolved` against the class
 `tbl` (an indirect `/Length` resolves through classic objects, fuel = their number), the
 header must be `c 0 obj`, the body a stream, and `ObjStm.decodeObjStmB` (strict header,
 `limits`, charged to the budget) must succeed. -/
-def r6Container (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × XrefEntry))
-    (s : R6State) (c off r : Nat) : R6State :=
-  match Xref.Length.parseIndirectResolved (entryLookup tbl) limits bytes tbl.size off with
+def r6Container (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (tbl : Array (Nat × XrefEntry)) (s : R6State) (c off r : Nat) : R6State :=
+  match Xref.Length.parseIndirectResolved (entryLookup tbl) limits bytes tbl.size off pre with
   | .error _ => { s.fail with lastEnd := r }
   | .ok (io, r2) =>
     match io.body with
-    | .stream st =>
+    | .stream st0 =>
       if io.num = c ∧ io.gen = 0 then
-        match Xref.ObjStm.decodeObjStmB limits s.budget st with
-        | (.ok os, b) =>
-          { s with lastEnd := max r r2, budget := b, acc := membersOf os c ++ s.acc }
-        | (.error _, b) => { s.fail with lastEnd := max r r2, budget := b }
+        match pre.f c st0 with
+        | .error _ => { s.fail with lastEnd := max r r2 }
+        | .ok st =>
+          match Xref.ObjStm.decodeObjStmB limits s.budget st with
+          | (.ok os, b) =>
+            { s with lastEnd := max r r2, budget := b, acc := membersOf os c ++ s.acc }
+          | (.error _, b) => { s.fail with lastEnd := max r r2, budget := b }
       else { s.fail with lastEnd := r }
     | .obj _ => { s.fail with lastEnd := r }
 
@@ -574,8 +583,8 @@ read (`lastEnd`: it is inside that object), or the failure budget
 (`limits.maxRepairFailures`) is spent. Otherwise one attempt: the header and the first object
 (`ObjParse.parseObject`); a parse error is a failure; a dictionary with `/Type /ObjStm` goes
 on to `r6Container`; anything else is not a container (no failure). -/
-def r6Step (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × XrefEntry)) (s : R6State)
-    (x : Nat × Nat × Nat) : R6State :=
+def r6Step (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (tbl : Array (Nat × XrefEntry)) (s : R6State) (x : Nat × Nat × Nat) : R6State :=
   if x.2.1 = 0 ∧ s.lastEnd ≤ x.2.2 ∧ s.fails < limits.maxRepairFailures then
     let s := { s with attempts := s.attempts + 1 }
     match ObjParse.parseHeader bytes x.2.2 with
@@ -584,7 +593,7 @@ def r6Step (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × XrefEntry)
       match ObjParse.parseObject limits bytes q with
       | .error _ => s.fail
       | .ok (.dict d, r) =>
-        if isObjStmDict d then r6Container limits bytes tbl s x.1 x.2.2 r
+        if isObjStmDict d then r6Container limits bytes pre tbl s x.1 x.2.2 r
         else { s with lastEnd := r }
       | .ok (_, r) => { s with lastEnd := r }
   else s
@@ -596,9 +605,12 @@ def r6Candidates (base : XrefSection) : List (Nat × Nat × Nat) :=
     | .inUse off g => some (x.1, g, off)
     | _ => none)).mergeSort (fun a b => decide (a.2.2 ≤ b.2.2))
 
-/-- The container pass (R6) over the classic section `base`. -/
-def r6Raw (limits : Limits) (bytes : ByteArray) (base : XrefSection) : R6State :=
-  (r6Candidates base).foldl (r6Step limits bytes base.entries.toArray)
+/-- The container pass (R6) over the classic section `base`, with container pre-pass `pre`
+(`Pre.id` in `repair`; the decryption of an encrypted file's containers in
+`Core.Open.OpenDoc.withObjStmEnc`, task 12.7h). -/
+def r6Raw (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre) (base : XrefSection) :
+    R6State :=
+  (r6Candidates base).foldl (r6Step limits bytes pre base.entries.toArray)
     ⟨0, 0, 0, Filter.Budget.init limits, []⟩
 
 /-- **R6 entries.** The compressed entries the container pass adds to the classic section
@@ -606,11 +618,11 @@ def r6Raw (limits : Limits) (bytes : ByteArray) (base : XrefSection) : R6State :
 R3), unless the number has a classic entry (a classic hit always wins) or is the container's
 own number; at most `min maxObjects bytes.size + 1 - base.entries.length` of them (the lowest
 numbers), ascending by object number. -/
-def objStmAdds (limits : Limits) (bytes : ByteArray) (base : XrefSection) :
-    List (Nat × XrefEntry) :=
+def objStmAdds (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (base : XrefSection) : List (Nat × XrefEntry) :=
   let tbl := base.entries.toArray
   let cap := min limits.maxObjects bytes.size + 1 - base.entries.length
-  (((keepAsc ((r6Raw limits bytes base).acc.mergeSort keyLe) 1).filter
+  (((keepAsc ((r6Raw limits bytes pre base).acc.mergeSort keyLe) 1).filter
       (fun x => (entryLookup tbl x.1).isNone && x.1 != x.2.1)).take cap).map
     (fun x => (x.1, XrefEntry.compressed x.2.1 x.2.2))
 
@@ -628,9 +640,10 @@ def mergeSection (base : XrefSection) (adds : List (Nat × XrefEntry)) : XrefSec
         rwa [List.pairwise_map] at this⟩
     else base
 
-/-- The classic section `base` with the R6 entries added. -/
-def withObjStm (limits : Limits) (bytes : ByteArray) (base : XrefSection) : XrefSection :=
-  mergeSection base (objStmAdds limits bytes base)
+/-- The classic section `base` with the R6 entries added (containers through `pre`). -/
+def withObjStm (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (base : XrefSection) : XrefSection :=
+  mergeSection base (objStmAdds limits bytes pre base)
 
 /-- **Entry point.** The repair path (R5, R6): a cross-reference section rebuilt by scanning,
 and a trailer. An error only when nothing usable is found. Rule R6 (object-stream members)
@@ -642,7 +655,7 @@ def repair (limits : Limits) (bytes : ByteArray) : Except Error (XrefSection × 
   | .ok (sec, tr) =>
     if tr.encrypted then .ok (sec, tr)
     else
-      let sec' := withObjStm limits bytes sec
+      let sec' := withObjStm limits bytes Xref.ObjStm.Pre.id sec
       .ok (sec', { tr with size := max tr.size (scanSize sec'.entries) })
 
 /-! ## Bounds of the scan loop -/
@@ -751,12 +764,12 @@ theorem scanObjects_offset_lt (limits : Limits) (bytes : ByteArray) :
 
 /-- One step of the container pass keeps the failure count within the budget, never raises the
 decode budget, and makes at most one attempt. -/
-theorem r6Step_spec (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × XrefEntry))
-    (s : R6State) (x : Nat × Nat × Nat) :
+theorem r6Step_spec (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (tbl : Array (Nat × XrefEntry)) (s : R6State) (x : Nat × Nat × Nat) :
     (s.fails ≤ limits.maxRepairFailures →
-      (r6Step limits bytes tbl s x).fails ≤ limits.maxRepairFailures) ∧
-    (r6Step limits bytes tbl s x).budget.remaining ≤ s.budget.remaining ∧
-    (r6Step limits bytes tbl s x).attempts ≤ s.attempts + 1 := by
+      (r6Step limits bytes pre tbl s x).fails ≤ limits.maxRepairFailures) ∧
+    (r6Step limits bytes pre tbl s x).budget.remaining ≤ s.budget.remaining ∧
+    (r6Step limits bytes pre tbl s x).attempts ≤ s.attempts + 1 := by
   unfold r6Step
   split
   · rename_i hc
@@ -772,14 +785,16 @@ theorem r6Step_spec (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × X
           · simp [R6State.fail]; omega
           · split
             · split
-              · rename_i st _ _
-                generalize hd : Xref.ObjStm.decodeObjStmB limits _ st = p
-                have hle := Xref.ObjStm.decodeObjStmB_le limits
-                  { s with attempts := s.attempts + 1 }.budget st
-                rw [hd] at hle
-                rcases p with ⟨_ | os, b⟩
-                · simp only [R6State.fail] at hle ⊢; omega
-                · simp only at hle ⊢; omega
+              · split
+                · simp [R6State.fail]; omega
+                · rename_i st _
+                  generalize hd : Xref.ObjStm.decodeObjStmB limits _ st = p
+                  have hle := Xref.ObjStm.decodeObjStmB_le limits
+                    { s with attempts := s.attempts + 1 }.budget st
+                  rw [hd] at hle
+                  rcases p with ⟨_ | os, b⟩
+                  · simp only [R6State.fail] at hle ⊢; omega
+                  · simp only at hle ⊢; omega
               · simp [R6State.fail]; omega
             · simp [R6State.fail]; omega
         · simp
@@ -788,26 +803,29 @@ theorem r6Step_spec (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × X
 
 /-- The container pass over any candidate list: failures within the budget, the decode budget
 never raised, at most one attempt per candidate. -/
-theorem r6Fold_spec (limits : Limits) (bytes : ByteArray) (tbl : Array (Nat × XrefEntry)) :
+theorem r6Fold_spec (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (tbl : Array (Nat × XrefEntry)) :
     ∀ (xs : List (Nat × Nat × Nat)) (s : R6State), s.fails ≤ limits.maxRepairFailures →
-      (xs.foldl (r6Step limits bytes tbl) s).fails ≤ limits.maxRepairFailures ∧
-      (xs.foldl (r6Step limits bytes tbl) s).budget.remaining ≤ s.budget.remaining ∧
-      (xs.foldl (r6Step limits bytes tbl) s).attempts ≤ s.attempts + xs.length
+      (xs.foldl (r6Step limits bytes pre tbl) s).fails ≤ limits.maxRepairFailures ∧
+      (xs.foldl (r6Step limits bytes pre tbl) s).budget.remaining ≤ s.budget.remaining ∧
+      (xs.foldl (r6Step limits bytes pre tbl) s).attempts ≤ s.attempts + xs.length
   | [], s, h => ⟨h, Nat.le_refl _, by simp⟩
   | x :: xs, s, h => by
-    obtain ⟨h1, h2, h3⟩ := r6Step_spec limits bytes tbl s x
-    obtain ⟨k1, k2, k3⟩ := r6Fold_spec limits bytes tbl xs _ (h1 h)
+    obtain ⟨h1, h2, h3⟩ := r6Step_spec limits bytes pre tbl s x
+    obtain ⟨k1, k2, k3⟩ := r6Fold_spec limits bytes pre tbl xs _ (h1 h)
     simp only [List.foldl_cons, List.length_cons]
     exact ⟨k1, Nat.le_trans k2 h2, by omega⟩
 
 /-- **R6 work bound.** The container pass makes at most one attempt per classic entry, at most
 `limits.maxRepairFailures` of them fail, and all its object-stream decodes together stay within
-`limits.maxDecodedTotalBytes` (they are charged to one `Filter.Budget`). -/
-theorem r6Raw_bounds (limits : Limits) (bytes : ByteArray) (base : XrefSection) :
-    (r6Raw limits bytes base).attempts ≤ base.entries.length ∧
-    (r6Raw limits bytes base).fails ≤ limits.maxRepairFailures ∧
-    (r6Raw limits bytes base).budget.remaining ≤ limits.maxDecodedTotalBytes := by
-  obtain ⟨h1, h2, h3⟩ := r6Fold_spec limits bytes base.entries.toArray (r6Candidates base)
+`limits.maxDecodedTotalBytes` (they are charged to one `Filter.Budget`). For every container
+pre-pass `pre` (task 12.7h: also the decrypting one). -/
+theorem r6Raw_bounds (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (base : XrefSection) :
+    (r6Raw limits bytes pre base).attempts ≤ base.entries.length ∧
+    (r6Raw limits bytes pre base).fails ≤ limits.maxRepairFailures ∧
+    (r6Raw limits bytes pre base).budget.remaining ≤ limits.maxDecodedTotalBytes := by
+  obtain ⟨h1, h2, h3⟩ := r6Fold_spec limits bytes pre base.entries.toArray (r6Candidates base)
     ⟨0, 0, 0, Filter.Budget.init limits, []⟩ (Nat.zero_le _)
   have hl : (r6Candidates base).length ≤ base.entries.length := by
     unfold r6Candidates
@@ -817,8 +835,8 @@ theorem r6Raw_bounds (limits : Limits) (bytes : ByteArray) (base : XrefSection) 
   refine ⟨by simp only at h3; omega, h1, h2⟩
 
 /-- Every R6 entry is compressed. -/
-theorem objStmAdds_compressed {limits : Limits} {bytes : ByteArray} {base : XrefSection}
-    {x : Nat × XrefEntry} (h : x ∈ objStmAdds limits bytes base) :
+theorem objStmAdds_compressed {limits : Limits} {bytes : ByteArray} {pre : Xref.ObjStm.Pre}
+    {base : XrefSection} {x : Nat × XrefEntry} (h : x ∈ objStmAdds limits bytes pre base) :
     ∃ c i, x.2 = .compressed c i := by
   unfold objStmAdds at h
   obtain ⟨y, -, rfl⟩ := List.mem_map.mp h
@@ -826,8 +844,9 @@ theorem objStmAdds_compressed {limits : Limits} {bytes : ByteArray} {base : Xref
 
 /-- No R6 entry has a classic entry in `base` (a classic hit always wins), and none is its
 own container. -/
-theorem objStmAdds_new {limits : Limits} {bytes : ByteArray} {base : XrefSection}
-    {n c i : Nat} (h : (n, XrefEntry.compressed c i) ∈ objStmAdds limits bytes base) :
+theorem objStmAdds_new {limits : Limits} {bytes : ByteArray} {pre : Xref.ObjStm.Pre}
+    {base : XrefSection} {n c i : Nat}
+    (h : (n, XrefEntry.compressed c i) ∈ objStmAdds limits bytes pre base) :
     entryLookup base.entries.toArray n = none ∧ n ≠ c := by
   unfold objStmAdds at h
   obtain ⟨y, hy, he⟩ := List.mem_map.mp h
@@ -838,8 +857,9 @@ theorem objStmAdds_new {limits : Limits} {bytes : ByteArray} {base : XrefSection
   exact this
 
 /-- The number of R6 entries is at most `min maxObjects bytes.size + 1 - base.entries.length`. -/
-theorem objStmAdds_length_le (limits : Limits) (bytes : ByteArray) (base : XrefSection) :
-    (objStmAdds limits bytes base).length ≤
+theorem objStmAdds_length_le (limits : Limits) (bytes : ByteArray) (pre : Xref.ObjStm.Pre)
+    (base : XrefSection) :
+    (objStmAdds limits bytes pre base).length ≤
       min limits.maxObjects bytes.size + 1 - base.entries.length := by
   unfold objStmAdds
   simp only [List.length_map, List.length_take]
@@ -890,6 +910,48 @@ theorem mergeSection_length_le (base : XrefSection) (adds : List (Nat × XrefEnt
     · rw [List.length_merge]; exact Nat.le_refl _
     · exact Nat.le_add_right _ _
 
+/-- **R6 added nothing.** When `withObjStm` yields a section without compressed entries, it
+is its base section (every R6 entry is compressed). -/
+theorem withObjStm_eq_of_noComp {limits : Limits} {bytes : ByteArray} {pre : Xref.ObjStm.Pre}
+    {base : XrefSection}
+    (hn : ∀ n c i, (n, XrefEntry.compressed c i) ∉ (withObjStm limits bytes pre base).entries) :
+    withObjStm limits bytes pre base = base := by
+  unfold withObjStm at hn ⊢
+  rcases mergeSection_cases base (objStmAdds limits bytes pre base) with h2 | h2
+  · exact h2
+  · rcases hadd : objStmAdds limits bytes pre base with _ | ⟨a, as⟩
+    · rfl
+    · have ha : a ∈ objStmAdds limits bytes pre base := by
+        rw [hadd]; exact List.mem_cons_self ..
+      obtain ⟨c, i, hc⟩ := objStmAdds_compressed ha
+      obtain ⟨n, e⟩ := a
+      simp only at hc
+      subst hc
+      exact absurd (h2 _ ha) (hn n c i)
+
+/-- The entries of `withObjStm … base`: every entry of `base`, plus only compressed (R6)
+entries. -/
+theorem withObjStm_entries {limits : Limits} {bytes : ByteArray} {pre : Xref.ObjStm.Pre}
+    {base : XrefSection} :
+    (∀ x ∈ base.entries, x ∈ (withObjStm limits bytes pre base).entries) ∧
+    (∀ x ∈ (withObjStm limits bytes pre base).entries, x ∈ base.entries ∨
+      ∃ c i, x.2 = .compressed c i) := by
+  refine ⟨fun _ hx => mergeSection_base hx, fun x hx => ?_⟩
+  rcases mergeSection_mem hx with hx | hx
+  · exact Or.inl hx
+  · exact Or.inr (objStmAdds_compressed hx)
+
+/-- **(b) for R6.** `withObjStm` keeps a section within `min maxObjects bytes.size + 1`
+entries. -/
+theorem withObjStm_length_le {limits : Limits} {bytes : ByteArray} {pre : Xref.ObjStm.Pre}
+    {base : XrefSection}
+    (hs : base.entries.length ≤ min limits.maxObjects bytes.size + 1) :
+    (withObjStm limits bytes pre base).entries.length ≤ min limits.maxObjects bytes.size + 1 := by
+  have h1 := mergeSection_length_le base (objStmAdds limits bytes pre base)
+  have h2 := objStmAdds_length_le limits bytes pre base
+  unfold withObjStm
+  omega
+
 /-! ## Properties of `repair` -/
 
 /-- A successful `repairWith` returns its section and a trailer with a `/Root`. -/
@@ -917,7 +979,8 @@ theorem repairWith_ok {limits : Limits} {bytes : ByteArray} {base sec : XrefSect
 theorem repair_ok {limits : Limits} {bytes : ByteArray} {sec : XrefSection} {tr : Trailer}
     (h : repair limits bytes = .ok (sec, tr)) :
     (sec = scanSection limits bytes ∨
-      (tr.encrypted = false ∧ sec = withObjStm limits bytes (scanSection limits bytes))) ∧
+      (tr.encrypted = false ∧
+        sec = withObjStm limits bytes Xref.ObjStm.Pre.id (scanSection limits bytes))) ∧
       tr.root?.isSome := by
   unfold repair at h
   split at h
@@ -953,19 +1016,7 @@ theorem repair_scan {limits : Limits} {bytes : ByteArray} {sec : XrefSection} {t
   rcases (repair_ok h).1 with h1 | ⟨-, h1⟩
   · exact h1
   · subst h1
-    unfold withObjStm at hn ⊢
-    rcases mergeSection_cases (scanSection limits bytes)
-      (objStmAdds limits bytes (scanSection limits bytes)) with h2 | h2
-    · exact h2
-    · rcases hadd : objStmAdds limits bytes (scanSection limits bytes) with _ | ⟨a, as⟩
-      · rfl
-      · have ha : a ∈ objStmAdds limits bytes (scanSection limits bytes) := by
-          rw [hadd]; exact List.mem_cons_self ..
-        obtain ⟨c, i, hc⟩ := objStmAdds_compressed ha
-        obtain ⟨n, e⟩ := a
-        simp only at hc
-        subst hc
-        exact absurd (h2 _ ha) (hn n c i)
+    exact withObjStm_eq_of_noComp hn
 
 /-- **(c) for `repair`.** Every in-use offset of a repaired section is `< bytes.size`. -/
 theorem repair_offset_lt {limits : Limits} {bytes : ByteArray} {sec : XrefSection}
@@ -993,11 +1044,16 @@ theorem repair_length_le {limits : Limits} {bytes : ByteArray} {sec : XrefSectio
     omega
   rcases (repair_ok h).1 with rfl | ⟨-, rfl⟩
   · exact hs
-  · have h1 := mergeSection_length_le (scanSection limits bytes)
-      (objStmAdds limits bytes (scanSection limits bytes))
-    have h2 := objStmAdds_length_le limits bytes (scanSection limits bytes)
-    unfold withObjStm
-    omega
+  · exact withObjStm_length_le hs
+
+/-- **No R6 in `repair` on an encrypted trailer**: its section is the scanned one (the
+containers are encrypted; `Core.Open.OpenDoc.withObjStmEnc` runs R6 after `withCrypt`). -/
+theorem repair_encrypted {limits : Limits} {bytes : ByteArray} {sec : XrefSection}
+    {tr : Trailer} (h : repair limits bytes = .ok (sec, tr)) (he : tr.encrypted = true) :
+    sec = scanSection limits bytes := by
+  rcases (repair_ok h).1 with h1 | ⟨h2, -⟩
+  · exact h1
+  · rw [he] at h2; cases h2
 
 /-- **(d) for `repair`.** A repaired section has one entry per object number (S6). -/
 theorem repair_keys_nodup {limits : Limits} {bytes : ByteArray} {sec : XrefSection}
@@ -1253,7 +1309,7 @@ private def shape (s : String) : String :=
 -- /N claims more members than the header holds: the strict header check rejects the
 -- container, nothing is added, one failed attempt
 #guard shape (withCat (objStm 4 pages23 (n := some 5))) == "0:f,1:u,4:u size=5"
-#guard (r6Raw Limits.default (withCat (objStm 4 pages23 (n := some 5))).toUTF8
+#guard (r6Raw Limits.default (withCat (objStm 4 pages23 (n := some 5))).toUTF8 Xref.ObjStm.Pre.id
   (scanSection Limits.default (withCat (objStm 4 pages23 (n := some 5))).toUTF8)).fails == 1
 -- a huge /N: above limits.maxObjects it is a limit error before any decode; below it the
 -- header parse stops at the end of the header (bounded by the data, not by /N)
@@ -1281,12 +1337,13 @@ private def shape (s : String) : String :=
 #guard shape (withCat "4 0 obj\n<< /Length 3 >>\nstream\n2 0\nendstream\nendobj\n") ==
   "0:f,1:u,4:u size=5"
 -- one attempt per classic object of generation 0, none failed on a sound file
-#guard (r6Raw Limits.default (withCat (objStm 4 pages23)).toUTF8
+#guard (r6Raw Limits.default (withCat (objStm 4 pages23)).toUTF8 Xref.ObjStm.Pre.id
   (scanSection Limits.default (withCat (objStm 4 pages23)).toUTF8)).attempts == 2
-#guard (r6Raw Limits.default (withCat (objStm 4 pages23)).toUTF8
+#guard (r6Raw Limits.default (withCat (objStm 4 pages23)).toUTF8 Xref.ObjStm.Pre.id
   (scanSection Limits.default (withCat (objStm 4 pages23)).toUTF8)).fails == 0
 -- files without object streams are unchanged (the earlier guards), e.g. minimal-valid.pdf
-#guard objStmAdds Limits.default minimalBytes (scanSection Limits.default minimalBytes) == []
+#guard objStmAdds Limits.default minimalBytes Xref.ObjStm.Pre.id
+  (scanSection Limits.default minimalBytes) == []
 
 end Tests
 

@@ -94,11 +94,13 @@ gets the members back after repair, where strict returns `null`.
   from equal `fetchCompressedTrace` (same lookup on the container, same fuel bound).
 * `objectCount` differs when free entries differ, as in 12.7a: compressed entries count on
   both sides, so `S` (in-use numbers) still bounds the fuel needed.
-* Encrypted files **with** compressed entries (`HypEnc` requires `SecOk`, i.e. none): R6 does
-  not run for an encrypted repaired trailer, so the repaired section never has compressed
-  entries there; exact C4 for them needs R6 to run after `withCrypt` (decrypting containers
-  with the repaired state, `OpenDoc.pre`), a Core change in `Core.Open.repairOpen`, plus
-  `encryptDict`'s special case for a compressed `/Encrypt` reference.
+* Encrypted files **with** compressed entries (`HypEnc` requires `SecOk`, i.e. none): done by
+  task 12.7h. R6 now runs after `withCrypt` for an encrypted file (`OpenDoc.withObjStmEnc`,
+  rule E4 of `Core.Open`), so `trailerOkEnc` gained an H7 part for that pass (the section after
+  `Repair.withObjStm … d.pre` has no compressed entry; `encOrphanBytes` in
+  `Spec.RepairAgreeEncComp` shows it is necessary), and `c4_enc` reads the repaired document
+  through `withObjStmEnc`; its conclusion is unchanged. Exact C4 with compressed entries:
+  `Spec.RepairAgreeEncComp.c4_enc_comp`.
 * Catalog in an object stream: R4 synthesizes `/Root` only from **classic** catalog objects,
   so a file with no `trailer` keyword (xref-stream files) whose catalog is compressed still
   fails repair; a follow-up could take `/Root` from the newest `/Type /XRef` dictionary (as
@@ -352,8 +354,11 @@ theorem byteArray_eq_of_data {a b : ByteArray} (h : a.data = b.data) : a = b := 
 
 /-- Condition H5e (replaces H5 and H6): the repair path's trailer exists and has the strict
 `/Root`, the same `encrypted` flag, the same `/Encrypt` value and the same first `/ID` string
-as the strict trailer; and H7 (task 12.7e): the repaired section has no compressed entry
-(always true when the repaired trailer is encrypted: rule R6 then does not run). Rule R4'
+as the strict trailer; and H7 (task 12.7e): the repaired section has no compressed entry,
+also after rule R6 runs on an encrypted file with the strict decryption state's container
+pass (`Repair.withObjStm … d.pre`, as `Core.Open.OpenDoc.withObjStmEnc` does after
+`withCrypt`; *added by task 12.7h*, which moved R6 for encrypted files there: before, R6 never
+ran on an encrypted trailer and this part was vacuous). Rule R4'
 makes the trailer part hold whenever the newest `trailer` dictionary with
 `/Root` is the strict trailer (the usual single-revision classic file). -/
 def trailerOkEnc (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
@@ -363,7 +368,8 @@ def trailerOkEnc (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
       decide (Dict.get? tr.dict Core.Xref.nameEncrypt =
         Dict.get? d.trailer.dict Core.Xref.nameEncrypt) &&
       decide ((Core.Crypt.id0Of tr.dict).data = (Core.Crypt.id0Of d.trailer.dict).data) &&
-      noComp sec.entries
+      noComp sec.entries &&
+      (d.crypt.isNone || noComp (Repair.withObjStm limits bytes d.pre sec).entries)
   | .error _ => false
 
 /-- **The C4 hypothesis for encrypted files**: H1–H4 with free entries (`SecOk`, as in
@@ -418,7 +424,7 @@ theorem c4_enc {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
   split at htr
   · rename_i sec tr hrep
     simp only [Bool.and_eq_true, decide_eq_true_eq] at htr
-    obtain ⟨⟨⟨⟨hroot, henc⟩, hE⟩, hid⟩, hnc⟩ := htr
+    obtain ⟨⟨⟨⟨⟨hroot, henc⟩, hE⟩, hid⟩, hnc⟩, hnc7⟩ := htr
     have hsec' := Repair.repair_scan hrep (noComp_spec hnc)
     subst hsec'
     let e' := OpenDoc.mk' bytes (scanSection limits bytes) tr 0 true
@@ -430,13 +436,26 @@ theorem c4_enc {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
         (by rw [het]; exact hE.symm) (by rw [het]; exact (byteArray_eq_of_data hid).symm)
         (lookup_no_compressed hsecE.no_compressed)
         (lookup_no_compressed (scanSection_no_compressed limits bytes)) hg0 rfl hwc
-    let d' : OpenDoc := { e' with crypt := d.crypt }
+    let d1 : OpenDoc := { e' with crypt := d.crypt }
+    let d' : OpenDoc := d1.withObjStmEnc limits
+    obtain ⟨hb', hrp', -, hc', -, hro', -⟩ := withObjStmEnc_fields d1 limits
+    have hx' : d'.xref = scanSection limits bytes := by
+      show (d1.withObjStmEnc limits).xref = _
+      rw [withObjStmEnc_xref]
+      rcases hcr : d1.crypt with _ | st
+      · rfl
+      · have hdc : d.crypt.isNone = false := by
+          show d1.crypt.isNone = false; rw [hcr]; rfl
+        rw [hdc, Bool.false_or] at hnc7
+        have hpre : d1.pre = d.pre := by unfold OpenDoc.pre; rfl
+        simp only [Option.isSome_some, ↓reduceIte, hpre]
+        exact Repair.withObjStm_eq_of_noComp (noComp_spec hnc7)
     have hg : ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen :=
-      fun num gen => (getObject_sec (d₂ := d') hsec hbytes rfl rfl rfl num gen).symm
+      fun num gen => (getObject_sec (d₂ := d') hsec hbytes hb' hx' hc'.symm num gen).symm
     have hv : validate limits d' = .ok d' :=
-      validate_congr hroot.symm (fun n g => (hg n g).symm) hval
-    refine ⟨d', ?_, rfl, by rw [hbytes]; rfl, fun n off g => (hsec.inUse_mem_iff n off g).symm,
-      hroot, rfl, hg⟩
+      validate_congr (hroot.symm.trans hro'.symm) (fun n g => (hg n g).symm) hval
+    refine ⟨d', ?_, hrp', by rw [hb', hbytes]; rfl, fun n off g => by
+      rw [hx']; exact (hsec.inUse_mem_iff n off g).symm, hro'.trans hroot, hc', hg⟩
     unfold repairOpen
     rw [hrep]
     simp only
@@ -901,7 +920,7 @@ theorem c4_comp {limits : Limits} {bytes : ByteArray} {d d' : OpenDoc}
       (n, XrefEntry.inUse off g) ∈ (scanSection limits bytes).entries :=
     inUse_mem_iff_of (fun n off g hx => hent _ hx) hcov hcap
   have hbytes := strictOpen_bytes hs
-  obtain ⟨sec, tr, hrep, hwc, -⟩ := repairOpen_ok hr
+  obtain ⟨sec, tr, d0, hrep, hwc, rfl, -⟩ := repairOpen_ok hr
   obtain ⟨hsup, hsub⟩ := Repair.repair_entries hrep
   unfold trailerOkComp at htr
   rw [hrep] at htr
@@ -909,6 +928,7 @@ theorem c4_comp {limits : Limits} {bytes : ByteArray} {d d' : OpenDoc}
   obtain ⟨⟨henc, hroot⟩, hcomp⟩ := htr
   rw [withCrypt_plain (d := OpenDoc.mk' bytes sec tr 0 true) henc] at hwc
   cases hwc
+  rw [withObjStmEnc_none (d := OpenDoc.mk' bytes sec tr 0 true) rfl]
   have hc : d.crypt = none := Option.isNone_iff_eq_none.mp hpl
   let d' := OpenDoc.mk' bytes sec tr 0 true
   have hnd1 := d.xref.keys_nodup
