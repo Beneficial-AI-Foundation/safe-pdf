@@ -80,3 +80,32 @@ entry is a bug in the comparator.
   disagreement), whatever qpdf lists; `run.py` counts it separately and prints it as
   `KNOWN`.
 - Status: accepted
+
+### D-003: repair-objstm-scope — what the repair path recovers from object streams
+
+- Classification: deliberate difference (the repair path recovers less than the reference
+  tool's reconstruction on some damaged files)
+- Found by: design of repair rule R6 (task 12.7e) on the fixture `objStmBytes`
+  (`SafePdf/Spec/RepairAgreeExt.lean`) and `Tests/adversarial/objstm-*.pdf`, 2026-11-23.
+  Not observed by a comparator: every corpus file opens strictly, so the repair path is
+  not exercised by the differential runs.
+- Reference tool and version: qpdf 11.x (behaviour from its documentation: when the
+  cross-reference data is unusable it reconstructs it by scanning, including object
+  streams). Not yet confirmed by a CI run.
+- Spec reference: ISO 32000-2:2020 §7.5.7 (object streams), §7.5.8 (cross-reference
+  streams); the standard does not specify recovery of damaged files.
+- Observed: after repair, our objects that live in object streams are recovered only from
+  object streams that are **classic** objects (`N 0 obj`, found by the byte scan), whose
+  header passes the strict check (exactly `/N` pairs, distinct numbers, increasing
+  offsets), within the failure and decode budgets; a number with a classic object keeps it;
+  when several object streams list a number, the newest (last in the file) wins. Not
+  recovered: members of object streams of **encrypted** files (their data is encrypted and
+  the decryption state is built after repair), and a catalog that lives in an object stream
+  when the file has no `trailer` keyword (the repair trailer takes `/Root` from `trailer`
+  dictionaries or classic `/Type /Catalog` objects only), so such a file fails to open
+  where a reference tool may open it.
+- Reading chosen and rationale: the repair path must stay total and bounded and must not
+  invent structure; R6 reuses the strict object-stream decoder and adds nothing it cannot
+  check. The two gaps are recorded for follow-up (notes in `RepairAgreeExt`'s module doc).
+- Comparator handling: none.
+- Status: open

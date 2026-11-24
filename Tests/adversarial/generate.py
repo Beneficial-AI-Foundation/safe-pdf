@@ -220,6 +220,71 @@ def deep_nesting():
     return p.finish(x)
 
 
+def objstm(n, members, count=None):
+    """Uncompressed object stream `n` holding `members` [(num, direct object)]; `count`
+    overrides /N (default: the number of members)."""
+    pairs, body = [], b""
+    for num, obj in members:
+        pairs.append(b"%d %d" % (num, len(body)))
+        body += obj.encode() + b"\n"
+    hdr = b" ".join(pairs) + b"\n"
+    cnt = len(members) if count is None else count
+    return stream_obj(n, "/Type /ObjStm /N %d /First %d" % (cnt, len(hdr)), hdr + body)
+
+
+PAGES2 = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+PAGE3 = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>"
+
+
+def repair_only(*objs):
+    """A catalog (object 1, classic) and `objs` [(num, raw)], with NO cross-reference data
+    and no trailer: only the repair path (task 12.7e, rule R6) can open it."""
+    p = Pdf()
+    p.add(1, plain_obj(1, "<< /Type /Catalog /Pages 2 0 R >>"))
+    for n, raw in objs:
+        p.add(n, raw)
+    p.buf += b"%%EOF\n"
+    return bytes(p.buf)
+
+
+def objstm_n_overflow():
+    # /N claims 1000 members but the header holds 2 pairs: the strict header check rejects
+    # the container, R6 adds nothing (objects 2 and 3 stay undefined).
+    return repair_only((4, objstm(4, [(2, PAGES2), (3, PAGE3)], count=1000)))
+
+
+def objstm_dup_claim():
+    # Containers 4 and 6 both list object 3 (different page sizes); the newest (6) wins.
+    page_b = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>"
+    return repair_only((4, objstm(4, [(2, PAGES2), (3, PAGE3)])),
+                       (6, objstm(6, [(3, page_b)])))
+
+
+def objstm_nested():
+    # Container 4 lists object 6, which is itself a (classic) container, and object 5, an
+    # object-stream dictionary that exists only inside 4 (a compressed "container"), and
+    # holds the full text of a third container (object 7) inside a string member. R6 keeps 6
+    # in use with its own members (3), gives 5 a compressed entry, never reads 5 or 7 as
+    # containers, and 7 is no scan hit (the scan jumps over container 4).
+    inner7 = objstm(7, [(2, "<< /Type /Pages /Kids [] /Count 0 >>")]).decode("latin-1")
+    return repair_only(
+        (4, objstm(4, [(6, "<< >>"), (5, "<< /Type /ObjStm /N 1 /First 4 >>"), (2, PAGES2),
+                       (8, "(" + inner7.replace("(", "").replace(")", "") + ")")])),
+        (6, objstm(6, [(3, PAGE3)])))
+
+
+def objstm_huge_n():
+    # /N at limits.maxObjects (8388607) with a 2-pair header: the header parse stops at the
+    # end of the header data; /N above it: limitExceeded before any decode. Neither adds.
+    return repair_only((4, objstm(4, [(2, PAGES2), (3, PAGE3)], count=8388607)),
+                       (6, objstm(6, [(9, "1")], count=99999999)))
+
+
+# Files with no cross-reference data (repair path only): `--check` verifies that instead.
+REPAIR_ONLY = {"objstm-n-overflow.pdf", "objstm-dup-claim.pdf", "objstm-nested.pdf",
+               "objstm-huge-n.pdf"}
+
+
 FILES = {
     "minimal-valid.pdf": minimal_valid,
     "xref-prev-cycle.pdf": xref_prev_cycle,
@@ -232,6 +297,10 @@ FILES = {
     "xobject-fanout.pdf": xobject_fanout,
     "objstm-self-container.pdf": objstm_self_container,
     "deep-nesting.pdf": deep_nesting,
+    "objstm-n-overflow.pdf": objstm_n_overflow,
+    "objstm-dup-claim.pdf": objstm_dup_claim,
+    "objstm-nested.pdf": objstm_nested,
+    "objstm-huge-n.pdf": objstm_huge_n,
 }
 
 
@@ -318,7 +387,11 @@ def check():
             print("FAIL %s: file differs from generator output" % name)
             bad += 1
             continue
-        errs = check_one(name, data)
+        if name in REPAIR_ONLY:
+            errs = [] if (b"startxref" not in data and b"xref\n" not in data
+                          and b"trailer" not in data) else ["has cross-reference data"]
+        else:
+            errs = check_one(name, data)
         if errs:
             bad += 1
             print("FAIL %s: %s" % (name, "; ".join(errs)))

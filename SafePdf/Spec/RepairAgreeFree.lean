@@ -670,8 +670,8 @@ theorem c4_free_eq {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
   split at htr
   · rename_i sec tr hrep
     simp only [Bool.and_eq_true, Bool.not_eq_true', beq_iff_eq] at htr
-    obtain ⟨henc, hroot⟩ := htr
-    have hsec := (Repair.repair_ok hrep).1
+    obtain ⟨⟨henc, hroot⟩, hnc⟩ := htr
+    have hsec := Repair.repair_scan hrep (noComp_spec hnc)
     subst hsec
     let d' := OpenDoc.mk' bytes (scanSection limits bytes) tr 0 true
     have hc : d.crypt = none := Option.isNone_iff_eq_none.mp hpl
