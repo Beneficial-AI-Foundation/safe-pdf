@@ -32,8 +32,8 @@ Design document: Plan.md
 | 7 | `phase-7-raster` | `phase-6-fonts-text` | [#8](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/8) | merged (2026-11-23) |
 | 8 | `phase-8-shell` | `phase-7-raster` | [#9](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/9) | merged (2026-11-23) |
 | 9 | `phase-9-gui` | `phase-8-shell` | [#10](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/10) | merged (2026-11-23) |
-| 10 | `phase-10-polish` | `origin/main` | [#15](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/15) | ready (2026-11-23; M10 ticked; the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from main, where the whole stack #1–#10 merged 2026-11-23) |
-| 11 | `phase-11-macos-shell` | `phase-10-polish` | [#16](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/16) | draft |
+| 10 | `phase-10-polish` | `origin/main` | [#15](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/15) | merged (2026-11-24, merge commit e638a83 — rebase-merge refused by GitHub, the branch holds task merges; was ready 2026-11-23; M10 ticked; the descoped bib-lean tasks 10.1–10.4 landed on #7–#9; the polish branch is cut from main, where the whole stack #1–#10 merged 2026-11-23) |
+| 11 | `phase-11-macos-shell` | `origin/main` (was `phase-10-polish` until #15 merged; main merged in 2026-11-24) | [#16](https://github.com/Beneficial-AI-Foundation/safe-pdf/pull/16) | draft |
 | 12 | `phase-12-hardening` | `phase-11-macos-shell` | — | none |
 States: none · draft · awaiting-ci · ready (<date>) · changes-requested · merged · closed.
 
@@ -795,3 +795,4 @@ Exit criterion checked: [ ]
 * 2026-11-24 — CI 50d5dd9: Linux viewer smoke 35 passed, 1 failed (1l now passes: `sent-file: 1`; 1o: only the trackpad bursts stalled — `bind .c <TouchpadScroll>` does not fail through `run` on Tk 8.6, so the probe said touchpad=true); fixed inline: detect `<TouchpadScroll>` by `package vsatisfies Tk 8.7-`; Aqua 36/3/0
 * 2026-11-24 — CI 2204728 fully green on Linux (build, viewer smoke, lean4lean 132 modules, compiled-vs-interpreted, differential-objects); 10.c2 verified. LOOP BLOCKED: every open task needs the human — 11.2 (feel check of the macOS spike, then 11.3–11.5), 12.3c (deep zoom: 10 Mpx cap or tiling), 12.9 (commission the external review), merging PR #15/#16
 * 2026-11-24 — the human: 12.3c keep the 10 Mpx cap (closed), 11.2 spike feel good (port plan proposed), 12.9 deferred
+* 2026-11-24 — PR #15 (phase 10) merged by the human's request with a merge commit (e638a83); origin/main merged into `phase-11-macos-shell` (93e8ea6, no content change); #16 now shows only phases 11–12
