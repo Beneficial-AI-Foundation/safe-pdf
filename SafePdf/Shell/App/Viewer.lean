@@ -8104,10 +8104,10 @@ def smokeWheelFlow (st : IO.Ref State) (dir : String) (totalMs : Nat := 140000) 
     continuous={← run ["set", "::safepdf::continuous"]}"
   let trace ← IO.mkRef (#[] : Array String)
   let tk ← run ["package", "provide", "Tk"]
-  let touchpad ← try
-      discard <| run ["bind", ".c", "<TouchpadScroll>"]
-      pure true
-    catch _ => pure false
+  -- `<TouchpadScroll>` exists from Tk 8.7 on; on Tk 8.6 (Ubuntu's tk-dev) `bind` does not fail
+  -- through `run`, so probing the binding reported a touchpad there (CI 50d5dd9) — test the
+  -- version instead.
+  let touchpad := (← run ["package", "vsatisfies", tk, "8.7-"]) == "1"
   let ws ← run ["tk", "windowingsystem"]
   out s!"tk: {tk} touchpad={touchpad} ws={ws}"
   progress s!"tk {tk} touchpad={touchpad} ws={ws}"
