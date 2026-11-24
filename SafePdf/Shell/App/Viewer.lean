@@ -2458,8 +2458,7 @@ def indexOfReply : Worker.Reply → Option (Except String Select.PageIndex)
     else
       let cells := (cs.map fun c =>
         ({ text := c.text, sep := c.sep, box := c.box, line := c.line } : Select.Cell)).toArray
-      some (.ok { cells, hay := Select.normChars cells, lineDirs := ds.toArray,
-                  hidden := hs.toArray })
+      some (.ok (Select.PageIndex.ofCells cells ds.toArray hs.toArray))
   | .response (.error _ m) _ => some (.error m)
   | .response _ _ => some (.error "the document worker answered with another message")
   | .failed e => some (.error s!"the document worker stopped: {failText e}")
@@ -6359,19 +6358,6 @@ def selectAll (st : IO.Ref State) : IO Unit := do
       selStatus st
   | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
 
-/-- The status after a copy of `n` characters, `hidden` of them from glyphs the page does not
-paint (task 12.5): the copy keeps invisible text — an OCR layer over a scan is the text of the
-page — but says how much of it the page does not show, so text hidden from the reader (a
-prompt or a payload) never reaches the clipboard unannounced. -/
-def copyStatus (n hidden : Nat) : String :=
-  if hidden == 0 then s!"copied {n} characters"
-  else s!"copied {n} characters; the copied text includes {hidden} characters that are not \
-    visible on the page (invisible text, e.g. an OCR layer)"
-
-#guard copyStatus 5 0 == "copied 5 characters"
-#guard copyStatus 11 3 == "copied 11 characters; the copied text includes 3 characters that are \
-  not visible on the page (invisible text, e.g. an OCR layer)"
-
 /-- Copies the selected text to the clipboard (Ctrl+C); the text is one quoted Tcl word.
 Invisible text (`Tr 3`/`Tr 7`) is copied and counted in the status (`copyStatus`, task 12.5);
 text outside the CropBox or clipped away is never in the selection. -/
@@ -6383,7 +6369,7 @@ def copySel (st : IO.Ref State) : IO Unit := do
       let t := Select.rangeText ix.cells a b
       discard <| run ["clipboard", "clear"]
       discard <| run ["clipboard", "append", "--", t]
-      setStatus (copyStatus t.length (ix.hiddenChars a b))
+      setStatus (Select.copyStatus t.length (ix.hiddenChars a b))
   | none => setStatus (← keyText "nothing selected (drag over text, double-click a word, or Ctrl+A)")
 
 /-- Scrolls the current search hit into view (centred on an axis where it is not visible). -/
@@ -6444,14 +6430,8 @@ def nextHit (st : IO.Ref State) (forward : Bool) : IO SearchEnd := do
     | none => return .stopped spent
   if let .ok ix ← pageIndex st s.page then
     let c := (ix.hits q).size
-    let cand := if forward then some ((cur.map (· + 1)).getD 0)
-      else match cur with
-        | some k => if k > 0 then some (k - 1) else none
-        | none => if c > 0 then some (c - 1) else none
-    if let some k := cand then
-      if k < c then return .hit s.page k c false
-  for i in [1:n + 1] do
-    let p := if forward then (s.page + i) % n else (s.page + n - i % n) % n
+    if let some k := Select.hitOnCurrent c cur forward then return .hit s.page k c false
+  for p in Select.searchPages n s.page forward do
     if !textCached (← st.get) p then
       match allow.spend (← IO.monoMsNow) with
       | some a => allow := a; spent := spent + 1
@@ -6461,8 +6441,7 @@ def nextHit (st : IO.Ref State) (forward : Bool) : IO SearchEnd := do
     if let .ok ix ← pageIndex st p then
       let c := (ix.hits q).size
       if c > 0 then
-        let wrapped := if forward then p ≤ s.page else p ≥ s.page
-        return .hit p (if forward then 0 else c - 1) c wrapped
+        return .hit p (Select.firstHitOn forward c) c (Select.wrappedTo forward s.page p)
   return .none
 
 /-- Handles `find next|prev QUERY` and `find close`. -/
