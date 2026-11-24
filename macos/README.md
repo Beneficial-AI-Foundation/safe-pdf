@@ -2,7 +2,7 @@
 
 The first part of this file is the C API v2 (current), then the Swift app (task 11.3b). Everything
 from "History: the AppKit spike" on is the task 11.1 spike (`main.m`, since replaced by the Swift
-app) and its v1 C calls, kept for reference and **superseded**.
+app) and its v1 C calls (removed in task 11.3c1), kept for reference only.
 
 
 ## C API v2 (tasks 11.3a1 to 11.3a5)
@@ -13,7 +13,7 @@ a header is silent the text says so. When this text and a header differ, the hea
 
 | Header | Implementation | Role | Test program |
 |---|---|---|---|
-| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, asynchronous requests (render, page index, links, outline, labels, attachments, layers), cancel, the v1 calls (deprecated) | `tests/core_test.c` (62 checks) |
+| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, exact page geometry (`safepdf_doc_page_geom`: CropBox as rationals + `/Rotate`), asynchronous requests (render, page index, links, outline, labels, attachments, layers), cancel; test-only `safepdf_test_render_sync` (in-process render for comparisons) | `tests/core_test.c` (103 checks) |
 | `safepdf_view.h` | `safepdf_view.c` | View and chrome logic: zoom, rotation, re-anchoring, spreads and page layout, zoom and view-mode drop-downs, page field, toolbar, commands, menus, key table, cursor | `tests/view_test.c` (174) |
 | `safepdf_marks.h` | `safepdf_marks.c` | Marks store (highlight, note, free text, ink) with undo/redo, Save (incremental update bytes), XFDF import and export, dialog texts | `tests/marks_test.c` (105) |
 | `safepdf_select.h` | `safepdf_select.c` | Text selection, copy and search over a page's index | `tests/select_test.c` (53) |
@@ -38,7 +38,7 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 
 * Core: after `safepdf_init`, any thread may call the API. A thread the Lean runtime does not know
   is registered on its first call and unregistered when it exits. `safepdf_thread_enter` and
-  `safepdf_thread_exit` remain for v1 callers and are optional.
+  `safepdf_thread_exit` remain and are optional.
 * View: the header sends other threads to core's rules (`safepdf_thread_enter` /
   `safepdf_thread_exit`). It says nothing more about concurrent calls.
 * Marks: a store is locked on every call, so it may be used from several threads. The header asks
@@ -114,7 +114,6 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 * Core: `safepdf_free_image`, `_page_index`, `_links`, `_outline`, `_labels`, `_attachments`,
   `_bytes` (frees the data and the struct), `_layers`. `safepdf_free_layers_state` frees the arrays
   of a `safepdf_layers_state` in caller storage (written by `safepdf_layers_toggle`) and zeroes it.
-  The v1 `safepdf_image_free` is for caller-storage images and zeroes the struct.
 * View: structs a call fills own their arrays and strings; each type has one free function
   (`safepdf_free_zoom_presets`, `_layout`, `_page_band`, `_view_choices`, `_commands`,
   `_menu_table`, `_key_table`, `_toolbar`, `_chrome_states`); NULL allowed, the struct is zeroed.
@@ -155,13 +154,12 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 * Marks coordinates must be finite with magnitude at most 2^32, else the call fails. Mark ids are
   greater than 0; 0 means none.
 
-### v1 calls are deprecated
+### v1 calls removed
 
 `safepdf_open`, `safepdf_close`, `safepdf_page_count`, `safepdf_page_size`, `safepdf_render` and
-`safepdf_image_free` (with the `safepdf_doc` type) do an in-process open and a synchronous render
-on the calling thread: no worker, no cancellation. The header keeps them until the spike app is
-retired (task 11.3b) and says to use the v2 calls instead. The section "The v1 C API" below
-describes them and is superseded.
+`safepdf_image_free` (with the `safepdf_doc` type) did an in-process open and a synchronous render
+on the calling thread. They were removed in task 11.3c1 once the Swift app replaced the spike;
+the section "The v1 C API" below is history.
 
 ### Building and running the C tests
 
@@ -174,7 +172,7 @@ Lean's runtime libraries, and print `NAME: N checks, 0 failures`.
 
 | Command | What it does |
 |---|---|
-| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, async render byte-equal to v1, cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, error paths |
+| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, page geometry (`tree.pdf` CropBoxes and `/Rotate` against `tree.pdf.expected`), async worker render byte-equal to the in-process render (`safepdf_test_render_sync`, rotations 0–3), cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, error paths |
 | `macos/tests/run_view.sh` | builds `safepdf_view.c` with the core shim, runs `view_test` (zoom, layout, drop-downs, commands, menus, keys, toolbar, cursors, the not-initialised failures) |
 | `macos/tests/run_marks.sh` | runs `marks_test` on three goldens (plain, AES-128, RC4-128), writes `saved.pdf` and `export.xfdf` under `macos/build/marks-test/`, then `lake build inspect`, runs `inspect` on `saved.pdf`, and runs `qpdf --check` on it when `qpdf` is installed (skipped with a message otherwise) |
 | `macos/tests/run_select.sh` | runs `select_test WORKER Tests/golden` (selection, copy, search, Find Next/Previous steps) |
@@ -283,7 +281,7 @@ parity."* Plan.md §8: the shell is unverified and replaceable; the core as a li
 deliverable. The spike was not parity with the Tk viewer (no toolbar,
 sidebar, selection, search, links or annotations; that is 11.3).
 
-## The v1 C API (`safepdf_core.h`) — deprecated, superseded by the C API v2
+## The v1 C API (`safepdf_core.h`) — removed (task 11.3c1)
 
 | Function | Contract |
 |---|---|

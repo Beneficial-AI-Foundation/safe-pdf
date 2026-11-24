@@ -28,7 +28,7 @@ so that the GUI can stop it (kill) at any time and, in task 12.2b, run it in a s
   `error .tooLong` answer and the worker exits with status 2 (the stream cannot be
   resynchronised without reading the oversized payload). End of input or `quit` ends it.
 * **The same calls as the viewer.** Rendering is `Core.Raster.Glyph.renderDocPage` with the
-  substitute fonts (as `App.Viewer.renderPage` and `Shell.Ffi.render`); text is
+  substitute fonts (as `App.Viewer.renderPage` and the FFI's test-only `Shell.Ffi.V2.testRender`); text is
   `SafePdf.Api.pageText` (with or without annotation text); page info, outline and links are
   `SafePdf.Api.pageInfo`, `outline`, `pageLinks`. Limits are the startup configuration's
   (`Protocol.StartConfig`, flag `--limits=`; task 12.2d), `Limits.default` without the flag.
