@@ -99,7 +99,33 @@ with an empty environment and `/` as working directory, and can kill it at any t
      allowed because glibc implements `fstat` with them, so a compromised worker can learn a
      path's *metadata* (existence, size, times), never its contents. Landlock and `bwrap`
      are not used: seccomp already removes every call that opens a path, and Landlock
-     cannot be applied to the runtime's existing threads.
+     cannot be applied to the runtime's existing threads. Before the filter (task 12.c1) the
+     worker sets `RLIMIT_CORE` to 0 and `PR_SET_DUMPABLE` to 0 — no core dump, and no
+     `ptrace` attach or `/proc/<pid>/mem` read by other processes of the same user — and
+     installs `SIGXCPU`/`SIGABRT` handlers that write one line to stderr and re-raise the
+     signal with its default action.
+   * **Resource fences** (task 12.3; Linux redone in 12.c1), installed before the sandbox:
+     a **watchdog thread** reads the process's private resident memory every 10 ms and ends
+     it (exit 6, one stderr line) above the ceiling — macOS `phys_footprint` (`task_info`),
+     Linux resident − shared pages of `/proc/self/statm`, read through a descriptor opened
+     before confinement (`lseek` + `read`; it shows the worker its own memory counters and
+     nothing else). Linux adds a kernel backstop relative to the mappings at startup:
+     `RLIMIT_DATA` = startup + 2 × ceiling, `RLIMIT_AS` = startup + 4 × ceiling. Absolute
+     limits (12.3's `RLIMIT_DATA` = ceiling, `RLIMIT_AS` = 2 × ceiling) broke the worker on
+     Linux CI: the Lean runtime's allocator (mimalloc 3, eager commit on overcommit systems)
+     maps 1 GiB arenas read-write up front, so every later mapping failed (the probe child
+     aborted, a 2048 MiB worker died on a 124 MB render). The watchdog measures pages
+     actually used; its overshoot is what the worker can touch in 10 ms, and a compromised
+     worker could stop it — the client's 20 s deadline kill does not depend on the worker.
+     **CPU**: `RLIMIT_CPU`, re-armed before every request to the time used so far + the
+     per-request seconds + 1; crossing it sends `SIGXCPU`. On Linux the worker is
+     non-dumpable for this reason too: with a pipe `core_pattern` (apport, systemd-coredump)
+     the kernel streamed the dying worker's reserved arenas to the helper and the fenced
+     request "timed out" at 20 s instead of ending at ~2 s (CI run 45303741160).
+   * **Diagnostics** (12.c1): a confined worker writes one stderr line naming its
+     confinement and fences; a failed startup step, the watchdog, `SIGXCPU` and `SIGABRT`
+     each write one line too. The client discards stderr; the probe and the `worker` suite's
+     fence checks print it.
    * **Anything else** (another OS, a Linux build without the kernel headers or on an
      architecture other than x86-64/arm64): confinement fails.
 4. **No unconfined fallback**: if any step fails the worker exits (3: environment, 4:
@@ -211,8 +237,9 @@ security review; those items protect the user even if every current theorem is c
     or render — per-call budgets reset today, so concurrency multiplies them.
     *Status (task 12.3):* the viewer reserves every render, thumbnail and text request in one
     pool (512 MiB, proven never exceeded, releases proven idempotent) before dispatch; a search
-    shares one allowance (400 pages, 60 s); the worker has a memory ceiling (Linux rlimits;
-    macOS, where `RLIMIT_AS`/`RLIMIT_DATA` are refused, a footprint watchdog) and a per-request
+    shares one allowance (400 pages, 60 s); the worker has a memory ceiling (a private
+    resident memory watchdog on macOS and Linux, plus baseline-relative `RLIMIT_DATA` /
+    `RLIMIT_AS` on Linux; §2.4) and a per-request
     `RLIMIT_CPU` next to the 20 s deadline; a CI scenario checks the published RSS ceilings
     (`docs/viewer.md`, "Budgets and ceilings"). Still open: Tk photos, Save/export and the
     per-page decode budget inside the worker are outside the pool.

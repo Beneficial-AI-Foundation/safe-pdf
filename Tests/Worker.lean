@@ -37,11 +37,14 @@ executable (`.lake/build/bin/worker`, a default build target) through
   naming missing directories renders as the default; `--limits` reaches the worker; an unknown
   flag ends the worker with status 5.
 * **Task 12.3, resource fences** (`--mem-limit-mib=`, `--cpu-limit-s=`, `Sandbox.fence`): a
-  worker with a 64 MiB ceiling asked for a ~124 MB render is ended (macOS watchdog: status 6;
-  Linux: the allocation fails under `RLIMIT_DATA`) instead of answering, while one with the
+  worker with a 64 MiB ceiling asked for a ~124 MB render is ended (the watchdog: status 6;
+  on Linux possibly an allocation failure under the rlimit backstop) instead of answering, while one with the
   viewer's ceiling renders the same page; a worker with a 1 s CPU fence that busy-loops 4 s
   before a render (`--test-spin-ms`) is ended by `SIGXCPU` before the loop ends, while four
-  requests of 0.6 s each (2.4 s in all) are answered: the fence is per request.
+  requests of 0.6 s each (2.4 s in all) are answered: the fence is per request. Task 12.c1:
+  the 64 MiB case, and every fence check that fails, is run once more with the worker's
+  stderr piped (`diagnose`) and its lines printed (`worker stderr: …`): the fences installed
+  and the step that ended it.
 -/
 
 namespace SafePdf.Tests.Worker
@@ -462,49 +465,100 @@ def startupFlags (exe : System.FilePath) : IO Nat := do
   f := f + (← check s!"an unknown flag ends the worker with status 5 (got {code})" (code == some 5))
   return f
 
+/-- Read a stream to its end, discarding the bytes (a render's pixels are not UTF-8). -/
+def drain (s : IO.FS.Handle) : IO Unit := do
+  repeat
+    if (← s.read 65536).isEmpty then break
+
+/-- Task 12.c1 diagnostics for a failed fence check: run the worker again with `start`, send
+`reqs` and close its stdin, with **stderr piped** (the client discards it), wait up to
+`timeoutMs` (then kill), and print its exit status and every stderr line: its confinement and
+fences, or the one line of the step that failed (startup, watchdog, `SIGXCPU`, `SIGABRT`). -/
+def diagnose (exe : System.FilePath) (start : Protocol.StartConfig) (reqs : List Request)
+    (timeoutMs : Nat := 30000) : IO Unit := do
+  let child ← IO.Process.spawn
+    { stdin := .piped, stdout := .piped, stderr := .piped, cmd := exe.toString,
+      args := start.toArgs, cwd := some "/", env := #[], inheritEnv := false }
+  let err ← IO.asTask child.stderr.readToEnd .dedicated
+  let out ← IO.asTask (drain child.stdout) .dedicated
+  let (stdin, child) ← child.takeStdin
+  for r in reqs do
+    if let some f := Protocol.frameRequest {} r then
+      try stdin.write f; stdin.flush catch _ => pure ()
+  let deadline := (← nowMs) + timeoutMs
+  let mut code := none
+  repeat
+    if let some s ← (try child.tryWait catch _ => pure none) then
+      code := some s
+      break
+    if (← nowMs) ≥ deadline then
+      try child.kill catch _ => pure ()
+      code := ← (try some <$> child.wait catch _ => pure none)
+      break
+    IO.sleep 5
+  discard <| IO.wait out
+  let err := match ← IO.wait err with | .ok s => s | .error e => s!"(stderr: {e})"
+  IO.println s!"    diagnose {start.toArgs.toList.drop 1}: exit {code}"
+  for l in err.splitOn "\n" do
+    if !l.isEmpty then IO.println s!"    worker stderr: {l}"
+
 /-- Task 12.3: the worker's memory and CPU fences (see the module doc). -/
 def fences (exe : System.FilePath) : IO Nat := do
   let mut f := 0
   let bytes ← IO.FS.readBinFile "Tests/golden/text/latin.pdf"
   -- Memory: page 1 (612 × 792) at zoom 8 is 4896 × 6336 pixels, 124 MB of RGBA.
-  let c ← spawn exe (start := { noSubst := true, memLimitMiB := 64 })
+  let small : Protocol.StartConfig := { noSubst := true, memLimitMiB := 64 }
+  let c ← spawn exe (start := small)
   let r0 ← c.request (.openDoc bytes true) (some 10000)
   f := f + (← check s!"a 64 MiB worker opens latin.pdf ({describe r0})" (isDoc 1 r0))
   let r ← c.request (.render 0 8 0 none) (some 20000)
   let code ← c.waitExit 5000
   IO.println s!"  worker fences: 64 MiB worker asked for a 124 MB render: {describe r}, exit {code}"
+  -- Task 12.c1: always shown (fast: the worker ends at once) — its stderr names the fences
+  -- installed and the mechanism that ended it.
+  diagnose exe small [.openDoc bytes true, .render 0 8 0 none]
   f := f + (← check s!"the memory ceiling ends the worker instead of answering ({describe r})"
     (match r with | .error (.exited _) => true | _ => false))
   f := f + (← check s!"the ended worker exited with a failure status ({code})"
     (match code with | some k => k != 0 | none => false))
-  let c ← spawn exe (start := { noSubst := true, memLimitMiB := 2048 })
+  let big : Protocol.StartConfig := { noSubst := true, memLimitMiB := 2048 }
+  let c ← spawn exe (start := big)
   discard <| c.request (.openDoc bytes true) (some 10000)
   let r ← c.request (.render 0 8 0 none) (some 60000)
-  f := f + (← check s!"a 2048 MiB worker renders the same page ({describe r})"
-    (match r with | .ok (.image w h _) => w == 4896 && h == 6336 | _ => false))
+  let k ← check s!"a 2048 MiB worker renders the same page ({describe r})"
+    (match r with | .ok (.image w h _) => w == 4896 && h == 6336 | _ => false)
   c.close
+  if k > 0 then diagnose exe big [.openDoc bytes true, .render 0 8 0 none, .quit] 60000
+  f := f + k
   -- CPU: one request spinning 4 s under a 1 s fence.
-  let c ← spawn exe (start := { noSubst := true, cpuLimitS := 1, spinMs := 4000 })
+  let spin4 : Protocol.StartConfig := { noSubst := true, cpuLimitS := 1, spinMs := 4000 }
+  let c ← spawn exe (start := spin4)
   discard <| c.request (.openDoc bytes true) (some 10000)
   let t0 ← nowMs
   let r ← c.request (.render 0 1 0 none) (some 20000)
   let t1 ← nowMs
   let code ← c.waitExit 5000
   IO.println s!"  worker fences: 1 s CPU fence, 4 s spin: {describe r} after {t1 - t0} ms, exit {code}"
-  f := f + (← check s!"the CPU fence ends a 4 s request ({describe r}, {t1 - t0} ms)"
-    (match r with | .error (.exited _) => t1 - t0 < 3900 | _ => false))
-  f := f + (← check s!"ended by SIGXCPU or with a failure status ({code})"
+  let k ← check s!"the CPU fence ends a 4 s request ({describe r}, {t1 - t0} ms)"
+    (match r with | .error (.exited _) => t1 - t0 < 3900 | _ => false)
+  let k := k + (← check s!"ended by SIGXCPU or with a failure status ({code})"
     (match code with | some k => k != 0 | none => false))
+  if k > 0 then diagnose exe spin4 [.openDoc bytes true, .render 0 1 0 none, .quit] 20000
+  f := f + k
   -- Per request: four 0.6 s requests under the same 1 s fence are all answered.
-  let c ← spawn exe (start := { noSubst := true, cpuLimitS := 1, spinMs := 600 })
+  let spin06 : Protocol.StartConfig := { noSubst := true, cpuLimitS := 1, spinMs := 600 }
+  let c ← spawn exe (start := spin06)
   discard <| c.request (.openDoc bytes true) (some 10000)
   let mut answered := 0
   for _ in [0:4] do
     match ← c.request (.render 0 1 0 none) (some 20000) with
     | .ok (.image ..) => answered := answered + 1
     | _ => pure ()
-  f := f + (← check s!"the CPU fence is re-armed per request ({answered}/4 answered)" (answered == 4))
+  let k ← check s!"the CPU fence is re-armed per request ({answered}/4 answered)" (answered == 4)
   c.close
+  if k > 0 then
+    diagnose exe spin06 ([.openDoc bytes true] ++ List.replicate 4 (.render 0 1 0 none) ++ [.quit])
+  f := f + k
   return f
 
 /-- Run the suite. -/

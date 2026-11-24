@@ -19,8 +19,12 @@ ends it with status 5 before it reads anything.
 Task 12.3: the flags `--mem-limit-mib=` and `--cpu-limit-s=` set the worker's memory ceiling
 and CPU time per request, installed by `Sandbox.prepare` before confinement (`Sandbox.fence`);
 the CPU fence is re-armed before every request (`Sandbox.armCpu`). A worker above its memory
-ceiling ends with status 6 (macOS watchdog) or by an allocation failure (Linux rlimits); one
-above its CPU time by `SIGXCPU`.
+ceiling ends with status 6 (the watchdog, macOS and Linux) or by an allocation failure (the
+Linux rlimit backstop); one above its CPU time by `SIGXCPU`.
+
+Task 12.c1: once confined, the worker writes one line to stderr naming its confinement and
+fences; a startup failure, the watchdog, `SIGXCPU` and `SIGABRT` each leave one line there too
+(`c/worker_sandbox.c`). The client discards stderr; the tests and the probe print it.
 -/
 
 /-- The worker: confine, then serve requests on stdin/stdout until end of input, `quit` or an
@@ -36,6 +40,10 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln f.message
     IO.Process.exit f.exitCode
   | .ok p =>
+    -- Task 12.c1: one diagnostic line (the client discards stderr; tests and the probe read
+    -- it): how the worker is confined and fenced.
+    IO.eprintln s!"safe-pdf worker: confined ({p.mechanism.getD "none"}); fences: \
+      {p.fences.getD "none"}"
     let code ← SafePdf.Shell.Worker.Serve.loop start.limits p.subst
       (min start.stallMs SafePdf.Shell.Worker.TestHooks.maxStallMs)
       (beforeEach := SafePdf.Shell.Worker.Sandbox.armCpu) (spinMs := start.spinMs)

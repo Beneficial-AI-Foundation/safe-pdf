@@ -23,8 +23,9 @@
  *   `sandbox_init` is deprecated but still works (Chromium's macOS sandbox uses the same SPI).
  * Linux: `PR_SET_NO_NEW_PRIVS`, then a seccomp-bpf allowlist installed on every thread
  *   (`SECCOMP_FILTER_FLAG_TSYNC`; the Lean runtime already runs threads). Unlisted syscalls
- *   fail with EPERM; a foreign architecture or an x32 syscall kills the process. UNTESTED:
- *   written on macOS without a Linux machine (ledger 12.2b).
+ *   fail with EPERM; a foreign architecture or an x32 syscall kills the process. Before
+ *   the filter: RLIMIT_CORE 0, PR_SET_DUMPABLE 0, and SIGXCPU/SIGABRT handlers that leave
+ *   one line on stderr (task 12.c1). Written on macOS; exercised only by Linux CI.
  * Elsewhere, or when the Linux headers are missing: confinement fails, so the worker
  *   refuses to serve.
  *
@@ -62,35 +63,49 @@ lean_obj_res safepdf_worker_env_count(void) {
 }
 
 /* ------------------------------------------------------------------------------------ */
-/* Resource fences (task 12.3; docs/safety.md §5, docs/viewer.md "Budgets and ceilings").
+/* Resource fences (task 12.3, fixed for Linux in 12.c1; docs/safety.md §2.4 and §5 item 0c,
+ * docs/viewer.md "Budgets and ceilings").
  *
  * Lean's cost model (fuel, `Limits`, `Filter.Budget`) bounds the work of each call, but not
  * the real memory and time of the process: transient copies, allocator overhead, a bound that
- * is large in practice. These fences sit outside it, in the kernel where possible:
+ * is large in practice. These fences sit outside it:
  *
- * Memory (`mem_bytes` > 0):
- *   Linux: RLIMIT_DATA = mem_bytes (since Linux 4.7 it counts every private writable mapping,
- *     so malloc's mmap'd blocks too) and RLIMIT_AS = 2 · mem_bytes (address space, with room
- *     for glibc's per-thread arena reservations and thread stacks); soft = hard, so the worker
- *     cannot raise them again. An allocation beyond them fails, and Lean's runtime ends the
- *     process on an allocation failure. UNTESTED here (written on macOS; CI runs it).
- *   macOS: setrlimit(RLIMIT_AS / RLIMIT_DATA) fails with EINVAL for every finite value
- *     (measured on macOS 26.6; the kernel enforces neither) and the jetsam limit
- *     (memorystatus_control) is refused to an unprivileged process. A watchdog thread
- *     therefore reads the task's phys_footprint (task_info TASK_VM_INFO, allowed under the
- *     seatbelt profile) every 10 ms and ends the process (_exit(6)) above mem_bytes. The
- *     overshoot is what the worker can allocate and touch in 10 ms. It is a fence against
- *     runaway inputs, not against a compromised worker, which could stop the thread; the
- *     client's deadline kill (20 s) does not depend on the worker.
+ * Memory (`mem_bytes` > 0): a watchdog thread reads the process's own private resident memory
+ *   every 10 ms and ends the process (_exit(6), one line on stderr) above mem_bytes. The
+ *   overshoot is what the worker can allocate and touch in 10 ms. It is a fence against
+ *   runaway inputs, not against a compromised worker, which could stop the thread; the
+ *   client's deadline kill (20 s) does not depend on the worker.
+ *   macOS: the task's phys_footprint (task_info TASK_VM_INFO, allowed under the seatbelt
+ *     profile). setrlimit(RLIMIT_AS / RLIMIT_DATA) fails with EINVAL for every finite value
+ *     (measured on macOS 26.6; the kernel enforces neither), and the jetsam limit
+ *     (memorystatus_control) is refused to an unprivileged process; RLIMIT_AS is still tried
+ *     first.
+ *   Linux: resident − shared pages of /proc/self/statm, read through a descriptor opened
+ *     before confinement (lseek + read are in the seccomp allowlist; the descriptor shows the
+ *     worker its own memory counters and nothing else). Kernel backstop: RLIMIT_DATA =
+ *     the private writable mappings at fence time + 2 · mem_bytes and RLIMIT_AS = the address
+ *     space at fence time + 4 · mem_bytes, soft = hard. They are relative to the baseline
+ *     because the Lean runtime's allocator (mimalloc 3, `arena_eager_commit` on overcommit
+ *     systems) reserves 1 GiB arenas as committed read-write mappings: a fresh worker
+ *     already maps more than a small absolute ceiling, and absolute limits (12.3: DATA =
+ *     mem_bytes, AS = 2 · mem_bytes) made every later mapping fail (CI run 45303741160: the
+ *     confined probe aborted, a 2048 MiB worker died on a 124 MB render). Reserved but
+ *     untouched arena pages are not resident, so the watchdog measures what is used.
  * CPU (`cpu_s` > 0): RLIMIT_CPU. The soft limit is re-armed before every request
  *   (`safepdf_worker_arm_cpu`) to the CPU time used so far + cpu_s + 1, so a long-lived
  *   worker is not ended by the CPU time of earlier requests; crossing it sends SIGXCPU, whose
  *   default action ends the process. The hard limit is left as it is (the worker has no
  *   privilege to raise it; a compromised worker could raise its own soft limit up to it,
  *   like it could ignore SIGXCPU: again the client's deadline is the fence for that case).
+ *   SIGXCPU and SIGABRT dump core by default; on Linux `confine` makes the worker
+ *   non-dumpable with RLIMIT_CORE = 0, because a pipe `core_pattern` (apport,
+ *   systemd-coredump) otherwise streams gigabytes of reserved arena to the helper and the
+ *   dying worker lingers past the client's deadline (CI run 45303741160: the 1 s CPU fence
+ *   "timed out" at 20 s and the client's SIGKILL ended the dump).
  */
 
 static uint32_t safepdf_cpu_s = 0;
+static uint64_t safepdf_mem_ceiling = 0;
 
 /* CPU time of the process so far, in whole seconds (rounded down). */
 static uint64_t safepdf_cpu_used_s(void) {
@@ -99,7 +114,20 @@ static uint64_t safepdf_cpu_used_s(void) {
   return (uint64_t)ts.tv_sec;
 }
 
+/* One line on stderr (also from a signal handler or the watchdog: write(2) only). */
+static void safepdf_say(const char *m) {
+  ssize_t w = write(2, m, strlen(m));
+  (void)w;
+}
+
 #if defined(__linux__)
+/* a + k · b, saturating at UINT64_MAX (= RLIM_INFINITY on Linux). */
+static uint64_t safepdf_sat_add_mul(uint64_t a, uint64_t k, uint64_t b) {
+  if (b != 0 && k > (UINT64_MAX - a) / b) return UINT64_MAX;
+  return a + k * b;
+}
+
+#include <fcntl.h>
 #include <sys/syscall.h>
 /* setrlimit through prlimit64 (the seccomp allowlist has prlimit64, not setrlimit). */
 static int safepdf_set_rlimit(int res, const struct rlimit *r) {
@@ -124,29 +152,79 @@ static int safepdf_arm_cpu_now(void) {
 }
 
 lean_obj_res safepdf_worker_arm_cpu(void) {
-  (void)safepdf_arm_cpu_now();
+  if (safepdf_arm_cpu_now() != 0) {
+    /* Not fatal by itself (the client's deadline still holds), but visible. */
+    char buf[160];
+    snprintf(buf, sizeof buf, "safe-pdf worker: cpu fence: re-arming RLIMIT_CPU failed: %s\n",
+             strerror(errno));
+    safepdf_say(buf);
+  }
   return lean_io_result_mk_ok(lean_box(0));
 }
 
+/* The process's private resident memory in bytes (0: ok, -1: cannot be read). */
 #if defined(__APPLE__)
 #include <mach/mach.h>
-static uint64_t safepdf_mem_ceiling = 0;
-
-static uint64_t safepdf_footprint(void) {
+#define SAFEPDF_HAS_WATCHDOG 1
+static int safepdf_footprint(uint64_t *out) {
   task_vm_info_data_t info;
   mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
   if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &cnt) != KERN_SUCCESS)
-    return 0;
-  return info.phys_footprint;
+    return -1;
+  *out = info.phys_footprint;
+  return 0;
+}
+#elif defined(__linux__)
+#define SAFEPDF_HAS_WATCHDOG 1
+static int safepdf_statm_fd = -1;
+static uint64_t safepdf_page_size = 4096;
+
+/* The first six fields of /proc/self/statm (pages): size resident shared text lib data. */
+static int safepdf_statm(uint64_t f[6]) {
+  char b[256];
+  if (safepdf_statm_fd < 0 || lseek(safepdf_statm_fd, 0, SEEK_SET) != 0) return -1;
+  ssize_t k = read(safepdf_statm_fd, b, sizeof b - 1);
+  if (k <= 0) return -1;
+  b[k] = 0;
+  size_t i = 0;
+  for (int nf = 0; nf < 6; nf++) {
+    while (b[i] == ' ') i++;
+    if (b[i] < '0' || b[i] > '9') return -1;
+    uint64_t v = 0;
+    while (b[i] >= '0' && b[i] <= '9') {
+      if (v > (UINT64_MAX - 9) / 10) return -1;
+      v = v * 10 + (uint64_t)(b[i] - '0');
+      i++;
+    }
+    f[nf] = v;
+  }
+  return 0;
 }
 
+static int safepdf_footprint(uint64_t *out) {
+  uint64_t f[6];
+  if (safepdf_statm(f) != 0) return -1;
+  uint64_t priv = f[1] > f[2] ? f[1] - f[2] : 0;
+  *out = safepdf_sat_add_mul(0, priv, safepdf_page_size);
+  return 0;
+}
+#endif
+
+#ifdef SAFEPDF_HAS_WATCHDOG
 static void *safepdf_watchdog(void *arg) {
   (void)arg;
-  static const char msg[] = "safe-pdf worker: memory ceiling exceeded\n";
   for (;;) {
-    if (safepdf_footprint() > safepdf_mem_ceiling) {
-      ssize_t w = write(2, msg, sizeof msg - 1);
-      (void)w;
+    uint64_t used = 0;
+    if (safepdf_footprint(&used) != 0) {
+      safepdf_say("safe-pdf worker: memory fence: the watchdog cannot read the footprint\n");
+      _exit(6);
+    }
+    if (used > safepdf_mem_ceiling) {
+      char buf[160];
+      snprintf(buf, sizeof buf,
+               "safe-pdf worker: memory ceiling exceeded (%llu MiB > %llu MiB)\n",
+               (unsigned long long)(used >> 20), (unsigned long long)(safepdf_mem_ceiling >> 20));
+      safepdf_say(buf);
       _exit(6);
     }
     struct timespec ts = { 0, 10 * 1000 * 1000 };
@@ -154,10 +232,20 @@ static void *safepdf_watchdog(void *arg) {
   }
   return NULL;
 }
+
+static int safepdf_start_watchdog(void) {
+  pthread_attr_t a;
+  pthread_t t;
+  if (pthread_attr_init(&a) != 0) return -1;
+  int rc = pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+  if (rc == 0) rc = pthread_create(&t, &a, safepdf_watchdog, NULL);
+  pthread_attr_destroy(&a);
+  return rc;
+}
 #endif
 
 lean_obj_res safepdf_worker_fence(uint64_t mem_bytes, uint32_t cpu_s) {
-  char buf[512];
+  char buf[640];
   size_t n = 0;
   buf[0] = 0;
   if (mem_bytes > 0) {
@@ -170,32 +258,62 @@ lean_obj_res safepdf_worker_fence(uint64_t mem_bytes, uint32_t cpu_s) {
                             (unsigned long long)(mem_bytes >> 20));
     } else {
       safepdf_mem_ceiling = mem_bytes;
-      pthread_attr_t a;
-      pthread_t t;
-      if (pthread_attr_init(&a) != 0 ||
-          pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED) != 0 ||
-          pthread_create(&t, &a, safepdf_watchdog, NULL) != 0)
+      if (safepdf_start_watchdog() != 0)
         return safepdf_io_fail("memory fence: cannot start the watchdog thread");
-      pthread_attr_destroy(&a);
       n += (size_t)snprintf(buf + n, sizeof buf - n,
                             "memory: phys_footprint watchdog %llu MiB / 10 ms "
                             "(RLIMIT_AS refused: %s)",
                             (unsigned long long)(mem_bytes >> 20), strerror(as_errno));
     }
 #elif defined(__linux__)
-    struct rlimit d = { (rlim_t)mem_bytes, (rlim_t)mem_bytes };
-    struct rlimit as = { (rlim_t)(2 * mem_bytes), (rlim_t)(2 * mem_bytes) };
-    if (setrlimit(RLIMIT_DATA, &d) != 0) {
-      snprintf(buf, sizeof buf, "memory fence: setrlimit(RLIMIT_DATA) failed: %s", strerror(errno));
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps > 0) safepdf_page_size = (uint64_t)ps;
+    if (safepdf_statm_fd < 0) safepdf_statm_fd = open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
+    if (safepdf_statm_fd < 0) {
+      snprintf(buf, sizeof buf, "memory fence: open(/proc/self/statm) failed: %s",
+               strerror(errno));
       return safepdf_io_fail(buf);
     }
-    if (setrlimit(RLIMIT_AS, &as) != 0) {
-      snprintf(buf, sizeof buf, "memory fence: setrlimit(RLIMIT_AS) failed: %s", strerror(errno));
+    uint64_t f[6];
+    if (safepdf_statm(f) != 0)
+      return safepdf_io_fail("memory fence: cannot read /proc/self/statm");
+    uint64_t vsz = safepdf_sat_add_mul(0, f[0], safepdf_page_size);
+    uint64_t data = safepdf_sat_add_mul(0, f[5], safepdf_page_size);
+    uint64_t priv = safepdf_sat_add_mul(0, f[1] > f[2] ? f[1] - f[2] : 0, safepdf_page_size);
+    uint64_t data_lim = safepdf_sat_add_mul(data, 2, mem_bytes);
+    uint64_t as_lim = safepdf_sat_add_mul(vsz, 4, mem_bytes);
+    if (priv > mem_bytes) {
+      snprintf(buf, sizeof buf, "memory fence: the worker already holds %llu MiB, above its "
+               "ceiling of %llu MiB", (unsigned long long)(priv >> 20),
+               (unsigned long long)(mem_bytes >> 20));
       return safepdf_io_fail(buf);
     }
-    n += (size_t)snprintf(buf + n, sizeof buf - n, "memory: RLIMIT_DATA %llu MiB, RLIMIT_AS %llu MiB",
-                          (unsigned long long)(mem_bytes >> 20),
-                          (unsigned long long)((2 * mem_bytes) >> 20));
+    struct rlimit d = { (rlim_t)data_lim, (rlim_t)data_lim };
+    struct rlimit as = { (rlim_t)as_lim, (rlim_t)as_lim };
+    if (safepdf_set_rlimit(RLIMIT_DATA, &d) != 0) {
+      snprintf(buf, sizeof buf, "memory fence: setrlimit(RLIMIT_DATA, %llu MiB) failed: %s",
+               (unsigned long long)(data_lim >> 20), strerror(errno));
+      return safepdf_io_fail(buf);
+    }
+    if (safepdf_set_rlimit(RLIMIT_AS, &as) != 0) {
+      snprintf(buf, sizeof buf, "memory fence: setrlimit(RLIMIT_AS, %llu MiB) failed: %s",
+               (unsigned long long)(as_lim >> 20), strerror(errno));
+      return safepdf_io_fail(buf);
+    }
+    safepdf_mem_ceiling = mem_bytes;
+    int wrc = safepdf_start_watchdog();
+    if (wrc != 0) {
+      snprintf(buf, sizeof buf, "memory fence: cannot start the watchdog thread: %s",
+               strerror(wrc));
+      return safepdf_io_fail(buf);
+    }
+    n += (size_t)snprintf(buf + n, sizeof buf - n,
+                          "memory: private resident watchdog %llu MiB / 10 ms (at start %llu "
+                          "MiB); backstop RLIMIT_DATA %llu MiB (at start %llu MiB + 2x), "
+                          "RLIMIT_AS %llu MiB (at start %llu MiB + 4x)",
+                          (unsigned long long)(mem_bytes >> 20), (unsigned long long)(priv >> 20),
+                          (unsigned long long)(data_lim >> 20), (unsigned long long)(data >> 20),
+                          (unsigned long long)(as_lim >> 20), (unsigned long long)(vsz >> 20));
 #else
     return safepdf_io_fail("memory fence: not available on this platform");
 #endif
@@ -275,6 +393,36 @@ lean_obj_res safepdf_worker_confine(void) {
 #ifndef CLONE_THREAD
 #define CLONE_THREAD 0x00010000
 #endif
+
+#include <signal.h>
+
+/* Task 12.c1 diagnostics: SIGXCPU (the CPU fence) and SIGABRT (an allocation or thread
+ * failure inside the runtime ends in abort) leave one line on stderr, then end the process
+ * with the same signal (SA_RESETHAND: the default action; the re-raised signal stays pending
+ * while the handler runs and is delivered when it returns). write, rt_sigprocmask and
+ * tgkill-to-self are in the allowlist. */
+static void safepdf_fatal_signal(int sig) {
+  safepdf_say(sig == SIGXCPU ? "safe-pdf worker: SIGXCPU: the CPU time fence ended the request\n"
+                             : "safe-pdf worker: SIGABRT: the runtime aborted\n");
+  raise(sig);
+}
+
+static int safepdf_install_fatal_handlers(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = safepdf_fatal_signal;
+  sa.sa_flags = SA_RESETHAND;
+  sigemptyset(&sa.sa_mask);
+  if (sigaction(SIGXCPU, &sa, NULL) != 0) return -1;
+  if (sigaction(SIGABRT, &sa, NULL) != 0) return -1;
+  /* An inherited blocked SIGXCPU would switch the CPU fence off: unblock both in this
+   * thread (threads started later inherit its mask). */
+  sigset_t un;
+  sigemptyset(&un);
+  sigaddset(&un, SIGXCPU);
+  sigaddset(&un, SIGABRT);
+  return pthread_sigmask(SIG_UNBLOCK, &un, NULL) == 0 ? 0 : -1;
+}
 
 #define SP_LD(off) BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (off))
 #define SP_RET(v) BPF_STMT(BPF_RET | BPF_K, (v))
@@ -374,6 +522,23 @@ lean_obj_res safepdf_worker_confine(void) {
 
   struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
   char buf[256];
+  /* No core dumps (task 12.c1): with a pipe core_pattern the kernel streams the whole
+   * worker, gigabytes of reserved allocator arena included, to the helper, and the dying
+   * worker outlives the client's deadline. Non-dumpable also keeps other processes of the
+   * same user from attaching to it (ptrace) or reading /proc/<pid>/mem. */
+  struct rlimit nocore = { 0, 0 };
+  if (safepdf_set_rlimit(RLIMIT_CORE, &nocore) != 0) {
+    snprintf(buf, sizeof buf, "setrlimit(RLIMIT_CORE, 0) failed: %s", strerror(errno));
+    return safepdf_io_fail(buf);
+  }
+  if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+    snprintf(buf, sizeof buf, "prctl(PR_SET_DUMPABLE, 0) failed: %s", strerror(errno));
+    return safepdf_io_fail(buf);
+  }
+  if (safepdf_install_fatal_handlers() != 0) {
+    snprintf(buf, sizeof buf, "sigaction(SIGXCPU/SIGABRT) failed: %s", strerror(errno));
+    return safepdf_io_fail(buf);
+  }
   if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
     snprintf(buf, sizeof buf, "prctl(PR_SET_NO_NEW_PRIVS) failed: %s", strerror(errno));
     return safepdf_io_fail(buf);
@@ -386,7 +551,8 @@ lean_obj_res safepdf_worker_confine(void) {
       snprintf(buf, sizeof buf, "seccomp(SET_MODE_FILTER, TSYNC) failed: %s", strerror(errno));
     return safepdf_io_fail(buf);
   }
-  return lean_io_result_mk_ok(lean_mk_string("Linux seccomp-bpf allowlist + no_new_privs"));
+  return lean_io_result_mk_ok(lean_mk_string("Linux seccomp-bpf allowlist + no_new_privs, "
+                                                 "not dumpable, RLIMIT_CORE 0"));
 }
 
 /* ------------------------------------------------------------------------------------ */

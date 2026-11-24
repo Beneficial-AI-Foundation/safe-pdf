@@ -15,11 +15,14 @@ in this order:
    directories of the startup flags (`Worker.workerFaces`, task 12.2d), every file in full.
 3. **Resource fences** (task 12.3, `fence`): the memory ceiling and the per-request CPU time
    of the startup flags `--mem-limit-mib=` / `--cpu-limit-s=`, outside Lean's cost model
-   (Linux `RLIMIT_DATA`/`RLIMIT_AS`; macOS, where those are refused, a `phys_footprint`
-   watchdog thread; `RLIMIT_CPU` on both, re-armed before every request by `armCpu`). A fence
-   that cannot be installed is a confinement failure (exit 4).
+   (a watchdog thread on the private resident memory: macOS `phys_footprint`, Linux
+   `/proc/self/statm` through a descriptor opened before confinement, with `RLIMIT_DATA` /
+   `RLIMIT_AS` relative to the startup mappings as a kernel backstop (task 12.c1);
+   `RLIMIT_CPU` on both, re-armed before every request by `armCpu`). A fence that cannot be
+   installed is a confinement failure (exit 4).
 4. **Confinement** (`confine`): macOS seatbelt (`(deny default)`), Linux seccomp-bpf
-   allowlist with `no_new_privs`; any failure (including an unsupported platform) is an
+   allowlist with `no_new_privs`, the process made non-dumpable with `RLIMIT_CORE` 0 (task
+   12.c1); any failure (including an unsupported platform) is an
    error and the worker exits with status 4 — it never serves unconfined. There is no
    debug escape in the `worker` executable (no flag, no environment variable); the
    test-only `worker-probe` executable has an unconfined control mode.
