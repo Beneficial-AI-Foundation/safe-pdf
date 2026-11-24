@@ -29,8 +29,8 @@
 # clones nothing), Lake is driven with `lake -d DIR` from the repo root, and the checker
 # binary runs with the repo root as working directory under `lake env`.
 #
-# Steps: fetch + verify + unpack -> `lake -d … build lean4lean` (the checker exe only, not
-# lean4lean's own metatheory) -> `lake env <checker> FUEL M` for every built module M equal
+# Steps: fetch + verify + unpack -> `lake -d … build l4lexact` (our exact-name driver over
+# lean4lean's Replay, not its metatheory) -> `lake env <driver> FUEL M` for every built module M equal
 # to or under each MODULE (default: SafePdf, i.e. SafePdf and every SafePdf.*; the oleans
 # must be built), one process per module. FUEL defaults to raised lean4lean fuel limits
 # (see below); override with the environment variable L4L_FUEL.
@@ -149,6 +149,56 @@ name = "Lean4Lean"
 name = "lean4lean"
 root = "Main"
 supportInterpreter = true
+
+[[lean_exe]]
+name = "l4lexact"
+root = "ExactMain"
+supportInterpreter = true
+EOF
+# Our own driver (upstream Main.lean selects modules by name *prefix* and replays the matches
+# on parallel task threads with Lean's fixed default thread stack). This one replays exactly
+# the module names given, one after another on the main thread, whose stack `ulimit -s`
+# controls. It calls the same Lean4Lean.Replay.replayFromImports; the check is unchanged.
+cat >"$src/lean4lean/ExactMain.lean" <<'EOF'
+import Lean4Lean.Replay
+
+open Lean hiding Environment Exception
+open Lean4Lean.Replay
+
+/-- `--config:field=value` flags overlaid on the default `FuelConfig` through its JSON form. -/
+def fuelOfFlags (flags : List String) : IO Lean4Lean.FuelConfig := do
+  let mut obj := match Lean.toJson (({} : Lean4Lean.FuelConfig)) with
+    | .obj m => m
+    | _ => Std.TreeMap.Raw.empty
+  for flag in flags do
+    let some rest := flag.dropPrefix? "--config:"
+      | throw <| IO.userError s!"unknown flag {flag}"
+    let [field, value] := rest.toString.splitOn "="
+      | throw <| IO.userError s!"malformed flag {flag}"
+    unless obj.contains field do throw <| IO.userError s!"unknown fuel field {field}"
+    match Lean.Json.parse value with
+    | .ok j => obj := obj.insert field j
+    | .error _ => throw <| IO.userError s!"bad value in {flag}"
+  IO.ofExcept (Lean.fromJson? (.obj obj))
+
+/-- Replay exactly the given modules (no prefix matching), sequentially, on this thread. -/
+unsafe def main (args : List String) : IO UInt32 := do
+  initSearchPath (← findSysroot)
+  let (flags, mods) := args.partition fun s => s.startsWith "-"
+  let fuel ← fuelOfFlags flags
+  let mut n := 0
+  let mut err := false
+  for arg in mods do
+    let m := arg.toName
+    if m.isAnonymous then throw <| IO.userError s!"Could not resolve module: {arg}"
+    try
+      n := n + (← replayFromImports m (fuel := fuel))
+    catch e =>
+      IO.eprintln s!"lean4lean found a problem in {m}:\n{e.toString}"
+      err := true
+  if err then return 1
+  println! "checked {n} declarations"
+  return 0
 EOF
 printf '%s\n' "$L4L_TOOLCHAIN" >"$src/lean4lean/lean-toolchain"
 printf '%s\n' "$L4L_TOOLCHAIN" >"$src/batteries/lean-toolchain"
@@ -158,36 +208,24 @@ if [ "$fetch_only" = 1 ]; then
   exit 0
 fi
 
-echo "lean4lean-check: building the checker (lake -d $src/lean4lean build lean4lean)"
-lake -d "$src/lean4lean" build lean4lean
-checker="$src/lean4lean/.lake/build/bin/lean4lean"
+echo "lean4lean-check: building the checker (lake -d $src/lean4lean build l4lexact)"
+lake -d "$src/lean4lean" build l4lexact
+checker="$src/lean4lean/.lake/build/bin/l4lexact"
 [ -x "$checker" ] || { echo "lean4lean-check: $checker not built" >&2; exit 1; }
 
-# One checker process per module, serially. lean4lean matches MODULE as a *prefix* and checks
-# several matches on parallel tasks; in that mode it crashed with SIGSEGV intermittently
-# (2026-11-23, macOS arm64: `SafePdf.Core.Crypt`, which also matches its four submodules,
-# 3 runs in 6), while 6 of 6 runs of each single submodule passed. A module that has
-# submodules (Crypt.lean next to Crypt/) cannot be checked alone, so such runs are retried
-# on a crash (L4L_RETRIES, default 8); its submodules also get their own runs. A parent
-# whose source holds only imports and comments (the umbrella SafePdf.lean) declares nothing,
-# so it is skipped: its prefix run would be every module at once in parallel.
-imports_only() {  # imports_only FILE.lean: true when FILE has no line but imports/comments
-  python3 -I -c '
-import re, sys
-s = re.sub(r"/-.*?-/", "", open(sys.argv[1], encoding="utf-8").read(), flags=re.S)
-s = re.sub(r"--[^\n]*", "", s)
-sys.exit(0 if all(not l.strip() or l.startswith("import ") for l in s.splitlines()) else 1)
-' "$1"
-}
+# Module selection. Upstream lean4lean matches each MODULE argument as a name *prefix* and
+# replays all matches on parallel tasks, so a parent such as SafePdf.Core.Crypt (Crypt.lean
+# beside Crypt/) could not be checked alone; on Linux CI those prefix runs crashed every time
+# (SIGSEGV: SafePdf.Core.Crypt, .Doc, .Xref, .Filter; 127 other modules passed) and macOS
+# crashed intermittently. Here every built module equal to or under each MODULE is listed
+# from the .olean tree and checked by *exact* name with our own driver (ExactMain.lean
+# above), one process per module, so a parent module is checked on its own declarations and
+# its submodules in their own runs.
 mods=()
 for m in "${modules[@]}"; do
   rel="$(printf '%s' "$m" | tr . /)"
   if [ -f ".lake/build/lib/lean/$rel.olean" ]; then
-    if [ -d ".lake/build/lib/lean/$rel" ] && [ -f "$rel.lean" ] && imports_only "$rel.lean"; then
-      echo "skip   $m (imports only; its submodules are checked one by one)"
-    else
-      mods+=("$m")
-    fi
+    mods+=("$m")
   fi
   if [ -d ".lake/build/lib/lean/$rel" ]; then
     while IFS= read -r f; do
@@ -202,21 +240,44 @@ if [ ${#mods[@]} -eq 0 ]; then
   exit 1
 fi
 
+# Stack. lean4lean's recursion is bounded by fuel (below), not by the native stack, and the
+# raised recDepth lets it recurse far deeper than 8 MiB of stack holds. The driver runs on
+# the main thread, whose stack is the process limit, so raise it (hard limit permitting).
+ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
+echo "lean4lean-check: stack limit: $(ulimit -s)"
+
+# Time limits: L4L_MODULE_TIMEOUT seconds per run (default 1200, enforced when `timeout` or
+# `gtimeout` exists) and L4L_TOTAL_TIMEOUT seconds for the whole script (default 2700; no
+# further module is started after it, and the script then fails with a TIMEOUT line).
+tmo=""
+for c in timeout gtimeout; do
+  if command -v "$c" >/dev/null; then tmo="$c"; break; fi
+done
+mod_limit="${L4L_MODULE_TIMEOUT:-1200}" total_limit="${L4L_TOTAL_TIMEOUT:-2700}"
+t0=$(date +%s)
+
 # Fuel: lean4lean bounds its recursion and unfolding by FuelConfig (Lean4Lean/FuelConfig.lean)
 # instead of the native stack; its defaults are below what some of our definitions need
 # (e.g. "deep recursion" on SafePdf.Core.Filter.Ascii.a85Spec_encode._f at recDepth 50000).
 # Raising fuel only lets the checker run longer; it does not accept anything it would reject.
 read -r -a fuel <<<"${L4L_FUEL:---config:recDepth=1000000 --config:whnf=10000000 --config:whnfEager=100000000 --config:lazyDelta=1000000}"
 
-echo "lean4lean-check: re-checking ${#mods[@]} module(s), fuel: ${fuel[*]}"
-status=0 failed=()
-retries="${L4L_RETRIES:-8}"
+echo "lean4lean-check: re-checking ${#mods[@]} module(s), exact names, fuel: ${fuel[*]}"
+# Outcomes, labelled apart: ok; FAIL = the kernel rejected a declaration (a real proof
+# problem); CRASH / TIMEOUT = the tool died or ran out of time (a tool problem, but still a
+# failure: the module is then not re-checked). Crashes are retried (L4L_RETRIES, default 3).
+status=0 failed=() crashed=() timedout=() skipped=()
+retries="${L4L_RETRIES:-3}"
 for m in "${mods[@]}"; do
+  if [ $(( $(date +%s) - t0 )) -ge "$total_limit" ]; then
+    skipped+=("$m")
+    continue
+  fi
   try=1
   while :; do
     start=$(date +%s)
     set +e
-    out="$(lake env "$checker" "${fuel[@]}" "$m" 2>&1)"
+    out="$(lake env ${tmo:+$tmo "$mod_limit"} "$checker" "${fuel[@]}" "$m" 2>&1)"
     rc=$?
     set -e
     secs=$(( $(date +%s) - start ))
@@ -229,16 +290,24 @@ for m in "${mods[@]}"; do
   done
   if [ "$rc" = 0 ]; then
     echo "ok     $m (${secs} s) $(printf '%s\n' "$out" | tail -n 1)"
-  else
-    printf '%s\n' "$out" | tail -n 20 >&2
-    if [ "$rc" -ge 128 ]; then
-      echo "CRASH  $m (exit $rc, signal $((rc - 128)); ${secs} s, after $try tries)"
-    else
-      echo "FAIL   $m (exit $rc; ${secs} s)"
-    fi
-    failed+=("$m")
-    status=1
+    continue
   fi
+  printf '%s\n' "$out" | tail -n 20 >&2
+  if [ "$rc" = 124 ] && [ -n "$tmo" ]; then
+    echo "TIMEOUT $m (over ${mod_limit} s; tool problem, not a kernel rejection)"
+    timedout+=("$m")
+  elif [ "$rc" -ge 128 ]; then
+    echo "CRASH  $m (exit $rc, signal $((rc - 128)); ${secs} s, after $try tries; tool crash, not a kernel rejection)"
+    crashed+=("$m")
+  else
+    echo "FAIL   $m (exit $rc; ${secs} s; kernel rejection or driver error)"
+    failed+=("$m")
+  fi
+  status=1
 done
-echo "lean4lean-check: ${#mods[@]} module(s), ${#failed[@]} failed${failed[*]:+: ${failed[*]}}"
+if [ ${#skipped[@]} -gt 0 ]; then
+  echo "TIMEOUT overall limit ${total_limit} s reached; not checked: ${skipped[*]}"
+  status=1
+fi
+echo "lean4lean-check: ${#mods[@]} module(s): ${#failed[@]} rejected/failed${failed[*]:+: ${failed[*]}}; ${#crashed[@]} crashed${crashed[*]:+: ${crashed[*]}}; ${#timedout[@]} timed out${timedout[*]:+: ${timedout[*]}}; ${#skipped[@]} not run"
 exit $status
