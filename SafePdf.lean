@@ -87,6 +87,7 @@ import SafePdf.Spec.RasterError
 import SafePdf.Spec.RasterError2
 import SafePdf.Spec.RepairAgreeExt
 import SafePdf.Spec.RepairAgreeComp
+import SafePdf.Spec.RepairAgreeEncComp
 import SafePdf.Core.Annot
 import SafePdf.Core.Raster.Glyph
 import SafePdf.Core.Text

@@ -14,7 +14,9 @@ resolution trace, revision history, repair-path report on real files"):
   section; on a strict error, the error and the step at which it happened.
 * `revisions` — revision history, oldest first: per section the object numbers it added,
   changed (redefined) or freed, with counts and a capped listing.
-* `repair` — the repair path (`Repair.repair`), run whether or not the strict path succeeds:
+* `repair` — the repair path (`Repair.repair`; since task 12.7h the section of the document
+  `Core.Open.repairOpen` builds, which for an encrypted file adds the object-stream members
+  found after `withCrypt`), run whether or not the strict path succeeds:
   objects found, parse attempts and failures of the scan, the repaired root, whether the
   repaired document validates, and a capped diff against the strict merged xref.
 
@@ -507,7 +509,8 @@ termination_by xs ys => xs.length + ys.length
 
 /-- Everything the `repair` view prints for one file. -/
 structure RepairReport where
-  /-- `Repair.repair`'s result. -/
+  /-- The repaired document's section and trailer (`Core.Open.repairOpen`, so for an
+  encrypted file with the R6 entries found after `withCrypt`), else `Repair.repair`'s result. -/
   repaired : Except Error (XrefSection × Trailer)
   /-- Header hits, parse attempts and failed attempts of the scan (`Repair.scanRaw`). -/
   hits : Nat
@@ -515,7 +518,8 @@ structure RepairReport where
   attempts : Nat
   /-- Failed attempts. -/
   failures : Nat
-  /-- Whether the repaired document validates (`Core.Open.repairOpen`). -/
+  /-- Whether the repaired document opens and validates (`Core.Open.repairOpen`, with
+  decryption). -/
   validates : Except Error Unit
   /-- The strict merged section, or the strict error. -/
   strict : Except Error XrefSection
@@ -525,11 +529,16 @@ structure RepairReport where
 /-- Compute the `repair` report (pure). -/
 def repairReport (limits : Limits) (bytes : ByteArray) : RepairReport :=
   let (raw, attempts, failures) := Repair.scanRaw limits bytes
-  let repaired := Repair.repair limits bytes
+  -- the repaired document (task 12.7h): for an encrypted file its section includes the
+  -- object-stream members R6 finds after `withCrypt` (`OpenDoc.withObjStmEnc`)
+  let opened := Core.Open.repairOpen limits bytes
+  let repaired := match opened with
+    | .ok d => .ok (d.xref, d.trailer)
+    | .error _ => Repair.repair limits bytes
   let validates : Except Error Unit := match repaired with
     | .error e => .error e
-    | .ok (sec, tr) =>
-      match Core.Open.validate limits (Core.Open.OpenDoc.mk' bytes sec tr 0 true) with
+    | .ok _ =>
+      match opened with
       | .ok _ => .ok ()
       | .error e => .error e
   let strict := match Core.Xref.Chain.loadChain limits bytes with

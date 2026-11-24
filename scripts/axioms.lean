@@ -1399,3 +1399,14 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Shell.App.Budget.Pool.admit_reserved
 #print axioms SafePdf.Shell.App.Budget.page_fits_pool
 #print axioms SafePdf.Shell.App.Budget.Allowance.spendAll_le
+-- Phase 12, task 12.7h: R6 after withCrypt, exact C4 for encrypted files with compressed entries
+#print axioms SafePdf.Spec.RepairAgreeEncComp.c4_enc_comp
+#print axioms SafePdf.Spec.RepairAgreeEncComp.c4_enc_comp_check
+#print axioms SafePdf.Spec.RepairAgreeEncComp.encryptDict_transfer
+#print axioms SafePdf.Spec.RepairAgreeEncComp.parseIndirectWith_obj
+#print axioms SafePdf.Core.Open.withObjStmEnc_fields
+#print axioms SafePdf.Core.Open.withObjStmEnc_xref
+#print axioms SafePdf.Core.Open.repairOpen_ok
+#print axioms SafePdf.Repair.withObjStm_eq_of_noComp
+#print axioms SafePdf.Repair.withObjStm_length_le
+#print axioms SafePdf.Repair.repair_encrypted
