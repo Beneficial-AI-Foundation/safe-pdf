@@ -29,8 +29,10 @@
 #include <lean/lean.h>
 #include <tcl.h>
 #include <tk.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef TCL_SIZE_MAX /* Tcl 8.6 has no Tcl_Size; lengths are int there */
@@ -52,6 +54,110 @@ extern lean_obj_res safepdf_gui_dispatch(lean_obj_arg args);
  * On X11 Tk only needs one thread to use it, so Linux keeps Lean's big stack. */
 __attribute__((constructor)) static void safepdf_keep_main_thread(void) {
   setenv("LEAN_MAIN_USE_THREAD", "0", 0);
+}
+
+#include <dlfcn.h>
+/* Background smoke mode (task 10.11, macOS only): whether this is a smoke run
+ * (`SAFEPDF_VIEWER_SMOKE` set) without `SAFEPDF_SMOKE_FOREGROUND=1`. Such a run must never
+ * activate the application or show a window over the user's work. */
+static int safepdf_smoke_background(void) {
+  const char *s = getenv("SAFEPDF_VIEWER_SMOKE");
+  const char *f = getenv("SAFEPDF_SMOKE_FOREGROUND");
+  return s != NULL && s[0] != 0 && !(f != NULL && strcmp(f, "1") == 0);
+}
+
+/* `[[TKApplication sharedApplication] setActivationPolicy:policy]` through the Objective-C
+ * runtime (looked up with dlsym: libobjc is already loaded with Tk, so no link flag is
+ * needed). policy 2 = NSApplicationActivationPolicyProhibited: no Dock icon, no menu bar,
+ * never the active application. Called before Tk_Init (creating NSApp as Tk's own class, which
+ * Tk then reuses) and again after it, in case Tk's setup asked for the regular policy. Does
+ * nothing when a symbol or the class is missing. */
+static void safepdf_prohibit_activation(void) {
+  void *(*getClass)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
+  void *(*selName)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
+  void *msgSend = dlsym(RTLD_DEFAULT, "objc_msgSend");
+  if (getClass == NULL || selName == NULL || msgSend == NULL) return;
+  void *cls = getClass("TKApplication");
+  if (cls == NULL) cls = getClass("NSApplication");
+  if (cls == NULL) return;
+  void *app = ((void *(*)(void *, void *))msgSend)(cls, selName("sharedApplication"));
+  if (app == NULL) return;
+  ((signed char (*)(void *, void *, long))msgSend)(app, selName("setActivationPolicy:"), 2L);
+}
+
+/* Task 10.16: Tk itself undoes the policy above. Traced in background smoke runs: during
+ * Tk_Init, Tk calls `[NSApp setActivationPolicy:Regular]` and then
+ * `[NSApp activateIgnoringOtherApps:YES]` (so for ~0.2 s the viewer was a Foreground app that
+ * had asked to be activated: `lsappinfo` showed its type Foreground in that window, and the
+ * viewer became the front app about a second after launch in some cases), and every smoke
+ * `sendKey`/`sendEvent` (`focus -force`) calls `activateIgnoringOtherApps:YES` again (about
+ * 1,900 calls per full smoke run). Besides, `wm attributes . -fullscreen 1` (case 1s) put the
+ * hidden window into native full screen (`toggleFullScreen:`, a new Space) whenever the
+ * screen was unlocked. So in background smoke mode the shim overrides, before Tk_Init runs,
+ * on Tk's NSApplication subclass `setActivationPolicy:` (every policy becomes Prohibited) and
+ * the activation methods `activateIgnoringOtherApps:`, `activate` and `unhide:` (no-ops), and
+ * on NSWindow `toggleFullScreen:` (a no-op: full screen never happens, as without a window
+ * manager). With SAFEPDF_SMOKE_TRACE_ACTIVATION=1 each blocked call is logged to stderr with
+ * a millisecond timestamp. Normal launches never reach this code. */
+static signed char (*safepdf_orig_set_policy)(void *, void *, long) = NULL;
+static int safepdf_trace_activation = 0;
+
+static void safepdf_trace(const char *what, long arg) {
+  if (!safepdf_trace_activation) return;
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  fprintf(stderr, "safepdf-shim: %lld blocked %s (%ld)\n",
+          (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000, what, arg);
+}
+static signed char safepdf_set_policy(void *self, void *cmd, long policy) {
+  safepdf_trace("setActivationPolicy:", policy);
+  return safepdf_orig_set_policy != NULL ? safepdf_orig_set_policy(self, cmd, 2L) : 1;
+}
+static void safepdf_no_activate_bool(void *self, void *cmd, signed char flag) {
+  (void)self; (void)cmd;
+  safepdf_trace("activateIgnoringOtherApps:", flag);
+}
+static void safepdf_no_activate(void *self, void *cmd) {
+  (void)self; (void)cmd;
+  safepdf_trace("activate", 0);
+}
+static void safepdf_no_unhide(void *self, void *cmd, void *sender) {
+  (void)self; (void)cmd; (void)sender;
+  safepdf_trace("unhide:", 0);
+}
+static void safepdf_no_fullscreen(void *self, void *cmd, void *sender) {
+  (void)self; (void)cmd; (void)sender;
+  safepdf_trace("toggleFullScreen:", 0);
+}
+
+static void safepdf_block_activation(void) {
+  void *(*getClass)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
+  void *(*selName)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
+  void *(*getMethod)(void *, void *) =
+    (void *(*)(void *, void *))dlsym(RTLD_DEFAULT, "class_getInstanceMethod");
+  void *(*getImp)(void *) = (void *(*)(void *))dlsym(RTLD_DEFAULT, "method_getImplementation");
+  void *(*replace)(void *, void *, void *, const char *) =
+    (void *(*)(void *, void *, void *, const char *))dlsym(RTLD_DEFAULT, "class_replaceMethod");
+  if (getClass == NULL || selName == NULL || getMethod == NULL || getImp == NULL ||
+      replace == NULL) return;
+  const char *t = getenv("SAFEPDF_SMOKE_TRACE_ACTIVATION");
+  safepdf_trace_activation = t != NULL && strcmp(t, "1") == 0;
+  void *cls = getClass("TKApplication");
+  if (cls == NULL) cls = getClass("NSApplication");
+  if (cls == NULL) return;
+  void *setSel = selName("setActivationPolicy:");
+  void *m = getMethod(cls, setSel);
+  if (m == NULL) return;
+  safepdf_orig_set_policy = (signed char (*)(void *, void *, long))getImp(m);
+  replace(cls, setSel, (void *)safepdf_set_policy, "c@:q");
+  replace(cls, selName("activateIgnoringOtherApps:"), (void *)safepdf_no_activate_bool, "v@:c");
+  replace(cls, selName("activate"), (void *)safepdf_no_activate, "v@:");
+  replace(cls, selName("unhide:"), (void *)safepdf_no_unhide, "v@:@");
+  void *fsSel = selName("toggleFullScreen:");
+  void *win = getClass("NSWindow");
+  if (win != NULL) replace(win, fsSel, (void *)safepdf_no_fullscreen, "v@:@");
+  void *tkWin = getClass("TKWindow");
+  if (tkWin != NULL) replace(tkWin, fsSel, (void *)safepdf_no_fullscreen, "v@:@");
 }
 #endif
 
@@ -102,12 +208,32 @@ LEAN_EXPORT lean_obj_res safepdf_tk_init(b_lean_obj_arg argv0) {
   Tcl_FindExecutable(lean_string_cstr(argv0));
   interp = Tcl_CreateInterp();
   if (interp == NULL) return io_error("Tcl_CreateInterp failed");
+#ifdef __APPLE__
+  int background = safepdf_smoke_background();
+  if (background) {
+    safepdf_block_activation();
+    safepdf_prohibit_activation();
+  }
+#endif
   if (Tcl_Init(interp) != TCL_OK || Tk_Init(interp) != TCL_OK) {
     lean_object *msg = interp_result();
     Tcl_DeleteInterp(interp);
     interp = NULL;
     return lean_io_result_mk_error(lean_mk_io_user_error(msg));
   }
+#ifdef __APPLE__
+  if (background) {
+    safepdf_prohibit_activation();
+    /* Keep every toplevel invisible and off the screen: "." now, later ones when mapped.
+     * Constant script, no data spliced in. */
+    Tcl_EvalEx(interp,
+      "wm attributes . -alpha 0.0\n"
+      "wm geometry . +-30000+-30000\n"
+      "bind all <Map> {+if {[winfo toplevel %W] eq {%W}} {catch {wm attributes %W -alpha 0.0}}}\n",
+      -1, TCL_EVAL_GLOBAL);
+    Tcl_ResetResult(interp);
+  }
+#endif
   return io_ok_unit();
 }
 

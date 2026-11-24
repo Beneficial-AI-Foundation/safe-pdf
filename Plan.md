@@ -292,9 +292,17 @@ consumed there as a library / external reader. The `--biblean` code already buil
     by platform; Ctrl stays on Linux.
   - **Aqua highlight rendering**: translucent fills via an overlay image (Tk Aqua has no
     stipples; outline-only highlights read as dated).
+  - **Text selection covers the whole selected text** (added 2026-11-23 at the human's
+    request): the selection is a continuous light-blue fill behind all the selected text, as
+    in PDF.js and Preview, not small boxes or outlines around glyph runs. Each line's fill
+    spans the full line height (no gaps between consecutive lines of a paragraph); interior
+    lines of a multi-line selection fill from the line's start to its end; the first line
+    fills from the selection start to the line end and the last from the line start to the
+    selection end. The ink stays readable through the fill. Copy and search keep working on
+    the same glyph ranges; only the drawn shape changes.
 - **M10**: the polish list above lands, smoke-tested — Escape dismissal everywhere,
   delete/undo on marks, the select tool with its cursors, Cmd keys on macOS, translucent
-  Aqua highlights, and the SafePDF title.
+  Aqua highlights, the whole-text light-blue selection, and the SafePDF title.
 
 ### Phase 11 — Native macOS shell (Tk stays on Linux)
 

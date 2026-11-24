@@ -1,6 +1,7 @@
 import SafePdf.Shell.App.Menu
 import SafePdf.Shell.App.View
 import SafePdf.Shell.App.Links
+import SafePdf.Shell.App.Bubble
 
 /-!
 # Toolbar model after PDF.js (task 9.7; Plan.md §6 Phase 9 "Look and feel: imitate PDF.js", §8 native app, §10 `SafePdf/Shell/`)
@@ -14,7 +15,8 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
 * **Layout** (`layout`): left — sidebar toggle (shown with a document; task 9.r9: thumbnails need no outline),
   previous / next page arrows, the page-number field and its "of N" label, then the view-mode
   drop-down (task 9.r4, `ViewChoice`); centre — zoom out,
-  zoom in and the zoom drop-down; right — the annotation tools (Highlight, enabled with a
+  zoom in and the zoom drop-down; right — the annotation tools (Select text, the default
+  tool, task 10.8: `Mode`; Highlight, enabled with a
   document since task 9.4: with a selection it highlights it in the current colour, without
   one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
   Add comment: a note on the selection or at the window centre, `Menu.Cmd.addNote`; Add text
@@ -41,6 +43,17 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   50 %–400 %, showing the current choice; a zoom reached with − / + that is not in the list
   shows as a percentage (PDF.js's custom option). Automatic Zoom is PDF.js's `auto` scale: the
   page width for portrait pages, the whole page for landscape ones, at most 125 %.
+* **Active tool and cursor** (`Mode`, `cursorFor`, task 10.8; Plan.md §6 Phase 10): one of
+  Select text (the default), Highlight, Add text, Draw is active, read off `Bubble.Ui`; its
+  button shows pressed; the page canvas cursor telegraphs what a press does there (I-beam over
+  text, hand over links and marks, crosshair in Draw).
+* **Transients** (`Transient`, task 10.6; Plan.md §6 Phase 10): the note popup, the edit
+  bubble's colour picker, the Highlight and Add text / Draw pop-overs, the go-to and find bars.
+  One dismissal rule for all of them: Escape closes the topmost open one (`onEscape`); a press
+  anywhere in the main window outside a transient (and outside the button that toggles it)
+  closes it (`onClick`), and the press is not consumed: it goes on to do what it does (as
+  PDF.js's `closeSecondaryToolbar`); opening one closes its rival (`onOpen`: find ↔ go-to,
+  Highlight ↔ Add text / Draw pop-over).
 -/
 
 namespace SafePdf.Shell.App.Toolbar
@@ -295,6 +308,8 @@ def pageEntry (labels : Array String) (n cur : Nat) (input : String) : Nat × Bo
 /-- Toolbar buttons that are not (yet) viewer commands: the annotation tools and Print (Save is
 the command `Menu.Cmd.save` since task 9.5c). -/
 inductive Tool where
+  /-- Select text (task 10.8): the default tool, on whenever no other tool is (`Mode`). -/
+  | select
   /-- Highlight (task 9.4; its pop-over and the selection bubble: 9.8, `Bubble`). -/
   | highlight
   /-- Add a comment / note (task 9.9: Add note…). -/
@@ -311,6 +326,7 @@ inductive Tool where
 
 /-- Tooltip of a tool button. -/
 def Tool.tip : Tool → String
+  | .select => "Select text"
   | .highlight => "Highlight"
   | .comment => "Add comment"
   | .text => "Add text"
@@ -320,14 +336,15 @@ def Tool.tip : Tool → String
 
 /-- The task that brings the tool (shown when the disabled button is asked for). -/
 def Tool.task : Tool → String
+  | .select => "10.8"
   | .highlight => "9.4"
   | .comment | .text | .draw => "9.9"
   | .image | .print => "after M9"
 
-/-- Whether the tool can be used: Highlight (task 9.4), Add comment, Add text and Draw (task
-9.9) with a document; Add image and Print not yet (after M9). -/
+/-- Whether the tool can be used: Select text (task 10.8), Highlight (task 9.4), Add comment,
+Add text and Draw (task 9.9) with a document; Add image and Print not yet (after M9). -/
 def Tool.enabled (c : Ctx) : Tool → Bool
-  | .highlight | .comment | .text | .draw => c.hasDoc
+  | .select | .highlight | .comment | .text | .draw => c.hasDoc
   | .image | .print => false
 
 /-- What a button does. -/
@@ -406,7 +423,8 @@ def layout : List (String × List Item) :=
        .button ⟨".bar.zin", "plus", "Zoom in", .cmd .zoomIn⟩,
        .zoomBox]),
     (".bar.r",
-      [.button ⟨".bar.highlight", "highlight", Tool.tip .highlight, .tool .highlight⟩,
+      [.button ⟨".bar.select", "select", Tool.tip .select, .tool .select⟩,
+       .button ⟨".bar.highlight", "highlight", Tool.tip .highlight, .tool .highlight⟩,
        .button ⟨".bar.comment", "comment", Tool.tip .comment, .tool .comment⟩,
        .button ⟨".bar.text", "text", Tool.tip .text, .tool .text⟩,
        .button ⟨".bar.draw", "draw", Tool.tip .draw, .tool .draw⟩,
@@ -470,19 +488,19 @@ def states (c : Ctx) : List Bool :=
 
 -- Paths are unique; the tool names map back to their tools.
 #guard (buttons.map (·.path)).eraseDups.length == buttons.length
-#guard buttons.length == 13
-#guard [Tool.highlight, .comment, .text, .draw, .image, .print].all fun t =>
+#guard buttons.length == 14
+#guard [Tool.select, .highlight, .comment, .text, .draw, .image, .print].all fun t =>
   buttons.any fun b => b.act == .tool t && toolOf b.icon == some t
 #guard targets.length == (states {}).length
 #guard targets.eraseDups.length == targets.length
 -- Without a document only Open, Quit and the overflow button work; the sidebar toggle hides.
 #guard (buttons.filter (·.enabled {})).map (·.path) == [".bar.more"]
 #guard (buttons.filter (·.visible {})).length == buttons.length - 1
--- First page of three with an outline: prev disabled, next enabled, of the tools Highlight,
--- Add comment, Add text and Draw (Add image and Print after M9).
+-- First page of three with an outline: prev disabled, next enabled, of the tools Select text,
+-- Highlight, Add comment, Add text and Draw (Add image and Print after M9).
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3, hasOutline := true }
   (buttons.filter (·.enabled c)).map (·.path) ==
-    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.highlight", ".bar.comment",
+    [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.select", ".bar.highlight", ".bar.comment",
      ".bar.text", ".bar.draw", ".bar.more"] &&
   buttons.all (·.visible c)
 -- No outline: the toggle still shows (thumbnails, task 9.r9).
@@ -499,5 +517,300 @@ def states (c : Ctx) : List Bool :=
 #guard overflowEntries.map (·.1) == [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18]
 -- Every overflow command is also in the menubar (one vocabulary).
 #guard overflowEntries.all fun (_, k) => (Menu.locate k).isSome
+
+/-! ## The active tool and the pointer cursor (task 10.8) -/
+
+/-- The tool the page responds to (Plan.md §6 Phase 10: "an explicit select-text tool (the
+default)"). It is read off the tool state `Bubble.Ui`, never stored apart from it: Add text
+or Draw when that editor mode is on, else Highlight when the Highlight tool is on, else
+Select text. So exactly one tool is active at any time, and turning another tool off returns
+to Select text (PDF.js: the editor mode buttons toggle, "no editor" is the default). -/
+inductive Mode where
+  /-- Select text (the default): a drag selects text, a click selects a mark or follows a
+  link. -/
+  | select
+  /-- Highlight (task 9.8): a text selection is highlighted on mouse-up. -/
+  | highlight
+  /-- Add text (FreeText, task 9.9): a click places a text box. -/
+  | text
+  /-- Draw (Ink, task 9.9): a drag draws a stroke. -/
+  | draw
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The active tool of tool state `u`. -/
+def Mode.of (u : Bubble.Ui) : Mode :=
+  match u.editor with
+  | .text => .text
+  | .draw => .draw
+  | .none => if u.tool then .highlight else .select
+
+/-- The toolbar tool (`Tool`) of a mode: its button is the one shown pressed. -/
+def Mode.tool : Mode → Tool
+  | .select => .select
+  | .highlight => .highlight
+  | .text => .text
+  | .draw => .draw
+
+/-- The tools that are modes, in toolbar order (their buttons show the active one pressed). -/
+def modeTools : List Tool := [.select, .highlight, .text, .draw]
+
+/-- Whether the button of tool `t` shows pressed in tool state `u`: exactly the active
+mode's. -/
+def pressed (u : Bubble.Ui) (t : Tool) : Bool := (Mode.of u).tool == t
+
+/-- The Select text button: turns the other tools off (with their pop-overs). -/
+def selectTool (u : Bubble.Ui) : Bubble.Ui :=
+  { u with tool := false, popover := false, editor := .none, edPop := false }
+
+/-- What lies under the mouse pointer on the page canvas. -/
+inductive Hit where
+  /-- A glyph box of the page text (`Select.Cell.box`). -/
+  | text
+  /-- A link annotation (`Links.linkAt`). -/
+  | link
+  /-- A mark: a highlight, a note, free text or a drawing (`Marks.Store.hitAt`). -/
+  | mark
+  /-- Nothing of these (the page background, or off the pages). -/
+  | empty
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The hit of a pointer over a mark, a link and text (any of them): the same order a click
+uses (`Viewer.dragTo`: marks lie above links, and links above the text). -/
+def hitOf (mark link text : Bool) : Hit :=
+  if mark then .mark else if link then .link else if text then .text else .empty
+
+/-- The Tk cursor of the page canvas for tool `m` over `h` (`""`: the widget default, the
+platform arrow). The names are Tk's portable ones that Tk Aqua maps to native cursors
+(`xterm` → I-beam, `hand2` → pointing hand, `crosshair` → crosshair):
+
+* Draw: `crosshair` everywhere (a press always starts a stroke; PDF.js shows a pen).
+* A mark (other tools): `hand2` — a click selects it (a text box or drawing is also grabbed
+  and moved), as a link click follows the link. A drag that starts on a highlight still
+  selects the text under it.
+* Add text: `xterm` elsewhere (PDF.js: `--editorFreeText-editing-cursor: text`): a click
+  places a text box, also over a link.
+* Select text and Highlight: `hand2` over a link, `xterm` over text, else the arrow. (PDF.js's
+  free highlight, a crosshair-like pen over non-text in Highlight mode, is not implemented
+  here: the Highlight tool only highlights selected text.) -/
+def cursorFor : Mode → Hit → String
+  | .draw, _ => "crosshair"
+  | _, .mark => "hand2"
+  | .text, _ => "xterm"
+  | _, .link => "hand2"
+  | _, .text => "xterm"
+  | _, .empty => ""
+
+/-- The default tool state has Select text active. -/
+theorem Mode.of_default : Mode.of {} = .select := rfl
+
+/-- The Select text button always makes Select text the active tool. -/
+theorem Mode.of_selectTool (u : Bubble.Ui) : Mode.of (selectTool u) = .select := rfl
+
+/-- Exactly one tool button shows pressed, whatever the tool state. -/
+theorem pressed_unique (u : Bubble.Ui) : (modeTools.filter (pressed u)).length = 1 := by
+  unfold pressed Mode.of
+  cases u.editor <;> (try cases u.tool) <;> decide
+
+/-- Turning Add text or Draw off (its button again) returns to Select text when it was the
+active tool before. -/
+theorem Mode.of_selectEditor_twice (u : Bubble.Ui) (e : Bubble.Editor) (h : Mode.of u = .select) :
+    Mode.of ((u.selectEditor e).selectEditor e) = .select := by
+  unfold Mode.of at h ⊢
+  unfold Bubble.Ui.selectEditor
+  cases hu : u.editor <;> cases e <;> rw [hu] at h <;> simp_all <;> split <;> simp_all
+
+/-- Turning Highlight off (its button again, without a selection) returns to Select text when
+it was the active tool before. -/
+theorem Mode.of_toolClick_twice (u : Bubble.Ui) (h : Mode.of u = .select) :
+    Mode.of ((u.toolClick false).1.toolClick false).1 = .select := by
+  unfold Mode.of at h ⊢
+  unfold Bubble.Ui.toolClick
+  cases hu : u.editor <;> rw [hu] at h <;> simp_all <;> split <;> simp_all
+
+-- Select text is the default and pressed; Highlight, Add text, Draw take over and give back.
+#guard Mode.of {} == .select && modeTools.filter (pressed {}) == [.select]
+#guard Mode.of ({} : Bubble.Ui).toggleTool == .highlight &&
+  Mode.of (({} : Bubble.Ui).selectEditor .draw) == .draw &&
+  Mode.of (({} : Bubble.Ui).selectEditor .text) == .text
+#guard Mode.of ((({} : Bubble.Ui).selectEditor .draw).selectEditor .draw) == .select
+#guard Mode.of (((({} : Bubble.Ui).toolClick false).1).toolClick false).1 == .select
+#guard Mode.of (selectTool (({} : Bubble.Ui).selectEditor .draw)) == .select &&
+  !(selectTool (({} : Bubble.Ui).selectEditor .draw)).edPop &&
+  !(selectTool ({ tool := true, popover := true } : Bubble.Ui)).popover
+-- Escape closes the pop-over and keeps the tool (task 10.6).
+#guard Mode.of ({ editor := .draw, edPop := true } : Bubble.Ui).escape == .draw
+#guard Mode.of ({ tool := true, popover := true } : Bubble.Ui).escape == .highlight
+-- The hit order: mark, link, text.
+#guard hitOf true true true == .mark && hitOf false true true == .link &&
+  hitOf false false true == .text && hitOf false false false == .empty
+-- The cursor table.
+#guard cursorFor .select .text == "xterm" && cursorFor .select .link == "hand2" &&
+  cursorFor .select .mark == "hand2" && cursorFor .select .empty == ""
+#guard cursorFor .highlight .text == "xterm" && cursorFor .highlight .link == "hand2" &&
+  cursorFor .highlight .empty == ""
+#guard [Hit.text, .link, .mark, .empty].all (cursorFor .draw · == "crosshair")
+#guard cursorFor .text .text == "xterm" && cursorFor .text .link == "xterm" &&
+  cursorFor .text .empty == "xterm" && cursorFor .text .mark == "hand2"
+
+/-! ## Transients and their dismissal (task 10.6) -/
+
+/-- A transient: a part of the window that opens on request and goes away on Escape or a click
+elsewhere (Plan.md §6 Phase 10). The selection bubble is not one of them: it belongs to the
+selection, which Escape and a click on the page clear (task 9.8). -/
+inductive Transient where
+  /-- The note popup `.note` (a toplevel; closing it follows 9.r12: `noteDone … close`). -/
+  | note
+  /-- The edit bubble's colour picker (canvas items on `.c`). -/
+  | picker
+  /-- The Highlight tool's pop-over `.hlbar` (the tool stays on when it closes). -/
+  | hlPop
+  /-- The Add text / Draw pop-over `.edbar` (the mode stays on when it closes). -/
+  | edPop
+  /-- The go-to-page bar `.goto`. -/
+  | goto
+  /-- The find bar `.find`. -/
+  | find
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Tk path of the page canvas. -/
+def pagePath : String := ".c"
+
+/-- The transients from the topmost down (the order Escape closes them in): the note popup is
+its own window above everything; the picker sits on the bubble on the page; the pop-overs
+hang over the page from the toolbar; the bars sit under the toolbar. -/
+def Transient.order : List Transient := [.note, .picker, .hlPop, .edPop, .goto, .find]
+
+/-- The Tk paths (with their descendants) where a press leaves transient `t` open: `t`'s own
+widgets, the toolbar button that toggles it (its own click decides), and for the picker and
+the tool pop-overs the page canvas. A press on the page goes to the viewer's `press`, which
+closes the picker unless it hits the picker or its colour button (task 9.8); the tool
+pop-overs stay open over the page because a click there uses their tool, and their swatches
+restyle what it selects (PDF.js keeps the parameters toolbar open with the editor mode). -/
+def Transient.keepPaths : Transient → List String
+  | .note => [".note"]
+  | .picker => [pagePath]
+  | .hlPop => [".hlbar", ".bar.highlight", pagePath]
+  | .edPop => [".edbar", ".bar.text", ".bar.draw", pagePath]
+  | .goto => [".goto"]
+  | .find => [".find"]
+
+/-- Whether Tk path `w` is `p` or one of its descendants. -/
+def within (w p : String) : Bool := w == p || w.startsWith (p ++ ".")
+
+/-- Whether a press on widget `w` leaves `t` open. -/
+def Transient.keeps (t : Transient) (w : String) : Bool := t.keepPaths.any (within w)
+
+/-- The transients that cannot be open together with `t` (opening `t` closes them): the two
+bars share the place under the toolbar; the two tool pop-overs belong to exclusive modes
+(`Bubble.Ui.selectEditor`, `Bubble.Ui.toolClick`). -/
+def Transient.rivals : Transient → List Transient
+  | .find => [.goto]
+  | .goto => [.find]
+  | .hlPop => [.edPop]
+  | .edPop => [.hlPop]
+  | _ => []
+
+/-- The topmost of the open transients `opened`. -/
+def topmost (opened : List Transient) : Option Transient :=
+  Transient.order.find? (opened.contains ·)
+
+/-- Escape: the transients to close, the topmost open one (none when nothing is open; then
+Escape goes on to its other jobs, such as leaving full screen). -/
+def onEscape (opened : List Transient) : List Transient := (topmost opened).toList
+
+/-- A mouse press on widget `w`: the open transients it closes (every one that does not keep
+`w`). The press itself is not consumed. -/
+def onClick (opened : List Transient) (w : String) : List Transient :=
+  opened.filter (!·.keeps w)
+
+/-- Opening `t`: the open transients to close first (its rivals). -/
+def onOpen (opened : List Transient) (t : Transient) : List Transient :=
+  opened.filter (t.rivals.contains ·)
+
+/-- Whether the press that dismisses a transient is consumed: no, it still selects, places or
+activates what it hits (PDF.js closes the secondary toolbar and lets the click through). -/
+def clickConsumed : Bool := false
+
+/-- Closing transient `t` in the tool state (`Bubble.Ui`): the picker and the pop-overs are
+flags there (the tool and the mode stay on); the others live in Tk only. -/
+def Transient.closeUi : Transient → Bubble.Ui → Bubble.Ui
+  | .picker, u => { u with picker := false }
+  | .hlPop, u => { u with popover := false }
+  | .edPop, u => { u with edPop := false }
+  | _, u => u
+
+/-- Every transient is in `Transient.order`. -/
+theorem Transient.mem_order (t : Transient) : t ∈ Transient.order := by
+  cases t <;> simp [Transient.order]
+
+/-- Escape closes at most one transient, and only an open one. -/
+theorem onEscape_sub (opened : List Transient) :
+    (onEscape opened).length ≤ 1 ∧ ∀ t ∈ onEscape opened, t ∈ opened := by
+  unfold onEscape topmost
+  cases h : Transient.order.find? (opened.contains ·) with
+  | none => simp
+  | some t =>
+    have := List.find?_some h
+    simp only [Option.toList_some, List.length_singleton, Nat.le_refl, List.mem_singleton,
+      forall_eq, true_and]
+    simpa using this
+
+/-- Escape closes something whenever something is open. -/
+theorem onEscape_nonempty (opened : List Transient) (h : opened ≠ []) : onEscape opened ≠ [] := by
+  unfold onEscape topmost
+  cases hf : Transient.order.find? (opened.contains ·) with
+  | some _ => simp
+  | none =>
+    exfalso
+    match opened, h with
+    | t :: _, _ =>
+      have := List.find?_eq_none.mp hf t (Transient.mem_order t)
+      simp at this
+
+/-- A press closes exactly the open transients that do not keep the pressed widget. -/
+theorem mem_onClick (opened : List Transient) (w : String) (t : Transient) :
+    t ∈ onClick opened w ↔ t ∈ opened ∧ t.keeps w = false := by
+  simp [onClick]
+
+/-- After opening `t` and closing `onOpen opened t`, none of `t`'s rivals is left open. -/
+theorem onOpen_rivals (opened : List Transient) (t u : Transient) (hu : u ∈ opened)
+    (hr : u ∈ t.rivals) : u ∈ onOpen opened t := by
+  simp [onOpen, hu, hr]
+
+/-- No transient is its own rival (opening one never closes itself). -/
+theorem Transient.not_self_rival (t : Transient) : t ∉ t.rivals := by
+  cases t <;> simp [Transient.rivals]
+
+-- Escape: the note popup first, then the picker, a pop-over, a bar; nothing open, nothing.
+#guard onEscape [.find, .hlPop, .note] == [.note]
+#guard onEscape [.find, .hlPop] == [.hlPop]
+#guard onEscape [.find, .picker, .edPop] == [.picker]
+#guard onEscape [.find] == [.find] && onEscape [.goto] == [.goto] && onEscape [] == []
+-- A press inside a transient, or on the button that toggles it, keeps it open.
+#guard onClick [.find] ".find.e" == [] && onClick [.find] ".find.close" == []
+#guard onClick [.goto] ".goto" == [] && onClick [.note] ".note.t" == []
+#guard onClick [.hlPop] ".hlbar" == [] && onClick [.hlPop] ".bar.highlight" == []
+#guard onClick [.edPop] ".edbar" == [] && onClick [.edPop] ".bar.draw" == [] &&
+  onClick [.edPop] ".bar.text" == []
+-- A press elsewhere closes it: the toolbar, the sidebar, the other bar.
+#guard onClick [.find] ".c" == [.find] && onClick [.goto] ".c" == [.goto]
+#guard onClick [.hlPop] ".bar.zin" == [.hlPop] && onClick [.hlPop] ".ol.th" == [.hlPop]
+#guard onClick [.edPop] ".bar.highlight" == [.edPop] && onClick [.edPop] ".ol.t" == [.edPop]
+#guard onClick [.find, .hlPop] ".goto.e" == [.find, .hlPop]
+#guard onClick [.note] ".c" == [.note] && onClick [.note] ".bar.more" == [.note]
+-- The page keeps the tool pop-overs and the picker (`press` handles the picker), and its
+-- children (the free-text editor `.c.ft`) count as the page; `.cx` would not.
+#guard onClick [.hlPop, .edPop, .picker, .find, .note] ".c" == [.find, .note]
+#guard onClick [.edPop, .find] ".c.ft" == [.find]
+#guard !within ".findx" ".find" && within ".find.e" ".find" && !within ".cx" ".c"
+#guard onClick [.picker] ".bar.zin" == [.picker]
+-- Opening a bar closes the other; opening a pop-over closes the other one.
+#guard onOpen [.find, .hlPop] .goto == [.find] && onOpen [.goto, .note] .find == [.goto]
+#guard onOpen [.hlPop, .find] .edPop == [.hlPop] && onOpen [.find] .note == []
+#guard !clickConsumed
+-- Closing a pop-over keeps its tool or mode on.
+#guard (Transient.hlPop.closeUi { tool := true, popover := true }) ==
+  ({ tool := true, popover := false } : Bubble.Ui)
+#guard (Transient.edPop.closeUi { editor := .text, edPop := true }).editor == .text
 
 end SafePdf.Shell.App.Toolbar

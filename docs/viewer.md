@@ -32,7 +32,8 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   or "from cache", notes, the view mode when it is not the default, notes about open settings
   that were not honoured, or the error). Every open starts afresh (task 9.r8): a mode or zoom
   chosen for one file does not carry over to the next; only the reopen after Save keeps them.
-* Title: `NAME - page k/n - safe-pdf`, with page labels `NAME - page iii (3/120) - safe-pdf`.
+* Title: `NAME - page k/n - SafePDF`, with page labels `NAME - page iii (3/120) - SafePDF`.
+* About (task 10.5): the app presents as **SafePDF** (the executable stays `viewer`). Help → About SafePDF (all platforms; on macOS also the application menu's About, `tkAboutDialog`) opens a message box. The macOS application menu's own name comes from the process (`viewer`) until a bundle exists (task 11.x).
 * Pages are rendered by `Core.Raster.Glyph.renderDocPage` (fresh budget per page, CropBox and
   `/Rotate` honoured, the user rotation added with `rotAdd`).
 * **Zoom** (`Toolbar.ZoomChoice` over `View.Mode`): Automatic Zoom (default, as in PDF.js:
@@ -40,7 +41,10 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   page, fit width, or a fixed percentage of actual size,
   where 100 % = 72 dpi × the screen scale factor (`tk scaling`, pixels per point). Steps
   25, 33, 50, 67, 75, 100, 125, 150, 200, 300, 400, 600, 800 %. Effective zooms are multiples
-  of 1/64 pixel per point. Zooming keeps a point fixed: the page point under the mouse
+  of 1/64 pixel per point. Zoom in/out step on the effective zoom (task 10.12,
+  `View.stepInZ`/`stepOutZ`): to the first step whose quantised zoom is strictly larger, or the
+  last one strictly smaller, and nothing at the end of the range; from a fit mode `+` then `-`
+  ends on the largest step at most the starting zoom (`View.stepOutZ_stepInZ_le`). Zooming keeps a point fixed: the page point under the mouse
   (Ctrl+wheel) or at the window centre (keys, toolbar) is computed with `Geom.toPage` before
   the change and put back under the same window position with `Geom.toScreen` after it
   (C2; `View.reanchor`). Window resizes re-render in the fit modes (debounced 100 ms).
@@ -64,34 +68,71 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
 
 ### Keys
 
-| Key | Action |
-|---|---|
-| `Next` (PageDown), `space` | scroll down a window; at the bottom: next page (top) |
-| `Prior` (PageUp), `BackSpace`, `Shift+space` | scroll up a window; at the top: previous page (bottom) |
-| `Down` / `Up` | scroll a tenth of the window; past the edge: next / previous page |
-| `Right` / `Left` | scroll horizontally; past the edge: next / previous page (top) |
-| `Home` / `End` | first / last page |
-| `+` (`=`, keypad `+`, also with Ctrl) | zoom in one step (about the window centre) |
-| `-` (keypad `-`, also with Ctrl) | zoom out one step |
-| `0`, `Ctrl+0` | actual size (100 %) |
-| `f` / `w` | fit page / fit width |
-| `r` / `R` | rotate the view 90° clockwise / counter-clockwise |
-| mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) |
-| `Shift`+wheel | scroll horizontally (stops at the edge) |
-| `Ctrl`+wheel | zoom in/out about the mouse pointer |
-| `Ctrl+O` / `Ctrl+W` / `Ctrl+Q` | open / close the document / quit (asks Save / Don't Save / Cancel about unsaved marks, 9.r2) |
-| `Ctrl+S` / `Ctrl+Shift+S` | save the marks into the opened file (asks before the first overwrite, 9.r2) / into a new file (9.5c) |
+One row per action; the Linux/X11 column is also Windows. On macOS (aqua) **every X11 key
+keeps working** (the Ctrl bindings stay); the macOS column lists the keys added there and the
+one the menus show (first). Where macOS has its own convention (Preview, the HIG) it is used
+instead of a plain Command twin of the Ctrl key (task 10.9). "10.7" marks keys owned by task
+10.7 (undo/redo, deleting marks), listed here but not bound by 10.9.
 
-**macOS (9.r3): Command instead of Ctrl.** On aqua (`tk windowingsystem` = `aqua`) every Ctrl
-key in this document also works with **⌘** — ⌘O, ⌘S, ⌘⇧S, ⌘W, ⌘Q, ⌘C, ⌘A, ⌘F, ⌘G, ⌘+ / ⌘= /
-⌘−, ⌘0, ⌘+wheel zoom, ⌘Return in the note popup, ⌘Q in the page field, find/go-to bars and
-the text-box editor — and the menus show the macOS accelerators (⌘S, ⇧⌘S, ⌥← for Back; Tk
-draws the `Command-S` labels as glyphs), as do the Save tooltip and the status hints. The
-Ctrl bindings stay. The application menu's Quit (and a quit from the Dock or at logout,
-`::tk::mac::Quit`) runs File → Quit's command. On X11/Windows nothing changes. The mapping
-(key → per-platform Tk sequences and label) is pure Lean in `Menu.lean` (`Menu.Platform`,
-`Menu.Key`, `Cmd.accelOn`, `Menu.platformScript`, checked by `#guard`s for both platforms);
-the viewer installs it right after building the window.
+| Action | Linux / X11 | macOS (aqua) |
+|---|---|---|
+| scroll down a window; at the bottom: next page (top) | `Next` (PageDown), `space` | same (fn+↓ is PageDown) |
+| scroll up a window; at the top: previous page (bottom) | `Prior` (PageUp), `BackSpace`, `Shift+space` | same (fn+↑) |
+| scroll a tenth of the window; past the edge: next / previous page | `Down` / `Up` | same |
+| scroll horizontally; past the edge: next / previous page (top) | `Right` / `Left` | same |
+| first / last page | `Home` / `End` | **⌘↑ / ⌘↓**; `Home` / `End` (fn+← / fn+→) |
+| zoom in one step (about the window centre) | `+`, `=`, keypad `+`, each also with Ctrl | **⌘+**, ⌘=, ⌘ keypad `+`; the plain keys |
+| zoom out one step | `-`, keypad `-`, each also with Ctrl | **⌘−**, ⌘ keypad `-`; the plain keys |
+| actual size (100 %) | `0`, `Ctrl+0` | **⌘0**, `0` |
+| fit page / fit width | `f` / `w` | **⌘9** (Preview's Zoom to Fit), `f` / `w` |
+| rotate the view 90° clockwise / counter-clockwise | `r` / `R` | **⌘R / ⌘L** (Preview); `r` / `R` |
+| mouse wheel | scroll vertically; past the edge: next page (top) / previous page (bottom) | same; trackpad two-finger scroll in both axes |
+| horizontal wheel | `Shift`+wheel | same |
+| zoom about the pointer | `Ctrl`+wheel | **⌘**+wheel, `Ctrl`+wheel |
+| open a PDF | `Ctrl+O` | **⌘O** |
+| close the document / quit (asks Save / Don't Save / Cancel about unsaved marks, 9.r2) | `Ctrl+W` / `Ctrl+Q` (Ctrl+Q also in the page field, find and go-to bars, text-box editor) | **⌘W** / **⌘Q** (also there; the application menu's Quit and a quit from the Dock run the same command, `::tk::mac::Quit`) |
+| save the marks into the opened file (asks before the first overwrite, 9.r2) / into a new file (9.5c) | `Ctrl+S` / `Ctrl+Shift+S` | **⌘S** / **⇧⌘S** |
+| copy the selection / select all text of the page | `Ctrl+C` / `Ctrl+A` | **⌘C** / **⌘A** |
+| open the find bar | `Ctrl+F` | **⌘F** |
+| find next / previous | `F3` / `Shift+F3`; in the find bar also `Return` / `Shift+Return` | **⌘G / ⇧⌘G** (also in the find bar); `F3` / `Shift+F3`, `Return` / `Shift+Return` |
+| close the find bar, go-to bar, page field (reverts) | `Escape` | same |
+| go to page (number or label) | `Ctrl+G` | **⌥⌘G** (Preview; ⌘G is Find next); `Ctrl+G` |
+| back / forward in the jump history | `Alt+Left` / `Alt+Right` | **⌘[ / ⌘]** (Preview, Safari); `Option+←` / `Option+→` |
+| show / hide the sidebar | `F9` | **⌃⌘S** (the HIG's Show Sidebar); `F9` (fn+F9) |
+| sidebar thumbnails: previous / next / go | `Up` / `Down` / `Return` (focused thumbnails) | same |
+| highlight the selection | `h` | **⌃⌘H** (Preview); `h` |
+| delete the selected mark | `Delete`; more keys: 10.7 | `Delete` (fn+⌫); ⌫: 10.7 |
+| undo / redo a mark change | 10.7: `Ctrl+Z` / `Ctrl+Shift+Z` | 10.7: ⌘Z / ⇧⌘Z |
+| save / cancel the note popup | `Ctrl+Return` / `Escape` | **⌘Return** / `Escape`, **⌘.** |
+| finish the text-box editor | `Escape` (or a click elsewhere) | same |
+| dialogs (external link, Save / Don't Save / Cancel): press the focused button / cancel | `Return` / `Escape` | `Return` / `Escape`, **⌘.** |
+| selection bubble, Highlight pop-over, tools | mouse; `Escape` (its rules: task 10.6) | same |
+| text fields (find, go-to, page field): select all, copy, paste, cut | Tk's entry keys (`Ctrl+/`, `Ctrl+C`, `Ctrl+V`, `Ctrl+X`) | Tk's aqua entry keys (⌘A, ⌘C, ⌘V, ⌘X) |
+
+**How it is built.** The X11 keys are bound by `Viewer.setupScript` (plain keys) and
+`Menu.platformScript` (Ctrl keys); on aqua (`tk windowingsystem` = `aqua`) `platformScript`
+adds the macOS keys and sets the menus' accelerators to the macOS form (`Command-S`,
+`Command-Option-G`, `Control-Command-S`, `Command-[`, which Tk's aqua menus draw as ⌘S, ⌥⌘G,
+⌃⌘S, ⌘[); the Save tooltip, the sidebar tooltip and the status hints follow
+(`Menu.Platform.keyText`: `Ctrl+S` → ⌘S, `F9` → ⌃⌘S). The table is pure Lean in `Menu.lean`:
+`Menu.Key` (with the macOS-only `ctrl` modifier), `Cmd.key` / `Cmd.primaryKeys` (X11),
+`Cmd.macKeys` (macOS; by default the Command twins of the Ctrl keys), `Menu.Action` (find
+next / previous, not menu commands), `Menu.keyTable` (every sequence bound on the main window
+with its script, per platform). Its `#guard`s check that every command with a Ctrl key has
+Command keys on macOS, that every command with a key on X11 shows one on macOS, that the
+macOS table extends the X11 one only by Command sequences, that no sequence runs two
+different scripts on either platform (Tk picks the binding with the most modifiers, so ⌃⌘S
+and ⌘S, ⌥⌘G and ⌘G do not overlap), and that no Command binding reaches X11 (where Tk reads
+`Command` as Meta). ⌘. is bound by `::safepdf::cancelBind W SCRIPT`, which the dialogs and
+the note popup call beside their Escape binding (a no-op off aqua).
+
+Deliberate differences: on X11 `Ctrl+G` stays Go to page and find next is `F3` (as in Okular
+and Firefox); on macOS ⌘G is Find next as everywhere on the Mac, so Go to
+page moves to ⌥⌘G. Back / Forward and first / last page take the Mac's document keys (⌘[ ⌘],
+⌘↑ ⌘↓) because PageUp/Home/End need fn on Mac keyboards. ⌘H is the system's Hide, so
+Highlight is ⌃⌘H as in Preview; ⌘, (Preferences) and ⌘? (Help) are not bound — the viewer
+has neither. Not verified on a real Mac: whether Tk 9 reports the keysym `g` for ⌥⌘G (with
+Option held some layouts change the character; `Ctrl+G` still works there).
 
 **Icon (9.r3).** The application/window icon is the logo's document mark
 (`docs/branding/icon-{16,32,64,128,256,512}.png`, generated once from
@@ -170,7 +211,8 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     300 %, 400 % (`Toolbar.ZoomChoice.presets`, radio entries). A zoom reached with − / +, the
     keys or Ctrl+wheel that is not in the list (33 %, 67 %, 600 %, …) shows as its percentage
     with no entry checked (PDF.js's custom option).
-  * *right*: Highlight (works since 9.4: highlights the selection in the current colour;
+  * *right*: **Select text** (10.8, an I-beam icon; the default tool, see *Select-text tool
+    and cursors* below), Highlight (works since 9.4: highlights the selection in the current colour;
     without a selection it turns the Highlight tool on and opens its pop-over, or off (9.8);
     see *Selection bubble and Highlight pop-over*), Add comment (9.9: Add note… on the
     selection, else at the window centre), Add text and Draw (9.9, see *Add text and Draw*),
@@ -184,6 +226,37 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
   * Buttons are 32 px canvases with round hover (`#e4e4e9`), pressed and toggled backgrounds,
     16 px icons in `#3b3b44`, dimmed when disabled (PDF.js: opacity 0.5); a tooltip appears
     after 600 ms; separators are 1 px × 20 px.
+* **Select-text tool and cursors** (10.8, Plan.md §6 Phase 10; `Toolbar.Mode`,
+  `Toolbar.cursorFor`). Exactly one of Select text, Highlight, Add text, Draw is the active
+  tool, and its button shows toggled (`Toolbar.pressed_unique`). The active tool is read off
+  the tool state (`Bubble.Ui`), never stored apart: Add text / Draw when that mode is on, else
+  Highlight when its tool is on, else Select text — the default at start-up and after a
+  document closes (`Mode.of_default`). PDF.js has no Select button: its editor-mode buttons
+  toggle and "no editor" is the default; here that state has a button. Picking another tool
+  unpresses Select text; turning that tool off with its own button gives it back
+  (`Mode.of_selectEditor_twice`, `Mode.of_toolClick_twice`); the Select text button turns the
+  others off with their pop-overs (`Toolbar.selectTool`, `Mode.of_selectTool`; an open text
+  box is committed). Escape still only closes a pop-over and keeps the tool (10.6). The page
+  canvas cursor telegraphs what a press does there, from what lies under the pointer
+  (`Toolbar.hitOf`, in the click's order: a mark, else a link, else a glyph box of the page
+  text `Select.Cell.box`, else nothing):
+
+  | tool | text | link | mark | elsewhere |
+  |---|---|---|---|---|
+  | Select text, Highlight | `xterm` (I-beam) | `hand2` | `hand2` | default arrow |
+  | Add text | `xterm` | `xterm` | `hand2` | `xterm` |
+  | Draw | `crosshair` | `crosshair` | `crosshair` | `crosshair` |
+
+  Tk's portable names, which Tk Aqua maps to the native I-beam, pointing hand and crosshair.
+  Choices: a mark shows the hand because a click selects it (as a link click follows the link;
+  a drag from a highlight still selects the text under it); Add text shows the I-beam
+  everywhere, as PDF.js (`--editorFreeText-editing-cursor: text`), since a click places a
+  text box even over a link; Draw shows a crosshair where PDF.js shows a pen. PDF.js's free
+  highlight (drawing a highlight over non-text in Highlight mode) is not implemented, so
+  Highlight keeps the arrow off the text. The cursor is updated on `<Motion>` (`Viewer.hover`:
+  `Links.linkAt` and `Marks.Store.hitAt`, and the per-page cached text index only for Select
+  text / Highlight over nothing else) and after every tool change at the last pointer position
+  (`Viewer.refreshCursor`); Tk is called only when the cursor changes.
 * **Opening and closing the sidebar** (9.r4): the canvas changes width with it. Window
   resizes are reported to Lean 100 ms after the last `<Configure>` (a window drag sends many),
   so before 9.r4 the canvas showed the old layout in the new width for that time — the page,
@@ -587,8 +660,13 @@ back from a file with its own id).
   blending into the pixels is the closest match. Notes, the dashed outline of a note's
   anchor text and the selected mark's outline (`#0060df`, PDF.js's selected-editor blue) are
   canvas items (tag `mark`) drawn below the selection and search highlights.
-* **Notes**: Add note… (Edit menu: on the selection, else at the window centre; context
-  menu: on the selection, else at the right-clicked point) adds a yellow note and opens its
+* **Notes**: Add note… (Edit menu, no click position: a comment on the selection if there is
+  one, else on the selected highlight's comment, else a point note at the window centre;
+  context menu: a note at the right-clicked point, unless the click is inside the selection's
+  highlight boxes, which makes it a comment on the selection — a click on an empty spot far
+  from the selection never turns the selection into a comment, task 10.17,
+  `Marks.noteAnchor`; the selection bubble's Add comment has no click position, so it
+  comments on the selection) adds a yellow note and opens its
   popup (a small window: text, Delete, Save (Ctrl+Return), Cancel/Escape; closing it is
   described below). A note shows as a
   speech-bubble icon of 20 × 20 page units (the size of a `/Text` annotation icon; it scales
@@ -936,9 +1014,38 @@ page copies exactly the page text of the text view.
   pointer, in reading order, are selected (`Select.dragRange`). A click without moving clears
   the selection. **Double-click** selects a word (letters, digits, non-ASCII characters
   without a separator in between, `Select.wordAt`). **Ctrl+A** selects the page.
-* The selection is drawn as canvas rectangles over the page image (one per line run,
-  `Select.rangeBoxes`, mapped back with `Geom.toScreen`), stippled 50 % blue; the page is not
-  re-rendered. On macOS (Aqua has no stipples) highlights are outlines instead.
+* The selection is drawn over the page image (mapped back with `Geom.toScreen`; the page is
+  not re-rendered) as a **continuous light-blue fill** as in PDF.js and Preview (task 10.18,
+  `Select.selBands`): one band per selected line, spanning the line's full height (lowest to
+  highest glyph box of the whole line); the first line from the selection start to the line's
+  end, interior lines from the line's start to its end, the last line from its start to the
+  selection end (a single line from the start glyph to the end glyph). Consecutive bands are
+  joined, both edges moved to the middle of the gap, when both lines are left-to-right
+  horizontal, the layout puts a plain line break (`"\n"`) between them (never across a
+  paragraph break `"\n\n"` or a column change) and the gap is at most the smaller band's
+  height. Bands only grow, so tightly set lines whose bands overlap stay as they are; rotated
+  and vertical lines keep their selected glyphs' run box (`Select.rangeBoxes`) and are not
+  joined. Band edges are rounded to the nearest pixel, so joined bands share a pixel edge. The
+  bands are translucent photo items (`::safepdf::tint`, `#3874f2` at 35 %) on **both**
+  platforms; copy and search ranges are unchanged. Checked by `#guard`s in `Select` and the
+  theorems `shape_covers`, `bandAt_covers` (bands cover every selected glyph box) and
+  `bandAt_meet` (joined bands meet), and by smoke case 10.10 (`sel-bands`). **Highlight
+  rendering** (task 10.10): on X11 the search hits are canvas rectangles stippled 50 %
+  (`-stipple gray50`; hits yellow, the current hit orange). Tk Aqua has no
+  stipples (they used to be outlines there), so on macOS each box is a canvas **image item
+  showing a translucent photo** (`::safepdf::tint`): the colour at alpha 35 % for the
+  selection (`#3874f2`, over white ≈ `#b9cefa`) and 50 % for hits (`#ffff00`, current
+  `#ffa500`), `Viewer.Tint`. Tk composites the photo's alpha over the page image, so glyph ink
+  stays visible and paper is tinted. One photo per colour, alpha and pixel size is shared by
+  every box of that size (smoke case 10.10 allows at most 12 photos for 561 hits of one word); after each overlay
+  redraw `::safepdf::tintGc` deletes the photos no item shows (`image inuse`). A single
+  page-sized overlay image composited in Lean was rejected: it costs O(page pixels) per redraw
+  (≈ 150 ns/px for Lean compositing, ~130 ms on a 612 × 792 pt page at 133 %, on every drag
+  motion), the per-box photos O(boxes). X11 keeps the stipples for search hits (Tk's X11 alpha
+  blending reads the window back per redraw, and a page can have hundreds of hits; the
+  selection is one band per line); switching it is the `State.stipple` flag. User
+  highlight marks are not affected (multiplied into the page image, below); unsaved drawings
+  with an opacity below 88 % are stippled on X11 and opaque on Aqua.
 * **Ctrl+C** (or the right-button menu: Copy, Select all, Find…) copies the selected text
   (`Select.rangeText`) with `clipboard clear; clipboard append -- TEXT`, the text one word
   quoted by `Tcl.quote`. The selection is per page and cleared when the page changes.
@@ -1110,8 +1217,11 @@ system library directories as `-Wl,-L…` (searched after the toolchain's) plus
 
     scripts/viewer-smoke.sh [--no-build]
 
-Builds `viewer`, then runs it with `SAFEPDF_VIEWER_SMOKE=DIR` (uses `$DISPLAY` when an X
-server answers, else `xvfb-run -a`). In smoke mode the viewer drives itself with Tk key
+Builds `viewer`, then runs it with `SAFEPDF_VIEWER_SMOKE=DIR` (on Linux: uses `$DISPLAY` when
+an X server answers, else `xvfb-run -a`; on macOS see below). It ends with a summary: cases
+passed, skipped (with the reason) and failed on this platform (`case_begin NAME` starts a case;
+a new case appended to the script starts with it too). `SAFEPDF_SMOKE_KEEP=1` keeps the work
+directory (printed at the start) for inspection. In smoke mode the viewer drives itself with Tk key
 events (`event generate`) and writes photos and state files (`Viewer.smoke`): `f` (fit page;
 the viewer opens in Automatic Zoom), `page-1.ppm`,
 `Next`, `page-2.ppm` + `state.txt` (title, status, page), `Home` `0` → `zoom-100.ppm`, `+` →
@@ -1161,7 +1271,7 @@ First, Previous at the start (stays), Go to page… (`ii` → page 2), Back, For
 entry states checked on pages 1 and 3 and after the jump); View → Outline twice (panel and
 check variable follow), Actual size, Zoom in (125 %), Zoom out, Fit width, Fit page, Rotate
 right/left; Edit → Find… (bar mapped), Select all (no text on that page); File → Close (title
-`safe-pdf`, document entries disabled) and File → Quit, which ends the run. Before closing, the
+`SafePDF`, document entries disabled) and File → Quit, which ends the run. Before closing, the
 same run checks the wheel (9.2) with generated Tk 9 `<MouseWheel>` events: in fit page one
 notch down turns to page 2 and one up back to page 1; at 200 % notches scroll page 1 down,
 the view reaches the bottom and exactly one notch more turns to the top of page 2; eleven
@@ -1359,17 +1469,29 @@ field, the overflow menu, `.` and fresh probe widgets carry none of the resource
 the entries, posts the menu and runs keyboard traversal; the `wish` checks that it got the
 resources itself (control), lists `winfo interps` (only itself) and tries `send` to every
 interpreter and to `tk`/`viewer`/`safe-pdf` (all fail); no `pwned` file. A second run with
-`SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`.
+`SAFEPDF_VIEWER_DRIVE=1` must reach the viewer through `send`: the viewer then renames itself
+`safepdf-lock-PID` and records it (`appname` in `lockdown.txt`), the `wish` sends to exactly that
+name with `send -async` and the script creates a file `sent` (10.19). On Aqua the lockdown half
+tries only `tk`/`viewer`/`safe-pdf` (`winfo interps` lists every Tk interpreter of the user,
+also other runs'), and when the control fails while a baseline `send` between two plain `wish`
+processes fails too (Tk Aqua delivers no AppleEvents in this session, seen with a locked
+screen), the control is skipped, not failed.
 
 The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
 (X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`
 binding, no `::tk::mac::Quit`, Save tooltip `Save (Ctrl+S)`, Ctrl+A selects) and with
 `SAFEPDF_VIEWER_PLATFORM=aqua` (honoured only in smoke mode; it installs the macOS mapping
 on X11, where Tk's `Command` modifier is Meta): `Command-O`/`Command-S`/`Command-Shift-S`/
-`Command-Q`/`Command-+`/`Option-Left` labels, `<Command-Key-s>`, `<Command-Key-S>` and
+`Command-Q`/`Command-+`/`Command-[` labels (`Option-Left` before 10.9), `<Command-Key-s>`, `<Command-Key-S>` and
 `<Shift-Command-Key-s>` bound to Save / Save As, `<Command-Key-q>` on `.` and in the find bar,
 `::tk::mac::Quit` = `::safepdf::emit quit`, tooltip `Save (⌘S)`, and a generated
-`<Command-Key-a>` selects all (status `… (⌘C copies)`). Both runs check the six icon images
+`<Command-Key-a>` selects all (status `… (⌘C copies)`); task 10.9 adds the labels
+`Command-Option-G` (Go to page), `Command-Up`, `Command-]`, `Control-Command-S`, `Command-L`, the
+bindings `<Command-Key-g>` / `<Command-Key-G>` (find next / previous, also in the find bar),
+`<Option-Command-Key-g>` and `<Control-Key-g>` (Go to page), `<Command-Key-bracketleft>`,
+`<Command-Key-Up>`, `<Control-Command-Key-s>`, `<Command-Key-l>`, `<Command-Key-9>` and the
+⌘. body of `::safepdf::cancelBind` — and on X11 their absence, `Ctrl+G`/`Home`/`Alt+Right`/
+`F9`/`Shift+R` labels and an empty `cancelBind`. Both runs check the six icon images
 (16–512 px) and, when `xprop`/`xwininfo` are installed, that the toplevel's wrapper carries
 `_NET_WM_ICON` starting with `512, 512`.
 
@@ -1495,6 +1617,71 @@ by hand (a 16 KiB tmpfs: `cannot save to f.pdf: resource exhausted (… no space
 device)`, the title keeps `* `, Quit → Save stays open with `quitting cancelled`, no
 temporary file); `ulimit -f` cannot simulate it (SIGXFSZ kills the process).
 
+### Smoke test on macOS (10.11)
+
+On macOS (`uname -s` = Darwin) the script runs the viewer natively on Tk Aqua (Homebrew
+`tcl-tk` 9.x): no X server, no `xvfb-run`; the whole script takes 2–3 minutes.
+
+**Background mode (the default).** You can keep working while it runs: in smoke mode on
+macOS the shim (`c/tk_shim.c`, `safepdf_prohibit_activation`) sets the application's
+activation policy to *Prohibited* before and after `Tk_Init` (no Dock icon, no menu bar, never
+the active app) and makes every toplevel transparent (`-alpha 0`) and `.` off screen
+(`+-30000+-30000`). Rendering, photos and `event generate` key/mouse events still work (case 1
+gives the same `state.txt` and `view.txt` as a foreground run), but with no active application
+Tk has no keyboard focus, so: the focus part of 1r's prompt answers, of 1t's `menu-open` and of
+the 10.6 `dismiss` rows is dropped; 1s expects no full screen (`true,0`, as without a window
+manager); 1q is skipped (it times out without an active app). Normal (non-smoke) launches are
+unchanged.
+
+**Leak-proofing (10.16).** Setting the policy was not enough: during `Tk_Init` Tk itself calls
+`[NSApp setActivationPolicy:Regular]` and `[NSApp activateIgnoringOtherApps:YES]` (the viewer
+was briefly a Foreground app and sometimes became the front app about a second after launch,
+seen in the `tint` and `edit` cases), every smoke `sendKey`/`sendEvent` (`focus -force`) asks
+for activation again (~1,900 times per run), and with the screen unlocked
+`wm attributes . -fullscreen 1` (1s) put the hidden window into native full screen (a new
+Space). So in background mode the shim (`safepdf_block_activation`, installed before
+`Tk_Init`) overrides, on Tk's `TKApplication`, `setActivationPolicy:` (always Prohibited),
+`activateIgnoringOtherApps:`, `activate` and `unhide:` (no-ops), and on `NSWindow`/`TKWindow`
+`toggleFullScreen:` (no-op). `SAFEPDF_SMOKE_TRACE_ACTIVATION=1` logs every blocked call to
+stderr with a millisecond timestamp. To check a run, sample the front application and the
+viewer's application type (`lsappinfo list`: `type="BackgroundOnly"` expected, never
+`Foreground`) every ~0.2 s while the script runs; a viewer from your checkout that is ever in
+front must be killed by pid (never `pkill -f viewer`: the user may have their own open).
+
+**Foreground mode** (`SAFEPDF_SMOKE_FOREGROUND=1`, for when nobody uses the machine): the
+windows show on screen and the app is activated, and every check runs with the full aqua
+expectations below. macOS does not let a background process take the keyboard focus from the
+app you are using, so the focus-dependent cases (1q, 1r, 1s, 1t) fail or time out if you work
+meanwhile or the screen is locked (the script warns when the front app is `loginwindow`).
+
+GNU `stat -c` and `cmp -n` are replaced by BSD equivalents on macOS (`file_size`, `file_mode`,
+`cmp_prefix`).
+
+What differs on Aqua, and how the script handles it:
+
+* **1l lockdown** runs (Tk Aqua has `send` and reads `~/.Xdefaults`). `winfo interps` lists
+  every Tk interpreter of the user, not of one display, so other Tk programs may appear; the
+  check instead requires every `send` to fail with "no application named" or inside an
+  interpreter without `::safepdf` (not a viewer).
+* **1p keys** and **1r savedlg**: only the aqua variant runs (natively); the X11 variant is
+  skipped — Tk Aqua cannot install the X11 mapping or dialog options.
+* **1s opensettings**: page 1 alone in an even spread is checked against the midpoint of
+  TwoColumnLeft's columns (the canvas width, hence the pixel x, differs); with a window manager
+  `wm attributes . -fullscreen` reads back 1 while in full screen; `smokeOpenSettings` waits
+  1 s before Escape on Aqua, which ignores leaving full screen while the window is still
+  entering it.
+* Everything else runs with the Linux expectations (pixel checks read the page photos, so
+  translucent highlights and Retina scaling do not matter; `tk scaling` here is 1.334).
+* `qpdf`, `xprop`/`xwininfo` and ImageMagick `import` checks skip themselves when missing, as
+  on Linux.
+
+Known macOS failures (real viewer bugs, left failing and named in the summary as
+`KNOWN-MAC-BUG`): **1i bubble** and **1m async** — at `tk scaling` 1.334 Automatic Zoom capped
+at 125 % quantises to 106/64 and shows 124 %; Zoom In goes to 125 %, the same quantised zoom,
+so `+` does nothing visible and `+` `-` ends at 100 % (1i's later clicks miss; 1m sees no
+second render). **1s opensettings** — a `/PageMode /FullScreen` file's status line lacks
+"full screen (Escape leaves)" until the next status update.
+
 CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
 builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
 cache keys at `lakefile.lean`).
@@ -1519,7 +1706,7 @@ The `m9` / `m9-reopen` smoke runs (see "Smoke test" above) on the two fixtures a
     wheel-facing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=7 monotone=true field=15 last=true bottom=true
     wheel-cfacing: seen=1,2,3,4,5,6,7,8 spreads=8 notches=42 monotone=true field=15 last=true bottom=true
     saved: true false 4 4
-    closed: true 0 safe-pdf
+    closed: true 0 SafePDF
     reopened: true 4 4 false false
     marks-reopened: highlight 0 yellow 1 | ink 0 2 [5, 5] 4 100 #0060DF | note 0 yellow M9 note ✓ [x] | text 0 M9 text 59 60 16 #D70022
     pixels-reopened: hl=55 note=30 text=14 ink=10

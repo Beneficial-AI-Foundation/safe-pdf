@@ -107,9 +107,16 @@
 #      turns its sibling off, the locked group stays, thumbnails follow, Save keeps the state
 #      and leaves /OCProperties alone, reopening restores the defaults, no Layers button
 #      without optional content (9.r11b);
+#   10.10. highlight fills (SAFEPDF_VIEWER_SMOKE_MODE=tint): on Aqua the selection and search hits
+#      are translucent photo items over the page (ink visible through, paper tinted, composited
+#      from the probed pixels), on X11 the hits are stippled rectangles and the selection photo
+#      items; the selection is one band per line, joined lines touching (10.18); drawing times
+#      printed;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
 #      status line.
-# Uses $DISPLAY when an X server answers there, else `xvfb-run -a`. Exit 0 on success.
+# Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
+# natively on Tk Aqua (task 10.11, docs/viewer.md "Smoke test on macOS"). Ends with a summary of
+# the cases passed / skipped / failed. Exit 0 on success.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,9 +129,61 @@ fi
 viewer="$repo/.lake/build/bin/viewer"
 [ -x "$viewer" ] || { echo "viewer-smoke: $viewer not built" >&2; exit 1; }
 
+# Pick the platform (task 10.11): on macOS (Darwin) the viewer runs natively on Tk Aqua, its
+# window shown on screen, with no X server; everywhere else the X logic below is unchanged.
+# `wrap=(env)` keeps "${wrap[@]}" non-empty for bash 3.2 (/bin/bash on macOS) under set -u.
+platform=x11
+if [ "$(uname -s)" = Darwin ]; then platform=aqua; fi
+
+# Per-case results for the summary at the end. case_begin NAME starts a case (the global
+# `fail` flag is saved and cleared), case_end records it as passed or failed and merges the
+# flag back; skip_case NAME REASON records a case (or a variant of one) that cannot run on
+# this platform. A failure outside any case is reported as such.
+cases_pass=(); cases_fail=(); cases_skip=()
+cur_case=""; fail_saved=0
+# Tcl errors (task 10.20): `run_viewer` appends every `Tcl error` line the viewer prints on
+# stdout or stderr to $tcl_log; a case fails when it added any (the lines are printed).
+tcl_log=""; tcl_seen=0
+tcl_count() { if [ -f "$tcl_log" ]; then wc -l < "$tcl_log" | tr -d ' '; else echo 0; fi; }
+case_begin() {
+  if [ -n "$cur_case" ]; then case_end; fi
+  cur_case="$1"; fail_saved="$fail"; fail=0; tcl_seen="$(tcl_count)"
+}
+case_end() {
+  [ -n "$cur_case" ] || return 0
+  if [ "$(tcl_count)" -gt "$tcl_seen" ]; then
+    echo "FAIL: $cur_case: the viewer printed Tcl errors:" >&2
+    tail -n +"$((tcl_seen + 1))" "$tcl_log" | sed 's/^/  /' >&2
+    fail=1
+  fi
+  if [ "$fail" = 0 ]; then cases_pass+=("$cur_case"); else cases_fail+=("$cur_case"); fi
+  if [ "$fail_saved" != 0 ]; then fail=1; fi
+  cur_case=""; fail_saved=0
+}
+skip_case() {
+  echo "viewer-smoke: SKIP ($platform): $1 — $2"
+  cases_skip+=("$1 — $2")
+}
+# known_bug NAME REASON (macOS only): the case NAME is expected to fail there because of a
+# real viewer bug (not a test-environment difference); its checks still run and fail, and the
+# summary names the bug next to the failure.
+known_bugs=()
+known_bug() {
+  if [ "$platform" = aqua ]; then known_bugs+=("$1|$2"); fi
+}
+
 # Pick a display.
 wrap=()
-if [ -n "${DISPLAY:-}" ] && { command -v xdpyinfo >/dev/null 2>&1 && xdpyinfo >/dev/null 2>&1 \
+if [ "$platform" = aqua ]; then
+  wrap=(env)
+  echo "viewer-smoke: using Tk Aqua (macOS; the viewer window appears on screen)"
+  # A locked screen (front application loginwindow) gives no app the keyboard focus or full
+  # screen: the focus-dependent cases (1q, 1r, 1s, 1t) then fail.
+  if [ "${SAFEPDF_SMOKE_FOREGROUND:-}" = 1 ] && command -v lsappinfo >/dev/null 2>&1 \
+      && lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null | grep -q loginwindow; then
+    echo "viewer-smoke: WARNING (aqua): the screen is locked; focus-dependent cases will fail" >&2
+  fi
+elif [ -n "${DISPLAY:-}" ] && { command -v xdpyinfo >/dev/null 2>&1 && xdpyinfo >/dev/null 2>&1 \
     || [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; }; then
   echo "viewer-smoke: using DISPLAY=$DISPLAY"
 elif command -v xvfb-run >/dev/null 2>&1; then
@@ -135,16 +194,53 @@ else
   exit 1
 fi
 
+# File size and permission bits (GNU stat on Linux, BSD stat on macOS); cmp_prefix A B:
+# A's bytes are a prefix of B (BSD `cmp -n` reports EOF when A ends at the limit).
+if [ "$platform" = aqua ]; then
+  file_size() { stat -f %z "$1"; }
+  file_mode() { stat -f %Lp "$1"; }
+  cmp_prefix() { head -c "$(file_size "$1")" "$2" | cmp - "$1"; }
+else
+  file_size() { stat -c %s "$1"; }
+  file_mode() { stat -c %a "$1"; }
+  cmp_prefix() { cmp -n "$(file_size "$1")" "$1" "$2"; }
+fi
+
+# Background mode (task 10.11, the macOS default): the shim (c/tk_shim.c) makes a smoke run
+# never activate and keeps its windows invisible and off screen, so the user can keep working
+# (since 10.16 it also blocks Tk's own activation requests and native full screen;
+# SAFEPDF_SMOKE_TRACE_ACTIVATION=1 logs each blocked call).
+# With no active application Tk has no keyboard focus: checks that read the focus are relaxed
+# (the focus part is dropped) and 1q is skipped. SAFEPDF_SMOKE_FOREGROUND=1 runs the old
+# foreground mode (windows on screen, the app activated: leave the machine alone meanwhile).
+SAFEPDF_SMOKE_BG=0
+if [ "$platform" = aqua ] && [ "${SAFEPDF_SMOKE_FOREGROUND:-}" != 1 ]; then
+  SAFEPDF_SMOKE_BG=1
+  echo "viewer-smoke: background mode (windows hidden, never activated; SAFEPDF_SMOKE_FOREGROUND=1 for the foreground run)"
+fi
+export SAFEPDF_SMOKE_BG
+
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+tcl_log="$work/tcl-errors.log"
+if [ -n "${SAFEPDF_SMOKE_KEEP:-}" ]; then
+  echo "viewer-smoke: keeping the outputs in $work (SAFEPDF_SMOKE_KEEP)"
+else
+  trap 'rm -rf "$work"' EXIT
+fi
 
 # run_viewer DIR FILE: smoke-mode run with a 60 s timeout. Files open in vertical scrolling
 # since 9.r1; the cases written for the single-page view keep it through SAFEPDF_VIEWER_VIEW
 # (set it empty for the real default, as case 1o does).
 run_viewer() {
   mkdir -p "$1"
+  local o e rc=0
+  o="$(mktemp)"; e="$(mktemp)"
   SAFEPDF_VIEWER_VIEW="${SAFEPDF_VIEWER_VIEW-single}" SAFEPDF_VIEWER_SMOKE="$1" \
-    timeout 60 "${wrap[@]}" "$viewer" "$2"
+    timeout 60 "${wrap[@]}" "$viewer" "$2" >"$o" 2>"$e" || rc=$?
+  cat "$o"; cat "$e" >&2
+  grep -h 'Tcl error' "$o" "$e" >> "$tcl_log" || true
+  rm -f "$o" "$e"
+  return "$rc"
 }
 
 # ppm_stats FILE: prints "W H NONWHITE" for a binary PPM (P6, maxval 255).
@@ -173,6 +269,7 @@ print(w, h, nonwhite)
 
 fail=0
 
+case_begin "1 two-page PDF"
 # 1. Two-page vector PDF.
 python3 -I "$here/viewer-smoke-pdf.py" "$work/two.pdf"
 run_viewer "$work/out" "$work/two.pdf"
@@ -185,11 +282,12 @@ if [ "$n1" -lt $((w1 * h1 / 10)) ]; then echo "FAIL: page 1 is (nearly) blank" >
 if [ "$n2" -lt 100 ]; then echo "FAIL: page 2 is (nearly) blank" >&2; fail=1; fi
 if [ "$w2" -le "$h2" ]; then echo "FAIL: page 2 (/Rotate 90) is not landscape" >&2; fail=1; fi
 grep -q '^page: 2/2$' "$work/out/state.txt" || { echo "FAIL: Next key did not reach page 2" >&2; fail=1; }
-grep -q '^title: two.pdf - page 2/2 - safe-pdf$' "$work/out/state.txt" \
+grep -q '^title: two.pdf - page 2/2 - SafePDF$' "$work/out/state.txt" \
   || { echo "FAIL: unexpected window title" >&2; fail=1; }
 grep -q '^status: .*from cache' "$work/out/state.txt" \
   || { echo "FAIL: page 2 was not prefetched into the cache" >&2; fail=1; }
 
+case_begin "1a zoom/rotation"
 # 1a. Zoom and rotation (task 8.2b): image sizes and ink scale with the zoom; rotation swaps.
 read -r wa ha na < <(ppm_stats "$work/out/zoom-100.ppm")
 read -r wi hi ni < <(ppm_stats "$work/out/zoom-in.ppm")
@@ -205,6 +303,7 @@ within 0.50 0.62 "$no" "$na" || { echo "FAIL: ink does not shrink with zoom out"
 if [ "$wr" != "$ho" ] || [ "$hr" != "$wo" ]; then echo "FAIL: rotation did not swap the sides" >&2; fail=1; fi
 within 0.95 1.05 "$nr" "$no" || { echo "FAIL: rotated page has different ink" >&2; fail=1; }
 
+case_begin "1b scrolling/anchoring"
 # 1b. Scrolling and C2 anchoring at 200% (view.txt from the viewer's smoke mode).
 cat "$work/out/view.txt"
 python3 -I -c '
@@ -229,15 +328,17 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out/view.txt" || fail=1
 
+case_begin "1c odd file name"
 # 1c. A file name full of Tcl metacharacters reaches the title verbatim (no script injection:
 # every data word goes through the proved `Tcl.quote`).
 odd='odd [exit 7] $HOME {x" \.pdf'
 cp "$work/two.pdf" "$work/$odd"
 run_viewer "$work/out-odd" "$work/$odd"
-grep -qxF "title: $odd - page 2/2 - safe-pdf" "$work/out-odd/state.txt" \
+grep -qxF "title: $odd - page 2/2 - SafePDF" "$work/out-odd/state.txt" \
   || { echo "FAIL: odd file name not shown verbatim" >&2; fail=1; }
 echo "odd name: $(grep '^title:' "$work/out-odd/state.txt")"
 
+case_begin "1d text/select/search"
 # 1d. Selection, copy and search (task 8.2c) on a generated two-page text PDF (Helvetica):
 # Ctrl+A + Ctrl+C must put the page text (as the inspector's text view extracts it) on the
 # clipboard; a double click on "safe" copies "safe"; a drag from the first glyph to the end of
@@ -325,6 +426,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-text" "$work/text.json" || fail=1
 
+case_begin "1e nav"
 # 1e. Outline, links, history, page labels (task 8.2d) on a generated three-page PDF labelled
 # i, ii, 1 (SAFEPDF_VIEWER_SMOKE_MODE=nav): the outline panel opens with Intro, Chapter (a
 # UTF-16 title) > Section; hovering the internal link shows a hand cursor and its target, a
@@ -384,7 +486,7 @@ v = dict(l.split(": ", 1) for l in open(d + "/nav.txt", encoding="utf-8").read()
          if ": " in l)
 rd = lambda n: open(d + "/" + n, encoding="utf-8").read()
 want = {
-    "title0": "nav.pdf - page i (1/3) - safe-pdf",
+    "title0": "nav.pdf - page i (1/3) - SafePDF",
     "outline-shown": "true",
     "outline-titles": "Intro|Chapter|Section",
     "outline-depths": "[0, 0, 1]",
@@ -392,7 +494,7 @@ want = {
     "cursor-internal": "hand2",
     "status-hover-internal": "go to page 1 (3/3)",
     "page-after-link": "3",
-    "title-after-link": "nav.pdf - page 1 (3/3) - safe-pdf",
+    "title-after-link": "nav.pdf - page 1 (3/3) - SafePDF",
     "page-after-back": "1",
     "page-after-forward": "3",
     "page-after-back2": "1",
@@ -400,7 +502,7 @@ want = {
     "status-hover-uri": "external link (click to copy the address): " + uri,
     "page-after-uri": "1",
     "page-after-outline-section": "2",
-    "title-after-outline-section": "nav.pdf - page ii (2/3) - safe-pdf",
+    "title-after-outline-section": "nav.pdf - page ii (2/3) - SafePDF",
     "page-after-outline-chapter": "3",
     "page-after-goto-ii": "2",
     "page-after-goto-1": "3",
@@ -420,6 +522,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-nav" "$work/nav-uri.txt" || fail=1
 
+case_begin "1f menubar"
 # 1f. Menubar (task 9.1) on the same three-page PDF (SAFEPDF_VIEWER_SMOKE_MODE=menu): the
 # menubar File / Edit / View / Go is attached to the window with the expected entries; every
 # action is invoked through `.menubar.*` entries: Go (next, last, first, previous, Go to
@@ -439,12 +542,13 @@ v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().sp
          if ": " in l)
 want = {
     "menubar": ".menubar",
-    "cascades": "File|Edit|View|Go",
+    "cascades": "File|Edit|View|Go|Help",
     "entries.menubar.file": "Open...|Save|Save As...|Import annotations...|Export annotations...|Close|Quit",
-    "entries.menubar.edit": "Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
+    "entries.menubar.edit": "Undo|Redo|Copy|Select all|Highlight selection|Highlight colour|Add note...|Delete mark|Highlight tool|Show all highlights|Find...",
     "entries.menubar.view": "Sidebar|Zoom in|Zoom out|Actual size|Fit page|Fit width|Rotate right|Rotate left|"
                             "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "entries.menubar.go": "Previous page|Next page|First page|Last page|Go to page...|Back|Forward",
+    "entries.menubar.help": "About SafePDF",
     "states-page1": "Previous page=disabled,Next page=normal,First page=disabled,Last page=normal,"
                     "Back=disabled,Forward=disabled,Copy=disabled,Sidebar=normal",
     "toolbar-prev-page1": "disabled",
@@ -470,7 +574,7 @@ want = {
     "rot-after-right": "90",
     "rot-after-left": "0",
     "find-bar-mapped": "1",
-    "title-after-close": "safe-pdf",
+    "title-after-close": "SafePDF",
     "states-after-close": "Close=disabled,Next page=disabled,Zoom in=disabled,Open...=normal,Quit=normal",
 }
 want.update({
@@ -505,6 +609,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-menu/menu.txt" || fail=1
 
+case_begin "1g toolbar"
 # 1g. Toolbar and sidebar after PDF.js (task 9.7, SAFEPDF_VIEWER_SMOKE_MODE=toolbar), on the
 # three-page PDF with labels i, ii, 1 and an outline, and on the two-page PDF without one:
 # layout of the three toolbar groups; the sidebar opens (with its toggle shown and pressed)
@@ -525,7 +630,7 @@ import sys
 def load(path):
     return dict(l.split(": ", 1) for l in open(path, encoding="utf-8").read().splitlines() if ": " in l)
 nav, two = load(sys.argv[1]), load(sys.argv[2])
-layout_r = ".bar.r=.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.print,.bar.save,.bar.s4,.bar.more"
+layout_r = ".bar.r=.bar.select,.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.print,.bar.save,.bar.s4,.bar.more"
 layout_m = ".bar.m=.bar.zout,.bar.s2,.bar.zin,.bar.zoom"
 common = {
     "zoom-label0": "Automatic Zoom",
@@ -585,6 +690,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-tb-nav/toolbar.txt" "$work/out-tb-two/toolbar.txt" || fail=1
 
+case_begin "1h marks"
 # 1h. Highlights and notes (task 9.4, SAFEPDF_VIEWER_SMOKE_MODE=marks) on the text PDF of 1d
 # (page 1 white except the black marker under "safe"; substitute fonts off): a double click on
 # "world" + the toolbar's Highlight turns its pixels PDF.js yellow (#FFFF98); Edit > Highlight
@@ -653,6 +759,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-marks/marks.txt" || fail=1
 
+case_begin "1i bubble"
 # 1i. Selection bubble and Highlight pop-over (task 9.8, SAFEPDF_VIEWER_SMOKE_MODE=bubble) on the
 # text PDF of 1d: a drag over "world" shows the float bubble at the end of the selection; its
 # Highlight button highlights in yellow (pixels) and the edit bubble replaces it; a click on
@@ -717,6 +824,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-bubble/bubble.txt" || fail=1
 
+case_begin "1j save/reopen"
 # 1j. Saving marks into the PDF (tasks 9.5c, 9.r2; SAFEPDF_VIEWER_SMOKE_MODE=save, then =reopen)
 # on a copy of the text PDF of 1d (mode 640): a highlight on "world" and a note make the title
 # start with "* " and enable Save; Quit, Ctrl+W and the window's close button answered Cancel
@@ -797,7 +905,7 @@ n = d.count(b"(safepdf-mark-") + d.count(b"<" + b"safepdf-mark-".hex().upper().e
 print("annotated file: %d bytes, %d mark annotations, %d revisions" % (len(d), n, d.count(b"startxref")))
 sys.exit(0 if n == 5 and d.count(b"startxref") == 5 else 1)
 ' "$work/save/text.pdf" || { echo "FAIL: Quit answered Save did not save, or marks were duplicated" >&2; fail=1; }
-[ "$(stat -c %a "$work/save/text.pdf")" = 640 ] || { echo "FAIL: the overwritten file lost its mode 640: $(stat -c %a "$work/save/text.pdf")" >&2; fail=1; }
+[ "$(file_mode "$work/save/text.pdf")" = 640 ] || { echo "FAIL: the overwritten file lost its mode 640: $(file_mode "$work/save/text.pdf")" >&2; fail=1; }
 ! ls -A "$work/save" "$work/out-save" | grep -q '\.tmp$' || { echo "FAIL: a temporary file was left behind" >&2; fail=1; }
 for f in "$work/save/text.pdf" "$work/out-save/saveas.pdf"; do
   if command -v qpdf >/dev/null 2>&1; then
@@ -808,7 +916,7 @@ done
 for pair in "text.pdf out-save/first.pdf" "out-save/first.pdf out-save/after-run1.pdf" \
     "out-save/after-run1.pdf save/text.pdf" "text.pdf out-save/saveas.pdf"; do
   set -- $pair
-  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+  cmp_prefix "$work/$1" "$work/$2" \
     || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
 done
 # Another reader draws the highlight: mutool at 72 dpi, inside the box of "world".
@@ -839,6 +947,7 @@ sys.exit(0 if n and yel * 3 >= n else 1)
 ' "$work/out-save/mutool.ppm" "$work/out-save/save.txt" || { echo "FAIL: mutool does not show the highlight" >&2; fail=1; }
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
+case_begin "1j' edit"
 # 1j'. Editing saved marks (task 9.5g, SAFEPDF_VIEWER_SMOKE_MODE=edit) on a copy of the
 # text.pdf left by the reopen run (5 saved marks): the whole-page highlight and the
 # "safe" highlight are deleted, the "world" highlight recoloured green and commented, a note's
@@ -883,7 +992,7 @@ for f in "$work/out-edit/edit1.pdf" "$work/edit/text-annotated.pdf"; do
 done
 for pair in "out-edit/before.pdf out-edit/edit1.pdf" "out-edit/edit1.pdf edit/text-annotated.pdf"; do
   set -- $pair
-  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+  cmp_prefix "$work/$1" "$work/$2" \
     || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
 done
 if command -v mutool >/dev/null 2>&1; then
@@ -930,6 +1039,7 @@ sys.exit(0 if ok else 1)
     || { echo "FAIL: mutool does not show the edited marks" >&2; fail=1; }
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
+case_begin "1j encrypted"
 # Encrypted input (SAFEPDF_VIEWER_SMOKE_MODE=encrypted): Ctrl+S with a note must not crash; until
 # task 9.5f the writer's refusal shows in the status line before any question (task 9.r2) and
 # nothing is written ("refused": the file byte for byte unchanged), afterwards the opened file
@@ -947,6 +1057,7 @@ if grep -qx 'outcome: refused' "$work/out-enc/encrypted.txt"; then
     || { echo "FAIL: encrypted refusal not shown, asked first, or the file was written" >&2; fail=1; }
 fi
 
+case_begin "1j'' xfdf"
 # 1j''. XFDF import/export (task 9.11, SAFEPDF_VIEWER_SMOKE_MODE=xfdf, `Viewer.smokeXfdf`) on a
 # copy of the text PDF: a highlight on "world" with a comment and a note are exported through
 # File → Export annotations… (the dialog answered by ::safepdf::autoPath) into marks.xfdf,
@@ -1000,6 +1111,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-xfdf/xfdf.txt" "$work/out-xfdf/marks.xfdf" || fail=1
 
+case_begin "1j''' editors"
 # 1j'''. Add text and Draw (task 9.9, SAFEPDF_VIEWER_SMOKE_MODE=editors, `Viewer.smokeEditors`)
 # on a copy of the text PDF (substitute fonts on, so the saved free text is painted): Add text
 # turns its mode and pop-over on; a click at (100, 400) opens a text box, typed text + Escape
@@ -1053,7 +1165,7 @@ for f in "$work/out-editors/editors1.pdf" "$work/editors/text.pdf"; do
 done
 for pair in "text.pdf out-editors/editors1.pdf" "out-editors/editors1.pdf editors/text.pdf"; do
   set -- $pair
-  cmp -n "$(stat -c %s "$work/$1")" "$work/$1" "$work/$2" \
+  cmp_prefix "$work/$1" "$work/$2" \
     || { echo "FAIL: $1 is not a prefix of $2" >&2; fail=1; }
 done
 if command -v mutool >/dev/null 2>&1; then
@@ -1088,6 +1200,7 @@ sys.exit(0 if red > 20 and blue >= 5 else 1)
 ' "$work/out-editors/mutool.ppm" "$work/out-editors/editors.txt" || { echo "FAIL: mutool does not show the free text and the strokes" >&2; fail=1; }
 else echo "viewer-smoke: mutool missing, check skipped"; fi
 
+case_begin "1k view modes"
 # 1k. View modes (task 9.3) on a three-page text PDF (Helvetica, substitute fonts off: white
 # pages): `Alpha` on page 1, `Bravo` on page 2 (y 400), `zebra` on page 3. Every mode through its
 # View menu entry (SAFEPDF_VIEWER_SMOKE_MODE=modes, `Viewer.smokeModes`).
@@ -1152,6 +1265,7 @@ for e in errs: print("FAIL: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-modes/modes.txt" || fail=1
 
+case_begin "1l lockdown"
 # 1l. Tcl lockdown (task 8.7; SAFEPDF_VIEWER_SMOKE_MODE=lockdown): HOME holds a hostile
 #     ~/.Xdefaults (script-valued resources that would create the file `pwned`), and a second
 #     Tk interpreter on the same display tries `send` into the viewer. Without the test hook
@@ -1168,7 +1282,7 @@ if [ -z "$lockwish" ]; then
 else
   cat > "$work/attacker.tcl" <<'TCL'
 wm withdraw .
-lassign $argv dir
+lassign $argv dir plat
 namespace eval ::safepdf {}
 set t0 [clock milliseconds]
 while {![file exists $dir/up] && [clock milliseconds] - $t0 < 40000} { after 50 }
@@ -1178,11 +1292,36 @@ puts $f "control-resources: [.ctl cget -validate] [.ctl cget -validatecommand]"
 .ctl configure -validate none
 puts $f "interps: [winfo interps]"
 set ok 0
-foreach i [lsort -unique [concat [winfo interps] tk viewer safe-pdf]] {
-  if {$i eq [tk appname]} continue
-  set code [catch {send $i {set ::safepdf::lockSent 1}} r]
-  puts $f "send $i: $code $r"
-  if {$code == 0} { incr ok }
+# The viewer started with SAFEPDF_VIEWER_DRIVE=1 reports its unique application name in
+# lockdown.txt (task 10.19): the control sends to exactly that one, asynchronously (a send the
+# viewer never services blocks until it exits), and the viewer proves the script ran by
+# creating $dir/sent; the attacker polls for the file. Without it (the lockdown run) every
+# registered interpreter (X11: the display is the test's own) or, on Aqua, only the usual names
+# (`winfo interps` there lists every Tk interpreter of the user, including other runs' and
+# foreign programs, which must not be sent scripts) are tried.
+set vname ""
+catch {
+  set lf [open $dir/lockdown.txt]
+  foreach l [split [read $lf] "\n"] {
+    if {[string match "appname: *" $l]} { set vname [string range $l 9 end] }
+  }
+  close $lf
+}
+if {$vname ne ""} {
+  set t1 [clock milliseconds]
+  set code [catch {send -async $vname "close \[open $dir/sent w\]; set ::safepdf::lockSent 1"} r]
+  puts $f "send-async $vname: $code $r"
+  while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50 }
+  puts $f "sent-file: [file exists $dir/sent] after [expr {[clock milliseconds] - $t1}] ms"
+  if {[file exists $dir/sent]} { incr ok }
+} else {
+  set cands [expr {$plat eq "aqua" ? {tk viewer safe-pdf} : [concat [winfo interps] tk viewer safe-pdf]}]
+  foreach i [lsort -unique $cands] {
+    if {$i eq [tk appname]} continue
+    set code [catch {send $i {set ::safepdf::lockSent 1}} r]
+    puts $f "send $i: $code $r"
+    if {$code == 0} { incr ok }
+  }
 }
 puts $f "sends-ok: $ok"
 close $f
@@ -1205,8 +1344,34 @@ TCL
 *Toplevel.container: 1
 XD
     env HOME="$d/home" SAFEPDF_VIEWER_SMOKE="$d" SAFEPDF_VIEWER_SMOKE_MODE=lockdown "$@" \
-      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5"; wait $v' _ \
-      "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d"
+      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5" "$6"; wait $v' _ \
+      "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d" "$platform"
+  }
+  # aqua_send_works: two plain wish processes, one asynchronous send between them (15 s).
+  aqua_send_works() {
+    local b="$work/send-base"
+    rm -rf "$b"; mkdir -p "$b"
+    cat > "$b/srv.tcl" <<'TCL'
+wm withdraw .
+tk appname safepdf-send-baseline
+close [open [lindex $argv 0]/up w]
+after 20000 exit
+TCL
+    cat > "$b/cli.tcl" <<'TCL'
+wm withdraw .
+set d [lindex $argv 0]
+set t0 [clock milliseconds]
+while {![file exists $d/up] && [clock milliseconds] - $t0 < 10000} { after 50 }
+catch {send -async safepdf-send-baseline "close \[open $d/got w\]"}
+set t0 [clock milliseconds]
+while {![file exists $d/got] && [clock milliseconds] - $t0 < 15000} { after 50 }
+exit
+TCL
+    "$lockwish" "$b/srv.tcl" "$b" & local sv=$!
+    "$lockwish" "$b/cli.tcl" "$b"
+    kill "$sv" 2>/dev/null || true
+    wait "$sv" 2>/dev/null || true
+    [ -e "$b/got" ]
   }
   lock_run "$work/out-lock" || { echo "FAIL: lockdown run failed" >&2; fail=1; }
   cat "$work/out-lock/lockdown.txt" "$work/out-lock/attack.txt" 2>/dev/null || true
@@ -1228,19 +1393,37 @@ if "error" in v: errs.append("smoke step failed: %s" % v["error"])
 if a.get("sends-ok") != "0": errs.append("a send into the viewer worked: %r" % a)
 if not a.get("control-resources", "").startswith("all exec touch"):
     errs.append("the hostile resources were not loaded (control): %r" % a.get("control-resources"))
-if a.get("interps", "").split() not in ([], ["attacker.tcl"]):
+if sys.argv[2] == "aqua":
+    # On Tk Aqua `winfo interps` lists every Tk interpreter of the user, not of one display,
+    # so other Tk programs may appear. Every send must fail as "no application" or inside an
+    # interpreter without ::safepdf (not a viewer: the viewer always has that namespace).
+    for k, r in a.items():
+        if k.startswith("send ") and not (r.startswith("1 no application named")
+                or r.startswith("1 can\x27t set \"::safepdf::lockSent\": parent namespace doesn\x27t exist")):
+            errs.append("%s: %r (a registered viewer?)" % (k, r))
+elif a.get("interps", "").split() not in ([], ["attacker.tcl"]):
     errs.append("the viewer is still registered: %r" % a.get("interps"))
 if os.path.exists(os.path.join(d, "pwned")): errs.append("a hostile resource ran (pwned exists)")
 for e in errs: print("FAIL: lockdown: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
-' "$work/out-lock" || fail=1
+' "$work/out-lock" "$platform" || fail=1
   lock_run "$work/out-drive" SAFEPDF_VIEWER_DRIVE=1 || { echo "FAIL: drive-hook run failed" >&2; fail=1; }
   cat "$work/out-drive/attack.txt" 2>/dev/null || true
-  grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null \
-    || { echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1; }
+  if ! grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null; then
+    # The control failed. If Tk Aqua cannot deliver a send between two plain wish processes
+    # either (task 10.19: AppleEvents are not dispatched in a session with a locked screen),
+    # the control is inconclusive in this session: skipped, not failed. Any other failure
+    # stays one.
+    if [ "$platform" = aqua ] && ! aqua_send_works; then
+      skip_case "1l drive control" "Tk Aqua send does not deliver between two plain wish processes in this session (locked screen?)"
+    else
+      echo "FAIL: with SAFEPDF_VIEWER_DRIVE=1 send does not reach the viewer" >&2; fail=1
+    fi
+  fi
   [ ! -e "$work/out-drive/pwned" ] || { echo "FAIL: a hostile resource ran with the hook" >&2; fail=1; }
 fi
 
+case_begin "1m async"
 # 1m. Non-blocking rendering (task 8.8; SAFEPDF_VIEWER_SMOKE_MODE=async, no event waits for a
 #     render): page 1 of the generated PDF strokes 3000 curves and takes the renderer seconds.
 #     While it renders the window shows the placeholder, a 20 ms Tcl timer keeps firing, a
@@ -1287,6 +1470,7 @@ for e in errs: print("FAIL: async: " + e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-async/async.txt" || fail=1
 
+case_begin "1n m9"
 # 1n. The consolidated Phase 9 / M9 run (task 9.6; SAFEPDF_VIEWER_SMOKE_MODE=m9, then =m9-reopen
 #     in a fresh process; `Viewer.smokeM9`): menubar entries; toolbar page box, arrows and zoom
 #     drop-down; the wheel alone reads the document end to end in single, continuous, facing and
@@ -1382,9 +1566,9 @@ for x in (v, r):
 try:
     n = int(v.get("pages", "0"))
     need(n >= 2, "pages: %r" % v.get("pages"))
-    want = {"menubar": ".menubar", "menus": "File,Edit,View,Go", "arrow-next": "2", "arrow-prev": "1",
+    want = {"menubar": ".menubar", "menus": "File,Edit,View,Go,Help", "arrow-next": "2", "arrow-prev": "1",
             "bubble": "float true", "bubble-highlight": "1 edit", "note": "2",
-            "saved": "true false 4 4", "closed": "true 0 safe-pdf", "reopened": "true 4 4 false false",
+            "saved": "true false 4 4", "closed": "true 0 SafePDF", "reopened": "true 4 4 false false",
             "canvas-items": "0 0 0", "export": "exported 4 mark(s) to m9.xfdf",
             "removed": "0 hl=0 note=0 text=0 ink=0", "back-to-single": "1 1",
             "import": "m9.xfdf: 4 imported, 0 already present, 0 skipped"}
@@ -1431,7 +1615,7 @@ sys.exit(1 if errs else 0)
   if command -v qpdf >/dev/null 2>&1; then
     qpdf --check "$d/$1.pdf" >/dev/null 2>&1 || { echo "FAIL: m9 $1: qpdf --check" >&2; fail=1; }
   else echo "viewer-smoke: qpdf missing, check skipped"; fi
-  cmp -n "$(stat -c %s "$src")" "$src" "$d/$1.pdf" \
+  cmp_prefix "$src" "$d/$1.pdf" \
     || { echo "FAIL: m9 $1: the original is not a prefix of the saved file" >&2; fail=1; }
   if command -v mutool >/dev/null 2>&1; then
     mutool draw -q -r 72 -c rgb -F pnm -o "$d/mutool.ppm" "$d/$1.pdf" 1
@@ -1481,6 +1665,7 @@ for p in $m9papers; do
   else echo "viewer-smoke: $p missing, M9 paper run skipped"; fi
 done
 
+case_begin "1o wheelflow"
 # 1o. Wheel flow across page boundaries and the default view mode (task 9.r1;
 #     SAFEPDF_VIEWER_SMOKE_MODE=wheelflow, `Viewer.smokeWheelFlow`), on the four-page M9 fixture
 #     and the M9 papers, opened without SAFEPDF_VIEWER_VIEW: the file opens in Vertical
@@ -1531,14 +1716,21 @@ for p in $m9papers; do
   if [ -f "$p" ]; then wheelflow_case "paper-$(basename "$p" .pdf)" "$p"; fi
 done
 
+case_begin "1p keys"
 # 1p. Platform keys and the icon (task 9.r3, SAFEPDF_VIEWER_SMOKE_MODE=keys, `Viewer.smokeKeys`)
 #     on the text PDF, twice: as installed here (X11: Ctrl labels, no Command binding) and
 #     with SAFEPDF_VIEWER_PLATFORM=aqua (the macOS mapping on X11, where Tk's Command is
 #     Meta): Command-S labels, Command twins of every Ctrl binding (Save, Save As both ways,
 #     Quit also in the find bar), ::tk::mac::Quit = File -> Quit, the Save tooltip as ⌘S,
-#     Command+A selects all. Both: the six embedded icons load at their sizes and, when xprop
+#     Command+A selects all; 10.9: the macOS conventions (⌘G/⇧⌘G find, ⌥⌘G go to page,
+#     ⌘[ back, ⌘↑ first page, ⌃⌘S sidebar, ⌘L rotate left, ⌘9 fit page, ⌘. in dialogs) and
+#     their labels, none of them on X11. Both: the six embedded icons load at their sizes and, when xprop
 #     is installed, the window carries _NET_WM_ICON starting with the 512 px image.
 for kp in x11 aqua; do
+  if [ "$kp" = x11 ] && [ "$platform" = aqua ]; then
+    skip_case "1p keys (x11 variant)" "Tk Aqua cannot install the X11 key mapping; the aqua run checks the native one"
+    continue
+  fi
   if [ "$kp" = aqua ]; then
     SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=keys SAFEPDF_VIEWER_PLATFORM=aqua \
       run_viewer "$work/out-keys-$kp" "$work/text.pdf" || true
@@ -1565,7 +1757,7 @@ if "net-wm-icon" in v and not v["net-wm-icon"].startswith("_NET_WM_ICON(CARDINAL
 if kp == "aqua":
     want("accel-open", "Command-O"); want("accel-save", "Command-S")
     want("accel-saveas", "Command-Shift-S"); want("accel-quit", "Command-Q")
-    want("accel-zoomin", "Command-+"); want("accel-back", "Option-Left")
+    want("accel-zoomin", "Command-+"); want("accel-back", "Command-[")  # 10.9: was Option-Left
     want("accel-pop-copy", "Command-C"); want("accel-pop-delete", "Delete")
     want("bind <Control-Key-s>", "[::safepdf::emit save]")
     want("bind <Command-Key-s>", "[::safepdf::emit save]")
@@ -1577,6 +1769,21 @@ if kp == "aqua":
     want("mac-quit", "[::tk::mac::Quit] [::safepdf::emit quit]")
     want("save-tip", "Save (⌘S)")
     if "⌘C copies" not in v.get("status-selectall", ""): errs.append("Command+A: %r" % v.get("status-selectall"))
+    # 10.9: macOS conventions (Preview, HIG).
+    want("accel-goto", "Command-Option-G"); want("accel-first", "Command-Up")
+    want("accel-forward", "Command-]"); want("accel-outline", "Control-Command-S")
+    want("accel-rotccw", "Command-L")
+    want("bind <Command-Key-g>", "[::safepdf::emit find next $::safepdf::query]")
+    want("bind <Command-Key-G>", "[::safepdf::emit find prev $::safepdf::query]")
+    want("bind <Option-Command-Key-g>", "[::safepdf::showGoto]")
+    want("bind <Control-Key-g>", "[::safepdf::showGoto]")
+    want("bind <Command-Key-bracketleft>", "[::safepdf::emit back]")
+    want("bind <Command-Key-Up>", "[::safepdf::emit first]")
+    want("bind <Control-Command-Key-s>", "[::safepdf::emit outlineToggle]")
+    want("bind <Command-Key-l>", "[::safepdf::emit rotate ccw]")
+    want("bind <Command-Key-9>", "[::safepdf::emit zoom fitpage]")
+    want("bind-find-next", "[::safepdf::emit find next $::safepdf::query; break]")
+    want("cancelBind", "[bind $w <Command-Key-period> $script]")
 else:
     want("accel-open", "Ctrl+O"); want("accel-save", "Ctrl+S")
     want("accel-saveas", "Ctrl+Shift+S"); want("accel-quit", "Ctrl+Q")
@@ -1589,11 +1796,20 @@ else:
     want("mac-quit", "[] []")
     want("save-tip", "Save (Ctrl+S)")
     if "Ctrl+C copies" not in v.get("status-selectall", ""): errs.append("Ctrl+A: %r" % v.get("status-selectall"))
+    # 10.9: X11 keeps Ctrl+G = Go to page, Alt+Left, Home, F9, Shift+R; no Command binding.
+    want("accel-goto", "Ctrl+G"); want("accel-first", "Home"); want("accel-forward", "Alt+Right")
+    want("accel-outline", "F9"); want("accel-rotccw", "Shift+R")
+    want("bind <Control-Key-g>", "[::safepdf::showGoto]")
+    for s in ("<Command-Key-g>", "<Command-Key-G>", "<Option-Command-Key-g>", "<Command-Key-bracketleft>",
+              "<Command-Key-Up>", "<Control-Command-Key-s>", "<Command-Key-l>", "<Command-Key-9>"):
+        want("bind " + s, "[]")
+    want("bind-find-next", "[]"); want("cancelBind", "[]")
 for e in errs: print("FAIL: keys %s: %s" % (kp, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$kp" "$work/out-keys-$kp/keys.txt" || fail=1
 done
 
+case_begin "1q r4"
 # 1q. Review 2026-11-23 (task 9.r4, SAFEPDF_VIEWER_SMOKE_MODE=r4, `Viewer.smokeR4`), in the
 #     default view (Vertical Scrolling): the toolbar's view-mode drop-down next to the page
 #     count (its four entries, each invoked, scroll/spread variables and icon; the View menu's
@@ -1663,12 +1879,17 @@ for e in errs: print("FAIL: r4 %s: %s" % (name, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$name" "$d/r4.txt" || fail=1
 }
+if [ "$SAFEPDF_SMOKE_BG" = 1 ]; then
+  skip_case "1q r4" "background mode: without an active app the run times out (seen with a locked screen); SAFEPDF_SMOKE_FOREGROUND=1 runs it"
+else
 r4_case text "$work/text.pdf"
 r4_case nav "$work/nav.pdf"
 for p in $m9papers; do
   if [ -f "$p" ]; then r4_case "paper-$(basename "$p" .pdf)" "$p"; fi
 done
+fi
 
+case_begin "1r savedlg"
 # 1r. Save dialogs (task 9.r6, SAFEPDF_VIEWER_SMOKE_MODE=savedlg, `Viewer.smokeSaveDialogs`) on
 #     a copy of the text PDF alone in a folder, as installed and with
 #     SAFEPDF_VIEWER_PLATFORM=aqua: the three-way prompt from the keyboard (Return on the
@@ -1680,6 +1901,10 @@ done
 #     onto the opened PDF (writes NAME.pdf.xfdf, the PDF unchanged) and without .xfdf; the
 #     opened file deleted behind the viewer's back (asks, creates nothing); no temporary file.
 for sp in x11 aqua; do
+  if [ "$sp" = x11 ] && [ "$platform" = aqua ]; then
+    skip_case "1r savedlg (x11 variant)" "the X11 dialog options do not apply on Tk Aqua; the aqua run checks the native ones"
+    continue
+  fi
   sd="$work/savedlg-$sp"
   mkdir -p "$sd"
   cp "$work/text.pdf" "$sd/text.pdf"
@@ -1707,6 +1932,10 @@ want = {
     "export-onto-pdf": "true true true", "vanished": "true true true",
 }
 if root: want.pop("read-only"); want.pop("ro-folder")  # root writes anyway
+import os
+if os.environ.get("SAFEPDF_SMOKE_BG") == "1":  # no keyboard focus in background mode
+    for k in ("choose-return", "choose-tab-cancel", "choose-escape", "choose-space"):
+        want[k] = want[k].split()[0]; v[k] = v.get(k, "").split(" ")[0]
 errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 xe = v.get("export-ext", "")
 if not xe.startswith("true true %s " % ("false" if sp == "aqua" else "true")) or not xe.endswith(".xfdf"):
@@ -1721,6 +1950,7 @@ sys.exit(1 if errs else 0)
   chmod -R u+w "$sd" 2>/dev/null || true
 done
 
+case_begin "1s opensettings"
 # 1s. Document open settings (task 9.r8, SAFEPDF_VIEWER_SMOKE_MODE=opensettings,
 #     `Viewer.smokeOpenSettings`), in the real default view: generated five-page PDFs with an
 #     outline, each opened in turn through the File → Open path: every /PageLayout (view mode
@@ -1806,8 +2036,18 @@ for l, v in [("SinglePage", "page,none"), ("OneColumn", "vertical,none"),
              ("TwoColumnLeft", "vertical,odd"), ("TwoColumnRight", "vertical,even"),
              ("TwoPageLeft", "page,odd"), ("TwoPageRight", "page,even")]:
     want("layout-" + l, view=v, vars=v, zoom="Automatic Zoom", page="1")
+aqua = sys.argv[2] == "aqua"
 for l in ["TwoColumnRight", "TwoPageRight"]:
-    if not rows.get("layout-" + l, {}).get("xs", "").startswith("0@237"):
+    xs = rows.get("layout-" + l, {}).get("xs", "")
+    if aqua:
+        # The canvas width differs on Tk Aqua (native widgets), so the pixel x does: page 1
+        # alone sits centred between the two columns of TwoColumnLeft (xs 0@L,1@R).
+        m = re.match(r"0@(\d+),1@(\d+)$", rows.get("layout-TwoColumnLeft", {}).get("xs", ""))
+        m1 = re.match(r"0@(\d+)", xs)
+        ok = m and m1 and abs(int(m1.group(1)) - (int(m.group(1)) + int(m.group(2))) / 2) <= 1
+    else:
+        ok = xs.startswith("0@237")
+    if not ok:
         errs.append("%s: page 1 not alone on the right: %r" % (l, rows.get("layout-" + l, {}).get("xs")))
 want("mode-UseOutlines", outline="true"); want("mode-UseNone", outline="false")
 want("mode-UseThumbs", outline="true", panel="thumbnails")
@@ -1820,13 +2060,16 @@ want("fit", zoom="Page Fit", page="1", outline="true")
 want("named", page="4", zoom="Page Width", off="0")
 want("js", page="1", zoom="Automatic Zoom"); has("js", "status", "open action /JavaScript ignored (not executed)")
 want("uri", page="1"); has("uri", "status", "open action /URI ignored (not executed)")
-want("prefs", bar="0", menu="", ys="0"); has("prefs", "title", "Open Settings Test - page 1/5 - safe-pdf")
+want("prefs", bar="0", menu="", ys="0"); has("prefs", "title", "Open Settings Test - page 1/5 - SafePDF")
 has("prefs", "status", "Escape shows them")
 want("prefs-escape", bar="1", menu=".menubar", ys="1")
 want("r2l", view="page,odd", rtl="true")
 m = re.match(r"0@(\d+),1@(\d+)$", rows.get("r2l", {}).get("xs", ""))
 if not m or int(m.group(1)) <= int(m.group(2)): errs.append("r2l: page 1 not right of page 2: %r" % rows.get("r2l", {}).get("xs"))
-want("full", full="true,0", outline="false"); has("full", "status", "full screen (Escape leaves)")
+# Without a window manager (Xvfb) `wm attributes . -fullscreen` reads back 0; Tk Aqua has one.
+import os
+fs = "true,1" if aqua and os.environ.get("SAFEPDF_SMOKE_BG") != "1" else "true,0"
+want("full", full=fs, outline="false"); has("full", "status", "full screen (Escape leaves)")
 want("full-escape", full="false,0", outline="true")
 want("window", zoom="50%")
 if rows.get("window", {}).get("geom", "").startswith("1200x960"): errs.append("window: FitWindow did not resize")
@@ -1836,8 +2079,9 @@ for n in ["start", "layout-OneColumn", "xyz", "js", "prefs", "r2l", "full", "win
     print("opensettings %s: %s %s %s p%s outline=%s full=%s bar=%s rtl=%s" % (n, r.get("view"), r.get("zoom"), r.get("geom"), r.get("page"), r.get("outline"), r.get("full"), r.get("bar"), r.get("rtl")))
 for e in errs: print("FAIL: opensettings %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
-' "$work/out-os/opensettings.txt" || fail=1
+' "$work/out-os/opensettings.txt" "$platform" || fail=1
 
+case_begin "1t noteclose"
 # 1t. Closing a note popup without Save (task 9.r12, SAFEPDF_VIEWER_SMOKE_MODE=noteclose,
 #     `Viewer.smokeNoteClose`) on the text PDF: a new note + Escape (focus in the text widget)
 #     -> no note, no icon; a new note + typed text + Escape -> kept with the typed text; that
@@ -1875,12 +2119,17 @@ want = {
     "stale-close": "notes=3 icons=true popup=0 ",
     "texts": "[typed text, via cancel, via close]",
 }
+import os, re
+if os.environ.get("SAFEPDF_SMOKE_BG") == "1":  # no keyboard focus in background mode
+    nf = lambda s: re.sub(r" ?focus=\S*", "", s)
+    want = {k: nf(w) for k, w in want.items()}; v = {k: nf(x) for k, x in v.items()}
 errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
 if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: noteclose: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-noteclose/noteclose.txt" || fail=1
 
+case_begin "1u thumbs"
 # 1u. Thumbnails panel (task 9.r9, SAFEPDF_VIEWER_SMOKE_MODE=thumbs, `Viewer.smokeThumbs`) on
 #     generated files: th-outline.pdf (60 pages, an outline, page 5 /Rotate 90) opens with the
 #     outline and both view buttons (Thumbnails, Document outline); the Thumbnails button shows
@@ -1974,6 +2223,7 @@ want("plain-toggle2", shown="false")
 for e in errs: print("FAIL: thumbs %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-th/thumbs.txt" || fail=1
+case_begin "1u thumbperf (reported only)"
 # Performance (task 9.r9, SAFEPDF_VIEWER_SMOKE_MODE=thumbperf), reported only: the
 # git-ignored corpus paper when present.
 for f in corpus/files/arxiv-1706.03762.pdf; do
@@ -1982,6 +2232,7 @@ for f in corpus/files/arxiv-1706.03762.pdf; do
   tr '\n' ' ' < "$work/out-thperf/thumbperf.txt" 2>/dev/null | sed 's/^/thumbperf: /'; echo
 done
 
+case_begin "1v attach"
 # 1v. Attachments panel (task 9.r10, SAFEPDF_VIEWER_SMOKE_MODE=attach, `Viewer.smokeAttach`)
 #     on generated PDFs: att.pdf (/PageMode /UseAttachments, an outline, /EmbeddedFiles tree
 #     with kids: hello.txt (plain, /Desc, /Params) and data.bin (FlateDecode, no /Size), an
@@ -2111,6 +2362,7 @@ for e in errs: print("FAIL: attach: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/att" "$work/out-att" || fail=1
 
+case_begin "1w layers"
 # 1w. Layers panel (task 9.r11b, SAFEPDF_VIEWER_SMOKE_MODE=layers, `Viewer.smokeLayers`) on
 #     generated PDFs (none in the corpus has optional content): oc.pdf (/PageMode /UseOC; one
 #     page whose squares and words are in the groups Base ON, Extra OFF, Notes ON, the radio
@@ -2243,6 +2495,7 @@ if command -v qpdf >/dev/null 2>&1; then
   qpdf --check "$work/oc/saved.pdf" >/dev/null 2>&1 || { echo "FAIL: layers: qpdf --check saved.pdf" >&2; fail=1; }
 fi
 
+case_begin "2 bad inputs"
 # 2. Bad inputs: the viewer must not crash and must report the error.
 printf 'this is not a PDF\n' > "$work/garbage.pdf"
 for f in "$work/garbage.pdf" "Tests/adversarial/pages-kids-cycle.pdf" "$work/missing.pdf"; do
@@ -2259,6 +2512,317 @@ for f in "$work/garbage.pdf" "Tests/adversarial/pages-kids-cycle.pdf" "$work/mis
     fail=1
   fi
 done
+case_end
 
+# New cases go here, each starting with `case_begin "NAME"` so the summary names it.
+
+case_begin "1x undo"
+# 1x. Delete and undo/redo on marks (task 10.7, SAFEPDF_VIEWER_SMOKE_MODE=undo, `Viewer.smokeUndo`)
+# on a copy of the text PDF of 1d: Backspace removes the selected highlight, Ctrl+Z restores it
+# (pixels), Ctrl+Shift+Z removes it again, undoing everything is clean (Undo disabled); a
+# note's text edit and creation are undone and redone; after Ctrl+S (Overwrite) the saved
+# highlight is deleted with Delete and restored with Ctrl+Z (clean again, drawn from the
+# file), then recoloured green and saved: the file holds both marks; with the highlight
+# selected, Backspace and Delete typed into the find entry and a note popup edit their text
+# (marks and page unchanged). Clicks carry -time and take `world`'s position from the current
+# view each time (task 10.14: on Aqua untimed clicks were double clicks selecting the word, so
+# the note became the highlight's comment and went with it). Externally: qpdf --check.
+mkdir -p "$work/undo" "$work/out-undo"
+cp "$work/text.pdf" "$work/undo/text.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=undo run_viewer "$work/out-undo" "$work/undo/text.pdf"
+cat "$work/out-undo/undo.txt"
+python3 -I -c '
+import sys
+v = dict(l.split(": ", 1) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if ": " in l)
+want = {
+    "start": "0 white disabled disabled",
+    "highlighted": "1 tinted true normal disabled",
+    "select-click": "true false",
+    "backspace": "true 0 white normal disabled",
+    "undo-delete": "1 tinted true normal normal",
+    "redo-delete": "0 white normal disabled",
+    "undo-all": "0 white false false disabled normal",
+    "undo-empty": "0 nothing to undo",
+    "redo-highlight": "1 tinted normal normal",
+    "note": "true first normal disabled",
+    "note-anchor": "(some point)",
+    "note-edited": "second",
+    "note-undo1": "first",
+    "note-undo2": "[]",
+    "note-undo3": "<none> 1",
+    "note-redo": "first 2 normal normal",
+    "saved": "true 2 false false tinted disabled disabled",
+    "saved-select": "true false",
+    "saved-delete": "true 1 true true white normal",
+    "saved-undo": "2 false false tinted disabled true true",
+    "resaved": "2 false (some green) 83 255 188 disabled disabled",
+    "file-marks": "2 2",
+    "find-keys": "ad 2 true false true",
+    "note-keys": "fst 2 true",
+    "note-far": "true point false",
+    "note-inside": "quads false",
+}
+errs = ["undo %s: %r, expected %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+for e in errs: print("FAIL: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-undo/undo.txt" || fail=1
+if command -v qpdf >/dev/null 2>&1; then
+  qpdf --check "$work/undo/text.pdf" >/dev/null 2>&1 || { echo "FAIL: undo: qpdf --check" >&2; fail=1; }
+else echo "viewer-smoke: qpdf missing, check skipped"; fi
+case_begin "10.6 dismiss"
+# 10.6. Escape and click-away dismiss every transient (task 10.6, SAFEPDF_VIEWER_SMOKE_MODE=dismiss,
+#     `Viewer.smokeDismiss`, rule in `Toolbar.Transient`) on the text PDF: the find bar closes
+#     on a drag on the page (which still selects) and on Escape; Ctrl+F closes the go-to bar;
+#     a press inside the go-to bar keeps it, one on the status line closes it; the Highlight
+#     and Add text pop-overs stay on presses inside them and on the page, close on a press
+#     elsewhere and on Escape (tool / mode stay on); the colour picker closes on a press off
+#     the page; a note popup closes on a press on the page keeping its typed text (9.r12) and,
+#     empty, on Escape in the main window (the note goes).
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=dismiss run_viewer "$work/out-dismiss" "$work/text.pdf" || true
+cat "$work/out-dismiss/dismiss.txt" 2>/dev/null | cut -c1-160 || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: dismiss: no dismiss.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "find-open": "1 focus=.find.e",
+    "find-drag": "0 sel=true focus=.c",
+    "find-esc": "0",
+    "goto-open": "1",
+    "goto-rival": "goto=0 find=1",
+    "goto-inside": "1",
+    "goto-away": "0",
+    "hl-open": "1 tool=true",
+    "hl-inside": "1",
+    "hl-page": "1",
+    "hl-away": "0 tool=true",
+    "hl-reopen": "1 tool=true",
+    "hl-esc": "0 tool=true",
+    "hl-off": "false",
+    "ed-open": "1 text=true",
+    "ed-away": "0 text=true",
+    "ed-esc": "0 text=true",
+    "picker-open": "true",
+    "picker-away": "false false",
+    "note-inside": "1",
+    "note-away": "popup=0 notes=1 text=kept by a click away",
+    "note-open": "popup=1 notes=2",
+    "note-esc": "popup=0 notes=1",
+}
+import os, re
+if os.environ.get("SAFEPDF_SMOKE_BG") == "1":  # no keyboard focus in background mode
+    nf = lambda s: re.sub(r" ?focus=\S*", "", s)
+    want = {k: nf(w) for k, w in want.items()}; v = {k: nf(x) for k, x in v.items()}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: dismiss: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-dismiss/dismiss.txt" || fail=1
+
+case_begin "10.10 tint"
+# 10.10. Highlight fills (SAFEPDF_VIEWER_SMOKE_MODE=tint, `Viewer.smokeTint`) on a generated page:
+# "Hello safe world" over a black marker under "safe" (as 1d), then 40 lines of 14 "safe"s
+# (561 search hits; Helvetica unpainted). On Aqua the selection (Ctrl+A) and the search hits
+# are translucent photo image items above the page image (one photo per colour and size,
+# none left once closed); the probed fill pixels composited over the probed page pixels keep
+# the marker's ink dark and tint white paper (selection blue, current hit orange, other hits
+# yellow). Background mode cannot capture the window, so the composite is computed here from
+# the two image pixels and the stacking order. On X11 the hits stay stippled rectangles; the
+# selection is photo items on both platforms (10.18). Drawing times are printed, not checked.
+# Selection bands (10.18): Ctrl+A draws one band per line (41), each spanning its line's full
+# width; the 40 body lines' bands touch (each bottom is the next top), the heading's band is not
+# joined to them (paragraph break); a selection from mid line 3 to mid line 5 draws 3 bands
+# (start glyph to line end, full line, line start to end glyph) that touch, and the paper
+# between two selected lines is tinted (a sel photo pixel with alpha there).
+python3 -I -c '
+import sys
+lines = b"".join(b"0 -15 Td (%s) Tj\n" % (b"safe " * 14) for _ in range(40))
+c = (b"0 g 118.008 700 34.02 12.6 re f\n"
+     b"BT /F1 18 Tf 72 700 Td (Hello safe world) Tj ET\n"
+     b"BT /F1 12 Tf 72 675 Td " + lines + b"ET\n")
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$work/tint.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=tint run_viewer "$work/out-tint" "$work/tint.pdf" \
+  || { echo "FAIL: tint: run failed" >&2; fail=1; }
+cat "$work/out-tint/tint.txt" 2>/dev/null || true
+python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: tint: no tint.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+aqua = v.get("aqua") == "true"
+if aqua != (sys.argv[2] == "aqua"): errs.append("aqua = %r on %s" % (v.get("aqua"), sys.argv[2]))
+kind = "image" if aqua else "rectangle"
+kv = lambda k: dict(re.findall(r"(\w+)=(\S+)", v.get(k, "")))
+sel, hit, closed = kv("sel"), kv("hit"), kv("closed")
+if sel.get("kind") != "image": errs.append("selection drawn as %r, want image (both platforms, 10.18)" % sel.get("kind"))
+if hit.get("kind") != kind: errs.append("hits drawn as %r, want %s" % (hit.get("kind"), kind))
+if int(sel.get("items", 0)) != 41: errs.append("select-all: %r items, want one band per line (41)" % sel.get("items"))
+# Selection bands (10.18).
+bands = lambda k: [tuple(int(t) for t in b.split(",")) for b in v.get(k, "").split(";") if b.count(",") == 3]
+sb, lx = bands("sel-bands"), [tuple(int(t) for t in b.split(",")) for b in v.get("sel-lines", "").split(";") if "," in b]
+print("tint sel-bands: %d bands, first %r, last %r" % (len(sb), sb[:2], sb[-1:]))
+if len(sb) != 41 or len(lx) != 41: errs.append("select-all: %d bands, %d lines, want 41" % (len(sb), len(lx)))
+else:
+    for i, (b, l) in enumerate(zip(sb, lx)):
+        if abs(b[0] - l[0]) > 1 or abs(b[2] - l[1]) > 1: errs.append("band %d x %r, line %r" % (i, (b[0], b[2]), l)); break
+    for i in range(1, 40):
+        if sb[i][3] != sb[i + 1][1]: errs.append("bands %d/%d do not touch: %r %r" % (i, i + 1, sb[i], sb[i + 1])); break
+    if sb[0][3] >= sb[1][1]: errs.append("heading band joined to the body: %r %r" % (sb[0], sb[1]))
+    if not all(b[3] - b[1] >= 15 for b in sb[1:]): errs.append("body bands thinner than a line: %r" % sb[1:3])
+s3 = bands("sel3-bands")
+ends = [int(t) for t in v.get("sel3-ends", "").split(",") if t.lstrip("-").isdigit()]
+print("tint sel3: %r ends %r" % (s3, ends))
+if len(s3) != 3 or len(ends) != 2 or len(lx) != 41: errs.append("3-line selection: %r ends %r" % (s3, v.get("sel3-ends")))
+else:
+    (f, m, l) = s3
+    if abs(f[0] - ends[0]) > 1 or abs(f[2] - lx[3][1]) > 1: errs.append("first band %r: want start %d to line end %d" % (f, ends[0], lx[3][1]))
+    if abs(m[0] - lx[4][0]) > 1 or abs(m[2] - lx[4][1]) > 1: errs.append("interior band %r: want line %r" % (m, lx[4]))
+    if abs(l[0] - lx[5][0]) > 1 or abs(l[2] - ends[1]) > 1: errs.append("last band %r: want line start %d to end %d" % (l, lx[5][0], ends[1]))
+    if f[3] != m[1] or m[3] != l[1]: errs.append("3-line bands do not touch: %r" % (s3,))
+gap = re.search(r"sel=image\((\d+) (\d+) (\d+) (\d+)\)", v.get("sel3-gap", ""))
+if not gap or int(gap.group(4)) == 0: errs.append("paper between selected lines not tinted: %r" % v.get("sel3-gap"))
+if int(hit.get("items", 0)) != 561: errs.append("search: %r hit items, want 561" % hit.get("items"))
+if "hit 1/561 on page 1" not in v.get("hit", ""): errs.append("search status: %r" % v.get("hit"))
+if closed != {"items": "0", "photos": "0"}: errs.append("after closing: %r" % v.get("closed"))
+if aqua and int(hit.get("photos", 99)) > 12:
+    errs.append("561 hits made %r photos (one per colour and size expected)" % hit.get("photos"))
+def probe(k):
+    # [(tag, kind, (r, g, b, a) or None)] bottom to top
+    out = []
+    for part in v.get(k, "").split(";"):
+        m = re.match(r"([^=]*)=(\w+)(?:\(([^)]*)\))?$", part)
+        if not m: continue
+        px = tuple(int(t) for t in m.group(3).split()) if m.group(3) and m.group(3)[0].isdigit() else None
+        out.append((m.group(1), m.group(2), px))
+    return out
+over = lambda a, f, p: (f * a + p * (255 - a) + 127) // 255
+def comp(k, tag, rgb, alpha):
+    items = probe(k)
+    pg = [i for i, t in enumerate(items) if t[0] == "pimg"]
+    fl = [i for i, t in enumerate(items) if t[0] == tag]
+    if not pg or not fl: errs.append("%s: page or %s item missing: %r" % (k, tag, v.get(k))); return None
+    if fl[-1] < pg[0]: errs.append("%s: the fill lies under the page image" % k)
+    p, f = items[pg[0]][2], items[fl[-1]][2]
+    if p is None or f is None or len(f) != 4: errs.append("%s: pixels %r" % (k, v.get(k))); return None
+    if f[:3] != rgb or not alpha[0] <= f[3] <= alpha[1]:
+        errs.append("%s: fill pixel %r, want %r at alpha %r" % (k, f, rgb, alpha))
+    c = tuple(over(f[3], f[i], p[i]) for i in range(3))
+    print("tint %s: page %r + fill %r -> %r" % (k, p[:3], f, c))
+    return p[:3], c
+lum = lambda c: (299 * c[0] + 587 * c[1] + 114 * c[2]) // 1000
+# The selection is a photo fill on both platforms (10.18), the hits on Aqua only.
+rs = [comp("sel-ink", "sel", (56, 116, 242), (64, 128)), comp("sel-paper", "sel", (56, 116, 242), (64, 128))]
+if None not in rs:
+    (pi, si), (pp, sp) = rs
+    # The ink shows through: the fill over the marker stays much darker than over paper.
+    if lum(si) + 100 > lum(sp): errs.append("selection hides the ink: %r vs paper %r" % (si, sp))
+    if not (sp[2] - sp[0] > 40 and sp[0] < 230 and sp[0] > 100): errs.append("selection paper tint %r" % (sp,))
+if aqua:
+    r = [comp("hit-ink", "hit", (255, 165, 0), (96, 160)), comp("hit-paper", "hit", (255, 255, 0), (96, 160))]
+    if None not in r and None not in rs:
+        (pi, si), (pp, sp) = rs
+        (hpi, hi), (hpp, hp) = r
+        if max(pi + hpi) > 64 or min(pp + hpp) < 250: errs.append("probe points: ink %r %r, paper %r %r" % (pi, hpi, pp, hpp))
+        if lum(hi) + 60 > lum(hp): errs.append("current hit hides the ink: %r vs paper %r" % (hi, hp))
+        # The paper is tinted, not white and not opaque colour.
+        if not (hp[0] > 240 and hp[1] > 240 and 80 < hp[2] < 200): errs.append("hit paper tint %r" % (hp,))
+for k in ("ms-sel", "ms-hits", "ms-all", "ms-all-other", "ms-fullpage-photo"):
+    print("tint %s: %s" % (k, v.get(k)))
+for e in errs: print("FAIL: tint: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-tint/tint.txt" "$platform" || fail=1
+
+case_begin "10.8 tools"
+# 10.8. Select-text tool and cursors (SAFEPDF_VIEWER_SMOKE_MODE=tools, `Viewer.smokeTools`, model
+#     `Toolbar.Mode` / `Toolbar.cursorFor`) on a page with "Hello safe world" and a link over
+#     blank paper: Select text is the default tool, pressed; the canvas cursor is the I-beam
+#     over text, the hand over the link, the default arrow on blank paper; Draw unpresses
+#     Select text and shows the crosshair (at once and over text); its button again gives
+#     Select text back; Escape keeps Highlight on, the Select text button ends it; Add text
+#     shows the I-beam over the link.
+python3 -I -c '
+import sys
+c = b"BT /F1 18 Tf 72 700 Td (Hello safe world) Tj ET\n"
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>",
+        b"<< /Length %d >>\nstream\n" % len(c) + c + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Type /Annot /Subtype /Link /Rect [72 500 300 540] /Border [0 0 0] /Dest [3 0 R /Fit] >>"]
+out = bytearray(b"%PDF-1.4\n")
+offs = []
+for i, body in enumerate(objs, start=1):
+    offs.append(len(out))
+    out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open(sys.argv[1], "wb").write(out)
+' "$work/tools.pdf"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=tools run_viewer "$work/out-tools" "$work/tools.pdf" || true
+cat "$work/out-tools/tools.txt" 2>/dev/null || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: tools: no tools.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+want = {
+    "tool0": "select select=1 highlight=0 text=0 draw=0",
+    "select-state": "normal",
+    "cursor-text": "[xterm]",
+    "cursor-link": "[hand2]",
+    "cursor-empty": "[]",
+    "draw-on": "draw select=0 highlight=0 text=0 draw=1",
+    "cursor-draw-still": "[crosshair]",
+    "cursor-draw-text": "[crosshair]",
+    "draw-off": "select select=1 highlight=0 text=0 draw=0",
+    "cursor-after-draw": "[xterm]",
+    "hl-on": "highlight select=0 highlight=1 text=0 draw=0 popover=true",
+    "hl-esc": "highlight select=0 highlight=1 text=0 draw=0 popover=false",
+    "select-btn": "select select=1 highlight=0 text=0 draw=0 popover=false",
+    "select-again": "select select=1 highlight=0 text=0 draw=0",
+    "text-on": "text select=0 highlight=0 text=1 draw=0",
+    "cursor-text-link": "[xterm]",
+    "cursor-select-link": "[hand2]",
+}
+errs = ["%s = %r, want %r" % (k, v.get(k), w) for k, w in want.items() if v.get(k) != w]
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: tools: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-tools/tools.txt" || fail=1
+
+# Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
+case_end
+if [ "$fail" != 0 ] && [ "${#cases_fail[@]}" = 0 ]; then cases_fail+=("(a check outside any case_begin)"); fi
+echo "viewer-smoke: summary ($platform): ${#cases_pass[@]} passed, ${#cases_skip[@]} skipped, ${#cases_fail[@]} failed"
+for c in ${cases_skip[@]+"${cases_skip[@]}"}; do echo "viewer-smoke:   skipped: $c"; done
+for c in ${cases_fail[@]+"${cases_fail[@]}"}; do
+  why=""
+  for k in ${known_bugs[@]+"${known_bugs[@]}"}; do
+    if [ "${k%%|*}" = "$c" ]; then why=" (KNOWN-MAC-BUG: ${k#*|})"; fi
+  done
+  echo "viewer-smoke:   FAILED: $c$why"
+done
 if [ "$fail" = 0 ]; then echo "viewer-smoke: OK"; else echo "viewer-smoke: FAILED" >&2; fi
 exit $fail

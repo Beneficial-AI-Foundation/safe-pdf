@@ -91,8 +91,10 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   as a `Select.PageIndex` (glyph cells in reading order with page-space boxes, plus the
   normalised search text). A mouse press/drag/release maps the window positions to page space
   with `Geom.toPage` and selects the glyphs between the nearest glyphs in reading order;
-  double-click selects a word; Ctrl+A the page. The selection is drawn as stippled canvas
-  rectangles over the page image (tag `sel`; the image is not re-rendered). Ctrl+C or the
+  double-click selects a word; Ctrl+A the page. The selection is drawn over the page image
+  (tag `sel`; the image is not re-rendered) as one translucent light-blue band per line on
+  both platforms (task 10.18, `Select.selBands`: full line height, consecutive lines of a
+  paragraph touching; photo image items, `Tint`, `::safepdf::tint` of task 10.10). Ctrl+C or the
   context menu (right button) copies `Select.rangeText` to the clipboard (`clipboard append`,
   the text passed as one quoted word).
 * **Search** (Ctrl+F opens the find bar; Enter/F3 next, Shift+Enter/Shift+F3 previous, Escape
@@ -138,6 +140,13 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   Highlight tool and its pop-over `.hlbar` (swatches, thickness slider, "Show all"; `syncTool`,
   `drawPopover`); with the tool on a mouse-up that selects text highlights it at once; Escape
   closes the pop-over and dismisses the bubble.
+* **Dismissal** (task 10.6, rule in `Toolbar.Transient`): the note popup, the colour picker,
+  the Highlight and Add text / Draw pop-overs and the go-to / find bars all close on Escape
+  (the topmost one; only with none open does Escape leave full screen) and on a mouse press
+  elsewhere in the main window (`::safepdf::clickAway` on the tag `all`, `clickAway`; the
+  press is not consumed). A press on the page keeps the tool pop-overs (their tool is in use
+  there) and is the picker's own (`press`); the note closes through `noteDone … close`
+  (9.r12); opening the find or go-to bar closes the other (`opening`).
 * **Review 2026-11-23** (task 9.r4): the toolbar's view-mode drop-down `.bar.vmode` after the
   page count (`Toolbar.ViewChoice`, kept in sync with the View and `»` menus by
   `setViewMode` / `showViewChoice`); opening or closing the outline sidebar lays the pages out
@@ -157,10 +166,21 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   selected one of the mode's kind. Unsaved ones are canvas items (`drawMarks`), saved ones are
   drawn by the renderer from their appearance streams (edits through the preview). Add
   comment adds a note (`addNote`).
+* **Delete, undo and redo** (task 10.7): Delete or Backspace removes the selected mark
+  (Backspace without one scrolls back, as before); Ctrl+Z / Edit → Undo and Ctrl+Shift+Z /
+  Edit → Redo (Command+Z / Command+Shift+Z on macOS) step through `Marks.History`: every edit
+  is recorded by `marksChanged` (one slider drag is one step), at most 100 steps, cleared
+  when a document is opened (also the reopen after Save: the file's marks are read back
+  rounded, so the steps before it would not line up). Only the marks are restored, so the
+  title's `*` and Save follow `Marks.Store.dirty`: undoing back to the opened state is clean.
+  The text fields (note popup, find and go-to bars, page field, text box) have their own bind
+  tags, so their Backspace, Delete and Ctrl+Z stay theirs.
 * **macOS keys and the icon** (task 9.r3): after the window is built, `Menu.platformScript`
   gives every Ctrl binding its Command twin on aqua (menu labels `Command-S`, ⌘ in the Save
   tooltip and status hints via `keyText`, `::tk::mac::Quit` → Quit); `setIcon` sets the
-  embedded `Icons` PNGs with `wm iconphoto . -default`.
+  embedded `Icons` PNGs with `wm iconphoto . -default`. Task 10.9 adds the macOS
+  conventions (`Menu.Cmd.macKeys`, `Menu.Action`: ⌘G / ⇧⌘G find, ⌥⌘G go to page, ⌘[ / ⌘],
+  ⌘↑ / ⌘↓, ⌃⌘S, ⌃⌘H, ⌘R / ⌘L, ⌘9) and ⌘. in the dialogs (`::safepdf::cancelBind`).
 * **Saving** (tasks 9.5c, 9.r2; Tk-free flow and decisions in `Save`): Ctrl+S / File → Save /
   the toolbar's Save writes the unsaved marks **into the opened file** as an incremental
   update (Plan S8/C7, Decision 2026-11-23), checked by a strict reopen and read-back, refused
@@ -387,7 +407,9 @@ structure State where
   query : Array Char := #[]
   /-- The current search hit: page and index among that page's hits. -/
   hit : Option (Nat × Nat) := none
-  /-- Highlights are stippled fills (`false` on Aqua, which has no stipples: outlines). -/
+  /-- Search hits are stippled fills (X11); `false` on Aqua, which has no stipples:
+  translucent photo fills (`::safepdf::tint`, task 10.10). The selection is a photo fill on
+  both (task 10.18). -/
   stipple : Bool := true
   /-- Smoke-test output directory (`SAFEPDF_VIEWER_SMOKE`). -/
   smokeDir : Option String := none
@@ -434,6 +456,9 @@ structure State where
   hover : Option (Nat × Nat) := none
   /-- The status line text from before the pointer entered a link (restored on leaving). -/
   savedStatus : String := ""
+  /-- The last pointer position over the page canvas (window coordinates; `none` after it
+  left), to update the cursor when the tool changes (task 10.8). -/
+  pointer : Option (Int × Int) := none
   /-- Back/forward history of jumps. -/
   history : Links.History := {}
   /-- Enabled states last applied to the menubar entries and toolbar buttons
@@ -470,6 +495,8 @@ structure State where
   marks : Marks.Store := {}
   /-- The selected mark (its id). -/
   markSel : Option Nat := none
+  /-- Undo/redo history of the marks (task 10.7; `marksChanged` records every edit). -/
+  markHist : Marks.History := {}
   /-- The current highlight colour (`::safepdf::hlColor`). -/
   hlColor : Marks.Color := .yellow
   /-- The pages with a photo on the canvas (task 9.3: `::safepdf::pgN`, the visible pages and
@@ -685,7 +712,7 @@ def modeNote (s : State) : String :=
 def baseName (path : String) : String :=
   (System.FilePath.mk path).fileName.getD path
 
-/-- Window title: `safe-pdf`, or `NAME - page k/n - safe-pdf`, with `* ` in front while there
+/-- Window title: `SafePDF`, or `NAME - page k/n - SafePDF`, with `* ` in front while there
 are unsaved marks (task 9.5c); `NAME` is `titleOverride` when set (task 10.1b), else the
 file name, or the document's `/Title` when its `/DisplayDocTitle` asks for it (task 9.r8,
 `docTitle`). -/
@@ -693,9 +720,12 @@ def State.title (s : State) : String :=
   match s.path, s.doc with
   | some p, some _ =>
     let star := if s.marks.dirty then "* " else ""
-    s!"{star}{s.titleOverride.getD (s.docTitle.getD (baseName p))} - {Links.pageText s.labels s.page s.pageCount} - safe-pdf"
-  | some p, none => s!"{s.titleOverride.getD (baseName p)} - safe-pdf"
-  | none, _ => "safe-pdf"
+    s!"{star}{s.titleOverride.getD (s.docTitle.getD (baseName p))} - {Links.pageText s.labels s.page s.pageCount} - {Menu.appName}"
+  | some p, none => s!"{s.titleOverride.getD (baseName p)} - {Menu.appName}"
+  | none, _ => Menu.appName
+
+#guard ({} : State).title == "SafePDF"
+#guard ({ path := some "/a/b.pdf" } : State).title == "b.pdf - SafePDF"
 
 /-- A fraction in `[0, 1]` as a decimal with six digits (for `xview`/`yview moveto`). -/
 def fmtFrac (r : Rat) : String :=
@@ -752,9 +782,11 @@ def keyText (s : String) : IO String :=
 def setStatus (msg : String) : IO Unit := do
   discard <| run [".status", "configure", "-text", msg]
 
-/-- Reports the marks to the library after a change of `State.marks` (task 10.1b; nothing
-for a local file). -/
-def marksChanged (st : IO.Ref State) : IO Unit := do
+/-- After a change of `State.marks`: records it in the undo history (task 10.7,
+`Marks.History.record`; `merge`: a further step of a slider drag) and reports the marks to the
+library (task 10.1b; nothing for a local file). -/
+def marksChanged (st : IO.Ref State) (merge : Bool := false) : IO Unit := do
+  st.modify fun s => { s with markHist := s.markHist.record s.marks.marks merge }
   let s ← st.get
   if let some l := s.library then l.onMarksChanged s.marks
 
@@ -801,7 +833,7 @@ def setupScript : String := "
 namespace eval ::safepdf { variable resizeId {}; variable query {}; variable outlineOn 0; variable panel outline }
 namespace eval ::safepdf::icon {}
 " ++ resourceGuardScript ++ "
-wm title . safe-pdf
+wm title . SafePDF
 wm geometry . 1200x960
 wm minsize . 480 240
 array set ::safepdf::col {
@@ -821,6 +853,25 @@ proc ::safepdf::rrect {c x0 y0 x1 y1 r args} {
   $c create polygon $a $y0 $a $y0 $b $y0 $b $y0 $x1 $y0 $x1 $u $x1 $u $x1 $v $x1 $v $x1 $y1 \\
     $b $y1 $b $y1 $a $y1 $a $y1 $x0 $y1 $x0 $v $x0 $v $x0 $u $x0 $u $x0 $y0 -smooth 1 {*}$args
 }
+# Translucent highlight fills (task 10.10; Tk Aqua has no stipples): a canvas image item showing
+# a photo filled with colour rgb (6 hex digits) at alpha a (2 hex digits), one photo per colour,
+# alpha and size, shared by every item of that size (search hits of one word, full lines).
+proc ::safepdf::tint {c x0 y0 x1 y1 rgb a tags} {
+  set w [expr {$x1 - $x0}]; set h [expr {$y1 - $y0}]
+  if {$w < 1 || $h < 1} return
+  set img ::safepdf::tint_${rgb}_${a}_${w}_$h
+  if {[catch {image type $img}]} {
+    image create photo $img -width $w -height $h
+    $img put [list [list #$rgb$a]] -to 0 0 $w $h
+  }
+  $c create image $x0 $y0 -anchor nw -image $img -tags $tags
+}
+# Deletes the tint photos no canvas item shows any more (after a redraw of the overlays).
+proc ::safepdf::tintGc {} {
+  foreach img [image names] {
+    if {[string match ::safepdf::tint_* $img] && ![image inuse $img]} { image delete $img }
+  }
+}
 # Icons (16 px, centred on a 32 px button; PDF.js's icons re-drawn, not copied). Items tagged
 # inkf are coloured through -fill, inko through -outline.
 proc ::safepdf::icon::sidebar {c} {
@@ -837,6 +888,12 @@ proc ::safepdf::icon::minus {c} { $c create line 10 16 22 16 -width 1.8 -capstyl
 proc ::safepdf::icon::plus {c} {
   $c create line 10 16 22 16 -width 1.8 -capstyle round -tags inkf
   $c create line 16 10 16 22 -width 1.8 -capstyle round -tags inkf
+}
+proc ::safepdf::icon::select {c} {
+  $c create line 12.5 8.5 14.5 8.5 16 10 17.5 8.5 19.5 8.5 -width 1.5 -capstyle round -joinstyle round -tags inkf
+  $c create line 12.5 23.5 14.5 23.5 16 22 17.5 23.5 19.5 23.5 -width 1.5 -capstyle round -joinstyle round -tags inkf
+  $c create line 16 10 16 22 -width 1.5 -tags inkf
+  $c create line 13.5 16 18.5 16 -width 1.2 -capstyle round -tags inkf
 }
 proc ::safepdf::icon::highlight {c} {
   $c create polygon 19 8 24 13 15 22 10 17 -fill {} -outline black -width 1.5 -joinstyle round -tags inko
@@ -1512,7 +1569,7 @@ bind . <Key-Next> {::safepdf::step y 1 pages}
 bind . <Key-space> {::safepdf::step y 1 pages}
 bind . <Key-Prior> {::safepdf::step y -1 pages}
 bind . <Shift-Key-space> {::safepdf::step y -1 pages}
-bind . <Key-BackSpace> {::safepdf::step y -1 pages}
+bind . <Key-BackSpace> {::safepdf::emit backspace}
 bind . <Key-Down> {::safepdf::step y 1 units}
 bind . <Key-Up> {::safepdf::step y -1 units}
 bind . <Key-Right> {::safepdf::step x 1 units}
@@ -1600,12 +1657,19 @@ ttk::button .find.close -text {Close} -command ::safepdf::hideFind
 pack .find.l .find.e .find.prev .find.next .find.close -side left -padx 2 -pady 2
 bindtags .find.e [list .find.e TEntry all]
 proc ::safepdf::showFind {} {
+  ::safepdf::emit opening find
   if {![winfo ismapped .find]} { pack .find -side top -fill x -after .barline }
   focus .find.e
   .find.e selection range 0 end
   .find.e icursor end
 }
-proc ::safepdf::hideFind {} { pack forget .find; focus .c; ::safepdf::emit find close }
+# Closing a bar gives the focus back to the page only when it was in the bar (a click-away
+# on another entry keeps that entry focused; task 10.6).
+proc ::safepdf::refocus {bar} {
+  set f [focus]
+  if {$f eq {} || $f eq $bar || [string match $bar.* $f]} { focus .c }
+}
+proc ::safepdf::hideFind {} { pack forget .find; ::safepdf::refocus .find; ::safepdf::emit find close }
 bind .find.e <Return> {::safepdf::emit find next $::safepdf::query; break}
 bind .find.e <KP_Enter> {::safepdf::emit find next $::safepdf::query; break}
 bind .find.e <Shift-Return> {::safepdf::emit find prev $::safepdf::query; break}
@@ -1636,12 +1700,13 @@ ttk::button .goto.close -text {Close} -command ::safepdf::hideGoto
 pack .goto.l .goto.e .goto.go .goto.close -side left -padx 2 -pady 2
 bindtags .goto.e [list .goto.e TEntry all]
 proc ::safepdf::showGoto {} {
+  ::safepdf::emit opening goto
   if {![winfo ismapped .goto]} { pack .goto -side top -fill x -after .barline }
   focus .goto.e
   .goto.e selection range 0 end
   .goto.e icursor end
 }
-proc ::safepdf::hideGoto {} { pack forget .goto; focus .c }
+proc ::safepdf::hideGoto {} { pack forget .goto; ::safepdf::refocus .goto }
 bind .goto.e <Return> {::safepdf::emit goto $::safepdf::gotoText; break}
 bind .goto.e <KP_Enter> {::safepdf::emit goto $::safepdf::gotoText; break}
 bind .goto.e <Escape> {::safepdf::hideGoto; break}
@@ -1657,7 +1722,7 @@ proc ::safepdf::askUri {uri} {
   wm title $w {External link}
   wm transient $w .
   ttk::label $w.msg -justify left -wraplength 460 -text {This link points outside the \\
-document, to the address below. safe-pdf never opens it; it can copy the address to the \\
+document, to the address below. SafePDF never opens it; it can copy the address to the \\
 clipboard.}
   text $w.t -wrap char -width 60 -height 4 -relief sunken -borderwidth 1
   $w.t insert end $uri
@@ -1671,6 +1736,7 @@ clipboard.}
   pack $w.b -side bottom -fill x
   wm protocol $w WM_DELETE_WINDOW {set ::safepdf::uriAnswer 0}
   bind $w <Escape> {set ::safepdf::uriAnswer 0}
+  ::safepdf::cancelBind $w {set ::safepdf::uriAnswer 0}
   set ::safepdf::uriAnswer {}
   if {$::safepdf::autoConfirm} {
     after 300 {
@@ -1726,6 +1792,7 @@ proc ::safepdf::choose {title msg default cancel args} {
   pack $w.f -fill both -expand 1
   wm protocol $w WM_DELETE_WINDOW [list set ::safepdf::chooseAnswer $cancel]
   bind $w <Escape> [list set ::safepdf::chooseAnswer $cancel]
+  ::safepdf::cancelBind $w [list set ::safepdf::chooseAnswer $cancel]
   # Return (and keypad Enter) presses the focused button, as in tk_messageBox: after Tab to
   # Cancel, Return must cancel, not run the default (9.r6); the default has the focus first.
   bind $w <Return> [list ::safepdf::chooseReturn $w $default]
@@ -1782,6 +1849,8 @@ set ::safepdf::popX {}
 set ::safepdf::popY {}
 bind . <Key-h> {::safepdf::emit highlight}
 bind . <Key-Delete> {::safepdf::emit markDelete}
+bind . <Control-z> {::safepdf::emit undo}
+bind . <Control-Z> {::safepdf::emit redo}
 # A note icon (a speech bubble, after the /Text annotation's Comment icon) in the box
 # x0 y0 x1 y1 of canvas c, filled with colour fill; selected: a blue ring.
 proc ::safepdf::noteIcon {c x0 y0 x1 y1 fill tags} {
@@ -1833,6 +1902,7 @@ proc ::safepdf::noteEdit {id text x y} {
   pack $w.b -side bottom -fill x
   pack $w.t -side top -fill both -expand 1 -padx 6 -pady {6 0}
   bind $w <Escape> [list ::safepdf::noteDone $id close]
+  ::safepdf::cancelBind $w [list ::safepdf::noteDone $id close]
   # break: the popup is gone after noteDone, so the Text class binding must not run.
   ::safepdf::primaryBind $w.t Return \"[list ::safepdf::noteDone $id save]; break\"
   focus $w.t
@@ -1985,6 +2055,15 @@ proc ::safepdf::inkAdd {x y} {
   .c coords inkcur {*}$::safepdf::inkPts
 }
 bind . <Key-Escape> {::safepdf::emit escape}
+# Click-away (task 10.6, Toolbar.onClick): a press anywhere in the main window closes the open
+# transients it lies outside of. Bound on the tag all, so it runs after the widget's own
+# bindings and the press still does its job; presses in other toplevels (the note popup,
+# menus, dialogs) are not click-aways.
+proc ::safepdf::clickAway {w} {
+  if {[catch {winfo toplevel $w} top] || $top ne {.}} return
+  ::safepdf::emit clickAway $w
+}
+bind all <ButtonPress-1> {+::safepdf::clickAway %W}
 focus .c
 "
 
@@ -2239,13 +2318,53 @@ def drawBubble (st : IO.Ref State) : IO Unit := do
       discard <| run ["::safepdf::swatch", ".c", num x, num y, num Bubble.swatch, c.hex,
         if cur then "1" else "0", s!"bub picker c:{c.name}"]
 
+/-- How the overlays of one kind are filled (task 10.10): the colour as six hex digits, the
+alpha (0–255) of the translucent fill on Aqua and the X11 stipple fill's colour. -/
+structure Tint where
+  /-- Colour, six hex digits (no `#`). -/
+  rgb : String
+  /-- Opacity of the Aqua fill, 0–255. -/
+  alpha : Nat
+  deriving Repr, BEq
+
+/-- The selection: macOS's accent blue at 35 % (over white ≈ `#b9cefa`). -/
+def Tint.sel : Tint := ⟨"3874f2", 90⟩
+/-- A search hit: yellow at 50 %. -/
+def Tint.hit : Tint := ⟨"ffff00", 128⟩
+/-- The current search hit: orange at 50 %. -/
+def Tint.cur : Tint := ⟨"ffa500", 128⟩
+
+/-- Two lower-case hex digits of `n mod 256`. -/
+def hex2 (n : Nat) : String :=
+  let d (k : Nat) : Char := "0123456789abcdef".toList.getD k '0'
+  String.ofList [d (n % 256 / 16), d (n % 16)]
+
+/-- The alpha suffix `::safepdf::tint` takes (two hex digits; Tk's `#RRGGBBAA`). -/
+def Tint.alphaHex (t : Tint) : String := hex2 (min 255 t.alpha)
+
+/-- The `-fill` colour of the X11 stipple fill. -/
+def Tint.fill (t : Tint) : String := "#" ++ t.rgb
+
+/-- Composite of a fill channel `f` at alpha `a` over a page channel `p` (what the canvas
+shows; the smoke test's expectation). -/
+def Tint.over (a f p : Nat) : Nat := (f * a + p * (255 - a) + 127) / 255
+
+#guard Tint.sel.alphaHex == "5a" && Tint.hit.alphaHex == "80" && hex2 0 == "00" && hex2 255 == "ff"
+#guard Tint.sel.fill == "#3874f2"
+-- Over white the selection is a light blue; over black ink the ink stays dark.
+#guard (Tint.over 90 0x38 255, Tint.over 90 0x74 255, Tint.over 90 0xf2 255) == (185, 206, 250)
+#guard Tint.over 90 0xf2 0 < 90
+
 /-- The slots that get overlays: the pages with a photo and the current page (task 9.3). -/
 def overlaySlots (s : State) : List Slot :=
   s.slots.toList.filter fun sl => sl.place.page == s.page || s.hasPhoto sl.place.page
 
 /-- Redraws the overlays of the pages on screen (`overlaySlots`): the marks' canvas items
 (`drawMarks`), all search hits (tag `hit`, the current one in orange), the selection (tag
-`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. -/
+`sel`) and the bubble (tag `bub`, `drawBubble`), in that stacking order. Hits are `Tint`
+fills: stippled rectangles on X11, translucent photos on Aqua (task 10.10; photos no item shows
+any more are deleted, `::safepdf::tintGc`). The selection is a translucent photo band per line
+on both platforms (`Select.PageIndex.bands`, task 10.18). -/
 def drawOverlay (st : IO.Ref State) : IO Unit := do
   discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
   st.modify ({ · with bubble := none, pickerAt := none })
@@ -2253,12 +2372,14 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
   if s.shown.isNone then return
   let slots := overlaySlots s
   for sl in slots do drawMarks s sl
-  let rect (sl : Slot) (b : Box) (color tag : String) : IO Unit := do
+  -- X11: a stippled rectangle; Aqua (no stipples): a translucent photo (task 10.10).
+  let rect (sl : Slot) (b : Box) (t : Tint) (tag : String) : IO Unit := do
     let (x0, y0, x1, y1) := sl.rect b
-    let style := if s.stipple then ["-fill", color, "-stipple", "gray50", "-outline", ""]
-      else ["-fill", "", "-outline", color, "-width", "2"]
-    discard <| run ([".c", "create", "rectangle", toString x0.floor, toString y0.floor,
-      toString x1.ceil, toString y1.ceil] ++ style ++ ["-tags", tag])
+    let c := [toString x0.floor, toString y0.floor, toString x1.ceil, toString y1.ceil]
+    if s.stipple then
+      discard <| run ([".c", "create", "rectangle"] ++ c ++
+        ["-fill", t.fill, "-stipple", "gray50", "-outline", "", "-tags", tag])
+    else discard <| run (["::safepdf::tint", ".c"] ++ c ++ [t.rgb, t.alphaHex, tag])
   if !s.query.isEmpty then
     for sl in slots do
       let pg := sl.place.page
@@ -2266,12 +2387,20 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
         let hits := ix.hits s.query
         for i in [0:hits.size] do
           if let some (a, b) := hits[i]? then
-            let color := if s.hit == some (pg, i) then "orange" else "yellow"
-            for b in Select.rangeBoxes ix.cells a b do rect sl b color "hit"
+            let t := if s.hit == some (pg, i) then Tint.cur else Tint.hit
+            for b in Select.rangeBoxes ix.cells a b do rect sl b t "hit"
+  -- The selection: one translucent band per line on both platforms (task 10.18,
+  -- `Select.selBands`), edges rounded to the nearest pixel so that joined bands share a pixel
+  -- edge (no gap, no doubly tinted overlap).
   if let some (p, a, b) := s.sel then
     if let some sl := slotOf s p then
       if let .ok ix ← pageIndex st p then
-        for b in Select.rangeBoxes ix.cells a b do rect sl b "#3874f2" "sel"
+        for b in ix.bands a b do
+          let (x0, y0, x1, y1) := sl.rect b
+          let r (v : Rat) : String := toString (v + 1 / 2).floor
+          discard <| run (["::safepdf::tint", ".c", r x0, r y0, r x1, r y1] ++
+            [Tint.sel.rgb, Tint.sel.alphaHex, "sel"])
+  discard <| run ["::safepdf::tintGc"]
   -- The free-text editor follows zoom, rotation and scrolling (task 9.9).
   if let some fe := s.ftEdit then
     if let some sl := slotOf s fe.page then
@@ -2940,6 +3069,7 @@ def refresh (st : IO.Ref State) : IO Unit := do
     discard <| run ["::safepdf::zoomShow", s.zoomSel.label, s.zoomSel.selected, "0"]
     showViewChoice s false
     discard <| run [".c", "delete", "sel", "hit", "mark", "bub"]
+    discard <| run ["::safepdf::tintGc"]
     st.modify ({ · with bubble := none, pickerAt := none, slots := #[], layoutKey := none,
                         shown := none })
     clearPages st
@@ -3376,8 +3506,12 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
   if pr.hideToolbar || pr.hideMenubar || pr.hideWindowUI then
     notes := notes ++ [hiddenNote]
   if o.mode == some .fullScreen then
-    setFullScreen st true
     notes := notes ++ [fullScreenNote]
+    -- Task 10.13: the note is stored before the window enters full screen: on Aqua that
+    -- renders (and rebuilds the status line from `openNote`) at once, so storing it later
+    -- left the old text until the next update. `openWith` stores the same value again.
+    st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
+    setFullScreen st true
   return (o.mode, pr, notes)
 
 /-- Escape's window part (task 9.r8): leaves full screen, else shows what the document's
@@ -3420,8 +3554,8 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
   st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
-                              history := {}, marks := {}, markSel := none, slots := #[],
-                              layoutKey := none, ownTop := none, ftEdit := none,
+                              history := {}, marks := {}, markSel := none, markHist := {},
+                              slots := #[], layoutKey := none, ownTop := none, ftEdit := none,
                               inkSession := none, inkStroke := none, moveFrom := none,
                               attList := #[], attIcons := [], attStatus := #[],
                               ocCfg := none, oc := none, lyRows := [] }
@@ -3442,7 +3576,7 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
     -- Our marks already in the file (task 9.5c): restored with their ids, saved.
     let marks ← IO.lazyPure fun _ => Marks.Store.load (Save.readMarks doc limits)
     st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none,
-                        marks })
+                        marks, markHist := Marks.History.start marks.marks })
     let (labels, outline) ← IO.lazyPure fun _ =>
       (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
     st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
@@ -3566,13 +3700,15 @@ def setMode (st : IO.Ref State) (zoomSel : Toolbar.ZoomChoice) (pos : Option (Na
 drop-down, `Toolbar.ZoomChoice.ofKey`). -/
 def zoom (st : IO.Ref State) (what : String) (pos : Option (Nat × Nat)) : IO Unit := do
   let s ← st.get
-  -- The current percentage: the fixed one, or the one a fit mode came out at (rounded).
+  -- The current effective (quantised) zoom: the fixed percentage's, or the one a fit mode
+  -- came out at. Zoom in/out step on it (task 10.12, `View.stepInZ`/`stepOutZ`): the result
+  -- is always strictly larger/smaller; at the end of the range nothing changes.
   let cur := match s.zoomSel.mode with
-    | some (.scale p) => p
-    | _ => View.zoomPct s.shownZoom s.scaling
+    | some (.scale p) => View.pctZoom p s.scaling
+    | _ => s.shownZoom
   match what with
-  | "in" => setMode st (.pct (View.stepIn cur)) pos
-  | "out" => setMode st (.pct (View.stepOut cur)) pos
+  | "in" => if let some p := View.stepInZ cur s.scaling then setMode st (.pct p) pos
+  | "out" => if let some p := View.stepOutZ cur s.scaling then setMode st (.pct p) pos
   | "actual" => setMode st .actual pos
   | "fitpage" => setMode st .pageFit pos
   | "fitwidth" => setMode st .pageWidth pos
@@ -4138,8 +4274,8 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
                               hover := none, history := {}, toggleShown := none,
-                              marks := {}, markSel := none, slots := #[], layoutKey := none,
-                              ownTop := none,
+                              marks := {}, markSel := none, markHist := {}, slots := #[],
+                              layoutKey := none, ownTop := none,
                               ui := { s.ui with tool := false, popover := false,
                                                 picker := false },
                               bubble := none, pickerAt := none, bubblePress := false,
@@ -4149,6 +4285,8 @@ def closeFile (st : IO.Ref State) : IO Unit := do
   discard <| run ["destroy", ".note"]
   discard <| run ["::safepdf::popHide"]
   discard <| run ["::safepdf::btnToggled", ".bar.highlight", "0"]
+  discard <| run ["::safepdf::btnToggled", ".bar.select",
+    if Toolbar.Mode.of (← st.get).ui == .select then "1" else "0"]
   discard <| run ["set", Menu.hlToolVar, "0"]
   fillOutline st
   showOutline st false
@@ -4250,6 +4388,8 @@ def buildToolbar : IO Unit := do
       | .pageField => discard <| run ["::safepdf::pageField"]
       | .zoomBox => discard <| run ["::safepdf::zoomBox"]
       | .viewBox => discard <| run ["::safepdf::viewBox"]
+  -- Select text is the default tool (task 10.8, `Toolbar.Mode.of_default`).
+  discard <| run ["::safepdf::btnToggled", ".bar.select", "1"]
   -- The sidebar's view buttons (task 9.r9, `Sidebar.panels`; packed per document by
   -- `syncPanelButtons`).
   for i in Sidebar.panels do
@@ -4281,14 +4421,20 @@ def menuCtx (s : State) : Menu.Ctx :=
     hasSel := s.sel.isSome, hasMark := s.markSel.isSome, hasOutline := !s.outline.isEmpty,
     canBack := !s.history.back.isEmpty, canForward := !s.history.fwd.isEmpty,
     dirty := s.doc.isSome && s.marks.dirty,
+    canUndo := s.markHist.canUndo, canRedo := s.markHist.canRedo,
     onFirst := View.spreadOf s.spread s.page == 0,
     onLast := s.pageCount > 0 &&
       View.spreadOf s.spread s.page == View.spreadOf s.spread (s.pageCount - 1) }
 
 /-- Sets the `-state` of every menubar entry, overflow-menu entry and toolbar button whose
 enabled state (`Toolbar.states`) changed since the last call, and shows or hides the sidebar
-toggle (`Sidebar.toggleVisible`). Runs after every event. -/
+toggle (`Sidebar.toggleVisible`). Runs after every event. Does nothing once the main window is
+gone (the menubar command deleted): a handler that destroyed `.` (a smoke case ending, a quit) is followed by this sync, and
+configuring the destroyed menubar would only print `invalid command name ".menubar.edit"`
+(task 10.20). -/
 def syncMenus (st : IO.Ref State) : IO Unit := do
+  -- Tk deletes the widget commands (`.menubar…`) with the main window.
+  if (← run ["info", "commands", Menu.barPath]) == "" then return
   let s ← st.get
   let c := menuCtx s
   let now := Toolbar.states c
@@ -4417,14 +4563,50 @@ def linkUnder (st : IO.Ref State) (wx wy : Int) : IO (Option ((Nat × Nat) × Li
   let some (pg, p) ← pagePointAt st wx wy | return none
   return (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
 
-/-- Pointer motion: over a link the cursor becomes a hand and the status line shows the
-target (the full address of a URI); leaving it restores the status line. -/
+/-- What lies under window position `pos` of the page canvas for the cursor (task 10.8,
+`Toolbar.hitOf`: a mark, else a link, else a glyph box of the page text) and the link there.
+The text index is consulted only when the cursor depends on it (Select text and Highlight,
+nothing above the text); it is the per-page cached index of the selection. -/
+def pointerHit (st : IO.Ref State) (pos : Option (Int × Int)) :
+    IO (Toolbar.Hit × Option ((Nat × Nat) × Links.Link)) := do
+  let some (x, y) := pos | return (.empty, none)
+  let some (pg, p) ← pagePointAt st x y | return (.empty, none)
+  let s ← st.get
+  let l := (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
+  let store := if s.ui.showAll then s.marks
+    else { s.marks with marks := s.marks.marks.filter (!·.isHighlight) }
+  let mark := match slotOf s pg with
+    | some sl => (store.hitAt sl.vp.box pg p).isSome
+    | none => false
+  let mode := Toolbar.Mode.of s.ui
+  let text ← if mark || l.isSome || mode == .draw || mode == .text then pure false else
+    match ← pageIndex st pg with
+    | .ok ix => pure (ix.cells.any fun c => Links.Box.contains c.box p)
+    | .error _ => pure false
+  return (Toolbar.hitOf mark l.isSome text, l)
+
+/-- Sets the page canvas cursor to `c`, calling Tk only when it changes. -/
+def setCursor (c : String) : IO Unit := do
+  if (← run [".c", "cget", "-cursor"]) != c then
+    discard <| run [".c", "configure", "-cursor", c]
+
+/-- Brings the page canvas cursor in step with the active tool at the last pointer position
+(task 10.8; after a tool change without pointer motion). -/
+def refreshCursor (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let (h, _) ← pointerHit st s.pointer
+  setCursor (Toolbar.cursorFor (Toolbar.Mode.of s.ui) h)
+
+/-- Pointer motion: the cursor telegraphs what a press does there (task 10.8,
+`Toolbar.cursorFor`: I-beam over text, hand over links and marks, crosshair in Draw); over a
+link the status line shows the target (the full address of a URI); leaving it restores the
+status line. -/
 def hover (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let s ← st.get
   if s.pressPt.isSome then return
-  let l ← match pos with
-    | some (x, y) => linkUnder st x y
-    | none => pure none
+  st.modify ({ · with pointer := pos })
+  let (h, l) ← pointerHit st pos
+  setCursor (Toolbar.cursorFor (Toolbar.Mode.of s.ui) h)
   let idx := l.map (·.1)
   if idx == s.hover then return
   if s.hover.isNone then
@@ -4432,12 +4614,8 @@ def hover (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
     st.modify ({ · with savedStatus := cur })
   st.modify ({ · with hover := idx })
   match l with
-  | some (_, k) =>
-    discard <| run [".c", "configure", "-cursor", "hand2"]
-    setStatus (Links.describe s.labels s.pageCount k.action)
-  | none =>
-    discard <| run [".c", "configure", "-cursor", ""]
-    setStatus (← st.get).savedStatus
+  | some (_, k) => setStatus (Links.describe s.labels s.pageCount k.action)
+  | none => setStatus (← st.get).savedStatus
 
 /-- Handles `outline ID`: activates the outline entry of outline row `oK`. -/
 def outlineClick (st : IO.Ref State) (id : String) : IO Unit := do
@@ -4597,6 +4775,7 @@ def syncTool (st : IO.Ref State) : IO Unit := do
   let b (v : Bool) : String := if v then "1" else "0"
   discard <| run ["set", Menu.hlToolVar, b s.ui.tool]
   discard <| run ["set", Menu.showAllVar, b s.ui.showAll]
+  discard <| run ["::safepdf::btnToggled", ".bar.select", b (Toolbar.pressed s.ui .select)]
   discard <| run ["::safepdf::btnToggled", ".bar.highlight", b s.ui.tool]
   if s.ui.popover && s.doc.isSome then
     drawPopover s
@@ -4607,6 +4786,7 @@ def syncTool (st : IO.Ref State) : IO Unit := do
     discard <| run ["::safepdf::popShow", toString (Bubble.Popover.left bx bw ww).floor]
   else discard <| run ["::safepdf::popHide"]
   syncEditor st
+  refreshCursor st
 
 /-- Sets the current highlight colour (and the colour menus' radio variable; the pop-over's
 ring follows). -/
@@ -4667,23 +4847,36 @@ def openNote (st : IO.Ref State) (id : Nat) : IO Unit := do
   discard <| run ["::safepdf::noteEdit", toString id, m.text, toString (max 0 x),
     toString (max 0 y)]
 
-/-- Handles `note [X Y]` (Edit → Add note…, the edit bubble's Comment, or the context menu at
-window position `(X, Y)`): adds a note anchored to the selection on the shown page; else,
-without a position and with a highlight selected, opens that highlight's comment (the note
-anchored to its quads, `Marks.Store.noteOn`) or adds one in its colour (task 9.8); else a note
-at the page point under `(X, Y)`, else at the window centre; selects it and opens its popup. -/
+/-- Handles `note [X Y]` (Edit → Add note…, the selection bubble's Add comment, or the context
+menu at window position `(X, Y)`). Without a position: a note anchored to the selection on the
+shown page (a comment on that text); else, with a highlight selected, opens that highlight's
+comment (the note anchored to its quads, `Marks.Store.noteOn`) or adds one in its colour (task
+9.8); else a note at the window centre. With a position (right-click → Add note…, task 10.17):
+a note at the page point under it, unless the click is inside the selection's highlight boxes
+(`Marks.noteAnchor`), which makes it a comment on the selection. Selects it, opens its popup. -/
 def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
   let s ← st.get
   if s.doc.isNone || (shownBox s).isNone then return
   let mut anchor : Option Marks.Anchor := none
   let mut page := s.page
+  -- The point under the click, and the selection's boxes on that page (empty: not there).
+  let click ← match pos with
+    | some (wx, wy) => pagePointAt st wx wy
+    | none => pure none
+  let mut selQs : List Box := []
+  let mut selPage := s.page
   if let some (p, a, b) := s.sel then
     if (slotOf s p).isSome then
       if let .ok ix ← pageIndex st p then
-        let qs := Select.rangeBoxes ix.cells a b
-        if !qs.isEmpty then
-          anchor := some (.quads qs)
-          page := p
+        selQs := Select.rangeBoxes ix.cells a b
+        selPage := p
+  if let some (pg, pt) := click then
+    -- A click on another page than the selection is never inside it.
+    anchor := Marks.noteAnchor (if pg == selPage then selQs else []) (some pt)
+    page := if (anchor.map fun | .quads _ => true | _ => false) == some true then selPage else pg
+  else if pos.isNone then
+    anchor := Marks.noteAnchor selQs none
+    page := selPage
   -- The comment of the selected highlight (the edit bubble's Comment, task 9.8): its note,
   -- or a new note anchored to its quads in its colour.
   let mut color := Marks.Color.yellow
@@ -4698,7 +4891,7 @@ def addNote (st : IO.Ref State) (pos : Option (Int × Int)) : IO Unit := do
         page := m.page
         color := m.color
   if anchor.isNone then
-    let (wx, wy) := pos.getD (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
+    let (wx, wy) := (((s.canvasW / 2 : Nat) : Int), ((s.canvasH / 2 : Nat) : Int))
     if let some (pg, p) ← pagePointAt st wx wy then
       anchor := some (.point p)
       page := pg
@@ -4871,13 +5064,74 @@ def popDrag (st : IO.Ref State) (xs _ys : String) : IO Unit := do
   syncTool st
   setStatus s!"thickness {v} (used by free highlights)"
 
-/-- Escape (task 9.8): closes the colour picker and the pop-over and dismisses the bubble (the
-text selection and the selected mark are cleared; the tool stays on). -/
+/-! ## Dismissing transients (task 10.6) -/
+
+/-- The transients open now (`Toolbar.Transient`, in `Transient.order`): the note popup and
+the bars from Tk (a bar counts as open while it is packed), the picker and the pop-overs
+from the tool state (a pop-over only with a document, as `syncTool` shows it). -/
+def openTransients (st : IO.Ref State) : IO (List Toolbar.Transient) := do
+  let s ← st.get
+  let packed (w : String) : IO Bool := do
+    return !(← try run ["winfo", "manager", w] catch _ => pure "").isEmpty
+  let note := (← try run ["winfo", "exists", ".note"] catch _ => pure "0") == "1"
+  let goto ← packed ".goto"
+  let find ← packed ".find"
+  let hl := s.ui.popover && s.doc.isSome
+  let ed := s.ui.edPop && s.ui.editor != .none && s.doc.isSome
+  return Toolbar.Transient.order.filter fun
+    | .note => note
+    | .picker => s.pickerAt.isSome || s.ui.picker
+    | .hlPop => hl
+    | .edPop => ed
+    | .goto => goto
+    | .find => find
+
+/-- Closes transient `t` the way its own Close does: the note popup through `noteDone … close`
+(task 9.r12: a typed text is kept, an empty new note removed; never a bare `destroy .note`),
+the bars through `hideFind` / `hideGoto`, the picker and the pop-overs in the tool state
+(`Transient.closeUi`: the tool and the mode stay on). -/
+def dismiss (st : IO.Ref State) (t : Toolbar.Transient) : IO Unit := do
+  match t with
+  | .note =>
+    let id ← try run ["set", "::safepdf::noteId"] catch _ => pure ""
+    discard <| run ["::safepdf::noteDone", id, "close"]
+  | .goto => discard <| run ["::safepdf::hideGoto"]
+  | .find => discard <| run ["::safepdf::hideFind"]
+  | .picker =>
+    st.modify fun s => { s with ui := t.closeUi s.ui }
+    drawOverlay st
+  | .hlPop | .edPop =>
+    st.modify fun s => { s with ui := t.closeUi s.ui }
+    syncTool st
+
+/-- Handles `clickAway W` (task 10.6): a mouse press on widget `W` of the main window closes
+the open transients it lies outside of (`Toolbar.onClick`). The press is not consumed: the
+widget's own bindings have already run (the binding sits on the tag `all`). -/
+def clickAway (st : IO.Ref State) (w : String) : IO Unit := do
+  for t in Toolbar.onClick (← openTransients st) w do dismiss st t
+
+/-- Handles `opening find` / `opening goto` (task 10.6): before a bar opens, its rival closes
+(`Toolbar.onOpen`; the pop-overs' rivalry is in `Bubble.Ui`). -/
+def opening (st : IO.Ref State) (name : String) : IO Unit := do
+  let t : Option Toolbar.Transient := match name with
+    | "find" => some .find
+    | "goto" => some .goto
+    | _ => none
+  let some t := t | return
+  for u in Toolbar.onOpen (← openTransients st) t do dismiss st u
+
+/-- Escape (tasks 9.8, 10.6): closes the topmost open transient (`Toolbar.onEscape`: the note
+popup, the picker, a pop-over, then the go-to or find bar); only when none was open does it
+leave full screen or bring back what the document hid (task 9.r8, `escapeWindow`). Every
+Escape also dismisses the bubble (the text selection and the selected mark are cleared, the
+picker with it) and ends a drawing session; the Highlight tool and the Add text / Draw mode
+stay on. -/
 def escape (st : IO.Ref State) : IO Unit := do
-  -- Task 9.r8: full screen ends, parts of the window the document hid come back.
-  discard <| escapeWindow st
-  st.modify fun s => { s with ui := s.ui.escape, sel := none, markSel := none, pressPt := none,
-                              inkSession := none }
+  let closed := Toolbar.onEscape (← openTransients st)
+  for t in closed do dismiss st t
+  if closed.isEmpty then discard <| escapeWindow st
+  st.modify fun s => { s with ui := { s.ui with picker := false }, sel := none, markSel := none,
+                              pressPt := none, inkSession := none }
   drawOverlay st
   syncTool st
 
@@ -4989,14 +5243,15 @@ def toggleEditor (st : IO.Ref State) (e : Bubble.Editor) : IO Unit := do
   editorStatus st
 
 /-- Applies a pop-over change to the selected mark when it is of the mode's kind (`pred`),
-as PDF.js applies the parameters to the selected editor. -/
+as PDF.js applies the parameters to the selected editor. `merge`: a step of a slider drag
+(one undo step per drag, task 10.7). -/
 def edApply (st : IO.Ref State) (pred : Marks.Mark → Bool)
-    (f : Marks.Store → Nat → Marks.Store) : IO Unit := do
+    (f : Marks.Store → Nat → Marks.Store) (merge : Bool := false) : IO Unit := do
   let s ← st.get
   let some m := s.markSel.bind s.marks.find? | return
   if !pred m then return
   st.modify ({ · with marks := f s.marks m.id })
-  marksChanged st
+  marksChanged st merge
   if !(← updatePreview st) then drawOverlay st
 
 /-- Whether a mark is free text / ink. -/
@@ -5013,16 +5268,16 @@ def edSlideTo (st : IO.Ref State) (row : Nat) (x : Rat) : IO Unit := do
   match s.ui.editor, row with
   | .draw, 2 =>
     st.modify fun s => { s with ui := { s.ui with inkOpacity := v } }
-    edApply st isInk fun ms id => ms.setOpacity id v
+    edApply st isInk (fun ms id => ms.setOpacity id v) (merge := true)
     setStatus s!"opacity {v}%"
   | .draw, _ =>
     st.modify fun s => { s with ui := { s.ui with inkThick := v } }
-    edApply st isInk fun ms id => ms.setSize id v
+    edApply st isInk (fun ms id => ms.setSize id v) (merge := true)
     setStatus s!"thickness {v}"
   | _, _ =>
     st.modify fun s => { s with ui := { s.ui with ftSize := v },
                                 ftEdit := s.ftEdit.map ({ · with size := v }) }
-    edApply st isFt fun ms id => ms.setSize id v
+    edApply st isFt (fun ms id => ms.setSize id v) (merge := true)
     setStatus s!"font size {v}"
   syncTool st
   drawOverlay st
@@ -5048,7 +5303,8 @@ def edClick (st : IO.Ref State) (xs ys : String) : IO Unit := do
     drawOverlay st
     setStatus s!"colour {Marks.rgbHex c}"
   | some (.slider row) =>
-    st.modify ({ · with edSlide := some row })
+    -- A new drag: its steps form one undo step of their own (task 10.7).
+    st.modify fun s => { s with edSlide := some row, markHist := s.markHist.seal }
     edSlideTo st row x
   | none => pure ()
 
@@ -5129,16 +5385,56 @@ def moveDrag (st : IO.Ref State) (wx wy : Int) (final : Bool) : IO Unit := do
       setStatus s!"{markName m} moved"
     else drawOverlay st
 
+/-- **Undo** (`undo`, Ctrl+Z, Edit → Undo) or **Redo** (Ctrl+Shift+Z, Edit → Redo) of a mark
+edit (task 10.7, `Marks.History`): an open text box is committed first (its edit becomes the
+step undone); the marks go back (forward) one step and are drawn again — saved marks through
+the preview (9.5g), so a saved mark whose edit or deletion is undone shows as in the file and
+the title's `*` goes when nothing is left to save. The selection is kept when its mark is
+still there; a drawing session ends; an open note popup whose note is gone or changed closes. -/
+def undoRedo (st : IO.Ref State) (undo : Bool) : IO Unit := do
+  if (← st.get).doc.isNone then return
+  discard <| commitFt st
+  -- In step with the store (every edit records itself; this only makes sure).
+  st.modify fun s => { s with markHist := s.markHist.record s.marks.marks }
+  let s ← st.get
+  let some (h, marks) := (if undo then s.markHist.undo s.marks else s.markHist.redo s.marks) | do
+    setStatus (if undo then "nothing to undo" else "nothing to redo")
+  let sel := s.markSel.filter fun id => (marks.find? id).isSome
+  st.modify ({ · with marks, markHist := h, markSel := sel, inkSession := none,
+                      moveFrom := none })
+  marksChanged st
+  if !(← updatePreview st) then repaint st
+  if let some nid := (← run ["set", "::safepdf::noteId"]).toNat? then
+    if ((marks.find? nid).map (·.text)) != ((s.marks.find? nid).map (·.text)) then
+      discard <| run ["::safepdf::noteGone", toString nid]
+  let n := (if undo then h.future else h.past).length
+  let left := if undo then h.past.length else h.future.length
+  setStatus (← keyText (if undo then
+      s!"undone ({left} more to undo, {n} to redo with Ctrl+Shift+Z)"
+    else s!"redone ({left} more to redo, {n} to undo with Ctrl+Z)"))
+
 /-- The free text or drawing under page point `p` of page `pg` (`Marks.Store.hitAt`). -/
 def editorAt (s : State) (pg : Nat) (p : Pt) : Option Marks.Mark := do
   let sl ← slotOf s pg
   let id ← s.marks.hitAt sl.vp.box pg p
   (s.marks.find? id).filter (·.isEditor)
 
-/-- Handles `tool NAME` (an annotation tool, Print or Save): Highlight (task 9.4), Add comment
+/-- The Select text button (task 10.8, `Toolbar.selectTool`): turns Highlight, Add text and
+Draw off with their pop-overs (an open text box is committed, a drawing session ends); Select
+text is then the active tool. Pressing it while it is active changes nothing. -/
+def selectToolOn (st : IO.Ref State) : IO Unit := do
+  if (← st.get).doc.isNone then return
+  discard <| commitFt st
+  st.modify fun s => { s with ui := Toolbar.selectTool s.ui, inkSession := none }
+  syncTool st
+  setStatus "Select text: drag over the text to select it; click a link to follow it, a mark \
+    to select it"
+
+/-- Handles `tool NAME` (an annotation tool, Print or Save): Select text (task 10.8), Highlight (task 9.4), Add comment
 (a note, `addNote`), Add text and Draw (task 9.9); Add image and Print are not available yet. -/
 def tool (st : IO.Ref State) (name : String) : IO Unit := do
   match Toolbar.toolOf name with
+  | some .select => selectToolOn st
   | some .highlight => toolHighlight st
   | some .comment => addNote st none
   | some .text => toggleEditor st .text
@@ -5432,7 +5728,7 @@ def smokeText (st : IO.Ref State) (dir : String) : IO Unit := do
           -- The word's highlight in image pixels, and the page image, for an ink check.
           let s' ← st.get
           IO.FS.writeFile (file "word-rect.txt")
-            s!"{← run [".c", "coords", "sel"]}\n{s'.imgX} {s'.imgY}\n"
+            s!"{← run [".c", "bbox", "sel"]}\n{s'.imgX} {s'.imgY}\n"
           try discard <| run [photoOf 0, "write", file "text-page-1.ppm", "-format", "ppm"]
           catch _ => pure ()
       if let some (_, b) := (ix.hits (Select.normQuery "world"))[0]? then
@@ -7196,6 +7492,11 @@ def smokeOpenSettings (st : IO.Ref State) (dir : String) : IO Unit := do
     settle st
     out := out.push (← row f)
     if f == "prefs" || f == "full" then
+      -- Tk Aqua ignores leaving full screen while the window is still entering it: wait for
+      -- the transition, as a user would (task 10.11).
+      if f == "full" && (← isAqua) then
+        discard <| run ["after", "1000"]
+        discard <| run ["update"]
       sendEvent ".c" "<Key-Escape>"
       settle st
       out := out.push (← row s!"{f}-escape")
@@ -7218,7 +7519,10 @@ on X11 (where Tk's `Command` modifier is Meta). Writes `keys.txt`: the platform,
 context-menu accelerators, the bindings of Ctrl/Command+S and Ctrl/Command+Shift+S, the
 quit binding of the find bar and `primaryBind`, `::tk::mac::Quit`, the Save tooltip, the
 status after the primary-modifier Select all key (generated as a Tk event), the icon images'
-sizes and, when `xprop` is installed, the start of the window's `_NET_WM_ICON`. -/
+sizes and, when `xprop` is installed, the start of the window's `_NET_WM_ICON`. Task 10.9
+adds (after the 9.r3 lines) the accelerators of Go to page, First page, Forward, Sidebar and
+Rotate left, the bindings of the macOS conventions on `.` and in the find bar, and
+`::safepdf::cancelBind`. -/
 def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
   let plat ← platformRef.get
   let mut out : Array String := #[]
@@ -7242,6 +7546,18 @@ def smokeKeys (_st : IO.Ref State) (dir : String) : IO Unit := do
   out := out.push s!"mac-quit: [{← run ["info", "procs", "::tk::mac::Quit"]}] [{←
     try run ["info", "body", "::tk::mac::Quit"] catch _ => pure ""}]"
   out := out.push s!"save-tip: {← run ["set", "::safepdf::btn(tip,.bar.save)"]}"
+  -- Task 10.9: the macOS conventions (labels, bindings, ⌘. in dialogs).
+  out := out.push s!"accel-goto: {← accel .gotoPage}"
+  out := out.push s!"accel-first: {← accel .firstPage}"
+  out := out.push s!"accel-forward: {← accel .forward}"
+  out := out.push s!"accel-outline: {← accel .outline}"
+  out := out.push s!"accel-rotccw: {← accel .rotateCcw}"
+  for seq in ["<Command-Key-g>", "<Command-Key-G>", "<Option-Command-Key-g>", "<Control-Key-g>",
+      "<Command-Key-bracketleft>", "<Command-Key-Up>", "<Control-Command-Key-s>",
+      "<Command-Key-l>", "<Command-Key-9>"] do
+    out := out.push s!"bind {seq}: [{← run ["bind", ".", seq]}]"
+  out := out.push s!"bind-find-next: [{← run ["bind", ".find.e", "<Command-Key-g>"]}]"
+  out := out.push s!"cancelBind: [{← run ["info", "body", "::safepdf::cancelBind"]}]"
   let mods := if plat == .aqua then "Command" else "Control"
   sendEvent ".c" s!"<{mods}-Key-a>"
   discard <| run ["update"]
@@ -7375,7 +7691,8 @@ exists, the registered interpreters and the options the resources target (on the
 the overflow menu, the main window and freshly created probe widgets), exercises them
 (typing into the page field, posting the menu, keyboard traversal) and writes `up`; the next
 steps wait (at most 20 s) for the other interpreter's `attacked` file, then write
-`lockdown.txt` and close the window. -/
+`lockdown.txt` and close the window. With `SAFEPDF_VIEWER_DRIVE=1` step 0 also renames the
+application to a unique name and records it (`appname`, task 10.19). -/
 def smokeLockdown (st : IO.Ref State) (dir : String) : IO Unit := do
   let file (name : String) : System.FilePath := (dir : System.FilePath) / name
   let s ← st.get
@@ -7384,7 +7701,14 @@ def smokeLockdown (st : IO.Ref State) (dir : String) : IO Unit := do
     discard <| run ["update"]
     let get (w o : String) : IO String := do
       try return s!"[{← run [w, "cget", o]}]" catch e => return s!"error {e}"
+    -- Task 10.19: with the drive hook the viewer takes a unique application name and reports
+    -- it, so the control run targets exactly this viewer, not a guessed `tk` (on Aqua
+    -- `winfo interps` also lists stale and foreign interpreters). Without the hook nothing
+    -- registers: `tk appname NAME` would undo `sendOffScript`.
     let mut out : Array String := #[]
+    if (← IO.getEnv "SAFEPDF_VIEWER_DRIVE") == some "1" then
+      discard <| run ["tk", "appname", s!"safepdf-lock-{← IO.Process.getPID}"]
+      out := out.push s!"appname: {← run ["tk", "appname"]}"
     out := out.push s!"send-command: [{← run ["info", "commands", "::send"]}]"
     out := out.push s!"interps: [{← try run ["winfo", "interps"] catch e => pure s!"error {e}"}]"
     out := out.push s!"pg-validate: {← get ".bar.pg.e" "-validate"} {← get ".bar.pg.e" "-validatecommand"}"
@@ -8275,6 +8599,210 @@ def smokeNoteClose (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile (file "noteclose.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of the dismissal rule (`SAFEPDF_VIEWER_SMOKE_MODE=dismiss`, task 10.6,
+`Toolbar.Transient`) on the text PDF of `smokeText`. Each line of `dismiss.txt` gives what is
+open after a step (`1`/`0`: the bar or pop-over is packed / placed): the find bar closes on a
+drag on the page (and the drag still selects: the click is not consumed) and on Escape with
+the focus on the page; Ctrl+F closes the go-to bar; the go-to bar stays on a press inside it
+and closes on a press on the status line; the Highlight pop-over stays on a press inside it
+and on the page, closes on a press elsewhere (the tool stays on) and on Escape; the Add text
+pop-over likewise (the mode stays on); the edit bubble's colour picker closes on a press
+outside the page; a note popup with typed text closes on a press on the page (the text is
+kept, task 9.r12), an empty new one on Escape in the main window (the note goes). -/
+def smokeDismiss (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let upd : IO Unit := discard <| run ["update"]
+  let packed (w : String) : IO String := do
+    return if (← run ["winfo", "manager", w]).isEmpty then "0" else "1"
+  let placed (w : String) : IO String := run ["winfo", "ismapped", w]
+  let note : IO String := run ["winfo", "exists", ".note"]
+  let press (w : String) (x y : String := "2") : IO Unit := do
+    sendEvent w "<ButtonPress-1>" ["-x", x, "-y", y, "-time", toString (← IO.monoMsNow)]
+    sendEvent w "<ButtonRelease-1>" ["-x", x, "-y", y, "-time", toString (← IO.monoMsNow)]
+    upd
+  let btn (w : String) : IO Unit := press w "16" "16"
+  let dragSel (q : String) : IO Unit := do
+    let some (wa, wb) := (ix.hits (Select.normQuery q))[0]? | return
+    let (some p0, some p1) := (← cellWindowPos st ix wa, ← cellWindowPos st ix (wb - 1)) | return
+    sendEvent ".c" "<ButtonPress-1>" ["-x", p0.1, "-y", p0.2]
+    sendEvent ".c" "<Motion>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    sendEvent ".c" "<ButtonRelease-1>" ["-x", p1.1, "-y", p1.2, "-state", "256"]
+    upd
+  let some blank ← boxWindowPos st ⟨40, 760, 40, 760⟩ | throw (IO.userError "page not shown")
+  let pause : IO Unit := discard <| run ["after", "600"]
+  -- 1. The find bar: a drag on the page closes it and still selects; Escape closes it.
+  sendEvent ".c" "<Control-Key-f>"
+  upd
+  out := out.push s!"find-open: {← packed ".find"} focus={← run ["focus"]}"
+  dragSel "world"
+  out := out.push s!"find-drag: {← packed ".find"} sel={(← st.get).sel.isSome} focus={← run ["focus"]}"
+  sendEvent ".c" "<Control-Key-f>"
+  upd
+  sendKey "Escape"
+  upd
+  out := out.push s!"find-esc: {← packed ".find"}"
+  -- 2. The go-to bar: Ctrl+F closes it (rivals); a press inside keeps it, one outside closes it.
+  sendEvent ".c" "<Control-Key-g>"
+  upd
+  out := out.push s!"goto-open: {← packed ".goto"}"
+  sendEvent ".c" "<Control-Key-f>"
+  upd
+  out := out.push s!"goto-rival: goto={← packed ".goto"} find={← packed ".find"}"
+  sendEvent ".find.e" "<Key-Escape>"
+  sendEvent ".c" "<Control-Key-g>"
+  upd
+  press ".goto.e"
+  out := out.push s!"goto-inside: {← packed ".goto"}"
+  press ".status"
+  out := out.push s!"goto-away: {← packed ".goto"}"
+  -- 3. The Highlight pop-over.
+  pause
+  btn ".bar.highlight"
+  out := out.push s!"hl-open: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  press ".hlbar"
+  out := out.push s!"hl-inside: {← placed ".hlbar"}"
+  press ".c" blank.1 blank.2
+  out := out.push s!"hl-page: {← placed ".hlbar"}"
+  press ".status"
+  out := out.push s!"hl-away: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  pause
+  btn ".bar.highlight"
+  pause
+  btn ".bar.highlight"
+  out := out.push s!"hl-reopen: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  sendKey "Escape"
+  upd
+  out := out.push s!"hl-esc: {← placed ".hlbar"} tool={(← st.get).ui.tool}"
+  pause
+  btn ".bar.highlight"
+  out := out.push s!"hl-off: {(← st.get).ui.tool}"
+  -- 4. The Add text pop-over.
+  pause
+  btn ".bar.text"
+  out := out.push s!"ed-open: {← placed ".edbar"} text={(← st.get).ui.editor == .text}"
+  press ".status"
+  out := out.push s!"ed-away: {← placed ".edbar"} text={(← st.get).ui.editor == .text}"
+  pause
+  btn ".bar.text"
+  pause
+  btn ".bar.text"
+  sendKey "Escape"
+  upd
+  out := out.push s!"ed-esc: {← placed ".edbar"} text={(← st.get).ui.editor == .text}"
+  pause
+  btn ".bar.text"
+  -- 5. The edit bubble's colour picker.
+  dragSel "safe"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  upd
+  if let some (k, r) := (← st.get).bubble then
+    if let some (_, x0, x1) := k.layout.find? (·.1 == .color) then
+      let vx := (View.parseDecimal (← run [".c", "canvasx", "0"])).getD 0
+      let vy := (View.parseDecimal (← run [".c", "canvasy", "0"])).getD 0
+      pause
+      press ".c" (toString (r.x0 + (x0 + x1) / 2 - vx).floor) (toString ((r.y0 + r.y1) / 2 - vy).floor)
+  out := out.push s!"picker-open: {(← st.get).pickerAt.isSome}"
+  press ".status"
+  out := out.push s!"picker-away: {(← st.get).pickerAt.isSome} {(← st.get).ui.picker}"
+  sendKey "Escape"
+  upd
+  -- 6. The note popup: a press on the page closes it the 9.r12 way (typed text kept).
+  let notes : IO (List Marks.Mark) := return (← st.get).marks.marks.toList.filter (·.isNote)
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.addNote.label]
+  upd
+  discard <| run [".note.t", "insert", "end", "kept by a click away"]
+  press ".note.t"
+  out := out.push s!"note-inside: {← note}"
+  pause
+  press ".c" blank.1 blank.2
+  out := out.push s!"note-away: popup={← note} notes={(← notes).length} text={((← notes).getLast?.map (·.text)).getD "<none>"}"
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.addNote.label]
+  upd
+  out := out.push s!"note-open: popup={← note} notes={(← notes).length}"
+  sendKey "Escape"
+  upd
+  out := out.push s!"note-esc: popup={← note} notes={(← notes).length}"
+  out := out.push "done"
+  IO.FS.writeFile (file "dismiss.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- Smoke steps of the select-text tool and the cursor (task 10.8,
+`SAFEPDF_VIEWER_SMOKE_MODE=tools`) on a page with the text `Hello safe world` and a link
+annotation over blank paper: Select text is active and pressed at start; the canvas cursor
+over the word `safe`, the link and blank paper (`Toolbar.cursorFor`); Draw takes over (Select
+text unpressed, crosshair at once and over the text) and its button again gives Select text
+back; Highlight takes over, Escape keeps it (task 10.6), the Select text button ends it; Add
+text shows the I-beam over the link. Clicks are spaced 2.5 s apart in event time (Aqua counts
+closer ones as double clicks). -/
+def smokeTools (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let upd : IO Unit := discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let some (wa, _) := (ix.hits (Select.normQuery "safe"))[0]? | throw (IO.userError "no safe")
+  let some onText ← cellWindowPos st ix (wa + 1) | throw (IO.userError "page not shown")
+  let some l := (← linksOf st 0)[0]? | throw (IO.userError "no link")
+  let some onLink ← boxWindowPos st l.box | throw (IO.userError "link not shown")
+  let some blank ← boxWindowPos st ⟨40, 760, 40, 760⟩ | throw (IO.userError "page not shown")
+  let t ← IO.mkRef ((← IO.monoMsNow) % 1000000000)
+  let btn (w : String) : IO Unit := do
+    t.modify (· + 2500)
+    let tm := toString (← t.get)
+    sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16", "-time", tm]
+    sendEvent w "<ButtonRelease-1>" ["-x", "16", "-y", "16", "-time", tm]
+    upd
+  let moveTo (pos : String × String) : IO Unit := do
+    sendEvent ".c" "<Motion>" ["-x", pos.1, "-y", pos.2]
+    upd
+  let cursor : IO String := return s!"[{← run [".c", "cget", "-cursor"]}]"
+  let modeName : Toolbar.Mode → String
+    | .select => "select" | .highlight => "highlight" | .text => "text" | .draw => "draw"
+  let tog (w : String) : IO String := run ["set", s!"::safepdf::btn(tog,{w})"]
+  let tools : IO String := do
+    return s!"{modeName (Toolbar.Mode.of (← st.get).ui)} select={← tog ".bar.select"} \
+      highlight={← tog ".bar.highlight"} text={← tog ".bar.text"} draw={← tog ".bar.draw"}"
+  out := out.push s!"tool0: {← tools}"
+  out := out.push s!"select-state: {← run ["::safepdf::btnState", ".bar.select"]}"
+  moveTo onText
+  out := out.push s!"cursor-text: {← cursor}"
+  moveTo onLink
+  out := out.push s!"cursor-link: {← cursor}"
+  moveTo blank
+  out := out.push s!"cursor-empty: {← cursor}"
+  -- Draw: crosshair at once (no motion) and over the text; its button again gives Select back.
+  btn ".bar.draw"
+  out := out.push s!"draw-on: {← tools}"
+  out := out.push s!"cursor-draw-still: {← cursor}"
+  moveTo onText
+  out := out.push s!"cursor-draw-text: {← cursor}"
+  btn ".bar.draw"
+  out := out.push s!"draw-off: {← tools}"
+  out := out.push s!"cursor-after-draw: {← cursor}"
+  -- Highlight: Escape keeps the tool, Select text ends it.
+  btn ".bar.highlight"
+  out := out.push s!"hl-on: {← tools} popover={(← st.get).ui.popover}"
+  sendKey "Escape"
+  upd
+  out := out.push s!"hl-esc: {← tools} popover={(← st.get).ui.popover}"
+  btn ".bar.select"
+  out := out.push s!"select-btn: {← tools} popover={(← st.get).ui.popover}"
+  btn ".bar.select"
+  out := out.push s!"select-again: {← tools}"
+  -- Add text: the I-beam also over the link (a click places a text box there).
+  btn ".bar.text"
+  moveTo onLink
+  out := out.push s!"text-on: {← tools}"
+  out := out.push s!"cursor-text-link: {← cursor}"
+  btn ".bar.select"
+  out := out.push s!"cursor-select-link: {← cursor}"
+  out := out.push "done"
+  IO.FS.writeFile (file "tools.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Waits until the thumbnails panel has rendered every thumbnail it wants (task 9.r9 smoke
 tests): processes Tk events, starts renders (`thumbView`), waits for them (`thumbPoll`). -/
 def thumbSettle (st : IO.Ref State) : IO Unit := do
@@ -8698,6 +9226,347 @@ def smokeLayers (st : IO.Ref State) (dir : String) : IO Unit := do
   IO.FS.writeFile ((dir : System.FilePath) / "layers.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
+/-- Smoke steps of delete and undo/redo on marks (`SAFEPDF_VIEWER_SMOKE_MODE=undo`, task 10.7)
+on a copy of the text PDF of `smokeText` (substitute fonts off: the page is white where the
+words are). `world` is highlighted (Edit → Highlight selection), selected by a click and
+removed with Backspace (white again); Ctrl+Z brings it back (tinted pixels), Ctrl+Shift+Z
+removes it again; two more Ctrl+Z go back to before the highlight (clean, Undo disabled), a
+Ctrl+Shift+Z redoes it. A note at a blank point gets the text `first`, then `second`; Ctrl+Z
+gives back `first`, then the empty new note, then no note; Ctrl+Shift+Z twice gives `first`
+again. Ctrl+S (answered Overwrite) saves the highlight and the note and reopens the file (the
+history is cleared). The saved highlight is selected and deleted with Delete (dirty, white);
+Ctrl+Z restores it (clean again, the saved mark shown from the file: tinted, Save disabled);
+it is recoloured green and Ctrl+S writes that: the reopened file holds both marks, the
+highlight green with its id. With the highlight selected, Backspace and Delete typed into the
+find entry and into the note's popup edit their text (marks, selection and page unchanged).
+Each click takes `world`'s position from the current view and carries its own `-time` (task
+10.14: untimed clicks were double clicks on Aqua; the word they selected anchored the note to
+the highlight's quads, making it the comment that Delete removes with the highlight). Results
+in `undo.txt`. -/
+def smokeUndo (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let k := saveKit st
+  let mut out : Array String := #[]
+  discard <| run ["update"]
+  let .ok ix ← pageIndex st 0 | throw (IO.userError "no text index")
+  let boxOf (q : String) : Option Box := do
+    let (a, b) ← (ix.hits (Select.normQuery q))[0]?
+    (Select.rangeBoxes ix.cells a b).head?
+  let some world := boxOf "world" | throw (IO.userError "word not found")
+  -- Tinted (coloured) pixels among 7 × 3 points inside a box: 0 without a highlight.
+  let tinted (b : Box) : IO Nat := do
+    let mut n := 0
+    for i in [1:8] do
+      for j in [1:4] do
+        let q : Pt := ⟨b.llx + (b.urx - b.llx) * i / 8, b.lly + (b.ury - b.lly) * j / 4⟩
+        let cs := ((← k.px q).splitOn " ").filterMap String.toNat?
+        if cs.length == 3 && (cs.foldl max 0) - (cs.foldl min 255) > 40 then n := n + 1
+    return n
+  let shade : IO String := return if (← tinted world) > 0 then "tinted" else "white"
+  let count : IO Nat := return (← st.get).marks.marks.size
+  let undoKey : IO Unit := sendEvent ".c" "<Control-Key-z>"
+  let redoKey : IO Unit := sendEvent ".c" "<Control-Key-Z>"
+  let states : IO String := return s!"{← k.menuState .undo} {← k.menuState .redo}"
+  let path := (← st.get).path.getD ""
+  -- Task 10.14: `world`'s window position is taken from the current view before each click
+  -- (Save reopens the file, which can scroll), scrolled into the window first when it is
+  -- outside; every click carries an explicit `-time` 2 s after the previous one (Tk Aqua counts
+  -- generated clicks without `-time` as double clicks, which select the word under them).
+  let wposNow : IO (String × String) := do
+    settle st
+    let s ← st.get
+    let some bx := shownBox s | throw (IO.userError "world not shown")
+    let (x0, y0, x1, y1) := canvasRect s bx world
+    let (some vx, some vy) := (View.parseDecimal (← run [".c", "canvasx", "0"]),
+      View.parseDecimal (← run [".c", "canvasy", "0"])) | throw (IO.userError "no view")
+    if y0 < vy || vy + (s.canvasH : Rat) < y1 then
+      discard <| run [".c", "yview", "moveto",
+        fmtFrac (((y0 + y1) / 2 - (s.canvasH : Rat) / 2) / (s.regionH : Rat))]
+    if x0 < vx || vx + (s.canvasW : Rat) < x1 then
+      discard <| run [".c", "xview", "moveto",
+        fmtFrac (((x0 + x1) / 2 - (s.canvasW : Rat) / 2) / (s.regionW : Rat))]
+    settle st
+    let some p ← boxWindowPos st world | throw (IO.userError "world not shown")
+    return p
+  let clock ← IO.mkRef ((← IO.monoMsNow) % 1000000000)
+  -- `n` press/release pairs 1 ms apart (2: a double click), 2 s after the last click.
+  let clicks (n : Nat) : IO Unit := do
+    let pos ← wposNow
+    clock.modify (· + 2000)
+    for i in [0:n] do
+      let t := toString ((← clock.get) + i)
+      sendEvent ".c" "<ButtonPress-1>" ["-x", pos.1, "-y", pos.2, "-time", t]
+      sendEvent ".c" "<ButtonRelease-1>" ["-x", pos.1, "-y", pos.2, "-time", t]
+    discard <| run ["update", "idletasks"]
+  -- The click's selection: (a mark selected, a text selection).
+  let selState : IO String := do
+    let s ← st.get
+    return s!"{s.markSel.isSome} {s.sel.isSome}"
+  out := out.push s!"start: {← count} {← shade} {← states}"
+  -- 1. Highlight `world`, select it, Backspace removes it.
+  clicks 2
+  discard <| run [".menubar.edit", "invoke", Menu.Cmd.highlight.label]
+  syncMenus st
+  out := out.push s!"highlighted: {← count} {← shade} {(← st.get).marks.dirty} {← states}"
+  clicks 1
+  let hid := (← st.get).markSel
+  out := out.push s!"select-click: {← selState}"
+  sendKey "BackSpace"
+  syncMenus st
+  out := out.push s!"backspace: {hid.isSome} {← count} {← shade} {← states}"
+  -- 2. Undo brings it back, redo removes it again.
+  undoKey
+  syncMenus st
+  out := out.push s!"undo-delete: {← count} {← shade} {((← st.get).marks.marks.toList.map (·.id)) == hid.toList} {← states}"
+  redoKey
+  syncMenus st
+  out := out.push s!"redo-delete: {← count} {← shade} {← states}"
+  -- 3. Back to before the highlight: clean, nothing more to undo; redo highlights again.
+  undoKey
+  undoKey
+  syncMenus st
+  out := out.push s!"undo-all: {← count} {← shade} {(← st.get).marks.dirty} {← k.star} {← states}"
+  undoKey
+  out := out.push s!"undo-empty: {← count} {← k.status}"
+  redoKey
+  syncMenus st
+  out := out.push s!"redo-highlight: {← count} {← shade} {← states}"
+  -- 4. A note: `first`, then `second`; undo steps back through its texts and its creation.
+  smokeNoteAt st 300 400 "first"
+  discard <| run ["destroy", ".note"]
+  let noteText : IO String := do
+    let s ← st.get
+    return ((s.marks.marks.toList.find? (·.isNote)).map (·.text)).getD "<none>"
+  let nid := ((← st.get).marks.marks.toList.find? (·.isNote)).map (·.id)
+  out := out.push s!"note: {nid.isSome} {← noteText} {← states}"
+  -- Anchored at its point, not to a (stale) word selection: that would make it the
+  -- highlight's comment, which Delete on the highlight removes with it (9.5g).
+  let anchorKind (m : Marks.Mark) : String := if m.quads.isEmpty then "point" else "quads"
+  out := out.push s!"note-anchor: {((← st.get).marks.marks.toList.find? (·.isNote)).map anchorKind}"
+  if let some n := nid then noteSave st (toString n) "second"
+  out := out.push s!"note-edited: {← noteText}"
+  undoKey
+  out := out.push s!"note-undo1: {← noteText}"
+  undoKey
+  out := out.push s!"note-undo2: [{← noteText}]"
+  undoKey
+  out := out.push s!"note-undo3: {← noteText} {← count}"
+  redoKey
+  redoKey
+  syncMenus st
+  out := out.push s!"note-redo: {← noteText} {← count} {← states}"
+  -- 5. Save (Overwrite): the history starts again with the reopened file.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  sendEvent ".c" "<Control-Key-s>"
+  syncMenus st
+  let s1 ← st.get
+  out := out.push s!"saved: {s1.path == some path} {s1.marks.marks.size} {s1.marks.dirty} {← k.star} {← shade} {← states}"
+  -- 6. The saved highlight: Delete, undo (clean again, drawn from the file).
+  clicks 1
+  out := out.push s!"saved-select: {← selState}"
+  let sid := (← st.get).markSel
+  let savedSel := sid.any (← st.get).marks.isSaved
+  sendKey "Delete"
+  syncMenus st
+  out := out.push s!"saved-delete: {savedSel} {← count} {(← st.get).marks.dirty} {← k.star} {← shade} {← k.menuState .save}"
+  undoKey
+  syncMenus st
+  let s2 ← st.get
+  out := out.push s!"saved-undo: {← count} {s2.marks.dirty} {← k.star} {← shade} {← k.menuState .save} {(sid.bind s2.marks.find?).isSome} {s2.view.isNone}"
+  -- 7. Recoloured green and saved: the file holds both marks, the highlight green.
+  clicks 1
+  discard <| run [".menubar.edit.hl", "invoke", Marks.Color.green.label]
+  sendEvent ".c" "<Control-Key-s>"
+  syncMenus st
+  let s3 ← st.get
+  out := out.push s!"resaved: {s3.marks.marks.size} {s3.marks.dirty} {((sid.bind s3.marks.find?).map (·.color.name))} {← k.px ⟨(world.llx + world.urx) / 2, (world.lly + world.ury) / 2⟩} {← states}"
+  out := out.push s!"file-marks: {← fileMarks path}"
+  -- 8. With the highlight selected, Backspace and Delete typed into the find bar's entry and
+  -- into a note popup's text edit the text there; the marks and the page stay.
+  clicks 1
+  let pg0 := (← st.get).page
+  sendEvent ".c" "<Control-Key-f>"
+  discard <| run ["update"]
+  discard <| run [".find.e", "delete", "0", "end"]
+  discard <| run [".find.e", "insert", "end", "abcd"]
+  discard <| run [".find.e", "icursor", "2"]
+  sendEvent ".find.e" "<Key-BackSpace>"
+  sendEvent ".find.e" "<Key-Delete>"
+  out := out.push s!"find-keys: {← run [".find.e", "get"]} {← count} {← selState} {(← st.get).page == pg0}"
+  sendEvent ".find.e" "<Key-Escape>"
+  if let some n := (← st.get).marks.marks.toList.find? (·.isNote) then
+    openNote st n.id
+    discard <| run ["update"]
+    discard <| run [".note.t", "mark", "set", "insert", "1.2"]
+    sendEvent ".note.t" "<Key-BackSpace>"
+    sendEvent ".note.t" "<Key-Delete>"
+    out := out.push s!"note-keys: {← run [".note.t", "get", "1.0", "end-1c"]} {← count} {(← st.get).page == pg0}"
+    discard <| run ["destroy", ".note"]
+  -- 9. Right-click → Add note… (task 10.17, `addNote st (some pos)`): far from a word
+  -- selection it is a point note; inside the selection it is a comment on it (quads).
+  let noteKind : IO String := do
+    let s ← st.get
+    return ((s.markSel.bind s.marks.find?).map anchorKind).getD "<none>"
+  clicks 2
+  let selected := (← st.get).sel.isSome
+  let pos ← wposNow
+  let (some px0, some py0) := (pos.1.toInt?, pos.2.toInt?) | throw (IO.userError "bad position")
+  addNote st (some (px0, py0 + 150))
+  out := out.push s!"note-far: {selected} {← noteKind} {(← st.get).sel.isSome}"
+  discard <| run ["destroy", ".note"]
+  clicks 2
+  let pos1 ← wposNow
+  let (some px1, some py1) := (pos1.1.toInt?, pos1.2.toInt?) | throw (IO.userError "bad position")
+  addNote st (some (px1, py1))
+  out := out.push s!"note-inside: {← noteKind} {(← st.get).sel.isSome}"
+  discard <| run ["destroy", ".note"]
+  IO.FS.writeFile (file "undo.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The tint photos that exist (`::safepdf::tint`, task 10.10). -/
+def tintImages : IO Nat := do
+  let l ← run ["lsearch", "-all", "-inline", ← run ["image", "names"], "::safepdf::tint_*"]
+  return (l.splitOn " ").filter (!·.isEmpty) |>.length
+
+/-- Milliseconds (two decimals) of `k` runs of `act`, averaged. -/
+def timeMs (k : Nat) (act : IO Unit) : IO String := do
+  let t0 ← IO.monoNanosNow
+  for _ in [0:k] do act
+  let t1 ← IO.monoNanosNow
+  let us := (t1 - t0) / (1000 * max 1 k)
+  let frac := (us % 1000) / 10
+  return s!"{us / 1000}.{if frac < 10 then "0" else ""}{frac}"
+
+/-- Smoke steps of the highlight fills (`SAFEPDF_VIEWER_SMOKE_MODE=tint`, task 10.10) on a page
+whose first line is `Hello safe world` over a black marker under `safe` (as 1d) and whose
+other lines repeat `safe` (hundreds of search hits; non-embedded Helvetica unpainted). Writes
+`tint.txt`: the item kind of the selection (Ctrl+A) and of the hits (search `safe`), item and
+tint photo counts, and probes — at a canvas point, the items there bottom to top as
+`tag=kind`, image items with their pixel `(R G B A)` — over the marker (ink) and over white
+paper, for the selection, the current hit and another hit; drawing times of the overlays
+(average of 5 `drawOverlay` + `update idletasks`) as tint photos and as stippled rectangles,
+and the cost of filling one page-sized photo (option (b), a full overlay image, for
+comparison). Background mode cannot capture the composited window, so the smoke test
+composites the probed page and fill pixels itself. -/
+def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file (name : String) : String := ((dir : System.FilePath) / name).toString
+  let mut out : Array String := #[]
+  settle st
+  discard <| run ["update"]
+  out := out.push s!"aqua: {!(← st.get).stipple}"
+  let .ok ix ← pageIndex st (← st.get).page | do
+    IO.FS.writeFile (file "tint.txt") "error: no text index\n"
+    discard <| run ["destroy", "."]
+  let hits := ix.hits (Select.normQuery "safe")
+  let boxOf (k : Nat) : Option Box := do
+    let (a, b) ← hits[k]?
+    (Select.rangeBoxes ix.cells a b).head?
+  let (some safe, some other, some hello) := (boxOf 0, boxOf 1, (ix.cells[0]?).map (·.box)) | do
+    IO.FS.writeFile (file "tint.txt") "error: words not found\n"
+    discard <| run ["destroy", "."]
+  let centre (b : Box) : Pt := ⟨(b.llx + b.urx) / 2, (b.lly + b.ury) / 2⟩
+  -- Inside the black marker (y 700–712.6) under `safe`.
+  let inkPt : Pt := ⟨(safe.llx + safe.urx) / 2, 706⟩
+  let probe (p : Pt) : IO String := do
+    let s ← st.get
+    let some bx := shownBox s | return "<no page>"
+    let (cx, cy, _, _) := canvasRect s bx ⟨p.x, p.y, p.x, p.y⟩
+    let (x, y) := (cx.floor, cy.floor)
+    let ids := ((← run [".c", "find", "overlapping", toString x, toString y, toString x,
+      toString y]).splitOn " ").filter (!·.isEmpty)
+    let mut parts : Array String := #[]
+    for id in ids do
+      let tag := ((← run [".c", "gettags", id]).splitOn " ").headD ""
+      let kind ← run [".c", "type", id]
+      if kind == "image" then
+        let img ← run [".c", "itemcget", id, "-image"]
+        let px ← match ((← run [".c", "coords", id]).splitOn " ").filterMap View.parseDecimal with
+          | [ix0, iy0] =>
+            try run [img, "get", toString (x - ix0.floor), toString (y - iy0.floor), "-withalpha"]
+            catch _ => pure "outside"
+          | _ => pure "?"
+        parts := parts.push s!"{tag}={kind}({px})"
+      else parts := parts.push s!"{tag}={kind}"
+    return ";".intercalate parts.toList
+  let kindOf (tag : String) : IO String := do
+    match ((← run [".c", "find", "withtag", tag]).splitOn " ").head? with
+    | some id => if id.isEmpty then pure "none" else run [".c", "type", id]
+    | none => pure "none"
+  let redraw : IO Unit := do drawOverlay st; discard <| run ["update", "idletasks"]
+  -- 1. Select the page.
+  sendEvent ".c" "<Control-Key-a>"
+  discard <| run ["update"]
+  out := out.push s!"sel: kind={← kindOf "sel"} items={← tagCount "sel"} photos={← tintImages}"
+  out := out.push s!"sel-ink: {← probe inkPt}"
+  out := out.push s!"sel-paper: {← probe (centre hello)}"
+  out := out.push s!"ms-sel: {← timeMs 5 redraw}"
+  -- 1b. Selection bands (task 10.18): the `sel` items' bounding boxes in drawing order, each
+  -- full line's extent (rounded as `drawOverlay`), then a selection from the middle of line 3
+  -- to the middle of line 5 (runs 2–4 after the heading) with the canvas x of its start and
+  -- end glyphs and a probe in the paper between lines 3 and 4.
+  let px (v : Rat) : String := toString (v + 1 / 2).floor
+  let bandsNow : IO String := do
+    let ids := ((← run [".c", "find", "withtag", "sel"]).splitOn " ").filter (!·.isEmpty)
+    let mut bs : Array String := #[]
+    for id in ids do bs := bs.push (",".intercalate ((← run [".c", "bbox", id]).splitOn " "))
+    return ";".intercalate bs.toList
+  let runs := (Select.lineRuns ix.cells 0 (ix.cells.size - 1)).toArray
+  let s1 ← st.get
+  if let some sl := slotOf s1 s1.page then
+    let lineX := runs.toList.map fun (_, _, b) =>
+      let (x0, _, x1, _) := sl.rect b
+      s!"{px x0},{px x1}"
+    out := out.push s!"sel-bands: {← bandsNow}"
+    out := out.push s!"sel-lines: {";".intercalate lineX}"
+    if let (some (_, i2, b2), some (_, _, b3), some (_, i4, _)) := (runs[2]?, runs[3]?, runs[4]?) then
+      let (a, b) := (i2 + 22, i4 + 22)
+      st.modify ({ · with sel := some (s1.page, a, b) })
+      redraw
+      let cx (i : Nat) (hi : Bool) : String := match ix.cells[i]? with
+        | some c => let (x0, _, x1, _) := sl.rect c.box; px (if hi then x1 else x0)
+        | none => "?"
+      out := out.push s!"sel3-bands: {← bandsNow}"
+      out := out.push s!"sel3-ends: {cx a false},{cx b true}"
+      -- In the paper gap above line 3, a quarter of the way down from line 2's glyph boxes.
+      out := out.push s!"sel3-gap: {← probe ⟨(b3.llx + b3.urx) / 2, b3.ury + (b2.lly - b3.ury) / 4⟩}"
+      out := out.push s!"sel3-text: {(Select.rangeText ix.cells a b).length}"
+  -- 2. Search `safe`: the first hit (current, orange) lies over the marker.
+  st.modify ({ · with sel := none })
+  sendEvent ".c" "<Control-Key-f>"
+  discard <| run ["update", "idletasks"]
+  discard <| run ["set", "::safepdf::query", "safe"]
+  sendEvent ".find.e" "<Key-Return>"
+  discard <| run ["update"]
+  out := out.push s!"hit: kind={← kindOf "hit"} items={← tagCount "hit"} photos={← tintImages} status={← run [".status", "cget", "-text"]}"
+  out := out.push s!"hit-ink: {← probe inkPt}"
+  out := out.push s!"hit-paper: {← probe (centre other)}"
+  out := out.push s!"ms-hits: {← timeMs 5 redraw}"
+  -- 3. Everything at once, then the same as stippled rectangles (the X11 drawing).
+  sendEvent ".c" "<Control-Key-a>"
+  discard <| run ["update"]
+  out := out.push s!"ms-all: {← timeMs 5 redraw} items={(← tagCount "sel") + (← tagCount "hit")}"
+  let stip := (← st.get).stipple
+  st.modify ({ · with stipple := !stip })
+  out := out.push s!"ms-all-other: {← timeMs 5 redraw} stipple={!stip}"
+  st.modify ({ · with stipple := stip })
+  redraw
+  -- 4. One page-sized overlay photo filled with a translucent colour (option (b)'s floor).
+  let pg := photoOf (← st.get).page
+  let (w, h) := (← run ["image", "width", pg], ← run ["image", "height", pg])
+  let fill : IO Unit := do
+    discard <| run ["image", "create", "photo", "::safepdf::tintProbe", "-width", w, "-height", h]
+    discard <| run ["::safepdf::tintProbe", "put", "{#3874f25a}", "-to", "0", "0", w, h]
+    discard <| run ["image", "delete", "::safepdf::tintProbe"]
+  out := out.push s!"ms-fullpage-photo: {← timeMs 5 fill} size={w}x{h}"
+  -- 5. Closing the search and dropping the selection leaves no fill and no photo.
+  sendEvent ".find.e" "<Key-Escape>"
+  st.modify ({ · with sel := none })
+  redraw
+  out := out.push s!"closed: items={(← tagCount "sel") + (← tagCount "hit")} photos={← tintImages}"
+  out := out.push "done"
+  IO.FS.writeFile (file "tint.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
 (the prefetch runs 100 ms after a page is shown). Files written into the smoke directory:
 * step 0: `f` (fit page; the viewer opens in Automatic Zoom);
@@ -8733,6 +9602,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       else smokeEncrypted st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / name) s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "undo" then
+    try smokeUndo st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "undo.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "xfdf" then
@@ -8802,6 +9677,24 @@ def smoke (st : IO.Ref State) : IO Unit := do
     try smokeNoteClose st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / "noteclose.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "tint" then
+    try smokeTint st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "tint.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "dismiss" then
+    try smokeDismiss st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "dismiss.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "tools" then
+    try smokeTools st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "tools.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "savedlg" then
@@ -8977,9 +9870,16 @@ def handle (st : IO.Ref State) (args : Array String) : IO Unit := do
   | ["noteDelete", id] => if let some id := id.toNat? then deleteMark st id
   | ["noteClose", id, text] => noteClose st id text
   | ["markDelete"] => markDelete st
+  | ["backspace"] =>
+    if s.doc.isSome && s.markSel.isSome then markDelete st
+    else discard <| run ["::safepdf::step", "y", "-1", "pages"]
+  | ["undo"] => undoRedo st true
+  | ["redo"] => undoRedo st false
   | ["hlTool"] => hlToolToggle st
   | ["showAll"] => toggleShowAll st
   | ["escape"] => escape st
+  | ["clickAway", w] => clickAway st w
+  | ["opening", name] => opening st name
   | ["popClick", x, y] => popClick st x y
   | ["edClick", x, y] => edClick st x y
   | ["edDrag", x, y] => edDrag st x y
@@ -9051,7 +9951,8 @@ edits); Draw: drag to draw strokes; drag a text box or drawing to move it.
 h or the Highlight button highlights the selection (the button without one: Highlight
 tool and its pop-over); a selection shows a Highlight bubble, a selected highlight its
 colour/comment/delete bubble; Escape dismisses them; right button: Highlight colours,
-Add note...; click a mark to select it (a note opens its text), Delete removes it.
+Add note...; click a mark to select it (a note opens its text), Delete or Backspace
+removes it; Ctrl+Z undoes a mark edit, Ctrl+Shift+Z redoes it (Edit > Undo / Redo).
 Ctrl+S saves the marks into FILE-annotated.pdf (an incremental update: the original bytes
 stay unchanged at its start); Ctrl+Shift+S saves to a chosen file; marks saved in a file are
 restored when it is opened; saved marks can be recoloured, deleted and edited (9.5g). Closing or quitting asks about unsaved marks.
