@@ -185,15 +185,25 @@ lean_exe viewer where
 
 /-! ## macOS AppKit spike (task 11.1; not a default target) -/
 
-/-- The first C ABI over the core (`SafePdf.Shell.Ffi`, `macos/README.md`). Not a default
+/-- The modules of the C API (`macos/README.md`): the first C ABI over the core
+(`SafePdf.Shell.Ffi`, task 11.1) and the marks/save/XFDF exports (`SafePdf.Shell.FfiMarks`,
+task 11.3a3). -/
+def ffiModules : Array Lean.Name := #[`SafePdf.Shell.Ffi, `SafePdf.Shell.FfiMarks]
+
+/-- The C API's modules (`ffiModules`). Not a default
 target: `lake build macosFfi` builds it. -/
 lean_lib SafePdfFfi where
-  roots := #[`SafePdf.Shell.Ffi]
+  roots := ffiModules
 
-/-- `libsafepdfffi.a`: the object files of `SafePdf.Shell.Ffi` and of every module it imports
-(the closure Lake would link into an executable), for `macos/build.sh` to link with Lean's
-runtime libraries. -/
+/-- `libsafepdfffi.a`: the object files of the `ffiModules` and of every module they import
+(the closure Lake would link into an executable, without duplicates), for `macos/build.sh` to
+link with Lean's runtime libraries. -/
 target macosFfi pkg : FilePath := do
-  let some mod ← findModule? `SafePdf.Shell.Ffi | error "module SafePdf.Shell.Ffi not found"
-  let info ← mod.linkInfoNoExport.fetch
-  info.bindM fun i => buildStaticLib (pkg.staticLibDir / "libsafepdfffi.a") (i.objs.map pure)
+  let mut infos := #[]
+  for n in ffiModules do
+    let some mod ← findModule? n | error s!"module {n} not found"
+    infos := infos.push (← mod.linkInfoNoExport.fetch)
+  (Job.collectArray infos).bindM fun is => do
+    let objs := is.foldl (fun acc i => i.objs.foldl
+      (fun a o => if a.contains o then a else a.push o) acc) #[]
+    buildStaticLib (pkg.staticLibDir / "libsafepdfffi.a") (objs.map pure)
