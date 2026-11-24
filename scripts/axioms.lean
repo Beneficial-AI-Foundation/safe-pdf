@@ -18,6 +18,7 @@ import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Toolbar
+import SafePdf.Shell.App.Budget
 import SafePdf.Shell.Worker.Protocol
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
@@ -1388,3 +1389,13 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_eq_check
 #print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_strip
 #print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_strip_check
+-- Phase 12, task 12.3: per-operation budget
+#print axioms SafePdf.Shell.App.Budget.Pool.used_le_ceiling
+#print axioms SafePdf.Shell.App.Budget.Pool.reserve_used
+#print axioms SafePdf.Shell.App.Budget.Pool.reserve_none
+#print axioms SafePdf.Shell.App.Budget.Pool.release_reserve
+#print axioms SafePdf.Shell.App.Budget.Pool.release_release
+#print axioms SafePdf.Shell.App.Budget.Pool.release_used_le
+#print axioms SafePdf.Shell.App.Budget.Pool.admit_reserved
+#print axioms SafePdf.Shell.App.Budget.page_fits_pool
+#print axioms SafePdf.Shell.App.Budget.Allowance.spendAll_le
