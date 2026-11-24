@@ -750,7 +750,7 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
 | Estimate of one text or links request | **2 MiB** (`textBytes`) | `Pool.admit` |
 | Render cache (unchanged, 8.2b) | 256 MiB / 64 entries | `View.Cache` |
 | One search (Find Next/Previous) | **400 pages** indexed and **60 s**, shared by all pages it visits (`searchPages`, `searchMs`) | `Budget.Allowance` (`spendAll_le`) |
-| Document worker memory | **2048 MiB** (`workerMemMiB`, flag `--mem-limit-mib=`) | Linux: `RLIMIT_DATA` 2048 MiB + `RLIMIT_AS` 4096 MiB; macOS: `phys_footprint` watchdog (see below) |
+| Document worker memory | **2048 MiB** (`workerMemMiB`, flag `--mem-limit-mib=`) | Linux: watchdog on private resident memory (`/proc/self/statm`) plus a `RLIMIT_DATA`/`RLIMIT_AS` backstop relative to the startup mappings (12.c1); macOS: `phys_footprint` watchdog (see below) |
 | Document worker CPU time per request | **60 s** (`workerCpuS`, flag `--cpu-limit-s=`), next to the 20 s wall-clock deadline | `RLIMIT_CPU`, re-armed before every request |
 | Interleave scenario, viewer peak RSS | **1024 MiB** (`viewerRssMiB`) | `scripts/interleave.sh` (CI) |
 | Interleave scenario, each worker's peak RSS | **512 MiB** (`workerRssMiB`) | `scripts/interleave.sh` (CI) |
@@ -783,8 +783,11 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   page of the 15-page Transformer paper the viewer's RSS reached 4.9 GiB on macOS while the
   pool never exceeded 447 MiB — the photos and the cache, not the work in flight, dominate.
 * **Worker fences outside Lean's cost model** (`c/worker_sandbox.c`, `Sandbox.fence`, applied
-  before confinement): Linux `RLIMIT_DATA`/`RLIMIT_AS` with soft = hard (an allocation beyond
-  them fails and Lean's runtime ends the process); **macOS 26 rejects `setrlimit(RLIMIT_AS)`
+  before confinement): Linux a watchdog thread on private resident memory (resident − shared
+  from `/proc/self/statm`, read through a descriptor opened before confinement) with a
+  `RLIMIT_DATA`/`RLIMIT_AS` backstop relative to the startup mappings — absolute limits fail
+  because Lean's mimalloc commits ~1 GiB arenas eagerly on Linux (12.c1) — and no core dumps
+  (`RLIMIT_CORE` 0, `PR_SET_DUMPABLE` 0); **macOS 26 rejects `setrlimit(RLIMIT_AS)`
   and `RLIMIT_DATA` with `EINVAL` for every finite value and refuses `memorystatus_control` to
   an unprivileged process**, so a watchdog thread reads the task's `phys_footprint` every
   10 ms and ends the worker with status 6 above the ceiling (a fence against runaway inputs,
