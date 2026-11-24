@@ -963,6 +963,18 @@ def notesText (ns : List String) : String :=
 #guard notes { sig := .certified 3 } == [signedNote]
 #guard notesText [] == ""
 
+/-- **The revision-retention text** (task 12.5) for a Save that deleted `n` saved marks: the
+update is incremental — the original bytes stay a prefix of the file (C7) — so the earlier
+revision, with the deleted annotations, is still inside the written file. The Tk viewer appends
+it to its status line (`Viewer.retentionNote`); the C API (`Shell.FfiMarks`) returns it as a
+save note. -/
+def retentionText (n : Nat) : String :=
+  s!"the {n} deleted mark(s) are still in the file's earlier revision (Save only appends an \
+    update) and can be recovered from it"
+
+#guard retentionText 2 == "the 2 deleted mark(s) are still in the file's earlier revision \
+  (Save only appends an update) and can be recovered from it"
+
 /-! ## Fresh IV seeds (task 12.4) -/
 
 /-- The size of one randomness source's contribution to an IV seed, in bytes. -/

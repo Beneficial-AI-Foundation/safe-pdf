@@ -4604,9 +4604,7 @@ def keepPermissions (target : String) (tmp : System.FilePath) : IO Unit := do
 file and can be recovered from it; a user deleting a mark to remove what it says must know.
 Empty when nothing saved was deleted. -/
 def retentionNote (n : Nat) : String :=
-  if n == 0 then ""
-  else s!"; note: the {n} deleted mark(s) are still in the file's earlier revision (Save only \
-    appends an update) and can be recovered from it"
+  if n == 0 then "" else "; note: " ++ Save.retentionText n
 
 #guard retentionNote 0 == ""
 #guard retentionNote 2 == "; note: the 2 deleted mark(s) are still in the file's earlier \
