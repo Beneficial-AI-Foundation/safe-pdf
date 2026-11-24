@@ -16,8 +16,9 @@ spawns; it is linked with the same confinement object, compiled with the TCP pro
 the `worker-confinement` suite, with `SAFEPDF_PROBE_TOKEN` set in its environment):
 opens a listening TCP socket on 127.0.0.1, then starts itself twice and reports both:
 
-* the **confined** child through `Worker.spawn` — exactly the client's spawn (empty
-  environment, cwd `/`) — every probe must be **denied** and the render must work;
+* the **confined** child spawned as `Worker.spawn` spawns the worker (the same flags, empty
+  environment, cwd `/`; only stderr is piped instead of discarded, and printed with a
+  `stderr: ` prefix, task 12.c1) — every probe must be **denied** and the render must work;
 * an **unconfined control** child with the parent's environment inherited, which skips the
   environment check and the sandbox: every probe must be **allowed** (shows the probes can
   detect access at all).
@@ -48,6 +49,19 @@ opaque listen : IO UInt32
 /-- The environment variable the parent holds and the confined child must not see. -/
 def tokenVar : String := "SAFEPDF_PROBE_TOKEN"
 
+/-- Print one line and flush it (task 12.c1): stdout is a pipe, so without the flush a child
+that dies by a signal loses every line it printed, and the parent cannot tell which probe it
+reached. -/
+def say (line : String) : IO Unit := do
+  let out ← IO.getStdout
+  out.putStrLn line
+  out.flush
+
+/-- The children's stdio: `Worker.workerStdio` with stderr piped instead of discarded, so the
+parent can print what a child wrote there (the worker's one-line diagnostics, task 12.c1). -/
+abbrev probeStdio : IO.Process.StdioConfig :=
+  { stdin := .piped, stdout := .piped, stderr := .piped }
+
 /-- Run an action; `ok detail` if it succeeded, the error text otherwise. -/
 def attempt (act : IO String) : IO (Bool × String) := do
   try return (true, ← act) catch e => return (false, toString e)
@@ -56,7 +70,7 @@ def attempt (act : IO String) : IO (Bool × String) := do
 def report (name : String) (expectAllowed : Bool) (r : Bool × String) : IO Bool := do
   let (allowed, detail) := r
   let detail := (detail.replace "\n" " ").take 160
-  IO.println s!"probe {name}: {if allowed then "ALLOWED" else "denied"} ({detail})"
+  say s!"probe {name}: {if allowed then "ALLOWED" else "denied"} ({detail})"
   return allowed == expectAllowed
 
 /-- Child mode: see the module doc. `start` is the startup configuration of the worker's flags
@@ -65,25 +79,25 @@ def child (start : Protocol.StartConfig := {}) : IO UInt32 := do
   let stdin ← IO.getStdin
   let line := (← stdin.getLine).trimAscii.toString
   let mode :: portStr :: tok :: rest := line.splitOn " "
-    | IO.println s!"bad config line: {line}"; return 2
-  let some port := portStr.toNat? | IO.println s!"bad port: {portStr}"; return 2
+    | say s!"bad config line: {line}"; return 2
+  let some port := portStr.toNat? | say s!"bad port: {portStr}"; return 2
   let pdf := " ".intercalate rest
   let confined := mode == "confined"
   let pdfBytes ← IO.FS.readBinFile pdf
   let p ← match ← Sandbox.prepare start confined with
     | .ok p => pure p
     | .error f =>
-      IO.println s!"startup: FAILED ({f.message})"
-      IO.println "verdict: FAIL"
+      say s!"startup: FAILED ({f.message})"
+      say "verdict: FAIL"
       return f.exitCode.toUInt32
-  IO.println s!"mode: {mode}; confinement: {p.mechanism.getD "none (control)"}; \
+  say s!"mode: {mode}; confinement: {p.mechanism.getD "none (control)"}; \
     {p.faces.length} substitute faces read before confinement"
   let want := !confined
   let mut ok := true
   -- Task 12.3: the confined child is started with the viewer's resource fences.
-  IO.println s!"fences: {p.fences.getD "none (control)"}"
+  say s!"fences: {p.fences.getD "none (control)"}"
   if confined && (p.fences.isNone || p.fences == some "no resource fence") then
-    IO.println "probe fences: MISSING"
+    say "probe fences: MISSING"
     ok := false
   ok := (← report "read /etc/hosts" want (← attempt do
     let b ← IO.FS.readBinFile "/etc/hosts"; return s!"{b.size} bytes")) && ok
@@ -91,7 +105,7 @@ def child (start : Protocol.StartConfig := {}) : IO UInt32 := do
   | some f =>
     ok := (← report s!"re-read font {f.path}" want (← attempt do
       let b ← IO.FS.readBinFile f.path; return s!"{b.size} bytes")) && ok
-  | none => IO.println "probe re-read font: skipped (no substitute font found)"
+  | none => say "probe re-read font: skipped (no substitute font found)"
   let tmp : System.FilePath := s!"/tmp/safepdf-worker-probe-{← IO.Process.getPID}"
   ok := (← report s!"create {tmp}" want (← attempt do
     IO.FS.writeFile tmp "probe"; IO.FS.removeFile tmp; return "created and removed")) && ok
@@ -121,42 +135,56 @@ def child (start : Protocol.StartConfig := {}) : IO UInt32 := do
     | .docInfo n _ _, .image w h data => some s!"{n} pages; page 1 {w}x{h}, {data.size} bytes"
     | _, _ => none
   ok := (← report "render page 1" true (rendered.isSome, rendered.getD "render failed")) && ok
-  IO.println s!"verdict: {if ok then "ok" else "FAIL"}"
+  say s!"verdict: {if ok then "ok" else "FAIL"}"
   return if ok then 0 else 1
 
-/-- Run one child: write its config line, collect its stdout, reap it. -/
-def runChild (c : IO.Process.Child Worker.workerStdio) (config : String) :
-    IO (String × Option UInt32) := do
+/-- Run one child: write its config line, collect its stdout and stderr (stderr on its own
+task, so neither pipe can fill up while the other is read), reap it. -/
+def runChild (c : IO.Process.Child probeStdio) (config : String) :
+    IO (String × String × Option UInt32) := do
+  let err ← IO.asTask c.stderr.readToEnd .dedicated
   c.stdin.putStr (config ++ "\n")
   c.stdin.flush
   let out ← c.stdout.readToEnd
   let code ← try some <$> c.wait catch _ => pure none
-  return (out, code)
+  let err := match ← IO.wait err with | .ok s => s | .error e => s!"(stderr: {e})\n"
+  return (out, err, code)
+
+/-- Print a child's stderr, each line prefixed with `stderr: ` (nothing if it was empty). -/
+def printStderr (err : String) : IO Unit := do
+  for l in err.splitOn "\n" do
+    if !l.isEmpty then say s!"stderr: {l}"
 
 /-- Parent mode: see the module doc. Returns the exit status. -/
 def parent (pdf : String) : IO UInt32 := do
   let some tokenVal ← IO.getEnv tokenVar
-    | IO.println s!"parent: set {tokenVar} in the environment first"; return 2
+    | say s!"parent: set {tokenVar} in the environment first"; return 2
   let pdf ← IO.FS.realPath pdf
   let self ← IO.appPath
   let port ← listen
-  if port == 0 then IO.println "parent: could not listen on 127.0.0.1"; return 2
-  IO.println s!"parent: {tokenVar} is set ({tokenVal.length} chars); listening on \
+  if port == 0 then say "parent: could not listen on 127.0.0.1"; return 2
+  say s!"parent: {tokenVar} is set ({tokenVal.length} chars); listening on \
     127.0.0.1:{port}"
-  -- Confined: exactly the client's spawn (empty environment, cwd `/`), with resource fences
-  -- (task 12.3; the viewer's are `App.Budget.ceilings`).
-  let c ← Worker.spawn self (start := { memLimitMiB := 2048, cpuLimitS := 60 })
-  let (out1, code1) ← runChild c.child s!"confined {port} {tokenVar} {pdf}"
-  IO.println s!"--- confined child (Worker.spawn: empty environment, cwd /), exit {code1}"
+  -- Confined: the client's spawn (`Worker.spawn`: the same flags, empty environment, cwd
+  -- `/`), with the viewer's resource fences (task 12.3, `App.Budget.ceilings`); only stderr
+  -- differs: piped instead of discarded, so the worker's diagnostics are printed (12.c1).
+  let start : Protocol.StartConfig := { memLimitMiB := 2048, cpuLimitS := 60 }
+  let c ← IO.Process.spawn
+    { toStdioConfig := probeStdio, cmd := self.toString, args := start.toArgs, cwd := some "/",
+      env := #[], inheritEnv := false }
+  let (out1, err1, code1) ← runChild c s!"confined {port} {tokenVar} {pdf}"
+  say s!"--- confined child (as Worker.spawn: empty environment, cwd /), exit {code1}"
   IO.print out1
+  printStderr err1
   -- Control: environment inherited, no sandbox.
   let ctl ← IO.Process.spawn
-    { toStdioConfig := Worker.workerStdio, cmd := self.toString, args := #[], cwd := some "/" }
-  let (out2, code2) ← runChild ctl s!"unconfined {port} {tokenVar} {pdf}"
-  IO.println s!"--- unconfined control child (environment inherited, no sandbox), exit {code2}"
+    { toStdioConfig := probeStdio, cmd := self.toString, args := #[], cwd := some "/" }
+  let (out2, err2, code2) ← runChild ctl s!"unconfined {port} {tokenVar} {pdf}"
+  say s!"--- unconfined control child (environment inherited, no sandbox), exit {code2}"
   IO.print out2
+  printStderr err2
   let ok := code1 == some 0 && code2 == some 0
-  IO.println s!"probe result: {if ok then "PASS" else "FAIL"}"
+  say s!"probe result: {if ok then "PASS" else "FAIL"}"
   return if ok then 0 else 1
 
 end SafePdf.Shell.Worker.Probe
