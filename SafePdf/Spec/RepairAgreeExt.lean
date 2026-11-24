@@ -660,28 +660,28 @@ theorem resolve_sub2 {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefEn
           · rw [hph] at hok
             simp only at hok ⊢
             have hr1 : ∃ x, (containerLength
-                (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                (lengthHop l2 limits bytes k)
                 (c :: ref.1 :: V) d p).2 = .ok x := by
               rcases h1 : (containerLength
-                  (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                  (lengthHop l2 limits bytes k)
                   (c :: ref.1 :: V) d p).2 with e | x
               · rw [h1] at hok; simp [containerMember] at hok
               · exact ⟨x, rfl⟩
             have hcl : containerLength
-                (fun v r => resolveLengthAux pre l1 limits bytes k v r) (c :: ref.1 :: V) d p =
+                (lengthHop l1 limits bytes k) (c :: ref.1 :: V) d p =
                 containerLength
-                (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                (lengthHop l2 limits bytes k)
                 (c :: ref.1 :: V) d p := by
               obtain ⟨x, hx⟩ := hr1
               unfold containerLength at hx ⊢
               split
               · rename_i m hh hm
                 rw [hm] at hx
-                exact ih k (by omega) _ _ x hx
+                exact lengthHop_sub hx (hU _)
               · rfl
             rw [hcl]
             rcases hm : containerMember pre limits bytes off c ref.1 idx d p
-                (containerLength (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                (containerLength (lengthHop l2 limits bytes k)
                   (c :: ref.1 :: V) d p).2 with e | o
             · rfl
             · rw [hm] at hok

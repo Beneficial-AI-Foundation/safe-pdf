@@ -25,41 +25,38 @@ relation from equal in-use and compressed entries.
   `/Root`; every repaired compressed entry is the strict one (H7c) and every strict
   compressed entry is the repaired one (H7f: R6 found exactly the strict object-stream
   members). `HypCompStrip` = H1, H2c, H3, H4 of `HypComp`, H5c + H7f, H6 (unencrypted).
-* **H8** (`fuelEq`): the repaired section has as many entries as the strict one, so both
-  paths resolve `/Length` with the same fuel. Under `HypCompStrip` the repaired section is
-  `0 free` + the strict in-use and compressed entries (`compStrip_sec`), so H8 says the strict
-  section has no other free entry. `HypCompEq` = `HypCompStrip` ∧ H8. All decidable; checkers
-  `checkCompEq`, `checkCompStrip`.
+* **H8** (`fuelEq`, until task 12.7g): the repaired section has as many entries as the
+  strict one, i.e. the strict section has no free entry besides 0. **Dropped by task 12.7g**:
+  `HypCompEq` is now `HypCompStrip` (the name is kept); `fuelEq` stays as a diagnostic.
+  All decidable; checkers `checkCompEq`, `checkCompStrip` (now the same condition).
 
 ## Results
 
-* `c4_comp_eq` / `c4_comp_eq_check` (**exact**): under `HypCompEq` the repair path succeeds,
-  with the same bytes, in-use entries, compressed entries and `/Root`, and **equal**
-  `getObject` for every `num gen`. `#guard`: `objStmBytes` passes `checkCompEq`.
-* `c4_comp_strip` / `c4_comp_strip_check` (no H8): the repair path fails with `fuelOut`
-  (`limitExceeded .objects`), or succeeds with the same entries and `/Root`, and `getObject`
-  is equal wherever the repair path does not itself run out of fuel. Proof: `resolve_mono_ne`
-  … `getObject_strip_le`: a computation that does not end in `fuelOut` is unchanged by more
-  fuel (exhaustion is the only way the fuel is observed and its error propagates unchanged).
+* `c4_comp_eq` / `c4_comp_eq_check` (**exact, no H8**): under `HypCompEq` (= `HypCompStrip`)
+  the repair path succeeds, with the same bytes, in-use entries, compressed entries and
+  `/Root`, and **equal** `getObject` for every `num gen`. `#guard`: `objStmBytes` and
+  `freeEntryBytes` (a free entry 4, sections of 7 and 6 entries) pass `checkCompEq`.
+* Fuel independence (task 12.7g): `resolve_fuel` (any two fuels above `cnt S V` give the
+  identical pair, compressed entries included), `lengthOf_fuel`, `parseFun_fuel`,
+  `fetchCompressed_fuel`, `getObject_strip_cnt` (strip-equal lookups, both fuels above the
+  number of in-use objects ⇒ equal `getObject`).
+* `c4_comp_strip` / `c4_comp_strip_check` (12.7f's weaker statement, still proved): the repair
+  path fails with `fuelOut` or succeeds with `getObject` equal wherever it does not run out of
+  fuel (`resolve_mono_ne` … `getObject_strip_le`). Subsumed by `c4_comp_eq`.
 
-## Why H8 (the obstacle)
+## The former obstacle (fixed by task 12.7g)
 
-12.7a's fuel argument (`resolve_eq`: any fuel above the number `cnt S V` of in-use objects not
-being visited gives the same result) fails with compressed entries. In
-`Length.resolveLengthAux` the object-stream hop makes two calls: the container's `/Length`
-(visiting `c :: ref.1 :: V`, fuel `fuel`) and then the member's value (visiting only
-`ref.1 :: V`, fuel `fuel - used`). The second call may re-walk the in-use objects the first
-one parsed (e.g. the member's value refers back into the container's `/Length` chain), so the
-work needed is not bounded by the number of objects, and with fuels `F' < F`, both above it,
-the repaired path can run out (`fuelOut`) where the strict path succeeds. The strict section
-has more entries than the repaired one exactly when it has free entries besides 0, so exact
-C4 without H8 is not provable from this Core. No fixture exhibits it yet.
+Until 12.7g, in `Length.resolveLengthAux` the object-stream hop resolved the container's
+`/Length` recursively and then the member's value with visiting only `ref.1 :: V` and fuel
+`fuel - used`, so the second call could re-walk objects the first had parsed: the work was
+not bounded by the number of objects and two fuels above it could differ (one path running
+out). Core now resolves the container's `/Length` in one hop (`Length.lengthHop`, ISO 32000-2
+§7.5.7) and adds the container and its `/Length` object to the member's visiting list
+(`Length.hopVis`); no in-use object is parsed twice, so `cnt S V` bounds the parses
+(`hop_cnt`) and the fuel is not observed above it.
 
-## Open (proposed splits)
+## Open
 
-* **12.7g (Core)**: make `/Length` resolution's fuel independent of free entries, e.g. pass the
-  number of non-free entries as fuel (both paths then agree under `HypCompStrip`), or bound
-  the hop's second call by a visited set instead of `fuel - used`; then drop H8.
 * **Encrypted files with compressed entries**: not covered. R6 does not run on an encrypted
   repaired trailer (containers are encrypted; the decryption state exists only after repair),
   so H7f fails whenever the strict section has a compressed entry, and `HypCompStrip` also
@@ -104,6 +101,18 @@ theorem errOffset_strip {l1 l2 : Nat → Option XrefEntry} (hs : ∀ n, strip (l
   · rw [h]
   · rcases h1 with h1 | ⟨a, g, h1⟩ <;> rcases h2 with h2 | ⟨a', g', h2⟩ <;> rw [h1, h2]
 
+/-- The one-hop resolver of an object stream's own `/Length` reads the lookup only up to
+free entries. -/
+theorem lengthHop_strip {l1 l2 : Nat → Option XrefEntry} (hs : ∀ n, strip (l1 n) = strip (l2 n))
+    (limits : Limits) (bytes : ByteArray) :
+    lengthHop l1 limits bytes = lengthHop l2 limits bytes := by
+  funext f V r
+  unfold lengthHop
+  rw [errOffset_strip hs]
+  rcases strip_cases hs r.1 with he | ⟨h1, h2⟩
+  · rw [he]
+  · rcases h1 with h1 | ⟨a, g, h1⟩ <;> rcases h2 with h2 | ⟨a', g', h2⟩ <;> rw [h1, h2]
+
 /-- **`/Length` resolution reads the lookup only up to free entries**: with the **same fuel**,
 lookups equal up to `free` versus absent (compressed entries allowed) give the identical
 (parse count, result) pair. -/
@@ -128,7 +137,7 @@ theorem resolve_strip {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefE
   · simp only [hv, ↓reduceIte, errOffset_strip hs]
   simp only [hv, ↓reduceIte]
   rcases strip_cases hs ref.1 with he | ⟨h1, h2⟩
-  · rw [he, hk k (Nat.le_refl k)]
+  · rw [he, hk k (Nat.le_refl k), lengthHop_strip hs]
     rcases hl : l2 ref.1 with _ | (⟨a, g⟩ | ⟨off, g'⟩ | ⟨c, idx⟩)
     · rfl
     · rfl
@@ -251,7 +260,8 @@ def trailerOkCompEq (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :
 
 /-- Condition **H8** (equal fuel): the repaired section has as many entries as the strict
 one, so both paths resolve `/Length` with the same fuel (`OpenDoc.objectCount`). Under H1–H4
-and H7f it says that the strict section has no free entry besides object 0. -/
+and H7f it says that the strict section has no other free entry besides object 0. No longer
+part of `HypCompEq` (task 12.7g); kept as a diagnostic. -/
 def fuelEq (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
   match Repair.repair limits bytes with
   | .ok (sec, _) => sec.entries.length == d.xref.entries.length
@@ -272,10 +282,11 @@ instance instDecidableHypCompStrip (limits : Limits) (bytes : ByteArray) (d : Op
     Decidable (HypCompStrip limits bytes d) := by
   unfold HypCompStrip; infer_instance
 
-/-- **The hypothesis of exact C4 with compressed entries**: `HypCompStrip` and H8
-(`fuelEq`). -/
+/-- **The hypothesis of exact C4 with compressed entries**: `HypCompStrip`. Until task 12.7g
+it also required H8 (`fuelEq`); since `/Length` resolution no longer depends on the fuel above
+the number of in-use objects (`resolve_fuel`), H8 is dropped and the name is kept. -/
 def HypCompEq (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Prop :=
-  HypCompStrip limits bytes d ∧ fuelEq limits bytes d = true
+  HypCompStrip limits bytes d
 
 /-- `HypCompEq` is decidable. -/
 instance instDecidableHypCompEq (limits : Limits) (bytes : ByteArray) (d : OpenDoc) :
@@ -378,6 +389,228 @@ theorem compStrip_sec {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     | compressed c i => exact (hl1 _ _).mp (hcd n c i hx)
     | inUse off g => exact (hin n off g).mpr ((hinS n off g).mp hx)
 
+/-! ## Fuel independence (task 12.7g)
+
+Since task 12.7g an object stream's own `/Length` is resolved in one hop (`Length.lengthHop`)
+and the member's value is resolved with the container and its `/Length` object added to the
+visiting list (`Length.hopVis`), so no resolution parses an in-use object twice. Hence the
+parses of a resolution with visiting list `V` number at most `cnt S V` (`S` holding every
+in-use number), the fuel is never exhausted above that, and the result is the same for every
+fuel above `cnt S V`, compressed entries included (`resolve_fuel`). Lifted to `lengthOf`,
+`parseIndirectResolved`, `fetchCompressedTrace` and `getObject` (`getObject_strip_cnt`): two
+documents whose lookups are equal up to free entries give equal `getObject` whenever both
+fuels exceed the number of in-use objects, whatever their free entries. -/
+
+/-- An object of `S` that is not visited makes `cnt` positive. -/
+theorem cnt_pos {S V : List Nat} {x : Nat} (hx : x ∈ S) (hv : x ∉ V) : 0 < cnt S V := by
+  have := cnt_cons_lt hx hv
+  omega
+
+/-- The visiting list of the member's value (rule L6) has at least one more in-use object
+than the hop's own visiting list, two when the container's `/Length` is a reference, and the
+hop's parse count is exactly the extra one. -/
+theorem hop_cnt {l : Nat → Option XrefEntry} {limits : Limits} {bytes : ByteArray}
+    {S : List Nat} (hS : ∀ n off g, l n = some (.inUse off g) → n ∈ S) {f : Nat}
+    {V : List Nat} {c n : Nat} {d : Dict} {p x : Nat} (hcS : c ∈ S) (hc : c ∉ n :: V)
+    (hx : (containerLength (lengthHop l limits bytes f) (c :: n :: V) d p).2 = .ok x) :
+    cnt S (hopVis d (c :: n :: V)) +
+      (containerLength (lengthHop l limits bytes f) (c :: n :: V) d p).1 + 1 ≤ cnt S V := by
+  have h1 := cnt_cons_lt hcS hc
+  have h2 := cnt_cons_le S V n
+  unfold containerLength at hx ⊢
+  unfold hopVis
+  rcases hm : Dict.lookup d Core.ObjParse.nameLength with _ | o
+  · simp only; omega
+  · cases o with
+    | ref m h =>
+      rw [hm] at hx
+      simp only at hx ⊢
+      obtain ⟨h', -⟩ := lengthHop_snd_ok hx
+      obtain ⟨off, l', hv, -, hl, -, -, -⟩ := lengthHop_ok h'
+      rw [h']
+      have := cnt_cons_lt (hS _ _ _ hl) hv
+      simp only at this ⊢
+      omega
+    | _ => simp only; omega
+
+/-- **Fuel independence of `/Length` resolution** (any lookup, compressed entries included):
+with every in-use number in `S`, resolution with any two fuels above `cnt S V` gives the
+identical (parse count, result) pair. -/
+theorem resolve_fuel {pre : Core.Xref.ObjStm.Pre} {l : Nat → Option XrefEntry}
+    (limits : Limits) (bytes : ByteArray) (S : List Nat)
+    (hS : ∀ n off g, l n = some (.inUse off g) → n ∈ S) :
+    ∀ f1 f2 V ref, cnt S V < f1 → cnt S V < f2 →
+      resolveLengthAux pre l limits bytes f1 V ref =
+        resolveLengthAux pre l limits bytes f2 V ref := by
+  intro f1
+  induction f1 using Nat.strongRecOn with
+  | _ f1 ih =>
+  intro f2 V ref h1 h2
+  obtain ⟨k, rfl⟩ : ∃ k, f1 = k + 1 := ⟨f1 - 1, by omega⟩
+  obtain ⟨j, rfl⟩ : ∃ j, f2 = j + 1 := ⟨f2 - 1, by omega⟩
+  rw [resolveLengthAux, resolveLengthAux]
+  by_cases hv : ref.1 ∈ V
+  · simp only [hv, ↓reduceIte]
+  simp only [hv, ↓reduceIte]
+  rcases hl : l ref.1 with _ | (⟨a, g⟩ | ⟨off, g'⟩ | ⟨c, idx⟩)
+  · rfl
+  · rfl
+  · have hlt := cnt_cons_lt (hS _ _ _ hl) hv
+    simp only
+    split
+    · rcases parseLengthObj limits bytes off ref.1 ref.2 with e | o
+      · rfl
+      · cases o
+        all_goals try rfl
+        rename_i m hh
+        simp only
+        rw [ih k (by omega) j _ _ (by omega) (by omega)]
+    · rfl
+  · simp only
+    by_cases hcy : c = ref.1 ∨ c ∈ V
+    · simp only [hcy, ↓reduceIte]
+    simp only [hcy, ↓reduceIte]
+    rcases hlc : l c with _ | (⟨a, g⟩ | ⟨off, g⟩ | ⟨c', i'⟩)
+    · rfl
+    · rfl
+    · simp only
+      split
+      · rcases hph : parseContainerHead limits bytes off c with e | ⟨d, p⟩
+        · rfl
+        · simp only
+          have hcS := hS _ _ _ hlc
+          have hcV : c ∉ ref.1 :: V := by
+            simp only [List.mem_cons, not_or]
+            exact ⟨fun h => hcy (Or.inl h), fun h => hcy (Or.inr h)⟩
+          have hpos := cnt_pos hcS (fun h => hcy (Or.inr h))
+          rw [lengthHop_fuel l limits bytes (f := j) (f' := k) (by omega) (by omega)]
+          have hcnt : ∀ x, (containerLength (lengthHop l limits bytes k) (c :: ref.1 :: V) d p).2 =
+              .ok x → _ := fun x hx => hop_cnt (limits := limits) (bytes := bytes) (f := k)
+                (d := d) (p := p) (x := x) hS hcS hcV hx
+          generalize containerLength (lengthHop l limits bytes k) (c :: ref.1 :: V) d p = X
+            at hcnt ⊢
+          rcases hX : X.2 with e | x
+          · simp [containerMember]
+          · have hc := hcnt x hX
+            rcases containerMember pre limits bytes off c ref.1 idx d p (.ok x) with e | o
+            · rfl
+            · cases o
+              all_goals try rfl
+              rename_i m hh
+              simp only
+              rw [ih (k - X.1) (by omega) (j - X.1) _ _ (by omega) (by omega)]
+      · rfl
+    · rfl
+
+/-- `lengthOf` is the same for any two fuels above the number of in-use objects. -/
+theorem lengthOf_fuel {pre : Core.Xref.ObjStm.Pre} {l : Nat → Option XrefEntry}
+    {limits : Limits} {bytes : ByteArray} {S : List Nat}
+    (hS : ∀ n off g, l n = some (.inUse off g) → n ∈ S) {f1 f2 : Nat}
+    (h1 : S.length < f1) (h2 : S.length < f2) :
+    lengthOf pre l limits bytes f1 = lengthOf pre l limits bytes f2 := by
+  funext self d at_
+  unfold lengthOf lengthDict resolveLength
+  have hc := Nat.le_trans (cnt_cons_le S [] self) (cnt_le S [])
+  rcases Dict.lookup d Core.ObjParse.nameLength with _ | o
+  · rfl
+  · cases o
+    all_goals try rfl
+    rename_i m h
+    simp only
+    rw [resolve_fuel limits bytes S hS f1 f2 [self] (m, h) (by omega) (by omega)]
+
+/-- The object parse is the same for any two fuels above the number of in-use objects. -/
+theorem parseFun_fuel {l : Nat → Option XrefEntry} {limits : Limits} {bytes : ByteArray}
+    {S : List Nat} (hS : ∀ n off g, l n = some (.inUse off g) → n ∈ S) {f1 f2 : Nat}
+    (h1 : S.length < f1) (h2 : S.length < f2) :
+    @parseIndirectResolved l limits bytes f1 = @parseIndirectResolved l limits bytes f2 := by
+  funext pos pre
+  unfold parseIndirectResolved
+  rw [lengthOf_fuel (pre := pre) hS h1 h2]
+
+/-- `ObjStm.fetchCompressedTrace` is the same for any two fuels above the number of in-use
+objects (the fuel only reaches the container's parse). -/
+theorem fetchCompressed_fuel {pre : Core.Xref.ObjStm.Pre} {l : Nat → Option XrefEntry}
+    {limits : Limits} {bytes : ByteArray} {S : List Nat}
+    (hS : ∀ n off g, l n = some (.inUse off g) → n ∈ S) {f1 f2 : Nat}
+    (h1 : S.length < f1) (h2 : S.length < f2) (num : Nat) :
+    Core.Xref.ObjStm.fetchCompressedTrace pre l limits bytes f1 num =
+      Core.Xref.ObjStm.fetchCompressedTrace pre l limits bytes f2 num := by
+  unfold Core.Xref.ObjStm.fetchCompressedTrace
+  rw [parseFun_fuel hS h1 h2]
+
+/-- **`getObject` is equal** on two documents over the same bytes and decryption state whose
+lookups are equal up to free entries (compressed entries included), when each fuel
+(`objectCount`) exceeds the length of a list holding that document's in-use numbers: the free
+entries, which make the fuels differ, are not observed. -/
+theorem getObject_strip_cnt {d d' : OpenDoc} (hb : d.bytes = d'.bytes) (hc : d.crypt = d'.crypt)
+    (hs : ∀ n, strip (d.lookup n) = strip (d'.lookup n)) {S1 S2 : List Nat}
+    (hS1 : ∀ n off g, d.lookup n = some (.inUse off g) → n ∈ S1)
+    (hS2 : ∀ n off g, d'.lookup n = some (.inUse off g) → n ∈ S2)
+    (h1 : S1.length < d.objectCount) (h2 : S2.length < d'.objectCount)
+    (limits : Limits) (num gen : Nat) :
+    d.getObject limits num gen = d'.getObject limits num gen := by
+  have hS1' : ∀ n off g, d'.lookup n = some (.inUse off g) → n ∈ S1 := by
+    intro n off g h
+    rcases strip_cases hs n with he | ⟨_, h2'⟩
+    · exact hS1 n off g (he.trans h)
+    · rcases h2' with h2' | ⟨a, g', h2'⟩ <;> rw [h2'] at h <;> cases h
+  have hpre : d.pre = d'.pre := by unfold OpenDoc.pre; rw [hc]
+  have hdec : d.decrypt = d'.decrypt := by
+    funext a b c; unfold OpenDoc.decrypt; rw [hc]
+  have hP : @parseIndirectResolved d'.lookup limits d'.bytes d.objectCount =
+      @parseIndirectResolved d'.lookup limits d'.bytes d'.objectCount :=
+    (parseFun_fuel (f2 := max d.objectCount d'.objectCount) hS1' h1 (by omega)).trans
+      (parseFun_fuel (f1 := d'.objectCount) (f2 := max d.objectCount d'.objectCount) hS2 h2
+        (by omega)).symm
+  have hF : ∀ num, Core.Xref.ObjStm.fetchCompressedTrace d'.pre d'.lookup limits d'.bytes
+      d.objectCount num = Core.Xref.ObjStm.fetchCompressedTrace d'.pre d'.lookup limits
+      d'.bytes d'.objectCount num := fun num => by
+    unfold Core.Xref.ObjStm.fetchCompressedTrace
+    rw [hP]
+  unfold OpenDoc.getObject OpenDoc.getObjectTrace
+  rcases strip_cases hs num with he | ⟨h1', h2'⟩
+  · rw [he, hb, hpre, hdec, fetchCompressed_strip hs limits _ _ num he, parseFun_strip hs, hP,
+      hF]
+  · rcases h1' with h1' | ⟨a, g, h1'⟩ <;> rcases h2' with h2' | ⟨a', g', h2'⟩ <;> rw [h1', h2']
+
+/-- The in-use numbers of an entry list. -/
+def inUseNums : List (Nat × XrefEntry) → List Nat
+  | [] => []
+  | (n, .inUse _ _) :: es => n :: inUseNums es
+  | _ :: es => inUseNums es
+
+/-- Every in-use entry's number is in `inUseNums`. -/
+theorem mem_inUseNums {es : List (Nat × XrefEntry)} {n off g : Nat}
+    (h : (n, XrefEntry.inUse off g) ∈ es) : n ∈ inUseNums es := by
+  induction es with
+  | nil => cases h
+  | cons e es ih =>
+    obtain ⟨m, x⟩ := e
+    rcases List.mem_cons.mp h with h' | h'
+    · cases h'; simp [inUseNums]
+    · have := ih h'
+      cases x <;> simp [inUseNums, this]
+
+/-- An entry list with a non-in-use entry has fewer in-use numbers than entries. -/
+theorem inUseNums_lt {es : List (Nat × XrefEntry)} {n a g : Nat}
+    (h : (n, XrefEntry.free a g) ∈ es) : (inUseNums es).length < es.length := by
+  have hle : ∀ es : List (Nat × XrefEntry), (inUseNums es).length ≤ es.length := by
+    intro es
+    induction es with
+    | nil => simp [inUseNums]
+    | cons e es ih =>
+      obtain ⟨m, x⟩ := e
+      cases x <;> simp [inUseNums] <;> omega
+  induction es with
+  | nil => cases h
+  | cons e es ih =>
+    obtain ⟨m, x⟩ := e
+    rcases List.mem_cons.mp h with h' | h'
+    · cases h'; simp [inUseNums]; exact Nat.lt_succ_of_le (hle es)
+    · have := ih h'
+      cases x <;> simp [inUseNums] <;> omega
+
 /-! ## Exact C4 with compressed entries -/
 
 /-- **C4 with compressed entries, exact form (repair conservativity; task 12.7f).** If the
@@ -393,22 +626,34 @@ theorem c4_comp_eq {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
       (∀ n c i, d'.lookup n = some (.compressed c i) ↔ d.lookup n = some (.compressed c i)) ∧
       d'.trailer.root? = d.trailer.root? ∧
       ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen := by
-  obtain ⟨hh, hfu⟩ := hh
   have hpl := hh.2.2.2.2.2
+  have htr := hh.2.2.2.2.1
   have hbytes := strictOpen_bytes hs
   obtain ⟨-, -, -, -, hval⟩ := strictOpen_ok hs
-  unfold fuelEq at hfu
-  split at hfu
+  unfold trailerOkCompEq at htr
+  split at htr
   · rename_i sec tr hrep
-    simp only [beq_iff_eq] at hfu
     obtain ⟨henc, hroot, hU, hC, -⟩ := compStrip_sec hh hrep
     let d' := OpenDoc.mk' bytes sec tr 0 true
     have hc : d.crypt = d'.crypt := Option.isNone_iff_eq_none.mp hpl
-    have hf : d.objectCount = d'.objectCount := by
-      simp only [OpenDoc.objectCount, d.index_eq, d', OpenDoc.mk', List.size_toArray, hfu]
+    have hz : (0, XrefEntry.free 0 65535) ∈ sec.entries :=
+      (Repair.repair_entries hrep).1 _ (by simp [Repair.scanSection])
+    have hl2 : ∀ m e, d'.lookup m = some e ↔ (m, e) ∈ sec.entries := fun m e => by
+      rw [WritePrefix.lookup_eq d']; exact Unambiguous.lookupEntry_eq_some_iff sec.keys_nodup
+    have hl1 : ∀ m e, d.lookup m = some e ↔ (m, e) ∈ d.xref.entries := fun m e => by
+      rw [WritePrefix.lookup_eq d, Unambiguous.lookupEntry_eq_some_iff d.xref.keys_nodup]
+    have hS : ∀ n off g, d'.lookup n = some (.inUse off g) → n ∈ inUseNums sec.entries :=
+      fun n off g h => mem_inUseNums ((hl2 _ _).mp h)
+    have hS1 : ∀ n off g, d.lookup n = some (.inUse off g) → n ∈ inUseNums d.xref.entries :=
+      fun n off g h => mem_inUseNums ((hl1 _ _).mp h)
+    have h1 : (inUseNums sec.entries).length < d'.objectCount := by
+      simp only [OpenDoc.objectCount, d', OpenDoc.mk', List.size_toArray]; exact inUseNums_lt hz
+    have h2 : (inUseNums d.xref.entries).length < d.objectCount := by
+      simp only [OpenDoc.objectCount, d.index_eq, List.size_toArray]
+      exact inUseNums_lt hh.1
     have hg : ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen :=
-      fun num gen => (getObject_strip (by rw [hbytes]; rfl) hc (strip_of hU hC) hf limits num
-        gen).symm
+      fun num gen => getObject_strip_cnt (by rw [hbytes]; rfl) hc.symm
+        (fun n => (strip_of hU hC n).symm) hS hS1 h1 h2 limits num gen
     have hv : validate limits d' = .ok d' :=
       validate_congr hroot.symm (fun n g => (hg n g).symm) hval
     refine ⟨d', ?_, rfl, by rw [hbytes]; rfl, fun n off g => (hU n off g).symm,
@@ -418,7 +663,7 @@ theorem c4_comp_eq {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     simp only
     rw [withCrypt_plain (d := d') henc]
     exact hv
-  · cases hfu
+  · cases htr
 
 /-- **Exact C4 with compressed entries, from the checker.** -/
 theorem c4_comp_eq_check {limits : Limits} {bytes : ByteArray}
@@ -495,25 +740,25 @@ theorem resolve_mono_ne (pre : Core.Xref.ObjStm.Pre) (lookup : Nat → Option Xr
           · rw [hph] at hne
             simp only at hne ⊢
             have hr1 : (containerLength
-                (fun v r => resolveLengthAux pre lookup limits bytes k v r)
+                (lengthHop lookup limits bytes k)
                 (c :: ref.1 :: V) d p).2 ≠ .error fuelOut := by
               intro h1
               rw [h1] at hne
               simp [containerMember] at hne
             have hcl : containerLength
-                (fun v r => resolveLengthAux pre lookup limits bytes k' v r) (c :: ref.1 :: V) d p =
+                (lengthHop lookup limits bytes k') (c :: ref.1 :: V) d p =
                 containerLength
-                (fun v r => resolveLengthAux pre lookup limits bytes k v r)
+                (lengthHop lookup limits bytes k)
                 (c :: ref.1 :: V) d p := by
               unfold containerLength at hr1 ⊢
               split
               · rename_i m hh hm
                 rw [hm] at hr1
-                exact ih k (by omega) k' _ _ (by omega) hr1
+                exact lengthHop_mono_ne (by omega) hr1
               · rfl
             rw [hcl]
             rcases hm : containerMember pre limits bytes off c ref.1 idx d p
-                (containerLength (fun v r => resolveLengthAux pre lookup limits bytes k v r)
+                (containerLength (lengthHop lookup limits bytes k)
                   (c :: ref.1 :: V) d p).2 with e | o
             · rfl
             · rw [hm] at hne
@@ -634,9 +879,8 @@ path opens `bytes` as `d` and `HypCompStrip limits bytes d` holds (no H8: the st
 may have more free entries, hence more fuel), then the repair path fails with `fuelOut`, or
 it succeeds with a document that is flagged `repaired`, has the same bytes, in-use entries,
 compressed entries and `/Root` as `d`, and whose `getObject` is **equal** to `d`'s at every
-`num gen` where it does not run out of fuel itself. (Where it does, `d` may succeed: a
-`/Length` resolution through an object stream spends `fuel - used` on its second hop, so
-resolution is not fuel-independent above the number of objects; see the module doc.) -/
+`num gen` where it does not run out of fuel itself. (Since task 12.7g it never does:
+`c4_comp_eq` holds under the same hypothesis.) -/
 theorem c4_comp_strip {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     (hs : strictOpen limits bytes = .ok d) (hh : HypCompStrip limits bytes d) :
     repairOpen limits bytes = .error fuelOut ∨
@@ -724,7 +968,10 @@ theorem c4_comp_strip_check {limits : Limits} {bytes : ByteArray}
 -- fails here too.
 #guard checkCompEq Limits.default repairFixedBytes = true
 #guard checkCompStrip Limits.default freeEntryBytes = true
-#guard checkCompEq Limits.default freeEntryBytes = false
+-- Task 12.7g: H8 is dropped, so `freeEntryBytes` (sections of 7 and 6 entries) passes the
+-- exact checker; `fuelEq` still tells the two sections apart.
+#guard checkCompEq Limits.default freeEntryBytes = true
+#guard (List.range 7).all (sameObj freeEntryBytes)
 #guard checkCompEq Limits.default repairDiffBytes = false
 -- Encrypted files are excluded (H6, and R6 does not run on encrypted trailers).
 #guard checkCompStrip Limits.default encBytes = false

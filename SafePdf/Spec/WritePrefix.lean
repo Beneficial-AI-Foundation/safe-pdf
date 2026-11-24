@@ -480,12 +480,10 @@ theorem resolveLengthAux_det {pre : Xref.ObjStm.Pre} {L : Nat → Option XrefEnt
         · rw [hph] at h1; simp at h1
         rw [hph] at h1 h2
         simp only at h1 h2
-        rcases hr1 : Xref.Length.containerLength
-          (fun v r => Xref.Length.resolveLengthAux pre L limits b f1 v r) (cc :: m :: v1) d p
-          with ⟨k1, e1⟩
-        rcases hr2 : Xref.Length.containerLength
-          (fun v r => Xref.Length.resolveLengthAux pre L limits b f2 v r) (cc :: m :: v2) d p
-          with ⟨k2, e2⟩
+        rcases hr1 : Xref.Length.containerLength (Xref.Length.lengthHop L limits b f1)
+          (cc :: m :: v1) d p with ⟨k1, e1⟩
+        rcases hr2 : Xref.Length.containerLength (Xref.Length.lengthHop L limits b f2)
+          (cc :: m :: v2) d p with ⟨k2, e2⟩
         rw [hr1] at h1
         rw [hr2] at h2
         rcases e1 with e | l1
@@ -493,7 +491,7 @@ theorem resolveLengthAux_det {pre : Xref.ObjStm.Pre} {L : Nat → Option XrefEnt
         rcases e2 with e | l2
         · simp [Xref.Length.containerMember] at h2
         have hl : l1 = l2 := containerLength_det
-          (fun r a1 a2 x' y' hx hy => ih f1 (by omega) f2 _ _ r a1 a2 x' y' hx hy) hr1 hr2
+          (fun _ _ _ _ _ hx hy => Xref.Length.lengthHop_det hx hy) hr1 hr2
         subst hl
         simp only at h1 h2
         rcases hm : Xref.Length.containerMember pre limits b off cc m idx d p (.ok l1) with e | o
@@ -506,10 +504,10 @@ theorem resolveLengthAux_det {pre : Xref.ObjStm.Pre} {L : Nat → Option XrefEnt
           exact Except.ok.inj h2.2
         | ref m2 g3 =>
           simp only at h1 h2
-          rcases hq1 : Xref.Length.resolveLengthAux pre L limits b (f1 - k1) (m :: v1) (m2, g3)
-            with ⟨a1, r1⟩
-          rcases hq2 : Xref.Length.resolveLengthAux pre L limits b (f2 - k2) (m :: v2) (m2, g3)
-            with ⟨a2, r2⟩
+          rcases hq1 : Xref.Length.resolveLengthAux pre L limits b (f1 - k1)
+            (Xref.Length.hopVis d (cc :: m :: v1)) (m2, g3) with ⟨a1, r1⟩
+          rcases hq2 : Xref.Length.resolveLengthAux pre L limits b (f2 - k2)
+            (Xref.Length.hopVis d (cc :: m :: v2)) (m2, g3) with ⟨a2, r2⟩
           rw [hq1] at h1
           rw [hq2] at h2
           simp only [Prod.mk.injEq] at h1 h2
@@ -519,6 +517,19 @@ theorem resolveLengthAux_det {pre : Xref.ObjStm.Pre} {L : Nat → Option XrefEnt
         | _ => simp at h1
       · simp [hg2] at h1
     · simp at h1
+
+/-- The one-hop resolver of an object stream's own `/Length` (rule L6) is stable in the
+same sense: a success stays a success with the same count and value on the extension, with
+more fuel, and with a lookup equal at the reference. -/
+theorem lengthHop_transfer {L L' : Nat → Option XrefEntry} {limits : Limits} {b b' : ByteArray}
+    (hE : Extends b b') (hs : HasEnd b) {f f' : Nat} (hff : f ≤ f') {v : List Nat}
+    {r : Nat × Nat} {c x : Nat} (hL : L' r.1 = L r.1)
+    (h : Xref.Length.lengthHop L limits b f v r = (c, .ok x)) :
+    Xref.Length.lengthHop L' limits b' f' v r = (c, .ok x) := by
+  obtain ⟨off, l, hv, hf, hl, hp, hi, rfl⟩ := Xref.Length.lengthHop_ok h
+  obtain ⟨k, rfl⟩ : ∃ k, f' = k + 1 := ⟨f' - 1, by omega⟩
+  unfold Xref.Length.lengthHop
+  simp only [hv, ↓reduceIte, hL, hl, parseLengthObj_ext hE hs hp, hi]
 
 /-- **`/Length` resolution is stable** under appending bytes, adding fuel and changing the
 lookup outside a set `K` of numbers that cannot take part in a resolution (`NotLen`): a
@@ -592,13 +603,17 @@ theorem resolveLengthAux_transfer {pre : Xref.ObjStm.Pre} {L L' : Nat → Option
         rw [parseContainerHead_ext hE hs hph]
         rw [hph] at h
         simp only at h ⊢
-        rcases hr1 : Xref.Length.containerLength
-          (fun v r => Xref.Length.resolveLengthAux pre L limits b f v r) (cc :: m :: vis) d p
-          with ⟨c1, e1⟩
+        rcases hr1 : Xref.Length.containerLength (Xref.Length.lengthHop L limits b f)
+          (cc :: m :: vis) d p with ⟨c1, e1⟩
         rw [hr1] at h
         rcases e1 with e | l
         · simp [Xref.Length.containerMember] at h
-        have hr1' := containerLength_transfer (fun v r c x hx => ih f (by omega) f' v r c x hx hff)
+        have hr1' := containerLength_transfer (res' := Xref.Length.lengthHop L' limits b' f')
+          (fun v r c x hx => by
+            obtain ⟨r1, r2⟩ := r
+            have hrK : r1 ∉ K := fun hk =>
+              (hK r1 hk).res f v r2 c x (Xref.Length.lengthHop_aux pre hx)
+            exact lengthHop_transfer hE hs hff (hL r1 hrK) hx)
           hr1 l rfl
         rw [hr1']
         simp only at h ⊢
@@ -609,12 +624,13 @@ theorem resolveLengthAux_transfer {pre : Xref.ObjStm.Pre} {L L' : Nat → Option
         cases o with
         | ref m2 h2 =>
           simp only at h ⊢
-          rcases hr2 : Xref.Length.resolveLengthAux pre L limits b (f - c1) (m :: vis) (m2, h2)
-            with ⟨c3, r3⟩
+          rcases hr2 : Xref.Length.resolveLengthAux pre L limits b (f - c1)
+            (Xref.Length.hopVis d (cc :: m :: vis)) (m2, h2) with ⟨c3, r3⟩
           rw [hr2] at h
           simp only [Prod.mk.injEq] at h
           obtain ⟨rfl, rfl⟩ := h
-          rw [ih (f - c1) (by omega) (f' - c1) (m :: vis) (m2, h2) c3 v hr2 (by omega)]
+          rw [ih (f - c1) (by omega) (f' - c1) (Xref.Length.hopVis d (cc :: m :: vis)) (m2, h2)
+            c3 v hr2 (by omega)]
         | _ => first | exact h | simp at h
       · simp [hg2] at h
     · simp at h
@@ -990,8 +1006,8 @@ theorem getObject_inUse_dict {d : Open.OpenDoc} {limits : Limits} {m gk : Nat} {
 succeed (`resolveLengthAux_det`). -/
 theorem containerLength_lengthOf {pre : Xref.ObjStm.Pre} {L : Nat → Option XrefEntry}
     {limits : Limits} {b : ByteArray} {f : Nat} {vis : List Nat} {d : Dict} {p c1 l fuel n l1 : Nat}
-    (h1 : Xref.Length.containerLength
-      (fun v r => Xref.Length.resolveLengthAux pre L limits b f v r) vis d p = (c1, .ok l))
+    (h1 : Xref.Length.containerLength (Xref.Length.lengthHop L limits b f) vis d p =
+      (c1, .ok l))
     (h2 : Xref.Length.lengthOf pre L limits b fuel n d p = .ok l1) : l = l1 := by
   unfold Xref.Length.containerLength at h1
   unfold Xref.Length.lengthOf Xref.Length.lengthDict Xref.Length.resolveLength at h2
@@ -1013,7 +1029,7 @@ theorem containerLength_lengthOf {pre : Xref.ObjStm.Pre} {L : Nat → Option Xre
       simp only [Int.natCast_nonneg, ↓reduceIte, Int.toNat_natCast, Except.ok.injEq] at h2
       exact h2
     subst hl1
-    exact resolveLengthAux_det _ _ _ _ _ _ _ _ _ h1 hr
+    exact resolveLengthAux_det _ _ _ _ _ _ _ _ _ (Xref.Length.lengthHop_aux pre h1) hr
   | _ =>
     rw [hm] at h1 h2
     simp only [Prod.mk.injEq] at h1 h2
@@ -1165,8 +1181,7 @@ theorem notLen_of_dict {d : Open.OpenDoc} {limits : Limits} {m gk : Nat} {dd : D
     · rw [hph] at hres; simp at hres
     rw [hph] at hres
     simp only at hres
-    rcases hr1 : Xref.Length.containerLength
-      (fun v r => Xref.Length.resolveLengthAux d.pre d.lookup limits d.bytes f v r)
+    rcases hr1 : Xref.Length.containerLength (Xref.Length.lengthHop d.lookup limits d.bytes f)
       (cc :: m :: vis) d1 p with ⟨c1, e1⟩
     rw [hr1] at hres
     rcases e1 with e | l
