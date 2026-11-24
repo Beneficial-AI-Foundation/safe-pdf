@@ -283,29 +283,25 @@ theorem resolveLengthAux_mono (pre : Core.Xref.ObjStm.Pre) (lookup : Nat → Opt
           · rfl
           · rw [hph] at hok
             simp only at hok ⊢
-            have hr1 : ∃ x, (containerLength
-                (fun v r => resolveLengthAux pre lookup limits bytes k v r)
+            have hr1 : ∃ x, (containerLength (lengthHop lookup limits bytes k)
                 (c :: ref.1 :: V) d p).2 = .ok x := by
-              rcases h1 : (containerLength
-                  (fun v r => resolveLengthAux pre lookup limits bytes k v r)
+              rcases h1 : (containerLength (lengthHop lookup limits bytes k)
                   (c :: ref.1 :: V) d p).2 with e | x
               · rw [h1] at hok; simp [containerMember] at hok
               · exact ⟨x, rfl⟩
-            have hcl : containerLength
-                (fun v r => resolveLengthAux pre lookup limits bytes k' v r) (c :: ref.1 :: V) d p =
-                containerLength
-                (fun v r => resolveLengthAux pre lookup limits bytes k v r)
-                (c :: ref.1 :: V) d p := by
+            have hcl : containerLength (lengthHop lookup limits bytes k') (c :: ref.1 :: V) d p =
+                containerLength (lengthHop lookup limits bytes k) (c :: ref.1 :: V) d p := by
               obtain ⟨x, hx⟩ := hr1
               unfold containerLength at hx ⊢
               split
               · rename_i m hh hm
                 rw [hm] at hx
-                exact ih k (by omega) k' _ _ x (by omega) hx
+                have hk0 := (lengthHop_snd_ok hx).2
+                rw [lengthHop_fuel lookup limits bytes (f := k') (f' := k) (by omega) hk0]
               · rfl
             rw [hcl]
             rcases hm : containerMember pre limits bytes off c ref.1 idx d p
-                (containerLength (fun v r => resolveLengthAux pre lookup limits bytes k v r)
+                (containerLength (lengthHop lookup limits bytes k)
                   (c :: ref.1 :: V) d p).2 with e | o
             · rfl
             · rw [hm] at hok
