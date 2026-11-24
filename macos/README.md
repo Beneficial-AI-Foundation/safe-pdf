@@ -1,8 +1,8 @@
-# macOS: the C API v2 and the AppKit spike
+# macOS: the C API v2 and the Swift app
 
-The first half of this file is the C API v2 (current). Everything from "The AppKit spike" on is
-the task 11.1 spike and its v1 C calls, kept for reference and **superseded** by the C API v2; the
-spike app (`main.m`) is being replaced (task 11.3b) and is not described further here.
+The first part of this file is the C API v2 (current), then the Swift app (task 11.3b). Everything
+from "History: the AppKit spike" on is the task 11.1 spike (`main.m`, since replaced by the Swift
+app) and its v1 C calls, kept for reference and **superseded**.
 
 
 ## C API v2 (tasks 11.3a1 to 11.3a5)
@@ -184,41 +184,104 @@ Lean's runtime libraries, and print `NAME: N checks, 0 failures`.
 `FfiView.lean`, `FfiMarks.lean`, `FfiSelect.lean` and `Ffi/Flat.lean` run there. The C tests
 themselves are not run in CI yet (task 11.4).
 
-# The AppKit spike (task 11.1) — superseded
+# The Swift app (task 11.3b)
+
+Native AppKit shell in Swift 6 (strict concurrency) over the C API v2; unverified shell code that
+only moves data between AppKit and the core. Its state is a scaffold: menubar and toolbar from the
+exported tables, a document window with an empty sidebar, continuous vertical pages rendered
+through the worker. Commands it does not implement yet stay disabled (`Commands.swift`).
+
+## Sources (`macos/App/`)
+
+| File | Role (from its header comment) |
+|---|---|
+| `main.swift` | Entry point: `SafePdf [FILE.pdf]`, or the headless self-test when `SAFEPDF_MACOS_SELFTEST=DIR` is set |
+| `AppDelegate.swift` | Application life cycle: menubar, the document window, files from Finder and `open -a`, About and Quit |
+| `ChromeTables.swift` | Swift copies of the exported chrome tables (every C struct copied into Swift values and freed at once) |
+| `Commands.swift` | Which exported commands this shell implements yet; `pendingTask` names the task that implements the rest |
+| `CoreBridge.swift` | Start-up of the C API and small conversions |
+| `Document.swift` | An open PDF over the C API v2 (a `safepdf_document` reference, released with the object) |
+| `DocumentToolbar.swift` | The unified toolbar built from the exported toolbar table |
+| `DocumentWindowController.swift` | The document window: unified toolbar, split view with sidebar and page area, command routing and enabled states |
+| `KeyEquivalents.swift` | Neutral keys (Menu.lean's key table) to AppKit key equivalents |
+| `MainMenu.swift` | The menubar built from the exported menu table |
+| `PageCanvasView.swift` | The pages, laid out by `safepdf_view_layout` and drawn from renders |
+| `PageViewController.swift` | The content item: an `NSScrollView` over the page canvas |
+| `Rendering.swift` | Asynchronous page renders through `safepdf_doc_render` |
+| `SelfTest.swift` | The headless self-test (below) |
+| `Sheets.swift` | Open and save panels and alerts as document-modal sheets |
+| `SidebarViewController.swift` | The sidebar item with its four panels, empty for now |
+
+Swift sees the C API through `module.modulemap`: one Clang module, `SafePdfC`, made of
+`safepdf_core.h`, `safepdf_view.h`, `safepdf_marks.h` and `safepdf_select.h`; the sources say
+`import SafePdfC`. `swiftc -I macos` finds the module map.
+
+## Build
+
+```
+macos/build.sh        # needs elan's Lean and the Xcode command line tools only
+```
+
+`build.sh` runs `lake build macosFfi worker`, compiles the four C shims with `clang` at
+`-mmacosx-version-min=14.0`, links `App/*.swift` with `swiftc` against the shims,
+`libsafepdfffi.a` and Lean's runtime, and writes into `macos/build/`:
+
+* `safepdf-mac`: the app binary, unbundled, with a copy of `worker` beside it;
+* `SafePdf.app`: `Contents/MacOS/SafePdf`, the worker in `Contents/Helpers/worker`,
+  `Contents/Resources/SafePdf.icns` (made with `iconutil` from `docs/branding/icon-*.png`),
+  `Info.plist` (`CFBundleIdentifier` `org.safe-pdf.SafePDF`) and `PkgInfo`; the worker and the
+  bundle are signed ad hoc (`codesign --sign -`). Distribution signing and notarisation are
+  deferred;
+* `core_test`: the C API v2 test program (run it with `macos/tests/run.sh`).
+
+Scripts never launch the app.
+
+## Running it by hand
+
+```
+open macos/build/SafePdf.app
+macos/build/SafePdf.app/Contents/MacOS/SafePdf FILE.pdf
+```
+
+## Headless self-test
+
+```
+macos/selftest.sh FILE.pdf [OUTDIR]        # OUTDIR defaults to macos/build/selftest
+SAFEPDF_SELFTEST_BUNDLE=1 macos/selftest.sh FILE.pdf    # the bundle's binary instead
+```
+
+`SAFEPDF_MACOS_SELFTEST=DIR` makes `main.swift` set the activation policy to Prohibited before
+anything else; there is no window and the app never calls `run` or activates. `SelfTest.swift`
+checks that the chrome tables build (every command in the menubar, every toolbar item), open and
+its error path, page 1 through `safepdf_doc_render` at 1x and 2x, pages 1 to 10 at 2x, the real
+scroll view and page canvas at 1x and 2x backing, scrolling to page 2 and dark mode; it writes
+PNGs and `timings.txt` to DIR, prints `failures: N` and exits 0 when `N` is 0.
+
+`selftest.sh` samples `lsappinfo front` every 0.5 s and checks `lsappinfo list` for a Foreground
+registration, both only for the PID the script started (a copy launched by hand is ignored; the
+match is by PID, so it covers the names `safepdf-mac`, `SafePdf` and `SafePDF`). It kills only
+that PID if either shows up, and reports `leaks: N`.
+
+## Known limitation (open question for the human)
+
+`Info.plist` sets `LSMinimumSystemVersion` to 14.0 and `build.sh` compiles and links for macOS 14.0,
+but the pinned Lean toolchain's runtime libraries (`libgmp.a`, `libuv.a`) are built for a newer
+macOS (15). The linker warns once per object (counted by `build.sh`, full text in
+`build/swift-link.log`). Whether the bundle runs on macOS 14 is therefore not established; whether
+to raise the minimum is a decision for the human.
+
+
+# History: the AppKit spike (task 11.1) — superseded
+
+The spike was a single Objective-C file, `main.m` (an `NSWindow` with an `NSScrollView` and a page
+view, one render thread), replaced by the Swift app above; `main.m` is no longer in this
+directory. The sections below describe it and its v1 calls as they were.
 
 Plan.md §6 Phase 11: *"Spike first: a minimal Cocoa window (open, render, scroll, zoom) over
 the C API; record the feel delta and the FFI surface in a Decisions entry before committing to
 parity."* Plan.md §8: the shell is unverified and replaceable; the core as a library is the
-deliverable. This directory is that spike. It is not parity with the Tk viewer (no toolbar,
+deliverable. The spike was not parity with the Tk viewer (no toolbar,
 sidebar, selection, search, links or annotations; that is 11.3).
-
-## Files
-
-| File | Role |
-|---|---|
-| `../SafePdf/Shell/Ffi.lean` | Lean side: `@[export safepdf_lean_*]` functions over `SafePdf.Api` (open, page count, page size, render, error text) |
-| `safepdf_core.h` / `safepdf_core.c` | The C API (v1 spike calls described below; v2 above): plain C, no Lean types |
-| `main.m` | The AppKit app: `NSWindow` + `NSScrollView` (centring clip view) + a page view that draws every page stacked vertically; one render thread |
-| `build.sh` | `lake build macosFfi`, then `clang` for the C and Objective-C files, then a link against Lean's runtime; writes `build/safepdf-mac` and `build/SafePdf.app` |
-| `selftest.sh` | Headless self-test under a front-app watcher (below) |
-
-## Build and run
-
-```
-macos/build.sh                      # needs elan's Lean and the Xcode command line tools only
-macos/build/safepdf-mac FILE.pdf    # or without FILE: an Open panel
-```
-
-The Lake side is a non-default library `SafePdfFfi` (root `SafePdf.Shell.Ffi`) plus a custom
-target `macosFfi`. That target takes the module's own link information, meaning its object
-files and those of its whole import closure (the same list Lake links into an executable), and
-packs them into `.lake/build/lib/libsafepdfffi.a`. The link line is Lake's executable link
-line without the libraries the core does not use:
-`-lleancpp -lInit -lStd -lleanrt -lcadical -lc++ -lgmp -luv -framework AppKit -Wl,-dead_strip`.
-The default `lake build` is unchanged.
-
-Keys: Cmd+O opens a file, Cmd+ / Cmd= zoom in (×1.25), Cmd- zooms out, Cmd-0 shows the
-actual size. Pinch zooms with the trackpad, and scrolling uses the trackpad or mouse wheel.
 
 ## The v1 C API (`safepdf_core.h`) — deprecated, superseded by the C API v2
 
@@ -243,13 +306,9 @@ The render path is the Tk viewer's: `Core.Raster.Glyph.renderDocPage` with the s
 fonts found on the system (`Shell.Fonts.loadSubstFonts`), with no rotation and the default
 optional-content state.
 
-## Headless self-test
+## The spike's headless self-test
 
-```
-macos/selftest.sh FILE.pdf [OUTDIR]       # OUTDIR defaults to macos/build/selftest
-```
-
-`SAFEPDF_MACOS_SELFTEST=DIR` sets `NSApplicationActivationPolicyProhibited` before the core
+In the spike, `SAFEPDF_MACOS_SELFTEST=DIR` set `NSApplicationActivationPolicyProhibited` before the core
 starts, creates **no window**, and never calls `run` or `activate`. It does the following:
 
 1. It checks the C API (open, page count and size, the error paths, page 1 rendered at 1× and
