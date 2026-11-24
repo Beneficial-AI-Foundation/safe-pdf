@@ -1229,4 +1229,25 @@ private def roundTrip (s : Store) : Option Store :=
   | .ok r => r.count == 1 && r.skipped == [⟨"highlight", "too many marks"⟩]
   | .error _ => false
 
+/-! ## Texts shared by the shells (task 11.3e2) -/
+
+/-- **The proposed export file** of the PDF `path`: `STEM.xfdf` next to it. -/
+def exportTarget (path : String) : String :=
+  ((path : System.FilePath).withExtension "xfdf").toString
+
+#guard exportTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && exportTarget "a.b.PDF" == "a.b.xfdf"
+
+/-- **The status after an import** of `name`: added, already present and skipped counts, and
+the first skipped annotation (`first`: its element and reason). -/
+def importStatus (name : String) (added dups skipped : Nat) (first : Option (String × String)) :
+    String :=
+  let f := match first with
+    | some (e, r) => s!" (first skipped: <{e}>: {r})"
+    | none => ""
+  s!"{name}: {added} imported, {dups} already present, {skipped} skipped{f}"
+
+#guard importStatus "a.xfdf" 3 1 0 none == "a.xfdf: 3 imported, 1 already present, 0 skipped"
+#guard importStatus "a.xfdf" 0 0 2 (some ("ink", "no page")) ==
+  "a.xfdf: 0 imported, 0 already present, 2 skipped (first skipped: <ink>: no page)"
+
 end SafePdf.Shell.App.Xfdf

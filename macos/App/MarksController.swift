@@ -9,11 +9,11 @@
 // history, noteAnchor, note_close, hit_at, the tool state steps, the bubble's kind, layout and
 // place, Escape's order); Swift converts coordinates, keeps the transient UI state and draws.
 //
-// Drawing differs from Tk in one way (the ledger's gotcha for 11.3a3): Tk renders the pages of
-// a document whose saved marks were edited from a preview (Save.preview, not exported), so an
-// edited or deleted saved mark shows as edited at once. Here saved marks stay painted by the
-// renderer from the file until Save (11.3e2), and an edited saved mark ("saved, changed") is
-// drawn from the store's list on top of it.
+// Saved marks are painted by the renderer. While saved marks are edited or deleted, the pages
+// are rendered from the preview (task 11.3e2, MarksPreview: Save.preview, as the Tk viewer's
+// `State.view`), so an edited or deleted saved mark shows as it will be saved; until that
+// preview is there (it is built off the main thread), an edited saved mark is drawn from the
+// store's list on top of the file's picture.
 
 import AppKit
 import SafePdfC
@@ -62,6 +62,8 @@ struct FreeTextEdit {
     let noteEditor = NoteEditor()
     let freeText = FreeTextBox()
     let popovers = ToolPopovers()
+    /// The preview of edited saved marks (task 11.3e2).
+    let preview = MarksPreview()
 
     /// Called after a change of the marks, the selected mark or the tool state (the window's
     /// edited dot, menus and toolbar).
@@ -109,6 +111,8 @@ struct FreeTextEdit {
             self.noteOpen = nil
             self.deleteMark(id)
         }
+        preview.onSource = { [weak pv] s in pv?.canvas.setRenderSource(s) }
+        preview.onStatus = { [weak self] s in self?.status(s) }
         popovers.onColor = { [weak self] c in self?.popoverColor(c) }
         popovers.onShowAll = { [weak self] in self?.toggleShowAll() }
         popovers.onEditorColor = { [weak self] rgb in self?.editorColor(rgb) }
@@ -134,6 +138,7 @@ struct FreeTextEdit {
         press = nil
         route = .none
         model = nil
+        preview.reset()
         if let doc {
             do {
                 let m = try MarksModel(document: doc)
@@ -154,6 +159,7 @@ struct FreeTextEdit {
     /// The store changed (an edit, undo or redo): redraw, place the bubble, update the chrome.
     private func marksChanged() {
         if let id = markSel, model?.find(id) == nil { markSel = nil }
+        if let m = model { preview.update(m) }
         redrawAll()
         placeBubble()
         onChange?()
@@ -1038,6 +1044,9 @@ struct FreeTextEdit {
     func draw(_ page: Int, _ t: PageTransform, _ c: PageCanvasView) {
         guard let cg = NSGraphicsContext.current?.cgContext, model != nil else { return }
         let s = Self.scale(t)
+        // Saved marks the renderer paints: all of them while the pages show the store's state of
+        // the saved marks (the file, or the preview); else edited ones are drawn here too.
+        let previewShown = model.map { preview.isCurrent($0) } ?? false
         for mk in visible(page) {
             let shift = moveFrom.flatMap { mf -> CGSize? in
                 mf.id == mk.id ? CGSize(width: mf.last.x - mf.p0.x, height: mf.last.y - mf.p0.y) : nil
@@ -1045,7 +1054,8 @@ struct FreeTextEdit {
             let tt = shift.map { PageTransform(ox: t.ox + t.ax * Double($0.width) + t.bx * Double($0.height),
                                                oy: t.oy + t.ay * Double($0.width) + t.by * Double($0.height),
                                                ax: t.ax, ay: t.ay, bx: t.bx, by: t.by) } ?? t
-            let drawn = !mk.isSaved || mk.state == Int32(SAFEPDF_MARK_SAVED_CHANGED)
+            let changed = mk.state == Int32(SAFEPDF_MARK_SAVED_CHANGED) && !previewShown
+            let drawn = !mk.isSaved || changed
             switch mk.kind {
             case Int32(SAFEPDF_MARK_HIGHLIGHT):
                 if drawn {
@@ -1062,7 +1072,7 @@ struct FreeTextEdit {
                 cg.setLineDash(phase: 0, lengths: [4, 2])
                 for q in mk.quads { cg.stroke(c.pixelOutward(tt.rect(q))) }
                 cg.restoreGState()
-                if (!mk.isSaved || mk.isComment || mk.state == Int32(SAFEPDF_MARK_SAVED_CHANGED)), let r = mk.rect {
+                if (!mk.isSaved || mk.isComment || changed), let r = mk.rect {
                     NoteIcon.draw(in: c.pixelOutward(tt.rect(r)), color: MarksPalette.color(mk.color), cg: cg)
                 }
             default:

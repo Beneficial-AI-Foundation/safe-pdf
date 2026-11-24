@@ -85,6 +85,22 @@ extern lean_object *safepdf_marks_lean_bubble_layout(uint8_t kind);
 extern lean_object *safepdf_marks_lean_bubble_place(lean_object *sel, double w, double h,
                                                     lean_object *area);
 extern uint32_t safepdf_marks_lean_escape_closes(uint32_t opened);
+extern lean_object *safepdf_marks_lean_preview(lean_object *h, lean_object *date);
+extern size_t safepdf_marks_lean_output_ceiling(uint8_t u);
+extern lean_object *safepdf_marks_lean_saved_status(lean_object *path, size_t marks, size_t appended,
+                                                    size_t total, size_t deleted, lean_object *notes);
+extern lean_object *safepdf_marks_lean_import_status(lean_object *name, size_t added, size_t dups,
+                                                     size_t skipped, uint8_t has_first,
+                                                     lean_object *elem, lean_object *reason);
+extern lean_object *safepdf_marks_lean_xfdf_target(lean_object *path);
+extern lean_object *safepdf_marks_lean_replace_question(lean_object *name);
+extern lean_object *safepdf_marks_lean_opened_overwrite_question(lean_object *name);
+extern lean_object *safepdf_marks_lean_dialog_buttons(uint8_t kind, uint8_t aqua);
+extern uint8_t safepdf_marks_lean_unsaved_answer(lean_object *key);
+extern uint8_t safepdf_marks_lean_close_goes_on(uint8_t dirty, uint8_t answer, uint8_t saved);
+extern lean_object *safepdf_marks_lean_dialog_dir(lean_object *dir, uint8_t usable, lean_object *home);
+extern lean_object *safepdf_marks_lean_one_line(lean_object *s);
+extern lean_object *safepdf_marks_lean_tmp_name(lean_object *base, uint64_t stamp);
 
 struct safepdf_marks {
     atomic_size_t refs;
@@ -807,4 +823,127 @@ int safepdf_marks_bubble_place(const safepdf_box *sel, size_t n, double w, doubl
 uint32_t safepdf_marks_escape_closes(uint32_t opened) {
     if (!marks_initialised) return 0;
     return safepdf_marks_lean_escape_closes(opened);
+}
+
+/* ---- Preview, save texts and dialogs (task 11.3e2) ------------------------------------- */
+
+int safepdf_marks_preview(safepdf_marks *m, const char *date, safepdf_marks_bytes *out,
+                          char **error) {
+    memset(out, 0, sizeof *out);
+    /* A snapshot: handles are immutable, so the (long) build runs without the lock. Its objects
+       are shared with the thread that edits the store meanwhile (which reads and increments the
+       same document and marks), so they get atomic reference counts first (lean_mark_mt, as
+       safepdf_core.c's documents), under the lock that serialises every other use. */
+    lock(m);
+    lean_mark_mt(m->handle);
+    lean_object *h = h_arg(m);
+    unlock(m);
+    lean_object *io = safepdf_marks_lean_preview(h, mk_str(date));
+    if (!lean_io_result_is_ok(io)) {
+        set_error(error, io_error_of(io));
+        lean_dec(io);
+        return -1;
+    }
+    lean_object *r = lean_io_result_get_value(io);
+    if (lean_obj_tag(r) == 0) {
+        set_error(error, dup_lean_string(lean_ctor_get(r, 0)));
+        lean_dec(io);
+        return -1;
+    }
+    lean_object *bytes = lean_ctor_get(r, 0);
+    size_t n = lean_sarray_size(bytes);
+    if (n > 0) {
+        out->data = malloc(n);
+        if (!out->data) { lean_dec(io); set_error(error, strdup("out of memory")); return -1; }
+        memcpy(out->data, lean_sarray_cptr(bytes), n);
+        out->size = n;
+    }
+    lean_dec(io);
+    return 0;
+}
+
+size_t safepdf_marks_output_ceiling(void) {
+    if (!marks_initialised) return 0;
+    return safepdf_marks_lean_output_ceiling(0);
+}
+
+char *safepdf_marks_saved_status(const char *path, const safepdf_save_result *r) {
+    if (!r || !marks_initialised) return NULL;
+    /* The notes are the protection notes, then the retention text when the flag is set. */
+    size_t n = r->note_count;
+    if ((r->flags & SAFEPDF_SAVE_NOTE_RETENTION) && n > 0) n--;
+    lean_object *notes = lean_mk_empty_array();
+    for (size_t i = 0; i < n; i++) notes = lean_array_push(notes, mk_str(r->notes ? r->notes[i] : NULL));
+    return take_string(safepdf_marks_lean_saved_status(mk_str(path), r->marks_written, r->appended,
+                                                       r->marks_total, r->deleted_saved, notes));
+}
+
+char *safepdf_marks_import_status(const char *name, const safepdf_xfdf_import *r) {
+    if (!r || !marks_initialised) return NULL;
+    int first = r->skip_count > 0 && r->skip_elements && r->skip_reasons;
+    return take_string(safepdf_marks_lean_import_status(
+        mk_str(name), r->added, r->already_present, r->skipped, (uint8_t)first,
+        mk_str(first ? r->skip_elements[0] : NULL), mk_str(first ? r->skip_reasons[0] : NULL)));
+}
+
+char *safepdf_marks_xfdf_target(const char *path) {
+    if (!marks_initialised) return NULL;
+    return take_string(safepdf_marks_lean_xfdf_target(mk_str(path)));
+}
+
+char *safepdf_marks_replace_question(const char *name) {
+    if (!marks_initialised) return NULL;
+    return take_string(safepdf_marks_lean_replace_question(mk_str(name)));
+}
+
+char *safepdf_marks_opened_overwrite_question(const char *name) {
+    if (!marks_initialised) return NULL;
+    return take_string(safepdf_marks_lean_opened_overwrite_question(mk_str(name)));
+}
+
+int safepdf_marks_dialog_buttons(int dialog, int aqua, safepdf_dialog_buttons *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!marks_initialised || dialog < 0 || dialog > 2) return -1;
+    lean_object *a = safepdf_marks_lean_dialog_buttons((uint8_t)dialog, aqua != 0);
+    size_t k = lean_array_size(a) / 2;
+    if (k > 3) k = 3;
+    for (size_t i = 0; i < k; i++) {
+        lean_object *key = lean_array_get_core(a, 2 * i);
+        lean_object *label = lean_array_get_core(a, 2 * i + 1);
+        size_t kl = lean_string_size(key) - 1, ll = lean_string_size(label) - 1;
+        if (kl >= sizeof out->key[i]) kl = sizeof out->key[i] - 1;
+        if (ll >= sizeof out->label[i]) ll = sizeof out->label[i] - 1;
+        memcpy(out->key[i], lean_string_cstr(key), kl);
+        memcpy(out->label[i], lean_string_cstr(label), ll);
+    }
+    out->count = k;
+    lean_dec(a);
+    return k > 0 ? 0 : -1;
+}
+
+int safepdf_marks_unsaved_answer(const char *key) {
+    if (!marks_initialised) return SAFEPDF_ANSWER_CANCEL;
+    return safepdf_marks_lean_unsaved_answer(mk_str(key));
+}
+
+int safepdf_marks_close_goes_on(int dirty, int answer, int saved) {
+    if (!marks_initialised) return 0;
+    uint8_t a = (answer == SAFEPDF_ANSWER_SAVE || answer == SAFEPDF_ANSWER_DONT_SAVE) ? (uint8_t)answer : 0;
+    return safepdf_marks_lean_close_goes_on(dirty != 0, a, saved != 0);
+}
+
+char *safepdf_marks_dialog_dir(const char *dir, int usable, const char *home) {
+    if (!marks_initialised) return NULL;
+    return take_string(safepdf_marks_lean_dialog_dir(mk_str(dir), usable != 0, mk_str(home)));
+}
+
+char *safepdf_marks_one_line(const char *s) {
+    if (!marks_initialised) return NULL;
+    return take_string(safepdf_marks_lean_one_line(mk_str(s)));
+}
+
+char *safepdf_marks_tmp_name(const char *base, uint64_t stamp) {
+    if (!marks_initialised) return NULL;
+    return take_string(safepdf_marks_lean_tmp_name(mk_str(base), stamp));
 }

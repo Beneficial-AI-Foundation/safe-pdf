@@ -75,6 +75,15 @@ final class PageScrollView: NSScrollView {
 }
 
 /// Where `goTo` / `show(page:_:)` scroll (the Tk viewer's ScrollTo).
+/// The view a reopen after Save keeps (task 11.3e2; 9.r8: the only open that carries the view
+/// over): the view modes, the zoom choice, the user's rotation and the page.
+struct KeptView {
+    let modes: ViewModes
+    let zoom: safepdf_zoom_choice
+    let rotation: UInt32
+    let page: Int
+}
+
 enum ScrollTarget {
     /// The page's top (View.topFor; the region's top in the page scroll mode).
     case top
@@ -227,7 +236,7 @@ final class PageViewController: NSViewController {
     /// page 1, an empty history — then the document's open settings apply (`/PageLayout`,
     /// `/Direction`, the open destination's page, zoom and position), and the pill lists what
     /// was not honoured.
-    func show(_ doc: Document?) {
+    func show(_ doc: Document?, keep: KeptView? = nil) {
         holdCurrent += 1
         defer { holdCurrent -= 1 }
         _ = view
@@ -244,7 +253,16 @@ final class PageViewController: NSViewController {
         marks.reset(doc)
         var target = ScrollTarget.top
         var notes: [String] = []
-        if let doc {
+        if let doc, let k = keep {
+            // The reopen after Save (Viewer.afterWrite: openFile keepView, then goTo page): the
+            // document's open settings are not applied again.
+            canvas.modes = k.modes
+            canvas.zoomChoice = k.zoom
+            canvas.userRotation = k.rotation
+            canvas.setCurrent(k.page)
+            canvas.relayout(canvas: canvasSize)
+            _ = doc
+        } else if let doc {
             let s = doc.settings
             canvas.modes = s.modes
             canvas.zoomChoice = s.zoom
@@ -280,6 +298,13 @@ final class PageViewController: NSViewController {
         apply(target)
         noteCap()
         onViewChange?()
+    }
+
+    /// What a reopen after Save keeps of the current view (nil: no document).
+    var keptView: KeptView? {
+        guard canvas.document != nil else { return nil }
+        return KeptView(modes: canvas.modes, zoom: canvas.zoomChoice, rotation: canvas.userRotation,
+                        page: canvas.currentPage)
     }
 
     /// The top of the visible area below the toolbar, in document-view points.

@@ -72,7 +72,7 @@ extension SelfTest {
             check(Commands.implemented.contains(Commands.id(c)), "command \(c.rawValue) implemented")
         }
         for c in [SAFEPDF_CMD_SAVE, SAFEPDF_CMD_SAVE_AS, SAFEPDF_CMD_IMPORT_XFDF, SAFEPDF_CMD_EXPORT_XFDF] {
-            check(Commands.pendingTask(Commands.id(c)) == "11.3e2", "command \(c.rawValue) left for 11.3e2")
+            check(Commands.implemented.contains(Commands.id(c)), "command \(c.rawValue) implemented (11.3e2)")
         }
         func enabled(_ c: safepdf_cmd) -> Bool {
             Chrome.states(DocumentWindowController.context(pdf: doc, pages: pv))?.commandEnabled[Commands.id(c)] ?? false

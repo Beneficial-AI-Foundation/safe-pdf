@@ -1,5 +1,6 @@
 // AppDelegate.swift — application life cycle: menubar, the document window, files from Finder
-// and `open -a`, About and Quit (task 11.3b). Plan.md §6 Phase 11; docs/macos-design.md §2
+// and `open -a`, About and Quit (task 11.3b); the unsaved-marks question before quitting and
+// before opening another file (task 11.3e2). Plan.md §6 Phase 11; docs/macos-design.md §2
 // (application menu, NSOpenPanel, the bundle's open-with).
 
 import AppKit
@@ -60,6 +61,24 @@ import SafePdfC
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// ⌘Q with unsaved marks: each document window asks Save / Don't Save / Cancel in turn
+    /// (Viewer: confirmDiscard "quitting"); Cancel, or a failed save, keeps the app running.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let windows = [controller].compactMap { $0 }.filter { $0.window != nil && $0.pages.marks.dirty }
+        guard !windows.isEmpty else { return .terminateNow }
+        Self.askInTurn(windows[...]) { go in NSApp.reply(toApplicationShouldTerminate: go) }
+        return .terminateLater
+    }
+
+    /// Asks each window in turn; stops at the first that does not go on.
+    private static func askInTurn(_ ws: ArraySlice<DocumentWindowController>, done: @escaping @MainActor (Bool) -> Void) {
+        guard let first = ws.first else { done(true); return }
+        first.showWindow(nil)
+        first.confirmQuit { go in
+            if go { askInTurn(ws.dropFirst(), done: done) } else { done(false) }
+        }
+    }
+
     private func ensureWindow() -> DocumentWindowController {
         if let c = controller, c.window != nil { return c }
         let c = DocumentWindowController()
@@ -73,7 +92,11 @@ import SafePdfC
         case Commands.id(SAFEPDF_CMD_OPEN_FILE):
             let wc = ensureWindow()
             wc.showWindow(nil)
-            Sheets.openPDF(on: wc.window) { url in wc.open(url) }
+            // The unsaved-marks question comes before the panel (Viewer.openDialog).
+            wc.saver.confirmDiscard("opening another file") { [weak wc] go in
+                guard go, let wc else { return }
+                Sheets.openPDF(on: wc.window) { [weak wc] url in wc?.openConfirmed(url) }
+            }
         case Commands.id(SAFEPDF_CMD_QUIT):
             NSApp.terminate(nil)
         case Commands.id(SAFEPDF_CMD_ABOUT):

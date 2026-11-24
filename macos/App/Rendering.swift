@@ -45,17 +45,25 @@ enum Rendering {
     /// queue. Returns the request id (0: not submitted, `deliver` is never called).
     @MainActor static func submit(_ doc: Document, page: Int, key: ZoomKey, priority: Int32,
                                   deliver: @escaping @MainActor (RenderResult) -> Void) -> safepdf_request_id {
+        submit(handle: doc.handle, layers: doc.layers, page: page, key: key, priority: priority,
+               deliver: deliver)
+    }
+
+    /// Submits a render to the document `handle` (a `Document`'s, or the preview of edited saved
+    /// marks, task 11.3e2) under `layers` (task 11.3d2; nil: the default state).
+    @MainActor static func submit(handle: OpaquePointer, layers: LayersState?, page: Int, key: ZoomKey,
+                                  priority: Int32,
+                                  deliver: @escaping @MainActor (RenderResult) -> Void) -> safepdf_request_id {
         let ticket = RenderTicket(page: page, key: key, deliver: deliver)
         let ctx = Unmanaged.passRetained(ticket).toOpaque()
-        // Under the document's layers state (task 11.3d2; nil: its default state).
         let id: safepdf_request_id
-        if let layers = doc.layers {
+        if let layers {
             id = layers.withC { st in
-                safepdf_doc_render(doc.handle, page, key.num, key.den, key.rotation, st, priority,
+                safepdf_doc_render(handle, page, key.num, key.den, key.rotation, st, priority,
                                    DispatchQueue.main, renderCallback, ctx)
             }
         } else {
-            id = safepdf_doc_render(doc.handle, page, key.num, key.den, key.rotation, nil, priority,
+            id = safepdf_doc_render(handle, page, key.num, key.den, key.rotation, nil, priority,
                                     DispatchQueue.main, renderCallback, ctx)
         }
         if id == 0 { Unmanaged<RenderTicket>.fromOpaque(ctx).release() }

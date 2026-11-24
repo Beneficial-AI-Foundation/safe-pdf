@@ -1094,4 +1094,40 @@ def write (limits : Limits) (doc : Doc.Doc) (store : Store) (target : String)
                    notes := notesFor limits doc n }
     catch e => return .error s!"cannot write {target}: {oneLine (toString e)}"
 
+/-! ## Status texts shared by the shells (task 11.3e2)
+
+Pure texts the Tk viewer shows after a save and in Save As…, moved here from `Viewer` so the
+native macOS shell shows the same words through the C API (`Shell.FfiMarks`). -/
+
+/-- **The revision-retention suffix** (task 12.5) of a save status that deleted `n` saved
+marks: `"; note: "` and `retentionText`; empty when nothing saved was deleted. -/
+def retentionNote (n : Nat) : String :=
+  if n == 0 then "" else "; note: " ++ retentionText n
+
+#guard retentionNote 0 == ""
+
+/-- **The status after a save** wrote `path`: `marks` new, changed or deleted marks (`0`: a
+plain copy), `appended` bytes appended, `total` marks in the written file, the protection
+`notes` (`notesFor`) and the retention suffix for `deleted` saved marks. -/
+def savedStatus (path : String) (marks appended total : Nat) (notes : List String)
+    (deleted : Nat) : String :=
+  let what := if marks == 0 then "a copy (no changed marks)"
+    else s!"{marks} new, changed or deleted mark(s) as an incremental update \
+      ({appended} bytes appended)"
+  s!"saved {what} to {path}; {total} marks in the file, the original bytes \
+    unchanged at its start{notesText notes}{retentionNote deleted}"
+
+#guard savedStatus "/d/a.pdf" 0 0 3 [] 0 ==
+  "saved a copy (no changed marks) to /d/a.pdf; 3 marks in the file, the original bytes \
+  unchanged at its start"
+#guard (savedStatus "a.pdf" 2 900 2 [] 1).endsWith (retentionNote 1)
+
+/-- The question when Save As… names the opened file `name` itself (not yet written by this
+session). -/
+def openedOverwriteQuestion (name : String) : String :=
+  s!"Overwrite the opened file {name}? The marks are added to it; its present content is \
+    kept unchanged inside it as the first revision."
+
+#guard (openedOverwriteQuestion "a.pdf").startsWith "Overwrite the opened file a.pdf?"
+
 end SafePdf.Shell.App.Save

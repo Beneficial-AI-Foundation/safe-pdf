@@ -3,6 +3,7 @@ import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Save
 import SafePdf.Shell.App.Xfdf
 import SafePdf.Shell.App.Toolbar
+import SafePdf.Shell.App.Budget
 
 /-!
 # C API v2: marks, save and XFDF (task 11.3a3; Plan.md §6 Phases 9–11, §4 C7, §8)
@@ -772,5 +773,108 @@ def escapeCloses (opened : UInt32) : UInt32 :=
   ((idx.zip order).foldl (fun acc (i, t) => if closed.contains t then acc + 2 ^ i else acc) 0).toUInt32
 
 #guard escapeCloses 0b101 == 0b1 && escapeCloses 0b110100 == 0b100 && escapeCloses 0 == 0
+
+/-! ## Preview, save and XFDF dialogs (task 11.3e2)
+
+The rest of the Tk viewer's save flow for the native shell: the preview the pages are rendered
+from while saved marks are edited (`Save.preview`, task 9.5g), the output ceiling (the Tk
+viewer's work pool, `Viewer.withOutput`), and the pure texts and decisions of the dialogs
+(`Save.unsavedButtons`, `onUnsavedAnswer`, `closeGoesOn`, `savedStatus`, `dialogDir`, …). -/
+
+/-- **The preview** (`Save.preview`, as `Viewer.updatePreview`): the bytes of the document with
+only the changes of saved marks applied (an in-memory incremental update, reopened strictly),
+dated `date` (empty: now); empty bytes when no saved mark is changed or deleted. The GUI opens
+these bytes as the document its pages are rendered from (the Tk viewer sends them to its
+document worker). -/
+@[export safepdf_marks_lean_preview]
+def preview (h : Handle) (date : String) : IO (Except String ByteArray) := do
+  let s := h.store
+  if s.changedSaved.isEmpty && s.deletedSaved.isEmpty then return .ok ByteArray.empty
+  let date ← if date.isEmpty then Save.nowDate else pure date
+  match Save.preview limits h.doc.doc s date with
+  | .error e => return .error e
+  | .ok none => return .ok ByteArray.empty
+  | .ok (some d) => return .ok d.file.bytes
+
+/-- **The output ceiling** of a Save or an XFDF export: the Tk viewer reserves the output in its
+work pool first (`Viewer.withOutput`, task 12.3b), whose ceiling is
+`Budget.ceilings.poolBytes`; the native shell passes it as `max_output`. -/
+@[export safepdf_marks_lean_output_ceiling]
+def outputCeiling (_u : UInt8) : USize := satU Budget.ceilings.poolBytes
+
+/-- **The status after a save** (`Save.savedStatus`): `notes` the protection notes only (the
+retention suffix comes from `deleted`). -/
+@[export safepdf_marks_lean_saved_status]
+def savedStatus (path : String) (marks appended total deleted : USize) (notes : Array String) :
+    String :=
+  Save.savedStatus path marks.toNat appended.toNat total.toNat notes.toList deleted.toNat
+
+/-- **The status after an import** (`Xfdf.importStatus`): `hasFirst` 0 when nothing was
+skipped. -/
+@[export safepdf_marks_lean_import_status]
+def importStatus (name : String) (added dups skipped : USize) (hasFirst : UInt8)
+    (elem reason : String) : String :=
+  Xfdf.importStatus name added.toNat dups.toNat skipped.toNat
+    (if hasFirst != 0 then some (elem, reason) else none)
+
+/-- The proposed XFDF export file of the PDF `path` (`Xfdf.exportTarget`). -/
+@[export safepdf_marks_lean_xfdf_target]
+def xfdfTarget (path : String) : String := Xfdf.exportTarget path
+
+/-- The question when adding the extension named an existing file (`Save.replaceQuestion`). -/
+@[export safepdf_marks_lean_replace_question]
+def replaceQuestion (name : String) : String := Save.replaceQuestion name
+
+/-- The question when Save As… names the opened file (`Save.openedOverwriteQuestion`). -/
+@[export safepdf_marks_lean_opened_overwrite_question]
+def openedOverwriteQuestion (name : String) : String := Save.openedOverwriteQuestion name
+
+/-- **A dialog's buttons** in display order, keys and labels alternating: `kind` 0 the
+unsaved-changes question (`Save.unsavedButtons`), 1 the first overwrite
+(`Save.overwriteButtons`), 2 changed on disk (`Save.changedButtons`); `aqua` the macOS order. -/
+@[export safepdf_marks_lean_dialog_buttons]
+def dialogButtons (kind aqua : UInt8) : Array String :=
+  let a := aqua != 0
+  let bs := match kind with
+    | 0 => Save.unsavedButtons a
+    | 1 => Save.overwriteButtons a
+    | 2 => Save.changedButtons a
+    | _ => []
+  (bs.flatMap fun (k, l) => [k, l]).toArray
+
+#guard dialogButtons 0 1 == #["dontsave", "Don't Save", "cancel", "Cancel", "save", "Save"]
+#guard dialogButtons 9 1 == #[]
+
+/-- **The unsaved-changes answer** (`Save.onUnsavedAnswer`): 1 save first, 2 go on without
+saving, 0 abort (Cancel or anything else). -/
+@[export safepdf_marks_lean_unsaved_answer]
+def unsavedAnswer (key : String) : UInt8 :=
+  match Save.onUnsavedAnswer key with
+  | some true => 1
+  | some false => 2
+  | none => 0
+
+/-- **Whether a close goes on** (`Save.closeGoesOn`): `answer` as `unsavedAnswer`. -/
+@[export safepdf_marks_lean_close_goes_on]
+def closeGoesOn (dirty answer saved : UInt8) : UInt8 :=
+  let a := if answer == 1 then some true else if answer == 2 then some false else none
+  if Save.closeGoesOn (dirty != 0) a (saved != 0) then 1 else 0
+
+#guard closeGoesOn 1 0 1 == 0 && closeGoesOn 1 2 0 == 1 && closeGoesOn 1 1 0 == 0 &&
+  closeGoesOn 0 0 0 == 1
+
+/-- The folder a file dialog starts in (`Save.dialogDir`; `home` empty: none). -/
+@[export safepdf_marks_lean_dialog_dir]
+def dialogDir (dir : String) (usable : UInt8) (home : String) : String :=
+  Save.dialogDir dir (usable != 0) (if home.isEmpty then none else some home)
+
+/-- The temporary file name of a save of `base` (`Save.tmpName`; the GUI's atomic write puts it
+next to the target). -/
+@[export safepdf_marks_lean_tmp_name]
+def tmpName (base : String) (stamp : UInt64) : String := Save.tmpName base stamp.toNat
+
+/-- A message on one line (`Save.oneLine`). -/
+@[export safepdf_marks_lean_one_line]
+def oneLine (s : String) : String := Save.oneLine s
 
 end SafePdf.Shell.FfiMarks
