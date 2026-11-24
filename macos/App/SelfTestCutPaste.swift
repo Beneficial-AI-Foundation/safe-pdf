@@ -87,7 +87,12 @@ extension SelfTest {
         let big = tb.pageFieldMetrics.width
         tb.fitPageField(labels: [], pages: 9)
         let small = tb.pageFieldMetrics.width
-        check(small <= roman && roman <= big && big <= DocumentToolbar.pageFieldMax && small >= 20,
+        if DocumentToolbar.borderlessPageField {
+            // macOS 26: no reserved bezel padding — a short document's field is little more than
+            // its two digits, so the number sits by the chevrons and "of N" (human's check).
+            check(small <= 30, "borderless page field fits its digits: \(small)")
+        }
+        check(small <= roman && roman <= big && big <= DocumentToolbar.pageFieldMax && small >= 12,
               "page field widths: 9 pages \(small), roman labels \(roman), 12345 pages \(big)")
         say("page field: \(m.width) pt wide, gap \(m.gap) to \"\(f.of)\"; 9 pages \(small), xxviii \(roman), 12345 pages \(big)")
     }

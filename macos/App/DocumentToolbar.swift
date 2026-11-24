@@ -62,6 +62,11 @@ import SafePdfC
     static let pageGap: CGFloat = 4
     /// The widest the page field gets (a longer label scrolls inside it).
     static let pageFieldMax: CGFloat = 96
+    /// macOS 26 (Liquid Glass toolbar): the page field draws no bezel of its own.
+    static var borderlessPageField: Bool {
+        if #available(macOS 26, *) { return true }
+        return false
+    }
     private var lastStates: ChromeStates?
 
     /// The SF Symbol for a Tk icon name.
@@ -257,6 +262,17 @@ import SafePdfC
         // fixed wide box, and "of N" follows it closely; the stack hugs its content so the
         // toolbar (and the macOS 26 glass capsule) does not stretch it.
         pageField.alignment = .center
+        // On macOS 26 the toolbar's glass capsule is the field's visual frame: the rounded bezel is
+        // not drawn there but its padding was still reserved, which left a visible gap between the
+        // previous/next chevrons and the number (the human's check, 2026-11-24). There the field is
+        // borderless, sized to its text, and the number sits right next to "of N".
+        if Self.borderlessPageField {
+            pageField.isBordered = false
+            pageField.drawsBackground = false
+            pageField.focusRingType = .default
+            pageField.alignment = .right
+            pageWidth.constant = Self.fieldWidth(for: ["888"], in: pageField)
+        }
         pageWidth.isActive = true
         pageField.setContentHuggingPriority(.required, for: .horizontal)
         ofLabel.textColor = .secondaryLabelColor
@@ -389,6 +405,10 @@ import SafePdfC
         func w(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: attrs).width }
         var text = w("88")
         for e in entries { text = max(text, w(e)) }
+        if borderlessPageField {
+            // No bezel: only the text cell's own inset (2 pt a side) and room for the caret.
+            return min(Self.pageFieldMax, ceil(text + 6))
+        }
         let probe = NSTextField(string: "8")
         probe.font = font
         probe.bezelStyle = .roundedBezel
