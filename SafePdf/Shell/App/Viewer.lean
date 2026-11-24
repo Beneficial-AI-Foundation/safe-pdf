@@ -4573,8 +4573,7 @@ def keepPermissions (target : String) (tmp : System.FilePath) : IO Unit := do
 (C7) — so the earlier revision, with the deleted annotations, is still inside the written
 file and can be recovered from it; a user deleting a mark to remove what it says must know.
 Empty when nothing saved was deleted. -/
-def retentionNote (n : Nat) : String :=
-  if n == 0 then "" else "; note: " ++ Save.retentionText n
+def retentionNote (n : Nat) : String := Save.retentionNote n
 
 #guard retentionNote 0 == ""
 #guard retentionNote 2 == "; note: the 2 deleted mark(s) are still in the file's earlier \
@@ -4592,11 +4591,7 @@ def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := 
   -- applied again).
   openFile st o.path (keepView := true)
   goTo st page
-  let what := if o.marks == 0 then "a copy (no changed marks)"
-    else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
-      ({o.appended} bytes appended)"
-  setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
-    unchanged at its start{Save.notesText o.notes}{retentionNote deleted}"
+  setStatus (Save.savedStatus o.path o.marks o.appended o.total o.notes deleted)
 
 /-- Writes the document with its unsaved marks to another file `target` (Save As…;
 `Save.write`: the incremental update, checked by a strict reopen before anything is written,
@@ -4793,8 +4788,7 @@ def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
       return some true
   if !s.inMemory && (← samePath chosen path) then
     if !(← isOwn st chosen) then
-      let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks \
-        are added to it; its present content is kept unchanged inside it as the first revision."
+      let a ← ask "yesno" "Save As" (Save.openedOverwriteQuestion (baseName path))
       if a != "yes" then
         setStatus "save cancelled"
         return some false
@@ -4856,18 +4850,15 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
 /-! ## XFDF import and export (task 9.11) -/
 
 /-- The proposed export file of the PDF `path`: `STEM.xfdf` next to it. -/
-def xfdfTarget (path : String) : String :=
-  ((path : System.FilePath).withExtension "xfdf").toString
+def xfdfTarget (path : String) : String := Xfdf.exportTarget path
 
 #guard xfdfTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && xfdfTarget "a.b.PDF" == "a.b.xfdf"
 
 /-- The status line after an import of `name`: added, already present and skipped counts, and
 the first skipped annotation's reason. -/
 def importStatus (name : String) (added dups : Nat) (rep : Xfdf.Report) : String :=
-  let first := match rep.skipped with
-    | k :: _ => s!" (first skipped: <{k.element}>: {k.reason})"
-    | [] => ""
-  s!"{name}: {added} imported, {dups} already present, {rep.skippedCount} skipped{first}"
+  Xfdf.importStatus name added dups rep.skippedCount
+    (rep.skipped.head?.map fun k => (k.element, k.reason))
 
 #guard importStatus "a.xfdf" 3 1 {} == "a.xfdf: 3 imported, 1 already present, 0 skipped"
 

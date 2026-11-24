@@ -245,12 +245,35 @@ int main(int argc, char **argv) {
         mh = find(&l, hl);
         CHECK(mh && mh->state == SAFEPDF_MARK_SAVED_CHANGED, "recoloured saved mark is changed");
         safepdf_free_mark_list(&l);
+        /* task 11.3e2: the preview shows the recoloured saved highlight */
+        safepdf_marks_bytes pv;
+        CHECK(safepdf_marks_preview(m2, fixed_date, &pv, &err) == 0 && pv.size > sr.size &&
+                  memcmp(pv.data, sr.bytes, sr.size) == 0,
+              "preview of a recoloured saved mark: %zu bytes %s", pv.size, nz(err));
+        safepdf_marks *mp = pv.size ? safepdf_marks_create(pv.data, pv.size, &err) : NULL;
+        CHECK(mp != NULL, "the preview opens: %s", nz(err));
+        if (mp) {
+            CHECK(safepdf_marks_list(mp, 0, &l, &err) == 0, "list preview");
+            mh = find(&l, hl);
+            CHECK(mh && mh->color == SAFEPDF_COLOR_RED && mh->state == SAFEPDF_MARK_SAVED,
+                  "the preview holds the highlight in red");
+            safepdf_free_mark_list(&l);
+            safepdf_marks_release(mp);
+        }
+        safepdf_free_marks_bytes(&pv);
         CHECK(safepdf_marks_undo(m2, &err) == 0, "undo recolour");
         safepdf_marks_get_state(m2, &st);
         CHECK(!st.dirty, "undo back to the file's state is clean");
+        CHECK(safepdf_marks_preview(m2, NULL, &pv, &err) == 0 && pv.size == 0 && pv.data == NULL,
+              "no preview without changed or deleted saved marks");
         /* delete a saved highlight (its comment goes too): the retention note */
         CHECK(safepdf_marks_delete(m2, hl, &err) == 0, "delete saved highlight");
         CHECK(count_all(m2) == 1, "highlight and its comment deleted");
+        CHECK(safepdf_marks_preview(m2, NULL, &pv, &err) == 0 && pv.size > 0, "preview after delete");
+        mp = pv.size ? safepdf_marks_create(pv.data, pv.size, &err) : NULL;
+        CHECK(mp && count_all(mp) == 1, "the preview no longer holds the deleted marks");
+        safepdf_marks_release(mp);
+        safepdf_free_marks_bytes(&pv);
         safepdf_save_result sr2;
         rc = safepdf_marks_save_build(m2, NULL, 0, NULL, 0, &sr2, &err);
         CHECK(rc == SAFEPDF_SAVE_OK, "save after delete: %d %s", rc, nz(err));
@@ -259,6 +282,11 @@ int main(int argc, char **argv) {
               "retention note: flags %u deleted %zu", sr2.flags, sr2.deleted_saved);
         CHECK(sr2.size > sr.size && memcmp(sr2.bytes, sr.bytes, sr.size) == 0,
               "second update appends again");
+        s = safepdf_marks_saved_status("/d/t.pdf", &sr2);
+        CHECK(s && strstr(s, "saved 2 new, changed or deleted mark(s) as an incremental update") &&
+                  strstr(s, "to /d/t.pdf; 1 marks in the file, the original bytes unchanged at its start; note: the 2 deleted mark(s)"),
+              "saved status with the retention note: %s", nz(s));
+        free(s);
         safepdf_marks *m3 = safepdf_marks_create(sr2.bytes, sr2.size, &err);
         CHECK(m3 && count_all(m3) == 1, "deleted marks are gone after reopening");
         safepdf_marks_release(m3);
@@ -418,6 +446,73 @@ int main(int argc, char **argv) {
                   SAFEPDF_TRANSIENT_NOTE &&
               safepdf_marks_escape_closes(0) == 0,
           "Escape closes the topmost transient");
+
+    /* --- task 11.3e2: preview, ceiling, texts and dialog rules --------------------------- */
+    {
+        safepdf_marks_bytes pv;
+        CHECK(safepdf_marks_preview(m, NULL, &pv, &err) == 0 && pv.size == 0,
+              "a store without saved marks has no preview");
+        CHECK(safepdf_marks_output_ceiling() == (size_t)192 * 1024 * 1024, "output ceiling 192 MiB");
+        safepdf_save_result fake = {0};
+        fake.marks_written = 0; fake.marks_total = 4;
+        char *t = safepdf_marks_saved_status("a.pdf", &fake);
+        CHECK(t && strcmp(t, "saved a copy (no changed marks) to a.pdf; 4 marks in the file, the original bytes unchanged at its start") == 0,
+              "copy status: %s", nz(t));
+        free(t);
+        safepdf_xfdf_import ir = {0};
+        ir.added = 3; ir.already_present = 1;
+        t = safepdf_marks_import_status("a.xfdf", &ir);
+        CHECK(t && strcmp(t, "a.xfdf: 3 imported, 1 already present, 0 skipped") == 0, "import status: %s", nz(t));
+        free(t);
+        char *el[1] = {"ink"}, *re[1] = {"no page"};
+        ir.skipped = 2; ir.skip_count = 1; ir.skip_elements = el; ir.skip_reasons = re;
+        t = safepdf_marks_import_status("a.xfdf", &ir);
+        CHECK(t && strstr(t, "2 skipped (first skipped: <ink>: no page)"), "import status with a skip: %s", nz(t));
+        free(t);
+        t = safepdf_marks_xfdf_target("/tmp/x/paper.pdf");
+        CHECK(t && strcmp(t, "/tmp/x/paper.xfdf") == 0, "xfdf target: %s", nz(t));
+        free(t);
+        t = safepdf_marks_replace_question("a.pdf");
+        CHECK(t && strcmp(t, "a.pdf already exists. Replace it?") == 0, "replace question: %s", nz(t));
+        free(t);
+        t = safepdf_marks_opened_overwrite_question("a.pdf");
+        CHECK(t && strstr(t, "Overwrite the opened file a.pdf?"), "opened overwrite: %s", nz(t));
+        free(t);
+        safepdf_dialog_buttons b;
+        CHECK(safepdf_marks_dialog_buttons(SAFEPDF_DIALOG_UNSAVED, 1, &b) == 0 && b.count == 3 &&
+                  strcmp(b.key[0], "dontsave") == 0 && strcmp(b.label[2], "Save") == 0,
+              "unsaved buttons, aqua order");
+        CHECK(safepdf_marks_dialog_buttons(SAFEPDF_DIALOG_OVERWRITE, 0, &b) == 0 && b.count == 3 &&
+                  strcmp(b.key[0], "overwrite") == 0 && strcmp(b.label[1], "Save As\xe2\x80\xa6") == 0,
+              "overwrite buttons, X11 order");
+        CHECK(safepdf_marks_dialog_buttons(SAFEPDF_DIALOG_CHANGED, 1, &b) == 0 && b.count == 2 &&
+                  strcmp(b.key[1], "saveas") == 0,
+              "changed buttons");
+        CHECK(safepdf_marks_dialog_buttons(7, 1, &b) == -1 && b.count == 0, "unknown dialog");
+        CHECK(safepdf_marks_unsaved_answer("save") == SAFEPDF_ANSWER_SAVE &&
+                  safepdf_marks_unsaved_answer("dontsave") == SAFEPDF_ANSWER_DONT_SAVE &&
+                  safepdf_marks_unsaved_answer("cancel") == SAFEPDF_ANSWER_CANCEL &&
+                  safepdf_marks_unsaved_answer(NULL) == SAFEPDF_ANSWER_CANCEL,
+              "unsaved answers");
+        CHECK(safepdf_marks_close_goes_on(0, SAFEPDF_ANSWER_CANCEL, 0) == 1 &&
+                  safepdf_marks_close_goes_on(1, SAFEPDF_ANSWER_DONT_SAVE, 0) == 1 &&
+                  safepdf_marks_close_goes_on(1, SAFEPDF_ANSWER_SAVE, 1) == 1 &&
+                  safepdf_marks_close_goes_on(1, SAFEPDF_ANSWER_SAVE, 0) == 0 &&
+                  safepdf_marks_close_goes_on(1, SAFEPDF_ANSWER_CANCEL, 1) == 0,
+              "close goes on (Save.closeGoesOn)");
+        t = safepdf_marks_dialog_dir("/d", 0, "/h");
+        CHECK(t && strcmp(t, "/h") == 0, "dialog dir: %s", nz(t));
+        free(t);
+        t = safepdf_marks_dialog_dir("/d", 1, NULL);
+        CHECK(t && strcmp(t, "/d") == 0, "dialog dir usable: %s", nz(t));
+        free(t);
+        t = safepdf_marks_tmp_name("a.pdf", 7);
+        CHECK(t && strcmp(t, ".a.pdf.safepdf-7.tmp") == 0, "tmp name: %s", nz(t));
+        free(t);
+        t = safepdf_marks_one_line("a\n  b");
+        CHECK(t && strcmp(t, "a b") == 0, "one line: %s", nz(t));
+        free(t);
+    }
 
     /* --- reference counting -------------------------------------------------------------- */
     safepdf_marks_retain(m);

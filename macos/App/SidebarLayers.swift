@@ -69,7 +69,9 @@ final class LayersPanel: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate 
         guard let doc else { done(false); return }
         let ticket = LayersTicket { [weak self, weak doc] result in
             guard let self, let doc, self.document === doc else { return }
-            if let (rs, st) = result { self.setRows(rs, state: st) }
+            // The reopen after a save keeps the layers' state (task 11.3e2, Tk 9.r11b): the
+            // document then carries it already; else the default state.
+            if let (rs, st) = result { self.setRows(rs, state: doc.layers ?? st) }
             done(!self.rows.isEmpty)
         }
         let ctx = Unmanaged.passRetained(ticket).toOpaque()

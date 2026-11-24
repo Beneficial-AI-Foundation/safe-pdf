@@ -146,6 +146,9 @@ struct Mark: Equatable {
     private var cache: [Int: [Mark]] = [:]
     /// Called after every change (undo / redo included): the window's edited dot and menus.
     var onChange: (() -> Void)?
+    /// The size of the bytes the store was created from (the changed-on-disk check reads at most
+    /// one byte more, task 11.3e2).
+    let originalSize: Int
 
     /// Why the store could not be created.
     struct CreateError: Error { let message: String }
@@ -162,6 +165,7 @@ struct Mark: Equatable {
             throw CreateError(message: Core.take(err) ?? "the marks could not be read")
         }
         handle = m
+        originalSize = bytes.pointee.len
     }
 
     /// A store of PDF bytes (the self-test's reopen of a saved file).
@@ -173,6 +177,7 @@ struct Mark: Equatable {
         }
         guard let m else { throw CreateError(message: Core.take(err) ?? "the marks could not be read") }
         handle = m
+        originalSize = bytes.count
     }
 
     deinit { safepdf_marks_release(handle) }
@@ -353,6 +358,24 @@ struct Mark: Equatable {
     @discardableResult
     func delete(_ id: UInt64) -> String? {
         edit { safepdf_marks_delete(handle, id, $0) }
+    }
+
+    /// Imports XFDF `bytes` (safepdf_marks_xfdf_import; one undo step when marks were added).
+    /// The report's status text (Xfdf.importStatus for `name`) and the number added, or the error.
+    func importXfdf(_ bytes: Data, name: String) -> Result<(status: String, added: Int), EditError> {
+        var r = safepdf_xfdf_import()
+        var err: UnsafeMutablePointer<CChar>? = nil
+        let rc: Int32 = bytes.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: UInt8.self).baseAddress
+            return safepdf_marks_xfdf_import(handle, p, raw.count, &r, &err)
+        }
+        if rc != 0 { return .failure(EditError(message: Core.take(err) ?? "the file was refused")) }
+        if let err { free(err) }
+        defer { safepdf_free_xfdf_import(&r) }
+        let text = Core.take(safepdf_marks_import_status(name, &r)) ?? ""
+        let added = r.added
+        if added > 0 { changed() }
+        return .success((text, added))
     }
 
     @discardableResult

@@ -31,6 +31,10 @@ final class SidebarViewController: NSViewController {
     private(set) var content = SidebarRules.content(outline: false, attachments: false, layers: false)
     /// The panel shown in the sidebar.
     private(set) var panel = SAFEPDF_PANEL_THUMBNAILS
+    /// The reopen after Save (task 11.3e2): keep the sidebar as it was; the panel it showed (nil:
+    /// it was closed).
+    private var keeping = false
+    private var keepOnLoad: safepdf_panel?
     /// The last panel the user chose (Sidebar.pick's `last`; the outline at first).
     private(set) var lastChosen = SAFEPDF_PANEL_OUTLINE
     private(set) weak var document: Document?
@@ -101,8 +105,10 @@ final class SidebarViewController: NSViewController {
     /// outline, attachments and layers are requested; once all three are known `onLoaded` gets
     /// the panel the page mode opens (Sidebar.onLoad). Every open starts afresh (9.r8): the
     /// default layers state, no panel carried over.
-    func show(_ doc: Document?, pages pv: PageViewController) {
+    func show(_ doc: Document?, pages pv: PageViewController, keep: Bool = false) {
         _ = view
+        keepOnLoad = keep ? (isShown ? panel : nil) : nil
+        keeping = keep
         document = doc
         pages = pv
         loadPanel = nil
@@ -141,7 +147,13 @@ final class SidebarViewController: NSViewController {
         rebuildSwitcher()
         onChange?()
         guard pending == 0, let doc = document else { return }
-        loadPanel = SidebarRules.onLoad(pageMode: doc.settings.pageMode, content)
+        if keeping {
+            // The reopen after Save keeps the sidebar (Viewer.openWith keepView: open on the last
+            // panel when it was shown, Sidebar.pick).
+            loadPanel = keepOnLoad.map { SidebarRules.pick(last: $0, content) }
+        } else {
+            loadPanel = SidebarRules.onLoad(pageMode: doc.settings.pageMode, content)
+        }
         if let p = loadPanel { choose(p) } // the panel shown is the toggle's `last` (Sidebar.pick)
         onLoaded?(loadPanel)
     }

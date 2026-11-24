@@ -446,6 +446,84 @@ enum {
     one), as a mask; 0 when none is open. */
 uint32_t safepdf_marks_escape_closes(uint32_t opened);
 
+/* ---- Preview, save texts and dialogs (task 11.3e2) ------------------------------------- */
+
+/** The preview (Save.preview, task 9.5g): while saved marks are changed or deleted, the bytes of
+    the document with only those changes applied (an in-memory incremental update, reopened
+    strictly; never written), which the GUI opens (safepdf_doc_open_bytes) and renders its pages
+    from, as the Tk viewer does. `date` as for save (NULL: now). 0 with `*out` filled — empty
+    (`size` 0) when no saved mark is changed or deleted (render the document itself); -1 with
+    `*error` (the pages stay as they are; Save would report the same error). Works on a
+    snapshot of the store taken under its lock (its objects are marked thread-shared first), so
+    it may run on a background thread while the GUI edits. Release `*out` with safepdf_free_marks_bytes. */
+int safepdf_marks_preview(safepdf_marks *m, const char *date, safepdf_marks_bytes *out,
+                          char **error);
+
+/** The output ceiling for safepdf_marks_save_build and safepdf_marks_xfdf_export: the Tk
+    viewer's work pool (Budget.ceilings.poolBytes, 192 MiB), in which it reserves a Save's or an
+    export's output first (Viewer.withOutput, task 12.3b). */
+size_t safepdf_marks_output_ceiling(void);
+
+/** The status after a save wrote `path` (Save.savedStatus, as the Tk viewer's status line):
+    from `r`'s counts, its protection notes and the revision-retention note when saved marks
+    were deleted. malloc'd; free(). */
+char *safepdf_marks_saved_status(const char *path, const safepdf_save_result *r);
+
+/** The status after an import of `name` (Xfdf.importStatus). malloc'd; free(). */
+char *safepdf_marks_import_status(const char *name, const safepdf_xfdf_import *r);
+
+/** STEM.xfdf next to the PDF `path` (Xfdf.exportTarget). malloc'd; free(). */
+char *safepdf_marks_xfdf_target(const char *path);
+
+/** "NAME already exists. Replace it?" (Save.replaceQuestion). malloc'd; free(). */
+char *safepdf_marks_replace_question(const char *name);
+
+/** Save As… naming the opened file (Save.openedOverwriteQuestion). malloc'd; free(). */
+char *safepdf_marks_opened_overwrite_question(const char *name);
+
+/** Dialogs (safepdf_marks_dialog_buttons). */
+enum {
+    SAFEPDF_DIALOG_UNSAVED = 0,   /* Save / Don't Save / Cancel */
+    SAFEPDF_DIALOG_OVERWRITE = 1, /* Overwrite / Save As… / Cancel */
+    SAFEPDF_DIALOG_CHANGED = 2    /* Save As… / Cancel */
+};
+
+/** A dialog's buttons in display order, left to right (keys "save", "dontsave", "overwrite",
+    "saveas", "cancel"). */
+typedef struct {
+    size_t count;
+    char key[3][16];
+    char label[3][32];
+} safepdf_dialog_buttons;
+
+/** The buttons of dialog `dialog` (Save.unsavedButtons / overwriteButtons / changedButtons;
+    `aqua` nonzero: the macOS order). 0 on success, -1 for an unknown dialog. */
+int safepdf_marks_dialog_buttons(int dialog, int aqua, safepdf_dialog_buttons *out);
+
+/** Unsaved-changes answers (safepdf_marks_unsaved_answer). */
+enum { SAFEPDF_ANSWER_CANCEL = 0, SAFEPDF_ANSWER_SAVE = 1, SAFEPDF_ANSWER_DONT_SAVE = 2 };
+
+/** The answer of the unsaved-changes question given the button `key` (Save.onUnsavedAnswer;
+    NULL or anything else: Cancel). */
+int safepdf_marks_unsaved_answer(const char *key);
+
+/** Whether a close / quit / open goes on (Save.closeGoesOn): `dirty` unsaved marks, `answer`
+    SAFEPDF_ANSWER_*, `saved` the Save it asked for succeeded. 1 or 0. */
+int safepdf_marks_close_goes_on(int dirty, int answer, int saved);
+
+/** The folder a file dialog starts in (Save.dialogDir): `dir` when `usable`, else `home`
+    (NULL / "": none), else ".". malloc'd; free(). */
+char *safepdf_marks_dialog_dir(const char *dir, int usable, const char *home);
+
+/** A message on one line (Save.oneLine). malloc'd; free(). */
+char *safepdf_marks_one_line(const char *s);
+
+/** The temporary file name of a save of the file named `base` (Save.tmpName:
+    ".BASE.safepdf-STAMP.tmp", BASE cut to 100 UTF-8 bytes). The GUI writes it in the target's
+    folder, reads it back, copies the replaced file's permissions and renames it over the
+    target, as Save.writeAtomic. malloc'd; free(). */
+char *safepdf_marks_tmp_name(const char *base, uint64_t stamp);
+
 #ifdef __cplusplus
 }
 #endif

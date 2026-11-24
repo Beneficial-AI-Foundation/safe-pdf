@@ -5,7 +5,9 @@
 // titlebar flags for repaired and encrypted files (task 11.3c2); Copy, Select All, Find and Find
 // next / previous, the search field and the external-link sheet's window (task 11.3d1); the
 // sidebar's panels, the page mode's panel, native full screen with the identity line (task
-// 11.3d2, SidebarViewController, FullScreen.swift).
+// 11.3d2, SidebarViewController, FullScreen.swift); Save, Save As…, XFDF import / export, the
+// unsaved-marks question on close and on opening another file, the reopen after Save keeping
+// the view (task 11.3e2, SaveController).
 // Plan.md §6 Phase 11; docs/macos-design.md §2 (window with full-size content view, unified
 // toolbar, title = document name with proxy icon; NSSplitViewController sidebar) and §3
 // decision 1 (enabled rules from the exported Menu.Ctx table).
@@ -14,7 +16,8 @@ import AppKit
 import SafePdfC
 
 final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation,
-    NSToolbarItemValidation, SafePdfCommandTarget, ZoomPresetTarget, ViewChoiceTarget, MarksCommandTarget
+    NSToolbarItemValidation, SafePdfCommandTarget, ZoomPresetTarget, ViewChoiceTarget, MarksCommandTarget,
+    SaveHost
 {
     let pages = PageViewController()
     let sidebar = SidebarViewController()
@@ -30,6 +33,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     /// The document's `/PageMode /FullScreen` put the window in full screen: leaving applies
     /// `/NonFullScreenPageMode` to the sidebar (Viewer.setFullScreen).
     private var documentFullScreen = false
+    /// Save, Save As…, XFDF and the unsaved-marks question (task 11.3e2), with sheets on this
+    /// window.
+    private(set) var saver = SaveController(dialogs: SheetDialogs(window: { nil }))
+    /// The unsaved-marks question was answered for this close (the next close goes through).
+    private var closeConfirmed = false
 
     init() {
         let window = NSWindow(
@@ -80,6 +88,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         window.collectionBehavior.insert(.fullScreenPrimary)
         identity = IdentityLine(pages: pages)
         wireSidebar()
+        saver = SaveController(dialogs: SheetDialogs(window: { [weak self] in self?.window }))
+        saver.host = self
         window.center()
         window.setFrameAutosaveName("SafePDFDocumentWindow")
         updateChrome()
@@ -88,8 +98,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// Opens `url` in this window; errors from the C API appear as a sheet.
+    /// Opens `url` in this window after the unsaved-marks question (Viewer.openDialog:
+    /// confirmDiscard "opening another file"); errors from the C API appear as a sheet.
     func open(_ url: URL) {
+        saver.confirmDiscard("opening another file") { [weak self] go in
+            if go { self?.load(url) }
+        }
+    }
+
+    /// Opens `url` once the unsaved-marks question was answered already (File → Open…).
+    func openConfirmed(_ url: URL) { load(url) }
+
+    /// The reopen after Save (task 11.3e2; Viewer.afterWrite): the written file, keeping the
+    /// view mode, zoom, rotation, page, sidebar and layers (9.r8).
+    func reopenAfterSave(_ url: URL, keep: KeptView?) -> Bool {
+        load(url, keep: keep)
+        return pdf?.url.standardizedFileURL == url.standardizedFileURL
+    }
+
+    /// Loads `url` into this window (no question); `keep`: the reopen after Save.
+    private func load(_ url: URL, keep: KeptView? = nil) {
         let t0 = Core.nowMs()
         let doc: Document
         do {
@@ -100,14 +128,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         }
         NSLog("SafePDF: opened %@ (%d pages) in %.1f ms", url.lastPathComponent, doc.pageCount,
               Core.nowMs() - t0)
+        // The reopen after a save keeps the layers' state (Tk 9.r11b).
+        if keep != nil { doc.layers = pdf?.layers }
         pdf = doc
         window?.representedURL = url
         // `/DisplayDocTitle`: the document's `/Title` instead of the file name (task 9.r8).
         window?.title = doc.settings.title ?? url.lastPathComponent
         setFlags(repaired: doc.repaired, encrypted: doc.encrypted)
-        pages.show(doc)
-        sidebar.show(doc, pages: pages)
-        if doc.settings.centerWindow { window?.center() }
+        pages.show(doc, keep: keep)
+        sidebar.show(doc, pages: pages, keep: keep != nil)
+        if keep == nil, doc.settings.centerWindow { window?.center() }
         window?.makeFirstResponder(pages.canvas)
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         doc.loadLabels { [weak self, weak doc] in
@@ -116,7 +146,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             self.updateChrome()
         }
         updateChrome()
-        applyFullScreenSetting(doc)
+        if keep == nil { applyFullScreenSetting(doc) }
     }
 
     /// Task 11.3d1: the search field runs Find; the selection's changes update Copy's state;
@@ -362,6 +392,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
                 chromeToolbar?.focusPageField(in: window)
             case Commands.id(SAFEPDF_CMD_FIND):
                 chromeToolbar?.focusSearch(in: window)
+            case Commands.id(SAFEPDF_CMD_SAVE):
+                saver.save()
+            case Commands.id(SAFEPDF_CMD_SAVE_AS):
+                saver.saveAs()
+            case Commands.id(SAFEPDF_CMD_EXPORT_XFDF):
+                saver.exportXfdf()
+            case Commands.id(SAFEPDF_CMD_IMPORT_XFDF):
+                saver.importXfdf()
             default:
                 AppDelegate.shared?.perform(cmd)
             }
@@ -527,7 +565,25 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         pages.liveResizeEnded()
     }
 
+    /// ⌘W, the close button, File → Close: with unsaved marks the close waits for Save / Don't
+    /// Save / Cancel (Viewer: confirmDiscard "closing").
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if closeConfirmed || pdf == nil || !pages.marks.dirty { return true }
+        saver.confirmDiscard("closing") { [weak self] go in
+            guard let self, go else { return }
+            self.closeConfirmed = true
+            self.window?.close()
+        }
+        return false
+    }
+
+    /// Quitting (Viewer: confirmDiscard "quitting"): `done` gets whether to go on.
+    func confirmQuit(_ done: @escaping @MainActor (Bool) -> Void) {
+        saver.confirmDiscard("quitting", done: done)
+    }
+
     func windowWillClose(_ notification: Notification) {
+        closeConfirmed = false
         identity?.sync(show: false, url: nil)
         pages.show(nil)
         sidebar.show(nil, pages: pages)

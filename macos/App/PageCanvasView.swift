@@ -56,6 +56,12 @@ struct PageAnchor {
 
 final class PageCanvasView: NSView {
     private(set) var document: Document?
+    /// The document the pages are rendered from while saved marks are edited (task 11.3e2, the
+    /// Tk viewer's `State.view`: `Save.preview`'s bytes); nil: `document` itself. Layout, text
+    /// and links always come from `document`.
+    private(set) var renderSource: PreviewSource?
+    /// The handle renders go to now.
+    private var renderHandle: OpaquePointer? { renderSource?.handle ?? document?.handle }
     /// Backing pixels per point to use instead of the window's (the self-test, off screen).
     var scaleOverride: CGFloat?
     private(set) var layout: LayoutHolder?
@@ -134,9 +140,10 @@ final class PageCanvasView: NSView {
     /// Shows `doc` (nil: none) at Automatic Zoom without rotation (every open starts afresh,
     /// 9.r8); cancels the previous document's requests.
     func setDocument(_ doc: Document?, canvas: CGSize) {
-        if let old = document {
-            for (_, r) in inflight { safepdf_doc_cancel(old.handle, r.id) }
+        if let h = renderHandle {
+            for (_, r) in inflight { safepdf_doc_cancel(h, r.id) }
         }
+        renderSource = nil
         inflight.removeAll()
         cache.removeAll()
         errors.removeAll()
@@ -303,8 +310,9 @@ final class PageCanvasView: NSView {
         safepdf_free_page_band(&band)
 
         let wantedSet = Set(wanted)
+        let h = renderHandle ?? doc.handle
         for (page, r) in inflight where !wantedSet.contains(page) {
-            safepdf_doc_cancel(doc.handle, r.id)
+            safepdf_doc_cancel(h, r.id)
             inflight[page] = nil
         }
         for page in wanted {
@@ -319,12 +327,14 @@ final class PageCanvasView: NSView {
     private func request(_ page: Int, doc: Document, priority: Int32) {
         guard let i = placeOf[page], let key = places[i].key else { return }
         if cache[page]?.key == key { return }
+        let h = renderHandle ?? doc.handle
         if let r = inflight[page] {
             if r.key == key { return }
-            safepdf_doc_cancel(doc.handle, r.id)
+            safepdf_doc_cancel(h, r.id)
             inflight[page] = nil
         }
-        let id = Rendering.submit(doc, page: page, key: key, priority: priority) { [weak self] res in
+        let id = Rendering.submit(handle: h, layers: doc.layers, page: page, key: key,
+                                  priority: priority) { [weak self] res in
             self?.renderDone(res)
         }
         if id != 0 { inflight[page] = (key, id) }
@@ -359,8 +369,8 @@ final class PageCanvasView: NSView {
     /// (cross-faded). Returns the number of renders requested again.
     @discardableResult
     func layersChanged() -> Int {
-        guard let doc = document else { return 0 }
-        for (_, r) in inflight { safepdf_doc_cancel(doc.handle, r.id) }
+        guard document != nil, let h = renderHandle else { return 0 }
+        for (_, r) in inflight { safepdf_doc_cancel(h, r.id) }
         inflight.removeAll()
         for (page, entry) in cache {
             cache[page] = (ZoomKey(num: 0, den: 1, rotation: entry.key.rotation), entry.image)
@@ -368,6 +378,21 @@ final class PageCanvasView: NSView {
         errors.removeAll()
         updateRenders(visible: visibleRect)
         return inflight.count
+    }
+
+    /// The pages are rendered from `source` from now on (task 11.3e2, Viewer.updatePreview: a
+    /// new preview of edited saved marks, or nil for the document itself): running renders are
+    /// cancelled; the images shown stay as scaled stand-ins until the new renders replace them
+    /// (cross-faded), as after a change of the layers. Returns the renders requested again.
+    @discardableResult
+    func setRenderSource(_ source: PreviewSource?) -> Int {
+        guard document != nil else { return 0 }
+        if source === renderSource { return 0 }
+        if let h = renderHandle {
+            for (_, r) in inflight { safepdf_doc_cancel(h, r.id) }
+        }
+        renderSource = source
+        return layersChanged()
     }
 
     override func draw(_ dirtyRect: NSRect) {
