@@ -127,6 +127,10 @@ all of these in Tcl. Things to try:
 
 ## Open questions for 11.2
 
+**All six answered 2026-11-24 in [docs/macos-design.md](../docs/macos-design.md) §3** (11.2's
+Decisions entry): Lean logic exported (1), flat C structs (2), `memcpy` kept for now (3), the
+document worker instead of in-process threads (4), packaging deferred (5), Swift (6).
+
 1. **Where the shared logic lives.** View, Select, Links, Marks and Save are Lean today
    (`SafePdf/Shell/App/*`, Tk-free). They could be exported through the C API (one Lean
    source of truth: proofs such as the selection/search soundness carry over, but every UI

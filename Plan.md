@@ -310,14 +310,29 @@ The Tk look is the ceiling on macOS (§8: the shell is unverified and replaceabl
 as a library is the deliverable). On macOS the viewer becomes a **native AppKit shell**
 over the `safe-pdf-core` C API; Linux keeps the Tk shell. Chosen at build time; one shared
 Tk-free logic layer (View, Select, Links, Marks, Save) serves both shells.
-- Spike first: a minimal Cocoa window (open, render, scroll, zoom) over the C API; record
-  the feel delta and the FFI surface in a Decisions entry before committing to parity.
-- Full shell: toolbar/sidebar parity with the PDF.js layout (Phase 9), the selection
-  bubble, marks + save flows, Cmd keys, trackpad momentum + pinch zoom, Retina rendering,
-  dark mode, native dialogs.
-- Scripted session for the native shell (accessibility-driven), mirroring the Tk smoke.
+- Spike first (11.1, **done**): a minimal Cocoa window (open, render, scroll, zoom) over
+  the C API; the human's feel check passed ("scrolling, pinch and sharpness feel pretty
+  good").
+- **The port brief** (the human, 2026-11-24): *same design as the Linux version, but it
+  should feel new — updated, modern design and seamless use.* The detailed plan is
+  [docs/macos-design.md](docs/macos-design.md): the Tk/PDF.js layout and every behaviour
+  rule kept; re-expressed in current AppKit (unified toolbar with SF Symbols and the
+  macOS 26 glass treatment, sidebar material, native momentum + live pinch magnification
+  with a cross-fade to the sharp re-render, dark mode, accent-coloured selection, sheets
+  and popovers, a proper `SafePdf.app` bundle) — glass APIs runtime-gated, minimum
+  macOS 14.
+- **Architecture (11.2, decided)**: the shared Lean logic is exported through the C API as
+  pure functions and flat C structs — anything with a theorem or `#guard` stays in Lean, so
+  the proofs keep applying; the shell itself is Swift and owns only widgets and events.
+  Rendering, text index, links and outline go through the **confined document worker**
+  (Phase 12's 12.2a–d) with priorities, cancellation and deadline kill: the native shell is
+  sandboxed and stall-free from day one, retiring the spike's in-process render path.
+- Full shell (11.3a–e): C API v2, app scaffold, viewing parity, text/navigation parity,
+  marks + save parity — then platform build selection + CI (11.4), an accessibility-driven
+  scripted session mirroring the Tk smoke (11.5), and a feel pass with the human (11.6).
 - **M11**: the macOS app passes the M8/M9 corpus and session checks natively (Cmd keys,
-  momentum scroll, Retina, dark mode); the Linux Tk build stays green and unchanged.
+  momentum scroll, Retina, dark mode); the Linux Tk build stays green and unchanged; the
+  human's feel checklist (docs/macos-design.md §5) comes back good.
 
 ### Phase 12 — Hardening (from the independent security review)
 
@@ -456,7 +471,7 @@ safe-pdf/
 
 ## 11. Immediate next steps
 
-1. Tick M10: land the Phase 10 polish tasks (10.5–10.10).
-2. Phase 11 spike (11.1): a minimal AppKit shell over `safe-pdf-core`; record the feel
-   delta before committing to parity.
-3. Phase 12 first patch (12.1): capped reads + true strict mode.
+1. Phase 11 port (11.3a–11.6): the native macOS shell per
+   [docs/macos-design.md](docs/macos-design.md); the Linux Tk build stays green.
+2. Phase 12 remainder: the open C4 follow-ups (12.7g, 12.7h); the external review (12.9)
+   is deferred by the human.
