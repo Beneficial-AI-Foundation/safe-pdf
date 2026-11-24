@@ -28,6 +28,8 @@ action, in the same order.
   quads in its colour — `Viewer.addNote`), free text and ink (`Store.add`, `addStroke`).
   Changing: `setText`, `recolor`, `setRgb`, `setSize`, `setOpacity`, `translate`. Deleting:
   `removeWithComment` (a highlight's comment goes with it). Undo/redo: `History.undo`/`redo`.
+  Groups (`beginGroup` / `endGroup`, task 11.6a): the edits between them are one undo step
+  (`History.record` of the group's result on the history before it).
 * **Listing** (`list`): the marks of a page (or all) as numbers and texts, decoded by the C
   side into `safepdf_mark` structs — kind, page, colour, display RGB (`Mark.hex`'s colour),
   new / saved / saved-and-changed (`Store.isSaved`, `Store.changedSaved`), whether a note is a
@@ -75,6 +77,9 @@ structure Handle where
   store : Store
   /-- The undo/redo history of `store.marks`. -/
   hist : History
+  /-- The history as it was when an open group of edits began (`beginGroup`, task 11.6a);
+  `none` when no group is open. -/
+  groupBase : Option History := none
 
 /-! ## Numbers across the boundary -/
 
@@ -153,7 +158,7 @@ def create (bytes : ByteArray) : Except String Handle :=
   | .error e => .error e.message
   | .ok d =>
     let store := Store.load (Save.readMarks d.doc limits)
-    .ok ⟨d, store, History.start store.marks⟩
+    .ok { doc := d, store, hist := History.start store.marks }
 
 /-- Number of pages of the store's document. -/
 @[export safepdf_marks_lean_page_count]
@@ -328,6 +333,29 @@ def translate (h : Handle) (id : USize) (dx dy : Float) (merge : UInt8) : EditRe
 @[export safepdf_marks_lean_seal]
 def sealStep (h : Handle) : Handle := { h with hist := h.hist.seal }
 
+/-- **Begin a group of edits** that Undo takes back as one step (task 11.6a: Paste re-creates
+a cut mark through the usual add calls — a highlight and its comment, a drawing's strokes —
+and the user undoes it at once). The history, brought in step with the store and sealed, is
+kept as the group's base; the edits of the group are recorded as usual until `endGroup`. A
+group already open is kept as it is. -/
+@[export safepdf_marks_lean_begin_group]
+def beginGroup (h : Handle) : Handle :=
+  match h.groupBase with
+  | some _ => h
+  | none =>
+    let base := (h.hist.record h.store.marks).seal
+    { h with hist := base, groupBase := some base }
+
+/-- **End a group of edits**: the group's result is recorded on the base history as one edit
+(`History.record`: nothing when the marks are as before the group; else Undo goes back to the
+marks before the group, `History.undo_record`, and redo is cleared). Nothing when no group is
+open. -/
+@[export safepdf_marks_lean_end_group]
+def endGroup (h : Handle) : Handle :=
+  match h.groupBase with
+  | none => h
+  | some base => { h with hist := base.record h.store.marks, groupBase := none }
+
 /-- **Delete** mark `id` (`Store.removeWithComment`: a highlight's comment goes with it). -/
 @[export safepdf_marks_lean_delete]
 def delete (h : Handle) (id : USize) : EditResult := do
@@ -341,7 +369,7 @@ def undoRedo (h : Handle) (undo : UInt8) : EditResult :=
   let hist := h.hist.record h.store.marks
   let r := if undo != 0 then hist.undo h.store else hist.redo h.store
   match r with
-  | some (hist, store) => .ok ({ h with store, hist := hist.record store.marks }, 0)
+  | some (hist, store) => .ok ({ h with store, hist := hist.record store.marks, groupBase := none }, 0)
   | none => .error (if undo != 0 then "nothing to undo" else "nothing to redo")
 
 /-- **The store's state** as numbers: can undo, can redo, dirty (`Store.dirty`), pending

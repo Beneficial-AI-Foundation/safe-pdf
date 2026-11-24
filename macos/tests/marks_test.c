@@ -172,6 +172,49 @@ int main(int argc, char **argv) {
     safepdf_marks_get_state(m, &st);
     CHECK(st.undo_depth == depth + 1, "one slider drag is one undo step (%zu -> %zu)", depth,
           st.undo_depth);
+    /* A group (task 11.6a, Paste): a highlight, its comment and a two-stroke drawing made
+       through the usual calls are one undo step; redo brings all back; an empty group adds
+       no step; undo closes an open group. */
+    {
+        size_t before = count_all(m), d0;
+        safepdf_marks_get_state(m, &st);
+        d0 = st.undo_depth;
+        safepdf_box gq[1] = {{300, 300, 360, 312}};
+        uint64_t gh = 0, gn = 0, gi = 0;
+        safepdf_marks_begin_group(m);
+        safepdf_marks_begin_group(m); /* ignored: the group is open */
+        CHECK(safepdf_marks_add_highlight(m, 0, SAFEPDF_COLOR_BLUE, gq, 1, &gh, &err) == 0 &&
+                  safepdf_marks_add_note(m, 0, SAFEPDF_COLOR_PINK, "travels", SAFEPDF_ANCHOR_QUADS,
+                                         NULL, gq, 1, &gn, &err) == 0 &&
+                  safepdf_marks_add_ink(m, 0, stroke, 3, 2, 80, 0x00FF00, &gi, &err) == 0 &&
+                  safepdf_marks_add_stroke(m, gi, stroke, 2, &err) == 0,
+              "group edits: %s", nz(err));
+        safepdf_marks_end_group(m);
+        safepdf_marks_get_state(m, &st);
+        CHECK(st.undo_depth == d0 + 1 && count_all(m) == before + 3,
+              "a group is one undo step (%zu -> %zu, %zu marks)", d0, st.undo_depth, count_all(m));
+        CHECK(safepdf_marks_list(m, 0, &l, &err) == 0, "list");
+        const safepdf_mark *gc = find(&l, gn);
+        CHECK(gc && gc->is_comment && gc->color == SAFEPDF_COLOR_PINK, "the grouped note is the comment");
+        safepdf_free_mark_list(&l);
+        CHECK(safepdf_marks_undo(m, &err) == 0 && count_all(m) == before, "undo takes the group back");
+        CHECK(safepdf_marks_redo(m, &err) == 0 && count_all(m) == before + 3, "redo brings it back");
+        CHECK(safepdf_marks_undo(m, &err) == 0 && count_all(m) == before, "undo again");
+        safepdf_marks_get_state(m, &st);
+        d0 = st.undo_depth;
+        safepdf_marks_begin_group(m);
+        safepdf_marks_end_group(m);
+        safepdf_marks_end_group(m); /* no group: nothing */
+        safepdf_marks_get_state(m, &st);
+        CHECK(st.undo_depth == d0 && st.can_redo, "an empty group adds no step and keeps redo");
+        safepdf_marks_begin_group(m);
+        CHECK(safepdf_marks_add_highlight(m, 0, SAFEPDF_COLOR_RED, gq, 1, &gh, &err) == 0, "hl");
+        CHECK(safepdf_marks_undo(m, &err) == 0 && count_all(m) == before, "undo inside a group");
+        safepdf_marks_end_group(m); /* closed by the undo: nothing */
+        safepdf_marks_get_state(m, &st);
+        CHECK(st.undo_depth == d0 && count_all(m) == before, "undo closed the group (%zu)",
+              st.undo_depth);
+    }
     CHECK(safepdf_marks_translate(m, ft, 1.5, -2.25, 0, &err) == 0, "move: %s", nz(err));
     CHECK(safepdf_marks_list(m, 0, &l, &err) == 0, "list");
     const safepdf_mark *mi = find(&l, ink), *mf = find(&l, ft);

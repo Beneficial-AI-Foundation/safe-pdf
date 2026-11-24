@@ -314,6 +314,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         if let st = states { chromeToolbar?.apply(st) }
         if let doc = pdf, doc.pageCount > 0 {
             let f = PageText.field(labels: doc.labels, page: pages.canvas.currentPage, pages: doc.pageCount)
+            chromeToolbar?.fitPageField(labels: doc.labels, pages: doc.pageCount)
             chromeToolbar?.setPage(entry: f.entry, of: f.of)
         } else {
             chromeToolbar?.setPage(entry: "", of: "", force: true)
@@ -508,6 +509,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         pages.text.find.step(raw: chromeToolbar?.searchText ?? "", forward: forward)
     }
 
+    /// Cut (⌘X) with the page view (no text field) taking the keys: the selected mark goes to
+    /// the mark clipboard (task 11.6a; a field editor gets `cut:` first and cuts its text).
+    @objc func cut(_ sender: Any?) {
+        guard pdf != nil else { return }
+        pages.marks.cutSelected()
+        updateChrome()
+    }
+
+    /// Paste (⌘V): the cut mark as a new mark on the current page (task 11.6a).
+    @objc func paste(_ sender: Any?) {
+        guard pdf != nil else { return }
+        pages.marks.paste()
+        updateChrome()
+    }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         // While the page field has the focus, keys without Command or Control (Page Up/Down,
         // function keys) belong to it, not to the menu.
@@ -537,6 +553,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             }
             return isEnabled(item.tag)
         }
+        if item.action == #selector(NSText.cut(_:)) { return pdf != nil && pages.marks.canCut }
+        if item.action == #selector(NSText.paste(_:)) { return pdf != nil && pages.marks.canPaste }
         if item.action == MainMenu.actionSelector { return pdf != nil }
         if item.action == MainMenu.colorSelector {
             item.state = pdf != nil && Int32(item.tag) == pages.marks.hlColor ? .on : .off

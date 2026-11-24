@@ -166,16 +166,24 @@ struct MenuStats {
                 stats.hiddenAlternates += 1
             }
         }
-        // Cut and Paste for the text fields (the search and page fields; task 11.3d1): hidden,
-        // sent to the first responder (the field editor validates them; the page view has none).
+        // Cut and Paste (task 11.3d1 for the text fields; task 11.6a for marks): the standard
+        // `cut:` / `paste:` sent to the first responder — a field editor (the search and page
+        // fields, the note editor, a free-text box) cuts and pastes its text; otherwise the
+        // window controller cuts the selected mark and pastes the cut one (it validates them).
+        // The exported menu table has no Cut / Paste entries, so they sit around its Copy.
         if let edit = menus.first(where: { $0.title == "Edit" }) ?? menus.dropFirst().first {
+            let copy = Commands.id(SAFEPDF_CMD_COPY)
             for (title, sel, key) in [("Cut", #selector(NSText.cut(_:)), "x"), ("Paste", #selector(NSText.paste(_:)), "v")]
             where !used.contains(keyId(key, [.command])) {
                 let item = NSMenuItem(title: title, action: sel, keyEquivalent: key)
-                item.isHidden = true
-                item.allowsKeyEquivalentWhenHidden = true
-                edit.addItem(item)
+                if let i = edit.items.firstIndex(where: { $0.action == commandSelector && $0.tag == copy && !$0.isHidden }) {
+                    edit.insertItem(item, at: sel == #selector(NSText.cut(_:)) ? i : i + 1)
+                } else {
+                    edit.addItem(item)
+                }
                 used.insert(keyId(key, [.command]))
+                stats.items += 1
+                stats.keyEquivalents += 1
             }
         }
         for m in menus {

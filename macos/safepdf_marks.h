@@ -276,6 +276,15 @@ int safepdf_marks_translate(safepdf_marks *m, uint64_t id, double dx, double dy,
 /** Close the open merge step (slider released). */
 void safepdf_marks_seal(safepdf_marks *m);
 
+/** A group of edits that Undo takes back as ONE step (task 11.6a: Paste re-creates a cut mark
+    through the add calls above — a highlight and its comment, a drawing's strokes). The edits
+    between begin and end are made with the usual calls; end records their result as one step
+    on the history as it was at begin (no step when the marks are as before). A begin while a
+    group is open is ignored; an end without a group does nothing; undo / redo closes an open
+    group. */
+void safepdf_marks_begin_group(safepdf_marks *m);
+void safepdf_marks_end_group(safepdf_marks *m);
+
 /** Delete mark `id` (a highlight's comment goes with it). */
 int safepdf_marks_delete(safepdf_marks *m, uint64_t id, char **error);
 

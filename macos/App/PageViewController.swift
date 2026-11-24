@@ -207,7 +207,11 @@ final class PageViewController: NSViewController {
             guard let self else { return }
             self.step(zoomIn: zoomIn, anchor: self.pointerAnchor(window: loc))
         }
-        scrollView.onWheel = { [weak self] event in self?.pageModeWheel(event) ?? false }
+        scrollView.onWheel = { [weak self] event in
+            // The user's wheel ends a slide at its destination first (task 11.6a).
+            self?.stopSlide()
+            return self?.pageModeWheel(event) ?? false
+        }
         canvas.onRenderError = { [weak self] page, error in
             guard let self, let doc = self.canvas.document else { return }
             let text = PageText.of(labels: doc.labels, page: page, pages: doc.pageCount)
@@ -285,6 +289,7 @@ final class PageViewController: NSViewController {
     /// vertical modes keep the view's place in the current page (Viewer.refresh), the page
     /// scroll mode keeps the scroll position as far as it can.
     func relayout() {
+        stopSlide()
         holdCurrent += 1
         defer { holdCurrent -= 1 }
         commitMagnificationIfNeeded()
@@ -334,7 +339,7 @@ final class PageViewController: NSViewController {
 
     /// Shows page `page` (clamped) scrolled as `target`, also when it is the current page
     /// (Viewer.showAt). In the page scroll mode a page of another spread lays that spread out.
-    func show(page: Int, _ target: ScrollTarget) {
+    func show(page: Int, _ target: ScrollTarget, animated: Bool = false) {
         guard let doc = canvas.document, doc.pageCount > 0 else { return }
         holdCurrent += 1
         defer { holdCurrent -= 1 }
@@ -343,13 +348,16 @@ final class PageViewController: NSViewController {
         wheelX = WheelAxis()
         wheelY = WheelAxis()
         canvas.setCurrent(p)
+        var slide = animated
         if !canvas.isLaidOut(p) {
+            // A new spread (page scroll mode): there is nothing to slide through.
+            slide = false
             canvas.relayout(canvas: canvasSize)
             laidOutWidth = canvasSize.width
             updateMagnificationRange()
             noteCap()
         }
-        apply(target)
+        apply(target, animated: slide)
         onViewChange?()
     }
 
@@ -380,7 +388,7 @@ final class PageViewController: NSViewController {
             return false
         }
         history.push(currentLoc())
-        show(page: page, .dest(left: left, top: top))
+        show(page: page, .dest(left: left, top: top), animated: true)
         return true
     }
 
@@ -400,7 +408,7 @@ final class PageViewController: NSViewController {
     func historyMove(back: Bool) {
         guard canvas.document != nil else { return }
         if let l = history.go(back: back, from: currentLoc()) {
-            show(page: l.page, .frac(x: l.x, y: l.y))
+            show(page: l.page, .frac(x: l.x, y: l.y), animated: true)
         } else {
             pill.show(back ? "nothing to go back to" : "nothing to go forward to")
         }
@@ -432,7 +440,7 @@ final class PageViewController: NSViewController {
 
     /// Scrolls the current page as `target` says (Viewer.applyScroll); in the vertical modes
     /// the resulting view top is the viewer's own (`ownTop`).
-    private func apply(_ target: ScrollTarget) {
+    private func apply(_ target: ScrollTarget, animated: Bool = false) {
         let clip = scrollView.contentView
         let ins = scrollView.contentInsets
         var origin = clip.bounds.origin
@@ -464,18 +472,110 @@ final class PageViewController: NSViewController {
         case .stay:
             break
         }
-        scrollClip(to: origin, own: true)
+        scrollClip(to: origin, own: true, animated: animated)
     }
 
     /// Scrolls the clip view to `origin` (constrained to the document). `own`: the viewer put
     /// the view there (the current page stays), else the user did.
-    private func scrollClip(to origin: CGPoint, own: Bool = false) {
+    private func scrollClip(to origin: CGPoint, own: Bool = false, animated: Bool = false) {
+        stopSlide()
         let clip = scrollView.contentView
         let r = clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size))
         lastScrollClamped = abs(r.origin.x - origin.x) > 0.5 || abs(r.origin.y - origin.y) > 0.5
         if own && canvas.modes.continuous { ownTop = r.origin.y }
+        if animated && slides && startSlide(to: r.origin) { return }
         clip.scroll(to: r.origin)
         scrollView.reflectScrolledClipView(clip)
+        refresh()
+    }
+
+    // MARK: sliding jumps (task 11.6a)
+
+    /// The slide's duration in seconds (ease-out).
+    static let slideSeconds: CFTimeInterval = 0.3
+    /// The longest distance a slide scrolls through, in view heights: a farther jump first cuts
+    /// to this distance before the destination, then slides the rest (scrolling through dozens
+    /// of pages would ask for their renders and blur by).
+    static let slideMaxViews: CGFloat = 1.5
+    /// Whether jumps slide: by default while the view is in a window and "Reduce motion" is off
+    /// (NSWorkspace.accessibilityDisplayShouldReduceMotion: then they jump); the self-test sets
+    /// it to slide headless.
+    var slideOverride: Bool?
+    private var slides: Bool {
+        slideOverride ?? Self.slideAllowed(inWindow: view.window != nil,
+                                           reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    }
+    /// The rule: jumps slide on screen, unless the user asked to reduce motion.
+    static func slideAllowed(inWindow: Bool, reduceMotion: Bool) -> Bool { inWindow && !reduceMotion }
+    /// The slide going on: start and end origins, start time, its timer (headless) or display link.
+    private var slide: (from: CGPoint, to: CGPoint, t0: CFTimeInterval)?
+    private var slideTimer: Timer?
+    private var slideLink: CADisplayLink?
+    /// Slides started and slide frames shown (the self-test reads them).
+    private(set) var slidesStarted = 0
+    private(set) var slideFrames = 0
+    /// Whether a slide is going on.
+    var isSliding: Bool { slide != nil }
+
+    /// Starts sliding the clip view to `to` (constrained); false when there is nothing to slide.
+    /// The destination's renders are asked for first; the current page stays the one the jump
+    /// went to while the view moves (holdCurrent), as for any programmatic scroll.
+    private func startSlide(to: CGPoint) -> Bool {
+        let clip = scrollView.contentView
+        var from = clip.bounds.origin
+        let dist = hypot(to.x - from.x, to.y - from.y)
+        guard dist >= 1 else { return false }
+        canvas.updateRenders(visible: NSRect(origin: to, size: clip.bounds.size))
+        let far = Self.slideMaxViews * max(1, clip.bounds.height)
+        if dist > far {
+            let k = far / dist
+            from = CGPoint(x: to.x - (to.x - from.x) * k, y: to.y - (to.y - from.y) * k)
+            clip.scroll(to: from)
+            scrollView.reflectScrolledClipView(clip)
+        }
+        holdCurrent += 1
+        slide = (from, to, CACurrentMediaTime())
+        slidesStarted += 1
+        if view.window != nil {
+            let link = canvas.displayLink(target: self, selector: #selector(slideStep))
+            link.add(to: .main, forMode: .common)
+            slideLink = link
+        } else {
+            let t = Timer(timeInterval: 1.0 / 60, target: self, selector: #selector(slideStep), userInfo: nil, repeats: true)
+            RunLoop.main.add(t, forMode: .common)
+            slideTimer = t
+        }
+        return true
+    }
+
+    /// One frame of the slide: the ease-out position at this time; at the end exactly the
+    /// destination, the current-page rule released and the renders requested.
+    @objc private func slideStep() {
+        guard let s = slide else { return }
+        let clip = scrollView.contentView
+        let f = min(1, max(0, (CACurrentMediaTime() - s.t0) / Self.slideSeconds))
+        let e = 1 - pow(1 - f, 3)
+        let p = f >= 1 ? s.to : CGPoint(x: s.from.x + (s.to.x - s.from.x) * e, y: s.from.y + (s.to.y - s.from.y) * e)
+        clip.scroll(to: p)
+        scrollView.reflectScrolledClipView(clip)
+        slideFrames += 1
+        if f >= 1 { stopSlide() }
+    }
+
+    /// Ends a slide going on at its destination (a new scroll, zoom or layout interrupts it).
+    private func stopSlide() {
+        guard let s = slide else { return }
+        slide = nil
+        slideTimer?.invalidate()
+        slideTimer = nil
+        slideLink?.invalidate()
+        slideLink = nil
+        let clip = scrollView.contentView
+        if clip.bounds.origin != s.to {
+            clip.scroll(to: s.to)
+            scrollView.reflectScrolledClipView(clip)
+        }
+        holdCurrent -= 1
         refresh()
     }
 
@@ -619,6 +719,7 @@ final class PageViewController: NSViewController {
     /// (View.pageAt, in the current view) is mapped into the new view by View.reanchor and
     /// scrolled back under the anchor. Ends any live magnification (back to 1).
     func change(anchor: ViewAnchor, _ change: () -> Void) {
+        stopSlide()
         holdCurrent += 1
         defer { holdCurrent -= 1 }
         guard canvas.document != nil else { return }
@@ -720,6 +821,7 @@ final class PageViewController: NSViewController {
     /// the Tk canvas's units and pages; past the end of the region the next page (spread) shows
     /// from its top, before its start the previous one from its bottom (Tk `::safepdf::step`).
     private func keyScroll(dx: Int, dy: Int, pages: Bool) {
+        stopSlide()
         let clip = scrollView.contentView
         if let doc = canvas.document, let info = spreadInfo {
             let o = clip.bounds.origin
@@ -753,7 +855,10 @@ final class PageViewController: NSViewController {
         refresh()
     }
 
-    @objc private func liveScrollStarted(_ note: Notification) { liveScrolling = true }
+    @objc private func liveScrollStarted(_ note: Notification) {
+        stopSlide()
+        liveScrolling = true
+    }
 
     @objc private func liveScrollEnded(_ note: Notification) { liveScrolling = false }
 

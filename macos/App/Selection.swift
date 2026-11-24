@@ -289,6 +289,22 @@ struct TextSelection: Equatable {
         return text
     }
 
+    /// The text under highlight quads of page `page` (task 11.6a: Cut puts a highlight's text on
+    /// the pasteboard): the cells from the first quad's left end to the last quad's right end
+    /// (Select.nearest, quads in reading order as Select.rangeBoxes makes them), copied as Copy
+    /// copies cells; nil when the page's text index is not loaded or there is no text.
+    func text(under quads: [safepdf_box], page: Int) -> String? {
+        guard let f = quads.first, let l = quads.last, let sp = store.index(page), sp.cellCount > 0 else { return nil }
+        var a = 0, b = 0
+        let fx = min(f.llx + 0.5, (f.llx + f.urx) / 2), lx = max(l.urx - 0.5, (l.llx + l.urx) / 2)
+        guard safepdf_select_nearest(sp.handle, fx, (f.lly + f.ury) / 2, &a) == 0,
+              safepdf_select_nearest(sp.handle, lx, (l.lly + l.ury) / 2, &b) == 0,
+              let c = safepdf_select_copy(sp.handle, min(a, b), max(a, b)) else { return nil }
+        defer { safepdf_select_free_copy_result(c) }
+        let s = Core.string(c.pointee.text)
+        return s.isEmpty ? nil : s
+    }
+
     // MARK: pointer (CanvasPointer)
 
     /// Whether a press (a click or a drag) is going on.
@@ -446,7 +462,9 @@ struct TextSelection: Equatable {
         var link: (page: Int, index: Int)? = nil
         var text = false
         var mark = false
+        var overPage = false
         if let v, document != nil, let (page, x, y) = pagePoint(at: v) {
+            overPage = canvas?.rect(ofPage: page)?.contains(v) ?? false
             mark = markAt?(page, x, y) ?? false
             if let ls = store.links(page) {
                 if let i = ls.index(at: x, y) { link = (page, i) }
@@ -465,7 +483,12 @@ struct TextSelection: Equatable {
         }
         let hit = safepdf_view_hit_of(mark, link != nil, text)
         cursor = safepdf_view_cursor_for(UInt32(mode), hit)
-        if canvas?.window != nil { Self.nsCursor(cursor).set() }
+        // Task 11.6a: with the Highlight tool the page shows the highlighter where the exported
+        // rule (Toolbar.cursorFor) gives the I-beam or the arrow — the rule is kept, only its
+        // AppKit picture differs; links and marks keep the pointing hand.
+        showsHighlighter = overPage && UInt32(mode) == SAFEPDF_MODE_HIGHLIGHT.rawValue
+            && (cursor == SAFEPDF_CURSOR_IBEAM.rawValue || cursor == SAFEPDF_CURSOR_ARROW.rawValue)
+        if canvas?.window != nil { (showsHighlighter ? Self.highlighterCursor : Self.nsCursor(cursor)).set() }
         if let l = link {
             if hoverLink.map({ $0.page != l.page || $0.index != l.index }) ?? true,
                let doc = document, let ls = store.links(l.page) {
@@ -474,6 +497,43 @@ struct TextSelection: Equatable {
         }
         hoverLink = link
     }
+
+    /// Whether the pointer shows the highlighter (the Highlight tool over a page; the self-test
+    /// reads it).
+    private(set) var showsHighlighter = false
+
+    /// The highlighter cursor (task 11.6a): the SF Symbol `highlighter` drawn black with a white
+    /// outline (legible on light and dark pages, as the system cursors), at 2x for Retina; the
+    /// hot spot is the marker's tip at the lower left.
+    static let highlighterCursor: NSCursor = {
+        let side: CGFloat = 24
+        let cfg = NSImage.SymbolConfiguration(pointSize: 17, weight: .medium)
+        guard let sym = NSImage(systemSymbolName: "highlighter", accessibilityDescription: "Highlighter")?
+            .withSymbolConfiguration(cfg) else { return .iBeam }
+        let s = sym.size
+        let origin = CGPoint(x: 2, y: 2)
+        func tinted(_ c: NSColor) -> NSImage {
+            NSImage(size: s, flipped: false) { r in
+                sym.draw(in: r)
+                c.set()
+                r.fill(using: .sourceAtop)
+                return true
+            }
+        }
+        let black = tinted(.black), white = tinted(.white)
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            for dx in [-1.0, 0, 1] { for dy in [-1.0, 0, 1] where dx != 0 || dy != 0 {
+                white.draw(at: CGPoint(x: origin.x + dx, y: origin.y + dy), from: .zero, operation: .sourceOver, fraction: 1)
+            } }
+            black.draw(at: origin, from: .zero, operation: .sourceOver, fraction: 1)
+            return true
+        }
+        // NSCursor's hot spot is in flipped (top-left) coordinates. The marker's chisel tip sits
+        // at about 13 % of the symbol's width and 77 % of its height from its top (measured on
+        // the rendered symbol, above its baseline stroke).
+        let top = side - origin.y - s.height
+        return NSCursor(image: image, hotSpot: NSPoint(x: origin.x + 0.13 * s.width, y: top + 0.77 * s.height))
+    }()
 
     /// The AppKit cursor of a safepdf_cursor.
     static func nsCursor(_ c: UInt32) -> NSCursor {

@@ -254,7 +254,30 @@ struct Mark: Equatable {
     private func changed() {
         version += 1
         cache.removeAll()
+        if grouping > 0 {
+            changedInGroup = true
+            return
+        }
         onChange?()
+    }
+
+    private var grouping = 0
+    private var changedInGroup = false
+
+    /// Runs `body`'s edits as ONE undo step (safepdf_marks_begin_group / _end_group, task
+    /// 11.6a: Paste); `onChange` runs once at the end.
+    func group<T>(_ body: () -> T) -> T {
+        if grouping == 0 { safepdf_marks_begin_group(handle) }
+        grouping += 1
+        let r = body()
+        grouping -= 1
+        guard grouping == 0 else { return r }
+        safepdf_marks_end_group(handle)
+        if changedInGroup {
+            changedInGroup = false
+            onChange?()
+        }
+        return r
     }
 
     /// Runs an edit call; on success the lists are dropped and `onChange` runs.

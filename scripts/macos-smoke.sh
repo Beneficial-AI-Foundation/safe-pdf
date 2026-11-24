@@ -510,6 +510,56 @@ EOF
 run_session c1h "$work/c1h.txt"
 fi
 
+# 11.6a (no Tk case: the native app's Cmd-X / Cmd-V on marks): Cut of a selected highlight
+# (its text on the private pasteboard, one undo step), Paste on its page and on another page
+# (each one undo step), Paste again, undo / redo; Cut of a note; Cut / Paste disabled without a
+# selected mark / a cut one.
+if wanted "1hx cutpaste"; then
+case_begin "1hx cut/paste marks"
+cat > "$work/c1hx.txt" <<'EOF'
+fixture text3 $OUT/x.pdf
+open $OUT/x.pdf
+key cmd+x
+expect ran = 0
+key cmd+v
+expect ran = 0
+dblclick 1 0
+key ctrl+cmd+h
+expect marks = 1
+key cmd+x
+expect ran = 1
+expect marks = 0
+expect clipboard ~ e
+expect pill ~ highlight cut
+key cmd+v
+expect marks = 1
+expect last-mark ~ highlight p1 yellow
+expect mark-selected = 1
+key cmd+z
+expect marks = 0
+key cmd+shift+z
+expect marks = 1
+cmd nextPage
+key cmd+v
+expect marks = 2
+expect last-mark ~ highlight p2 yellow
+key cmd+v
+expect marks = 3
+key cmd+z
+expect marks = 2
+note cut me
+expect kinds = HHN
+select-mark last
+key cmd+x
+expect kinds = HH
+expect clipboard = cut me
+key cmd+v
+expect kinds = HHN
+expect last-mark ~ cut me
+EOF
+run_session c1hx "$work/c1hx.txt"
+fi
+
 # 1t (Tk 1t): closing a note without Save: an empty new note goes, a typed one is saved, a
 # stored text stays; an empty highlight comment goes, the highlight stays.
 if wanted "1t note"; then

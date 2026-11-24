@@ -273,6 +273,7 @@ and `has_stream`. The list also carries `icons` (`safepdf_attachment_icon`: page
 | `safepdf_marks_add_highlight` / `_add_note` / `_add_comment` / `_add_free_text` / `_add_ink` / `_add_stroke` | Add a mark (each one undo step; a comment reuses a highlight's existing note; a stroke joins a drawing) |
 | `safepdf_marks_set_text` / `_recolor` / `_set_rgb` / `_set_size` / `_set_opacity` / `_translate` | Edit a mark; `merge` joins the current slider drag's undo step |
 | `safepdf_marks_seal` | Close the open merge step (slider released) |
+| `safepdf_marks_begin_group` / `safepdf_marks_end_group` | The edits between them are one undo step (11.6a: Paste re-creates a cut mark — a highlight and its comment, a drawing's strokes) |
 | `safepdf_marks_delete` | Delete a mark (a highlight's comment goes with it) |
 | `safepdf_marks_undo` / `safepdf_marks_redo` | One step; -1 "nothing to undo" / "nothing to redo" |
 | `safepdf_marks_output_estimate` | Upper bound of the saved file's size |
@@ -397,6 +398,7 @@ none pending since 11.3e2).
 | `SelfTestSidebar.swift` | The self-test's checks of 11.3d2 and 11.3f (thumbnails, outline, attachments with the size probe and the icon click, layers, page modes, identity line) |
 | `SelfTestMarks.swift` | The self-test's checks of 11.3e1 (marks on the page) |
 | `SelfTestSave.swift` | The self-test's checks of 11.3e2 and 11.3f (Save, XFDF, the preview and the thumbnails following it) |
+| `SelfTestCutPaste.swift` | The self-test's checks of 11.6a (page field width, ⌘X / ⌘V of marks, the highlighter cursor, sliding jumps) |
 | `Sheets.swift` | Open and save panels and alerts as document-modal sheets |
 | `SidebarViewController.swift` | The sidebar item with its four panels and the switcher; wires them to the page view |
 | `SidebarModel.swift` | The sidebar's rules through the C API |
@@ -461,7 +463,23 @@ Swift sees the C API through `module.modulemap`: one Clang module, `SafePdfC`, m
   document-modal sheet shows the exact address with **Copy Address** and **Cancel** (Copy Address
   only puts it on the clipboard); any other action (Launch, GoToR, JavaScript, an unknown
   destination) is described in the pill and not followed. The app makes no `NSWorkspace` call.
-* **Cursor**: `Toolbar.cursorFor` over what lies under the pointer (text, link, mark).
+* **Cursor**: `Toolbar.cursorFor` over what lies under the pointer (text, link, mark). With the
+  Highlight tool (11.6a) the page shows a highlighter cursor (the SF Symbol `highlighter`, black
+  with a white outline, hot spot at the tip) where the rule gives the I-beam or the arrow; links
+  and marks keep the pointing hand.
+* **Cut and Paste of marks** (11.6a, Edit → Cut ⌘X / Paste ⌘V, the standard `cut:` / `paste:`
+  actions: a focused text field takes them first): Cut removes the selected mark — highlight
+  (with its comment), note, free text or drawing — in one undo step and keeps it on the app's
+  mark clipboard; its text (a note's or free text's, or the highlighted text) goes on the
+  pasteboard. Paste re-creates it through the add exports as a new, selected mark in one undo
+  step: at the same place on its own page, else at the same page coordinates moved inside the
+  current page's CropBox; it pastes again as often as wanted. The items are enabled only with a
+  selected / a cut mark.
+* **Sliding jumps** (11.6a): outline items, thumbnails, links, the page field and Back / Forward
+  scroll to the destination with a 0.3 s ease-out slide (a display link on screen) instead of
+  jumping, the destination's renders asked for first and the current page held at the target; a
+  jump farther than 1.5 view heights first cuts to that distance. "Reduce motion" (and headless
+  runs) jump at once; a wheel, a key scroll, a zoom or a relayout ends a slide at its target.
 
 ## Sidebar (11.3d2, 11.3f)
 
@@ -563,7 +581,7 @@ a `macos` job (runner `macos-26`) that runs `lake build`, `macosFfi` / `worker`,
 `macos/tests/run_all.sh`, the headless self-test and `codesign`.
 
 `build.sh` runs `lake build macosFfi worker`, compiles the four C shims with `clang` at
-`-mmacosx-version-min=14.0`, links `App/*.swift` with `swiftc` against the shims,
+`-mmacosx-version-min=15.0`, links `App/*.swift` with `swiftc` (`-target …-macos15.0`) against the shims,
 `libsafepdfffi.a` and Lean's runtime, and writes into `macos/build/`:
 
 * `safepdf-mac`: the app binary, unbundled, with a copy of `worker` beside it;
@@ -620,7 +638,14 @@ pages 1 to 10 at 2x, the real scroll view and page canvas at 1x and 2x backing, 
   with scripted dialogs (overwrite question, C7 prefix, reopen keeping the view, a second save
   appending, the preview after deleting a saved highlight — pixels — and, 11.3f, the thumbnails
   rendered from that preview and back from the file after the undo), encrypted files, the
-  changed-on-disk check, the unsaved-marks question, XFDF export / import.
+  changed-on-disk check, the unsaved-marks question, XFDF export / import;
+* `SelfTestCutPaste.swift` (11.6a): the page field's width (narrower than the old 56 pt box, "of
+  N" right after it, wider for roman labels and many pages), ⌘X / ⌘V of a highlight with its
+  comment, a note, free text and a drawing (same page and page 2, one undo step each, undo /
+  redo, a second paste, the text on a private pasteboard, the Edit items), the highlighter
+  cursor, and sliding jumps (a page jump and an outline click on a generated five-page file pass
+  through intermediate positions and end exactly where the immediate jump lands; the Reduce
+  motion rule).
 
 It writes PNGs and `timings.txt` to DIR, prints `failures: N` and exits 0 when `N` is 0.
 
@@ -636,12 +661,14 @@ Results on 2026-11-24 (task 11.3f): `failures: 0` and `leaks: 0` on `text/latin.
 
 ## Known limitations
 
-* **Minimum macOS (open question for the human).** `Info.plist` sets `LSMinimumSystemVersion` to
-  14.0 and `build.sh` compiles and links for macOS 14.0, but the pinned Lean toolchain's runtime
-  libraries (`libgmp.a`, `libuv.a`) are built for a newer macOS (15). The linker warns once per
-  object (counted by `build.sh`, full text in `build/swift-link.log`). Whether the bundle runs on
-  macOS 14 is therefore not established; whether to raise the minimum is a decision for the
-  human.
+* **Minimum macOS: 15** (the human's decision, task 11.6a). `Info.plist` sets
+  `LSMinimumSystemVersion` to 15.0 and `build.sh` compiles and links for macOS 15.0, which the
+  pinned Lean toolchain's `libgmp.a` / `libuv.a` are built for. The linker still warns once per
+  object of `libsafepdfffi.a` (117 objects): Lake compiles the Lean-generated C without a
+  deployment target, so those objects carry the build machine's macOS (26.0 on a macOS 26 host).
+  `build.sh` counts the warnings (full text in `build/swift-link.log`); passing
+  `-mmacosx-version-min=15.0` to Lake's C compiler (`moreLeancArgs` in `lakefile.lean`) would
+  silence them.
 * **Attachment size probe** (11.3f): the Tk viewer's tooltip probe lowers the per-stream decoding
   cap to 16 MB (`Attach.probeLimit`; a larger file shows "> 16 MB"). `safepdf_doc_attachment_bytes`
   has no cap parameter, so the app's probe decodes under the viewer's own limits (as Save

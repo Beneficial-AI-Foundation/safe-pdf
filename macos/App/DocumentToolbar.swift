@@ -54,6 +54,14 @@ import SafePdfC
     private var items: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     private let pageField = NSTextField(string: "")
     private let ofLabel = NSTextField(labelWithString: "")
+    /// The page field's width (fitPageField; "888" wide until a document is open).
+    private lazy var pageWidth = pageField.widthAnchor.constraint(equalToConstant: Self.fieldWidth(for: ["888"], in: pageField))
+    private var pageStack: NSStackView?
+    private var fitKey = ""
+    /// The gap between the page field and "of N".
+    static let pageGap: CGFloat = 4
+    /// The widest the page field gets (a longer label scrolls inside it).
+    static let pageFieldMax: CGFloat = 96
     private var lastStates: ChromeStates?
 
     /// The SF Symbol for a Tk icon name.
@@ -245,11 +253,21 @@ import SafePdfC
         pageField.cell?.isScrollable = true
         pageField.toolTip = "Page (Return goes there, Escape restores)"
         pageField.setAccessibilityLabel("Page")
-        pageField.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        // Task 11.6a: the field is as wide as the document's widest entry (fitPageField), not a
+        // fixed wide box, and "of N" follows it closely; the stack hugs its content so the
+        // toolbar (and the macOS 26 glass capsule) does not stretch it.
+        pageField.alignment = .center
+        pageWidth.isActive = true
+        pageField.setContentHuggingPriority(.required, for: .horizontal)
         ofLabel.textColor = .secondaryLabelColor
+        ofLabel.setContentHuggingPriority(.required, for: .horizontal)
+        ofLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         let stack = NSStackView(views: [pageField, ofLabel])
         stack.orientation = .horizontal
-        stack.spacing = 4
+        stack.alignment = .centerY
+        stack.spacing = Self.pageGap
+        stack.setHuggingPriority(.required, for: .horizontal)
+        pageStack = stack
         let item = NSToolbarItem(itemIdentifier: id)
         item.view = stack
         item.label = "Page"
@@ -339,9 +357,7 @@ import SafePdfC
             enabled = enabled && Commands.implemented.contains(Int(s.cmd))
         }
         item.isEnabled = enabled
-        if #available(macOS 15, *) {
-            item.isHidden = i < st.itemVisible.count ? !st.itemVisible[i] : false
-        }
+        item.isHidden = i < st.itemVisible.count ? !st.itemVisible[i] : false
     }
 
     /// Shows the zoom choice: its entry checked, its label (ZoomChoice.label, e.g. "137%" after a
@@ -363,6 +379,39 @@ import SafePdfC
         if force || !isEditingPage { pageField.stringValue = entry }
         ofLabel.stringValue = of
         pageField.isEnabled = !of.isEmpty
+    }
+
+    /// The width the page field needs for the widest of `entries` (its font, its bezel and
+    /// text insets), between two digits' width and `pageFieldMax`.
+    static func fieldWidth(for entries: [String], in field: NSTextField) -> CGFloat {
+        let font = field.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        func w(_ s: String) -> CGFloat { (s as NSString).size(withAttributes: attrs).width }
+        var text = w("88")
+        for e in entries { text = max(text, w(e)) }
+        let probe = NSTextField(string: "8")
+        probe.font = font
+        probe.bezelStyle = .roundedBezel
+        let pad = max(8, (probe.cell?.cellSize.width ?? 0) - w("8"))
+        return min(Self.pageFieldMax, ceil(text + pad + 2))
+    }
+
+    /// Sizes the page field for the document: its widest page label or number (Toolbar.entryText
+    /// shows one of them). Measured once per document and once more when its labels arrive.
+    func fitPageField(labels: [String], pages: Int) {
+        let key = "\(pages):\(labels.count):\(labels.lazy.map(\.utf16.count).max() ?? 0)"
+        guard key != fitKey else { return }
+        fitKey = key
+        var entries = [String(max(pages, 1))]
+        entries += labels.prefix(100_000)
+        pageWidth.constant = Self.fieldWidth(for: entries, in: pageField)
+        pageStack?.layoutSubtreeIfNeeded()
+    }
+
+    /// The page field's width and the gap from its right edge to "of N" (the self-test).
+    var pageFieldMetrics: (width: CGFloat, gap: CGFloat) {
+        pageStack?.layoutSubtreeIfNeeded()
+        return (pageWidth.constant, ofLabel.frame.minX - pageField.frame.maxX)
     }
 
     /// Whether the page field has the keyboard focus (its keys stay out of the page view and
