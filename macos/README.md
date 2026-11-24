@@ -1,11 +1,11 @@
 # macOS: the C API v2 and the Swift app
 
-The first part of this file is the C API v2 (current), then the Swift app (task 11.3b). Everything
-from "History: the AppKit spike" on is the task 11.1 spike (`main.m`, since replaced by the Swift
-app) and its v1 C calls (removed in task 11.3c1), kept for reference only.
+The first part of this file is the C API v2 (current), then the Swift app (tasks 11.3b–11.3f).
+Everything from "History: the AppKit spike" on is the task 11.1 spike (`main.m`, since replaced by
+the Swift app) and its v1 C calls (removed in task 11.3c1), kept for reference only.
 
 
-## C API v2 (tasks 11.3a1 to 11.3a5)
+## C API v2 (tasks 11.3a1 to 11.3e2)
 
 The C API is four plain-C headers in this directory. No Lean type appears in any of them. The
 sections below restate what the headers' own comments and the test programs in `tests/` say; where
@@ -13,15 +13,15 @@ a header is silent the text says so. When this text and a header differ, the hea
 
 | Header | Implementation | Role | Test program |
 |---|---|---|---|
-| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, exact page geometry (`safepdf_doc_page_geom`: CropBox as rationals + `/Rotate`), asynchronous requests (render, page index, links, outline, labels, attachments, layers), cancel; the document's open settings (`safepdf_doc_open_settings`, task 11.3c2); test-only `safepdf_test_render_sync` (in-process render for comparisons) | `tests/core_test.c` (117 checks) |
-| `safepdf_view.h` | `safepdf_view.c` | View and chrome logic: zoom, rotation, re-anchoring, spreads and page layout, zoom and view-mode drop-downs, page field, toolbar, commands, menus, key table, cursor; task 11.3c2: the wheel step, the page as text, the back/forward history, page → screen | `tests/view_test.c` (314) |
-| `safepdf_marks.h` | `safepdf_marks.c` | Marks store (highlight, note, free text, ink) with undo/redo, Save (incremental update bytes), XFDF import and export, dialog texts | `tests/marks_test.c` (105) |
-| `safepdf_select.h` | `safepdf_select.c` | Text selection, copy and search over a page's index | `tests/select_test.c` (53) |
+| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, page geometry, open settings, asynchronous requests (render, page index, links, outline, labels, attachments, attachment bytes, layers), cancel; the sidebar's rules (11.3d2); the test-only in-process render | `tests/core_test.c` (144 checks) |
+| `safepdf_view.h` | `safepdf_view.c` | View and chrome logic: zoom, rotation, re-anchoring, spreads and layout, zoom and view-mode drop-downs, page field, commands, menus, key table, toolbar, enabled states, cursor; wheel step, page text, history, page → screen (11.3c2) | `tests/view_test.c` (314) |
+| `safepdf_marks.h` | `safepdf_marks.c` | Marks store (highlight, note, free text, ink) with undo/redo, Save (incremental update bytes), XFDF import and export, dialog texts; tool, bubble and pop-over rules (11.3e1); the preview, status texts and dialog helpers (11.3e2) | `tests/marks_test.c` (148) |
+| `safepdf_select.h` | `safepdf_select.c` | Text selection, copy and search over a page's index; pointer, links and the search allowance (11.3d1) | `tests/select_test.c` (70) |
 
-The Lean side is `SafePdf/Shell/Ffi.lean`, `Ffi/V2.lean`, `Ffi/Flat.lean`, `FfiView.lean`,
-`FfiMarks.lean` and `FfiSelect.lean`; the headers call the Tk viewer's own Lean functions, so the
-theorems and `#guard`s there hold for these results. Plain-C structs are copied out of Lean
-objects; nothing with a theorem or `#guard` is reimplemented in C.
+The Lean side is `SafePdf/Shell/Ffi.lean`, `Ffi/V2.lean`, `Ffi/Flat.lean`, `Ffi/Sidebar.lean`,
+`FfiView.lean`, `FfiMarks.lean` and `FfiSelect.lean`; the headers call the Tk viewer's own Lean
+functions, so the theorems and `#guard`s there hold for these results. Plain-C structs are copied
+out of Lean objects; nothing with a theorem or `#guard` is reimplemented in C.
 
 ### Initialisation order
 
@@ -38,11 +38,14 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 
 * Core: after `safepdf_init`, any thread may call the API. A thread the Lean runtime does not know
   is registered on its first call and unregistered when it exits. `safepdf_thread_enter` and
-  `safepdf_thread_exit` remain and are optional.
+  `safepdf_thread_exit` remain and are optional. The sidebar rules are pure and synchronous, any
+  thread after `safepdf_init`.
 * View: the header sends other threads to core's rules (`safepdf_thread_enter` /
   `safepdf_thread_exit`). It says nothing more about concurrent calls.
 * Marks: a store is locked on every call, so it may be used from several threads. The header asks
-  that each such thread be registered with `safepdf_thread_enter`.
+  that each such thread be registered with `safepdf_thread_enter`. `safepdf_marks_preview` works on
+  a snapshot taken under the lock (its objects marked thread-shared first), so it may run on a
+  background thread while the GUI edits.
 * Select: a page handle is immutable; any thread may call and use handles concurrently.
 * Completion callbacks of core requests: see the next section.
 
@@ -50,10 +53,9 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 
 * A document (`safepdf_document`) comes from `safepdf_doc_open_file` (capped read, at most
   `Limits.maxInputBytes + 1` bytes) or `safepdf_doc_open_bytes` (the buffer is copied). Both parse
-  in this process, so `safepdf_doc_page_count`, `safepdf_doc_page_size`,
-  `safepdf_doc_is_repaired` and `safepdf_doc_is_encrypted` are synchronous. Each document gets
-  its own confined `worker` process, spawned on the first request and sent the bytes, never the
-  path.
+  in this process, so page count, sizes, geometry, open settings, the repaired and encrypted flags
+  and `safepdf_doc_bytes` are synchronous. Each document gets its own confined `worker` process,
+  spawned on the first request and sent the bytes, never the path.
 * `safepdf_open_options` (NULL means all defaults): `worker_path`, `deadline_ms` (0 means 20000),
   `strict` (the repair path never runs), `test_stall_ms` (tests only: the worker sleeps before
   each render).
@@ -71,9 +73,10 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
   (`SAFEPDF_PRIO_CURRENT` 0, `SAFEPDF_PRIO_VISIBLE` 1, `SAFEPDF_PRIO_THUMBNAIL` 2; oldest first among
   equals), cancel and a deadline. Page labels, attachments, attachment bytes and layers are
   computed in this process on a Lean task, because the worker protocol has no request for them;
-  their priority is ignored. `safepdf_doc_raise` makes a queued worker request more urgent.
+  they take no priority. `safepdf_doc_raise` makes a queued worker request more urgent.
 * `safepdf_layers_toggle` is synchronous (0, or -1 with `*error`).
-* The view, marks and select functions are synchronous; they take no queue and call no callback.
+* The view, marks, select and sidebar functions are synchronous; they take no queue and call no
+  callback.
 * The header does not state a limit on the number of requests in flight or on queue length.
 
 ### Cancel, release, deadline
@@ -91,7 +94,8 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
   run), so it may be called from a callback's own queue. Then the handle is freed.
 * **Known gap** (ledger, task 11.3a1; the header does not mention it): release can block for up to
   the deadline while the worker is still starting or opening the document. A caller that must not
-  block (for example the main thread) should release from a background queue.
+  block (for example the main thread) should release from a background queue (the app releases
+  preview documents on a background queue).
 
 ### Worker path and environment
 
@@ -112,12 +116,15 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
   results are UTF-8 and NUL-terminated (a NUL in document text becomes U+FFFD) and live as long as
   the struct. Input pointers are borrowed for the duration of the call.
 * Core: `safepdf_free_image`, `_page_index`, `_links`, `_outline`, `_labels`, `_attachments`,
-  `_bytes` (frees the data and the struct), `_layers`. `safepdf_free_layers_state` frees the arrays
-  of a `safepdf_layers_state` in caller storage (written by `safepdf_layers_toggle`) and zeroes it.
+  `_bytes` (frees the data and the struct), `_layers`, `_open_settings`.
+  `safepdf_free_layers_state` frees the arrays of a `safepdf_layers_state` in caller storage
+  (written by `safepdf_layers_toggle`) and zeroes it. The sidebar's `char *` results and the
+  arrays of `safepdf_sidebar_thumbs_wanted` / `_thumb_evict` are `free()`d.
 * View: structs a call fills own their arrays and strings; each type has one free function
   (`safepdf_free_zoom_presets`, `_layout`, `_page_band`, `_view_choices`, `_commands`,
-  `_menu_table`, `_key_table`, `_toolbar`, `_chrome_states`); NULL allowed, the struct is zeroed.
-  Functions returning `char *` return a malloc'd string for the caller to `free()`.
+  `_menu_table`, `_key_table`, `_toolbar`, `_chrome_states`, `_view_history`); NULL allowed, the
+  struct is zeroed. Functions returning `char *` return a malloc'd string for the caller to
+  `free()`.
 * Marks: filled structs are released with `safepdf_free_mark_list`, `_save_result`,
   `_xfdf_import`, `_marks_bytes` (frees the data only, unlike core's `safepdf_free_bytes`); each
   zeroes its argument and allows NULL. Returned `char *` strings are `free()`d. The store is
@@ -134,8 +141,9 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 
 ### Error strings
 
-* Core: `char **error` out-parameters (open, `safepdf_layers_toggle`) are set on failure to a
-  malloc'd English string; release it with `free()`. In callbacks, `error` is borrowed (above).
+* Core: `char **error` out-parameters (open, `safepdf_layers_toggle`, `safepdf_test_render_sync`)
+  are set on failure to a malloc'd English string; release it with `free()`. In callbacks, `error`
+  is borrowed (above).
 * Marks: `*error` is set only when the call fails and only when `error` is not NULL; malloc'd.
   Save returns `SAFEPDF_SAVE_OK` or a `SAFEPDF_SAVE_ERR_*` code, with `*error` set and `*out`
   zeroed on failure. Undo/redo with nothing to do fails with "nothing to undo" / "nothing to redo".
@@ -147,12 +155,175 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 ### Numbers and coordinates
 
 * Core and select coordinates are page space in points (PDF user space, y up) as doubles converted
-  from the core's exact rationals, for display only.
+  from the core's exact rationals, for display only. `safepdf_doc_page_geom` gives the exact
+  rationals.
 * View rationals cross as `safepdf_rat {num, den}` with `den > 0`; `den <= 0` is rejected, and a
   result that does not fit 64 bits is an error. `safepdf_rat_to_double` is for display only: the
   header says never to feed a rounded value back as a zoom.
 * Marks coordinates must be finite with magnitude at most 2^32, else the call fails. Mark ids are
-  greater than 0; 0 means none.
+  greater than 0; 0 means none. `safepdf_marks_bubble_place` alone takes canvas rectangles with
+  y down.
+
+### Function reference
+
+Every function the four headers declare, with its contract in one line (the header comment
+abridged; Lean names in parentheses are the functions called). Return conventions as above unless
+a line says otherwise.
+
+#### `safepdf_core.h`
+
+| Function | Contract |
+|---|---|
+| `safepdf_init` | Initialise the Lean runtime and the core's modules; 0 on success; idempotent |
+| `safepdf_thread_enter` / `safepdf_thread_exit` | Register / unregister a non-main thread (optional: threads register on their first call) |
+| `safepdf_set_worker_path` | Default worker executable for later opens (copied; NULL clears); 0 on success |
+| `safepdf_doc_open_file` | Open a PDF path through the capped read; NULL with `*error` on failure |
+| `safepdf_doc_open_bytes` | Open a PDF from a buffer (copied); NULL with `*error` on failure |
+| `safepdf_doc_retain` / `safepdf_doc_release` | Add / drop a reference; the last release closes the document (cancels, drains, blocks until callbacks are enqueued) |
+| `safepdf_doc_page_count` | Number of pages (synchronous) |
+| `safepdf_doc_page_size` | Displayed size in points (CropBox with `/Rotate`); -1 out of range |
+| `safepdf_doc_page_geom` | The effective CropBox as exact rationals and `/Rotate` in degrees (for `safepdf_view_layout`); -1 on a bad page or a coordinate beyond 64 bits |
+| `safepdf_doc_is_repaired` / `safepdf_doc_is_encrypted` | Nonzero when the file opened only through repair / is encrypted (empty user password) |
+| `safepdf_doc_open_settings` / `safepdf_free_open_settings` | The open settings (`Core.Doc.OpenSettings.read`, `View.modesOf`, `Links.jumpOf`, `Toolbar.zoomChoiceOf`): `/PageLayout` as view modes, `/Direction /R2L`, `/PageMode`, `/NonFullScreenPageMode`, the open destination and its zoom, the viewer preferences, the window title (`/DisplayDocTitle`), and the notes of what was not honoured; 0 / -1 |
+| `safepdf_doc_bytes` | A copy of the bytes the document was opened from (the marks store is created from them); free with `safepdf_free_bytes` |
+| `safepdf_doc_render` | Render a page at `zoom_num/zoom_den` px/pt with an extra clockwise rotation (quarter turns) under a layers state (NULL: default). Worker |
+| `safepdf_doc_page_index` | The selection and search index of a page under a layers state. Worker |
+| `safepdf_doc_links` | The links of a page. Worker |
+| `safepdf_doc_outline` | The outline. Worker |
+| `safepdf_doc_page_labels` | The page labels. In process |
+| `safepdf_doc_attachments` | The attachments, listed (nothing decoded), with their annotations' icons. In process |
+| `safepdf_doc_attachment_bytes` | The decoded bytes of attachment `index` (under the viewer's limits). In process |
+| `safepdf_doc_layers` | The layers panel rows and the default layers state. In process |
+| `safepdf_doc_cancel` | Cancel a request (queued: dropped; in flight over 250 ms: its worker killed) |
+| `safepdf_doc_raise` | Make a queued worker request more urgent |
+| `safepdf_layers_toggle` | Toggle a layers-panel row in a state (radio groups, locked groups, inert headings); the new state into caller storage; synchronous |
+| `safepdf_sidebar_on_load` | The panel the sidebar opens with for a `/PageMode` (`Sidebar.onLoad`); `SAFEPDF_PANEL_NONE`: closed |
+| `safepdf_sidebar_available` | Whether a panel's switcher button shows (`Sidebar.Panel.available`) |
+| `safepdf_sidebar_pick` | The panel the toggle opens (`Sidebar.pick`): the last while available, else the outline, else the thumbnails |
+| `safepdf_sidebar_constants` | The thumbnail constants (`thumbW`, `thumbTop`, `thumbLabelH`, `thumbGap`, `thumbMargin`, `thumbBudget`) |
+| `safepdf_doc_thumb` | A page's thumbnail size at 1x and its render zoom, with the user's extra rotation (`Sidebar.thumbSize`) |
+| `safepdf_sidebar_thumb_scale` | The 12.3b scale of a thumbnail image (0 full, 1 half, 2 quarter, 3 eighth) so that `thumbBudget` images fit the 32 MiB reserve |
+| `safepdf_sidebar_thumb_layout` | The thumbnails' tops and the panel height (`Sidebar.thumbLayout`) |
+| `safepdf_sidebar_thumbs_wanted` | The thumbnails to render for a visible band, nearest its middle first (`Sidebar.thumbsWanted`) |
+| `safepdf_sidebar_thumb_evict` | The thumbnails to drop beyond `thumbBudget`, farthest first (`Sidebar.thumbEvict`) |
+| `safepdf_sidebar_tree` | An outline tree's parents, disclosure and initial open state from depths (`Sidebar.rows`, `initialOpen`) |
+| `safepdf_attachment_target_problem` | Why a file cannot take a saved attachment (`Attach.targetProblem`), NULL when it can |
+| `safepdf_attachment_size_after` | The size column after a decode (`Attach.sizeColumn`: the decoded size, or "error"; the listed size first) |
+| `safepdf_action_describe` | An outline action in words with labels and the page count (`Links.describe`) |
+| `safepdf_identity_line` | The trusted full-screen identity line (`Viewer.identityLine`; controls and bidi overrides blanked; never `/Title`) |
+| `safepdf_test_render_sync` | TESTS ONLY: renders in this process on the calling thread, as the worker would, for byte comparisons |
+| `safepdf_free_image`, `_page_index`, `_links`, `_outline`, `_labels`, `_attachments`, `_bytes`, `_layers`, `_layers_state` | Free a delivered result (NULL allowed) |
+
+The `safepdf_attachment` struct carries, besides name, file name, description, listed size, MIME
+type, dates, page and problem, what the panel shows before decoding (11.3d2): `size_text`
+(`Attach.sizeColumn`: "1.5 KB", "?", "—"), `tooltip` (`Attach.tooltip`, "" when nothing to say)
+and `has_stream`. The list also carries `icons` (`safepdf_attachment_icon`: page, rectangle, row).
+
+#### `safepdf_view.h`
+
+| Function | Contract |
+|---|---|
+| `safepdf_view_init` | Initialise the view module (after `safepdf_init`); 0; idempotent |
+| `safepdf_rat_to_double` | A rational as a double (display only) |
+| `safepdf_view_get_constants` | Margin, page gap, zoom range, Automatic Zoom's ceiling, the per-page pixel cap, the renderer's side cap, the view pixel cap |
+| `safepdf_view_zoom_steps` | The zoom steps in percent (`View.zoomSteps`) |
+| `safepdf_view_quant` | Round a zoom down to a multiple of 1/64, at least 1/64 (`View.quant`) |
+| `safepdf_view_pct_zoom` / `safepdf_view_zoom_pct` | Percentage → quantised zoom at a screen scale, and back (rounded) |
+| `safepdf_view_step_in` / `safepdf_view_step_out` | Zoom In / Out on the effective zoom: 1 with the step, 0 at the end of the range (theorems `stepInZ_gt`, `stepOutZ_lt`) |
+| `safepdf_view_fit_zoom` | The zoom fitting a box into a canvas less the margin (width only optional), quantised, in [1/16, 8] |
+| `safepdf_view_cap_zoom` | A zoom lowered so the page image has at most N pixels (`View.capZoom`), with whether it was lowered |
+| `safepdf_view_pixel_size` | Screen and rendered pixel sizes of a box at a zoom, and whether the renderer crops it |
+| `safepdf_view_rotation` | Quarter-turn steps and the displayed size of a box at a rotation |
+| `safepdf_view_reanchor` | Where the page point shown at `q` lies after a zoom / rotation change (C2; theorem `reanchor_self`) |
+| `safepdf_view_spread` | A page's spread, the spread count and the pages Next / Previous go to |
+| `safepdf_view_zoom_presets` / `safepdf_free_zoom_presets` | The zoom drop-down (`ZoomChoice.presets`) |
+| `safepdf_view_zoom_label` / `safepdf_view_zoom_parse` | A zoom choice's label; a key ("auto", "150", …) to a choice |
+| `safepdf_view_zoom_with` | A zoom choice's zoom for a page in a canvas (Automatic Zoom: page width when portrait, else page fit, capped) |
+| `safepdf_view_layout` / `safepdf_free_layout` | Lay out the pages as the Tk viewer (`Viewer.computeLayout`): places, render zoom and rotation, capped / cropped flags |
+| `safepdf_view_pages_in_band` / `safepdf_free_page_band` | Visible pages of a band and the wanted ones (one more each side) |
+| `safepdf_view_page_at` | The page at (or nearest) a scroll-region point and the scroll tops that show it |
+| `safepdf_view_view_choices` / `safepdf_free_view_choices` | The view-mode drop-down (`Toolbar.ViewChoice`) |
+| `safepdf_view_choice_of_modes` / `safepdf_view_choice_modes` | The entry modes show; the modes an entry sets (a two-page choice keeps Even Spreads) |
+| `safepdf_view_page_field` | The page field's text and its "of N" / "(k of N)" label |
+| `safepdf_view_page_entry` | Return in the page field (`Toolbar.pageEntry`): 1 valid with the page, 0 invalid (revert) |
+| `safepdf_view_commands` / `safepdf_view_actions` / `safepdf_free_commands` | The commands (`Menu.Cmd`, with macOS accelerators) and the key actions |
+| `safepdf_view_app_name` / `safepdf_view_about_detail` | "SafePDF" and the About text |
+| `safepdf_view_menubar` / `safepdf_view_overflow_menu` / `safepdf_free_menu_table` | The menubar (File, Edit, View, Go, Help) and the toolbar's overflow menu |
+| `safepdf_view_keys` / `safepdf_free_key_table` | The main window's key bindings (`Menu.keyTable .aqua`) |
+| `safepdf_view_toolbar` / `safepdf_free_toolbar` | The toolbar left to right (`Toolbar.layout`) |
+| `safepdf_view_states` / `safepdf_free_chrome_states` | Enabled states per command and per toolbar item, visibility per item, from a `safepdf_ctx` |
+| `safepdf_view_hit_of` / `safepdf_view_cursor_for` / `safepdf_view_mode_tool` | What lies under the pointer; the cursor for a mode over it; the tool pressed in a mode |
+| `safepdf_view_wheel_step` | One wheel event on one axis (`View.wheelStep`): none, scroll to `*pos`, next or previous page |
+| `safepdf_view_page_text` | "page k/n" or "page L (k/n)" (`Links.pageText`) |
+| `safepdf_view_history_step` / `safepdf_free_view_history` | Push / back / forward on the history (`Links.History`, at most 100 per stack; theorem `History.back_push`): 1 done with the target, 0 nothing to go to |
+| `safepdf_view_to_screen` | Where a page point shows, in pixels from the page image's top-left (`Geom.toScreen`) |
+
+#### `safepdf_marks.h`
+
+| Function | Contract |
+|---|---|
+| `safepdf_marks_init` | Initialise the marks module (calls `safepdf_init`); 0; idempotent |
+| `safepdf_marks_create` | The store of a PDF's bytes, its saved marks listed as saved; NULL with `*error` |
+| `safepdf_marks_retain` / `safepdf_marks_release` | Add / drop a reference |
+| `safepdf_marks_get_state` | Counts, dirty flag, undo / redo availability |
+| `safepdf_marks_list` / `safepdf_marks_list_all` / `safepdf_free_mark_list` | The marks of a page / of every page |
+| `safepdf_marks_hit_at` | The topmost mark under a page point (note icons first); 0 none |
+| `safepdf_marks_note_anchor` | Where a new note anchors (`Marks.noteAnchor`: the clicked point, the selection's quads, or none) |
+| `safepdf_marks_note_close` | What closing a note popup without Save does: keep, save the text shown, or delete |
+| `safepdf_marks_add_highlight` / `_add_note` / `_add_comment` / `_add_free_text` / `_add_ink` / `_add_stroke` | Add a mark (each one undo step; a comment reuses a highlight's existing note; a stroke joins a drawing) |
+| `safepdf_marks_set_text` / `_recolor` / `_set_rgb` / `_set_size` / `_set_opacity` / `_translate` | Edit a mark; `merge` joins the current slider drag's undo step |
+| `safepdf_marks_seal` | Close the open merge step (slider released) |
+| `safepdf_marks_delete` | Delete a mark (a highlight's comment goes with it) |
+| `safepdf_marks_undo` / `safepdf_marks_redo` | One step; -1 "nothing to undo" / "nothing to redo" |
+| `safepdf_marks_output_estimate` | Upper bound of the saved file's size |
+| `safepdf_marks_save_build` / `safepdf_free_save_result` | Build the incremental update Save writes (64 fresh bytes needed for an encrypted file); `SAFEPDF_SAVE_OK` or an error code |
+| `safepdf_marks_disk_state` | Whether the file on disk still holds the bytes the store came from |
+| `safepdf_marks_save_route` | Save's route (`Save.route`) |
+| `safepdf_marks_overwrite_question` / `_changed_question` / `_unsaved_question` | The dialogs' texts |
+| `safepdf_marks_write_problem` / `_target_problem` | Why the opened file / a Save As or Export target cannot be written; NULL when it can |
+| `safepdf_marks_default_target` / `safepdf_marks_with_ext` | `STEM-annotated.pdf` next to a path; a name with an extension unless it has it |
+| `safepdf_marks_xfdf_estimate` / `safepdf_marks_xfdf_export` / `safepdf_free_marks_bytes` | Every mark as XFDF (upper bound; the export) |
+| `safepdf_marks_xfdf_import` / `safepdf_free_xfdf_import` | Import XFDF with the bounded reader; marks already present are not added again; a refused file leaves the store unchanged |
+| `safepdf_marks_tool_params` | The tools' parameters: the five highlight colours, the editor palette, font size, thickness and opacity ranges and defaults, free-text padding and line factor, the note icon size |
+| `safepdf_marks_ui_step` | One step of the tool state (`Bubble.Ui`: tool click, toggle, editor, Select text, Escape); returns the mode and whether the Highlight button highlights the selection |
+| `safepdf_marks_bubble_kind` | The bubble after a selection or on a selected highlight (`Bubble.kindFor`) |
+| `safepdf_marks_bubble_layout` | A bubble's size and buttons with their commands and tooltips |
+| `safepdf_marks_bubble_place` | Where a bubble goes for the selection rectangles (`Bubble.place`, theorem `place_inside`; y down) |
+| `safepdf_marks_escape_closes` | What Escape closes among the open transients (`Toolbar.onEscape`: the topmost) |
+| `safepdf_marks_preview` | The preview bytes (`Save.preview`): the document with only the changes of saved marks applied, empty when none; runs on a snapshot |
+| `safepdf_marks_output_ceiling` | The save / export output ceiling (`Budget.ceilings.poolBytes`, 192 MiB) |
+| `safepdf_marks_saved_status` / `safepdf_marks_import_status` | The status after a save / an import |
+| `safepdf_marks_xfdf_target` | `STEM.xfdf` next to the PDF |
+| `safepdf_marks_replace_question` / `safepdf_marks_opened_overwrite_question` | "NAME already exists. Replace it?"; Save As naming the opened file |
+| `safepdf_marks_dialog_buttons` | A dialog's buttons in display order (`aqua`: the macOS order) |
+| `safepdf_marks_unsaved_answer` | The unsaved-changes answer of a button key (anything else: Cancel) |
+| `safepdf_marks_close_goes_on` | Whether a close / quit / open goes on (`Save.closeGoesOn`) |
+| `safepdf_marks_dialog_dir` | The folder a file dialog starts in (`Save.dialogDir`) |
+| `safepdf_marks_one_line` | A message on one line (`Save.oneLine`) |
+| `safepdf_marks_tmp_name` | The temporary file name of a save (`Save.tmpName`) |
+
+#### `safepdf_select.h`
+
+| Function | Contract |
+|---|---|
+| `safepdf_select_init` | Initialise the selection module (after `safepdf_init`); 0; idempotent |
+| `safepdf_select_page_new` / `_retain` / `_release` | A page index converted once into an immutable, reference-counted handle |
+| `safepdf_select_cell_count` | Number of cells |
+| `safepdf_select_nearest` | The cell nearest a point (`Select.nearest`, first on ties); -1 no cells or a refused coordinate |
+| `safepdf_select_drag` | The range of a drag (`Select.dragRange`) |
+| `safepdf_select_word_at` / `safepdf_select_line_at` | Double click: the word; triple click: the line |
+| `safepdf_select_bands` | The selection bands (`Select.selBands`, task 10.18: one per line, consecutive lines meet) |
+| `safepdf_select_range_boxes` | The highlight boxes of a range (`Select.rangeBoxes`: the quads of a highlight) |
+| `safepdf_select_copy` | Copy a range: the text, its character count, how many come from unpainted glyphs, the status |
+| `safepdf_select_normalize_query` | The query as the search sees it (`Select.normQuery`) |
+| `safepdf_select_count` / `safepdf_select_find` | Hits on a page: their number; the hits with their boxes (`Select.findAll`, sound by `findAll_sound`) |
+| `safepdf_select_find_doc` | The hits over several pages (highlight-all; NULL handles skipped) |
+| `safepdf_select_next_hit` | Find Next / Previous over per-page counts (`Select.searchStep`): a hit, NEED a page's index, or none |
+| `safepdf_select_over_text` | Whether a point lies in a glyph box (the cursor's text test) |
+| `safepdf_select_link_at` | The topmost link containing a point (`Links.linkAt`); -1 none |
+| `safepdf_select_link_describe` | A link's status text (`Links.describe`) |
+| `safepdf_select_allowance_start` / `safepdf_select_allowance_spend` | A search's work allowance (`Budget.Allowance`: 400 pages, 60 s); spend one page, -1 when used up |
+| `safepdf_select_free_box_list` / `_copy_result` / `_hit_list` | Free a result (NULL allowed) |
 
 ### v1 calls removed
 
@@ -160,16 +331,6 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 `safepdf_image_free` (with the `safepdf_doc` type) did an in-process open and a synchronous render
 on the calling thread. They were removed in task 11.3c1 once the Swift app replaced the spike;
 the section "The v1 C API" below is history.
-
-### Added in task 11.3c2
-
-| Function | Lean | Contract |
-|---|---|---|
-| `int safepdf_doc_open_settings(const safepdf_document *, safepdf_open_settings *out)` / `safepdf_free_open_settings` | `V2.openSettingsOf` over `Core.Doc.OpenSettings.read`, `View.modesOf`, `Links.jumpOf`, `Toolbar.zoomChoiceOf` (moved out of the Tk `Viewer.applyOpenSettings`, unchanged) | Synchronous, from the in-process parse. `/PageLayout` as view modes (`has_layout`, `scroll`, `spread`), `/Direction /R2L` (`rtl`), `/PageMode` (`page_mode`, `SAFEPDF_PAGE_MODE_UNSET` when absent), the open destination (a destination or GoTo only: `has_dest`, `dest_page`, optional `left` / `top` in page units) with the zoom to open at (`zoom`, from Automatic Zoom), the viewer preferences, the window title (`/DisplayDocTitle` with a non-blank `/Title`, else NULL) and `notes` (`Issue.message`: an ignored JavaScript or URI action, a bad value, …). 0 / -1 |
-| `int safepdf_view_wheel_step(const safepdf_wheel *, kind, int64_t delta, bool cross, now_ms, top, view, region, safepdf_wheel *out, uint64_t *pos)` | `View.wheelStep` with `View.wheelPixels` and `View.wheelThreshold` (as `Viewer.wheel`) | One wheel event on one axis; returns `SAFEPDF_WHEEL_NONE / SCROLL (*pos) / NEXT / PREV` or -1. A zeroed `safepdf_wheel` is the initial state; `cross` only for the vertical axis in the page scroll mode |
-| `char *safepdf_view_page_text(labels, nlabels, page, pages)` | `Links.pageText` | `page k/n` or `page L (k/n)`; malloc'd |
-| `int safepdf_view_history_step(op, const safepdf_view_history *h, safepdf_view_loc cur, safepdf_view_history *out, safepdf_view_loc *target)` / `safepdf_free_view_history` | `Links.History.push / goBack / goForward` (theorem `History.back_push`) | 1 done (`*target` where to go), 0 nothing to go to (`*out` a copy), -1 error; at most 100 entries per stack |
-| `int safepdf_view_to_screen(z, rot, const safepdf_rat_box *, safepdf_rat_point p, safepdf_rat_point *out)` | `Geom.toScreen` | Where a page point shows, pixels from the page image's top-left (scrolling to a destination) |
 
 ### Building and running the C tests
 
@@ -182,61 +343,224 @@ Lean's runtime libraries, and print `NAME: N checks, 0 failures`.
 
 | Command | What it does |
 |---|---|
-| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, open settings on generated three-page files (11.3c2), page geometry (`tree.pdf` CropBoxes and `/Rotate` against `tree.pdf.expected`), async worker render byte-equal to the in-process render (`safepdf_test_render_sync`, rotations 0–3), cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, error paths |
-| `macos/tests/run_view.sh` | builds `safepdf_view.c` with the core shim, runs `view_test` (zoom, layout, drop-downs, commands, menus, keys, toolbar, cursors, the not-initialised failures; 11.3c2: wheel steps, page text, history, page → screen) |
+| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, open settings on generated three-page files, page geometry (`tree.pdf` CropBoxes and `/Rotate` against `tree.pdf.expected`), async worker render byte-equal to the in-process render (`safepdf_test_render_sync`, rotations 0–3), cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, the sidebar rules, error paths |
+| `macos/tests/run_view.sh` | builds `safepdf_view.c` with the core shim, runs `view_test` (zoom, layout, drop-downs, commands, menus, keys, toolbar, cursors, the not-initialised failures, wheel steps, page text, history, page → screen) |
 | `macos/tests/run_marks.sh` | runs `marks_test` on three goldens (plain, AES-128, RC4-128), writes `saved.pdf` and `export.xfdf` under `macos/build/marks-test/`, then `lake build inspect`, runs `inspect` on `saved.pdf`, and runs `qpdf --check` on it when `qpdf` is installed (skipped with a message otherwise) |
-| `macos/tests/run_select.sh` | runs `select_test WORKER Tests/golden` (selection, copy, search, Find Next/Previous steps) |
+| `macos/tests/run_select.sh` | runs `select_test WORKER Tests/golden` (selection, copy, search, Find Next/Previous steps, pointer and links, the allowance) |
 | `macos/tests/run_all.sh` | compiles `tests/all_headers.c` (all four headers, `-Wall -Wextra -Werror`), runs the four scripts above in turn, then lists the global symbols the four `safepdf_*.o` objects define (`nm -g -U`) and fails on a duplicate. Prints one summary line; exit status is non-zero on any failure |
 
-`lake build macosFfi` is also a step of the Linux CI `build` job, so the `#guard`s of
-`FfiView.lean`, `FfiMarks.lean`, `FfiSelect.lean` and `Ffi/Flat.lean` run there. The C tests
-themselves are not run in CI yet (task 11.4).
+Counts on 2026-11-24 (task 11.3f, `macos/tests/run_all.sh`): `core_test: 144 checks, 0 failures`, `view_test: 314 checks, 0
+failures`, `marks_test: 148 checks, 0 failures`, `select_test: 70 checks, 0 failures`, `no duplicate
+global symbols (193 defined in 4 objects)`, `run_all.sh: ok`.
 
-# The Swift app (tasks 11.3b, 11.3c1, 11.3c2)
+`lake build macosFfi` is also a step of the Linux CI `build` job, so the `#guard`s of
+`FfiView.lean`, `FfiMarks.lean`, `FfiSelect.lean` and `Ffi/Flat.lean` run there. Since task 11.4 the
+CI `macos` job runs `macos/tests/run_all.sh`.
+
+# The Swift app (tasks 11.3b to 11.3f)
 
 Native AppKit shell in Swift 6 (strict concurrency) over the C API v2; unverified shell code that
-only moves data between AppKit and the core. Menubar and toolbar from the exported tables, a
-document window with an empty sidebar (11.3d), pages rendered through the worker with the Tk
-viewer's zoom, rotation and pinch (11.3c1) and, since 11.3c2, its navigation: the four view modes
-with odd / even spreads and right to left, page-at-a-time wheel and keys in the page scroll mode,
-the current-page rule, an editable page field with page labels, back / forward, the document's
-open settings on every open, the subtitle `page k/n · zoom`, a status pill for notes and errors,
-and titlebar flags for repaired and encrypted files. Commands it does not implement yet
-(selection, find, sidebar panels: 11.3d; marks and save: 11.3e) stay disabled (`Commands.swift`).
+only moves data between AppKit and the core (Plan.md §8). Every rule with a theorem or a `#guard`
+is a call into the Tk viewer's own Lean code through the four headers; Swift converts values,
+keeps transient UI state and draws. Every exported command is implemented (`Commands.swift`:
+none pending since 11.3e2).
 
 ## Sources (`macos/App/`)
 
 | File | Role (from its header comment) |
 |---|---|
 | `main.swift` | Entry point: `SafePdf [FILE.pdf]`, or the headless self-test when `SAFEPDF_MACOS_SELFTEST=DIR` is set |
-| `AppDelegate.swift` | Application life cycle: menubar, the document window, files from Finder and `open -a`, About and Quit |
+| `AppDelegate.swift` | Application life cycle: menubar, the document window, files from Finder and `open -a`, About and Quit; the unsaved-marks question before quitting and before opening another file |
 | `ChromeTables.swift` | Swift copies of the exported chrome tables (every C struct copied into Swift values and freed at once) |
-| `Commands.swift` | Which exported commands this shell implements yet; `pendingTask` names the task that implements the rest |
+| `Commands.swift` | Which exported commands this shell implements (all since 11.3e2) |
 | `CoreBridge.swift` | Start-up of the C API and small conversions |
-| `Document.swift` | An open PDF over the C API v2 (a `safepdf_document` reference, released with the object) |
-| `DocumentToolbar.swift` | The unified toolbar built from the exported toolbar table |
-| `DocumentWindowController.swift` | The document window: unified toolbar, split view with sidebar and page area, command routing and enabled states |
+| `Document.swift` | An open PDF over the C API v2 (a `safepdf_document` reference, released with the object): exact page geometry, open settings, page labels |
+| `DocumentToolbar.swift` | The unified toolbar built from the exported toolbar table (SF Symbols, the Tk bar's order) |
+| `DocumentWindowController.swift` | The document window: toolbar, split view with sidebar and page area, command routing and enabled states, zoom and rotation commands, view modes, page field, back/forward, open settings, subtitle, titlebar flags, Copy / Find, the sidebar and full screen, Save / Save As / XFDF and the unsaved-marks question |
+| `FindController.swift` | Find, Find Next / Previous and highlight-all on the page view |
+| `FullScreen.swift` | Native full screen with the trusted file-identity line |
 | `KeyEquivalents.swift` | Neutral keys (Menu.lean's key table) to AppKit key equivalents |
+| `LinkController.swift` | Following links on the page view; the external-link sheet (Copy Address / Cancel) |
 | `MainMenu.swift` | The menubar built from the exported menu table |
-| `PageCanvasView.swift` | The pages, laid out by `safepdf_view_layout` and drawn from renders |
-| `PageViewController.swift` | The content item: an `NSScrollView` over the page canvas |
-| `Rendering.swift` | Asynchronous page renders through `safepdf_doc_render` |
+| `MarksController.swift` | Marks on the page view: the tools, highlights and notes, free text and drawings, selecting, moving, recolouring and deleting marks, undo/redo, the selection bubble and Escape |
+| `MarksModel.swift` | The marks store of one document over `safepdf_marks.h`, created from the document's bytes |
+| `MarksPreview.swift` | The preview of edited saved marks: a second document over its own worker |
+| `MarksViews.swift` | The views of the marks: the bubble and colour picker, the note editor, the free-text box, the tools' pop-overs |
+| `PageCanvasView.swift` | The pages, laid out by `safepdf_view_layout` and drawn from renders; the keys the menu cannot carry |
+| `PageViewController.swift` | The content item: an `NSScrollView` over the page canvas; zoom, pinch, rotation and the navigation rules |
+| `Rendering.swift` | Asynchronous page renders through `safepdf_doc_render` (zero-copy into a `CGImage`) |
+| `SaveController.swift` | Save, Save As…, the unsaved-marks question and XFDF import / export |
+| `Selection.swift` | Text selection on the page view, Copy and Select All, the pointer's cursor |
 | `SelfTest.swift` | The headless self-test (below) |
-| `SelfTestNav.swift` | The self-test's checks of task 11.3c2 (navigation, modes, page field, history, open settings, subtitle, pill, flags) |
-| `StatusPill.swift` | The transient status pill: `NSGlassEffectView` on macOS 26, a HUD material on 14/15 |
-| `ViewNav.swift` | View modes, spreads, wheel steps, history, page text and open settings through the C API |
+| `SelfTestNav.swift` | The self-test's checks of 11.3c2 (navigation, modes, page field, history, open settings, subtitle, pill, flags) |
+| `SelfTestText.swift` | The self-test's checks of 11.3d1 (selection, copy, cursor, find, links) |
+| `SelfTestSidebar.swift` | The self-test's checks of 11.3d2 and 11.3f (thumbnails, outline, attachments with the size probe and the icon click, layers, page modes, identity line) |
+| `SelfTestMarks.swift` | The self-test's checks of 11.3e1 (marks on the page) |
+| `SelfTestSave.swift` | The self-test's checks of 11.3e2 and 11.3f (Save, XFDF, the preview and the thumbnails following it) |
 | `Sheets.swift` | Open and save panels and alerts as document-modal sheets |
-| `SidebarViewController.swift` | The sidebar item with its four panels, empty for now |
+| `SidebarViewController.swift` | The sidebar item with its four panels and the switcher; wires them to the page view |
+| `SidebarModel.swift` | The sidebar's rules through the C API |
+| `SidebarThumbnails.swift` | The thumbnails panel |
+| `SidebarOutline.swift` | The outline panel and the tree both tree panels use |
+| `SidebarAttachments.swift` | The attachments panel |
+| `SidebarLayers.swift` | The layers panel |
+| `StatusPill.swift` | The transient status pill: `NSGlassEffectView` on macOS 26, a material on 14/15 |
+| `TextStore.swift` | The per-document cache of page text indexes and links |
+| `ViewNav.swift` | View modes, spreads, wheel steps, history, page text and open settings through the C API |
+| `ZoomModel.swift` | The zoom and rotation rules through `safepdf_view.h` |
 
 Swift sees the C API through `module.modulemap`: one Clang module, `SafePdfC`, made of
 `safepdf_core.h`, `safepdf_view.h`, `safepdf_marks.h` and `safepdf_select.h`; the sources say
 `import SafePdfC`. `swiftc -I macos` finds the module map.
 
+## Viewing (11.3c1, 11.3c2)
+
+* **Zoom**: Zoom In / Out step through `View.stepInZ` / `stepOutZ` on the effective, quantised
+  zoom; the toolbar's zoom drop-down offers the `ZoomChoice` presets (Automatic Zoom, Actual
+  Size, Page Fit, Page Width, percentages). Every zoom or rotation change notes the page point
+  under the anchor (the pointer, else the window centre) and scrolls so that `View.reanchor`'s
+  image of it lies there again. ⌘-scroll zooms at the pointer (the Tk viewer's
+  Command-MouseWheel binding).
+* **Pinch**: live magnification (the bitmap scales during the gesture), committed to a quantised
+  zoom at the gesture's end; smart magnify (two-finger double tap) is ignored. The sharp render
+  cross-fades over the scaled image.
+* **Rotation**: quarter turns clockwise and counter-clockwise, re-anchored as zoom.
+* **View modes**: the view-mode drop-down's four choices (page or vertical scrolling, with or
+  without two-page spreads) with odd / even spreads and `/Direction /R2L` mirroring; in the page scroll mode only the
+  current spread is laid out and the wheel and Space / arrows turn pages at the edges
+  (`View.wheelStep`). The current page is the page the viewer went to while the view stays there,
+  else the page under the window centre.
+* **Page field**: the toolbar field shows `Toolbar.entryText` with "of N" or "(k of N)" for page
+  labels; Return goes there (`Toolbar.pageEntry`), an invalid entry reverts.
+* **History**: Back / Forward over `Links.History` (at most 100 places each way); jumps from links,
+  the outline, thumbnails and the page field are recorded.
+* **Open settings**: every open starts afresh and applies the document's settings
+  (`safepdf_doc_open_settings`): `/PageLayout`, `/Direction`, the `/OpenAction` destination and
+  its zoom, the window title from `/DisplayDocTitle`, `/PageMode` for the sidebar; what is not
+  honoured goes to the status pill.
+* **Window and status**: title = document name with the proxy icon, subtitle `page k/n · zoom`
+  (page labels as in Tk); the transient status pill (bottom centre, 4 s, then fades) shows notes
+  and errors (the 10 Mpx per-page cap, open-settings notes, render errors); a titlebar accessory
+  flags repaired and encrypted files.
+
+## Text (11.3d1)
+
+* **Selection**: a drag selects on the page it started on, from the glyph nearest the press point
+  to the glyph nearest the pointer (`Select.dragRange`; as Tk); a double click selects the word,
+  a triple click the line, shift-click extends from where the selection started. The selection is
+  one band per line (`Select.selBands`) in the system accent colour at 35 %.
+* **Copy** and **Select All**: Copy puts `Select.rangeText` on the clipboard and the pill shows
+  `Select.copyStatus`, which counts text from glyphs the page does not paint (task 12.5).
+* **Find**: the toolbar's search field (⌘F; ⌘G / ⇧⌘G for next / previous) with the Tk viewer's
+  messages ("hit k/c on page p", per page as in Tk; "not found"; "search: empty query"); the
+  order is `Select.searchStep`, pages are indexed as needed under the work allowance (400 pages,
+  60 s); highlight-all draws every hit on the visible pages in yellow and the current one in
+  orange.
+* **Links**: a click in place follows the link under it (`Links.linkAt`): a destination in the
+  document is a jump recorded in the history; **an external URI is never opened** — a
+  document-modal sheet shows the exact address with **Copy Address** and **Cancel** (Copy Address
+  only puts it on the clipboard); any other action (Launch, GoToR, JavaScript, an unknown
+  destination) is described in the pill and not followed. The app makes no `NSWorkspace` call.
+* **Cursor**: `Toolbar.cursorFor` over what lies under the pointer (text, link, mark).
+
+## Sidebar (11.3d2, 11.3f)
+
+The sidebar (an `NSSplitViewController` sidebar item) has four panels switched by a segmented
+control showing only the panels the document has (`Sidebar.buttons`: thumbnails always, the
+outline, attachments and layers when present). When the outline, attachments and layers are
+known, it opens as `/PageMode` says (`Sidebar.onLoad`: UseThumbs, UseOutlines, UseAttachments,
+UseOC when the content exists; without a page mode the outline when there is one; UseNone and
+FullScreen keep it closed); the toggle reopens the last panel chosen while the document has it
+(`Sidebar.pick`).
+
+* **Thumbnails**: laid out by `Sidebar.thumbLayout`; only the visible ones and `thumbMargin` more
+  each side are rendered, through the worker at the thumbnail priority, at most 2 in flight;
+  requests scrolled away are cancelled; at most `thumbBudget` (40) images are kept, rendered at
+  ½–⅛ scale when needed to fit the 32 MiB reserve. The current page's thumbnail is highlighted
+  and follows the view; a click (or Return on the keyboard selection) jumps. Thumbnails use the
+  layers state of the page view and, while saved marks are edited, the same preview document as
+  the pages (11.3f, as Tk's `State.view`); marks not yet saved are drawn only on the page view
+  (as in Tk).
+* **Outline**: an `NSOutlineView` tree (`Sidebar.rows`, `initialOpen`); a click activates the
+  destination (a jump in the history; an external address goes to the same Copy Address sheet).
+* **Attachments**: listed without decoding (name, the size known without decoding, a tooltip with
+  description, type, dates, page, problem). Save Attachment As… (double-click, Return, the context
+  menu) decodes, then asks with an `NSSavePanel` and refuses `Attach.targetProblem`'s targets.
+  There is no open, open-with or Quick Look action: nothing launches an attachment. A click on a
+  file attachment annotation's icon on the page opens the sidebar on this panel and selects its
+  row (11.3f, `Viewer.attSelect`). When a row's tooltip is about to show and its size is unknown
+  (a filtered stream, "?"), it is decoded once in the background and the size column shows the
+  decoded size (11.3f, `Viewer.attProbe`; see the deviation under "Known limitations").
+* **Layers**: the optional-content tree with checkboxes (`Sidebar.layerRows`); a click is
+  `safepdf_layers_toggle` (radio groups, locked groups); pages and thumbnails re-render under the
+  new state, which is never written to the file. Every open starts with the default state.
+
+## Full screen (11.3d2)
+
+Native full screen. While the window is in full screen a dark strip at the bottom of the page area
+reads the trusted identity line (`safepdf_identity_line`: the cleaned file name and path, never
+the document's `/Title`); the page view ends above it, so nothing the document draws can cover
+it. A document's `/PageMode /FullScreen` enters full screen on open with the note "full screen
+(Escape leaves)"; Escape leaves, and the sidebar then follows `/NonFullScreenPageMode`.
+
+## Marks (11.3e1)
+
+* **Tools**: Select text, Highlight, Add comment, Add text, Draw (exactly one pressed,
+  `safepdf_marks_ui_step`); the Highlight and Add text / Draw pop-overs (`NSPopover`) set the
+  colour, font size, thickness and opacity; Escape closes the topmost transient and keeps the tool
+  (`safepdf_marks_escape_closes`).
+* **Bubble**: after a selection a floating bar (glass on macOS 26, a material before) offers the
+  five highlight colours and Comment (plus Copy, a native addition); on a selected highlight the
+  edit bubble offers its colour (the picker), Comment and Delete. Placement is `Bubble.place`.
+* **Notes**: Add comment anchors by `Marks.noteAnchor` (the clicked point, or the selection's
+  quads); the note editor is an `NSPopover` with Delete, Cancel and Save (⌘Return); closing it
+  without Save follows `safepdf_marks_note_close`.
+* **Edit**: a click on a mark selects it; free text and drawings move by dragging; a double click
+  edits a text box in place (Escape or a click elsewhere commits); a drawing session's strokes are
+  one mark; a slider drag is one undo step. Delete removes the selected mark (a highlight's comment
+  goes with it). Undo / Redo (⌘Z / ⇧⌘Z) step the store's history.
+* Saved marks are painted by the renderer; new ones are drawn by the page view over it.
+
+## Save, Save As, XFDF (11.3e2)
+
+The Tk viewer's flow step for step, every rule and text from `safepdf_marks.h`: Save writes the
+marks as an incremental update (the original bytes stay a prefix, C7); the first overwrite of the
+opened file asks Overwrite / Save As… / Cancel; a file changed on disk since it was opened offers
+Save As… / Cancel; Save As… proposes `STEM-annotated.pdf`, takes the opened file's own name
+only after `Save.openedOverwriteQuestion` and refuses folders and read-only targets
+(`Save.targetProblem`); the write is atomic (a temporary file in the
+target's folder, read back, permissions copied, renamed). An encrypted file is saved only with 64
+fresh bytes from `SecRandomCopyBytes`. After a save the file is reopened keeping view mode, zoom,
+rotation, page and sidebar. Closing the window, quitting or opening another file with unsaved
+marks asks Save / Don't Save / Cancel (a failed save aborts the close). Import XFDF adds the marks
+not already present (one undo step; a refused file changes nothing); Export XFDF writes
+`STEM.xfdf`. Output is capped at `safepdf_marks_output_ceiling` (half of it for an export).
+
+## Preview of edited saved marks (11.3e2, 11.3f)
+
+While saved marks are changed or deleted, the pages show the document as the next save will write
+it: `safepdf_marks_preview` builds the bytes on a background queue from a snapshot of the store,
+and they are opened with `safepdf_doc_open_bytes` as a **second document over its own confined
+worker**. The page canvas and (11.3f) the thumbnails send their renders there; layout, text and
+links stay with the opened document, as in Tk. A newer edit supersedes a preview still being
+built; an error leaves the pages as they are and the pill says why; undoing back to the file's
+state renders from the document itself again. Preview documents are released on a background
+queue.
+
 ## Build
 
 ```
-macos/build.sh        # needs elan's Lean and the Xcode command line tools only
+macos/build.sh            # needs elan's Lean and the Xcode command line tools only
+lake build macosApp       # macOS only: macosFfi + worker, then macos/build.sh -> macos/build/SafePdf.app
+lake build app            # the platform viewer: macosApp on macOS, the Tk viewer + worker elsewhere
+lake build viewer worker  # the Tk viewer on Linux or macOS (needs Tk through pkg-config)
 ```
+
+The Lake targets come from task 11.4 (`lakefile.lean`): `macosApp` builds `macosFfi` and `worker`
+and then runs `macos/build.sh` with `SAFEPDF_MACOS_LAKE_DONE=1` (so the script does not build them
+again). `macos/build.sh` still works on its own and builds `macosFfi` and `worker` itself. CI has
+a `macos` job (runner `macos-26`) that runs `lake build`, `macosFfi` / `worker`, `macos/build.sh`,
+`macos/tests/run_all.sh`, the headless self-test and `codesign`.
 
 `build.sh` runs `lake build macosFfi worker`, compiles the four C shims with `clang` at
 `-mmacosx-version-min=14.0`, links `App/*.swift` with `swiftc` against the shims,
@@ -267,32 +591,64 @@ SAFEPDF_SELFTEST_BUNDLE=1 macos/selftest.sh FILE.pdf    # the bundle's binary in
 ```
 
 `SAFEPDF_MACOS_SELFTEST=DIR` makes `main.swift` set the activation policy to Prohibited before
-anything else; there is no window and the app never calls `run` or activates. `SelfTest.swift`
-checks that the chrome tables build (every command in the menubar, every toolbar item), open and
-its error path, page 1 through `safepdf_doc_render` at 1x and 2x, pages 1 to 10 at 2x, the real
-scroll view and page canvas at 1x and 2x backing, scrolling to page 2 and dark mode; zoom,
-pinch, rotation and backing changes (11.3c1); and (11.3c2, `SelfTestNav.swift`) the current-page
-rule after Last page, every view-mode choice with its spreads, right to left, Next / Previous by
-spreads, the wheel and Space / Up turning pages in the page scroll mode, the page field (Return,
-an invalid entry), back / forward, the subtitle with the document's page labels, the 10 Mpx cap
-pill, the titlebar flags, and open settings on generated files written to `DIR/opensettings/`
-(no golden has `/PageLayout` or `/OpenAction`; the files are those of the Tk smoke case 1s: an
-`/XYZ` open action, `TwoPageLeft` + `/R2L`, `TwoColumnRight`, a named GoTo, a JavaScript action,
-the hiding preferences with `/DisplayDocTitle`, none). It writes PNGs and `timings.txt` to DIR,
-prints `failures: N` and exits 0 when `N` is 0.
+anything else; there is no window and the app never calls `run` or activates. Give `OUTDIR` as an
+absolute path. `SelfTest.swift` checks that the chrome tables build (every command in the menubar,
+every toolbar item), open and its error path, page 1 through `safepdf_doc_render` at 1x and 2x,
+pages 1 to 10 at 2x, the real scroll view and page canvas at 1x and 2x backing, scrolling to page
+2 and dark mode; zoom, pinch, rotation and backing changes (11.3c1); then, in order:
+
+* `SelfTestNav.swift` (11.3c2): the current-page rule after Last page, every view-mode choice with
+  its spreads, right to left, Next / Previous by spreads, the wheel and Space / Up turning pages in
+  the page scroll mode, the page field (Return, an invalid entry), back / forward, the subtitle
+  with the document's page labels, the 10 Mpx cap pill, the titlebar flags, and open settings on
+  generated files written to `DIR/opensettings/` (the files of the Tk smoke case 1s);
+* `SelfTestText.swift` (11.3d1): selection by drag, double / triple click and shift-click, the
+  accent-coloured bands, Select All and Copy (onto a private pasteboard), the cursor, Find Next /
+  Previous with wrap and highlight-all, the NEED path across pages, and links on
+  `pages/tree.pdf` (an internal jump with history; an external address reaches the sheet, built,
+  never shown or opened);
+* `SelfTestSidebar.swift` (11.3d2, 11.3f): thumbnails (sizes, lazy rendering, cancellation, the
+  budget on a generated 60-page file, the highlight, a click's jump), the outline of
+  `pages/outline.pdf`, the attachments of a generated `att.pdf` (listing, saving, refused targets;
+  11.3f: the tooltip's size probe of a filtered attachment — one probe, kept — and a click on the
+  file attachment icon on page 2 opening the attachments panel with its row selected), the layers
+  of a generated `oc.pdf`, the page modes' panels, and the identity line;
+* `SelfTestMarks.swift` (11.3e1): highlights through the real pointer path and the bubble, the
+  picker, comments and notes, free text, ink, undo / redo, the tools and cursors, the Edit
+  commands' states, saved marks listed after a reopen;
+* `SelfTestSave.swift` (11.3e2, 11.3f): Save on a copy in `DIR/save/` through the real controller
+  with scripted dialogs (overwrite question, C7 prefix, reopen keeping the view, a second save
+  appending, the preview after deleting a saved highlight — pixels — and, 11.3f, the thumbnails
+  rendered from that preview and back from the file after the undo), encrypted files, the
+  changed-on-disk check, the unsaved-marks question, XFDF export / import.
+
+It writes PNGs and `timings.txt` to DIR, prints `failures: N` and exits 0 when `N` is 0.
 
 `selftest.sh` samples `lsappinfo front` every 0.5 s and checks `lsappinfo list` for a Foreground
 registration, both only for the PID the script started (a copy launched by hand is ignored; the
 match is by PID, so it covers the names `safepdf-mac`, `SafePdf` and `SafePDF`). It kills only
-that PID if either shows up, and reports `leaks: N`.
+that PID if either shows up, and reports `leaks: N`. When `lsappinfo` reports no front
+application at all (a session without a window server, as on a CI runner), it prints a SKIP line
+for the watcher instead (task 11.4).
 
-## Known limitation (open question for the human)
+Results on 2026-11-24 (task 11.3f): `failures: 0` and `leaks: 0` on `text/latin.pdf`, `pages/tree.pdf` and
+`pages/outline.pdf`, and on `text/latin.pdf` with `SAFEPDF_SELFTEST_BUNDLE=1`.
 
-`Info.plist` sets `LSMinimumSystemVersion` to 14.0 and `build.sh` compiles and links for macOS 14.0,
-but the pinned Lean toolchain's runtime libraries (`libgmp.a`, `libuv.a`) are built for a newer
-macOS (15). The linker warns once per object (counted by `build.sh`, full text in
-`build/swift-link.log`). Whether the bundle runs on macOS 14 is therefore not established; whether
-to raise the minimum is a decision for the human.
+## Known limitations
+
+* **Minimum macOS (open question for the human).** `Info.plist` sets `LSMinimumSystemVersion` to
+  14.0 and `build.sh` compiles and links for macOS 14.0, but the pinned Lean toolchain's runtime
+  libraries (`libgmp.a`, `libuv.a`) are built for a newer macOS (15). The linker warns once per
+  object (counted by `build.sh`, full text in `build/swift-link.log`). Whether the bundle runs on
+  macOS 14 is therefore not established; whether to raise the minimum is a decision for the
+  human.
+* **Attachment size probe** (11.3f): the Tk viewer's tooltip probe lowers the per-stream decoding
+  cap to 16 MB (`Attach.probeLimit`; a larger file shows "> 16 MB"). `safepdf_doc_attachment_bytes`
+  has no cap parameter, so the app's probe decodes under the viewer's own limits (as Save
+  Attachment As… does) and a larger file shows its decoded size. The tooltip text is the C API's
+  (`Attach.tooltip` without a probe outcome), so a probed row's tooltip still names the stored
+  size; the size column shows the decoded one. Matching Tk exactly needs a capped variant of the
+  bytes request in `safepdf_core.h`.
 
 
 # History: the AppKit spike (task 11.1) — superseded

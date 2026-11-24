@@ -13,6 +13,12 @@
 // rendered at the backing scale, at ½–⅛ of it when thumbBudget images would not fit the 32 MiB
 // thumbnail reserve (task 12.3b's sizing rule, `SidebarRules.scale`). Nothing renders while the
 // panel is hidden. Thumbnails show the layers state of the page view.
+//
+// Marks (task 11.3f): as in the Tk viewer (`Viewer.renderTask` / `workerFor` render thumbnails
+// from `State.view`), while saved marks are changed or deleted the thumbnails are rendered from
+// the same preview document as the pages (`setRenderSource`, fed by
+// `PageCanvasView.onRenderSource`), so an edited or deleted saved mark shows there too. Marks
+// not yet saved are drawn by the page view's overlay only, not on thumbnails (as in Tk).
 
 import AppKit
 import SafePdfC
@@ -163,6 +169,11 @@ final class ThumbnailsPanel: NSView, NSCollectionViewDataSource, NSCollectionVie
     private(set) var inflight: [Int: safepdf_request_id] = [:]
     /// The current page (highlighted).
     private(set) var current = 0
+    /// The preview of edited saved marks the thumbnails are rendered from (task 11.3f, the Tk
+    /// viewer's `State.view`); nil: the document itself.
+    private(set) var renderSource: PreviewSource?
+    /// The handle thumbnail renders go to now (and are cancelled on).
+    private var renderHandle: OpaquePointer? { renderSource?.handle ?? document?.handle }
     /// Rendering happens only while the panel is shown.
     var active = false { didSet { if active && !oldValue { updateRenders() } } }
     /// Backing scale to use instead of the window's (the self-test, off screen).
@@ -214,6 +225,7 @@ final class ThumbnailsPanel: NSView, NSCollectionViewDataSource, NSCollectionVie
     func setDocument(_ doc: Document?, quarters q: UInt32, current page: Int) {
         cancelAll()
         images.removeAll()
+        renderSource = nil
         document = doc
         labels = doc?.labels ?? []
         current = page
@@ -315,8 +327,9 @@ final class ThumbnailsPanel: NSView, NSCollectionViewDataSource, NSCollectionVie
         let want = SidebarRules.wanted(heights: slots.map { UInt32($0.h) }, top: UInt64(top.rounded(.down)),
                                        bottom: UInt64(bottom.rounded(.up)))
         let wantSet = Set(want)
+        let handle = renderHandle ?? doc.handle
         for (p, id) in inflight where !wantSet.contains(p) {
-            safepdf_doc_cancel(doc.handle, id)
+            safepdf_doc_cancel(handle, id)
             inflight[p] = nil
             cancelledCount += 1
         }
@@ -355,7 +368,8 @@ final class ThumbnailsPanel: NSView, NSCollectionViewDataSource, NSCollectionVie
     private func submit(_ p: Int, doc: Document) {
         guard slots.indices.contains(p), let key = renderKey(slots[p]) else { return }
         let gen = generation
-        let id = Rendering.submit(doc, page: p, key: key, priority: Int32(SAFEPDF_PRIO_THUMBNAIL)) { [weak self] res in
+        let id = Rendering.submit(handle: renderHandle ?? doc.handle, layers: doc.layers, page: p, key: key,
+                                  priority: Int32(SAFEPDF_PRIO_THUMBNAIL)) { [weak self] res in
             self?.done(res, generation: gen)
         }
         if id != 0 { inflight[p] = id }
@@ -375,14 +389,36 @@ final class ThumbnailsPanel: NSView, NSCollectionViewDataSource, NSCollectionVie
     }
 
     private func cancelAll() {
-        if let doc = document {
-            for (_, id) in inflight { safepdf_doc_cancel(doc.handle, id) }
+        if let h = renderHandle {
+            for (_, id) in inflight { safepdf_doc_cancel(h, id) }
         }
         inflight.removeAll()
     }
 
+    /// The thumbnails are rendered from `source` from now on (task 11.3f; the page canvas's
+    /// `onRenderSource`: a new preview of edited saved marks, or nil for the document itself, as
+    /// Viewer.updatePreview's new generation lays the Tk thumbnails out again). Running requests
+    /// are cancelled and every thumbnail is rendered again. Returns whether the source changed.
+    @discardableResult
+    func setRenderSource(_ source: PreviewSource?) -> Bool {
+        guard document != nil, source !== renderSource else { return false }
+        cancelAll()
+        renderSource = source
+        sourceChanges += 1
+        rerenderAll()
+        return true
+    }
+
+    /// Changes of the rendering source so far (the self-test counts them).
+    private(set) var sourceChanges = 0
+
     /// The layers state changed (Viewer.applyLayers): every thumbnail is rendered again.
     func layersChanged() {
+        rerenderAll()
+    }
+
+    /// Drops every image and renders the wanted thumbnails again.
+    private func rerenderAll() {
         cancelAll()
         images.removeAll()
         generation += 1

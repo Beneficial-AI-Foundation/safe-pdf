@@ -9,6 +9,18 @@
 // folder, the opened PDF, a read-only file, a folder that is not writable) and writes exactly the
 // decoded bytes atomically. There is no open, open-with or quick-look action: nothing launches,
 // opens or interprets an attachment's bytes.
+//
+// Task 11.3f: a click on a file attachment annotation's icon on the page selects its row
+// (`iconAt`, Attach.iconAt: the topmost icon, last in /Annots order; the sidebar opens the panel,
+// Viewer.attSelect). When a row's tooltip is about to show and its size is not known without
+// decoding (a filtered stream: the "?" column), the file is decoded once in the background
+// (Viewer.attProbe) and the size column shows the decoded size (safepdf_attachment_size_after);
+// the result is kept per row, one probe runs at a time, and the bytes are dropped at once.
+// Deviation: the Tk probe lowers the per-stream cap to 16 MB (Attach.probeLimit);
+// safepdf_doc_attachment_bytes has no cap parameter, so a probe here decodes under the viewer's
+// own limits (as Save attachment as... does) and a file larger than 16 MB shows its decoded size
+// instead of "> 16 MB". The tooltip text itself is the C API's (Attach.tooltip without a probe
+// outcome).
 
 import AppKit
 import SafePdfC
@@ -49,10 +61,28 @@ struct AttachmentRow {
     }
 }
 
-final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+/// A file attachment annotation's icon (safepdf_attachment_icon): page, rectangle, row.
+struct AttachmentIcon {
+    let page: Int
+    let rect: safepdf_box
+    let entry: Int
+}
+
+final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
+    NSViewToolTipOwner {
     let scroll = NSScrollView()
     let table = AttachmentTableView()
     private(set) var rows: [AttachmentRow] = []
+    /// The file attachment annotations' icons (task 11.3f).
+    private(set) var icons: [AttachmentIcon] = []
+    /// Rows whose decoding was tried (a probe or a save) and whether it worked (task 11.3f).
+    private(set) var decoded: [Int: Bool] = [:]
+    /// Decoding errors by row (the status text of a selected row).
+    private var decodeErrors: [Int: String] = [:]
+    /// The probe in flight: its row and request id.
+    private(set) var probing: (row: Int, id: safepdf_request_id)?
+    /// Probes started so far (the self-test counts them).
+    private(set) var probes = 0
     private(set) weak var document: Document?
     /// A status message (the pill).
     var onStatus: ((String) -> Void)?
@@ -96,13 +126,19 @@ final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate
 
     /// Lists the attachments of `doc` (nil: none); `done(hasAttachments)` once they arrived.
     func load(_ doc: Document?, done: @escaping @MainActor (Bool) -> Void) {
+        if let p = probing, let old = document { safepdf_doc_cancel(old.handle, p.id) }
+        probing = nil
+        decoded = [:]
+        decodeErrors = [:]
         document = doc
         rows = []
+        icons = []
         table.reloadData()
         guard let doc else { done(false); return }
-        let ticket = AttachmentsTicket { [weak self, weak doc] rs in
+        let ticket = AttachmentsTicket { [weak self, weak doc] rs, ics in
             guard let self, let doc, self.document === doc else { return }
             self.rows = rs ?? []
+            self.icons = ics.filter { self.rows.indices.contains($0.entry) }
             self.table.reloadData()
             done(!self.rows.isEmpty)
         }
@@ -115,16 +151,23 @@ final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate
 
     private static let listCallback: safepdf_attachments_fn = { context, _, status, _, list in
         var rows: [AttachmentRow]? = nil
+        var icons: [AttachmentIcon] = []
         if status == SAFEPDF_STATUS_OK, let l = list, let items = l.pointee.items {
             rows = (0..<l.pointee.count).map { AttachmentRow(items[$0]) }
+            if let ics = l.pointee.icons {
+                icons = (0..<l.pointee.icon_count).map {
+                    AttachmentIcon(page: ics[$0].page, rect: ics[$0].rect, entry: ics[$0].entry)
+                }
+            }
         }
         safepdf_free_attachments(list)
         guard let context else { return }
         let bits = UInt(bitPattern: context)
         let copied = rows
+        let copiedIcons = icons
         MainActor.assumeIsolated {
             guard let ctx = UnsafeMutableRawPointer(bitPattern: bits) else { return }
-            Unmanaged<AttachmentsTicket>.fromOpaque(ctx).takeRetainedValue().deliver(copied)
+            Unmanaged<AttachmentsTicket>.fromOpaque(ctx).takeRetainedValue().deliver(copied, copiedIcons)
         }
     }
 
@@ -138,16 +181,9 @@ final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate
             done(nil, "cannot save attachment \(row.name): \(row.problemText)")
             return
         }
-        let ticket = BytesTicket { [weak self] data, error in
-            guard let self else { return }
-            if self.rows.indices.contains(i) {
-                let fields = self.rows[i].sizeFields
-                let after = withUnsafePointer(to: fields) {
-                    Core.take(safepdf_attachment_size_after($0, data != nil, UInt64(data?.count ?? 0)))
-                }
-                if let after { self.rows[i].sizeText = after }
-                self.table.reloadData(forRowIndexes: IndexSet(integer: i), columnIndexes: IndexSet(integer: 1))
-            }
+        let ticket = BytesTicket { [weak self, weak doc] data, error in
+            guard let self, let doc, self.document === doc else { return }
+            self.record(i, data: data, error: error)
             if let data { done(data, nil) } else { done(nil, "cannot save attachment \(row.name): \(error ?? "decoding failed")") }
         }
         let ctx = Unmanaged.passRetained(ticket).toOpaque()
@@ -171,6 +207,92 @@ final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate
             guard let ctx = UnsafeMutableRawPointer(bitPattern: bits) else { return }
             Unmanaged<BytesTicket>.fromOpaque(ctx).takeRetainedValue().deliver(copied, err)
         }
+    }
+
+    /// Keeps what decoding row `i` gave (Viewer.attRecord): its size column after decoding
+    /// (safepdf_attachment_size_after) and whether it worked. A cancelled request is not kept.
+    private func record(_ i: Int, data: Data?, error: String?) {
+        guard rows.indices.contains(i), data != nil || error != "cancelled" else { return }
+        decoded[i] = data != nil
+        if data == nil { decodeErrors[i] = error ?? "decoding failed" }
+        let fields = rows[i].sizeFields
+        let after = withUnsafePointer(to: fields) {
+            Core.take(safepdf_attachment_size_after($0, data != nil, UInt64(data?.count ?? 0)))
+        }
+        if let after { rows[i].sizeText = after }
+        table.reloadData(forRowIndexes: IndexSet(integer: i), columnIndexes: IndexSet(integer: 1))
+    }
+
+    // MARK: the tooltip's size probe (Viewer.attProbe, task 11.3f)
+
+    /// Whether row `i`'s size is unknown until it is decoded: an embedded stream without a listed
+    /// size, no problem, not decoded yet.
+    func needsProbe(_ i: Int) -> Bool {
+        guard rows.indices.contains(i) else { return false }
+        let r = rows[i]
+        return r.hasStream && !r.hasSize && r.problem == 0 && decoded[i] == nil
+    }
+
+    /// Row `i`'s tooltip is about to show: decodes it once in the background when its size is
+    /// unknown (one probe at a time; the bytes are dropped, only the size is kept). Returns
+    /// whether a probe started.
+    @discardableResult
+    func probe(_ i: Int) -> Bool {
+        guard probing == nil, needsProbe(i), let doc = document else { return false }
+        let ticket = BytesTicket { [weak self, weak doc] data, error in
+            guard let self else { return }
+            if self.probing?.row == i { self.probing = nil }
+            guard let doc, self.document === doc else { return }
+            self.record(i, data: data, error: error)
+        }
+        let ctx = Unmanaged.passRetained(ticket).toOpaque()
+        let id = safepdf_doc_attachment_bytes(doc.handle, i, DispatchQueue.main, Self.bytesCallback, ctx)
+        if id == 0 {
+            Unmanaged<BytesTicket>.fromOpaque(ctx).release()
+            return false
+        }
+        probing = (i, id)
+        probes += 1
+        return true
+    }
+
+    /// NSViewToolTipOwner: the tooltip of a row's cell, asked for when it is about to show; starts
+    /// the size probe of that row.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+              userData data: UnsafeMutableRawPointer?) -> String {
+        let r = table.row(for: view)
+        guard rows.indices.contains(r) else { return "" }
+        probe(r)
+        return rows[r].tooltip
+    }
+
+    // MARK: icons on the page and the selected row's text (task 11.3f)
+
+    /// The row of the topmost file attachment annotation icon on `page` containing page point
+    /// (x, y) (Attach.iconAt: the last in /Annots order wins; bounds inclusive).
+    func iconAt(page: Int, x: Double, y: Double) -> Int? {
+        var hit: Int? = nil
+        for ic in icons where ic.page == page &&
+            ic.rect.llx <= x && x <= ic.rect.urx && ic.rect.lly <= y && y <= ic.rect.ury {
+            hit = ic.entry
+        }
+        return hit
+    }
+
+    /// The status text of a selected row (Attach.selectedText): its name, size column, and its
+    /// problem, decoding error or how to save it.
+    func selectedText(_ i: Int) -> String {
+        guard rows.indices.contains(i) else { return "" }
+        let r = rows[i]
+        let what: String
+        if r.problem != 0 {
+            what = r.problemText
+        } else if decoded[i] == false {
+            what = "cannot be decoded: \(decodeErrors[i] ?? "decoding failed")"
+        } else {
+            what = "double-click or right-click → Save attachment as… to save it"
+        }
+        return "attachment \(r.name) (\(r.sizeText)): \(what)"
     }
 
     /// Writes decoded `data` of attachment `i` to `url` (Attach.targetProblem's refusals; an
@@ -284,7 +406,12 @@ final class AttachmentsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate
             cell.textField?.stringValue = r.name
             cell.textField?.textColor = r.problem != 0 ? .secondaryLabelColor : .labelColor
         }
-        cell.toolTip = r.tooltip.isEmpty ? nil : r.tooltip
+        // The tooltip is asked for when it is about to show (it starts the size probe).
+        cell.removeAllToolTips()
+        cell.toolTip = nil
+        if !r.tooltip.isEmpty || needsProbe(row) {
+            cell.addToolTip(NSRect(x: 0, y: 0, width: 4096, height: 256), owner: self, userData: nil)
+        }
         return cell
     }
 }
@@ -304,9 +431,9 @@ final class AttachmentTableView: NSTableView {
 
 /// Who gets the attachment list (retained across the C call, released once by the callback).
 @MainActor final class AttachmentsTicket {
-    let deliver: @MainActor ([AttachmentRow]?) -> Void
+    let deliver: @MainActor ([AttachmentRow]?, [AttachmentIcon]) -> Void
 
-    init(deliver: @escaping @MainActor ([AttachmentRow]?) -> Void) { self.deliver = deliver }
+    init(deliver: @escaping @MainActor ([AttachmentRow]?, [AttachmentIcon]) -> Void) { self.deliver = deliver }
 }
 
 /// Who gets an attachment's bytes.

@@ -60,6 +60,8 @@ final class PageCanvasView: NSView {
     /// Tk viewer's `State.view`: `Save.preview`'s bytes); nil: `document` itself. Layout, text
     /// and links always come from `document`.
     private(set) var renderSource: PreviewSource?
+    /// Told when the rendering source changes (task 11.3f: the thumbnails follow it).
+    var onRenderSource: ((PreviewSource?) -> Void)?
     /// The handle renders go to now.
     private var renderHandle: OpaquePointer? { renderSource?.handle ?? document?.handle }
     /// Backing pixels per point to use instead of the window's (the self-test, off screen).
@@ -392,6 +394,7 @@ final class PageCanvasView: NSView {
             for (_, r) in inflight { safepdf_doc_cancel(h, r.id) }
         }
         renderSource = source
+        onRenderSource?(source)
         return layersChanged()
     }
 

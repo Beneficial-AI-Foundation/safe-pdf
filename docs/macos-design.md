@@ -132,6 +132,34 @@ exported `Save` logic plans the incremental update, native panels and file I/O w
   panels, honest-UI items.
 * **11.3e — Marks and save parity**: tools, bubble, pop-overs, undo/redo, XFDF, Save/Save
   As with the C7 flow.
+
+Status of 11.3 (2026-11-24; details in [macos/README.md](../macos/README.md)):
+
+* **11.3a — done** (11.3a1–a5): the four headers `safepdf_core.h`, `_view.h`, `_marks.h`,
+  `_select.h` over refcounted documents and the confined worker, their C tests and `run_all.sh`.
+* **11.3b — done** (11.3b, b2): the Swift app replacing the spike, `SafePdf.app` with ad-hoc
+  signing, menubar and toolbar from the exported tables, the headless self-test.
+* **11.3c — done** (11.3c1, c2): exact page geometry, zoom model, pinch, rotation; view modes and
+  spreads, page field, history, open settings, subtitle, status pill, titlebar flags.
+* **11.3d — done** (11.3d1, d2): selection, copy, find, links; the four sidebar panels with the
+  `/PageMode` panel; native full screen with the identity strip.
+* **11.3e — done** (11.3e1, e2): marks on the page (tools, bubble, notes, edit, undo); Save, Save
+  As, XFDF, the unsaved-marks prompts and the preview of edited saved marks (a second document
+  over its own worker).
+* **11.3f — done**: docs sync; thumbnails rendered from the preview (as Tk); an attachment icon
+  click opens the attachments panel on its row; the tooltip's attachment size probe.
+
+Deviations already decided (each as the Tk viewer does, unless noted):
+
+* External links are never opened: the sheet offers Copy Address / Cancel (as Tk).
+* A drag selects on the page where it started (as Tk).
+* Find reports counts per page ("hit k/c on page p", as Tk).
+* The attachment size probe decodes under the viewer's limits, not Tk's 16 MB probe cap
+  (`safepdf_doc_attachment_bytes` has no cap parameter; recorded under 11.3f).
+* **Open for the human**: the minimum macOS. `LSMinimumSystemVersion` is 14.0, but the pinned
+  Lean toolchain's runtime libraries are built for macOS 15, so running on macOS 14 is not
+  established.
+
 * **11.4 — Platform build selection + CI** (as planned): macOS builds the native shell,
   Linux keeps Tk; both non-default targets; a macOS CI job.
 * **11.5 — Native smoke**: accessibility-driven scripted session mirroring
