@@ -1,9 +1,10 @@
 import SafePdf.Api
 import SafePdf.Shell.Worker.Client
 import SafePdf.Shell.Worker.Serve
+import Tests.OptionalContent
 
 /-!
-# Document worker, end to end (task 12.2a)
+# Document worker, end to end (tasks 12.2a, 12.2d)
 
 Plan.md §6 Phase 12, "Restricted, stoppable document worker". Spawns the real `worker`
 executable (`.lake/build/bin/worker`, a default build target) through
@@ -25,6 +26,16 @@ executable (`.lake/build/bin/worker`, a default build target) through
   process is gone, and a fresh worker opens and renders the next file.
 * **Overhead**: page 1 at zoom 1 rendered 5 times in-process and through the worker (the
   worker's time includes the frame copy and pipe transfer); printed, not asserted.
+* **Task 12.2d, the viewer's text and links**: for every page (at most 6) of eight golden files
+  and of the optional-content fixture under three layers states, the worker's `pageIndex`
+  answer equals the viewer's in-process index (`Select.PageIndex.ofText` of
+  `Annot.extractDocPageAnnots`) cell for cell — text, separator, box, line, line directions,
+  hidden flags — and the index the viewer rebuilds from it has the same text (byte for byte)
+  and search text; `viewLinks` equals `Links.pageLinks`. Layered renders equal the in-process
+  render under the same state, and differ between states; hidden text follows the state.
+* **Startup flags**: `--no-subst` renders as in process without substitute fonts; a font search
+  naming missing directories renders as the default; `--limits` reaches the worker; an unknown
+  flag ends the worker with status 5.
 -/
 
 namespace SafePdf.Tests.Worker
@@ -95,7 +106,7 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
   let some page := d.doc.pages[0]? | check "page 0 exists" false
   let local_ := (Raster.Glyph.renderDocPage limits d.doc page (3 / 2) .r0
     (Filter.Budget.init limits) (subst := subst)).1
-  match ← c.request (.render 0 (3 / 2) 0), local_ with
+  match ← c.request (.render 0 (3 / 2) 0 none), local_ with
   | .ok (.image w h data), .ok img =>
     f := f + (← check s!"render size {w}x{h} vs {img.w}x{img.h}" (w == img.w && h == img.h))
     f := f + (← check "render bytes equal the in-process render" (data == img.data))
@@ -109,7 +120,7 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
   -- Rotated render too.
   let localR := (Raster.Glyph.renderDocPage limits d.doc page 1 .r90
     (Filter.Budget.init limits) (subst := subst)).1
-  match ← c.request (.render 0 1 1), localR with
+  match ← c.request (.render 0 1 1 none), localR with
   | .ok (.image w h data), .ok img =>
     f := f + (← check "rotated render equals the in-process render"
       (w == img.w && h == img.h && data == img.data))
@@ -130,10 +141,10 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
   | .ok (.text s _), .ok t => f := f + (← check "text with annotations equals Api.pageText" (s == t.text))
   | r, _ => f := f + (← check s!"text with annotations ({describe r})" false)
   -- Bad page, bad rotation, bad zoom.
-  f := f + (← check "page out of range is pageFailed" (isErr .pageFailed (← c.request (.render 99 1 0))))
-  f := f + (← check "rotation 4 is pageFailed" (isErr .pageFailed (← c.request (.render 0 1 4))))
-  f := f + (← check "zoom 0 is pageFailed" (isErr .pageFailed (← c.request (.render 0 0 0))))
-  f := f + (← check "zoom -1 is pageFailed" (isErr .pageFailed (← c.request (.render 0 (-1) 0))))
+  f := f + (← check "page out of range is pageFailed" (isErr .pageFailed (← c.request (.render 99 1 0 none))))
+  f := f + (← check "rotation 4 is pageFailed" (isErr .pageFailed (← c.request (.render 0 1 4 none))))
+  f := f + (← check "zoom 0 is pageFailed" (isErr .pageFailed (← c.request (.render 0 0 0 none))))
+  f := f + (← check "zoom -1 is pageFailed" (isErr .pageFailed (← c.request (.render 0 (-1) 0 none))))
   -- Outline and links of another document, in the same worker.
   let ob ← IO.FS.readBinFile "Tests/golden/pages/outline.pdf"
   let some od := (Api.openBytes ob).toOption | check "outline.pdf opens in process" false
@@ -205,7 +216,7 @@ def killAndRestart (exe : System.FilePath) : IO Nat := do
   let c ← spawn exe
   f := f + (← check "open before kill" (isDoc 1 (← c.request (.openDoc bytes true) (some 10000))))
   let t0 ← nowMs
-  let r ← c.request (.render 0 8 0) (some 20)
+  let r ← c.request (.render 0 8 0 none) (some 20)
   let t1 ← nowMs
   f := f + (← check s!"render at zoom 8 times out after 20 ms ({describe r})"
     (match r with | .error .timeout => true | _ => false))
@@ -218,7 +229,7 @@ def killAndRestart (exe : System.FilePath) : IO Nat := do
   match ← c2.request (.openDoc ob true) (some 10000) with
   | .ok (.docInfo n _ _) =>
     f := f + (← check "a fresh worker opens the next file" (n > 0))
-    match ← c2.request (.render 0 1 0) (some 10000) with
+    match ← c2.request (.render 0 1 0 none) (some 10000) with
     | .ok (.image w h d) => f := f + (← check "a fresh worker renders" (d.size == 4 * w * h && w > 0))
     | r => f := f + (← check s!"fresh render ({describe r})" false)
   | r => f := f + (← check s!"fresh open ({describe r})" false)
@@ -247,7 +258,7 @@ def overhead (exe : System.FilePath) : IO Nat := do
   let s1 ← IO.monoNanosNow
   let mut wsz := 0
   for _ in [0:n] do
-    match ← c.request (.render 0 1 0) with
+    match ← c.request (.render 0 1 0 none) with
     | .ok (.image _ _ data) => wsz := wsz + data.size
     | _ => pure ()
   let t2 ← IO.monoNanosNow
@@ -256,6 +267,194 @@ def overhead (exe : System.FilePath) : IO Nat := do
   IO.println s!"  worker overhead: {n} renders of page 1 at zoom 1 ({sz / n} bytes each): \
     in-process {ms t0 t1} ms, worker {ms s1 t2} ms; spawn + open {ms s0 s1} ms"
   check "overhead: same image sizes" (sz == wsz)
+
+/-! ## Task 12.2d: the viewer's text index, links, layered renders, startup flags -/
+
+/-- The viewer's in-process text index of a page (`App.Viewer.pageIndex` without a worker):
+`Select.PageIndex.ofText` of `Annot.extractDocPageAnnots` under `oc`. -/
+def localIndex (limits : Limits) (d : Api.Document) (page : Doc.Page)
+    (oc : Option Doc.OptionalContent.State) : Except String Shell.App.Select.PageIndex :=
+  match (Annot.extractDocPageAnnots limits d.doc page (Filter.Budget.init limits) (oc := oc)).1 with
+  | .ok pt => .ok (Shell.App.Select.PageIndex.ofText pt)
+  | .error e => .error (Shell.renderError e)
+
+/-- Whether the worker's `pageIndex` answer is the in-process index, field for field, and the
+index rebuilt from it (as the viewer does) has the same text and normalised search text. -/
+def sameIndex (ix : Shell.App.Select.PageIndex) (cs : List Protocol.Cell) (ds : List Nat)
+    (hs : List Bool) : Bool :=
+  let cells := (cs.map fun c =>
+    ({ text := c.text, sep := c.sep, box := c.box, line := c.line } : Shell.App.Select.Cell)).toArray
+  ix.cells.toList.map (fun c => (c.text, c.sep, c.box, c.line)) ==
+      cs.map (fun c => (c.text, c.sep, c.box, c.line)) &&
+    ix.lineDirs.toList == ds && ix.hidden.toList == hs &&
+    (Shell.App.Select.fullText cells).toUTF8 == (Shell.App.Select.fullText ix.cells).toUTF8 &&
+    Shell.App.Select.normChars cells == ix.hay
+
+/-- The text index and the links of every page (at most 6) of `bytes` through the worker `c`
+against the in-process ones, under `oc`. Returns failures and the number of non-empty
+indexes. -/
+def compareDoc (c : Client) (name : String) (bytes : ByteArray)
+    (oc : Option Doc.OptionalContent.State := none) : IO (Nat × Nat) := do
+  let limits := Limits.default
+  let some d := (Api.openBytes bytes).toOption
+    | return (← check s!"{name} opens in process" false, 0)
+  let mut f := 0
+  let mut nonEmpty := 0
+  f := f + (← check s!"{name}: openDoc" (isDoc d.pageCount (← c.request (.openDoc bytes true))))
+  for i in [0:min d.pageCount 6] do
+    let some page := d.doc.pages[i]? | continue
+    match ← c.request (.pageIndex i oc), localIndex limits d page oc with
+    | .ok (.pageIndex cs ds hs), .ok ix =>
+      if !cs.isEmpty then nonEmpty := nonEmpty + 1
+      f := f + (← check s!"{name} p{i + 1}: text index equals the in-process index \
+        ({cs.length} cells)" (sameIndex ix cs ds hs))
+    | .ok (.error _ m), .error m' =>
+      f := f + (← check s!"{name} p{i + 1}: same text error ({m} / {m'})" (m == m'))
+    | r, _ => f := f + (← check s!"{name} p{i + 1}: pageIndex ({describe r})" false)
+    let expect := (Shell.App.Links.pageLinks d.doc limits i).toList.map fun l =>
+      ({ box := l.box, action := Serve.action l.action } : Protocol.ViewLink)
+    match ← c.request (.viewLinks i) with
+    | .ok (.viewLinks ls) =>
+      f := f + (← check s!"{name} p{i + 1}: links equal Links.pageLinks ({ls.length})" (ls == expect))
+    | r => f := f + (← check s!"{name} p{i + 1}: viewLinks ({describe r})" false)
+  return (f, nonEmpty)
+
+/-- Text index and links on golden files, a layered page (render and text under three layers
+states), and the timings of a text request. -/
+def textLinksLayers (exe : System.FilePath) : IO Nat := do
+  let mut f := 0
+  let limits := Limits.default
+  let c ← spawn exe
+  let files := ["Tests/golden/text/latin.pdf", "Tests/golden/text/offpage.pdf",
+    "Tests/golden/text/lineseps.pdf", "Tests/golden/text/actualtext.pdf",
+    "Tests/golden/text/unicode.pdf", "Tests/golden/pages/outline.pdf",
+    "Tests/golden/pages/tree.pdf", "Tests/golden/svg/shapes.pdf"]
+  let mut nonEmpty := 0
+  let mut links := 0
+  for file in files do
+    let bytes ← IO.FS.readBinFile file
+    let (g, n) ← compareDoc c file bytes
+    f := f + g
+    nonEmpty := nonEmpty + n
+    if let some d := (Api.openBytes bytes).toOption then
+      links := links + (List.range (min d.pageCount 6)).foldl
+        (fun a i => a + (Shell.App.Links.pageLinks d.doc limits i).size) 0
+  f := f + (← check s!"some golden pages have text ({nonEmpty})" (nonEmpty ≥ 5))
+  f := f + (← check s!"some golden pages have links ({links})" (links ≥ 1))
+  -- The layers fixture of the optional-content suite, under the document's default (group 6
+  -- OFF), every group ON and group 5 OFF.
+  let ocBytes := OptionalContent.fixture
+    "<< /OCGs [5 0 R 6 0 R] /D << /Name (Default) /OFF [6 0 R] >> >>"
+  let allOn : Doc.OptionalContent.State := { known := [(5, 0), (6, 0)], off := [] }
+  let fiveOff : Doc.OptionalContent.State := { known := [(5, 0), (6, 0)], off := [(5, 0)] }
+  let states : List (Option Doc.OptionalContent.State) := [none, some allOn, some fiveOff]
+  for oc in states do
+    let (g, _) ← compareDoc c s!"layers {reprStr oc}" ocBytes oc
+    f := f + g
+  let some od := (Api.openBytes ocBytes).toOption
+    | return f + (← check "layers fixture opens" false)
+  let some page := od.doc.pages[0]? | return f + (← check "layers page" false)
+  discard <| c.request (.openDoc ocBytes true)
+  let subst ← workerFonts limits
+  let mut imgs : List ByteArray := []
+  for oc in states do
+    let here := (Raster.Glyph.renderDocPage limits od.doc page 1 .r0 (Filter.Budget.init limits)
+      (subst := subst) (oc := oc)).1
+    match ← c.request (.render 0 1 0 oc), here with
+    | .ok (.image w h data), .ok img =>
+      f := f + (← check s!"layered render {reprStr oc} equals the in-process render"
+        (w == img.w && h == img.h && data == img.data))
+      imgs := imgs ++ [data]
+    | r, _ => f := f + (← check s!"layered render {reprStr oc} ({describe r})" false)
+  f := f + (← check "the layers states render differently"
+    (match imgs with | [a, b, c'] => a != b && b != c' | _ => false))
+  -- Hidden text follows the layers state.
+  let has (cs : List Protocol.Cell) : Bool :=
+    ((String.join (cs.map (·.text))).splitOn "HIDDENTEXT").length > 1
+  match ← c.request (.pageIndex 0 none), ← c.request (.pageIndex 0 (some allOn)) with
+  | .ok (.pageIndex a _ _), .ok (.pageIndex b _ _) =>
+    f := f + (← check "text hidden by the default layers state is not in the index, \
+      and is with every group ON" (!has a && has b))
+  | _, _ => f := f + (← check "layers text requests" false)
+  -- A page out of range.
+  f := f + (← check "pageIndex of a page out of range is pageFailed"
+    (isErr .pageFailed (← c.request (.pageIndex 99 none))))
+  f := f + (← check "viewLinks of a page out of range is pageFailed"
+    (isErr .pageFailed (← c.request (.viewLinks 99))))
+  -- Timing: the text index of latin.pdf page 1, in process and through the worker.
+  let bytes ← IO.FS.readBinFile "Tests/golden/text/latin.pdf"
+  let some d := (Api.openBytes bytes).toOption | return f
+  let some p0 := d.doc.pages[0]? | return f
+  discard <| c.request (.openDoc bytes true)
+  let n := 5
+  let t0 ← IO.monoNanosNow
+  let mut k := 0
+  for _ in [0:n] do
+    match localIndex limits d p0 none with
+    | .ok ix => k := k + ix.cells.size
+    | .error _ => pure ()
+  let t1 ← IO.monoNanosNow
+  for _ in [0:n] do
+    match ← c.request (.pageIndex 0 none) with
+    | .ok (.pageIndex cs _ _) => k := k + cs.length
+    | _ => pure ()
+  let t2 ← IO.monoNanosNow
+  let ms (a b : Nat) : String := s!"{(b - a) / 100000 / 10}.{(b - a) / 100000 % 10}"
+  IO.println s!"  worker text index: {n} × latin.pdf page 1 ({k / (2 * n)} cells): \
+    in-process {ms t0 t1} ms, worker {ms t1 t2} ms"
+  c.close
+  return f
+
+/-- Startup flags: `--no-subst` renders as in process without substitute fonts; a font search
+naming missing directories renders as the default; `--limits` reaches the worker; an unknown
+flag ends the worker (status 5) before it reads anything. -/
+def startupFlags (exe : System.FilePath) : IO Nat := do
+  let mut f := 0
+  let limits := Limits.default
+  let bytes ← IO.FS.readBinFile "Tests/golden/text/latin.pdf"
+  let some d := (Api.openBytes bytes).toOption | return (← check "latin opens" false)
+  let some page := d.doc.pages[0]? | return (← check "latin page" false)
+  let renderWith (subst : Raster.Subst.SubstFonts) :=
+    (Raster.Glyph.renderDocPage limits d.doc page 1 .r0 (Filter.Budget.init limits)
+      (subst := subst)).1
+  let subst ← workerFonts limits
+  let noFaces ← workerFaces { noSubst := true }
+  f := f + (← check "workerFaces with noSubst is empty" noFaces.isEmpty)
+  let cases : List (String × Protocol.StartConfig × Raster.Subst.SubstFonts) :=
+    [("--no-subst", { noSubst := true }, {}),
+     ("--home/--font-dir of missing directories",
+       { home := some "/nonexistent-safepdf-home", fontDirs := ["/nonexistent-safepdf-fonts"] },
+       subst)]
+  for (what, start, sf) in cases do
+    let c ← spawn exe limits #[] start
+    discard <| c.request (.openDoc bytes true) (some 10000)
+    match ← c.request (.render 0 1 0 none) (some 20000), renderWith sf with
+    | .ok (.image w h data), .ok img =>
+      f := f + (← check s!"worker started with {what} renders as in process"
+        (w == img.w && h == img.h && data == img.data))
+      if what == "--no-subst" && !subst.faces.isEmpty then
+        match renderWith subst with
+        | .ok img2 => f := f + (← check "--no-subst changes the render (substitutes found here)"
+            (img2.data != data))
+        | .error _ => pure ()
+    | r, _ => f := f + (← check s!"render with {what} ({describe r})" false)
+    c.close
+  -- A changed limit reaches the worker: a page side cap of 10 pixels bounds a zoom-1 render
+  -- of the 612 × 792 page.
+  let c ← spawn exe { maxPageSide := 10 }
+  discard <| c.request (.openDoc bytes true) (some 10000)
+  let r ← c.request (.render 0 1 0 none) (some 20000)
+  f := f + (← check s!"--limits reaches the worker ({describe r})"
+    (match r with | .ok (.image w h _) => w ≤ 10 && h ≤ 10 | .ok (.error ..) => true | _ => false))
+  c.close
+  -- An unknown flag.
+  let child ← IO.Process.spawn
+    { toStdioConfig := workerStdio, cmd := exe.toString, args := #["--bogus"], cwd := some "/",
+      env := #[], inheritEnv := false }
+  let cb : Client := { child, limits, status := ← IO.mkRef none }
+  let code ← cb.waitExit
+  f := f + (← check s!"an unknown flag ends the worker with status 5 (got {code})" (code == some 5))
+  return f
 
 /-- Run the suite. -/
 def run : IO Nat := do
@@ -266,6 +465,8 @@ def run : IO Nat := do
   f := f + (← malformed exe)
   f := f + (← killAndRestart exe)
   f := f + (← overhead exe)
+  f := f + (← textLinksLayers exe)
+  f := f + (← startupFlags exe)
   return f
 
 end SafePdf.Tests.Worker

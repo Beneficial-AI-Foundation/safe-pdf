@@ -1,6 +1,10 @@
 import SafePdf.Api
 import SafePdf.Shell.Worker.Wire
 import SafePdf.Shell.Worker.TestHooks
+import SafePdf.Core.Annot
+import SafePdf.Shell.App.Select
+import SafePdf.Shell.App.Links
+import SafePdf.Shell.Views.Common
 
 /-!
 # The document worker: request handling and loop (task 12.2a)
@@ -26,7 +30,13 @@ so that the GUI can stop it (kill) at any time and, in task 12.2b, run it in a s
 * **The same calls as the viewer.** Rendering is `Core.Raster.Glyph.renderDocPage` with the
   substitute fonts (as `App.Viewer.renderPage` and `Shell.Ffi.render`); text is
   `SafePdf.Api.pageText` (with or without annotation text); page info, outline and links are
-  `SafePdf.Api.pageInfo`, `outline`, `pageLinks`. Limits are `Limits.default`.
+  `SafePdf.Api.pageInfo`, `outline`, `pageLinks`. Limits are the startup configuration's
+  (`Protocol.StartConfig`, flag `--limits=`; task 12.2d), `Limits.default` without the flag.
+* **The viewer's text and links** (task 12.2d). `pageIndex` answers with exactly what the
+  viewer's selection, copy and search index (`App.Select.PageIndex.ofText` of
+  `Core.Annot.extractDocPageAnnots`: page and annotation text, glyphs outside the CropBox and
+  clipped glyphs left out) holds, computed here with the same calls under the requested layers
+  state; `viewLinks` answers with `App.Links.pageLinks`. Renders take a layers state too.
 
 Nothing but frames is written to stdout. The executable's `main` is in
 `SafePdf.Shell.Worker.Main`; this module holds everything else, so tests can import it.
@@ -62,6 +72,28 @@ def glyph (g : Api.Glyph) : Protocol.Glyph :=
 /-- A failed per-page call. -/
 def pageError (e : Api.Error) : Response := .error .pageFailed e.message
 
+/-- The protocol's cell of a selection cell. -/
+def cell (c : App.Select.Cell) : Protocol.Cell :=
+  { text := c.text, sep := c.sep, box := c.box, line := c.line }
+
+/-- The protocol's action of a viewer link action. -/
+def action : App.Links.Action → Protocol.Action
+  | .goto j => .goto j.page j.left j.top
+  | .uri s => .uri s
+  | .badPage => .badPage
+  | .unresolved n => .unresolved n
+  | .other k => .other k
+  | .none => .none
+
+/-- **The selection index of page `p`** as the viewer builds it in process (task 12.2d):
+`Select.PageIndex.ofText` of `Annot.extractDocPageAnnots` with a fresh budget under `oc`. An
+error is the viewer's text for it (`Shell.renderError`). -/
+def pageIndexOf (limits : Limits) (doc : Doc.Doc) (page : Doc.Page)
+    (oc : Option Doc.OptionalContent.State) : Except String App.Select.PageIndex :=
+  match (Annot.extractDocPageAnnots limits doc page (Filter.Budget.init limits) (oc := oc)).1 with
+  | .ok pt => .ok (App.Select.PageIndex.ofText pt)
+  | .error e => .error (Shell.renderError e)
+
 /-- Answer one request on the open document `d` (pure; `subst` are the fonts). -/
 def answerDoc (d : Api.Document) (subst : Raster.Subst.SubstFonts) : Request → Response
   | .info => .docInfo d.pageCount d.repaired d.encrypted
@@ -69,7 +101,7 @@ def answerDoc (d : Api.Document) (subst : Raster.Subst.SubstFonts) : Request →
     match Api.pageInfo d i with
     | .ok pi => .pageInfo pi.label pi.size.1 pi.size.2 (rotationToNat pi.rotation)
     | .error e => pageError e
-  | .render i zoom rot =>
+  | .render i zoom rot oc =>
     match rotationOfNat? rot with
     | none => .error .pageFailed s!"rotation must be 0–3 quarter turns (got {rot})"
     | some r =>
@@ -79,7 +111,7 @@ def answerDoc (d : Api.Document) (subst : Raster.Subst.SubstFonts) : Request →
         if zoom ≤ 0 then pageError (.badZoom zoom)
         else
           match (Raster.Glyph.renderDocPage d.limits d.doc p zoom r
-              (Filter.Budget.init d.limits) (subst := subst)).1 with
+              (Filter.Budget.init d.limits) (subst := subst) (oc := oc)).1 with
           | .ok img => .image img.w img.h img.data
           | .error e => pageError (.pdf e)
   | .text i withAnnots =>
@@ -92,13 +124,26 @@ def answerDoc (d : Api.Document) (subst : Raster.Subst.SubstFonts) : Request →
     match Api.pageLinks d i with
     | .ok ls => .links (ls.map fun l => { rect := l.rect, target := target l.target })
     | .error e => pageError e
+  | .pageIndex i oc =>
+    match d.page i with
+    | .error e => pageError e
+    | .ok p =>
+      match pageIndexOf d.limits d.doc p oc with
+      | .ok ix => .pageIndex (ix.cells.toList.map cell) ix.lineDirs.toList ix.hidden.toList
+      | .error m => .error .pageFailed m
+  | .viewLinks i =>
+    match d.page i with
+    | .error e => pageError e
+    | .ok _ => .viewLinks ((App.Links.pageLinks d.doc d.limits i).toList.map fun l =>
+        { box := l.box, action := action l.action })
   | .openDoc .. | .quit => .error .malformed "unreachable"
 
-/-- Answer one request, updating the state (pure: no file, network or environment access). -/
-def answer (st : State) (req : Request) : State × Response :=
+/-- Answer one request, updating the state (pure: no file, network or environment access).
+Documents open under `limits` (the startup configuration's). -/
+def answer (st : State) (req : Request) (limits : Limits := {}) : State × Response :=
   match req with
   | .openDoc bytes allowRepair =>
-    match Api.openBytes bytes { allowRepair } with
+    match Api.openBytes bytes { allowRepair, limits } with
     | .error e => ({ st with doc := none }, .error .openFailed e.message)
     | .ok d => ({ st with doc := some d }, .docInfo d.pageCount d.repaired d.encrypted)
   | .quit => (st, .bye)
@@ -128,7 +173,7 @@ def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) (stallMs : Nat := 0
         writeAll stdout (Protocol.frameResponse limits (.error .malformed (reprStr e)))
       | .ok req =>
         TestHooks.beforeRequest stallMs req
-        let (st', resp) := answer st req
+        let (st', resp) := answer st req limits
         st := st'
         writeAll stdout (Protocol.frameResponse limits resp)
         if let .quit := req then return 0

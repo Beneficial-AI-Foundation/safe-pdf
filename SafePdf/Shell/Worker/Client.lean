@@ -56,13 +56,17 @@ inductive ClientError where
 instance : ToString ClientError := ⟨fun e => reprStr e⟩
 
 /-- **Start a worker** from the executable `exe` (an absolute path), always with an empty
-environment (the worker refuses anything else, task 12.2b). `env` carries test settings only:
+environment (the worker refuses anything else, task 12.2b). Its configuration goes on the
+command line (task 12.2d, `Protocol.StartConfig.toArgs`): `limits` and the font search of
+`start` (its own `limits` field is replaced by `limits`). `env` carries test settings only:
 `SAFEPDF_WORKER_TEST_STALL_MS=N` becomes the worker's `--test-stall-ms=N` flag
 (`SafePdf.Shell.Worker.TestHooks`); other entries are ignored. -/
 def spawn (exe : System.FilePath) (limits : Limits := {})
-    (env : Array (String × Option String) := #[]) : IO Client := do
-  let args := env.filterMap fun (k, v) =>
-    if k == "SAFEPDF_WORKER_TEST_STALL_MS" then v.map (s!"--test-stall-ms={·}") else none
+    (env : Array (String × Option String) := #[]) (start : Protocol.StartConfig := {}) :
+    IO Client := do
+  let stall := (env.findSome? fun (k, v) =>
+    if k == "SAFEPDF_WORKER_TEST_STALL_MS" then v.bind String.toNat? else none).getD 0
+  let args := { start with limits, stallMs := stall }.toArgs
   let child ← IO.Process.spawn
     { toStdioConfig := workerStdio, cmd := exe.toString, args, cwd := some "/", env := #[],
       inheritEnv := false }
@@ -234,8 +238,10 @@ structure SessionState where
 structure SessionConfig where
   /-- The worker executable (absolute path). -/
   exe : System.FilePath
-  /-- Frame caps. -/
+  /-- Frame caps, and the limits the worker parses and renders with (`--limits=`). -/
   limits : Limits := {}
+  /-- The worker's font search (task 12.2d; its `limits` field is ignored). -/
+  start : Protocol.StartConfig := {}
   /-- A request (or the open of a spawned worker) not answered within this many ms kills the
   worker. -/
   deadlineMs : Nat := 20000
@@ -321,7 +327,7 @@ def Session.ensureClient (s : Session) (d : Nat × ByteArray × Bool) :
     s.dropClient
   let env ← s.env.get
   let r ← try
-      let c ← spawn s.cfg.exe s.cfg.limits env
+      let c ← spawn s.cfg.exe s.cfg.limits env s.cfg.start
       pure (Except.ok c)
     catch e => pure (Except.error s!"cannot start the document worker: {e}")
   match r with

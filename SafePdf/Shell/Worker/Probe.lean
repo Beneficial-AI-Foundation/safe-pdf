@@ -59,8 +59,9 @@ def report (name : String) (expectAllowed : Bool) (r : Bool × String) : IO Bool
   IO.println s!"probe {name}: {if allowed then "ALLOWED" else "denied"} ({detail})"
   return allowed == expectAllowed
 
-/-- Child mode: see the module doc. -/
-def child : IO UInt32 := do
+/-- Child mode: see the module doc. `start` is the startup configuration of the worker's flags
+(task 12.2d: `Worker.spawn` passes them, as to the worker). -/
+def child (start : Protocol.StartConfig := {}) : IO UInt32 := do
   let stdin ← IO.getStdin
   let line := (← stdin.getLine).trimAscii.toString
   let mode :: portStr :: tok :: rest := line.splitOn " "
@@ -69,8 +70,7 @@ def child : IO UInt32 := do
   let pdf := " ".intercalate rest
   let confined := mode == "confined"
   let pdfBytes ← IO.FS.readBinFile pdf
-  let limits := Limits.default
-  let p ← match ← Sandbox.prepare limits confined with
+  let p ← match ← Sandbox.prepare start confined with
     | .ok p => pure p
     | .error f =>
       IO.println s!"startup: FAILED ({f.message})"
@@ -111,7 +111,7 @@ def child : IO UInt32 := do
     | .error e => throw e)) && ok
   let st : Serve.State := { subst := p.subst }
   let (st, r1) := Serve.answer st (.openDoc pdfBytes true)
-  let (_, r2) := Serve.answer st (.render 0 1 0)
+  let (_, r2) := Serve.answer st (.render 0 1 0 none)
   let rendered := match r1, r2 with
     | .docInfo n _ _, .image w h data => some s!"{n} pages; page 1 {w}x{h}, {data.size} bytes"
     | _, _ => none
@@ -158,9 +158,12 @@ end SafePdf.Shell.Worker.Probe
 /-- `worker-probe` (child mode) or `worker-probe --parent PDF`. -/
 def main (args : List String) : IO UInt32 := do
   let code ← match args with
-    | [] => SafePdf.Shell.Worker.Probe.child
     | ["--parent", pdf] => SafePdf.Shell.Worker.Probe.parent pdf
-    | _ => do
-      IO.eprintln "usage: worker-probe --parent PDF   (no arguments: child mode, config on stdin)"
-      pure 2
+    | args =>
+      match SafePdf.Shell.Worker.Protocol.StartConfig.ofArgs args with
+      | .ok start => SafePdf.Shell.Worker.Probe.child start
+      | .error m => do
+        IO.eprintln s!"{m}\nusage: worker-probe --parent PDF   (otherwise child mode: the \
+          worker's flags, config on stdin)"
+        pure 2
   IO.Process.exit code.toUInt8
