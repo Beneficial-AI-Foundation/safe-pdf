@@ -54,6 +54,24 @@ extern lean_object *safepdf_lean_doc_layers_toggle(lean_object *d, lean_object *
                                                    size_t row);
 extern lean_object *safepdf_lean_doc_open_settings(lean_object *d);
 
+/* Lean exports (SafePdf/Shell/Ffi/Sidebar.lean, task 11.3d2). */
+extern uint32_t safepdf_lean_sidebar_on_load(uint32_t mode, uint32_t c);
+extern uint8_t safepdf_lean_sidebar_available(uint32_t p, uint32_t c);
+extern uint32_t safepdf_lean_sidebar_pick(uint32_t last, uint32_t c);
+extern lean_object *safepdf_lean_sidebar_constants(lean_object *unit);
+extern uint32_t safepdf_lean_sidebar_thumb_scale(size_t w, size_t h);
+extern lean_object *safepdf_lean_doc_thumb(lean_object *d, size_t i, uint8_t q);
+extern lean_object *safepdf_lean_sidebar_thumb_layout(lean_object *a);
+extern lean_object *safepdf_lean_sidebar_thumbs_wanted(lean_object *a);
+extern lean_object *safepdf_lean_sidebar_thumb_evict(lean_object *a);
+extern lean_object *safepdf_lean_sidebar_tree(lean_object *a);
+extern lean_object *safepdf_lean_attachment_target_problem(lean_object *name, uint32_t flags);
+extern lean_object *safepdf_lean_attachment_size_after(uint8_t has, uint64_t listed,
+                                                       uint8_t stream, uint8_t ok, uint64_t n);
+extern lean_object *safepdf_lean_identity_line(lean_object *path, uint8_t has, uint8_t in_memory);
+extern lean_object *safepdf_lean_action_describe(lean_object *labels, size_t n, uint8_t kind,
+                                                 size_t page, lean_object *text);
+
 /* ================================================================ runtime and threads */
 
 static int initialised = 0;
@@ -567,7 +585,7 @@ static const char *opt_s(const fblob *b, const char *pool, const ftab *t, size_t
 }
 
 static safepdf_attachment_list *build_attachments(const uint8_t *p, size_t n) {
-    static const size_t cols[] = { 17, 6, 2 };
+    static const size_t cols[] = { 20, 6, 2 };
     fblob b;
     if (fblob_parse(p, n, 3, cols, &b) || b.t[2].rows != 1) return NULL;
     safepdf_attachment_list *x = calloc(1, sizeof *x);
@@ -594,6 +612,9 @@ static safepdf_attachment_list *build_attachments(const uint8_t *p, size_t n) {
         a->in_tree = fu(t, r, 14) != 0;
         a->problem = (int)fu(t, r, 15);
         a->problem_text = fs(&b, x->strings_, t, r, 16);
+        a->size_text = fs(&b, x->strings_, t, r, 17);
+        a->tooltip = fs(&b, x->strings_, t, r, 18);
+        a->has_stream = fu(t, r, 19) != 0;
     }
     for (size_t r = 0; r < x->icon_count; r++) {
         x->icons[r].page = (size_t)fu(&b.t[1], r, 0);
@@ -890,6 +911,232 @@ int safepdf_layers_toggle(safepdf_document *doc, const safepdf_layers_state *cur
     lean_dec(r);
     if (rc) { set_error(error, strdup("internal error: malformed layers state")); return -1; }
     return 0;
+}
+
+/* ================================================================ v2: the sidebar (11.3d2) */
+
+static uint32_t content_bits(safepdf_sidebar_content c) {
+    return (c.has_outline ? 1u : 0u) | (c.has_attachments ? 2u : 0u) | (c.has_layers ? 4u : 0u);
+}
+
+static safepdf_panel panel_of(uint32_t p) {
+    return p <= SAFEPDF_PANEL_NONE ? (safepdf_panel)p : SAFEPDF_PANEL_NONE;
+}
+
+safepdf_panel safepdf_sidebar_on_load(int32_t page_mode, safepdf_sidebar_content c) {
+    if (!initialised) return SAFEPDF_PANEL_NONE;
+    ensure_thread();
+    return panel_of(safepdf_lean_sidebar_on_load((uint32_t)page_mode, content_bits(c)));
+}
+
+bool safepdf_sidebar_available(safepdf_panel panel, safepdf_sidebar_content c) {
+    if (!initialised) return false;
+    ensure_thread();
+    return safepdf_lean_sidebar_available((uint32_t)panel, content_bits(c)) != 0;
+}
+
+safepdf_panel safepdf_sidebar_pick(safepdf_panel last, safepdf_sidebar_content c) {
+    if (!initialised) return SAFEPDF_PANEL_THUMBNAILS;
+    ensure_thread();
+    return panel_of(safepdf_lean_sidebar_pick((uint32_t)last, content_bits(c)));
+}
+
+/* A ByteArray of the 64-bit little-endian numbers `v` (Flat.getU64's layout). */
+static lean_object *u64_array(const uint64_t *v, size_t n) {
+    lean_object *a = lean_alloc_sarray(1, 8 * n, 8 * n);
+    uint8_t *q = lean_sarray_cptr(a);
+    for (size_t i = 0; i < n; i++)
+        for (int k = 0; k < 8; k++) q[8 * i + k] = (uint8_t)(v[i] >> (8 * k));
+    return a;
+}
+
+/* Number i of a result ByteArray (0 past its end). */
+static uint64_t u64_at(lean_object *a, size_t i) {
+    size_t n = lean_sarray_size(a);
+    return 8 * i + 8 <= n ? rd64(lean_sarray_cptr(a) + 8 * i) : 0;
+}
+
+/* A malloc'd copy of a Lean string result (consumed). */
+static char *take_string(lean_object *s) {
+    char *out = strdup(lean_string_cstr(s));
+    lean_dec(s);
+    return out;
+}
+
+/* Copies a list (count, then numbers) from result `r` (consumed) into a malloc'd array. */
+static int take_list(lean_object *r, size_t **out, size_t *count) {
+    *out = NULL;
+    *count = 0;
+    uint64_t n = u64_at(r, 0);
+    if (n > lean_sarray_size(r) / 8) { lean_dec(r); return -1; }
+    if (n) {
+        size_t *v = malloc((size_t)n * sizeof *v);
+        if (!v) { lean_dec(r); return -1; }
+        for (size_t i = 0; i < (size_t)n; i++) v[i] = (size_t)u64_at(r, 1 + i);
+        *out = v;
+        *count = (size_t)n;
+    }
+    lean_dec(r);
+    return 0;
+}
+
+int safepdf_sidebar_constants(safepdf_thumb_constants *out) {
+    if (!out || !initialised) return -1;
+    ensure_thread();
+    lean_object *r = safepdf_lean_sidebar_constants(lean_box(0));
+    out->width = (uint32_t)u64_at(r, 0);
+    out->top = (uint32_t)u64_at(r, 1);
+    out->label_h = (uint32_t)u64_at(r, 2);
+    out->gap = (uint32_t)u64_at(r, 3);
+    out->margin = (uint32_t)u64_at(r, 4);
+    out->budget = (uint32_t)u64_at(r, 5);
+    lean_dec(r);
+    return 0;
+}
+
+int safepdf_doc_thumb(const safepdf_document *doc, size_t page, unsigned rotation,
+                      safepdf_thumb *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!doc || !out || rotation > 3) return -1;
+    ensure_thread();
+    lean_inc(doc->handle);
+    lean_object *r = safepdf_lean_doc_thumb(doc->handle, page, (uint8_t)rotation);
+    int ok = lean_sarray_size(r) == 32;
+    if (ok) {
+        out->width = (uint32_t)u64_at(r, 0);
+        out->height = (uint32_t)u64_at(r, 1);
+        out->zoom_num = u64_at(r, 2);
+        out->zoom_den = u64_at(r, 3);
+        ok = out->zoom_den > 0;
+    }
+    lean_dec(r);
+    if (!ok) { memset(out, 0, sizeof *out); return -1; }
+    return 0;
+}
+
+unsigned safepdf_sidebar_thumb_scale(size_t w, size_t h) {
+    if (!initialised) return 3;
+    ensure_thread();
+    return (unsigned)safepdf_lean_sidebar_thumb_scale(w, h);
+}
+
+int safepdf_sidebar_thumb_layout(const uint32_t *heights, size_t n, uint32_t width, uint64_t *ys,
+                                 uint64_t *total) {
+    if (!initialised || !total || (n && (!heights || !ys)) || n > (SIZE_MAX / 8 - 1) / 2) return -1;
+    uint64_t *v = malloc((1 + 2 * n) * sizeof *v);
+    if (!v) return -1;
+    v[0] = n;
+    for (size_t i = 0; i < n; i++) { v[1 + 2 * i] = width; v[2 + 2 * i] = heights[i]; }
+    ensure_thread();
+    lean_object *a = u64_array(v, 1 + 2 * n);
+    free(v);
+    lean_object *r = safepdf_lean_sidebar_thumb_layout(a);
+    int rc = u64_at(r, 0) == n && lean_sarray_size(r) == 8 * (n + 2) ? 0 : -1;
+    for (size_t i = 0; rc == 0 && i < n; i++) ys[i] = u64_at(r, 1 + i);
+    if (rc == 0) *total = u64_at(r, 1 + n);
+    lean_dec(r);
+    return rc;
+}
+
+int safepdf_sidebar_thumbs_wanted(const uint32_t *heights, size_t n, uint32_t width,
+                                  uint64_t top, uint64_t bottom, size_t **out, size_t *count) {
+    if (!out || !count) return -1;
+    *out = NULL;
+    *count = 0;
+    if (!initialised || (n && !heights) || n > (SIZE_MAX / 8 - 3) / 2) return -1;
+    uint64_t *v = malloc((3 + 2 * n) * sizeof *v);
+    if (!v) return -1;
+    v[0] = n;
+    for (size_t i = 0; i < n; i++) { v[1 + 2 * i] = width; v[2 + 2 * i] = heights[i]; }
+    v[1 + 2 * n] = top;
+    v[2 + 2 * n] = bottom;
+    ensure_thread();
+    lean_object *a = u64_array(v, 3 + 2 * n);
+    free(v);
+    return take_list(safepdf_lean_sidebar_thumbs_wanted(a), out, count);
+}
+
+int safepdf_sidebar_thumb_evict(const size_t *held, size_t nheld, const size_t *wanted,
+                                size_t nwanted, size_t center, size_t **out, size_t *count) {
+    if (!out || !count) return -1;
+    *out = NULL;
+    *count = 0;
+    if (!initialised || (nheld && !held) || (nwanted && !wanted) ||
+        nheld > SIZE_MAX / 16 || nwanted > SIZE_MAX / 16) return -1;
+    size_t m = 3 + nheld + nwanted;
+    uint64_t *v = malloc(m * sizeof *v);
+    if (!v) return -1;
+    size_t k = 0;
+    v[k++] = nheld;
+    for (size_t i = 0; i < nheld; i++) v[k++] = held[i];
+    v[k++] = nwanted;
+    for (size_t i = 0; i < nwanted; i++) v[k++] = wanted[i];
+    v[k++] = center;
+    ensure_thread();
+    lean_object *a = u64_array(v, m);
+    free(v);
+    return take_list(safepdf_lean_sidebar_thumb_evict(a), out, count);
+}
+
+int safepdf_sidebar_tree(const size_t *depths, const bool *open, size_t n,
+                         safepdf_tree_row *out) {
+    if (!initialised || (n && (!depths || !open || !out)) || n > (SIZE_MAX / 8 - 1) / 2) return -1;
+    if (n == 0) return 0;
+    uint64_t *v = malloc((1 + 2 * n) * sizeof *v);
+    if (!v) return -1;
+    v[0] = n;
+    for (size_t i = 0; i < n; i++) { v[1 + 2 * i] = depths[i]; v[2 + 2 * i] = open[i] ? 1 : 0; }
+    ensure_thread();
+    lean_object *a = u64_array(v, 1 + 2 * n);
+    free(v);
+    lean_object *r = safepdf_lean_sidebar_tree(a);
+    int rc = lean_sarray_size(r) == 24 * n ? 0 : -1;
+    for (size_t i = 0; rc == 0 && i < n; i++) {
+        uint64_t p = u64_at(r, 3 * i);
+        out[i].parent = p == 0 || p > n ? -1 : (int64_t)(p - 1);
+        out[i].has_kids = u64_at(r, 3 * i + 1) != 0;
+        out[i].open = u64_at(r, 3 * i + 2) != 0;
+    }
+    lean_dec(r);
+    return rc;
+}
+
+char *safepdf_attachment_target_problem(const char *name, bool is_dir, bool exists,
+                                        bool file_writable, bool dir_writable, bool opened) {
+    if (!initialised) return strdup("the core is not initialised");
+    ensure_thread();
+    uint32_t flags = (is_dir ? 1u : 0u) | (exists ? 2u : 0u) | (file_writable ? 4u : 0u) |
+                     (dir_writable ? 8u : 0u) | (opened ? 16u : 0u);
+    char *s = take_string(safepdf_lean_attachment_target_problem(lean_mk_string(name ? name : ""),
+                                                                 flags));
+    if (s && !*s) { free(s); return NULL; }
+    return s;
+}
+
+char *safepdf_attachment_size_after(const safepdf_attachment *a, bool ok, uint64_t decoded) {
+    if (!a || !initialised) return NULL;
+    ensure_thread();
+    return take_string(safepdf_lean_attachment_size_after(a->has_size ? 1 : 0, a->size,
+                                                          a->has_stream ? 1 : 0, ok ? 1 : 0,
+                                                          decoded));
+}
+
+char *safepdf_action_describe(const safepdf_action *a, const char *const *labels, size_t nlabels,
+                              size_t pages) {
+    if (!a || !initialised) return NULL;
+    ensure_thread();
+    lean_object *arr = lean_alloc_array(nlabels, nlabels);
+    for (size_t i = 0; i < nlabels; i++)
+        lean_array_cptr(arr)[i] = lean_mk_string(labels && labels[i] ? labels[i] : "");
+    return take_string(safepdf_lean_action_describe(arr, pages, (uint8_t)a->kind, a->page,
+                                                    lean_mk_string(a->text ? a->text : "")));
+}
+
+char *safepdf_identity_line(const char *path, bool in_memory) {
+    if (!initialised) return NULL;
+    ensure_thread();
+    return take_string(safepdf_lean_identity_line(lean_mk_string(path ? path : ""), path ? 1 : 0,
+                                                  in_memory ? 1 : 0));
 }
 
 /* ================================================================ v2: frees */

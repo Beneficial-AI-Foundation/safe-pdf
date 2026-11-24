@@ -342,6 +342,10 @@ typedef struct {
     int in_tree;               /**< from the /EmbeddedFiles name tree */
     int problem;               /**< 0 none; 1 not embedded; 2 bad /EF; 3 not a stream */
     const char *problem_text;  /**< "" when problem == 0 */
+    /* task 11.3d2: what the attachments panel shows before decoding anything */
+    const char *size_text;     /**< the size column (Attach.sizeColumn: "1.5 KB", "?", "—") */
+    const char *tooltip;       /**< the row's tooltip (Attach.tooltip; "" when nothing to say) */
+    int has_stream;            /**< it has an embedded file stream */
 } safepdf_attachment;
 
 /** A file attachment annotation's icon. */
@@ -465,6 +469,109 @@ void safepdf_doc_raise(safepdf_document *doc, safepdf_request_id id, int priorit
     Synchronous. 0 on success, -1 on failure (`*error` set, `*out` zeroed). */
 int safepdf_layers_toggle(safepdf_document *doc, const safepdf_layers_state *current,
                           size_t row, safepdf_layers_state *out, char **error);
+
+/* ----------------------------------------------------------------- v2: the sidebar (11.3d2) */
+
+/* The sidebar's rules (App.Sidebar, App.Attach, Viewer.identityLine; SafePdf/Shell/Ffi/Sidebar.lean).
+ * Pure and synchronous, any thread after safepdf_init. */
+
+/** A sidebar panel (Sidebar.panels order). */
+typedef enum {
+    SAFEPDF_PANEL_THUMBNAILS = 0, SAFEPDF_PANEL_OUTLINE = 1, SAFEPDF_PANEL_ATTACHMENTS = 2,
+    SAFEPDF_PANEL_LAYERS = 3, SAFEPDF_PANEL_NONE = 4 /* the sidebar stays closed */
+} safepdf_panel;
+
+/** What a document has (Sidebar.Content). */
+typedef struct {
+    bool has_outline;
+    bool has_attachments;
+    bool has_layers;
+} safepdf_sidebar_content;
+
+/** The panel the sidebar opens with on load (Sidebar.onLoad) for `page_mode`
+    (safepdf_page_mode, UNSET for none); SAFEPDF_PANEL_NONE: closed. */
+safepdf_panel safepdf_sidebar_on_load(int32_t page_mode, safepdf_sidebar_content c);
+
+/** Whether `panel`'s switcher button shows (Sidebar.Panel.available, Sidebar.buttons). */
+bool safepdf_sidebar_available(safepdf_panel panel, safepdf_sidebar_content c);
+
+/** The panel the sidebar toggle opens (Sidebar.pick): `last` while available, else the outline,
+    else the thumbnails. */
+safepdf_panel safepdf_sidebar_pick(safepdf_panel last, safepdf_sidebar_content c);
+
+/** The thumbnail constants (Sidebar.thumbW, thumbTop, thumbLabelH, thumbGap, thumbMargin,
+    thumbBudget), in pixels at 1x and counts. */
+typedef struct {
+    uint32_t width, top, label_h, gap, margin, budget;
+} safepdf_thumb_constants;
+int safepdf_sidebar_constants(safepdf_thumb_constants *out);
+
+/** A page's thumbnail (the Tk viewer's pageSizeRot / Sidebar.thumbSize / thumbZoom): its size
+    in pixels at 1x (`width` x `height`) and the zoom that renders it (pixels per point at 1x,
+    thumbW / the rotated page width, `zoom_num / zoom_den`), with the user's extra rotation in
+    quarter turns (0-3). 0 on success, -1 for a page out of range or a bad rotation (`*out`
+    zeroed). */
+typedef struct {
+    uint32_t width, height;
+    uint64_t zoom_num, zoom_den;
+} safepdf_thumb;
+int safepdf_doc_thumb(const safepdf_document *doc, size_t page, unsigned rotation,
+                      safepdf_thumb *out);
+
+/** The scale at which a thumbnail image of `w` x `h` pixels is rendered: 0 full, 1 half,
+    2 quarter, 3 eighth zoom (task 12.3b's rule: thumbBudget such images fit the 32 MiB
+    thumbnail reserve). */
+unsigned safepdf_sidebar_thumb_scale(size_t w, size_t h);
+
+/** The thumbnails laid out top to bottom (Sidebar.thumbLayout) from their `heights` (each
+    `width` wide; pixels at 1x): `ys` (caller storage for `n`) receives each image's top, `*total`
+    the panel's height. 0 on success. */
+int safepdf_sidebar_thumb_layout(const uint32_t *heights, size_t n, uint32_t width, uint64_t *ys,
+                                 uint64_t *total);
+
+/** The thumbnails to render for the visible band [top, bottom) of a panel laid out by
+    Sidebar.thumbLayout from `heights` (each `width` wide; pixels at 1x): Sidebar.thumbsWanted
+    with thumbMargin, nearest the band's middle first. `*out` is malloc'd (free()), NULL when
+    empty. 0 on success. */
+int safepdf_sidebar_thumbs_wanted(const uint32_t *heights, size_t n, uint32_t width,
+                                  uint64_t top, uint64_t bottom, size_t **out, size_t *count);
+
+/** The thumbnails to drop (Sidebar.thumbEvict with thumbBudget) of `held` given `wanted` and
+    the centre page, farthest first. `*out` malloc'd (free()), NULL when empty. 0 on success. */
+int safepdf_sidebar_thumb_evict(const size_t *held, size_t nheld, const size_t *wanted,
+                                size_t nwanted, size_t center, size_t **out, size_t *count);
+
+/** A row of an outline tree (Sidebar.rows, Sidebar.initialOpen). */
+typedef struct {
+    int64_t parent;       /**< the parent row, -1 for none */
+    bool has_kids;        /**< it has children (a disclosure triangle) */
+    bool open;            /**< it starts expanded */
+} safepdf_tree_row;
+
+/** The tree of `n` entries given by their depths (each at most one more than the previous
+    row's) and whether each starts open; `out` is caller storage for `n` rows. 0 on success. */
+int safepdf_sidebar_tree(const size_t *depths, const bool *open, size_t n,
+                         safepdf_tree_row *out);
+
+/** Why `name` cannot take a saved attachment (Attach.targetProblem: a folder, the opened
+    document, a read-only file, a folder that is not writable); NULL when it can. malloc'd. */
+char *safepdf_attachment_target_problem(const char *name, bool is_dir, bool exists,
+                                        bool file_writable, bool dir_writable, bool opened);
+
+/** The size column of an attachment after it was decoded for saving (Attach.sizeColumn with
+    the outcome: its decoded size when `ok`, "error" otherwise; the listed size first).
+    malloc'd. */
+char *safepdf_attachment_size_after(const safepdf_attachment *a, bool ok, uint64_t decoded);
+
+/** What an outline item's action does, in words (Links.describe with the page labels and the
+    page count): the status text of an item that is not followed. malloc'd. */
+char *safepdf_action_describe(const safepdf_action *a, const char *const *labels, size_t nlabels,
+                              size_t pages);
+
+/** The trusted identity line (task 12.5, Viewer.identityLine): "SafePDF is showing NAME (PATH)
+    - this line is drawn by SafePDF, never by the document", with controls and bidi overrides
+    blanked; `path` NULL: no document. Never the document's /Title. malloc'd. */
+char *safepdf_identity_line(const char *path, bool in_memory);
 
 /* ----------------------------------------------------------------- tests only */
 

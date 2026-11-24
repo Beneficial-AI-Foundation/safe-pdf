@@ -345,6 +345,23 @@ final class PageCanvasView: NSView {
         onRender?(res)
     }
 
+    /// The document's layers state changed (task 11.3d2, the layers panel; Viewer.applyLayers):
+    /// running renders are stale and cancelled; the images shown stay, drawn as scaled stand-ins
+    /// (their key no longer matches), until the renders under the new state replace them
+    /// (cross-faded). Returns the number of renders requested again.
+    @discardableResult
+    func layersChanged() -> Int {
+        guard let doc = document else { return 0 }
+        for (_, r) in inflight { safepdf_doc_cancel(doc.handle, r.id) }
+        inflight.removeAll()
+        for (page, entry) in cache {
+            cache[page] = (ZoomKey(num: 0, den: 1, rotation: entry.key.rotation), entry.image)
+        }
+        errors.removeAll()
+        updateRenders(visible: visibleRect)
+        return inflight.count
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
         cg.interpolationQuality = .high

@@ -13,7 +13,9 @@ enum Commands {
     /// Commands this shell performs: the scaffold's (11.3b), the zoom and rotation commands
     /// (11.3c1), the view modes, Go to page and Back / Forward (11.3c2), Copy, Select All and
     /// Find (11.3d1; Find next / previous are the key actions, always available with a
-    /// document).
+    /// document). The sidebar toggle (SAFEPDF_CMD_OUTLINE) opens the panels of task 11.3d2
+    /// (Sidebar.pick); native full screen is the standard View → Enter Full Screen entry
+    /// (MainMenu), not a Menu.Cmd.
     static let implemented: Set<Int> = [
         id(SAFEPDF_CMD_OPEN_FILE), id(SAFEPDF_CMD_CLOSE), id(SAFEPDF_CMD_QUIT),
         id(SAFEPDF_CMD_ABOUT), id(SAFEPDF_CMD_OUTLINE), id(SAFEPDF_CMD_PREV_PAGE),

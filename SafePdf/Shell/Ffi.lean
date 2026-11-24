@@ -1,4 +1,5 @@
 import SafePdf.Shell.Ffi.V2
+import SafePdf.Shell.Ffi.Sidebar
 
 /-!
 # The C ABI over `safe-pdf-core`: library root (tasks 11.1, 11.3a1, 11.3c1)
@@ -16,6 +17,8 @@ exports are **not** the public C API: `macos/safepdf_core.c` wraps them into pla
 * `SafePdf.Shell.Ffi.V2` — the document layer over the confined worker (refcounted handles,
   asynchronous requests through `Worker.Session`, completion through the `safepdf_c_deliver`
   callback, page geometry for layout).
+* `SafePdf.Shell.Ffi.Sidebar` — the sidebar's rules (panels, page mode, thumbnails, outline
+  tree, attachment save targets) and the 12.5 identity line (task 11.3d2).
 * `SafePdf.Shell.Ffi.Flat` — the pure conversions to the flat layout the C structs are copied
   from.
 

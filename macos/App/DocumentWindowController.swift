@@ -3,7 +3,9 @@
 // rotation commands, the zoom drop-down and the page view's keys (task 11.3c1); view modes and
 // spreads, the page field, back/forward, open settings, the subtitle `page k/n · zoom`, the
 // titlebar flags for repaired and encrypted files (task 11.3c2); Copy, Select All, Find and Find
-// next / previous, the search field and the external-link sheet's window (task 11.3d1).
+// next / previous, the search field and the external-link sheet's window (task 11.3d1); the
+// sidebar's panels, the page mode's panel, native full screen with the identity line (task
+// 11.3d2, SidebarViewController, FullScreen.swift).
 // Plan.md §6 Phase 11; docs/macos-design.md §2 (window with full-size content view, unified
 // toolbar, title = document name with proxy icon; NSSplitViewController sidebar) and §3
 // decision 1 (enabled rules from the exported Menu.Ctx table).
@@ -23,6 +25,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     private(set) var pdf: Document?
     private var states: ChromeStates?
     private var flagsAccessory: NSTitlebarAccessoryViewController?
+    /// The 12.5 identity line in full screen (task 11.3d2).
+    private var identity: IdentityLine?
+    /// The document's `/PageMode /FullScreen` put the window in full screen: leaving applies
+    /// `/NonFullScreenPageMode` to the sidebar (Viewer.setFullScreen).
+    private var documentFullScreen = false
 
     init() {
         let window = NSWindow(
@@ -70,6 +77,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             guard let self else { return }
             Sheets.error("Cannot show the document", detail: message, on: self.window)
         }
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        identity = IdentityLine(pages: pages)
+        wireSidebar()
         window.center()
         window.setFrameAutosaveName("SafePDFDocumentWindow")
         updateChrome()
@@ -96,14 +106,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         window?.title = doc.settings.title ?? url.lastPathComponent
         setFlags(repaired: doc.repaired, encrypted: doc.encrypted)
         pages.show(doc)
+        sidebar.show(doc, pages: pages)
         if doc.settings.centerWindow { window?.center() }
         window?.makeFirstResponder(pages.canvas)
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         doc.loadLabels { [weak self, weak doc] in
             guard let self, let doc, self.pdf === doc else { return }
+            self.sidebar.labelsArrived()
             self.updateChrome()
         }
         updateChrome()
+        applyFullScreenSetting(doc)
     }
 
     /// Task 11.3d1: the search field runs Find; the selection's changes update Copy's state;
@@ -186,7 +199,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
 
     /// What the enabled rules look at (Viewer.menuCtx): first and last spread, history.
     private func context() -> safepdf_ctx {
-        Self.context(pdf: pdf, pages: pages)
+        var c = Self.context(pdf: pdf, pages: pages)
+        if c.has_doc { c.has_outline = sidebar.content.has_outline }
+        return c
     }
 
     /// Menu.Ctx of a page view (the self-test checks it without a window).
@@ -231,6 +246,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         window?.subtitle = Self.subtitle(pdf: pdf, pages: pages)
         chromeToolbar?.setZoom(pages.canvas.zoomChoice)
         chromeToolbar?.setViewChoice(pages.canvas.modes.choice)
+        sidebar.isShown = !(sidebarItem?.isCollapsed ?? true)
+        sidebar.sync()
     }
 
     // MARK: page field (Toolbar.pageEntry)
@@ -290,7 +307,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             case Commands.id(SAFEPDF_CMD_CLOSE):
                 window?.performClose(nil)
             case Commands.id(SAFEPDF_CMD_OUTLINE):
-                split.toggleSidebar(nil)
+                toggleSidebarPanel()
             case Commands.id(SAFEPDF_CMD_GOTO_PAGE):
                 chromeToolbar?.focusPageField(in: window)
             case Commands.id(SAFEPDF_CMD_FIND):
@@ -406,6 +423,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             if let on = Self.radioOn(item.tag, modes: pages.canvas.modes) {
                 item.state = pdf != nil && on ? .on : .off
             }
+            if item.tag == Commands.id(SAFEPDF_CMD_OUTLINE) { // a check entry (Menu.outlineVar)
+                item.state = pdf != nil && !(sidebarItem?.isCollapsed ?? true) ? .on : .off
+            }
             return isEnabled(item.tag)
         }
         if item.action == MainMenu.actionSelector { return pdf != nil }
@@ -432,8 +452,101 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     }
 
     func windowWillClose(_ notification: Notification) {
+        identity?.sync(show: false, url: nil)
         pages.show(nil)
+        sidebar.show(nil, pages: pages)
         pdf = nil
         setFlags(repaired: false, encrypted: false)
+    }
+
+    // MARK: sidebar (task 11.3d2)
+
+    /// Connects the sidebar to the window: the page mode's panel on load, status notes in the
+    /// pill, external outline links confirmed before their address is copied.
+    private func wireSidebar() {
+        sidebar.onLoaded = { [weak self] panel in
+            guard let self else { return }
+            // Full screen keeps the sidebar closed (Sidebar.onLoad gives none for FullScreen).
+            self.setSidebar(shown: panel != nil)
+        }
+        sidebar.onStatus = { [weak self] s in self?.pages.pill.show(s) }
+        sidebar.onChange = { [weak self] in self?.updateChrome() }
+        sidebar.onExternalLink = { [weak self] uri in self?.confirmUri(uri) }
+    }
+
+    /// Opens (with its panel already chosen) or closes the sidebar.
+    func setSidebar(shown: Bool) {
+        guard let item = sidebarItem else { return }
+        if item.isCollapsed == shown {
+            if window?.isVisible == true { item.animator().isCollapsed = !shown } else { item.isCollapsed = !shown }
+        }
+        sidebar.isShown = shown
+        updateChrome()
+    }
+
+    /// The sidebar toggle (F9, ⌃⌘S, View → Sidebar, the toolbar button; Sidebar.afterToggle):
+    /// closes it, or opens it on the last panel chosen while the document has it.
+    func toggleSidebarPanel() {
+        let shown = !(sidebarItem?.isCollapsed ?? true)
+        if !shown { sidebar.choose(sidebar.togglePanel) }
+        setSidebar(shown: !shown)
+    }
+
+    /// An external address of an outline item (Viewer.confirmUri): copied to the clipboard only
+    /// when the user confirms; never opened.
+    private func confirmUri(_ uri: String) {
+        guard let window else { return }
+        Sheets.ask("Copy the link address?", detail: "The outline item points to an external address:\n\(uri)\n\nSafePDF never opens it.",
+                   buttons: ["Copy Address", "Cancel"], on: window) { [weak self] i in
+            if i == 0 {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(uri, forType: .string)
+                self?.pages.pill.show("copied the link address to the clipboard (not opened): \(uri)")
+            } else {
+                self?.pages.pill.show("external link not followed: \(uri)")
+            }
+        }
+    }
+
+    // MARK: full screen (task 11.3d2; Viewer.setFullScreen, 12.5 syncIdentity)
+
+    /// `/PageMode /FullScreen` (Viewer.applyOpenSettings): the window enters native full screen
+    /// once it is on screen, with the sidebar closed. The identity line shows before it enters.
+    private func applyFullScreenSetting(_ doc: Document) {
+        guard doc.settings.pageMode == SAFEPDF_PAGE_MODE_FULL_SCREEN.rawValue, let window,
+              !window.styleMask.contains(.fullScreen) else { return }
+        DispatchQueue.main.async { [weak self, weak doc] in
+            guard let self, let doc, self.pdf === doc, let w = self.window, w.isVisible,
+                  !w.styleMask.contains(.fullScreen) else { return }
+            self.documentFullScreen = true
+            w.toggleFullScreen(nil)
+        }
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        identity?.sync(show: pdf != nil, url: pdf?.url)
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        documentFullScreen = false
+        identity?.sync(show: false, url: nil)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        identity?.sync(show: false, url: nil)
+        // Leaving the document's full screen applies /NonFullScreenPageMode to the sidebar.
+        if documentFullScreen, let doc = pdf {
+            let p = SidebarRules.onLoad(pageMode: doc.settings.nonFullScreenMode, sidebar.content)
+            if let p { sidebar.showPanel(p) }
+            setSidebar(shown: p != nil)
+        }
+        documentFullScreen = false
+    }
+
+    /// Escape leaves full screen (the Tk viewer's escapeWindow).
+    override func cancelOperation(_ sender: Any?) {
+        if let w = window, w.styleMask.contains(.fullScreen) {
+            w.toggleFullScreen(nil)
+        }
     }
 }

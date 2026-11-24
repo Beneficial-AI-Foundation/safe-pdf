@@ -587,6 +587,165 @@ static void test_errors(void) {
     free(p);
 }
 
+/* ---- the sidebar's rules and the identity line (task 11.3d2) ---- */
+
+/* A PDF of `n` objects (objs[0] is object 1) with an xref table; malloc'd, length in *len. */
+static uint8_t *mini_pdf(const char *const *objs, size_t n, size_t *len) {
+    size_t cap = 4096;
+    for (size_t i = 0; i < n; i++) cap += strlen(objs[i]) + 64;
+    char *b = malloc(cap + 64 * n);
+    size_t *offs = calloc(n, sizeof *offs);
+    size_t k = (size_t)sprintf(b, "%%PDF-1.7\n");
+    for (size_t i = 0; i < n; i++) {
+        offs[i] = k;
+        k += (size_t)sprintf(b + k, "%zu 0 obj\n%s\nendobj\n", i + 1, objs[i]);
+    }
+    size_t x = k;
+    k += (size_t)sprintf(b + k, "xref\n0 %zu\n0000000000 65535 f \n", n + 1);
+    for (size_t i = 0; i < n; i++) k += (size_t)sprintf(b + k, "%010zu 00000 n \n", offs[i]);
+    k += (size_t)sprintf(b + k, "trailer\n<< /Size %zu /Root 1 0 R >>\nstartxref\n%zu\n%%%%EOF\n", n + 1, x);
+    free(offs);
+    *len = k;
+    return (uint8_t *)b;
+}
+
+static void test_sidebar(void) {
+    safepdf_sidebar_content none = { false, false, false };
+    safepdf_sidebar_content outl = { true, false, false };
+    safepdf_sidebar_content all = { true, true, true };
+    CHECK(safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_UNSET, outl) == SAFEPDF_PANEL_OUTLINE &&
+          safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_UNSET, none) == SAFEPDF_PANEL_NONE &&
+          safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_USE_THUMBS, none) == SAFEPDF_PANEL_THUMBNAILS &&
+          safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_USE_ATTACHMENTS, outl) == SAFEPDF_PANEL_OUTLINE &&
+          safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_USE_ATTACHMENTS, all) == SAFEPDF_PANEL_ATTACHMENTS &&
+          safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_USE_OC, all) == SAFEPDF_PANEL_LAYERS &&
+          safepdf_sidebar_on_load(SAFEPDF_PAGE_MODE_FULL_SCREEN, all) == SAFEPDF_PANEL_NONE,
+          "Sidebar.onLoad");
+    CHECK(safepdf_sidebar_available(SAFEPDF_PANEL_THUMBNAILS, none) &&
+          !safepdf_sidebar_available(SAFEPDF_PANEL_OUTLINE, none) &&
+          safepdf_sidebar_available(SAFEPDF_PANEL_LAYERS, all) &&
+          !safepdf_sidebar_available(SAFEPDF_PANEL_NONE, all), "Sidebar.buttons");
+    CHECK(safepdf_sidebar_pick(SAFEPDF_PANEL_LAYERS, outl) == SAFEPDF_PANEL_OUTLINE &&
+          safepdf_sidebar_pick(SAFEPDF_PANEL_LAYERS, none) == SAFEPDF_PANEL_THUMBNAILS, "Sidebar.pick");
+    safepdf_thumb_constants k;
+    CHECK(safepdf_sidebar_constants(&k) == 0 && k.width == 98 && k.top == 12 && k.label_h == 20 &&
+          k.gap == 14 && k.margin == 3 && k.budget == 40, "thumbnail constants");
+    CHECK(safepdf_sidebar_thumb_scale(196, 254) == 0 && safepdf_sidebar_thumb_scale(512, 512) == 1,
+          "thumbnail scale (12.3b)");
+
+    uint32_t hs[100];
+    for (size_t i = 0; i < 100; i++) hs[i] = 127;
+    size_t *w = NULL, nw = 0;
+    CHECK(safepdf_sidebar_thumbs_wanted(hs, 100, 98, 0, 400, &w, &nw) == 0 && nw == 6 && w &&
+          w[0] == 1 && w[1] == 0 && w[2] == 2 && w[5] == 5, "Sidebar.thumbsWanted");
+    free(w);
+    uint64_t ys[2], total = 0;
+    uint32_t two[2] = { 127, 76 };
+    CHECK(safepdf_sidebar_thumb_layout(two, 2, 98, ys, &total) == 0 && ys[0] == 12 &&
+          ys[1] == 12 + 127 + 34 && total == 12 + 127 + 34 + 76 + 34, "Sidebar.thumbLayout");
+    size_t held[45], want[2] = { 0, 1 };
+    for (size_t i = 0; i < 45; i++) held[i] = i;
+    size_t *ev = NULL, nev = 0;
+    CHECK(safepdf_sidebar_thumb_evict(held, 45, want, 2, 0, &ev, &nev) == 0 && nev == 5 && ev &&
+          ev[0] == 44, "Sidebar.thumbEvict");
+    free(ev);
+    size_t depths[4] = { 0, 1, 2, 0 };
+    bool opens[4] = { true, false, false, false };
+    safepdf_tree_row rows[4];
+    CHECK(safepdf_sidebar_tree(depths, opens, 4, rows) == 0 && rows[0].parent == -1 &&
+          rows[1].parent == 0 && rows[2].parent == 1 && rows[3].parent == -1 && rows[0].has_kids &&
+          rows[0].open && rows[1].has_kids && !rows[1].open && !rows[2].has_kids, "Sidebar.rows");
+
+    char *s = safepdf_identity_line("/a/b\xE2\x80\xAE" "fdp.pdf", false);
+    CHECK(s && strcmp(s, "SafePDF is showing b fdp.pdf (/a/b fdp.pdf) - this line is drawn by SafePDF, never by the document") == 0,
+          "identity line: %s", s ? s : "(null)");
+    free(s);
+    s = safepdf_identity_line(NULL, false);
+    CHECK(s && strcmp(s, "SafePDF: no document") == 0, "identity line without a document");
+    free(s);
+    s = safepdf_attachment_target_problem("x.txt", false, true, false, true, false);
+    CHECK(s && strcmp(s, "x.txt is read-only; choose another name") == 0, "target problem: %s", s ? s : "(null)");
+    free(s);
+    CHECK(safepdf_attachment_target_problem("x.txt", false, false, false, true, false) == NULL, "target ok");
+    safepdf_action act = { .kind = SAFEPDF_ACTION_OTHER, .text = "Launch" };
+    s = safepdf_action_describe(&act, NULL, 0, 3);
+    CHECK(s && strcmp(s, "link action /Launch (not followed)") == 0, "Links.describe: %s", s ? s : "(null)");
+    free(s);
+
+    /* The thumbnail of a page: outline.pdf's first page. */
+    safepdf_document *d = open_golden("pages/outline.pdf", NULL);
+    CHECK(d != NULL, "open outline.pdf");
+    if (d) {
+        double pw = 0, ph = 0;
+        safepdf_doc_page_size(d, 0, &pw, &ph);
+        safepdf_thumb t, t1;
+        CHECK(safepdf_doc_thumb(d, 0, 0, &t) == 0 && t.width == 98 && t.zoom_den > 0 &&
+              fabs((double)t.zoom_num / (double)t.zoom_den * pw - 98) < 1e-6 &&
+              fabs(t.height - 98 * ph / pw) <= 1, "thumbnail of page 1: %u x %u", t.width, t.height);
+        CHECK(safepdf_doc_thumb(d, 0, 1, &t1) == 0 && fabs(t1.height - 98 * pw / ph) <= 1,
+              "thumbnail of page 1 turned: %u x %u", t1.width, t1.height);
+        CHECK(safepdf_doc_thumb(d, 99999, 0, &t) == -1 && safepdf_doc_thumb(d, 0, 4, &t) == -1,
+              "thumbnail out of range");
+        printf("thumbnail of outline.pdf page 1: %u x %u px at %llu/%llu px/pt\n", t1.width, t1.height,
+               (unsigned long long)t1.zoom_num, (unsigned long long)t1.zoom_den);
+        safepdf_doc_release(d);
+    }
+
+    /* Attachments: what the panel shows before decoding, and the bytes. */
+    static const char hello[] = "Hello from an attachment.\n";
+    char ef[256];
+    snprintf(ef, sizeof ef, "<< /Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size %zu >> /Length %zu >>\nstream\n%s\nendstream",
+             strlen(hello), strlen(hello), hello);
+    const char *objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R /PageMode /UseAttachments /Names << /EmbeddedFiles << /Names [(hello.txt) 5 0 R (ext) 6 0 R] >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+        "<< /Type /Filespec /F (hello.txt) /UF (hello.txt) /Desc (A greeting) /EF << /F 7 0 R >> >>",
+        "<< /Type /Filespec /F (external.pdf) >>",
+        ef,
+    };
+    size_t len = 0;
+    uint8_t *pdf = mini_pdf(objs, 7, &len);
+    char *err = NULL;
+    d = safepdf_doc_open_bytes(pdf, len, NULL, &err);
+    free(pdf);
+    CHECK(d != NULL, "open the attachments PDF (%s)", err ? err : "");
+    free(err);
+    if (d) {
+        reply r;
+        reply_init(&r);
+        safepdf_doc_attachments(d, q, on_atts, &r);
+        CHECK(wait_for(&r, 30000) == 0 && r.status == SAFEPDF_STATUS_OK, "attachments (%s)", r.error);
+        safepdf_attachment_list *al = r.result;
+        CHECK(al && al->count == 2, "two attachments (%zu)", al ? al->count : 0);
+        if (al && al->count == 2) {
+            safepdf_attachment *a = &al->items[0], *e = &al->items[1];
+            CHECK(strcmp(a->size_text, "26 B") == 0 && a->has_stream &&
+                  strstr(a->tooltip, "A greeting") && strstr(a->tooltip, "Type: text/plain"),
+                  "hello.txt row: %s / %s", a->size_text, a->tooltip);
+            CHECK(strcmp(e->size_text, "\xE2\x80\x94") == 0 && !e->has_stream && e->problem == 1,
+                  "external row: %s problem %d", e->size_text, e->problem);
+            char *after = safepdf_attachment_size_after(a, true, 26);
+            CHECK(after && strcmp(after, "26 B") == 0, "size after decoding");
+            free(after);
+            printf("attachments: %s %s [%s]; %s %s\n", a->name, a->size_text, a->tooltip, e->name, e->size_text);
+        }
+        safepdf_free_attachments(al);
+        reply_init(&r);
+        safepdf_doc_attachment_bytes(d, 0, q, on_bytes, &r);
+        CHECK(wait_for(&r, 30000) == 0 && r.status == SAFEPDF_STATUS_OK, "attachment bytes (%s)", r.error);
+        safepdf_bytes *by = r.result;
+        CHECK(by && by->len == strlen(hello) && memcmp(by->data, hello, by->len) == 0, "attachment bytes equal");
+        safepdf_free_bytes(by);
+        safepdf_open_settings os;
+        CHECK(safepdf_doc_open_settings(d, &os) == 0 && os.page_mode == SAFEPDF_PAGE_MODE_USE_ATTACHMENTS,
+              "UseAttachments page mode");
+        safepdf_free_open_settings(&os);
+        safepdf_doc_release(d);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s WORKER GOLDEN_DIR\n", argv[0]);
@@ -608,6 +767,7 @@ int main(int argc, char **argv) {
     test_deadline();
     test_chain();
     test_errors();
+    test_sidebar();
     printf("core_test: %d checks, %d failures (%.0f ms)\n", checks, failures, now_ms() - t0);
     return failures ? 1 : 0;
 }
