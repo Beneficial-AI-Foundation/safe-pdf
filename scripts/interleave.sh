@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # The interleave scenario (task 12.3, milestone M12: "an interleaved zoom/search/thumbnail CI
 # scenario stays within published memory ceilings"; docs/viewer.md "Budgets and ceilings").
+# Task 12.3b adds the deep zoom phase: 600 % and then 800 %, each scrolled through the whole
+# document in 12 steps (the zoom is limited to Budget.ceilings.pagePixels per page), and
+# checks the live-photo pool (pages and thumbnails) too.
 # Run from the repo root.
 #   scripts/interleave.sh [--no-build] [--file PDF]
 #
@@ -13,7 +16,10 @@
 #   * viewer peak RSS <= Budget.ceilings.viewerRssMiB, each worker's <= workerRssMiB (the
 #     numbers are read from SafePdf/Shell/App/Budget.lean, the published source);
 #   * the viewer's own report: done, no reservation held at the end (no leak), the pool's peak
-#     under its ceiling, nothing refused, no text request without a reservation, renders made.
+#     under its ceiling, nothing refused, no text request without a reservation, renders made;
+#     the photo pool's peak under its ceiling, every live photo reserved at its size, the deep
+#     zoom phase run and its zoom limited;
+#   * a process above three times its ceiling is killed at once and the run fails.
 # Headless: on macOS the viewer runs in the smoke tests' background mode (never activated,
 # windows hidden; SAFEPDF_SMOKE_BG=1) and the sampler watches the front application: should
 # the viewer ever become frontmost, it kills the processes it started (only those) and fails.
@@ -46,6 +52,8 @@ ceil() { sed -n "s/^ *$1 : Nat := \([0-9]*\)$/\1/p" SafePdf/Shell/App/Budget.lea
 viewer_mib="$(ceil viewerRssMiB)"
 worker_mib="$(ceil workerRssMiB)"
 [ -n "$viewer_mib" ] && [ -n "$worker_mib" ] || { echo "interleave: ceilings not found in Budget.lean" >&2; exit 1; }
+# A process above 3x its ceiling is killed at once (protects the machine; the run fails).
+kill_mib="$(( 3 * (viewer_mib > worker_mib ? viewer_mib : worker_mib) ))"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -80,10 +88,10 @@ root=$!
 set +e
 python3 -I -c '
 import json, os, subprocess, sys, time
-root, viewer, out = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+root, viewer, out, kill_kib = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]) * 1024
 worker = os.path.join(os.path.dirname(viewer), "worker")
 mac = sys.platform == "darwin"
-peak, kind, samples, leak = {}, {}, 0, None
+peak, kind, samples, leak, runaway = {}, {}, 0, None, None
 def tree():
     try:
         txt = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,stat=,command="], capture_output=True, text=True).stdout
@@ -128,6 +136,13 @@ while True:
         kind[pid] = k
         peak[pid] = max(peak.get(pid, 0), rss, hwm(pid))
     samples += 1
+    big = [pid for pid in ps if kind.get(pid) and peak.get(pid, 0) > kill_kib]
+    if big:
+        runaway = "pid %d (%s) above %d MiB" % (big[0], kind[big[0]], kill_kib // 1024)
+        for pid in ps:
+            try: os.kill(pid, 9)
+            except OSError: pass
+        break
     if mac and ps:
         f = front_pid()
         if f is not None and f in ps:
@@ -138,10 +153,10 @@ while True:
             break
     if root not in ps: break
     time.sleep(0.2)
-json.dump({"samples": samples, "front_leak": leak,
+json.dump({"samples": samples, "front_leak": leak, "runaway": runaway,
            "peaks": [{"pid": p, "kind": kind[p], "kib": peak[p]} for p in sorted(peak)]},
           open(out, "w"))
-' "$root" "$viewer" "$work/peaks.json"
+' "$root" "$viewer" "$work/peaks.json" "$kill_mib"
 sampler=$?
 wait "$root"; rc=$?
 set -e
@@ -154,6 +169,7 @@ import json, re, sys
 peaks, report, vmib, wmib, rc, src = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
 errs = []
 p = json.load(open(peaks))
+if p.get("runaway"): errs.append("runaway memory: %s: processes killed" % p["runaway"])
 if p["front_leak"]: errs.append("the viewer became the front application (%s): processes killed" % p["front_leak"])
 views = [x for x in p["peaks"] if x["kind"] == "viewer"]
 works = [x for x in p["peaks"] if x["kind"] == "worker"]
@@ -182,9 +198,19 @@ else:
     if n("refused") != 0: errs.append("refused: %s" % v.get("refused"))
     if n("unreserved") != 0: errs.append("text requests without a reservation: %s" % v.get("unreserved"))
     if n("renders") <= 0: errs.append("no render")
+    # Task 12.3b: the live Tk photos (pages, thumbnails) under their pool, every photo with a
+    # reservation of its present size; the deep zoom phase (600 % and 800 %) ran, zoom capped.
+    if not (0 < n("photo-peak") <= n("photo-ceiling")): errs.append("photo pool peak %s vs ceiling %s" % (v.get("photo-peak"), v.get("photo-ceiling")))
+    if n("photo-mismatch") != 0: errs.append("photos and their reservations differ: %s" % v.get("photo-mismatch"))
+    if n("deep-zoom-steps") != 24: errs.append("deep zoom steps: %s (expected 24)" % v.get("deep-zoom-steps"))
+    if n("zoom-rss-peak-kib") > vmib * 1024: errs.append("viewer RSS in the deep zoom phase (its own reading) %.1f MiB above %d MiB" % (n("zoom-rss-peak-kib") / 1024, vmib))
+    if "zoom limited to" not in v.get("zoom-status", ""): errs.append("the 600-800 %% zoom was not limited: %r" % v.get("zoom-status"))
     print("interleave: pool peak %.1f MiB of %.0f MiB; waits %s, lowered thumbnails %s, search stops %s, renders %s, thumbnails %s, spawns %s, timeouts %s"
           % (n("pool-peak") / 1048576, n("pool-ceiling") / 1048576, v.get("waits"), v.get("degraded"),
              v.get("search-stops"), v.get("renders"), v.get("thumbs-rendered"), v.get("spawns"), v.get("timeouts")))
+    print("interleave: photo pool peak %.1f MiB of %.0f MiB; evicted %s, refused %s; deep zoom (600 %%, 800 %%): %s steps, viewer RSS peak there %.1f MiB; %s"
+          % (n("photo-peak") / 1048576, n("photo-ceiling") / 1048576, v.get("photo-evicted"), v.get("photo-refused"),
+             v.get("deep-zoom-steps"), n("zoom-rss-peak-kib") / 1024, v.get("zoom-status", "").split("; ", 1)[-1]))
 for e in errs: print("FAIL: interleave: " + e, file=sys.stderr)
 print("interleave: " + ("FAILED" if errs else "OK"))
 sys.exit(1 if errs else 0)

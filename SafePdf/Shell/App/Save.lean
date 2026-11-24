@@ -989,6 +989,38 @@ def seedFor (doc : Doc.Doc) : IO (Except String ByteArray) := do
   try return .ok (← freshSeed)
   catch e => return .error s!"cannot save an encrypted document: {oneLine (toString e)}"
 
+/-! ## The expected output size (task 12.3b) -/
+
+/-- The text bytes and the page points a mark carries (what its annotation's size grows with). -/
+def markWeight (m : Mark) : Nat × Nat :=
+  match m.kind with
+  | .highlight qs => (0, 4 * qs.length)
+  | .note t _ => (t.utf8ByteSize, 1)
+  | .freeText t _ _ _ => (t.utf8ByteSize, 1)
+  | .ink ss _ _ _ => (0, ss.foldl (fun n st => n + st.length) 0)
+
+/-- **A bound on the update one Save appends** for `store`: 64 KiB (cross-reference section,
+trailer, rewritten page dictionaries' share) plus, per mark, 16 KiB (dictionary, appearance
+stream, popup), 8 bytes per text byte (escaped twice: `/Contents` and the appearance) and
+96 bytes per page point (quad corners, ink points: in `/QuadPoints` or `/InkList` and in the
+appearance), plus 16 KiB per deleted saved mark (its page's rewritten `/Annots`). Every mark
+of the store is counted, written or not. -/
+def updateEstimate (store : Store) : Nat :=
+  65536 + store.marks.foldl (fun n m =>
+    let (t, p) := markWeight m
+    n + 16384 + 8 * t + 96 * p) 0 + 16384 * store.deletedSaved.length
+
+/-- **The expected output of a Save** (task 12.3b; the viewer reserves it in its work pool
+before building, `Budget.Op.output`): the original bytes plus the update (`updateEstimate`). -/
+def outputEstimate (doc : Doc.Doc) (store : Store) : Nat :=
+  doc.file.bytes.size + updateEstimate store
+
+#guard updateEstimate {} == 65536
+#guard
+  let s : Store := {}
+  let (s, _) := (s.addHighlight 0 .yellow [⟨100, 698, 166, 708⟩]).getD (s, 0)
+  updateEstimate s == 65536 + 16384 + 96 * 4
+
 /-- The bytes Save would write for the store's changes (`bytes` unchanged when there are
 none), checked as described in the module doc; an error message otherwise (also the
 protection policy's refusal, task 12.4). `ivSeed` feeds the AES IVs (`seedFor`). Also returns

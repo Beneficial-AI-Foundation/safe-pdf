@@ -745,6 +745,20 @@ def markXml (pb : Box) (date : String) (m : Mark) (comment : Option Mark := none
         "><inklist>" ++ String.join (ss.map fun st => "<gesture>" ++ gestureXml st ++ "</gesture>") ++
         "</inklist></ink>"
 
+/-- **A bound on the size of the XFDF text `toXfdf` writes for `s`** (task 12.3b; the viewer
+reserves it in its work pool before building the text, `Budget.Op.output`): 4 KiB of header
+and footer, and per mark 2 KiB of element and attributes, 6 bytes per text byte (escaped:
+`&#xHHHH;` is at most 8 characters for a 1–4-byte character) and 48 bytes per page point
+(`coords`, `rect`, `<gesture>` numbers). -/
+def exportEstimate (s : Store) : Nat :=
+  4096 + s.marks.foldl (fun n m =>
+    let (t, p) : Nat × Nat := match m.kind with
+      | .highlight qs => (0, 4 * qs.length)
+      | .note t _ => (t.utf8ByteSize, 1)
+      | .freeText t _ _ _ => (t.utf8ByteSize, 1)
+      | .ink ss _ _ _ => (0, ss.foldl (fun k st => k + st.length) 0)
+    n + 2048 + 6 * t + 48 * p) 0
+
 /-- **Export**: the XFDF document of every mark of `s` (creation order; a highlight's comment
 inside the highlight's element, not on its own); `box` gives page boxes for note icons (US
 Letter when `none`), `date` the `date` attribute (omitted when empty), `href` the PDF's file
@@ -762,6 +776,15 @@ def toXfdf (s : Store) (box : Nat → Option Box) (date : String) (href : Option
     if m.isNote && comments.any (·.id == m.id) then none
     else markXml ((box m.page).getD letter) date m (s.commentOf m)
   head ++ "<annots>\n" ++ annots.foldl (fun acc x => acc ++ x ++ "\n") "" ++ "</annots>\n</xfdf>\n"
+
+-- The bound holds for a highlight with a comment and a note full of characters to escape.
+#guard
+  let s : Store := {}
+  let (s, h) := (s.addHighlight 0 .yellow [⟨100, 698, 166, 708⟩, ⟨100, 686, 111, 696⟩]).getD (s, 0)
+  let (s, _) := s.addNote 0 .yellow "a <comment> & \"more\" é 😀" (.quads [⟨100, 698, 166, 708⟩])
+  let (s, _) := s.addNote 1 .green (String.ofList (List.replicate 300 '<')) (.point ⟨300, 400⟩)
+  h > 0 && (toXfdf s (fun _ => some letter) "D:20261123000000Z" (some "paper.pdf")).utf8ByteSize ≤
+    exportEstimate s
 
 /-! ## Import -/
 
