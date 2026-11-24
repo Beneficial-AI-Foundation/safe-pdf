@@ -30,12 +30,14 @@ entry (`Repair.objStmAdds_new`), so the decryption state stays valid after it.
 * H2c, H3, H4 of `HypCompStrip`: every in-use strict entry is the newest scan hit of its
   number (compressed and free entries allowed), every hit has an in-use strict entry, the scan
   is within `limits.maxObjects`.
-* `trailerOkEncComp` (H5e + H7f + H8, all on the repair path's output): the repaired trailer
+* `trailerOkEncComp` (H5e + H7f + H1, all but H1 on the repair path's output): the repaired trailer
   is **encrypted** and has the strict `/Root`, `/Encrypt` value and first `/ID` string (H5e of
   `HypEnc`); the section after R6 with the strict container pass, `withObjStm … d.pre sec`, has
-  exactly the strict compressed entries (H7f of `HypCompEq`) and as many entries as the strict
-  section (H8 of `HypCompEq`, equal fuel; task 12.7g may drop it from `c4_comp_eq`, and then
-  from here through `getObject_strip`).
+  exactly the strict compressed entries (H7f of `HypCompEq`), and the strict section has the
+  entry `0 free` (H1 of `HypCompStrip`). Until task 12.7g H1 was H8 (as many repaired as strict
+  entries, equal fuel); since `/Length` resolution no longer observes the fuel above the number
+  of in-use objects, the proof uses `RepairAgreeComp.getObject_strip_cnt` instead of
+  `getObject_strip`, so free entries besides 0 are allowed.
 
 ## Results
 
@@ -231,12 +233,13 @@ theorem withCrypt_enc {limits : Limits} {e d : OpenDoc} (h : e.withCrypt limits 
 
 /-! ## The hypothesis -/
 
-/-- Conditions H5e, H7f and H8 for an encrypted file (task 12.7h): the repair path's trailer
+/-- Conditions H5e, H7f and H1 for an encrypted file (task 12.7h; H8 replaced by H1 in 12.7g):
+the repair path's trailer
 exists, is encrypted (as the strict one) and has the strict `/Root`, `/Encrypt` value and first
 `/ID` string; after rule R6 with the strict container pass (`withObjStm … d.pre`, what
 `OpenDoc.withObjStmEnc` runs once the repaired state equals the strict one), every compressed
 entry is the strict entry of its number, every strict compressed entry is there, and the
-section has as many entries as the strict one (equal fuel). -/
+strict section has the entry `0 free 65535`. -/
 def trailerOkEncComp (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
   match Repair.repair limits bytes with
   | .ok (sec, tr) =>
@@ -248,7 +251,7 @@ def trailerOkEncComp (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool 
       sec'.entries.all (fun x => !isComp x.2 || d.lookup x.1 == some x.2) &&
       d.xref.entries.all (fun x =>
         !isComp x.2 || (OpenDoc.mk' bytes sec' tr 0 true).lookup x.1 == some x.2) &&
-      sec'.entries.length == d.xref.entries.length
+      decide ((0, XrefEntry.free 0 65535) ∈ d.xref.entries)
   | .error _ => false
 
 /-- **The hypothesis of exact C4 for encrypted files with compressed entries**: H2c, H3, H4
@@ -299,7 +302,7 @@ theorem c4_enc_comp {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
   unfold trailerOkEncComp at htr
   split at htr
   · rename_i sec tr hrep
-    simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at htr
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at htr
     obtain ⟨⟨⟨⟨⟨⟨⟨htre, hde⟩, hroot⟩, hE⟩, hid⟩, hcomp⟩, hcomp2⟩, hlen⟩ := htr
     have hsec := Repair.repair_encrypted hrep htre
     subst hsec
@@ -363,14 +366,24 @@ theorem c4_enc_comp {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
         have := List.all_eq_true.mp hcomp2 _ ((hl1 _ _).mp h)
         simp only [isComp, Bool.not_true, Bool.false_or, beq_iff_eq] at this
         exact (hl2 _ _).mpr ((hl3 _ _).mp this)
-    have hf : d.objectCount = d'.objectCount := by
-      simp only [OpenDoc.objectCount, d.index_eq, d'.index_eq, List.size_toArray, hx']
-      exact hlen.symm
+    have hz : (0, XrefEntry.free 0 65535) ∈ sec'.entries :=
+      (Repair.withObjStm_entries (limits := limits) (bytes := bytes) (pre := d.pre)
+        (base := scanSection limits bytes)).1 _ (by simp [Repair.scanSection])
+    have hS1 : ∀ n off g, d.lookup n = some (.inUse off g) → n ∈ inUseNums d.xref.entries :=
+      fun n off g h => mem_inUseNums ((hl1 _ _).mp h)
+    have hS2 : ∀ n off g, d'.lookup n = some (.inUse off g) → n ∈ inUseNums sec'.entries :=
+      fun n off g h => mem_inUseNums ((hl2 _ _).mp h)
+    have h1 : (inUseNums d.xref.entries).length < d.objectCount := by
+      simp only [OpenDoc.objectCount, d.index_eq, List.size_toArray]
+      exact inUseNums_lt hlen
+    have h2 : (inUseNums sec'.entries).length < d'.objectCount := by
+      simp only [OpenDoc.objectCount, d'.index_eq, List.size_toArray, hx']
+      exact inUseNums_lt hz
     have hg : ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen :=
-      fun num gen => (getObject_strip (d := d) (d' := d') (by rw [hbytes, hb']; rfl)
+      fun num gen => (getObject_strip_cnt (d := d) (d' := d') (by rw [hbytes, hb']; rfl)
         (show d.crypt = d'.crypt from hc'.symm)
-        (strip_of (fun n off g => (hU n off g).symm) (fun n c i => (hC n c i).symm)) hf
-        limits num gen).symm
+        (strip_of (fun n off g => (hU n off g).symm) (fun n c i => (hC n c i).symm)) hS1 hS2
+        h1 h2 limits num gen).symm
     have hv : validate limits d' = .ok d' :=
       validate_congr (hroot.symm.trans hro'.symm) (fun n g => (hg n g).symm) hval
     refine ⟨d', ?_, hrp', by rw [hb', hbytes]; rfl, hU, hC, hro'.trans hroot, hc', hg⟩
