@@ -239,7 +239,7 @@ else
   trap 'rm -rf "$work"' EXIT
 fi
 
-# run_viewer DIR FILE: smoke-mode run with a 60 s timeout. Files open in vertical scrolling
+# run_viewer DIR FILE: smoke-mode run with a 60 s timeout (`viewer_timeout=S` before the call: S s). Files open in vertical scrolling
 # since 9.r1; the cases written for the single-page view keep it through SAFEPDF_VIEWER_VIEW
 # (set it empty for the real default, as case 1o does).
 run_viewer() {
@@ -247,7 +247,7 @@ run_viewer() {
   local o e rc=0
   o="$(mktemp)"; e="$(mktemp)"
   SAFEPDF_VIEWER_VIEW="${SAFEPDF_VIEWER_VIEW-single}" SAFEPDF_VIEWER_SMOKE="$1" \
-    timeout 60 "${wrap[@]}" "$viewer" "$2" >"$o" 2>"$e" || rc=$?
+    timeout "${viewer_timeout:-60}" "${wrap[@]}" "$viewer" "$2" >"$o" 2>"$e" || rc=$?
   cat "$o"; cat "$e" >&2
   grep -h 'Tcl error' "$o" "$e" >> "$tcl_log" || true
   rm -f "$o" "$e"
@@ -1282,7 +1282,8 @@ case_begin "1l lockdown"
 #     Tk interpreter on the same display tries `send` into the viewer. Without the test hook
 #     the viewer has no `send` command, is not in `winfo interps`, every send fails, and the
 #     resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1 the send works (the corpus
-#     driver's path). The other interpreter also checks that it got the hostile resources
+#     driver's path; on X11 a synchronous send answered by the viewer also counts, task
+#     10.c2). The other interpreter also checks that it got the hostile resources
 #     itself (so the guard, not a missing resource file, is what the test sees).
 lockwish=""
 for w in wish9.0 wish8.6 wish; do
@@ -1322,15 +1323,21 @@ if {$vname ne ""} {
   set t1 [clock milliseconds]
   set code [catch {send -async $vname "close \[open $dir/sent w\]; set ::safepdf::lockSent 1"} r]
   puts $f "send-async $vname: $code $r"
-  while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50 }
+  # Task 10.c2: on X11 an asynchronous send is a property change that sits in Xlib's output
+  # buffer until the client flushes it; `after 50` alone never does, `update` does.
+  update
+  while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50; update }
   puts $f "sent-file: [file exists $dir/sent] after [expr {[clock milliseconds] - $t1}] ms"
   if {[file exists $dir/sent]} { incr ok } elseif {$plat ne "aqua"} {
-    # Task 10.c1 diagnostic (X11): a synchronous send reports why the viewer refused the
-    # script (Tk ignores sends when the X server's host list lets other hosts in: "X server
-    # insecure"); one the viewer never services returns once it exits (at most ~20 s).
+    # X11 (task 10.c1 diagnostic, 10.c2 control): a synchronous send that comes back from the
+    # viewer with its Tk version and application name also proves that a send reaches the
+    # viewer (it ran the script); otherwise its error says why the viewer refused (Tk ignores
+    # sends when the X server's host list lets other hosts in: "X server insecure"). One the
+    # viewer never services returns once it exits (at most ~20 s).
     flush $f
     set code [catch {send $vname {list [package provide Tk] [tk appname]}} r]
     puts $f "send-sync $vname: $code $r"
+    if {$code == 0 && [lindex $r 1] eq $vname} { incr ok; puts $f "send-sync-ok: 1" }
   }
 } else {
   set cands [expr {$plat eq "aqua" ? {tk viewer safe-pdf} : [concat [winfo interps] tk viewer safe-pdf]}]
@@ -1714,17 +1721,26 @@ case_begin "1o wheelflow"
 #     most the page-turn push (a quarter view of trackpad travel on a page that fits, a notch
 #     for the wheel) and zero in the vertical modes; no step jumps further than one event plus
 #     the push carried onto a new page. Tk 8.6 (Ubuntu's tk-dev, the Linux CI) has no
-#     <TouchpadScroll>: there the trackpad bursts are skipped (task 10.c1).
+#     <TouchpadScroll>: there the trackpad bursts are skipped (task 10.c1). Task 10.c2: a third
+#     burst per mode presses <Button-5> (the X11 wheel of Tk 8.6, one notch each); every burst
+#     stops after 300 events that move nothing or 8 s, the run (150 s timeout) after 140 s with an `error:`
+#     line; the viewer writes wheelflow.txt line by line and prints `wheelflow-progress:`
+#     lines, and a failed run shows what it wrote and the end of its trace.
 wheelflow_case() {  # wheelflow_case NAME PDF
   local d="$work/wheelflow-$1"
-  SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2" \
-    || { echo "FAIL: wheelflow $1: run failed" >&2; fail=1; return; }
+  if ! viewer_timeout=150 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2"; then
+    echo "FAIL: wheelflow $1: run failed" >&2; fail=1
+    [ ! -f "$d/wheelflow.txt" ] || sed "s/^/wheelflow $1 partial: /" "$d/wheelflow.txt" >&2
+    [ ! -f "$d/wheelflow-trace.txt" ] || tail -n 5 "$d/wheelflow-trace.txt" | sed "s/^/wheelflow $1 trace: /" >&2
+    return
+  fi
   python3 -I -c '
 import math, sys
 name, path = sys.argv[1], sys.argv[2]
 lines = open(path, encoding="utf-8").read().splitlines()
 errs = []
 v = dict(l.split(": ", 1) for l in lines if ": " in l)
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
 if v.get("default") != "scroll=vertical spread=none radio=vertical none continuous=1":
     errs.append("a fresh file is not in Vertical Scrolling: %r" % v.get("default"))
 seen = 0
@@ -1742,16 +1758,19 @@ for l in lines:
     f = dict(t.split("=", 1) for t in rest.split())
     view = int(f["view"])
     pad = label.endswith("-pad")
+    button = label.endswith("-button")
     vertical = label.startswith("continuous")
-    step = 12 if pad else math.ceil(view / 30) + 1
-    stall_max = 0 if vertical else (math.ceil(view / 4 / 12) + 1 if pad else 3)
+    # Button-5 (task 10.c2) is one notch: a tenth of the view, and the page-turn push is one
+    # notch, so at most one event at the edge moves nothing.
+    step = 12 if pad else math.ceil(view / (10 if button else 30)) + 1
+    stall_max = 0 if vertical else (math.ceil(view / 4 / 12) + 1 if pad else 1 if button else 3)
     step_max = step if vertical else 2 * step
-    if f["reached"] != "true": errs.append("%s stopped on page %s after %s events" % (label, f["page"], f["events"]))
+    if f["reached"] != "true": errs.append("%s stopped on page %s after %s events in %s ms (stopped=%s)" % (label, f["page"], f["events"], f["ms"], f.get("stopped")))
     if f["back"] != "0": errs.append("%s went backwards %s times" % (label, f["back"]))
     if int(f["max-stall"]) > stall_max: errs.append("%s stalled for %s events (max %d)" % (label, f["max-stall"], stall_max))
     if int(f["max-step"]) > step_max: errs.append("%s jumped %s px (max %d)" % (label, f["max-step"], step_max))
     print("wheelflow %s: %s" % (name, l))
-if seen != 10: errs.append("expected 10 bursts, got %d (%r)" % (seen, lines[:3]))
+if seen != 15: errs.append("expected 15 bursts, got %d (%r)" % (seen, lines[:3]))
 if "touchpad=false" in tk and sys.argv[3] == "aqua": errs.append("Tk Aqua without <TouchpadScroll>: %r" % tk)
 for e in errs: print("FAIL: wheelflow %s: %s" % (name, e), file=sys.stderr)
 sys.exit(1 if errs else 0)

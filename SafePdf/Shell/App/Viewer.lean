@@ -7998,17 +7998,34 @@ packs them as `dx << 16 | dy & 0xffff`; `tk::PreciseScrollDeltas` unpacks them).
 def touchpadDelta (dx dy : Int) : Int :=
   dx * 65536 + (if dy < 0 then dy + 65536 else dy)
 
+/-- Appends the line `l` to the file `f` (created if missing) and flushes it, so that a run
+killed by the smoke script's timeout keeps what it wrote (task 10.c2). -/
+def appendLine (f : System.FilePath) (l : String) : IO Unit := do
+  let h ← IO.FS.Handle.mk f .append
+  h.putStrLn l
+  h.flush
+
+/-- Prints `l` on stdout and flushes it (smoke progress lines that the smoke script shows even
+when it kills the run, task 10.c2). -/
+def progressLine (l : String) : IO Unit := do
+  let o ← IO.getStdout
+  o.putStrLn l
+  o.flush
+
 /-- One burst of wheel events for `smokeWheelFlow` (task 9.r1): from the top of page 1 in
 the current view mode, sends `ev i` for `i = 0, 1, …` 8 ms apart with no pause (a trackpad
 gesture or a fast wheel; between events only Tk's event loop runs, as for a user, no settling
 of renders) until the current spread reaches the spread of page `target + 1`, or `maxEv`
-events. Appends `label event ms page top` lines to `trace` and returns a summary line:
-`reached`, `events`, the longest run of events that moved nothing (`max-stall`), moves
+events. Task 10.c2: the burst also stops after `stallCap` consecutive events that move nothing
+(an event type the platform drops) or once it has run `budgetMs` (a slow display), and says
+why (`stopped=`). Appends `label event ms page top` lines to `trace` and returns a summary
+line: `reached`, `events`, the longest run of events that moved nothing (`max-stall`), moves
 backwards (`back`), the largest move between two events on one page or, in the vertical
 modes, in the document (`max-step`, pixels), and the largest top of a page just turned to in
 the page modes (`turn-top`). -/
 def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : String)
-    (ev : Nat → IO Unit) (target maxEv : Nat) : IO String := do
+    (ev : Nat → IO Unit) (target maxEv : Nat) (stallCap : Nat := 300)
+    (budgetMs : Nat := 8000) : IO String := do
   sendKey "Home"
   settle st
   let s0 ← st.get
@@ -8025,8 +8042,15 @@ def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : Strin
   let mut maxStep := 0
   let mut turnTop := 0
   let mut events := 0
+  let mut stopped := "none"
   for i in [0:maxEv] do
     if View.spreadOf sp (← st.get).page ≥ goal then break
+    if stall ≥ stallCap then
+      stopped := "stall"
+      break
+    if (← IO.monoMsNow) - t0 > budgetMs then
+      stopped := "time"
+      break
     ev i
     events := i + 1
     discard <| run ["update"]
@@ -8048,22 +8072,34 @@ def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : Strin
   let s ← st.get
   return s!"flow-{label}: reached={decide (View.spreadOf sp s.page ≥ goal)} page={s.page + 1} \
     events={events} max-stall={maxStall} back={back} max-step={maxStep} turn-top={turnTop} \
-    view={s.canvasH} ms={(← IO.monoMsNow) - t0}"
+    view={s.canvasH} ms={(← IO.monoMsNow) - t0} stopped={stopped}"
 
 /-- Wheel flow across page boundaries (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, task 9.r1): first
 the view mode a freshly opened file is in (`default:`, the state and the View menu's radio
 variables); then, in each of the four view modes at Page Width and in the single-page mode at
 Page Fit, a trackpad-like burst of small `<TouchpadScroll>` deltas (12 px down, with ±1 px
-of sideways jitter, as Tk 9 on macOS delivers them) and a burst of third-notch
-`<MouseWheel>` deltas (high-resolution wheels) from page 1 to page 5 (`flowBurst`). Writes
-`wheelflow.txt` and the per-event trace `wheelflow-trace.txt`. -/
-def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
+of sideways jitter, as Tk 9 on macOS delivers them), a burst of third-notch `<MouseWheel>`
+deltas (high-resolution wheels) and (task 10.c2) a burst of `<Button-5>` presses (the X11
+wheel of Tk 8.6, one notch each) from page 1 to page 5 (`flowBurst`). Task 10.c2: every line
+of `wheelflow.txt` and each burst's part of the per-event trace `wheelflow-trace.txt` are
+written as soon as they are known, progress goes to stdout (`wheelflow-progress:`), and past
+`totalMs` the run stops with an `error:` line instead of running into the smoke script's
+timeout. -/
+def smokeWheelFlow (st : IO.Ref State) (dir : String) (totalMs : Nat := 140000) : IO Unit := do
+  let file := (dir : System.FilePath) / "wheelflow.txt"
+  let traceFile := (dir : System.FilePath) / "wheelflow-trace.txt"
+  IO.FS.writeFile file ""
+  IO.FS.writeFile traceFile ""
+  let tStart ← IO.monoMsNow
+  let out (l : String) : IO Unit := appendLine file l
+  let progress (l : String) : IO Unit := do
+    progressLine s!"wheelflow-progress: {(← IO.monoMsNow) - tStart} ms {l}"
+  progress "start"
   discard <| run ["update"]
   settle st
   let s0 ← st.get
-  let mut out : Array String := #[]
-  out := out.push s!"pages: {s0.pageCount}"
-  out := out.push s!"default: scroll={s0.scroll.key} spread={s0.spread.key} \
+  out s!"pages: {s0.pageCount}"
+  out s!"default: scroll={s0.scroll.key} spread={s0.spread.key} \
     radio={← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} \
     continuous={← run ["set", "::safepdf::continuous"]}"
   let trace ← IO.mkRef (#[] : Array String)
@@ -8072,29 +8108,43 @@ def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
       discard <| run ["bind", ".c", "<TouchpadScroll>"]
       pure true
     catch _ => pure false
-  out := out.push s!"tk: {tk} touchpad={touchpad}"
+  let ws ← run ["tk", "windowingsystem"]
+  out s!"tk: {tk} touchpad={touchpad} ws={ws}"
+  progress s!"tk {tk} touchpad={touchpad} ws={ws}"
   let pad (i : Nat) : IO Unit :=
     sendEvent ".c" "<TouchpadScroll>"
       ["-delta", toString (touchpadDelta ([0, 1, 0, -1].getD (i % 4) 0) (-12)), "-x", "300", "-y", "300"]
   let fine (_ : Nat) : IO Unit :=
     sendEvent ".c" "<MouseWheel>" ["-delta", "-40", "-x", "300", "-y", "300"]
+  let button (_ : Nat) : IO Unit := do
+    sendEvent ".c" "<Button-5>" ["-x", "300", "-y", "300"]
+    sendEvent ".c" "<ButtonRelease-5>" ["-x", "300", "-y", "300"]
   let cases : List (String × String × String × Toolbar.ZoomChoice) :=
     [("single", "page", "none", .pageWidth), ("continuous", "vertical", "none", .pageWidth),
      ("facing", "page", "odd", .pageWidth), ("continuous-facing", "vertical", "odd", .pageWidth),
      ("single-fit", "page", "none", .pageFit)]
+  let burst (name : String) (ev : Nat → IO Unit) : IO Unit := do
+    if (← IO.monoMsNow) - tStart > totalMs then
+      throw <| IO.userError s!"time budget of {totalMs} ms used up before flow-{name}"
+    progress s!"flow-{name} begins"
+    trace.set #[]
+    let l ← flowBurst st trace name ev 4 3000
+    out l
+    for t in (← trace.get) do appendLine traceFile t
+    progress l
   for (label, sc, sp, z) in cases do
+    progress s!"mode {label}"
     setViewMode st "scroll" sc
     setViewMode st "spread" sp
     setMode st z none
     settle st
     -- Task 10.c1: Tk 8.6 has no `<TouchpadScroll>` (generated ones are dropped, and the
     -- burst would run its 3000 events without moving).
-    if touchpad then out := out.push (← flowBurst st trace s!"{label}-pad" pad 4 3000)
-    else out := out.push s!"flow-{label}-pad: skipped (Tk {tk} has no <TouchpadScroll>)"
-    out := out.push (← flowBurst st trace s!"{label}-fine" fine 4 3000)
-  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") ("\n".intercalate out.toList ++ "\n")
-  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow-trace.txt")
-    ("\n".intercalate (← trace.get).toList ++ "\n")
+    if touchpad then burst s!"{label}-pad" pad
+    else out s!"flow-{label}-pad: skipped (Tk {tk} has no <TouchpadScroll>)"
+    burst s!"{label}-fine" fine
+    burst s!"{label}-button" button
+  progress "done"
   discard <| run ["destroy", "."]
 
 /-- Smoke steps of non-blocking rendering (`SAFEPDF_VIEWER_SMOKE_MODE=async`, task 8.8; the
@@ -10839,7 +10889,9 @@ def smoke (st : IO.Ref State) : IO Unit := do
   if s.smokeMode == "wheelflow" then
     try smokeWheelFlow st dir
     catch e =>
-      IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") s!"error: {e}\n"
+      -- Task 10.c2: appended, after the lines already written.
+      appendLine ((dir : System.FilePath) / "wheelflow.txt") s!"error: {e}"
+      progressLine s!"wheelflow-progress: error: {e}"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "async" then
