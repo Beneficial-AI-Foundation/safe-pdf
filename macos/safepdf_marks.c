@@ -50,6 +50,8 @@ extern lean_object *safepdf_marks_lean_set_opacity(lean_object *h, size_t id, ui
 extern lean_object *safepdf_marks_lean_translate(lean_object *h, size_t id, double dx, double dy,
                                                  uint8_t merge);
 extern lean_object *safepdf_marks_lean_seal(lean_object *h);
+extern lean_object *safepdf_marks_lean_begin_group(lean_object *h);
+extern lean_object *safepdf_marks_lean_end_group(lean_object *h);
 extern lean_object *safepdf_marks_lean_delete(lean_object *h, size_t id);
 extern lean_object *safepdf_marks_lean_undo_redo(lean_object *h, uint8_t undo);
 extern lean_object *safepdf_marks_lean_state(lean_object *h);
@@ -449,6 +451,22 @@ int safepdf_marks_translate(safepdf_marks *m, uint64_t id, double dx, double dy,
 void safepdf_marks_seal(safepdf_marks *m) {
     lock(m);
     lean_object *h = safepdf_marks_lean_seal(h_arg(m));
+    lean_dec(m->handle);
+    m->handle = h;
+    unlock(m);
+}
+
+void safepdf_marks_begin_group(safepdf_marks *m) {
+    lock(m);
+    lean_object *h = safepdf_marks_lean_begin_group(h_arg(m));
+    lean_dec(m->handle);
+    m->handle = h;
+    unlock(m);
+}
+
+void safepdf_marks_end_group(safepdf_marks *m) {
+    lock(m);
+    lean_object *h = safepdf_marks_lean_end_group(h_arg(m));
     lean_dec(m->handle);
     m->handle = h;
     unlock(m);

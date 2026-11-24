@@ -47,8 +47,9 @@ The same design, re-expressed in current AppKit. On macOS 26 the system design i
 Glass (WWDC25 session 310, "Build an AppKit app with the new design"): standard toolbars
 and sidebars get the glass treatment automatically when the app is built against the
 macOS 26 SDK; `NSGlassEffectView` exists for custom floating controls and is absent on
-older systems, so every 26-only call is runtime-gated. Deployment minimum: macOS 14; the
-app simply looks pre-glass there.
+older systems, so every 26-only call is runtime-gated. Deployment minimum: macOS 15 (decided
+by the human in 11.6a: the pinned Lean toolchain's runtime libraries are built for 15); the app
+simply looks pre-glass there.
 
 | Tk viewer surface | Native implementation |
 |---|---|
@@ -156,9 +157,29 @@ Deviations already decided (each as the Tk viewer does, unless noted):
 * Find reports counts per page ("hit k/c on page p", as Tk).
 * The attachment size probe decodes under the viewer's limits, not Tk's 16 MB probe cap
   (`safepdf_doc_attachment_bytes` has no cap parameter; recorded under 11.3f).
-* **Open for the human**: the minimum macOS. `LSMinimumSystemVersion` is 14.0, but the pinned
-  Lean toolchain's runtime libraries are built for macOS 15, so running on macOS 14 is not
-  established.
+* The minimum macOS (**resolved**, the human's decision in 11.6a): macOS 15 —
+  `LSMinimumSystemVersion` 15.0, `build.sh` compiles and links for 15.0 (the Lean toolchain's
+  `libgmp.a` / `libuv.a` are built for 15.0).
+
+The human's decisions after the manual check (task 11.6a):
+
+* The Lean tests do not run on the `macos` CI job (the Linux job runs them; the macOS job builds
+  the native app and runs its C, self-test and smoke checks).
+* The attachment size probe gap (above) is accepted.
+* External links offer Copy Address only (never opened), as above.
+* ⌘X / ⌘V work on marks: Cut removes the selected mark (highlight, note, free text, drawing; a
+  highlight's comment with it) in one undo step and keeps it on an app-internal mark clipboard,
+  its text (or the highlighted text) going on the pasteboard as plain text; Paste re-creates it
+  as a new mark — at the same place on its own page, else at the same page coordinates moved
+  inside the current page's CropBox — through the existing add exports in one undo step
+  (`safepdf_marks_begin_group` / `_end_group`). Text fields keep their own ⌘X / ⌘V.
+
+Fixes from the manual check (11.6a): the page field is sized for the document's widest page
+label or number with "of N" right after it; the Highlight tool shows a highlighter cursor over
+the page (the exported `cursorFor` rule is kept: its I-beam / arrow in Highlight mode is drawn
+as the highlighter); outline, thumbnail, link, page-field and Back / Forward jumps slide to the
+destination (0.3 s ease-out, at most 1.5 view heights: a farther jump first cuts to that
+distance; immediate with "Reduce motion").
 
 * **11.4 — Platform build selection + CI** (as planned): macOS builds the native shell,
   Linux keeps Tk; both non-default targets; a macOS CI job.

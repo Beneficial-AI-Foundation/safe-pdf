@@ -37,8 +37,9 @@ leanlibs=(-L "$prefix/lib/lean" -L "$prefix/lib"
   -lleancpp -lInit -lStd -lleanrt -lcadical -lc++ -lgmp -luv)
 
 # 2. The C API shims with the system clang (it has the macOS SDK), at the app's deployment
-#    target.
-min=14.0
+#    target: macOS 15 (task 11.6a, the human's decision; the Lean toolchain's libgmp.a and
+#    libuv.a are built for 15.0, so nothing older can be promised).
+min=15.0
 cflags=(-O2 -Wall -Wextra -I "$prefix/include" -I "$here")
 for m in core view marks select; do
   clang "${cflags[@]}" -mmacosx-version-min="$min" -c "$here/safepdf_$m.c" -o "$out/safepdf_$m.o"
@@ -47,9 +48,11 @@ done
 # 3. The Swift app (Swift 6 language mode, strict concurrency), linked by swiftc against the
 #    shims, the Lean library and Lean's runtime: Lake's executable link line minus the
 #    libraries the core's closure does not use (Lean, Lake, LeanExport, ssl).
-#    The Lean toolchain's own libgmp.a / libuv.a objects are marked for a newer macOS than
-#    $min; the linker warns once per object. Those warnings are counted, not repeated (the
-#    full text stays in build/swift-link.log); any other diagnostic is shown.
+#    Objects marked for a newer macOS than $min make the linker warn once per object: since
+#    the minimum is 15.0 the toolchain's libgmp.a / libuv.a (15.0) no longer do; the C that
+#    Lake compiles for libsafepdfffi.a carries the build machine's macOS (Lake passes no
+#    deployment target). Those warnings are counted, not repeated (the full text stays in
+#    build/swift-link.log); any other diagnostic is shown.
 log="$out/swift-link.log"
 if ! swiftc -swift-version 6 -O -target "$(uname -m)-apple-macos$min" -module-name SafePdfApp \
   -I "$here" "$here"/App/*.swift \
@@ -65,7 +68,7 @@ newer="than being linked ($min)"
 grep -v -F "$newer" "$log" >&2 || true
 n="$(grep -c -F "$newer" "$log" || true)"
 if [ "$n" != 0 ]; then
-  echo "macos/build.sh: note: $n objects of Lean's runtime libraries are built for a newer macOS than $min (see $log)" >&2
+  echo "macos/build.sh: note: $n linked objects are built for a newer macOS than $min (Lake's C objects carry the build machine's version; see $log)" >&2
 fi
 cp "$worker" "$out/worker"
 

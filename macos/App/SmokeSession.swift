@@ -533,6 +533,10 @@ import UniformTypeIdentifiers
                 case MainMenu.commandSelector: wc.performSafePdfCommand(item)
                 case MainMenu.actionSelector: wc.performSafePdfAction(item)
                 case MainMenu.colorSelector: wc.chooseHighlightColor(item)
+                // Cut / Paste (task 11.6a): with no text field focused the window controller is
+                // the responder that takes them (headless there is no field editor).
+                case #selector(NSText.cut(_:)): wc.cut(item)
+                case #selector(NSText.paste(_:)): wc.paste(item)
                 default:
                     skips.append("key \(spec): the standard AppKit item “\(item.title)” is not sent headless")
                 }

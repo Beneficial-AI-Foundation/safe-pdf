@@ -28,6 +28,13 @@ struct FreeTextEdit {
     var rgb: UInt32
 }
 
+/// A cut mark on the app's mark clipboard (task 11.6a): the mark as listed and, for a
+/// highlight, its comment note.
+struct MarkClip {
+    let mark: Mark
+    let comment: Mark?
+}
+
 @MainActor final class MarksController: CanvasPointer {
     private weak var pages: PageViewController?
     /// The document's marks store (nil: no document, or its marks could not be read).
@@ -541,6 +548,151 @@ struct FreeTextEdit {
         if openIt && mk.isNote { openNote(id) }
         onChange?()
         return true
+    }
+
+    // MARK: cut and paste (task 11.6a)
+
+    /// The app's mark clipboard: the mark last cut (⌘X) and, for a highlight, its comment. ⌘V
+    /// pastes it as a new mark, as often as wanted; it outlives the document it came from.
+    static var clipboard: MarkClip?
+
+    /// Whether Cut can cut a mark now (a mark is selected).
+    var canCut: Bool { model != nil && selectedMark != nil }
+
+    /// Whether Paste can paste a mark now (one was cut, a document is open).
+    var canPaste: Bool { model != nil && Self.clipboard != nil && (canvas?.document?.pageCount ?? 0) > 0 }
+
+    /// The comment of highlight `h` as listed (Store.noteOn: the newest note of its page anchored
+    /// to exactly its quads, which the store lists with `is_comment`).
+    private func comment(of h: Mark) -> Mark? {
+        guard h.isHighlight, let m = model else { return nil }
+        return m.list(h.page).last {
+            $0.isNote && $0.isComment && $0.quads.count == h.quads.count
+                && zip($0.quads, h.quads).allSatisfy { MarksModel.same($0.0, $0.1) }
+        }
+    }
+
+    /// Cut (⌘X) of the selected mark (highlight, note, free text, drawing): it is deleted in one
+    /// undo step (a highlight's comment with it, Viewer.deleteMark) and kept on the mark
+    /// clipboard; its text — a note's or free text's, or the highlighted text — goes on the
+    /// pasteboard as plain text.
+    func cutSelected() {
+        _ = commitFreeText()
+        guard let m = model, let mk = selectedMark else {
+            if model != nil { status("no mark selected (click a highlight, note, text box or drawing)") }
+            return
+        }
+        let cm = comment(of: mk)
+        let text = mk.isHighlight ? (self.text?.text(under: mk.quads, page: mk.page) ?? "") : mk.text
+        deleteMark(mk.id)
+        guard m.find(mk.id) == nil else { return }
+        Self.clipboard = MarkClip(mark: mk, comment: cm)
+        if !text.isEmpty, let pb = self.text?.pasteboard {
+            pb.clearContents()
+            pb.setString(text, forType: .string)
+        }
+        status("\(mk.name) cut\(cm != nil ? " with its comment" : "") (⌘V pastes it on the current page)")
+        onChange?()
+    }
+
+    /// Paste (⌘V) of the cut mark as a new mark on the current page, in one undo step: at the
+    /// same place on its own page, else at the same page coordinates moved inside the page's
+    /// CropBox (`pasteOffset`). It becomes the selected mark.
+    func paste() {
+        guard let m = model, let c = canvas, let doc = c.document, doc.pageCount > 0,
+              let clip = Self.clipboard else { return }
+        _ = commitFreeText()
+        let page = min(max(0, c.currentPage), doc.pageCount - 1)
+        let d = page == clip.mark.page ? CGVector(dx: 0, dy: 0)
+            : Self.pasteOffset(clip.mark, into: doc.geometry.indices.contains(page) ? doc.geometry[page].box : nil)
+        let before = m.version
+        let r = m.group { Self.recreate(clip, page: page, dx: Double(d.dx), dy: Double(d.dy), in: m) }
+        switch r {
+        case .success(let id):
+            markSel = id
+            inkSession = nil
+            ui.picker = 0
+            status("\(clip.mark.name) pasted on page \(page + 1)")
+        case .failure(let e):
+            // A part made before the failure goes with one undo (the group is one step).
+            if m.version != before { _ = m.undo() }
+            status("paste: \(e.message)")
+        }
+        redrawAll()
+        placeBubble()
+        onChange?()
+    }
+
+    /// The page-space box a mark covers: its /Rect, quads, point and stroke points.
+    static func extent(_ mk: Mark) -> CGRect? {
+        var r: CGRect?
+        func add(_ q: CGRect) { r = r.map { $0.union(q) } ?? q }
+        if let b = mk.rect { add(CGRect(x: b.llx, y: b.lly, width: b.urx - b.llx, height: b.ury - b.lly)) }
+        for b in mk.quads { add(CGRect(x: b.llx, y: b.lly, width: b.urx - b.llx, height: b.ury - b.lly)) }
+        if let p = mk.point { add(CGRect(origin: p, size: .zero)) }
+        for s in mk.strokes { for p in s { add(CGRect(origin: p, size: .zero)) } }
+        return r
+    }
+
+    /// The move that puts a mark pasted at its own page coordinates inside page box `box`
+    /// (CropBox, page space): none when it fits; else the least move, along an axis where it is
+    /// larger than the box its left and top edges at the box's.
+    static func pasteOffset(_ mk: Mark, into box: safepdf_rat_box?) -> CGVector {
+        guard let box, let e = extent(mk) else { return CGVector(dx: 0, dy: 0) }
+        let x0 = ZoomModel.double(box.llx), y0 = ZoomModel.double(box.lly)
+        let x1 = ZoomModel.double(box.urx), y1 = ZoomModel.double(box.ury)
+        func axis(_ a: Double, _ b: Double, _ lo: Double, _ hi: Double, startAtLow: Bool) -> Double {
+            if b - a > hi - lo { return startAtLow ? lo - a : hi - b }
+            if a < lo { return lo - a }
+            if b > hi { return hi - b }
+            return 0
+        }
+        return CGVector(dx: axis(e.minX, e.maxX, min(x0, x1), max(x0, x1), startAtLow: true),
+                        dy: axis(e.minY, e.maxY, min(y0, y1), max(y0, y1), startAtLow: false))
+    }
+
+    /// Re-creates a cut mark on `page` moved by (dx, dy) through the store's add calls (with its
+    /// colour, size, opacity, text, and a highlight's comment on its quads); the new mark's id.
+    static func recreate(_ clip: MarkClip, page: Int, dx: Double, dy: Double,
+                         in m: MarksModel) -> Result<UInt64, EditError> {
+        let mk = clip.mark
+        func q(_ b: safepdf_box) -> safepdf_box {
+            safepdf_box(llx: b.llx + dx, lly: b.lly + dy, urx: b.urx + dx, ury: b.ury + dy)
+        }
+        func p(_ v: CGPoint) -> CGPoint { CGPoint(x: Double(v.x) + dx, y: Double(v.y) + dy) }
+        let rgb = (UInt32(mk.rgb.r) << 16) | (UInt32(mk.rgb.g) << 8) | UInt32(mk.rgb.b)
+        switch mk.kind {
+        case Int32(SAFEPDF_MARK_HIGHLIGHT):
+            let quads = mk.quads.map(q)
+            let r = m.addHighlight(page: page, color: mk.color, quads: quads)
+            guard case .success = r, let cm = clip.comment else { return r }
+            if case .failure(let e) = m.addNote(page: page, color: cm.color, text: cm.text,
+                                                anchor: Int32(SAFEPDF_ANCHOR_QUADS), point: nil, quads: quads) {
+                return .failure(e)
+            }
+            return r
+        case Int32(SAFEPDF_MARK_NOTE):
+            if !mk.quads.isEmpty {
+                return m.addNote(page: page, color: mk.color, text: mk.text, anchor: Int32(SAFEPDF_ANCHOR_QUADS),
+                                 point: nil, quads: mk.quads.map(q))
+            }
+            guard let pt = mk.point else { return .failure(EditError(message: "the note has no anchor")) }
+            return m.addNote(page: page, color: mk.color, text: mk.text, anchor: Int32(SAFEPDF_ANCHOR_POINT),
+                             point: p(pt), quads: [])
+        case Int32(SAFEPDF_MARK_FREETEXT):
+            guard let pt = mk.point else { return .failure(EditError(message: "the text box has no position")) }
+            return m.addFreeText(page: page, text: mk.text, at: p(pt), size: mk.size, rgb: rgb)
+        default:
+            guard let first = mk.strokes.first, !first.isEmpty else {
+                return .failure(EditError(message: "the drawing has no stroke"))
+            }
+            let r = m.addInk(page: page, points: first.map(p), width: mk.size, opacity: mk.opacity, rgb: rgb)
+            guard case .success(let id) = r else { return r }
+            for s in mk.strokes.dropFirst() where !s.isEmpty {
+                if let e = m.addStroke(id, points: s.map(p)) { return .failure(EditError(message: e)) }
+            }
+            return r
+        }
     }
 
     // MARK: undo / redo
