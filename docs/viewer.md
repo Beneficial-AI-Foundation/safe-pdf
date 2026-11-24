@@ -538,7 +538,7 @@ edges are for the page scroll modes (single page, facing).
   turns pages (the `Left`/`Right` keys still do).
 * **Smoke** (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, case 1o): bursts of 12 px
   `<TouchpadScroll>` events with sideways jitter and of third-notch `<MouseWheel>` events, 8 ms
-  apart, through five pages in every view mode at Page Width and in the single page at Page
+  apart (and, since 10.c2, of `<Button-5>` presses), through five pages in every view mode at Page Width and in the single page at Page
   Fit; trace of (event, ms, page, top) in `wheelflow-trace.txt`. On `arxiv-1706.03762.pdf`
   (882 px view) before 9.r1 the trackpad bursts never left page 1 in the page modes; after,
   the longest run of events that moved nothing is 3 (single, Page Width), 18 (Page Fit and
@@ -1694,7 +1694,17 @@ push (none in the continuous modes), and without a step longer than one event pl
 carried push. About 12 s per file. Tk 8.6 (the Linux CI) has no `<TouchpadScroll>`: a
 generated one is dropped and each trackpad burst would run its 3000 events without moving (the
 run timed out at 60 s), so there the five trackpad bursts print `skipped` and only the wheel
-bursts are checked (task 10.c1; `tk:` line of `wheelflow.txt`).
+bursts are checked (task 10.c1; `tk:` line of `wheelflow.txt`). Task 10.c2: the second CI run
+still timed out on both files with no output at all, because `wheelflow.txt` was written
+only at the end. Now every line is written when it is known, each burst's trace is appended
+after the burst, and the viewer prints `wheelflow-progress:` lines (ms since start, mode,
+burst summary) on stdout, flushed. Each burst stops after 300 motionless events
+(`stopped=stall`, an event type the platform drops) or 8 s (`stopped=time`), and the run stops
+with an `error:` line after 140 s (script timeout 150 s for this case). A failed run shows the
+lines it wrote and the end of its trace. Each mode also gets a third burst of `<Button-5>`
+presses (with releases): one notch each, the X11 wheel of Tk 8.6. It is checked like the wheel
+burst, with a step of a tenth of the view and at most one motionless event at a page edge. So
+there are 15 bursts per file.
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
@@ -1733,7 +1743,14 @@ server is "secure" (access control on and no host-list entries but `SI:localuser
 otherwise "X server insecure", silently for `-async`): the drive run first prints the test
 server's `xhost` list (`xhost:` lines) and removes other entries, and when the file does not
 appear the `wish` tries a synchronous `send` and prints its result (`send-sync`, task 10.c1:
-the first Linux CI run, Tk 8.6, saw the async send accepted and never run).
+the first Linux CI run, Tk 8.6, saw the async send accepted and never run). Task 10.c2: the
+second CI run had the synchronous send come back from the viewer (`0 8.6.14 safepdf-lock-PID`)
+while the file still never appeared. Best explanation: on X11 `send -async` is a property
+change that stays in Xlib's output buffer until the client flushes it, and the `wish` only
+polled with `after 50` (which never flushes); it now calls `update` after the send and in its
+wait. On X11 a synchronous send that returns the viewer's Tk version and its application name
+also counts as reaching the viewer (`send-sync-ok`), since the viewer ran the script. The
+lockdown half is unchanged: there every send must fail.
 
 The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
 (X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`
