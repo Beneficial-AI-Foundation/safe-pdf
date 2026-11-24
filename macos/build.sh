@@ -5,7 +5,8 @@
 #   macos/build/SafePdf.app       the bundle: Contents/MacOS/SafePdf, Contents/Helpers/worker,
 #                                 Contents/Resources/SafePdf.icns, Info.plist; ad-hoc signed
 #   macos/build/core_test         the C API v2 test program (macos/tests/run.sh runs it)
-#   macos/build.sh                (run from anywhere; uses the repository's Lake project)
+#   macos/build.sh                (run from anywhere; uses the repository's Lake project;
+#                                 `lake build macosApp` runs it too)
 # Needs: the Lean toolchain (elan), the Xcode command line tools (clang, swiftc, iconutil,
 # codesign; macOS SDK). No other dependency. Never launches the app.
 #
@@ -23,8 +24,12 @@ if [ "$(uname)" != Darwin ]; then
 fi
 
 # 1. The Lean side: SafePdf.Shell.Ffi and its import closure as one static library, and the
-#    confined document worker (not built by macosFfi).
-(cd "$repo" && lake build macosFfi worker)
+#    confined document worker (not built by macosFfi). `lake build macosApp` (lakefile.lean)
+#    builds both itself and then runs this script with SAFEPDF_MACOS_LAKE_DONE=1, so that no
+#    `lake build` runs inside a running one.
+if [ "${SAFEPDF_MACOS_LAKE_DONE:-0}" != 1 ]; then
+  (cd "$repo" && lake build macosFfi worker)
+fi
 ffi="$repo/.lake/build/lib/libsafepdfffi.a"
 worker="$repo/.lake/build/bin/worker"
 prefix="$(cd "$repo" && lean --print-prefix)"

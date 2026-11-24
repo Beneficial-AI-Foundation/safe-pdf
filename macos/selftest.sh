@@ -25,10 +25,19 @@ mkdir -p "$out"
 watch="$out/front-app.log"
 : > "$watch"
 
+# Without a WindowServer session (e.g. a CI runner with no logged-in GUI user) lsappinfo has
+# no front application to report: the watcher is then skipped with a printed line (nothing
+# could become frontmost) and only the self-test's own exit status counts.
+watcher=1
+if ! lsappinfo front 2>/dev/null | grep -q '^ASN:'; then
+  watcher=0
+  echo "selftest: SKIP front-app watcher: lsappinfo reports no front application (no WindowServer session?)"
+fi
+
 SAFEPDF_MACOS_SELFTEST="$out" "$bin" "$pdf" &
 pid=$!
 leaked=0
-while kill -0 "$pid" 2>/dev/null; do
+while [ "$watcher" = 1 ] && kill -0 "$pid" 2>/dev/null; do
   # Only the PID this script started counts: a copy launched by hand is not ours.
   front_pid="$(lsappinfo info -only pid "$(lsappinfo front)" 2>/dev/null | tr -dc '0-9' || true)"
   front="$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null || true)"
@@ -48,5 +57,9 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 status=0
 wait "$pid" || status=$?
-echo "selftest: exit $status; front-app samples: $(wc -l < "$watch" | tr -d ' '), leaks: $leaked"
+if [ "$watcher" = 1 ]; then
+  echo "selftest: exit $status; front-app samples: $(wc -l < "$watch" | tr -d ' '), leaks: $leaked"
+else
+  echo "selftest: exit $status; front-app watcher skipped"
+fi
 [ "$leaked" = 0 ] && [ "$status" = 0 ]
