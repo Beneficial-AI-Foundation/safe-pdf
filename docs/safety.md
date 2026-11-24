@@ -262,8 +262,8 @@ security review; those items protect the user even if every current theorem is c
     excluded-feature or limit paths; document each.
 
 **What exists now (task 12.6).** The rig for items 5, 6 and 10 is in `scripts/`; its CI jobs
-wait in `docs/ci-pending.patch` (workflow pushes need a token with `workflow` scope), so
-none of it runs in CI until a maintainer applies that patch.
+(`lean4lean`, `compiled-vs-interpreted`, `viewer`, and the pinned-corpus positions/pixels steps)
+are in `.github/workflows/ci.yml` since 2026-11-24.
 * Item 5: `scripts/lean4lean-check.sh` fetches lean4lean at a pinned commit (its `master`
   targets our v4.36.0), SHA-256-verified, builds it from a fresh directory and re-checks every
   `SafePdf.*` module from its `.olean`. lean4lean is derived from the C++ kernel, so this is a
