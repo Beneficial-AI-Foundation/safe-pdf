@@ -24,11 +24,13 @@ prefix="$(cd "$repo" && lean --print-prefix)"
 cflags=(-O2 -Wall -Wextra -I "$prefix/include")
 clang "${cflags[@]}" -c "$here/safepdf_core.c" -o "$out/safepdf_core.o"
 clang "${cflags[@]}" -c "$here/safepdf_marks.c" -o "$out/safepdf_marks.o"
+clang "${cflags[@]}" -c "$here/safepdf_select.c" -o "$out/safepdf_select.o"
 clang "${cflags[@]}" -fobjc-arc -Wno-deprecated-declarations -c "$here/main.m" -o "$out/main.o"
 
 # 3. Link: the Lean runtime as Lake links an executable (`lake build viewer -v`), minus the
 #    libraries the core's closure does not use (Lean, Lake, LeanExport, ssl).
-clang -o "$out/safepdf-mac" "$out/main.o" "$out/safepdf_core.o" "$out/safepdf_marks.o" "$ffi" \
+clang -o "$out/safepdf-mac" "$out/main.o" "$out/safepdf_core.o" "$out/safepdf_marks.o" \
+  "$out/safepdf_select.o" "$ffi" \
   -L "$prefix/lib/lean" -L "$prefix/lib" \
   -lleancpp -lInit -lStd -lleanrt -lcadical -lc++ -lgmp -luv \
   -framework AppKit -framework CoreGraphics \

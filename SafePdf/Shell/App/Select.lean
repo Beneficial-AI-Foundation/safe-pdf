@@ -452,11 +452,15 @@ hides are not in `lines` at all (`Text.Options.keeps_hiddenWhy`, `Text.unclipped
 def cellsHidden (o : Options) (lines : Array Line) : Array Bool :=
   lines.foldl (fun acc l => acc ++ ((Text.lineOrder o l).map fun g => !g.visible).toArray) #[]
 
+/-- The index of a page's cells, line directions and hidden flags (as the worker sends them,
+task 12.2d), with the normalised search text computed from the cells (`normChars`). -/
+def PageIndex.ofCells (cells : Array Cell) (lineDirs : Array Nat) (hidden : Array Bool) :
+    PageIndex :=
+  { cells, hay := normChars cells, lineDirs, hidden }
+
 /-- The index of an extracted page (default layout options, as the text view). -/
 def PageIndex.ofText (pt : Text.PageText) : PageIndex :=
-  let cs := cellsOf {} pt.lines
-  { cells := cs, hay := normChars cs, lineDirs := pt.lines.map (·.dir),
-    hidden := cellsHidden {} pt.lines }
+  PageIndex.ofCells (cellsOf {} pt.lines) (pt.lines.map (·.dir)) (cellsHidden {} pt.lines)
 
 /-- Task 12.5: the number of characters of `rangeText ix.cells a b` that come from glyphs the
 page does not paint (separators not counted). -/
@@ -474,6 +478,85 @@ def PageIndex.bands (ix : PageIndex) (a b : Nat) : List Box := selBands ix.cells
 /-- The hits of `q` on a page, as cell ranges. -/
 def PageIndex.hits (ix : PageIndex) (q : Array Char) : Array (Nat × Nat) :=
   ((findAll ix.hay q).map (hitRange ix.hay q.size)).toArray
+
+/-- The line of cell `i` (triple click): its first and last cell (`lineStart`, `lineEnd`). -/
+def lineAt (cs : Array Cell) (i : Nat) : Nat × Nat :=
+  (lineStart cs i i, lineEnd cs cs.size i)
+
+/-- The status after a copy of `n` characters, `hidden` of them from glyphs the page does not
+paint (task 12.5): the copy keeps invisible text — an OCR layer over a scan is the text of the
+page — but says how much of it the page does not show, so text hidden from the reader (a
+prompt or a payload) never reaches the clipboard unannounced. -/
+def copyStatus (n hidden : Nat) : String :=
+  if hidden == 0 then s!"copied {n} characters"
+  else s!"copied {n} characters; the copied text includes {hidden} characters that are not \
+    visible on the page (invisible text, e.g. an OCR layer)"
+
+/-! ## The search loop (the viewer's `nextHit`)
+
+Find Next / Find Previous look at the current page first (the hit after, or before, the
+current one), then at the other pages in order (`searchPages`, wrapping around to the current
+page), stopping at the first page with a hit: its first hit going forward, its last going
+backward. The viewer (`Viewer.nextHit`) runs this order with the worker's page indices and a
+work allowance; `searchStep` is the same order over the hit counts known so far, for a caller
+that fetches page indices itself. -/
+
+/-- The hit to show on the current page, which has `c` hits: the one after (`forward`) or
+before the current hit `cur` (an index on this page), or the first (last) one without a
+current hit; `none` when there is no such hit on this page. -/
+def hitOnCurrent (c : Nat) (cur : Option Nat) (forward : Bool) : Option Nat :=
+  let cand := if forward then some ((cur.map (· + 1)).getD 0)
+    else match cur with
+      | some k => if k > 0 then some (k - 1) else none
+      | none => if c > 0 then some (c - 1) else none
+  match cand with
+  | some k => if k < c then some k else none
+  | none => none
+
+/-- The pages a search visits after the current page `page` of `n`, in order: the following
+(`forward`) or preceding pages, wrapping around, ending with `page` itself. -/
+def searchPages (n page : Nat) (forward : Bool) : List Nat :=
+  (List.range n).map fun j =>
+    let i := j + 1
+    if forward then (page + i) % n else (page + n - i % n) % n
+
+/-- The hit shown on another page with `c > 0` hits: its first going forward, its last
+backward. -/
+def firstHitOn (forward : Bool) (c : Nat) : Nat := if forward then 0 else c - 1
+
+/-- Whether reaching page `p` from page `page` wrapped around the document. -/
+def wrappedTo (forward : Bool) (page p : Nat) : Bool := if forward then p ≤ page else p ≥ page
+
+/-- One step of a search over the hit counts known so far. -/
+inductive SearchStep where
+  /-- The next hit: page, index of the hit on that page, hits on that page, wrapped around. -/
+  | hit (p k c : Nat) (wrapped : Bool)
+  /-- The hit count of page `p` is needed first (fetch its index, then step again). -/
+  | need (p : Nat)
+  /-- No hit in the document. -/
+  | none
+  deriving Repr, BEq, Inhabited
+
+/-- **One step of the search** (`Viewer.nextHit`'s order): `counts[p]` is page `p`'s number of
+hits (`some 0` for a page without text or whose index failed), `none` while its index is not
+known; `cur` the current hit's index when it is on `page`. -/
+def searchStep (counts : Array (Option Nat)) (page : Nat) (cur : Option Nat) (forward : Bool) :
+    SearchStep :=
+  let rest : SearchStep :=
+    let r := (searchPages counts.size page forward).findSome? fun p =>
+      match counts[p]? with
+      | some (some c) => if c > 0 then some (SearchStep.hit p (firstHitOn forward c) c
+          (wrappedTo forward page p)) else Option.none
+      | some Option.none => some (SearchStep.need p)
+      | Option.none => Option.none
+    r.getD .none
+  match counts[page]? with
+  | some Option.none => .need page
+  | some (some c) =>
+    match hitOnCurrent c cur forward with
+    | some k => .hit page k c false
+    | Option.none => rest
+  | Option.none => rest
 
 /-! ## Checks -/
 
@@ -585,5 +668,26 @@ private def ocrPT : Text.PageText :=
 #guard (PageIndex.ofText ocrPT).hiddenChars 7 5 == 3
 #guard (PageIndex.ofText samplePT).hiddenChars 0 100 == 0
 #guard rangeText (PageIndex.ofText ocrPT).cells 0 100 == "Hello World"
+#guard copyStatus 5 0 == "copied 5 characters"
+#guard copyStatus 11 3 == "copied 11 characters; the copied text includes 3 characters that are \
+  not visible on the page (invisible text, e.g. an OCR layer)"
+-- Triple click: the whole line of a cell.
+#guard lineAt sampleCells 7 == (0, 10) && lineAt sampleCells 12 == (11, 15) &&
+  lineAt sampleCells 17 == (16, 18) && lineAt sampleCells 0 == (0, 10)
+-- The search loop's page order and steps.
+#guard searchPages 5 2 true == [3, 4, 0, 1, 2] && searchPages 5 2 false == [1, 0, 4, 3, 2]
+#guard searchPages 0 0 true == []
+#guard hitOnCurrent 3 (some 1) true == some 2 && hitOnCurrent 3 (some 2) true == none &&
+  hitOnCurrent 3 none false == some 2 && hitOnCurrent 3 (some 0) false == none &&
+  hitOnCurrent 0 none true == none
+#guard searchStep #[some 2, none, some 0, some 1] 0 (some 1) true == .need 1
+#guard searchStep #[some 2, some 0, some 0, some 1] 0 (some 1) true == .hit 3 0 1 false
+#guard searchStep #[some 2, some 0, some 0, some 1] 3 (some 0) true == .hit 0 0 2 true
+#guard searchStep #[some 2, some 0, some 0, some 1] 0 none false == .hit 0 1 2 false
+#guard searchStep #[some 2, some 0, some 0, some 1] 0 (some 0) false == .hit 3 0 1 true
+#guard searchStep #[some 1, some 0] 0 (some 0) true == .hit 0 0 1 true
+#guard searchStep #[none, some 4] 0 none true == .need 0
+#guard searchStep #[some 0, some 0] 1 none true == .none
+#guard searchStep #[] 0 none true == .none
 
 end SafePdf.Shell.App.Select
