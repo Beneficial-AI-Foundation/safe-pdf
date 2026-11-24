@@ -12,6 +12,7 @@
 #include "../safepdf_core.h"
 
 #include <dispatch/dispatch.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,7 +107,38 @@ static safepdf_document *open_golden(const char *rel, const safepdf_open_options
     return d;
 }
 
-/* ---- open from bytes, page count and size; async render equals the v1 sync render ---- */
+/* Renders `page` of `d` through the worker and in process (safepdf_test_render_sync, the same
+   renderer call) and checks the two images are equal byte for byte. */
+static void check_render_equal(safepdf_document *d, const char *name, size_t page, uint32_t num,
+                               uint32_t den, unsigned rot) {
+    reply r;
+    reply_init(&r);
+    safepdf_request_id id = safepdf_doc_render(d, page, num, den, rot, NULL, SAFEPDF_PRIO_CURRENT,
+                                               q, on_image, &r);
+    CHECK(id > 0, "render id");
+    CHECK(wait_for(&r, 30000) == 0, "render callback");
+    CHECK(r.status == SAFEPDF_STATUS_OK && r.id == id, "%s p%zu render status %d (%s)", name, page,
+          r.status, r.error);
+    char *err = NULL;
+    safepdf_image *b = safepdf_test_render_sync(d, page, num, den, rot, &err);
+    CHECK(b != NULL, "%s p%zu in-process render: %s", name, page, err ? err : "");
+    safepdf_image *a = r.result;
+    if (a && b) {
+        CHECK(a->width == b->width && a->height == b->height && a->stride == b->stride,
+              "%s p%zu sizes %zux%zu vs %zux%zu", name, page, a->width, a->height, b->width, b->height);
+        CHECK(a->width == b->width && a->height == b->height &&
+                  memcmp(a->rgba, b->rgba, 4 * a->width * a->height) == 0,
+              "%s p%zu rot %u: worker render equals the in-process render byte for byte", name, page, rot);
+        printf("render %s p%zu at %u/%u rot %u: %zux%zu, worker == in-process\n", name, page, num, den,
+               rot, a->width, a->height);
+    }
+    safepdf_free_image(a);
+    safepdf_free_image(b);
+    free(err);
+}
+
+/* ---- open from bytes, page count and size; the worker's render equals the in-process one
+   (task 11.3c1: replaces the comparison with the retired v1 synchronous render) ---- */
 static void test_render_equal(void) {
     safepdf_document *d = open_golden("text/latin.pdf", NULL);
     CHECK(d != NULL, "open latin.pdf from bytes");
@@ -116,36 +148,17 @@ static void test_render_equal(void) {
     CHECK(safepdf_doc_page_size(d, 0, &w, &h) == 0 && w > 0 && h > 0, "page size %gx%g", w, h);
     CHECK(safepdf_doc_page_size(d, 100000, &w, &h) == -1, "page size out of range");
 
-    reply r;
-    reply_init(&r);
-    safepdf_request_id id = safepdf_doc_render(d, 0, 3, 2, 0, NULL, SAFEPDF_PRIO_CURRENT, q, on_image, &r);
-    CHECK(id > 0, "render id");
-    CHECK(wait_for(&r, 30000) == 0, "render callback");
-    CHECK(r.status == SAFEPDF_STATUS_OK && r.id == id, "render status %d (%s)", r.status, r.error);
+    check_render_equal(d, "latin.pdf", 0, 3, 2, 0);
+    check_render_equal(d, "latin.pdf", 0, 1, 1, 1);
 
-    char *p = path_of("text/latin.pdf");
+    /* The test render's own error path. */
     char *err = NULL;
-    safepdf_doc *v1 = safepdf_open(p, &err);
-    CHECK(v1 != NULL, "v1 open: %s", err ? err : "");
-    safepdf_image img = { 0 };
-    if (v1) {
-        CHECK(safepdf_render(v1, 0, 3, 2, &img, &err) == 0, "v1 render: %s", err ? err : "");
-        safepdf_close(v1);
-    }
-    safepdf_image *a = r.result;
-    if (a && img.rgba) {
-        CHECK(a->width == img.width && a->height == img.height && a->stride == img.stride,
-              "sizes %zux%zu vs %zux%zu", a->width, a->height, img.width, img.height);
-        CHECK(a->width == img.width && a->height == img.height &&
-                  memcmp(a->rgba, img.rgba, 4 * a->width * a->height) == 0,
-              "async render equals the v1 sync render byte for byte");
-    }
-    safepdf_free_image(a);
-    safepdf_image_free(&img);
+    CHECK(safepdf_test_render_sync(d, 9999, 1, 1, 0, &err) == NULL && err != NULL,
+          "in-process render of a bad page -> error");
     free(err);
-    free(p);
 
     /* Bad arguments are delivered as errors, not crashes. */
+    reply r;
     reply_init(&r);
     safepdf_doc_render(d, 0, 0, 1, 0, NULL, 0, q, on_image, &r);
     CHECK(wait_for(&r, 30000) == 0 && r.status == SAFEPDF_STATUS_ERROR, "zero zoom -> error (%s)", r.error);
@@ -153,6 +166,58 @@ static void test_render_equal(void) {
     safepdf_doc_render(d, 9999, 1, 1, 0, NULL, 0, q, on_image, &r);
     CHECK(wait_for(&r, 30000) == 0 && r.status == SAFEPDF_STATUS_ERROR, "bad page -> error (%s)", r.error);
     CHECK(safepdf_doc_render(NULL, 0, 1, 1, 0, NULL, 0, q, on_image, &r) == 0, "NULL doc -> 0");
+    safepdf_doc_release(d);
+}
+
+/* ---- page geometry (task 11.3c1): exact CropBox and /Rotate, as Tests/golden/pages/tree.pdf's
+   expected inspector output lists them ---- */
+static int rat_is(safepdf_rat q, int64_t num, int64_t den) { return q.num == num && q.den == den; }
+
+static double rat_d(safepdf_rat q) { return (double)q.num / (double)q.den; }
+
+static void test_geom(void) {
+    safepdf_document *d = open_golden("pages/tree.pdf", NULL);
+    CHECK(d != NULL, "open tree.pdf");
+    if (!d) return;
+    CHECK(safepdf_doc_page_count(d) == 4, "tree.pdf has 4 pages (%zu)", safepdf_doc_page_count(d));
+    /* crop [0 0 595.276 841.89] rotate 270; [0 0 300.5 400] 180; [0 0 595.276 841.89] 0;
+       [0 0 612 792] 90 (tree.pdf.expected). */
+    static const int64_t want[4][9] = {
+        { 0, 1, 0, 1, 148819, 250, 84189, 100, 270 },
+        { 0, 1, 0, 1, 601, 2, 400, 1, 180 },
+        { 0, 1, 0, 1, 148819, 250, 84189, 100, 0 },
+        { 0, 1, 0, 1, 612, 1, 792, 1, 90 },
+    };
+    for (size_t p = 0; p < 4 && p < safepdf_doc_page_count(d); p++) {
+        safepdf_page_geom g;
+        int rc = safepdf_doc_page_geom(d, p, &g);
+        CHECK(rc == 0, "page_geom %zu", p);
+        const int64_t *e = want[p];
+        CHECK(rat_is(g.box.llx, e[0], e[1]) && rat_is(g.box.lly, e[2], e[3]) &&
+                  rat_is(g.box.urx, e[4], e[5]) && rat_is(g.box.ury, e[6], e[7]) && g.rotate == e[8],
+              "page %zu geom [%lld/%lld %lld/%lld %lld/%lld %lld/%lld] rot %u", p,
+              (long long)g.box.llx.num, (long long)g.box.llx.den, (long long)g.box.lly.num,
+              (long long)g.box.lly.den, (long long)g.box.urx.num, (long long)g.box.urx.den,
+              (long long)g.box.ury.num, (long long)g.box.ury.den, g.rotate);
+        /* Consistent with the displayed size (/Rotate swaps the sides). */
+        double w = 0, h = 0;
+        double bw = rat_d(g.box.urx) - rat_d(g.box.llx), bh = rat_d(g.box.ury) - rat_d(g.box.lly);
+        safepdf_doc_page_size(d, p, &w, &h);
+        int swap = g.rotate == 90 || g.rotate == 270;
+        CHECK(fabs((swap ? bh : bw) - w) < 1e-6 && fabs((swap ? bw : bh) - h) < 1e-6,
+              "page %zu size %gx%g vs geom %gx%g rot %u", p, w, h, bw, bh, g.rotate);
+    }
+    printf("geom: tree.pdf pages 0-3 match tree.pdf.expected (crop boxes exact, /Rotate 270 180 0 90)\n");
+    safepdf_page_geom g;
+    CHECK(safepdf_doc_page_geom(d, 4, &g) == -1 && g.box.llx.den == 0, "page_geom out of range -> -1, zeroed");
+    CHECK(safepdf_doc_page_geom(NULL, 0, &g) == -1, "page_geom NULL doc -> -1");
+    CHECK(safepdf_doc_page_geom(d, 0, NULL) == -1, "page_geom NULL out -> -1");
+
+    /* Rotated pages render the same through the worker and in process, with and without an
+       extra rotation. */
+    check_render_equal(d, "tree.pdf", 1, 1, 2, 0);
+    check_render_equal(d, "tree.pdf", 0, 1, 2, 3);
+    check_render_equal(d, "tree.pdf", 3, 1, 2, 1);
     safepdf_doc_release(d);
 }
 
@@ -434,6 +499,7 @@ int main(int argc, char **argv) {
     q = dispatch_queue_create("org.safe-pdf.core-test", DISPATCH_QUEUE_SERIAL);
     double t0 = now_ms();
     test_render_equal();
+    test_geom();
     test_text();
     test_nav();
     test_cancel();

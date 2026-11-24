@@ -64,9 +64,14 @@ enum Core {
     }
 
     /// An exact rational for a display length in points, in 1/64 steps (the view module's
-    /// quantum). Used for page sizes, which the C API reports as doubles (see Document).
+    /// quantum): backing scales, pinch zooms, anchor offsets, and the fallback page box when a
+    /// page has no exact geometry (see Document).
+    /// Never traps: a non-finite value is 0, a huge one is clamped to ±2^52 / 64.
     static func rat(_ x: Double) -> safepdf_rat {
-        safepdf_rat(num: Int64((x * 64).rounded()), den: 64)
+        let v = (x * 64).rounded()
+        guard v.isFinite else { return safepdf_rat(num: 0, den: 64) }
+        let limit = 4_503_599_627_370_496.0 // 2^52
+        return safepdf_rat(num: Int64(min(max(v, -limit), limit)), den: 64)
     }
 
     /// Milliseconds since an arbitrary origin (monotonic).

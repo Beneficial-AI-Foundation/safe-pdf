@@ -2,13 +2,23 @@
 // (task 11.3b). Plan.md §6 Phase 11; docs/macos-design.md §2 ("NSToolbar with standard items;
 // SF Symbols icons; ... same item order as the Tk bar; no user customisation"). Items and order
 // come from safepdf_view_toolbar (Toolbar.layout), enabled and visible states from
-// safepdf_view_states. The page field, the zoom and view-mode drop-downs only display for now
-// (task 11.3c); the tools are task 11.3e.
+// safepdf_view_states. The zoom drop-down chooses Toolbar.ZoomChoice presets (task 11.3c1); the
+// page field and the view-mode drop-down only display for now (task 11.3c2); the tools are
+// task 11.3e.
 
 import AppKit
 import SafePdfC
 
+/// The zoom drop-down's entries send this up the responder chain (tag = preset index).
+@MainActor @objc protocol ZoomPresetTarget {
+    func chooseZoomPreset(_ sender: Any?)
+}
+
 @MainActor final class DocumentToolbar: NSObject, NSToolbarDelegate {
+    static let zoomSelector = #selector(ZoomPresetTarget.chooseZoomPreset(_:))
+    /// The zoom drop-down's presets (Toolbar.ZoomChoice.presets), in menu order.
+    let zoomPresets: [ZoomPresetSpec] = Chrome.zoomPresets() ?? []
+    private var zoomMenuItem: NSMenuToolbarItem?
     let toolbar: NSToolbar
     private let specs: [ToolbarItemSpec]
     /// Item identifier per table index (nil for separators: NSToolbar has none).
@@ -153,7 +163,7 @@ import SafePdfC
     }
 
     private func pageFieldItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
-        // TODO(11.3c): editable with Toolbar.pageEntry (Enter / Escape / revert) and page labels.
+        // TODO(11.3c2): editable with Toolbar.pageEntry (Enter / Escape / revert) and page labels.
         pageField.isEditable = false
         pageField.isSelectable = false
         pageField.alignment = .right
@@ -173,16 +183,22 @@ import SafePdfC
     private func zoomItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
         let item = NSMenuToolbarItem(itemIdentifier: id)
         let menu = NSMenu(title: "Zoom")
-        // TODO(11.3c): the zoom model (ZoomChoice presets, stepping, anchoring). Shown, inert.
-        for p in Chrome.zoomPresets() ?? [] {
-            let mi = NSMenuItem(title: p.label, action: nil, keyEquivalent: "")
+        for (i, p) in zoomPresets.enumerated() {
+            let mi = NSMenuItem(title: p.label, action: Self.zoomSelector, keyEquivalent: "")
+            mi.tag = i
             mi.state = p.kind == SAFEPDF_ZOOM_AUTO.rawValue ? .on : .off
             menu.addItem(mi)
+            // The named choices, a separator, the percentages.
+            let pctKind = SAFEPDF_ZOOM_PERCENT.rawValue
+            if p.kind != pctKind, i + 1 < zoomPresets.count, zoomPresets[i + 1].kind == pctKind {
+                menu.addItem(.separator())
+            }
         }
         item.menu = menu
         item.title = menu.items.first(where: { $0.state == .on })?.title ?? "Zoom"
         item.label = "Zoom"
         item.toolTip = "Zoom"
+        zoomMenuItem = item
         return item
     }
 
@@ -190,7 +206,7 @@ import SafePdfC
         let item = NSMenuToolbarItem(itemIdentifier: id)
         let menu = NSMenu(title: "View mode")
         let current = safepdf_view_choice_of_modes(SAFEPDF_SCROLL_VERTICAL.rawValue, SAFEPDF_SPREAD_NONE.rawValue)
-        // TODO(11.3c): the view modes (ViewChoice.modes). Shown, inert.
+        // TODO(11.3c2): the view modes (ViewChoice.modes). Shown, inert.
         for c in Chrome.viewChoices() ?? [] {
             let mi = NSMenuItem(title: c.label, action: nil, keyEquivalent: "")
             mi.state = c.choice == current ? .on : .off
@@ -225,6 +241,19 @@ import SafePdfC
             item.isHidden = i < st.itemVisible.count ? !st.itemVisible[i] : false
         }
     }
+
+    /// Shows the zoom choice: its entry checked, its label (ZoomChoice.label, e.g. "137%" after a
+    /// pinch) as the drop-down's title.
+    func setZoom(_ c: safepdf_zoom_choice) {
+        guard let item = zoomMenuItem else { return }
+        for mi in item.menu.items where mi.action == Self.zoomSelector && mi.tag < zoomPresets.count {
+            mi.state = ZoomModel.same(ZoomModel.choice(zoomPresets[mi.tag]), c) ? .on : .off
+        }
+        item.title = ZoomModel.label(c)
+    }
+
+    /// The zoom drop-down's title (the self-test checks it).
+    var zoomTitle: String? { zoomMenuItem?.title }
 
     /// Shows the page field's texts (safepdf_view_page_field); empty without a document.
     func setPage(entry: String, of: String) {

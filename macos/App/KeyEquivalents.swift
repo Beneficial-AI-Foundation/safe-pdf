@@ -21,7 +21,7 @@ enum KeyEquivalents {
     /// Whether a binding is safe as a menu key equivalent. A key with neither Command nor
     /// Control (a plain letter, an arrow, Delete) would be taken from the page field and other
     /// text fields, so only function and paging keys may go without them; the rest is left for
-    /// the page view's own key handling (task 11.3c).
+    /// the page view (PageKeys in PageCanvasView.swift, task 11.3c1).
     static func usableInMenu(_ k: KeySpec) -> Bool {
         let strong = UInt32(SAFEPDF_MOD_COMMAND | SAFEPDF_MOD_CONTROL)
         if k.mods & strong != 0 { return true }

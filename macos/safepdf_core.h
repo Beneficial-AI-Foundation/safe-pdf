@@ -1,9 +1,11 @@
 /*
  * safepdf_core.h — the C API over safe-pdf-core.
  *
- * v1 (task 11.1, AppKit spike) and v2 (task 11.3a1, the document layer over the worker).
- * Plain C: no Lean types leak through. Implemented in safepdf_core.c over the Lean exports
- * of SafePdf/Shell/Ffi.lean, SafePdf/Shell/Ffi/V2.lean and SafePdf/Shell/Ffi/Flat.lean; link
+ * v2 (task 11.3a1, the document layer over the worker; page geometry, task 11.3c1). The v1
+ * calls of the 11.1 spike (safepdf_open, the synchronous safepdf_render, safepdf_image_free)
+ * were retired in task 11.3c1. Plain C: no Lean types leak through. Implemented in
+ * safepdf_core.c over the Lean exports of SafePdf/Shell/Ffi.lean, SafePdf/Shell/Ffi/V2.lean
+ * and SafePdf/Shell/Ffi/Flat.lean; link
  * with libsafepdfffi.a (`lake build macosFfi`) and Lean's runtime libraries (macos/build.sh).
  * Design: docs/macos-design.md §3 (decisions 2 and 4).
  *
@@ -16,6 +18,8 @@
  *   count and sizes are answered synchronously from that parse) and start the document's
  *   worker session: one confined `worker` process per document, spawned on the first request,
  *   sent the bytes (never the path).
+ *   safepdf_doc_page_geom gives each page's CropBox as exact rationals and its /Rotate, in the
+ *   safepdf_page_geom of safepdf_view.h (included here), ready for safepdf_view_layout.
  *
  * The worker executable
  *   safepdf_open_options.worker_path, else the path set by safepdf_set_worker_path, else
@@ -76,16 +80,15 @@
  * Threads
  *   safepdf_init runs once, on the main thread, before anything else. Any thread may then call
  *   the API: a thread that is not registered with the Lean runtime is registered on its first
- *   call and unregistered when it exits (safepdf_thread_enter/exit remain for v1 callers).
+ *   call and unregistered when it exits (safepdf_thread_enter/exit remain optional).
  *   The worker session runs its own Lean task threads; completion is reported from one of them
  *   to the C shim (an @[extern] callback), which copies the result into the C structs and
  *   enqueues the caller's callback with dispatch_async_f. Callbacks therefore run outside Lean
  *   and may call the API again (e.g. submit the next request).
  *
- * ===== v1 (DEPRECATED: kept until task 11.3b retires macos/main.m) =====
- *   safepdf_open / safepdf_close / safepdf_page_count / safepdf_page_size / safepdf_render /
- *   safepdf_image_free: in-process open and a synchronous render on the calling thread, no
- *   worker, no cancellation. Use the v2 calls instead.
+ * Tests only
+ *   safepdf_open_options.test_stall_ms and safepdf_test_render_sync exist for
+ *   macos/tests/core_test.c; an application never calls them.
  */
 #ifndef SAFEPDF_CORE_H
 #define SAFEPDF_CORE_H
@@ -93,6 +96,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <dispatch/dispatch.h>
+
+#include "safepdf_view.h" /* safepdf_rat_box, safepdf_page_geom */
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,37 +117,10 @@ typedef struct {
 /** Initialise the Lean runtime and the core's modules. 0 on success. Idempotent. */
 int safepdf_init(void);
 
-/** Register / unregister the calling (non-main) thread with the Lean runtime. Optional since
-    v2 (threads are registered on their first call). */
+/** Register / unregister the calling (non-main) thread with the Lean runtime. Optional
+    (threads are registered on their first call). */
 void safepdf_thread_enter(void);
 void safepdf_thread_exit(void);
-
-/* ----------------------------------------------------------------- v1 (deprecated) */
-
-/** DEPRECATED (v1). An open document (opaque), parsed and rendered in this process. */
-typedef struct safepdf_doc safepdf_doc;
-
-/** DEPRECATED (v1). Open the PDF at `path` (UTF-8). NULL on failure, with `*error` set. */
-safepdf_doc *safepdf_open(const char *path, char **error);
-
-/** DEPRECATED (v1). Release a document. NULL is allowed. */
-void safepdf_close(safepdf_doc *doc);
-
-/** DEPRECATED (v1). Number of pages. */
-size_t safepdf_page_count(const safepdf_doc *doc);
-
-/** DEPRECATED (v1). Displayed size of page `page` (0-based) in points (CropBox, /Rotate
-    applied). 0 on success, -1 when `page` is out of range. */
-int safepdf_page_size(const safepdf_doc *doc, size_t page, double *width, double *height);
-
-/** DEPRECATED (v1). Render page `page` at zoom `zoom_num / zoom_den` pixels per point on the
-    calling thread (blocks). 0 on success (`*out` filled), -1 on failure (`*error` set). */
-int safepdf_render(const safepdf_doc *doc, size_t page, uint32_t zoom_num, uint32_t zoom_den,
-                   safepdf_image *out, char **error);
-
-/** Release the buffer of a rendered image and zero the struct (v1 images, caller storage).
-    NULL is allowed. */
-void safepdf_image_free(safepdf_image *img);
 
 /* ----------------------------------------------------------------- v2: documents */
 
@@ -204,6 +182,14 @@ size_t safepdf_doc_page_count(const safepdf_document *doc);
     0 on success, -1 when `page` is out of range. */
 int safepdf_doc_page_size(const safepdf_document *doc, size_t page, double *width,
                           double *height);
+
+/** The geometry of page `page` (0-based) for safepdf_view_layout (synchronous, read at open):
+    `out->box` is the effective CropBox in page units as exact rationals (den > 0), the box the
+    renderer draws; `out->rotate` the effective /Rotate in degrees (0, 90, 180, 270). Pass the
+    user's extra rotation separately (safepdf_layout_params.user_rotation, and to
+    safepdf_doc_render as quarter turns). 0 on success; -1 when `doc` or `out` is NULL, `page`
+    is out of range, or a coordinate does not fit 64 bits (`*out` zeroed). */
+int safepdf_doc_page_geom(const safepdf_document *doc, size_t page, safepdf_page_geom *out);
 
 /** Nonzero when the file opened only through the repair path. */
 int safepdf_doc_is_repaired(const safepdf_document *doc);
@@ -437,6 +423,15 @@ void safepdf_doc_raise(safepdf_document *doc, safepdf_request_id id, int priorit
     Synchronous. 0 on success, -1 on failure (`*error` set, `*out` zeroed). */
 int safepdf_layers_toggle(safepdf_document *doc, const safepdf_layers_state *current,
                           size_t row, safepdf_layers_state *out, char **error);
+
+/* ----------------------------------------------------------------- tests only */
+
+/** TESTS ONLY (macos/tests/core_test.c): renders `page` IN THIS PROCESS, on the calling thread
+    (blocks), with the call the worker answers safepdf_doc_render with (same zoom, extra
+    rotation, default layers state, substitute fonts), so a test can compare the two byte for
+    byte. Returns an image to free with safepdf_free_image, or NULL with `*error` set. */
+safepdf_image *safepdf_test_render_sync(safepdf_document *doc, size_t page, uint32_t zoom_num,
+                                        uint32_t zoom_den, unsigned rotation, char **error);
 
 /* ----------------------------------------------------------------- v2: frees */
 
