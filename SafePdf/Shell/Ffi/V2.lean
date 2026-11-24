@@ -4,6 +4,7 @@ import SafePdf.Shell.Fonts
 import SafePdf.Shell.Worker.Client
 import SafePdf.Shell.Ffi.Flat
 import SafePdf.Shell.Views.Common
+import SafePdf.Shell.App.Toolbar
 
 /-!
 # C API v2, document layer over the worker (task 11.3a1)
@@ -404,6 +405,74 @@ def pageGeom (d : Handle) (i : USize) : ByteArray :=
   | .ok p =>
     let xs := geomInts (Raster.Geom.Box.ofRect p.cropBox) p.rotate
     if xs.all fitsI64 then xs.foldl putI64 .empty else .empty
+
+/-! ## Open settings (task 11.3c2) -/
+
+/-- Index of a page mode (the C enum `safepdf_page_mode`). -/
+def pageModeIdx : Core.Doc.OpenSettings.PageMode → Nat
+  | .useNone => 0 | .useOutlines => 1 | .useThumbs => 2 | .fullScreen => 3 | .useOC => 4
+  | .useAttachments => 5
+
+/-- An optional rational on the wire: flag, numerator, denominator (absent, or not fitting 64
+bits: `0, 0, 1`). -/
+def optRatInts (q : Option Rat) : List Int :=
+  match q with
+  | some r => if fitsI64 r.num && fitsI64 r.den then [1, r.num, r.den] else [0, 0, 1]
+  | none => [0, 0, 1]
+
+/-- The open settings as they cross to C: 22 integers and the strings (the window title, `""`
+unless shown, then the notes). -/
+structure OpenOut where
+  /-- The integers (see `openSettingsOf`). -/
+  ints : ByteArray
+  /-- The title, then one note per issue. -/
+  strs : Array String
+
+/-- **The open settings of `doc`** (`Core.Doc.OpenSettings.read`) as the Tk viewer applies them
+(`Viewer.applyOpenSettings`): `/PageLayout` → view modes (`View.modesOf`), `/Direction /R2L`,
+the page mode, the open destination (a destination or a GoTo only: `Links.jumpOf`; its zoom
+through `Toolbar.zoomChoiceOf` from Automatic Zoom, where every open starts), the viewer
+preferences, and the window title (`/DisplayDocTitle`: the `/Title` as text when not blank).
+Integers: layout flag, scroll mode (0 page, 1 vertical), spread mode (0 none, 1 odd, 2 even),
+right to left, page mode (−1 none, else `pageModeIdx`), destination flag, page, left
+(`optRatInts`), top (`optRatInts`), zoom kind and percent (`safepdf_zoom_choice`), hide
+toolbar, hide menubar, hide window UI, fit window, centre window, display doc title,
+`/NonFullScreenPageMode`. Strings: the title (`""` when not shown), then `Issue.message` of every
+issue (what was not honoured). -/
+def openSettingsOf (doc : Doc.Doc) : OpenOut :=
+  let o := Core.Doc.OpenSettings.read doc limits
+  let pr := o.prefs
+  let b (x : Bool) : Int := if x then 1 else 0
+  let lay : List Int := match o.layout with
+    | some l =>
+      let (sc, sp) := App.View.modesOf l
+      [1, if sc == .vertical then 1 else 0,
+       match sp with | .none => 0 | .odd => 1 | .even => 2]
+    | none => [0, 1, 0]
+  let mode : Int := match o.mode with
+    | some m => pageModeIdx m
+    | none => -1
+  let dj := o.dest.bind fun d => (App.Links.jumpOf d).map (d, ·)
+  let dest : List Int := match dj with
+    | some (_, j) => [1, (j.page : Int)] ++ optRatInts j.left ++ optRatInts j.top
+    | none => [0, 0, 0, 0, 1, 0, 0, 1]
+  let zoom : App.Toolbar.ZoomChoice := match dj with
+    | some (d, _) => App.Toolbar.zoomChoiceOf (Core.Doc.OpenSettings.zoomOf d.fit) .auto
+    | none => .auto
+  let zw : List Int := match zoom with
+    | .auto => [0, 0] | .actual => [1, 0] | .pageFit => [2, 0] | .pageWidth => [3, 0]
+    | .pct p => [4, p]
+  let ints := lay ++ [b (pr.direction == .r2l), mode] ++ dest ++ zw ++
+    [b pr.hideToolbar, b pr.hideMenubar, b pr.hideWindowUI, b pr.fitWindow, b pr.centerWindow,
+     b pr.displayDocTitle, pageModeIdx pr.nonFullScreen]
+  let title := if pr.displayDocTitle then
+      ((o.title.map App.Links.textString).filter (·.any (· != ' '))).getD "" else ""
+  { ints := ints.foldl putI64 .empty, strs := #[title] ++ (o.issues.map (·.message)).toArray }
+
+/-- **The open settings of the document** (`safepdf_doc_open_settings`): `openSettingsOf` on the
+in-process parse, on the calling thread. -/
+@[export safepdf_lean_doc_open_settings]
+def openSettings (d : Handle) : OpenOut := openSettingsOf d.api.doc
 
 /-- The rotation of `q` quarter turns clockwise (`none` above 3). -/
 def rotOfQuarters : Nat → Option Doc.Rotation

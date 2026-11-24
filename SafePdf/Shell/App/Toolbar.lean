@@ -813,4 +813,20 @@ theorem Transient.not_self_rival (t : Transient) : t ∉ t.rivals := by
   ({ tool := true, popover := false } : Bubble.Ui)
 #guard (Transient.edPop.closeUi { editor := .text, edPop := true }).editor == .text
 
+/-- The zoom choice for an open destination's zoom (task 9.r8, rule O5 of
+`Core.Doc.OpenSettings`): a percentage clamped to the viewer's 25–800 %; Fit and FitR → Page
+Fit; FitH → Page Width; FitV → Page Fit (best effort: there is no fit-height choice; for a
+portrait page in a landscape window it is the same zoom); `keep` → unchanged. Moved here from
+the Tk viewer (`Viewer.applyOpenSettings`) for the native shell (task 11.3c2). -/
+def zoomChoiceOf (z : Core.Doc.OpenSettings.Zoom) (cur : ZoomChoice) : ZoomChoice :=
+  match z with
+  | .keep => cur
+  | .percent p => .pct (max View.minPct (min View.maxPct p))
+  | .fitPage | .fitHeight => .pageFit
+  | .fitWidth => .pageWidth
+
+#guard zoomChoiceOf (.percent 150) .auto == .pct 150 && zoomChoiceOf (.percent 5) .auto == .pct 25 &&
+  zoomChoiceOf (.percent 6400) .auto == .pct 800 && zoomChoiceOf .keep .auto == .auto &&
+  zoomChoiceOf .fitHeight .auto == .pageFit && zoomChoiceOf .fitWidth .auto == .pageWidth
+
 end SafePdf.Shell.App.Toolbar

@@ -341,6 +341,106 @@ static void test_nav(void) {
     safepdf_doc_release(d);
 }
 
+/* ---- open settings (task 11.3c2): generated three-page files, as the Tk smoke case 1s ---- */
+
+/* A three-page PDF whose catalog adds `cat` and whose /Info /Title is `title`, malloc'd. */
+static uint8_t *settings_pdf(const char *cat, const char *title, size_t *len) {
+    char objs[10][256];
+    snprintf(objs[1], 256, "<< /Type /Catalog /Pages 2 0 R %s >>", cat);
+    snprintf(objs[2], 256, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 612 792] >>");
+    for (int i = 0; i < 3; i++) {
+        snprintf(objs[3 + i], 256, "<< /Type /Page /Parent 2 0 R /Contents %d 0 R >>", 6 + i);
+        char c[64];
+        snprintf(c, sizeof c, "0.%d g 72 72 %d %d re f", 2 + i, 100 + 60 * i, 100 + 100 * i);
+        snprintf(objs[6 + i], 256, "<< /Length %zu >>\nstream\n%s\nendstream", strlen(c), c);
+    }
+    snprintf(objs[9], 256, "<< /Title (%s) >>", title);
+    size_t cap = 8192, n = 0;
+    char *b = malloc(cap);
+    if (!b) return NULL;
+    long offs[10];
+    n += (size_t)snprintf(b + n, cap - n, "%%PDF-1.7\n");
+    for (int i = 1; i <= 9; i++) {
+        offs[i] = (long)n;
+        n += (size_t)snprintf(b + n, cap - n, "%d 0 obj\n%s\nendobj\n", i, objs[i]);
+    }
+    long x = (long)n;
+    n += (size_t)snprintf(b + n, cap - n, "xref\n0 10\n0000000000 65535 f \n");
+    for (int i = 1; i <= 9; i++) n += (size_t)snprintf(b + n, cap - n, "%010ld 00000 n \n", offs[i]);
+    n += (size_t)snprintf(b + n, cap - n,
+                          "trailer\n<< /Size 10 /Root 1 0 R /Info 9 0 R >>\nstartxref\n%ld\n%%%%EOF\n", x);
+    *len = n;
+    return (uint8_t *)b;
+}
+
+static int open_settings_of(const char *cat, const char *title, safepdf_open_settings *os) {
+    size_t len = 0;
+    uint8_t *b = settings_pdf(cat, title, &len);
+    char *err = NULL;
+    safepdf_document *d = b ? safepdf_doc_open_bytes(b, len, NULL, &err) : NULL;
+    free(b);
+    if (!d) { CHECK(0, "open settings fixture (%s): %s", cat, err ? err : "?"); free(err); return -1; }
+    int rc = safepdf_doc_open_settings(d, os);
+    CHECK(rc == 0, "safepdf_doc_open_settings (%s)", cat);
+    safepdf_doc_release(d);
+    return rc;
+}
+
+static void test_open_settings(void) {
+    safepdf_open_settings os;
+    CHECK(safepdf_doc_open_settings(NULL, &os) == -1, "open settings of NULL");
+    /* No settings: the default view, nothing to note. */
+    if (open_settings_of("", "unused", &os) == 0) {
+        CHECK(!os.has_layout && os.scroll == SAFEPDF_SCROLL_VERTICAL && os.spread == SAFEPDF_SPREAD_NONE &&
+              !os.rtl && os.page_mode == SAFEPDF_PAGE_MODE_UNSET && !os.has_dest &&
+              os.zoom.kind == SAFEPDF_ZOOM_AUTO && !os.title && os.note_count == 0,
+              "no settings: defaults");
+        safepdf_free_open_settings(&os);
+    }
+    /* Two pages, page 1 on the right; open at page 3, 150 %, its top-left. */
+    if (open_settings_of("/PageLayout /TwoPageRight /OpenAction [5 0 R /XYZ 0 792 1.5]", "unused", &os) == 0) {
+        CHECK(os.has_layout && os.scroll == SAFEPDF_SCROLL_PAGE && os.spread == SAFEPDF_SPREAD_EVEN,
+              "TwoPageRight: page scrolling, even spreads (%u, %u)", os.scroll, os.spread);
+        CHECK(os.has_dest && os.dest_page == 2 && os.has_left && os.left.num == 0 && os.has_top &&
+              os.top.num == 792 && os.top.den == 1 && os.zoom.kind == SAFEPDF_ZOOM_PERCENT &&
+              os.zoom.pct == 150, "XYZ open action: page %zu zoom %u/%u", os.dest_page,
+              os.zoom.kind, os.zoom.pct);
+        printf("open settings: TwoPageRight + XYZ -> scroll %u spread %u page %zu zoom %u%%\n",
+               os.scroll, os.spread, os.dest_page + 1, os.zoom.pct);
+        safepdf_free_open_settings(&os);
+    }
+    /* FitH: Page Width, a top and no left. */
+    if (open_settings_of("/PageLayout /TwoColumnLeft /OpenAction [4 0 R /FitH 700]", "unused", &os) == 0) {
+        CHECK(os.scroll == SAFEPDF_SCROLL_VERTICAL && os.spread == SAFEPDF_SPREAD_ODD &&
+              os.dest_page == 1 && !os.has_left && os.has_top && os.top.num == 700 &&
+              os.zoom.kind == SAFEPDF_ZOOM_PAGE_WIDTH, "TwoColumnLeft + FitH");
+        safepdf_free_open_settings(&os);
+    }
+    /* JavaScript is never run: no destination, a note. */
+    if (open_settings_of("/OpenAction << /S /JavaScript /JS (app.alert\\(1\\)) >>", "unused", &os) == 0) {
+        CHECK(!os.has_dest && os.zoom.kind == SAFEPDF_ZOOM_AUTO && os.note_count == 1 &&
+              strstr(os.notes[0], "JavaScript") && strstr(os.notes[0], "not executed"),
+              "JavaScript open action ignored with a note (%s)", os.note_count ? os.notes[0] : "-");
+        if (os.note_count) printf("open settings note: %s\n", os.notes[0]);
+        safepdf_free_open_settings(&os);
+    }
+    /* Right to left, the outline page mode, the document title. */
+    if (open_settings_of("/PageMode /UseOutlines /ViewerPreferences << /Direction /R2L /DisplayDocTitle true "
+                         "/HideToolbar true /CenterWindow true >>", "Open Settings Test", &os) == 0) {
+        CHECK(os.rtl && os.page_mode == SAFEPDF_PAGE_MODE_USE_OUTLINES && os.hide_toolbar &&
+              os.center_window && !os.fit_window && os.display_doc_title && os.title &&
+              strcmp(os.title, "Open Settings Test") == 0, "R2L, UseOutlines, title %s",
+              os.title ? os.title : "(none)");
+        safepdf_free_open_settings(&os);
+    }
+    /* A bad /PageLayout value: ignored with a note. */
+    if (open_settings_of("/PageLayout /Sideways", "unused", &os) == 0) {
+        CHECK(!os.has_layout && os.note_count == 1 && strstr(os.notes[0], "PageLayout"),
+              "bad /PageLayout noted (%s)", os.note_count ? os.notes[0] : "-");
+        safepdf_free_open_settings(&os);
+    }
+}
+
 /* ---- cancel a queued request and one in flight ---- */
 static void test_cancel(void) {
     safepdf_open_options o = { .test_stall_ms = 4000 };
@@ -502,6 +602,7 @@ int main(int argc, char **argv) {
     test_geom();
     test_text();
     test_nav();
+    test_open_settings();
     test_cancel();
     test_release_pending();
     test_deadline();

@@ -4068,35 +4068,6 @@ def resetOpenView (st : IO.Ref State) : IO Unit := do
                               afterFullScreen := .useNone }
   syncViewVars (← st.get)
 
-/-- The zoom choice for an open destination's zoom (task 9.r8, rule O5 of
-`Core.Doc.OpenSettings`): a percentage clamped to the viewer's 25–800 %; Fit and FitR → Page
-Fit; FitH → Page Width; FitV → Page Fit (best effort: there is no fit-height choice; for a
-portrait page in a landscape window it is the same zoom); `keep` → unchanged. -/
-def zoomChoiceOf (z : Core.Doc.OpenSettings.Zoom) (cur : Toolbar.ZoomChoice) :
-    Toolbar.ZoomChoice :=
-  match z with
-  | .keep => cur
-  | .percent p => .pct (max View.minPct (min View.maxPct p))
-  | .fitPage | .fitHeight => .pageFit
-  | .fitWidth => .pageWidth
-
-#guard zoomChoiceOf (.percent 150) .auto == .pct 150 && zoomChoiceOf (.percent 5) .auto == .pct 25 &&
-  zoomChoiceOf (.percent 6400) .auto == .pct 800 && zoomChoiceOf .keep .auto == .auto &&
-  zoomChoiceOf .fitHeight .auto == .pageFit && zoomChoiceOf .fitWidth .auto == .pageWidth
-
-/-- The view modes of a `/PageLayout` (PDF.js `apiPageLayoutToViewerModes`; Odd Spreads put
-the odd pages on the left, Even Spreads on the right). -/
-def modesOf (l : Core.Doc.OpenSettings.PageLayout) : View.ScrollMode × View.SpreadMode :=
-  (if l.continuous then .vertical else .page,
-   match l.spread with
-   | .none => .none
-   | .oddLeft => .odd
-   | .oddRight => .even)
-
-#guard modesOf .singlePage == (.page, .none) && modesOf .oneColumn == (.vertical, .none) &&
-  modesOf .twoColumnLeft == (.vertical, .odd) && modesOf .twoColumnRight == (.vertical, .even) &&
-  modesOf .twoPageLeft == (.page, .odd) && modesOf .twoPageRight == (.page, .even)
-
 /-- `/FitWindow` (task 9.r8): sizes the window so that the canvas shows page `p` at the zoom
 choice's percentage (100 % for the fit choices), both pages of a spread side by side, at most
 90 % of the screen. -/
@@ -4141,7 +4112,7 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
   let o ← IO.lazyPure fun _ => Core.Doc.OpenSettings.read doc limits
   let pr := o.prefs
   if let some l := o.layout then
-    let (sc, sp) := modesOf l
+    let (sc, sp) := View.modesOf l
     st.modify ({ · with scroll := sc, spread := sp })
   let docTitle := if pr.displayDocTitle then
       (o.title.map Links.textString).filter (·.any (· != ' ')) else none
@@ -4151,7 +4122,7 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
     if let some j := Links.jumpOf d then
       let z := Core.Doc.OpenSettings.zoomOf d.fit
       st.modify fun s => { s with page := j.page, pending := some (.dest j.left j.top),
-                                  zoomSel := zoomChoiceOf z s.zoomSel }
+                                  zoomSel := Toolbar.zoomChoiceOf z s.zoomSel }
   syncViewVars (← st.get)
   applyChrome st (pr.hideToolbar, pr.hideMenubar, pr.hideWindowUI)
   let mut notes := o.issues.map (·.message)

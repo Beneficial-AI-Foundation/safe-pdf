@@ -10,7 +10,10 @@
 // paper stays white). Task 11.3c1: the exact page geometry, the page view's keys, the zoom
 // drop-down, zoom steps and presets anchored at the centre (C2), a pinch committed to a
 // quantised zoom, the cross-fade of sharp renders, rotation both ways, and a backing-scale
-// change. Writes PNGs and timings.txt to DIR; prints `failures: N`.
+// change. Task 11.3c2 (SelfTestNav.swift): the current-page rule, view modes and spreads,
+// page-at-a-time wheel and keys, the page field, back/forward, open settings on generated
+// files, the subtitle, the status pill and the titlebar flags. Writes PNGs and timings.txt to
+// DIR; prints `failures: N`.
 
 import AppKit
 import SafePdfC
@@ -19,12 +22,12 @@ import SafePdfC
     private static var log = ""
     private static var failures = 0
 
-    private static func say(_ s: String) {
+    static func say(_ s: String) {
         log += s + "\n"
         FileHandle.standardError.write(Data((s + "\n").utf8))
     }
 
-    private static func check(_ ok: Bool, _ what: @autoclosure () -> String) {
+    static func check(_ ok: Bool, _ what: @autoclosure () -> String) {
         if !ok {
             failures += 1
             say("FAIL: " + what())
@@ -33,7 +36,7 @@ import SafePdfC
 
     /// Runs the main run loop until `done()` or `limit` seconds; returns the time waited (ms).
     @discardableResult
-    private static func pump(limit: Double, until done: () -> Bool) -> Double {
+    static func pump(limit: Double, until done: () -> Bool) -> Double {
         let t0 = Core.nowMs()
         while !done() && Core.nowMs() - t0 < limit * 1000 {
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
@@ -41,13 +44,13 @@ import SafePdfC
         return Core.nowMs() - t0
     }
 
-    private static func writePNG(_ rep: NSBitmapImageRep, _ path: String) -> Bool {
+    static func writePNG(_ rep: NSBitmapImageRep, _ path: String) -> Bool {
         guard let data = rep.representation(using: .png, properties: [:]) else { return false }
         return (try? data.write(to: URL(fileURLWithPath: path))) != nil
     }
 
     /// Draws `view` off screen at `scale` pixels per point.
-    private static func snapshot(_ view: NSView, scale: CGFloat) -> NSBitmapImageRep? {
+    static func snapshot(_ view: NSView, scale: CGFloat) -> NSBitmapImageRep? {
         let r = view.bounds
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: Int(r.width * scale), pixelsHigh: Int(r.height * scale),
@@ -228,6 +231,7 @@ import SafePdfC
         }
 
         zoomAndRotation(doc, pv, dir: dir)
+        viewingParity(doc, pv, dir: dir)
 
         pv.show(nil)
         say(String(format: "total self-test time: %.0f ms; failures: %d", Core.nowMs() - processStartMs, failures))
@@ -244,7 +248,7 @@ import SafePdfC
                          charactersIgnoringModifiers: chars, isARepeat: false, keyCode: 0)
     }
 
-    private static func function(_ code: Int) -> String {
+    static func function(_ code: Int) -> String {
         Unicode.Scalar(code).map { String(Character($0)) } ?? ""
     }
 
@@ -257,7 +261,7 @@ import SafePdfC
         return (a.page, Double(a.q.x) / z, Double(a.q.y) / z)
     }
 
-    private static func waitRenders(_ pv: PageViewController) {
+    static func waitRenders(_ pv: PageViewController) {
         pump(limit: 60) { pv.canvas.pendingCount == 0 }
     }
 

@@ -13,8 +13,8 @@ a header is silent the text says so. When this text and a header differ, the hea
 
 | Header | Implementation | Role | Test program |
 |---|---|---|---|
-| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, exact page geometry (`safepdf_doc_page_geom`: CropBox as rationals + `/Rotate`), asynchronous requests (render, page index, links, outline, labels, attachments, layers), cancel; test-only `safepdf_test_render_sync` (in-process render for comparisons) | `tests/core_test.c` (103 checks) |
-| `safepdf_view.h` | `safepdf_view.c` | View and chrome logic: zoom, rotation, re-anchoring, spreads and page layout, zoom and view-mode drop-downs, page field, toolbar, commands, menus, key table, cursor | `tests/view_test.c` (174) |
+| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, exact page geometry (`safepdf_doc_page_geom`: CropBox as rationals + `/Rotate`), asynchronous requests (render, page index, links, outline, labels, attachments, layers), cancel; the document's open settings (`safepdf_doc_open_settings`, task 11.3c2); test-only `safepdf_test_render_sync` (in-process render for comparisons) | `tests/core_test.c` (117 checks) |
+| `safepdf_view.h` | `safepdf_view.c` | View and chrome logic: zoom, rotation, re-anchoring, spreads and page layout, zoom and view-mode drop-downs, page field, toolbar, commands, menus, key table, cursor; task 11.3c2: the wheel step, the page as text, the back/forward history, page → screen | `tests/view_test.c` (314) |
 | `safepdf_marks.h` | `safepdf_marks.c` | Marks store (highlight, note, free text, ink) with undo/redo, Save (incremental update bytes), XFDF import and export, dialog texts | `tests/marks_test.c` (105) |
 | `safepdf_select.h` | `safepdf_select.c` | Text selection, copy and search over a page's index | `tests/select_test.c` (53) |
 
@@ -161,6 +161,16 @@ objects; nothing with a theorem or `#guard` is reimplemented in C.
 on the calling thread. They were removed in task 11.3c1 once the Swift app replaced the spike;
 the section "The v1 C API" below is history.
 
+### Added in task 11.3c2
+
+| Function | Lean | Contract |
+|---|---|---|
+| `int safepdf_doc_open_settings(const safepdf_document *, safepdf_open_settings *out)` / `safepdf_free_open_settings` | `V2.openSettingsOf` over `Core.Doc.OpenSettings.read`, `View.modesOf`, `Links.jumpOf`, `Toolbar.zoomChoiceOf` (moved out of the Tk `Viewer.applyOpenSettings`, unchanged) | Synchronous, from the in-process parse. `/PageLayout` as view modes (`has_layout`, `scroll`, `spread`), `/Direction /R2L` (`rtl`), `/PageMode` (`page_mode`, `SAFEPDF_PAGE_MODE_UNSET` when absent), the open destination (a destination or GoTo only: `has_dest`, `dest_page`, optional `left` / `top` in page units) with the zoom to open at (`zoom`, from Automatic Zoom), the viewer preferences, the window title (`/DisplayDocTitle` with a non-blank `/Title`, else NULL) and `notes` (`Issue.message`: an ignored JavaScript or URI action, a bad value, …). 0 / -1 |
+| `int safepdf_view_wheel_step(const safepdf_wheel *, kind, int64_t delta, bool cross, now_ms, top, view, region, safepdf_wheel *out, uint64_t *pos)` | `View.wheelStep` with `View.wheelPixels` and `View.wheelThreshold` (as `Viewer.wheel`) | One wheel event on one axis; returns `SAFEPDF_WHEEL_NONE / SCROLL (*pos) / NEXT / PREV` or -1. A zeroed `safepdf_wheel` is the initial state; `cross` only for the vertical axis in the page scroll mode |
+| `char *safepdf_view_page_text(labels, nlabels, page, pages)` | `Links.pageText` | `page k/n` or `page L (k/n)`; malloc'd |
+| `int safepdf_view_history_step(op, const safepdf_view_history *h, safepdf_view_loc cur, safepdf_view_history *out, safepdf_view_loc *target)` / `safepdf_free_view_history` | `Links.History.push / goBack / goForward` (theorem `History.back_push`) | 1 done (`*target` where to go), 0 nothing to go to (`*out` a copy), -1 error; at most 100 entries per stack |
+| `int safepdf_view_to_screen(z, rot, const safepdf_rat_box *, safepdf_rat_point p, safepdf_rat_point *out)` | `Geom.toScreen` | Where a page point shows, pixels from the page image's top-left (scrolling to a destination) |
+
 ### Building and running the C tests
 
 All need macOS (they use `dispatch` and `clang`), the Lean toolchain, and the Xcode command line
@@ -172,8 +182,8 @@ Lean's runtime libraries, and print `NAME: N checks, 0 failures`.
 
 | Command | What it does |
 |---|---|
-| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, page geometry (`tree.pdf` CropBoxes and `/Rotate` against `tree.pdf.expected`), async worker render byte-equal to the in-process render (`safepdf_test_render_sync`, rotations 0–3), cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, error paths |
-| `macos/tests/run_view.sh` | builds `safepdf_view.c` with the core shim, runs `view_test` (zoom, layout, drop-downs, commands, menus, keys, toolbar, cursors, the not-initialised failures) |
+| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, open settings on generated three-page files (11.3c2), page geometry (`tree.pdf` CropBoxes and `/Rotate` against `tree.pdf.expected`), async worker render byte-equal to the in-process render (`safepdf_test_render_sync`, rotations 0–3), cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, error paths |
+| `macos/tests/run_view.sh` | builds `safepdf_view.c` with the core shim, runs `view_test` (zoom, layout, drop-downs, commands, menus, keys, toolbar, cursors, the not-initialised failures; 11.3c2: wheel steps, page text, history, page → screen) |
 | `macos/tests/run_marks.sh` | runs `marks_test` on three goldens (plain, AES-128, RC4-128), writes `saved.pdf` and `export.xfdf` under `macos/build/marks-test/`, then `lake build inspect`, runs `inspect` on `saved.pdf`, and runs `qpdf --check` on it when `qpdf` is installed (skipped with a message otherwise) |
 | `macos/tests/run_select.sh` | runs `select_test WORKER Tests/golden` (selection, copy, search, Find Next/Previous steps) |
 | `macos/tests/run_all.sh` | compiles `tests/all_headers.c` (all four headers, `-Wall -Wextra -Werror`), runs the four scripts above in turn, then lists the global symbols the four `safepdf_*.o` objects define (`nm -g -U`) and fails on a duplicate. Prints one summary line; exit status is non-zero on any failure |
@@ -182,12 +192,17 @@ Lean's runtime libraries, and print `NAME: N checks, 0 failures`.
 `FfiView.lean`, `FfiMarks.lean`, `FfiSelect.lean` and `Ffi/Flat.lean` run there. The C tests
 themselves are not run in CI yet (task 11.4).
 
-# The Swift app (task 11.3b)
+# The Swift app (tasks 11.3b, 11.3c1, 11.3c2)
 
 Native AppKit shell in Swift 6 (strict concurrency) over the C API v2; unverified shell code that
-only moves data between AppKit and the core. Its state is a scaffold: menubar and toolbar from the
-exported tables, a document window with an empty sidebar, continuous vertical pages rendered
-through the worker. Commands it does not implement yet stay disabled (`Commands.swift`).
+only moves data between AppKit and the core. Menubar and toolbar from the exported tables, a
+document window with an empty sidebar (11.3d), pages rendered through the worker with the Tk
+viewer's zoom, rotation and pinch (11.3c1) and, since 11.3c2, its navigation: the four view modes
+with odd / even spreads and right to left, page-at-a-time wheel and keys in the page scroll mode,
+the current-page rule, an editable page field with page labels, back / forward, the document's
+open settings on every open, the subtitle `page k/n · zoom`, a status pill for notes and errors,
+and titlebar flags for repaired and encrypted files. Commands it does not implement yet
+(selection, find, sidebar panels: 11.3d; marks and save: 11.3e) stay disabled (`Commands.swift`).
 
 ## Sources (`macos/App/`)
 
@@ -207,6 +222,9 @@ through the worker. Commands it does not implement yet stay disabled (`Commands.
 | `PageViewController.swift` | The content item: an `NSScrollView` over the page canvas |
 | `Rendering.swift` | Asynchronous page renders through `safepdf_doc_render` |
 | `SelfTest.swift` | The headless self-test (below) |
+| `SelfTestNav.swift` | The self-test's checks of task 11.3c2 (navigation, modes, page field, history, open settings, subtitle, pill, flags) |
+| `StatusPill.swift` | The transient status pill: `NSGlassEffectView` on macOS 26, a HUD material on 14/15 |
+| `ViewNav.swift` | View modes, spreads, wheel steps, history, page text and open settings through the C API |
 | `Sheets.swift` | Open and save panels and alerts as document-modal sheets |
 | `SidebarViewController.swift` | The sidebar item with its four panels, empty for now |
 
@@ -252,8 +270,16 @@ SAFEPDF_SELFTEST_BUNDLE=1 macos/selftest.sh FILE.pdf    # the bundle's binary in
 anything else; there is no window and the app never calls `run` or activates. `SelfTest.swift`
 checks that the chrome tables build (every command in the menubar, every toolbar item), open and
 its error path, page 1 through `safepdf_doc_render` at 1x and 2x, pages 1 to 10 at 2x, the real
-scroll view and page canvas at 1x and 2x backing, scrolling to page 2 and dark mode; it writes
-PNGs and `timings.txt` to DIR, prints `failures: N` and exits 0 when `N` is 0.
+scroll view and page canvas at 1x and 2x backing, scrolling to page 2 and dark mode; zoom,
+pinch, rotation and backing changes (11.3c1); and (11.3c2, `SelfTestNav.swift`) the current-page
+rule after Last page, every view-mode choice with its spreads, right to left, Next / Previous by
+spreads, the wheel and Space / Up turning pages in the page scroll mode, the page field (Return,
+an invalid entry), back / forward, the subtitle with the document's page labels, the 10 Mpx cap
+pill, the titlebar flags, and open settings on generated files written to `DIR/opensettings/`
+(no golden has `/PageLayout` or `/OpenAction`; the files are those of the Tk smoke case 1s: an
+`/XYZ` open action, `TwoPageLeft` + `/R2L`, `TwoColumnRight`, a named GoTo, a JavaScript action,
+the hiding preferences with `/DisplayDocTitle`, none). It writes PNGs and `timings.txt` to DIR,
+prints `failures: N` and exits 0 when `N` is 0.
 
 `selftest.sh` samples `lsappinfo front` every 0.5 s and checks `lsappinfo list` for a Foreground
 registration, both only for the PID the script started (a copy launched by hand is ignored; the

@@ -197,6 +197,48 @@ int safepdf_doc_is_repaired(const safepdf_document *doc);
 /** Nonzero when the file is encrypted (opened with the empty user password). */
 int safepdf_doc_is_encrypted(const safepdf_document *doc);
 
+/* ----------------------------------------------------------------- v2: open settings */
+
+/** /PageMode and /NonFullScreenPageMode values (Core.Doc.OpenSettings.PageMode). */
+typedef enum {
+    SAFEPDF_PAGE_MODE_UNSET = -1, /* the document sets none */
+    SAFEPDF_PAGE_MODE_USE_NONE = 0, SAFEPDF_PAGE_MODE_USE_OUTLINES = 1,
+    SAFEPDF_PAGE_MODE_USE_THUMBS = 2, SAFEPDF_PAGE_MODE_FULL_SCREEN = 3,
+    SAFEPDF_PAGE_MODE_USE_OC = 4, SAFEPDF_PAGE_MODE_USE_ATTACHMENTS = 5
+} safepdf_page_mode;
+
+/** The document's open settings (task 9.r8; Core.Doc.OpenSettings.read), as the Tk viewer
+    applies them on every open (Viewer.applyOpenSettings; the view first resets to vertical
+    scrolling, no spreads, left to right, Automatic Zoom, page 1). */
+typedef struct {
+    bool has_layout;      /* /PageLayout given: `scroll` and `spread` are its view modes
+                             (View.modesOf); else they are the default (vertical, none) */
+    uint32_t scroll;      /* safepdf_scroll_mode */
+    uint32_t spread;      /* safepdf_spread_mode */
+    bool rtl;             /* /ViewerPreferences /Direction /R2L: spreads mirrored */
+    int32_t page_mode;    /* safepdf_page_mode (/PageMode; UNSET when absent) */
+    bool has_dest;        /* /OpenAction is a destination (or a GoTo) on a page of the file */
+    size_t dest_page;     /* its page (0-based) */
+    bool has_left, has_top; /* its left / top in page units, when it gives them */
+    safepdf_rat left, top;
+    safepdf_zoom_choice zoom; /* the zoom to open at (Toolbar.zoomChoiceOf from Automatic
+                                 Zoom; Automatic Zoom without a destination) */
+    bool hide_toolbar, hide_menubar, hide_window_ui, fit_window, center_window,
+        display_doc_title;
+    int32_t non_full_screen_mode; /* /NonFullScreenPageMode (safepdf_page_mode) */
+    char *title;          /* the window title (/DisplayDocTitle with a non-blank /Title), else
+                             NULL */
+    char **notes;         /* what was not honoured (Issue.message: an ignored JavaScript or URI
+                             open action, an unresolved destination, a bad value, …) */
+    size_t note_count;
+} safepdf_open_settings;
+
+/** The open settings of `doc` (synchronous, from the in-process parse; a few dictionary
+    lookups). 0 on success (free with safepdf_free_open_settings), -1 on failure (`*out`
+    zeroed). */
+int safepdf_doc_open_settings(const safepdf_document *doc, safepdf_open_settings *out);
+void safepdf_free_open_settings(safepdf_open_settings *s);
+
 /* ----------------------------------------------------------------- v2: result structs */
 
 /** A page-space box (points, y up). */

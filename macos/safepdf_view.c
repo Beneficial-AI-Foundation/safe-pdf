@@ -56,6 +56,10 @@ extern lean_object *safepdf_lean_view_overflow(lean_object *u);
 extern lean_object *safepdf_lean_view_keys(lean_object *u);
 extern lean_object *safepdf_lean_view_actions(lean_object *u);
 extern lean_object *safepdf_lean_view_app_strings(lean_object *u);
+extern lean_object *safepdf_lean_view_wheel_step(lean_object *a);
+extern lean_object *safepdf_lean_view_page_text(lean_object *labels, size_t page, size_t n);
+extern lean_object *safepdf_lean_view_history(lean_object *a);
+extern lean_object *safepdf_lean_view_to_screen(lean_object *a);
 
 static int initialised = 0;
 
@@ -821,4 +825,130 @@ uint32_t safepdf_view_cursor_for(uint32_t mode, uint32_t hit) {
 uint32_t safepdf_view_mode_tool(uint32_t mode) {
     if (!initialised) return SAFEPDF_TOOL_SELECT;
     return safepdf_lean_view_mode_tool(mode);
+}
+
+/* ---------------------------------------------------------------- wheel (task 11.3c2) */
+
+/** A wheel-state rational: {0, 0} (a zeroed struct) is 0. */
+static safepdf_rat wheel_rat(safepdf_rat q) {
+    if (q.num == 0 && q.den == 0) return (safepdf_rat){ 0, 1 };
+    return q;
+}
+
+int safepdf_view_wheel_step(const safepdf_wheel *w, uint32_t kind, int64_t delta, bool cross,
+                            uint64_t now_ms, uint64_t top, uint64_t view, uint64_t region,
+                            safepdf_wheel *out, uint64_t *pos) {
+    if (!w || !out || kind > SAFEPDF_WHEEL_PIXEL) return -1;
+    ints in = {0};
+    push_rat(&in, wheel_rat(w->acc)); push_rat(&in, wheel_rat(w->push)); push(&in, u64(w->last_ms));
+    push(&in, kind); push(&in, delta); push(&in, cross); push(&in, u64(now_ms));
+    push(&in, u64(top)); push(&in, u64(view)); push(&in, u64(region));
+    lean_object *r = call(safepdf_lean_view_wheel_step, &in, 7);
+    if (!r) return -1;
+    safepdf_wheel next;
+    int act = (int)num(r, 0);
+    if (rat_at(r, 2, &next.acc) != 0 || rat_at(r, 4, &next.push) != 0 || act < 0 || act > 3) {
+        lean_dec(r);
+        return -1;
+    }
+    next.last_ms = unum(r, 6);
+    if (pos) *pos = unum(r, 1);
+    *out = next;
+    lean_dec(r);
+    return act;
+}
+
+/* ---------------------------------------------------------------- page text (task 11.3c2) */
+
+char *safepdf_view_page_text(const char *const *labels, size_t nlabels, size_t page,
+                             size_t pages) {
+    if (!initialised) return NULL;
+    lean_object *s = safepdf_lean_view_page_text(mk_strings(labels, nlabels), page, pages);
+    char *out = dup_str(s);
+    lean_dec(s);
+    return out;
+}
+
+/* ---------------------------------------------------------------- history (task 11.3c2) */
+
+void safepdf_free_view_history(safepdf_view_history *h) {
+    if (!h) return;
+    free(h->back);
+    free(h->fwd);
+    memset(h, 0, sizeof *h);
+}
+
+static void push_loc(ints *b, safepdf_view_loc l) {
+    push(b, u64(l.page)); push_rat(b, l.x); push_rat(b, l.y);
+}
+
+/** The location at integers i … i + 4 of a result; -1 when a rational did not fit. */
+static int loc_at(lean_object *r, size_t i, safepdf_view_loc *out) {
+    out->page = (size_t)unum(r, i);
+    if (rat_at(r, i + 1, &out->x) != 0 || rat_at(r, i + 3, &out->y) != 0) return -1;
+    return 0;
+}
+
+/** Copies `n` locations from integer `i` on into a malloc'd array (NULL for none). */
+static int locs_at(lean_object *r, size_t i, size_t n, safepdf_view_loc **out) {
+    *out = NULL;
+    if (n == 0) return 0;
+    if (i + 5 * n > nums_len(r)) return -1;
+    safepdf_view_loc *a = calloc(n, sizeof *a);
+    if (!a) return -1;
+    for (size_t k = 0; k < n; k++) {
+        if (loc_at(r, i + 5 * k, &a[k]) != 0) { free(a); return -1; }
+    }
+    *out = a;
+    return 0;
+}
+
+int safepdf_view_history_step(uint32_t op, const safepdf_view_history *h, safepdf_view_loc cur,
+                              safepdf_view_history *out, safepdf_view_loc *target) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (op > SAFEPDF_HISTORY_FORWARD) return -1;
+    size_t nb = h ? h->back_count : 0, nf = h ? h->fwd_count : 0;
+    if ((nb && !h->back) || (nf && !h->fwd)) return -1;
+    ints in = {0};
+    push(&in, op);
+    push_loc(&in, cur);
+    push(&in, u64(nb));
+    for (size_t i = 0; i < nb; i++) push_loc(&in, h->back[i]);
+    push(&in, u64(nf));
+    for (size_t i = 0; i < nf; i++) push_loc(&in, h->fwd[i]);
+    lean_object *r = call(safepdf_lean_view_history, &in, 8);
+    if (!r) return -1;
+    int found = num(r, 0) != 0;
+    safepdf_view_loc t;
+    size_t nb2 = (size_t)unum(r, 6);
+    size_t nf_at = 7 + 5 * nb2;
+    int rc = loc_at(r, 1, &t);
+    if (rc == 0 && nf_at < nums_len(r)) {
+        size_t nf2 = (size_t)unum(r, nf_at);
+        rc = locs_at(r, 7, nb2, &out->back);
+        if (rc == 0) { out->back_count = nb2; rc = locs_at(r, nf_at + 1, nf2, &out->fwd); }
+        if (rc == 0) out->fwd_count = nf2;
+    } else {
+        rc = -1;
+    }
+    lean_dec(r);
+    if (rc != 0) { safepdf_free_view_history(out); return -1; }
+    if (target) *target = t;
+    return found;
+}
+
+/* ---------------------------------------------------------------- page → screen (11.3c2) */
+
+int safepdf_view_to_screen(safepdf_rat z, uint32_t rot, const safepdf_rat_box *box,
+                           safepdf_rat_point p, safepdf_rat_point *out) {
+    ints in = {0};
+    push_rat(&in, z); push(&in, rot); push_box(&in, box); push_rat(&in, p.x); push_rat(&in, p.y);
+    lean_object *r = call(safepdf_lean_view_to_screen, &in, 4);
+    if (!r) return -1;
+    safepdf_rat_point q;
+    int rc = rat_at(r, 0, &q.x) == 0 && rat_at(r, 2, &q.y) == 0 ? 0 : -1;
+    lean_dec(r);
+    if (rc == 0 && out) *out = q;
+    return rc;
 }

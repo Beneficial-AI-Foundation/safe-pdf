@@ -52,6 +52,7 @@ extern lean_object *safepdf_lean_doc_raise(lean_object *d, uint64_t cid, uint8_t
 extern lean_object *safepdf_lean_doc_shutdown(lean_object *d);
 extern lean_object *safepdf_lean_doc_layers_toggle(lean_object *d, lean_object *state,
                                                    size_t row);
+extern lean_object *safepdf_lean_doc_open_settings(lean_object *d);
 
 /* ================================================================ runtime and threads */
 
@@ -285,6 +286,67 @@ int safepdf_doc_page_geom(const safepdf_document *doc, size_t page, safepdf_page
 
 int safepdf_doc_is_repaired(const safepdf_document *doc) { return doc && (doc->flags & 1); }
 int safepdf_doc_is_encrypted(const safepdf_document *doc) { return doc && (doc->flags & 2); }
+
+/* ================================================================ v2: open settings */
+
+void safepdf_free_open_settings(safepdf_open_settings *s) {
+    if (!s) return;
+    free(s->title);
+    for (size_t i = 0; i < s->note_count; i++) free(s->notes[i]);
+    free(s->notes);
+    memset(s, 0, sizeof *s);
+}
+
+/* Integer i of an open-settings result (0 past its end). */
+static int64_t os_int(lean_object *ints, size_t i) {
+    if (8 * (i + 1) > lean_sarray_size(ints)) return 0;
+    return (int64_t)rd64le(lean_sarray_cptr(ints) + 8 * i);
+}
+
+int safepdf_doc_open_settings(const safepdf_document *doc, safepdf_open_settings *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!doc) return -1;
+    ensure_thread();
+    lean_inc(doc->handle);
+    lean_object *r = safepdf_lean_doc_open_settings(doc->handle);
+    lean_object *ints = lean_ctor_get(r, 0), *strs = lean_ctor_get(r, 1);
+    size_t nstr = lean_array_size(strs);
+    if (lean_sarray_size(ints) != 22 * 8 || nstr < 1) { lean_dec(r); return -1; }
+    out->has_layout = os_int(ints, 0) != 0;
+    out->scroll = (uint32_t)os_int(ints, 1);
+    out->spread = (uint32_t)os_int(ints, 2);
+    out->rtl = os_int(ints, 3) != 0;
+    out->page_mode = (int32_t)os_int(ints, 4);
+    out->has_dest = os_int(ints, 5) != 0;
+    out->dest_page = (size_t)os_int(ints, 6);
+    out->has_left = os_int(ints, 7) != 0;
+    out->left = (safepdf_rat){ os_int(ints, 8), os_int(ints, 9) };
+    out->has_top = os_int(ints, 10) != 0;
+    out->top = (safepdf_rat){ os_int(ints, 11), os_int(ints, 12) };
+    out->zoom = (safepdf_zoom_choice){ (uint32_t)os_int(ints, 13), (uint32_t)os_int(ints, 14) };
+    out->hide_toolbar = os_int(ints, 15) != 0;
+    out->hide_menubar = os_int(ints, 16) != 0;
+    out->hide_window_ui = os_int(ints, 17) != 0;
+    out->fit_window = os_int(ints, 18) != 0;
+    out->center_window = os_int(ints, 19) != 0;
+    out->display_doc_title = os_int(ints, 20) != 0;
+    out->non_full_screen_mode = (int32_t)os_int(ints, 21);
+    int ok = 1;
+    const char *title = lean_string_cstr(lean_array_get_core(strs, 0));
+    if (title[0] && !(out->title = strdup(title))) ok = 0;
+    if (ok && nstr > 1) {
+        out->notes = calloc(nstr - 1, sizeof *out->notes);
+        if (!out->notes) ok = 0;
+        for (size_t i = 1; ok && i < nstr; i++) {
+            if (!(out->notes[i - 1] = strdup(lean_string_cstr(lean_array_get_core(strs, i))))) ok = 0;
+            else out->note_count = i;
+        }
+    }
+    lean_dec(r);
+    if (!ok) { safepdf_free_open_settings(out); return -1; }
+    return 0;
+}
 
 /* ================================================================ tests only */
 
