@@ -359,6 +359,91 @@ static void test_chrome(void) {
           safepdf_view_mode_tool(SAFEPDF_MODE_HIGHLIGHT) == SAFEPDF_TOOL_HIGHLIGHT);
 }
 
+/* Task 11.3c2: the wheel, page text, history and page-to-screen exports. */
+static void test_viewing_parity(void) {
+    /* View.wheelStep (FfiView.lean #guards): 100 px down from the top scrolls to 100. */
+    safepdf_wheel w0, w;
+    memset(&w0, 0, sizeof w0);
+    uint64_t pos = 0;
+    CHECK(safepdf_view_wheel_step(&w0, SAFEPDF_WHEEL_PIXEL, -100, true, 1000, 0, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_SCROLL && pos == 100);
+    /* At the bottom a 30 px push beyond the 25 px threshold turns the page (page mode only);
+       the 5 px beyond the threshold are owed to the new page. */
+    CHECK(safepdf_view_wheel_step(&w0, SAFEPDF_WHEEL_PIXEL, -30, true, 1000, 500, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_NEXT && req(w.acc, 5, 1));
+    CHECK(safepdf_view_wheel_step(&w0, SAFEPDF_WHEEL_PIXEL, -30, false, 1000, 500, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_NONE);
+    /* A push below the threshold accumulates, the next event turns (in place: out == w). */
+    w = w0;
+    CHECK(safepdf_view_wheel_step(&w, SAFEPDF_WHEEL_PIXEL, -20, true, 1000, 500, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_NONE && req(w.push, 20, 1));
+    CHECK(safepdf_view_wheel_step(&w, SAFEPDF_WHEEL_PIXEL, -10, true, 1010, 500, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_NEXT);
+    /* Up at the top: previous page; a line of a 500 px view is 50 px. */
+    CHECK(safepdf_view_wheel_step(&w0, SAFEPDF_WHEEL_LINE, 1, true, 1000, 0, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_PREV);
+    CHECK(safepdf_view_wheel_step(&w0, SAFEPDF_WHEEL_LINE, -1, true, 1000, 0, 500, 1000, &w,
+                                  &pos) == SAFEPDF_WHEEL_SCROLL && pos == 50);
+    CHECK(safepdf_view_wheel_step(&w0, 7, -1, true, 1000, 0, 500, 1000, &w, &pos) == -1);
+
+    /* Links.pageText #guards. */
+    const char *roman[] = { "i", "ii", "iii" };
+    char *t = safepdf_view_page_text(roman, 3, 2, 120);
+    CHECK(t && strcmp(t, "page iii (3/120)") == 0);
+    free(t);
+    t = safepdf_view_page_text(NULL, 0, 1, 2);
+    CHECK(t && strcmp(t, "page 2/2") == 0);
+    free(t);
+
+    /* Links.History (theorem back_push): a jump from a, back from b returns to a, forward
+       from a returns to b. */
+    safepdf_view_loc a = { 0, R(0, 1), R(1, 4) }, b = { 5, R(0, 1), R(1, 2) }, tgt;
+    safepdf_view_history h0, h1, h2, h3;
+    memset(&h0, 0, sizeof h0);
+    CHECK(safepdf_view_history_step(SAFEPDF_HISTORY_BACK, &h0, a, &h1, &tgt) == 0 &&
+          h1.back_count == 0 && tgt.page == 0);
+    safepdf_free_view_history(&h1);
+    CHECK(safepdf_view_history_step(SAFEPDF_HISTORY_PUSH, &h0, a, &h1, &tgt) == 1 &&
+          h1.back_count == 1 && h1.fwd_count == 0 && h1.back[0].page == 0 &&
+          req(h1.back[0].y, 1, 4));
+    CHECK(safepdf_view_history_step(SAFEPDF_HISTORY_BACK, &h1, b, &h2, &tgt) == 1 &&
+          tgt.page == 0 && req(tgt.y, 1, 4) && h2.back_count == 0 && h2.fwd_count == 1 &&
+          h2.fwd[0].page == 5);
+    CHECK(safepdf_view_history_step(SAFEPDF_HISTORY_FORWARD, &h2, tgt, &h3, &tgt) == 1 &&
+          tgt.page == 5 && req(tgt.y, 1, 2) && h3.back_count == 1 && h3.fwd_count == 0);
+    safepdf_free_view_history(&h1);
+    safepdf_free_view_history(&h2);
+    /* A new jump clears the forward stack; at most 100 entries are kept. */
+    safepdf_view_history big;
+    memset(&big, 0, sizeof big);
+    for (size_t i = 0; i < 120; i++) {
+        safepdf_view_loc l = { i, R(0, 1), R(0, 1) };
+        safepdf_view_history next;
+        CHECK(safepdf_view_history_step(SAFEPDF_HISTORY_PUSH, &big, l, &next, NULL) == 1);
+        safepdf_free_view_history(&big);
+        big = next;
+    }
+    CHECK(big.back_count == 100 && big.back[0].page == 119 && big.fwd_count == 0);
+    safepdf_free_view_history(&big);
+    safepdf_free_view_history(&h3);
+    safepdf_view_loc bad = { 0, R(0, 0), R(0, 1) };
+    CHECK(safepdf_view_history_step(SAFEPDF_HISTORY_PUSH, &h0, bad, &h1, &tgt) == -1);
+
+    /* Geom.toScreen (FfiView.lean #guards): the top-left corner of a 612 x 792 page is (0, 0);
+       (100, 692) at zoom 3/2 is (150, 150); rotated a quarter turn the top-left of the page
+       goes to the top-right of the image. */
+    safepdf_rat_box letter = box(612, 792);
+    safepdf_rat_point p = { R(0, 1), R(792, 1) }, q;
+    CHECK(safepdf_view_to_screen(R(1, 1), 0, &letter, p, &q) == 0 && req(q.x, 0, 1) &&
+          req(q.y, 0, 1));
+    safepdf_rat_point p2 = { R(100, 1), R(692, 1) };
+    CHECK(safepdf_view_to_screen(R(3, 2), 0, &letter, p2, &q) == 0 && req(q.x, 150, 1) &&
+          req(q.y, 150, 1));
+    CHECK(safepdf_view_to_screen(R(1, 1), 90, &letter, p, &q) == 0 && req(q.x, 792, 1) &&
+          req(q.y, 0, 1));
+    CHECK(safepdf_view_to_screen(R(1, 0), 0, &letter, p, &q) == -1);
+}
+
 int main(void) {
     /* Before safepdf_view_init every call fails cleanly. */
     safepdf_rat z;
@@ -372,6 +457,7 @@ int main(void) {
     test_spreads_layout();
     test_zoom_choices();
     test_chrome();
+    test_viewing_parity();
     printf("view_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

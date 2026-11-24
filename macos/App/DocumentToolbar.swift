@@ -3,8 +3,8 @@
 // SF Symbols icons; ... same item order as the Tk bar; no user customisation"). Items and order
 // come from safepdf_view_toolbar (Toolbar.layout), enabled and visible states from
 // safepdf_view_states. The zoom drop-down chooses Toolbar.ZoomChoice presets (task 11.3c1); the
-// page field and the view-mode drop-down only display for now (task 11.3c2); the tools are
-// task 11.3e.
+// page field is editable (Toolbar.pageEntry: Return jumps, Escape restores; page labels) and the
+// view-mode drop-down chooses Toolbar.ViewChoice entries (task 11.3c2); the tools are task 11.3e.
 
 import AppKit
 import SafePdfC
@@ -14,8 +14,23 @@ import SafePdfC
     func chooseZoomPreset(_ sender: Any?)
 }
 
-@MainActor final class DocumentToolbar: NSObject, NSToolbarDelegate {
+/// The view-mode drop-down's entries send this up the responder chain (tag = the
+/// Toolbar.ViewChoice index, safepdf_view_choice).
+@MainActor @objc protocol ViewChoiceTarget {
+    func chooseViewChoice(_ sender: Any?)
+}
+
+@MainActor final class DocumentToolbar: NSObject, NSToolbarDelegate, NSTextFieldDelegate {
     static let zoomSelector = #selector(ZoomPresetTarget.chooseZoomPreset(_:))
+    static let viewSelector = #selector(ViewChoiceTarget.chooseViewChoice(_:))
+    /// Return in the page field, with its text.
+    var onPageEntry: ((String) -> Void)?
+    /// Escape in the page field (the window restores it and gives the page view the focus).
+    var onPageCancel: (() -> Void)?
+    /// The page field lost the focus (leaving it reverts it, as in the Tk viewer).
+    var onPageLeave: (() -> Void)?
+    private var viewMenuItem: NSMenuToolbarItem?
+    private let viewChoices: [ViewChoiceSpec] = Chrome.viewChoices() ?? []
     /// The zoom drop-down's presets (Toolbar.ZoomChoice.presets), in menu order.
     let zoomPresets: [ZoomPresetSpec] = Chrome.zoomPresets() ?? []
     private var zoomMenuItem: NSMenuToolbarItem?
@@ -163,12 +178,16 @@ import SafePdfC
     }
 
     private func pageFieldItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
-        // TODO(11.3c2): editable with Toolbar.pageEntry (Enter / Escape / revert) and page labels.
-        pageField.isEditable = false
-        pageField.isSelectable = false
+        pageField.isEditable = true
+        pageField.isSelectable = true
         pageField.alignment = .right
         pageField.bezelStyle = .roundedBezel
-        pageField.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        pageField.delegate = self
+        pageField.usesSingleLineMode = true
+        pageField.cell?.isScrollable = true
+        pageField.toolTip = "Page (Return goes there, Escape restores)"
+        pageField.setAccessibilityLabel("Page")
+        pageField.widthAnchor.constraint(equalToConstant: 56).isActive = true
         ofLabel.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [pageField, ofLabel])
         stack.orientation = .horizontal
@@ -205,18 +224,45 @@ import SafePdfC
     private func viewItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
         let item = NSMenuToolbarItem(itemIdentifier: id)
         let menu = NSMenu(title: "View mode")
-        let current = safepdf_view_choice_of_modes(SAFEPDF_SCROLL_VERTICAL.rawValue, SAFEPDF_SPREAD_NONE.rawValue)
-        // TODO(11.3c2): the view modes (ViewChoice.modes). Shown, inert.
-        for c in Chrome.viewChoices() ?? [] {
-            let mi = NSMenuItem(title: c.label, action: nil, keyEquivalent: "")
-            mi.state = c.choice == current ? .on : .off
+        for c in viewChoices {
+            let mi = NSMenuItem(title: c.label, action: Self.viewSelector, keyEquivalent: "")
+            mi.tag = Int(c.choice)
+            mi.image = NSImage(systemSymbolName: Self.viewSymbol(c.choice), accessibilityDescription: c.label)
             menu.addItem(mi)
         }
         item.menu = menu
-        item.image = NSImage(systemSymbolName: "rectangle.split.1x2", accessibilityDescription: "View mode")
         item.label = "View mode"
-        item.toolTip = "View mode"
+        viewMenuItem = item
+        setViewChoice(ViewModes.start.choice)
         return item
+    }
+
+    /// The SF Symbol of a view-mode choice.
+    static func viewSymbol(_ choice: UInt32) -> String {
+        switch choice {
+        case SAFEPDF_VIEW_SINGLE.rawValue: return "doc"
+        case SAFEPDF_VIEW_TWO.rawValue: return "book"
+        case SAFEPDF_VIEW_TWO_SCROLL.rawValue: return "rectangle.split.2x2"
+        default: return "rectangle.split.1x2"
+        }
+    }
+
+    /// Shows the view-mode choice (Toolbar.ViewChoice.ofModes): its entry checked, its icon and
+    /// "View mode: LABEL" as the tooltip (the Tk drop-down's).
+    func setViewChoice(_ choice: UInt32) {
+        guard let item = viewMenuItem else { return }
+        var label = ""
+        for mi in item.menu.items where mi.action == Self.viewSelector {
+            mi.state = UInt32(mi.tag) == choice ? .on : .off
+            if UInt32(mi.tag) == choice { label = mi.title }
+        }
+        item.image = NSImage(systemSymbolName: Self.viewSymbol(choice), accessibilityDescription: "View mode")
+        item.toolTip = "View mode: \(label)"
+    }
+
+    /// The view-mode drop-down's checked entry (the self-test checks it).
+    var viewChoiceShown: UInt32? {
+        viewMenuItem?.menu.items.first(where: { $0.state == .on }).map { UInt32($0.tag) }
     }
 
     /// Applies enabled / visible states (and whether this shell implements the command).
@@ -255,9 +301,51 @@ import SafePdfC
     /// The zoom drop-down's title (the self-test checks it).
     var zoomTitle: String? { zoomMenuItem?.title }
 
-    /// Shows the page field's texts (safepdf_view_page_field); empty without a document.
-    func setPage(entry: String, of: String) {
-        pageField.stringValue = entry
+    /// Shows the page field's texts (safepdf_view_page_field); empty without a document. The
+    /// field is left alone while it is being edited (unless `force`).
+    func setPage(entry: String, of: String, force: Bool = false) {
+        if force || !isEditingPage { pageField.stringValue = entry }
         ofLabel.stringValue = of
+        pageField.isEnabled = !of.isEmpty
+    }
+
+    /// Whether the page field has the keyboard focus (its keys stay out of the page view and
+    /// the menu's plain key equivalents).
+    var isEditingPage: Bool { pageField.currentEditor() != nil }
+
+    /// The page field's texts (the self-test reads them).
+    var pageTexts: (entry: String, of: String) { (pageField.stringValue, ofLabel.stringValue) }
+
+    /// Go to page…: the page field takes the focus with its text selected (PDF.js).
+    func focusPageField(in window: NSWindow?) {
+        guard let window, pageField.window === window else { return }
+        window.makeFirstResponder(pageField)
+        pageField.selectText(nil)
+    }
+
+    /// Return and Escape in the page field (other keys edit the text).
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === pageField else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            onPageEntry?(pageField.stringValue)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            onPageCancel?()
+            return true
+        }
+        return false
+    }
+
+    /// Leaving the page field (a click elsewhere, Tab): it reverts to the current page.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === pageField else { return }
+        onPageLeave?()
+    }
+
+    /// Typing into the page field (the self-test's path for Return / Escape without a window).
+    func typePage(_ text: String, commit: Bool) {
+        pageField.stringValue = text
+        if commit { onPageEntry?(text) } else { onPageCancel?() }
     }
 }

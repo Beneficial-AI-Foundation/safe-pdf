@@ -1,12 +1,14 @@
 // PageCanvasView.swift — the pages, laid out by safepdf_view_layout and drawn from renders
-// (tasks 11.3b, 11.3c1). Plan.md §6 Phase 11; docs/macos-design.md §1 (zoom model, rotation,
+// (tasks 11.3b, 11.3c1, 11.3c2). Plan.md §6 Phase 11; docs/macos-design.md §1 (zoom model, rotation,
 // C2 anchoring), §2 (NSScrollView page area, dark canvas around paper-white pages, sharp image
 // cross-fades over the scaled one) and §3 decision 4 (renders through the worker, callbacks on
 // the main queue).
 //
 // Layout input: each page's exact CropBox and /Rotate (safepdf_doc_page_geom), the zoom choice
-// (Toolbar.ZoomChoice) and the user's rotation; continuous vertical scrolling without spreads
-// (view modes are task 11.3c2). Keys the menu cannot carry (plain letters, Home/End, arrows,
+// (Toolbar.ZoomChoice), the user's rotation and the view modes (task 11.3c2: page or vertical
+// scrolling, no / odd / even spreads, right to left; in the page scroll mode only the current
+// page's spread is laid out). The current page is set by the page view controller (the Tk
+// viewer's rule: the page it went to, else the page under the window centre). Keys the menu cannot carry (plain letters, Home/End, arrows,
 // space) are handled here, through the exported key table, while the canvas is first responder.
 
 import AppKit
@@ -51,9 +53,11 @@ final class PageCanvasView: NSView {
     private var placeOf: [Int: Int] = [:]
     private var cache: [Int: (key: ZoomKey, image: CGImage)] = [:]
     private var inflight: [Int: (key: ZoomKey, id: safepdf_request_id)] = [:]
-    /// The last render error per page (shown by 11.3c2's status pill; logged for now).
+    /// The last render error per page (the status pill shows it, task 11.3c2).
     private(set) var errors: [Int: String] = [:]
     private(set) var currentPage = 0
+    /// The view modes (every open starts with continuous vertical scrolling, no spreads).
+    var modes = ViewModes.start
     /// The zoom drop-down's choice (Toolbar.ZoomChoice; every open starts at Automatic Zoom).
     var zoomChoice = ZoomModel.auto
     /// The user's rotation in degrees (0, 90, 180, 270), added to every page's /Rotate.
@@ -66,6 +70,8 @@ final class PageCanvasView: NSView {
     var onRender: ((RenderResult) -> Void)?
     /// Called when the page at the top of the view changes.
     var onCurrentPageChange: ((Int) -> Void)?
+    /// Called with a page and its render error (the status pill shows it).
+    var onRenderError: ((Int, String) -> Void)?
     /// Called when a layout cannot be computed (the window shows it as a sheet).
     var onError: ((String) -> Void)?
     /// Called just before a sharp render replaces a scaled (stale-zoom) image of a page in
@@ -117,6 +123,7 @@ final class PageCanvasView: NSView {
         currentPage = 0
         zoomChoice = ZoomModel.auto
         userRotation = 0
+        modes = .start
         relayout(canvas: canvas)
     }
 
@@ -134,12 +141,12 @@ final class PageCanvasView: NSView {
         let b = backing
         var geoms = doc.geometry
         var params = safepdf_layout_params(
-            scroll: SAFEPDF_SCROLL_VERTICAL.rawValue, spread: SAFEPDF_SPREAD_NONE.rawValue,
+            scroll: modes.scroll, spread: modes.spread,
             user_rotation: userRotation, zoom: zoomChoice,
             scaling: ZoomModel.scaling(b),
             canvas_w: UInt32(clamping: Int((canvas.width * b).rounded(.down))),
             canvas_h: UInt32(clamping: Int((canvas.height * b).rounded(.down))),
-            page: min(currentPage, doc.pageCount - 1), rtl: false)
+            page: min(currentPage, doc.pageCount - 1), rtl: modes.rtl)
         var out = safepdf_layout()
         guard safepdf_view_layout(&geoms, geoms.count, &params, &out) == 0 else {
             onError?("The pages could not be laid out (safepdf_view_layout failed).")
@@ -174,6 +181,30 @@ final class PageCanvasView: NSView {
         setFrameSize(CGSize(width: max(canvas.width, CGFloat(holder.raw.region_w) / b),
                             height: max(canvas.height, CGFloat(holder.raw.region_h) / b)))
         needsDisplay = true
+    }
+
+    /// Makes `page` the current page (the controller's rule) and reports a change. In the page
+    /// scroll mode the caller lays the pages out again when the spread changed.
+    func setCurrent(_ page: Int) {
+        guard let doc = document, doc.pageCount > 0 else { return }
+        let p = min(max(0, page), doc.pageCount - 1)
+        guard p != currentPage else { return }
+        currentPage = p
+        onCurrentPageChange?(p)
+    }
+
+    /// Whether the current layout shows `page` (the page scroll mode lays out one spread).
+    func isLaidOut(_ page: Int) -> Bool { placeOf[page] != nil }
+
+    /// The page at a point of the view (points): the page containing it, else the nearest one
+    /// (View.pageAt).
+    func page(at point: CGPoint) -> Int? {
+        guard let holder = layout else { return nil }
+        let b = laidOutBacking
+        var hit = safepdf_page_hit()
+        guard safepdf_view_page_at(&holder.raw, UInt64(max(0, point.x * b)), UInt64(max(0, point.y * b)),
+                                   0, &hit) == 1 else { return nil }
+        return hit.page
     }
 
     /// The place of a page in the current layout.
@@ -213,21 +244,30 @@ final class PageCanvasView: NSView {
         return CGPoint(x: (pl.pixels.minX + q2.x) / b, y: (pl.pixels.minY + q2.y) / b)
     }
 
-    /// The scroll position (points, top of the clip view) that shows `page` from its top
+    /// The scroll position (points, top of the visible area) that shows `page` from its top
     /// (View.topFor through safepdf_view_page_at).
     func scrollTop(forPage page: Int, viewHeight: CGFloat) -> CGFloat? {
+        hitOf(page, viewHeight: viewHeight).map { CGFloat($0.top) / laidOutBacking }
+    }
+
+    /// The scroll position that shows `page` down to its bottom (View.bottomFor).
+    func scrollBottom(forPage page: Int, viewHeight: CGFloat) -> CGFloat? {
+        hitOf(page, viewHeight: viewHeight).map { CGFloat($0.bottom) / laidOutBacking }
+    }
+
+    private func hitOf(_ page: Int, viewHeight: CGFloat) -> safepdf_page_hit? {
         guard let holder = layout, let i = placeOf[page] else { return nil }
         let b = laidOutBacking
         let p = places[i].pixels
         var hit = safepdf_page_hit()
         guard safepdf_view_page_at(&holder.raw, UInt64(p.midX), UInt64(p.minY),
                                    UInt64(max(0, viewHeight * b)), &hit) == 1 else { return nil }
-        return CGFloat(hit.top) / b
+        return hit
     }
 
     /// Requests renders for the pages meeting `visible` (plus one each side, View.wantedPages),
-    /// cancels requests for pages no longer wanted, drops far-away images, and updates the
-    /// current page.
+    /// cancels requests for pages no longer wanted and drops far-away images. The current page
+    /// is rendered first.
     func updateRenders(visible: NSRect) {
         guard let doc = document, let holder = layout else { return }
         let b = laidOutBacking
@@ -235,19 +275,9 @@ final class PageCanvasView: NSView {
         let bottom = UInt64(max(0, visible.maxY * b))
         var band = safepdf_page_band()
         guard safepdf_view_pages_in_band(&holder.raw, top, bottom, &band) == 0 else { return }
-        var visiblePages: [Int] = []
         var wanted: [Int] = []
-        if let v = band.visible { for i in 0..<band.visible_count { visiblePages.append(v[i]) } }
         if let w = band.wanted { for i in 0..<band.wanted_count { wanted.append(w[i]) } }
         safepdf_free_page_band(&band)
-
-        var hit = safepdf_page_hit()
-        let probe = top + (bottom - min(top, bottom)) / 3
-        if safepdf_view_page_at(&holder.raw, UInt64(max(0, visible.midX * b)), probe,
-                                bottom - min(top, bottom), &hit) == 1, hit.page != currentPage {
-            currentPage = hit.page
-            onCurrentPageChange?(hit.page)
-        }
 
         let wantedSet = Set(wanted)
         for (page, r) in inflight where !wantedSet.contains(page) {
@@ -255,7 +285,7 @@ final class PageCanvasView: NSView {
             inflight[page] = nil
         }
         for page in wanted {
-            let prio = page == visiblePages.first ? Int32(SAFEPDF_PRIO_CURRENT) : Int32(SAFEPDF_PRIO_VISIBLE)
+            let prio = page == currentPage ? Int32(SAFEPDF_PRIO_CURRENT) : Int32(SAFEPDF_PRIO_VISIBLE)
             request(page, doc: doc, priority: prio)
         }
         if let lo = wanted.min(), let hi = wanted.max() {
@@ -295,6 +325,7 @@ final class PageCanvasView: NSView {
         } else if let e = res.error {
             errors[res.page] = e
             NSLog("SafePDF: page %d: %@", res.page + 1, e)
+            onRenderError?(res.page, e)
         }
         onRender?(res)
     }

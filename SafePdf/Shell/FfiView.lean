@@ -707,4 +707,105 @@ def appStrings (_u : Unit) : Array String := #[Menu.appName, Menu.aboutDetail]
 #guard accelW .gotoPage == ([5], ["g", "G"]) && accelW .outline == ([9], ["s", "S"]) &&
   accelW .saveAs == ([3], ["s", "S"]) && accelW .prevPage == ([0], ["Prior", "PageUp"])
 
+/-! ## Viewing parity, part 2 (task 11.3c2): wheel, page text, history, page → screen -/
+
+/-- `View.WheelKind` from its index (`notch`, `line`, `pixel`; the C enum
+`safepdf_wheel_kind`). -/
+def wheelKindOf : Nat → View.WheelKind
+  | 0 => .notch
+  | 1 => .line
+  | _ => .pixel
+
+/-- **One wheel event** as the Tk viewer's `Viewer.wheel` handles it: `View.wheelStep` with the
+movement of `View.wheelPixels` and the push of `View.wheelThreshold`. In: wheel state (`acc`
+(2), `push` (2), `last`), kind, delta `d` (signed, Tk's `%D`: positive is up/left), `cross`
+(the vertical axis in the page scroll mode), `now` (ms), `top`, `view`, `region` (pixels).
+Out: action (0 none, 1 scroll to, 2 next page, 3 previous page), position (action 1), the new
+state (`acc` (2), `push` (2), `last`). -/
+@[export safepdf_lean_view_wheel_step]
+def wheelStep (a : ByteArray) : ByteArray :=
+  let w : View.Wheel := { acc := getRat a 0, push := getRat a 2, last := getNat a 4 }
+  let k := wheelKindOf (getNat a 5)
+  let view := getNat a 10
+  let region := getNat a 11
+  let (w', act) := View.wheelStep w (getNat a 8) (View.wheelPixels k (getI64 a 6) view)
+    (getBool a 7) (getNat a 9) view region (View.wheelThreshold k view (region - view))
+  let (code, pos) : Nat × Nat := match act with
+    | .none => (0, 0)
+    | .scrollTo p => (1, p)
+    | .next => (2, 0)
+    | .prev => (3, 0)
+  enc ([Int.ofNat code, natW pos] ++ ratW w'.acc ++ ratW w'.push ++ [natW w'.last])
+
+-- 100 px down from the top scrolls; at the bottom a push of 30 px past the threshold (25 px:
+-- a twentieth of the view) turns the page.
+#guard (List.range 2).map (getI64 (wheelStep (enc [0, 1, 0, 1, 0, 2, -100, 1, 1000, 0, 500, 1000]))) ==
+  [1, 100]
+#guard getI64 (wheelStep (enc [0, 1, 0, 1, 0, 2, -30, 1, 1000, 500, 500, 1000])) 0 == 2
+#guard getI64 (wheelStep (enc [0, 1, 0, 1, 0, 2, -30, 0, 1000, 500, 500, 1000])) 0 == 0
+
+/-- `Links.pageText`: the page as the window title and status line show it (`page k/n`, or
+`page L (k/n)` with page labels). -/
+@[export safepdf_lean_view_page_text]
+def pageText (labels : Array String) (page n : USize) : String :=
+  Links.pageText labels page.toNat n.toNat
+
+#guard pageText #["i", "ii", "iii"] 2 120 == "page iii (3/120)" && pageText #[] 1 2 == "page 2/2"
+
+/-- A history location held in integers `i … i + 4` (page, `x` (2), `y` (2)). -/
+def getLoc (b : ByteArray) (i : Nat) : Links.Loc := ⟨getNat b i, getRat b (i + 1), getRat b (i + 3)⟩
+
+/-- A history location on the wire. -/
+def locW (l : Links.Loc) : List Int := [natW l.page] ++ ratW l.x ++ ratW l.y
+
+/-- `n` locations from integer `i` on. -/
+def getLocs (b : ByteArray) (i n : Nat) : List Links.Loc :=
+  (List.range n).map fun k => getLoc b (i + 5 * k)
+
+/-- A history on the wire: the back stack's length and locations, then the forward stack's. -/
+def historyW (h : Links.History) : List Int :=
+  [(h.back.length : Int)] ++ h.back.flatMap locW ++ [(h.fwd.length : Int)] ++ h.fwd.flatMap locW
+
+/-- **Back/forward history** (`Links.History`, theorem `History.back_push`). In: operation (0
+`push` — a jump from `cur`; 1 `goBack`; 2 `goForward`), `cur` (5), the back stack (length,
+then 5 integers per location, nearest first), the forward stack (the same). Lengths are capped
+by the input's size. Out: found flag (always 1 for `push`), the location to show (`cur` for
+`push` and when nothing was found), the new history (`historyW`; unchanged when nothing was
+found). -/
+@[export safepdf_lean_view_history]
+def history (a : ByteArray) : ByteArray :=
+  let cap := a.size / 40
+  let cur := getLoc a 1
+  let nb := min (getNat a 6) cap
+  let nf := min (getNat a (7 + 5 * nb)) cap
+  let h : Links.History := ⟨getLocs a 7 nb, getLocs a (8 + 5 * nb) nf⟩
+  let res : Option (Links.Loc × Links.History) := match getNat a 0 with
+    | 0 => some (cur, h.push cur)
+    | 1 => h.goBack cur
+    | _ => h.goForward cur
+  match res with
+  | some (l, h') => enc ([1] ++ locW l ++ historyW h')
+  | none => enc ([0] ++ locW cur ++ historyW h)
+
+-- Push page 0, then go back from page 5: back to page 0, page 5 on the forward stack.
+#guard
+  let pushed := history (enc [0, 0, 0, 1, 0, 1, 0, 0])
+  let back := history (enc ([1, 5, 0, 1, 1, 2] ++ (List.range 7).map (getI64 pushed ∘ (· + 6))))
+  getI64 pushed 0 == 1 && getI64 pushed 5 == 1 && getI64 back 0 == 1 && getI64 back 1 == 0 &&
+  getI64 back 6 == 0 && getI64 back 7 == 1 && getI64 back 8 == 5
+-- Nothing to go forward to.
+#guard getI64 (history (enc [2, 3, 0, 1, 0, 1, 0, 0])) 0 == 0
+
+/-- `Geom.toScreen` (C2): where page point `p` (page units) is shown, in pixels from the page
+image's top-left, at zoom `z` and rotation `r` of box `bx` — how the Tk viewer scrolls to a
+destination (`Viewer.applyScroll`, `.dest`). In: `z` (2), rotation degrees, box (8), point (4).
+Out: point (4). -/
+@[export safepdf_lean_view_to_screen]
+def toScreenW (a : ByteArray) : ByteArray :=
+  let q := toScreen (getRat a 0) (rotOf (getNat a 2)) (getBox a 3) ⟨getRat a 11, getRat a 13⟩
+  enc (ratW q.x ++ ratW q.y)
+
+#guard toScreenW (enc [1, 1, 0, 0, 1, 0, 1, 612, 1, 792, 1, 0, 1, 792, 1]) == enc [0, 1, 0, 1]
+#guard toScreenW (enc [3, 2, 0, 0, 1, 0, 1, 612, 1, 792, 1, 100, 1, 692, 1]) == enc [150, 1, 150, 1]
+
 end SafePdf.Shell.FfiView

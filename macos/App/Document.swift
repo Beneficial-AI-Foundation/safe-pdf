@@ -1,4 +1,5 @@
-// Document.swift — an open PDF over the C API v2 (task 11.3b; exact page geometry, 11.3c1).
+// Document.swift — an open PDF over the C API v2 (task 11.3b; exact page geometry, 11.3c1;
+// open settings and page labels, 11.3c2).
 // Plan.md §6 Phase 11; docs/macos-design.md §3 decision 4 (rendering through the confined
 // document worker; the GUI only reads the file through the capped read and holds the handle).
 
@@ -22,6 +23,12 @@ import SafePdfC
     let geometry: [safepdf_page_geom]
     let repaired: Bool
     let encrypted: Bool
+    /// The document's open settings (safepdf_doc_open_settings, read at open; none when the
+    /// call fails).
+    private(set) var settings = OpenSettings.none
+    /// The page labels (safepdf_doc_page_labels, asynchronous: empty until they arrive; one per
+    /// page, "" where the document gives none).
+    private(set) var labels: [String] = []
 
     /// Why an open failed.
     struct OpenError: Error {
@@ -67,9 +74,49 @@ import SafePdfC
         geometry = geoms
         repaired = safepdf_doc_is_repaired(h) != 0
         encrypted = safepdf_doc_is_encrypted(h) != 0
+        settings = OpenSettings.read(self) ?? .none
+    }
+
+    /// Requests the page labels; `done` runs on the main queue once they are stored (not when
+    /// the request fails: the page field then shows numbers, as without labels).
+    func loadLabels(_ done: @escaping @MainActor () -> Void) {
+        let ticket = LabelsTicket { [weak self] labels in
+            guard let self, labels.count == self.pageCount else { return }
+            self.labels = labels
+            done()
+        }
+        let ctx = Unmanaged.passRetained(ticket).toOpaque()
+        if safepdf_doc_page_labels(handle, DispatchQueue.main, Document.labelsCallback, ctx) == 0 {
+            Unmanaged<LabelsTicket>.fromOpaque(ctx).release()
+        }
+    }
+
+    /// The C callback: runs on the main queue (the queue passed above).
+    private static let labelsCallback: safepdf_labels_fn = { context, _, status, _, list in
+        var copied: [String] = []
+        if status == SAFEPDF_STATUS_OK, let list, let ls = list.pointee.labels {
+            for i in 0..<list.pointee.count { copied.append(ls[i].map { String(cString: $0) } ?? "") }
+        }
+        safepdf_free_labels(list)
+        guard let context else { return }
+        let ok = status == SAFEPDF_STATUS_OK
+        let bits = UInt(bitPattern: context)
+        let labels = copied
+        MainActor.assumeIsolated {
+            guard let ctx = UnsafeMutableRawPointer(bitPattern: bits) else { return }
+            let ticket = Unmanaged<LabelsTicket>.fromOpaque(ctx).takeRetainedValue()
+            if ok { ticket.deliver(labels) }
+        }
     }
 
     deinit {
         safepdf_doc_release(handle)
     }
+}
+
+/// Who gets the page labels (retained across the C call, released once by the callback).
+@MainActor final class LabelsTicket {
+    let deliver: @MainActor ([String]) -> Void
+
+    init(deliver: @escaping @MainActor ([String]) -> Void) { self.deliver = deliver }
 }

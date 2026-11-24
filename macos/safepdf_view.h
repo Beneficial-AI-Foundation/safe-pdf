@@ -442,6 +442,85 @@ uint32_t safepdf_view_cursor_for(uint32_t mode, uint32_t hit);
 /** Toolbar.Mode.tool: the tool whose button shows pressed in a mode. */
 uint32_t safepdf_view_mode_tool(uint32_t mode);
 
+/* ---------------------------------------------------------------- wheel (task 11.3c2) */
+
+/** View.WheelKind: what a wheel delta counts. */
+typedef enum {
+    SAFEPDF_WHEEL_NOTCH = 0, /* 1/120 notches */
+    SAFEPDF_WHEEL_LINE = 1,  /* whole lines (one notch is about one line) */
+    SAFEPDF_WHEEL_PIXEL = 2  /* pixels (trackpads, precise deltas) */
+} safepdf_wheel_kind;
+
+/** View.WheelAct: what a wheel event does. */
+typedef enum {
+    SAFEPDF_WHEEL_NONE = 0,   /* nothing yet (sub-pixel movement, a push below the threshold) */
+    SAFEPDF_WHEEL_SCROLL = 1, /* scroll so that the view's top (left) edge is at `*pos` */
+    SAFEPDF_WHEEL_NEXT = 2,   /* turn to the top of the next page (spread) */
+    SAFEPDF_WHEEL_PREV = 3    /* turn to the bottom of the previous page (spread) */
+} safepdf_wheel_act;
+
+/** View.Wheel: one axis's wheel state between events. A zeroed struct is the initial state
+    (a rational {0, 0} counts as 0). Keep one per axis. */
+typedef struct { safepdf_rat acc; safepdf_rat push; uint64_t last_ms; } safepdf_wheel;
+
+/** One wheel event, as the Tk viewer's wheel handler: View.wheelStep with the movement of
+    View.wheelPixels and the threshold of View.wheelThreshold. `delta` is signed as Tk's %D
+    (positive: up / left): lines or notches, or pixels for SAFEPDF_WHEEL_PIXEL. `cross` is
+    true for the vertical axis in the page scroll mode (only then can a page turn).
+    `now_ms` is a monotonic clock; `top`, `view` and `region` are the axis's scroll position,
+    view size and scroll-region size in pixels. Writes the new state to `*out` (may alias `w`)
+    and, for SAFEPDF_WHEEL_SCROLL, the position to `*pos`. Returns the safepdf_wheel_act, or
+    -1 on bad input. At either end of the document the shell drops `out->acc` after a turn
+    that went nowhere (the Tk viewer does). */
+int safepdf_view_wheel_step(const safepdf_wheel *w, uint32_t kind, int64_t delta, bool cross,
+                            uint64_t now_ms, uint64_t top, uint64_t view, uint64_t region,
+                            safepdf_wheel *out, uint64_t *pos);
+
+/* ---------------------------------------------------------------- page text (task 11.3c2) */
+
+/** Links.pageText: the page as the window title and subtitle show it, "page k/n", or
+    "page L (k/n)" with page labels ("page iii (3/120)"). `labels` as for
+    safepdf_view_page_field. Malloc'd; NULL on failure. */
+char *safepdf_view_page_text(const char *const *labels, size_t nlabels, size_t page,
+                             size_t pages);
+
+/* ---------------------------------------------------------------- history (task 11.3c2) */
+
+/** Links.Loc: a place in the document, page and scroll fractions (top-left of the view over
+    the scroll region's size, exact rationals in [0, 1]). */
+typedef struct { size_t page; safepdf_rat x, y; } safepdf_view_loc;
+
+/** Links.History: the back and forward stacks, nearest first (at most 100 each). A zeroed
+    struct is the empty history. Filled structs own their arrays (safepdf_free_view_history). */
+typedef struct {
+    safepdf_view_loc *back; size_t back_count;
+    safepdf_view_loc *fwd; size_t fwd_count;
+} safepdf_view_history;
+
+/** History operations. */
+typedef enum {
+    SAFEPDF_HISTORY_PUSH = 0,   /* History.push: a jump from `cur` (links, outline, page field) */
+    SAFEPDF_HISTORY_BACK = 1,   /* History.goBack from `cur` */
+    SAFEPDF_HISTORY_FORWARD = 2 /* History.goForward from `cur` */
+} safepdf_history_op;
+
+/** Applies `op` to history `h` at the current place `cur` (theorem History.back_push: Back
+    after a jump returns to where it started). 1: done, `*out` the new history and `*target`
+    where to go (`cur` for PUSH); 0: nothing to go back / forward to (`*out` a copy of `h`,
+    `*target` = cur); -1 on error (`*out` zeroed). `out` must not alias `h`; free the old one
+    after the call. */
+int safepdf_view_history_step(uint32_t op, const safepdf_view_history *h, safepdf_view_loc cur,
+                              safepdf_view_history *out, safepdf_view_loc *target);
+void safepdf_free_view_history(safepdf_view_history *h);
+
+/* ---------------------------------------------------------------- page → screen (11.3c2) */
+
+/** Geom.toScreen (C2): where page point `p` (page units) is shown at zoom `z` and rotation
+    `rot` (degrees) of `box`, in pixels from the page image's top-left. The shell scrolls
+    there to show a destination (left / top) as the Tk viewer does. */
+int safepdf_view_to_screen(safepdf_rat z, uint32_t rot, const safepdf_rat_box *box,
+                           safepdf_rat_point p, safepdf_rat_point *out);
+
 #ifdef __cplusplus
 }
 #endif

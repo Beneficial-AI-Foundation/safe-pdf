@@ -1,6 +1,8 @@
 // DocumentWindowController.swift — the document window: unified toolbar, split view with the
 // sidebar and the page area, command routing and enabled states (task 11.3b); the zoom and
-// rotation commands, the zoom drop-down and the page view's keys (task 11.3c1).
+// rotation commands, the zoom drop-down and the page view's keys (task 11.3c1); view modes and
+// spreads, the page field, back/forward, open settings, the subtitle `page k/n · zoom`, the
+// titlebar flags for repaired and encrypted files (task 11.3c2).
 // Plan.md §6 Phase 11; docs/macos-design.md §2 (window with full-size content view, unified
 // toolbar, title = document name with proxy icon; NSSplitViewController sidebar) and §3
 // decision 1 (enabled rules from the exported Menu.Ctx table).
@@ -9,7 +11,7 @@ import AppKit
 import SafePdfC
 
 final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation,
-    NSToolbarItemValidation, SafePdfCommandTarget, ZoomPresetTarget
+    NSToolbarItemValidation, SafePdfCommandTarget, ZoomPresetTarget, ViewChoiceTarget
 {
     let pages = PageViewController()
     let sidebar = SidebarViewController()
@@ -19,6 +21,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     /// The open PDF (not NSWindowController.document, which is for NSDocument).
     private(set) var pdf: Document?
     private var states: ChromeStates?
+    private var flagsAccessory: NSTitlebarAccessoryViewController?
 
     init() {
         let window = NSWindow(
@@ -56,6 +59,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             window.toolbar = tb.toolbar
         }
         pages.canvas.onCurrentPageChange = { [weak self] _ in self?.updateChrome() }
+        chromeToolbar?.onPageEntry = { [weak self] text in self?.pageEntry(text) }
+        chromeToolbar?.onPageCancel = { [weak self] in self?.pageFieldDone() }
+        chromeToolbar?.onPageLeave = { [weak self] in self?.revertPageField() }
         pages.onViewChange = { [weak self] in self?.updateChrome() }
         pages.canvas.onKeyCommand = { [weak self] cmd in self?.run(cmd) ?? false }
         pages.canvas.onError = { [weak self] message in
@@ -84,50 +90,145 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
               Core.nowMs() - t0)
         pdf = doc
         window?.representedURL = url
-        window?.title = url.lastPathComponent
+        // `/DisplayDocTitle`: the document's `/Title` instead of the file name (task 9.r8).
+        window?.title = doc.settings.title ?? url.lastPathComponent
+        setFlags(repaired: doc.repaired, encrypted: doc.encrypted)
         pages.show(doc)
+        if doc.settings.centerWindow { window?.center() }
         window?.makeFirstResponder(pages.canvas)
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        doc.loadLabels { [weak self, weak doc] in
+            guard let self, let doc, self.pdf === doc else { return }
+            self.updateChrome()
+        }
         updateChrome()
+    }
+
+    // MARK: titlebar flags
+
+    /// The persistent flags (docs/macos-design.md §2): a small titlebar accessory saying the file
+    /// was repaired and / or is encrypted; none for a plain file.
+    private func setFlags(repaired: Bool, encrypted: Bool) {
+        if let old = flagsAccessory, let i = window?.titlebarAccessoryViewControllers.firstIndex(of: old) {
+            window?.removeTitlebarAccessoryViewController(at: i)
+        }
+        flagsAccessory = nil
+        guard let window, let view = Self.flagsView(repaired: repaired, encrypted: encrypted) else { return }
+        let acc = NSTitlebarAccessoryViewController()
+        acc.view = view
+        acc.layoutAttribute = .trailing
+        #if compiler(>=6.2) // the macOS 26 SDK: the scroll-edge effect under the accessory
+        if #available(macOS 26.1, *) { acc.preferredScrollEdgeEffectStyle = .soft }
+        #endif
+        window.addTitlebarAccessoryViewController(acc)
+        flagsAccessory = acc
+    }
+
+    /// The flags' view (nil: nothing to flag). Each flag is an SF Symbol and a word, with a
+    /// tooltip that says what it means.
+    static func flagsView(repaired: Bool, encrypted: Bool) -> NSView? {
+        var views: [NSView] = []
+        func flag(_ symbol: String, _ text: String, _ tip: String) {
+            let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: text) ?? NSImage())
+            image.contentTintColor = .secondaryLabelColor
+            let label = NSTextField(labelWithString: text)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.textColor = .secondaryLabelColor
+            let stack = NSStackView(views: [image, label])
+            stack.spacing = 3
+            stack.toolTip = tip
+            stack.setAccessibilityElement(true)
+            stack.setAccessibilityLabel("\(text): \(tip)")
+            views.append(stack)
+        }
+        if repaired {
+            flag("wrench.adjustable", "Repaired",
+                 "The file is damaged; it was opened by the repair path and may not show as its author intended.")
+        }
+        if encrypted {
+            flag("lock", "Encrypted", "The file is encrypted (opened with the empty user password).")
+        }
+        guard !views.isEmpty else { return nil }
+        let stack = NSStackView(views: views)
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 10)
+        stack.frame = NSRect(origin: .zero, size: stack.fittingSize)
+        return stack
     }
 
     // MARK: chrome states
 
+    /// What the enabled rules look at (Viewer.menuCtx): first and last spread, history.
     private func context() -> safepdf_ctx {
+        Self.context(pdf: pdf, pages: pages)
+    }
+
+    /// Menu.Ctx of a page view (the self-test checks it without a window).
+    static func context(pdf: Document?, pages: PageViewController) -> safepdf_ctx {
         var c = safepdf_ctx()
-        if let doc = pdf {
+        if let doc = pdf, doc.pageCount > 0 {
             let page = pages.canvas.currentPage
             c.has_doc = true
             c.page = page
             c.pages = doc.pageCount
-            c.on_first = page == 0
-            c.on_last = page + 1 >= doc.pageCount
-            // TODO(11.3c2/d/e): outline, selection, marks, history, undo and dirty flags.
+            if let info = pages.spreadInfo {
+                c.on_first = info.spread == 0
+                c.on_last = info.spread + 1 >= info.spread_count
+            }
+            c.can_back = pages.history.canBack
+            c.can_forward = pages.history.canForward
+            // TODO(11.3d/e): outline, selection, marks, undo and dirty flags.
         }
         return c
     }
 
-    /// Recomputes enabled states (safepdf_view_states), the page field and the subtitle.
+    /// The window subtitle: the page as the Tk title shows it (Links.pageText, with labels) and
+    /// the zoom, `page iii (3/120) · 150%`.
+    static func subtitle(pdf: Document?, pages: PageViewController) -> String {
+        guard let doc = pdf, doc.pageCount > 0 else { return "" }
+        let text = PageText.of(labels: doc.labels, page: pages.canvas.currentPage, pages: doc.pageCount)
+        return text + (pages.shownPct.map { " · \($0)%" } ?? "")
+    }
+
+    /// Recomputes enabled states (safepdf_view_states), the page field, the view-mode and zoom
+    /// drop-downs and the subtitle.
     func updateChrome() {
         states = Chrome.states(context())
         if let st = states { chromeToolbar?.apply(st) }
-        if let doc = pdf {
-            var entry: UnsafeMutablePointer<CChar>? = nil
-            var of: UnsafeMutablePointer<CChar>? = nil
-            let page = pages.canvas.currentPage
-            if safepdf_view_page_field(nil, 0, page, doc.pageCount, &entry, &of) == 0 {
-                chromeToolbar?.setPage(entry: Core.take(entry) ?? "", of: Core.take(of) ?? "")
-            } else {
-                _ = Core.take(entry)
-                _ = Core.take(of)
-            }
-            let zoom = pages.canvas.shownPct.map { " · \($0)%" } ?? ""
-            window?.subtitle = "page \(page + 1)/\(doc.pageCount)\(zoom)"
+        if let doc = pdf, doc.pageCount > 0 {
+            let f = PageText.field(labels: doc.labels, page: pages.canvas.currentPage, pages: doc.pageCount)
+            chromeToolbar?.setPage(entry: f.entry, of: f.of)
         } else {
-            chromeToolbar?.setPage(entry: "", of: "")
-            window?.subtitle = ""
+            chromeToolbar?.setPage(entry: "", of: "", force: true)
         }
+        window?.subtitle = Self.subtitle(pdf: pdf, pages: pages)
         chromeToolbar?.setZoom(pages.canvas.zoomChoice)
+        chromeToolbar?.setViewChoice(pages.canvas.modes.choice)
+    }
+
+    // MARK: page field (Toolbar.pageEntry)
+
+    /// Return in the page field (Viewer.pageEntry): a label or number jumps there (recorded in
+    /// the history); an invalid entry reverts the field and the pill says why.
+    private func pageEntry(_ text: String) {
+        pages.pageEntry(text)
+        pageFieldDone()
+    }
+
+    /// Leaves the page field: its text shows the current page again, the page view has the
+    /// focus.
+    private func pageFieldDone() {
+        window?.makeFirstResponder(pages.canvas)
+        revertPageField()
+    }
+
+    /// The page field shows the current page again.
+    private func revertPageField() {
+        if let doc = pdf, doc.pageCount > 0 {
+            let f = PageText.field(labels: doc.labels, page: pages.canvas.currentPage, pages: doc.pageCount)
+            chromeToolbar?.setPage(entry: f.entry, of: f.of, force: true)
+        }
+        updateChrome()
     }
 
     /// Whether a command can run now: the exported rule and this shell implements it.
@@ -149,24 +250,56 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     @discardableResult
     func run(_ cmd: Int) -> Bool {
         guard isEnabled(cmd) else { return false }
-        guard let doc = pdf else {
+        guard pdf != nil else {
             AppDelegate.shared?.perform(cmd)
             return true
         }
-        let page = pages.canvas.currentPage
+        guard Self.perform(cmd, pages: pages) else {
+            switch cmd {
+            case Commands.id(SAFEPDF_CMD_CLOSE):
+                window?.performClose(nil)
+            case Commands.id(SAFEPDF_CMD_OUTLINE):
+                split.toggleSidebar(nil)
+            case Commands.id(SAFEPDF_CMD_GOTO_PAGE):
+                chromeToolbar?.focusPageField(in: window)
+            default:
+                AppDelegate.shared?.perform(cmd)
+            }
+            updateChrome()
+            return true
+        }
+        updateChrome()
+        return true
+    }
+
+    /// The page view's commands (navigation, view modes, zoom, rotation), shared with the
+    /// self-test: returns false for a command that is not one of them.
+    static func perform(_ cmd: Int, pages: PageViewController) -> Bool {
+        guard let doc = pages.canvas.document else { return false }
+        var modes = pages.canvas.modes
         switch cmd {
-        case Commands.id(SAFEPDF_CMD_CLOSE):
-            window?.performClose(nil)
-        case Commands.id(SAFEPDF_CMD_OUTLINE):
-            split.toggleSidebar(nil)
         case Commands.id(SAFEPDF_CMD_NEXT_PAGE), Commands.id(SAFEPDF_CMD_PREV_PAGE):
-            var info = safepdf_spread_info()
-            guard safepdf_view_spread(SAFEPDF_SPREAD_NONE.rawValue, doc.pageCount, page, &info) == 0 else { return false }
-            pages.scroll(toPage: cmd == Commands.id(SAFEPDF_CMD_NEXT_PAGE) ? info.next_page : info.prev_page)
+            guard let info = pages.spreadInfo else { return true }
+            pages.goTo(cmd == Commands.id(SAFEPDF_CMD_NEXT_PAGE) ? info.next_page : info.prev_page)
         case Commands.id(SAFEPDF_CMD_FIRST_PAGE):
-            pages.scroll(toPage: 0)
+            pages.goTo(0)
         case Commands.id(SAFEPDF_CMD_LAST_PAGE):
-            pages.scroll(toPage: max(0, doc.pageCount - 1))
+            pages.goTo(max(0, doc.pageCount - 1))
+        case Commands.id(SAFEPDF_CMD_BACK), Commands.id(SAFEPDF_CMD_FORWARD):
+            pages.historyMove(back: cmd == Commands.id(SAFEPDF_CMD_BACK))
+        case Commands.id(SAFEPDF_CMD_SCROLL_PAGE), Commands.id(SAFEPDF_CMD_SCROLL_VERTICAL):
+            modes.scroll = cmd == Commands.id(SAFEPDF_CMD_SCROLL_PAGE)
+                ? SAFEPDF_SCROLL_PAGE.rawValue : SAFEPDF_SCROLL_VERTICAL.rawValue
+            pages.setModes(modes)
+        case Commands.id(SAFEPDF_CMD_SPREAD_NONE):
+            modes.spread = SAFEPDF_SPREAD_NONE.rawValue
+            pages.setModes(modes)
+        case Commands.id(SAFEPDF_CMD_SPREAD_ODD):
+            modes.spread = SAFEPDF_SPREAD_ODD.rawValue
+            pages.setModes(modes)
+        case Commands.id(SAFEPDF_CMD_SPREAD_EVEN):
+            modes.spread = SAFEPDF_SPREAD_EVEN.rawValue
+            pages.setModes(modes)
         case Commands.id(SAFEPDF_CMD_ZOOM_IN), Commands.id(SAFEPDF_CMD_ZOOM_OUT):
             pages.step(zoomIn: cmd == Commands.id(SAFEPDF_CMD_ZOOM_IN))
         case Commands.id(SAFEPDF_CMD_ACTUAL_SIZE):
@@ -178,10 +311,30 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         case Commands.id(SAFEPDF_CMD_ROTATE_CW), Commands.id(SAFEPDF_CMD_ROTATE_CCW):
             pages.rotate(clockwise: cmd == Commands.id(SAFEPDF_CMD_ROTATE_CW))
         default:
-            AppDelegate.shared?.perform(cmd)
+            return false
         }
-        updateChrome()
         return true
+    }
+
+    /// Whether a view-mode command's radio entry is on (Menu.Cmd.radio: the mode it sets is
+    /// the current one); nil for other commands.
+    static func radioOn(_ cmd: Int, modes m: ViewModes) -> Bool? {
+        switch cmd {
+        case Commands.id(SAFEPDF_CMD_SCROLL_PAGE): return m.scroll == SAFEPDF_SCROLL_PAGE.rawValue
+        case Commands.id(SAFEPDF_CMD_SCROLL_VERTICAL): return m.scroll == SAFEPDF_SCROLL_VERTICAL.rawValue
+        case Commands.id(SAFEPDF_CMD_SPREAD_NONE): return m.spread == SAFEPDF_SPREAD_NONE.rawValue
+        case Commands.id(SAFEPDF_CMD_SPREAD_ODD): return m.spread == SAFEPDF_SPREAD_ODD.rawValue
+        case Commands.id(SAFEPDF_CMD_SPREAD_EVEN): return m.spread == SAFEPDF_SPREAD_EVEN.rawValue
+        default: return nil
+        }
+    }
+
+    /// An entry of the view-mode drop-down (tag = Toolbar.ViewChoice index; ViewChoice.modes).
+    @objc func chooseViewChoice(_ sender: Any?) {
+        guard pdf != nil, let tag = (sender as? NSMenuItem)?.tag, tag >= 0,
+              let m = pages.canvas.modes.choosing(UInt32(tag)) else { return }
+        pages.setModes(m)
+        updateChrome()
     }
 
     /// An entry of the zoom drop-down (tag = index into Toolbar.ZoomChoice.presets).
@@ -197,9 +350,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == MainMenu.commandSelector { return isEnabled(item.tag) }
+        // While the page field has the focus, keys without Command or Control (Page Up/Down,
+        // function keys) belong to it, not to the menu.
+        if chromeToolbar?.isEditingPage == true, !item.keyEquivalent.isEmpty,
+           item.keyEquivalentModifierMask.intersection([.command, .control]).isEmpty {
+            return false
+        }
+        if item.action == MainMenu.commandSelector {
+            if let on = Self.radioOn(item.tag, modes: pages.canvas.modes) {
+                item.state = pdf != nil && on ? .on : .off
+            }
+            return isEnabled(item.tag)
+        }
         if item.action == MainMenu.actionSelector { return false } // TODO(11.3d)
-        if item.action == DocumentToolbar.zoomSelector { return pdf != nil }
+        if item.action == DocumentToolbar.zoomSelector || item.action == DocumentToolbar.viewSelector {
+            return pdf != nil
+        }
         return true
     }
 
@@ -222,5 +388,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     func windowWillClose(_ notification: Notification) {
         pages.show(nil)
         pdf = nil
+        setFlags(repaired: false, encrypted: false)
     }
 }

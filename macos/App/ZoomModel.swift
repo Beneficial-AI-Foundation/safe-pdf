@@ -110,5 +110,16 @@ import SafePdfC
         return CGPoint(x: Double(out.x.num) / Double(out.x.den), y: Double(out.y.num) / Double(out.y.den))
     }
 
+    /// Geom.toScreen (C2, task 11.3c2): where page point (x, y) (page units) is shown at zoom `z`
+    /// and rotation `rot` of `box`, in pixels from the page image's top-left (a destination).
+    static func toScreen(z: safepdf_rat, rot: UInt32, box: safepdf_rat_box, x: safepdf_rat,
+                         y: safepdf_rat) -> CGPoint? {
+        var b = box
+        var out = safepdf_rat_point()
+        guard safepdf_view_to_screen(z, rot, &b, safepdf_rat_point(x: x, y: y), &out) == 0,
+              out.x.den > 0, out.y.den > 0 else { return nil }
+        return CGPoint(x: double(out.x), y: double(out.y))
+    }
+
     static func double(_ q: safepdf_rat) -> Double { q.den > 0 ? Double(q.num) / Double(q.den) : 0 }
 }
