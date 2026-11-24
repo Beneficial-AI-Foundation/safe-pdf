@@ -112,6 +112,7 @@ last_ms policy visible-windows cursor doc-title`, `enabled:CMD`, `radio:CMD`, `l
 | 1f menubar | ported | enabled states, Go / View commands, the wheel across page boundaries both ways (continuous scrolling emulated, see above) |
 | 1g toolbar | ported | zoom and view drop-downs, page field, sidebar toggle without an outline (thumbnails) |
 | 1h marks | ported | ⌃⌘H highlight (yellow pixels), recolour from the Highlight menu (red pixels), Delete, a note, marks kept across zoom / rotation / pages |
+| 1hx cut/paste | new (11.6a) | ⌘X / ⌘V of a highlight and a note, onto another page, undo/redo, Cut/Paste disabled states |
 | 1i bubble | partly | tool-mode highlight on mouse-up and Show all (in 1h); the bubble's own buttons are skipped (views over the page; macos/selftest.sh drives them) |
 | 1j save/reopen | ported | first-overwrite question (Cancel writes nothing), Overwrite, C7 prefix, reopen keeps the zoom, marks saved, second save asks nothing, mutool sees the annotations |
 | 1j' edit | ported | saved marks recoloured and deleted, third revision (prefix), the revision-retention note (12.5) |

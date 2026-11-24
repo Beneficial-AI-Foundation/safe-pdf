@@ -92,6 +92,10 @@ def tkLinkArgs : Array String := run_io do
 package «safe-pdf» where
   version := v!"0.1.0"
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
+  -- macOS: compile Lean's C output for the app's minimum, macOS 15 (decided 2026-11-24, task
+  -- 11.6a), so `libsafepdfffi.a` links into `SafePdf.app` without "built for newer macOS"
+  -- warnings; no effect elsewhere.
+  moreLeancArgs := if System.Platform.isOSX then #["-mmacosx-version-min=15.0"] else #[]
 
 /-- The verified core and the unverified shell modules it umbrella-imports (`SafePdf.lean`). -/
 @[default_target] lean_lib SafePdf
