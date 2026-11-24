@@ -115,7 +115,7 @@ jobs:
 
       # The smoke test's 1d case compares against the inspector's text.
       - name: Build viewer and inspector
-        run: lake build viewer inspect
+        run: lake build viewer inspect worker
 
       # Task 12.6: the viewer runs on the pinned corpus subset (scripts/corpus/pinned.txt,
       # each file pinned by SHA-256 in corpus/manifest.json). actions/cache v4.2.0.
