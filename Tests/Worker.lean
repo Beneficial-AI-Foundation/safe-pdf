@@ -36,6 +36,12 @@ executable (`.lake/build/bin/worker`, a default build target) through
 * **Startup flags**: `--no-subst` renders as in process without substitute fonts; a font search
   naming missing directories renders as the default; `--limits` reaches the worker; an unknown
   flag ends the worker with status 5.
+* **Task 12.3, resource fences** (`--mem-limit-mib=`, `--cpu-limit-s=`, `Sandbox.fence`): a
+  worker with a 64 MiB ceiling asked for a ~124 MB render is ended (macOS watchdog: status 6;
+  Linux: the allocation fails under `RLIMIT_DATA`) instead of answering, while one with the
+  viewer's ceiling renders the same page; a worker with a 1 s CPU fence that busy-loops 4 s
+  before a render (`--test-spin-ms`) is ended by `SIGXCPU` before the loop ends, while four
+  requests of 0.6 s each (2.4 s in all) are answered: the fence is per request.
 -/
 
 namespace SafePdf.Tests.Worker
@@ -456,6 +462,51 @@ def startupFlags (exe : System.FilePath) : IO Nat := do
   f := f + (← check s!"an unknown flag ends the worker with status 5 (got {code})" (code == some 5))
   return f
 
+/-- Task 12.3: the worker's memory and CPU fences (see the module doc). -/
+def fences (exe : System.FilePath) : IO Nat := do
+  let mut f := 0
+  let bytes ← IO.FS.readBinFile "Tests/golden/text/latin.pdf"
+  -- Memory: page 1 (612 × 792) at zoom 8 is 4896 × 6336 pixels, 124 MB of RGBA.
+  let c ← spawn exe (start := { noSubst := true, memLimitMiB := 64 })
+  let r0 ← c.request (.openDoc bytes true) (some 10000)
+  f := f + (← check s!"a 64 MiB worker opens latin.pdf ({describe r0})" (isDoc 1 r0))
+  let r ← c.request (.render 0 8 0 none) (some 20000)
+  let code ← c.waitExit 5000
+  IO.println s!"  worker fences: 64 MiB worker asked for a 124 MB render: {describe r}, exit {code}"
+  f := f + (← check s!"the memory ceiling ends the worker instead of answering ({describe r})"
+    (match r with | .error (.exited _) => true | _ => false))
+  f := f + (← check s!"the ended worker exited with a failure status ({code})"
+    (match code with | some k => k != 0 | none => false))
+  let c ← spawn exe (start := { noSubst := true, memLimitMiB := 2048 })
+  discard <| c.request (.openDoc bytes true) (some 10000)
+  let r ← c.request (.render 0 8 0 none) (some 60000)
+  f := f + (← check s!"a 2048 MiB worker renders the same page ({describe r})"
+    (match r with | .ok (.image w h _) => w == 4896 && h == 6336 | _ => false))
+  c.close
+  -- CPU: one request spinning 4 s under a 1 s fence.
+  let c ← spawn exe (start := { noSubst := true, cpuLimitS := 1, spinMs := 4000 })
+  discard <| c.request (.openDoc bytes true) (some 10000)
+  let t0 ← nowMs
+  let r ← c.request (.render 0 1 0 none) (some 20000)
+  let t1 ← nowMs
+  let code ← c.waitExit 5000
+  IO.println s!"  worker fences: 1 s CPU fence, 4 s spin: {describe r} after {t1 - t0} ms, exit {code}"
+  f := f + (← check s!"the CPU fence ends a 4 s request ({describe r}, {t1 - t0} ms)"
+    (match r with | .error (.exited _) => t1 - t0 < 3900 | _ => false))
+  f := f + (← check s!"ended by SIGXCPU or with a failure status ({code})"
+    (match code with | some k => k != 0 | none => false))
+  -- Per request: four 0.6 s requests under the same 1 s fence are all answered.
+  let c ← spawn exe (start := { noSubst := true, cpuLimitS := 1, spinMs := 600 })
+  discard <| c.request (.openDoc bytes true) (some 10000)
+  let mut answered := 0
+  for _ in [0:4] do
+    match ← c.request (.render 0 1 0 none) (some 20000) with
+    | .ok (.image ..) => answered := answered + 1
+    | _ => pure ()
+  f := f + (← check s!"the CPU fence is re-armed per request ({answered}/4 answered)" (answered == 4))
+  c.close
+  return f
+
 /-- Run the suite. -/
 def run : IO Nat := do
   let some exe ← workerExe
@@ -467,6 +518,7 @@ def run : IO Nat := do
   f := f + (← overhead exe)
   f := f + (← textLinksLayers exe)
   f := f + (← startupFlags exe)
+  f := f + (← fences exe)
   return f
 
 end SafePdf.Tests.Worker

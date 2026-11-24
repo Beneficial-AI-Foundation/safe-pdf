@@ -9,6 +9,10 @@
  *   safepdf_worker_env_count : IO UInt32   — number of entries in `environ`
  *   safepdf_worker_confine   : IO String   — drop privileges for good, or fail (IO error);
  *                                            returns a one-line description of the mechanism
+ *   safepdf_worker_fence     : UInt64 → UInt32 → IO String — task 12.3: the worker's memory
+ *                                            ceiling (bytes) and per-request CPU time (s),
+ *                                            outside Lean's cost model; called before confine
+ *   safepdf_worker_arm_cpu   : IO Unit      — re-arm the CPU fence before a request
  *   safepdf_probe_tcp, safepdf_probe_listen — test-only, compiled only with
  *                                            -DSAFEPDF_WORKER_PROBE (`worker-probe`)
  *
@@ -29,11 +33,17 @@
  * arguments and results are unboxed `uint32_t` inside the IO result (boxed with
  * `lean_box_uint32`).
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include <lean/lean.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -49,6 +59,159 @@ lean_obj_res safepdf_worker_env_count(void) {
   if (environ != NULL)
     for (char **e = environ; *e != NULL && n < UINT32_MAX; e++) n++;
   return lean_io_result_mk_ok(lean_box_uint32(n));
+}
+
+/* ------------------------------------------------------------------------------------ */
+/* Resource fences (task 12.3; docs/safety.md §5, docs/viewer.md "Budgets and ceilings").
+ *
+ * Lean's cost model (fuel, `Limits`, `Filter.Budget`) bounds the work of each call, but not
+ * the real memory and time of the process: transient copies, allocator overhead, a bound that
+ * is large in practice. These fences sit outside it, in the kernel where possible:
+ *
+ * Memory (`mem_bytes` > 0):
+ *   Linux: RLIMIT_DATA = mem_bytes (since Linux 4.7 it counts every private writable mapping,
+ *     so malloc's mmap'd blocks too) and RLIMIT_AS = 2 · mem_bytes (address space, with room
+ *     for glibc's per-thread arena reservations and thread stacks); soft = hard, so the worker
+ *     cannot raise them again. An allocation beyond them fails, and Lean's runtime ends the
+ *     process on an allocation failure. UNTESTED here (written on macOS; CI runs it).
+ *   macOS: setrlimit(RLIMIT_AS / RLIMIT_DATA) fails with EINVAL for every finite value
+ *     (measured on macOS 26.6; the kernel enforces neither) and the jetsam limit
+ *     (memorystatus_control) is refused to an unprivileged process. A watchdog thread
+ *     therefore reads the task's phys_footprint (task_info TASK_VM_INFO, allowed under the
+ *     seatbelt profile) every 10 ms and ends the process (_exit(6)) above mem_bytes. The
+ *     overshoot is what the worker can allocate and touch in 10 ms. It is a fence against
+ *     runaway inputs, not against a compromised worker, which could stop the thread; the
+ *     client's deadline kill (20 s) does not depend on the worker.
+ * CPU (`cpu_s` > 0): RLIMIT_CPU. The soft limit is re-armed before every request
+ *   (`safepdf_worker_arm_cpu`) to the CPU time used so far + cpu_s + 1, so a long-lived
+ *   worker is not ended by the CPU time of earlier requests; crossing it sends SIGXCPU, whose
+ *   default action ends the process. The hard limit is left as it is (the worker has no
+ *   privilege to raise it; a compromised worker could raise its own soft limit up to it,
+ *   like it could ignore SIGXCPU: again the client's deadline is the fence for that case).
+ */
+
+static uint32_t safepdf_cpu_s = 0;
+
+/* CPU time of the process so far, in whole seconds (rounded down). */
+static uint64_t safepdf_cpu_used_s(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) return 0;
+  return (uint64_t)ts.tv_sec;
+}
+
+#if defined(__linux__)
+#include <sys/syscall.h>
+/* setrlimit through prlimit64 (the seccomp allowlist has prlimit64, not setrlimit). */
+static int safepdf_set_rlimit(int res, const struct rlimit *r) {
+  return (int)syscall(__NR_prlimit64, 0, res, r, NULL);
+}
+static int safepdf_get_rlimit(int res, struct rlimit *r) {
+  return (int)syscall(__NR_prlimit64, 0, res, NULL, r);
+}
+#else
+static int safepdf_set_rlimit(int res, const struct rlimit *r) { return setrlimit(res, r); }
+static int safepdf_get_rlimit(int res, struct rlimit *r) { return getrlimit(res, r); }
+#endif
+
+static int safepdf_arm_cpu_now(void) {
+  if (safepdf_cpu_s == 0) return 0;
+  struct rlimit cur;
+  if (safepdf_get_rlimit(RLIMIT_CPU, &cur) != 0) return -1;
+  rlim_t soft = (rlim_t)(safepdf_cpu_used_s() + safepdf_cpu_s + 1);
+  if (cur.rlim_max != RLIM_INFINITY && soft > cur.rlim_max) soft = cur.rlim_max;
+  struct rlimit r = { soft, cur.rlim_max };
+  return safepdf_set_rlimit(RLIMIT_CPU, &r);
+}
+
+lean_obj_res safepdf_worker_arm_cpu(void) {
+  (void)safepdf_arm_cpu_now();
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+static uint64_t safepdf_mem_ceiling = 0;
+
+static uint64_t safepdf_footprint(void) {
+  task_vm_info_data_t info;
+  mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &cnt) != KERN_SUCCESS)
+    return 0;
+  return info.phys_footprint;
+}
+
+static void *safepdf_watchdog(void *arg) {
+  (void)arg;
+  static const char msg[] = "safe-pdf worker: memory ceiling exceeded\n";
+  for (;;) {
+    if (safepdf_footprint() > safepdf_mem_ceiling) {
+      ssize_t w = write(2, msg, sizeof msg - 1);
+      (void)w;
+      _exit(6);
+    }
+    struct timespec ts = { 0, 10 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+  }
+  return NULL;
+}
+#endif
+
+lean_obj_res safepdf_worker_fence(uint64_t mem_bytes, uint32_t cpu_s) {
+  char buf[512];
+  size_t n = 0;
+  buf[0] = 0;
+  if (mem_bytes > 0) {
+#if defined(__APPLE__)
+    struct rlimit r = { (rlim_t)mem_bytes, (rlim_t)mem_bytes };
+    int as_rc = setrlimit(RLIMIT_AS, &r);
+    int as_errno = errno;
+    if (as_rc == 0) {
+      n += (size_t)snprintf(buf + n, sizeof buf - n, "memory: RLIMIT_AS %llu MiB",
+                            (unsigned long long)(mem_bytes >> 20));
+    } else {
+      safepdf_mem_ceiling = mem_bytes;
+      pthread_attr_t a;
+      pthread_t t;
+      if (pthread_attr_init(&a) != 0 ||
+          pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED) != 0 ||
+          pthread_create(&t, &a, safepdf_watchdog, NULL) != 0)
+        return safepdf_io_fail("memory fence: cannot start the watchdog thread");
+      pthread_attr_destroy(&a);
+      n += (size_t)snprintf(buf + n, sizeof buf - n,
+                            "memory: phys_footprint watchdog %llu MiB / 10 ms "
+                            "(RLIMIT_AS refused: %s)",
+                            (unsigned long long)(mem_bytes >> 20), strerror(as_errno));
+    }
+#elif defined(__linux__)
+    struct rlimit d = { (rlim_t)mem_bytes, (rlim_t)mem_bytes };
+    struct rlimit as = { (rlim_t)(2 * mem_bytes), (rlim_t)(2 * mem_bytes) };
+    if (setrlimit(RLIMIT_DATA, &d) != 0) {
+      snprintf(buf, sizeof buf, "memory fence: setrlimit(RLIMIT_DATA) failed: %s", strerror(errno));
+      return safepdf_io_fail(buf);
+    }
+    if (setrlimit(RLIMIT_AS, &as) != 0) {
+      snprintf(buf, sizeof buf, "memory fence: setrlimit(RLIMIT_AS) failed: %s", strerror(errno));
+      return safepdf_io_fail(buf);
+    }
+    n += (size_t)snprintf(buf + n, sizeof buf - n, "memory: RLIMIT_DATA %llu MiB, RLIMIT_AS %llu MiB",
+                          (unsigned long long)(mem_bytes >> 20),
+                          (unsigned long long)((2 * mem_bytes) >> 20));
+#else
+    return safepdf_io_fail("memory fence: not available on this platform");
+#endif
+  }
+  if (cpu_s > 0) {
+    safepdf_cpu_s = cpu_s;
+    if (safepdf_arm_cpu_now() != 0) {
+      snprintf(buf, sizeof buf, "cpu fence: setrlimit(RLIMIT_CPU) failed: %s", strerror(errno));
+      return safepdf_io_fail(buf);
+    }
+    if (n > 0 && n < sizeof buf) n += (size_t)snprintf(buf + n, sizeof buf - n, "; ");
+    if (n < sizeof buf)
+      n += (size_t)snprintf(buf + n, sizeof buf - n, "cpu: RLIMIT_CPU %u s per request", cpu_s);
+  }
+  if (n == 0) snprintf(buf, sizeof buf, "no resource fence");
+  return lean_io_result_mk_ok(lean_mk_string(buf));
 }
 
 /* ------------------------------------------------------------------------------------ */

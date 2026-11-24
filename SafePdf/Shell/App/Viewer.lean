@@ -12,6 +12,7 @@ import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
 import SafePdf.Shell.App.Xfdf
 import SafePdf.Shell.App.Icons
+import SafePdf.Shell.App.Budget
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
@@ -357,6 +358,8 @@ structure Job where
   task : Task RenderOut
   /-- The worker request (`Worker.Session.cancel`); `none` for an in-process render. -/
   id : Option Nat := none
+  /-- Its reservation in `State.pool` (task 12.3), released when the job leaves its list. -/
+  ticket : Option Budget.Ticket := none
 
 /-- A text-index or links request queued for the document worker (task 12.2d): the page, the
 document generation it was asked for, the worker request id and the reply. -/
@@ -369,6 +372,9 @@ structure SideJob where
   id : Nat
   /-- The worker's reply. -/
   task : Task Worker.Reply
+  /-- Its reservation in `State.pool` (task 12.3), released when the reply is there or the
+  request is dropped (`sweepSide`, `dropSideJob`). -/
+  ticket : Option Budget.Ticket := none
 
 /-- The free-text editor open on the canvas (task 9.9). -/
 structure FtEdit where
@@ -577,6 +583,26 @@ structure State where
   renderQueued : Bool := false
   /-- Renders running on worker threads (task 8.8), at most `maxJobs`. -/
   jobs : Array Job := #[]
+  /-- Task 12.3: the reservations of the work in flight (`Budget.Pool`, ceiling
+  `Budget.ceilings.poolBytes`): every render, thumbnail and text or links request reserves its
+  bytes before it is dispatched and releases them where its job leaves its list. -/
+  pool : Budget.Pool := Budget.Pool.empty Budget.ceilings.poolBytes
+  /-- A page render waits for the pool (`renderMore` runs again from `poll`). -/
+  budgetWait : Bool := false
+  /-- Most bytes ever reserved at once (the interleave scenario's measurement). -/
+  poolPeak : Nat := 0
+  /-- Operations that waited for the pool, thumbnails rendered smaller for it, operations
+  refused by it, text requests dispatched without a reservation (expected 0), searches stopped
+  by their work allowance. -/
+  budgetWaits : Nat := 0
+  /-- See `budgetWaits`. -/
+  budgetDegraded : Nat := 0
+  /-- See `budgetWaits`. -/
+  budgetRefused : Nat := 0
+  /-- See `budgetWaits`. -/
+  budgetUnreserved : Nat := 0
+  /-- See `budgetWaits`. -/
+  searchStops : Nat := 0
   /-- A `poll` event is scheduled (`ensurePoll`). -/
   pollQueued : Bool := false
   /-- How long (ms) an event that must show pages now (`showNow`) waits for their renders
@@ -2206,31 +2232,108 @@ def workerForText (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session �
   if (← st.get).view.isSome then return none
   workerFor st doc
 
+/-! ## The reservation pool (task 12.3, `Budget`) -/
+
+/-- Releases reservation `t` (none: nothing). Releasing a ticket twice changes nothing
+(`Budget.Pool.release_release`). -/
+def releaseTicket (st : IO.Ref State) (t : Option Budget.Ticket) : IO Unit :=
+  if let some t := t then st.modify fun s => { s with pool := s.pool.release t } else pure ()
+
+/-- Releases the reservations of the text and links requests whose reply is there (the reply
+is a small value; the reservation covered the request in flight). -/
+def sweepSide (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let sweep (js : Array SideJob) : IO (Array SideJob × List Budget.Ticket) := do
+    let mut out := #[]
+    let mut freed := []
+    for j in js do
+      if let some t := j.ticket then
+        if ← IO.hasFinished j.task then
+          out := out.push { j with ticket := none }
+          freed := t :: freed
+          continue
+      out := out.push j
+    return (out, freed)
+  let (ts, f1) ← sweep s.textJobs
+  let (ls, f2) ← sweep s.linkJobs
+  st.modify fun s => { s with textJobs := ts, linkJobs := ls,
+                              pool := (f1 ++ f2).foldl Budget.Pool.release s.pool }
+
+/-- **Asks the pool for operation `o`** (after `sweepSide`): on `reserved` the new pool is
+kept and the peak updated; waits, lowered quality and refusals are counted. -/
+def admit (st : IO.Ref State) (o : Budget.Op) : IO Budget.Outcome := do
+  sweepSide st
+  let s ← st.get
+  let out := s.pool.admit Budget.ceilings o
+  match out with
+  | .reserved _ q k =>
+    st.modify fun s => { s with pool := q, poolPeak := max s.poolPeak q.used,
+                                budgetDegraded := s.budgetDegraded + (if k > 0 then 1 else 0) }
+  | .wait => st.modify fun s => { s with budgetWaits := s.budgetWaits + 1 }
+  | .refuse => st.modify fun s => { s with budgetRefused := s.budgetRefused + 1 }
+  return out
+
+/-- The pixel size of the render `key` of `doc` (the renderer crops at `Limits.maxPageSide`). -/
+def keyPixels (doc : Doc) (key : View.Key) : Nat × Nat :=
+  match doc.pages[key.page]? with
+  | some page =>
+    let (w, h) := View.pixelSize key.zoom (rotAdd page.rotate key.rot) (Box.ofRect page.cropBox)
+    (min w limits.maxPageSide, min h limits.maxPageSide)
+  | none => (0, 0)
+
+/-- The reservation of a text or links request: reserved at once, or (`optional`) `none` when
+the pool says wait; otherwise the GUI waits for text requests in flight to answer (they release
+their reservations) and asks again. Images leave `Budget.Ceilings.textReserve` to text, so only
+text requests can make text wait; should none be in flight, the request goes without a
+reservation and is counted (`budgetUnreserved`, expected 0). -/
+def textTicket (st : IO.Ref State) (optional : Bool) : IO (Option (Option Budget.Ticket)) := do
+  for _ in [0:64] do
+    match ← admit st .text with
+    | .reserved t _ _ => return some (some t)
+    | .refuse => break
+    | .wait =>
+      if optional then return none
+      let s ← st.get
+      let busy := (s.textJobs ++ s.linkJobs).filter (·.ticket.isSome)
+      let some j := busy[0]? | break
+      discard <| IO.wait j.task
+  st.modify fun s => { s with budgetUnreserved := s.budgetUnreserved + 1 }
+  return some none
+
 /-- The worker request of page `p`'s text index (`links := false`) or links: the one queued for
 the current generation, raised to `prio` when that is more urgent, else a new one with priority
-`prio`. Requests of other generations are cancelled and forgotten. -/
-def sideJob (st : IO.Ref State) (ses : Worker.Session) (src : Nat) (links : Bool) (p prio : Nat) :
-    IO SideJob := do
+`prio`, which first reserves its bytes in the pool (task 12.3, `textTicket`; `optional`: give
+up, `none`, rather than wait for the pool). Requests of other generations are cancelled and
+forgotten (their reservations released). -/
+def sideJob (st : IO.Ref State) (ses : Worker.Session) (src : Nat) (links : Bool) (p prio : Nat)
+    (optional : Bool := false) : IO (Option SideJob) := do
   let s ← st.get
   let jobs := if links then s.linkJobs else s.textJobs
   let (old, cur) := jobs.partition (·.gen != s.gen)
-  for j in old do ses.cancel j.id
+  for j in old do
+    ses.cancel j.id
+    releaseTicket st j.ticket
   let set (js : Array SideJob) (s : State) : State :=
     if links then { s with linkJobs := js } else { s with textJobs := js }
   match cur.find? (·.page == p) with
   | some j =>
     ses.raise j.id prio
     st.modify (set cur)
-    return j
+    return some j
   | none =>
+    st.modify (set cur)
+    let some ticket ← textTicket st optional | return none
     let req := if links then Worker.Protocol.Request.viewLinks p else .pageIndex p s.oc
     let (id, task) ← ses.submit src req prio
-    let j : SideJob := ⟨p, s.gen, id, task⟩
-    st.modify (set (cur.push j))
-    return j
+    let j : SideJob := ⟨p, s.gen, id, task, ticket⟩
+    st.modify fun s => set ((if links then s.linkJobs else s.textJobs).push j) s
+    return some j
 
 /-- Takes the answered request `j` out of the queued text or links requests. -/
-def dropSideJob (st : IO.Ref State) (links : Bool) (j : SideJob) : IO Unit :=
+def dropSideJob (st : IO.Ref State) (links : Bool) (j : SideJob) : IO Unit := do
+  let s ← st.get
+  let held := ((if links then s.linkJobs else s.textJobs).find? (·.id == j.id)).bind (·.ticket)
+  releaseTicket st held
   st.modify fun s => if links then { s with linkJobs := s.linkJobs.filter (·.id != j.id) }
     else { s with textJobs := s.textJobs.filter (·.id != j.id) }
 
@@ -2273,7 +2376,8 @@ def pageIndex (st : IO.Ref State) (p : Nat) (wait : Bool := true) :
   | _ =>
     let some page := doc.pages[p]? | return .error "page index out of range"
     if let some (ses, src) ← workerForText st doc then
-      let j ← sideJob st ses src false p (if wait then 0 else 1)
+      let some j ← sideJob st ses src false p (if wait then 0 else 1)
+        | return .error "the page text request was not made"
       if !wait && !(← IO.hasFinished j.task) then return .error pendingText
       let reply ← IO.wait j.task
       dropSideJob st false j
@@ -2672,9 +2776,20 @@ now), unless a render of it is already running. -/
 def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat := 1) : IO Unit := do
   let s ← st.get
   if s.jobs.any (·.key == key) then return
+  -- Task 12.3: the image's bytes are reserved before dispatch; without room the page waits
+  -- (`poll` asks again after a release); an image larger than the pool is refused.
+  let (w, h) := keyPixels doc key
+  let ticket ← match ← admit st (.page w h) with
+    | .reserved t _ _ => pure t
+    | .wait =>
+      st.modify ({ · with budgetWait := true })
+      return
+    | .refuse =>
+      st.modify fun s => { s with cache := s.cache.insert key (.error (.limitExceeded .imagePixels)) }
+      return
   let start ← IO.monoNanosNow
   let (task, id) ← renderTask st doc key prio
-  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task, id⟩ }
+  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task, id, some ticket⟩ }
   -- Task 12.2d: with the worker, a page in view also gets its links asked for (after the
   -- renders of its priority), so that pointer motion finds them without waiting; the current
   -- page (priority 0) its text index too.
@@ -2682,9 +2797,9 @@ def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat := 1) : 
     if let some (ses, src) ← workerForText st doc then
       let s ← st.get
       if !(s.links[key.page]?.any (·.isSome)) then
-        discard <| sideJob st ses src true key.page 1
+        discard <| sideJob st ses src true key.page 1 (optional := true)
       if prio == 0 && !(s.texts[key.page]?.any (·.isSome)) then
-        discard <| sideJob st ses src false key.page 1
+        discard <| sideJob st ses src false key.page 1 (optional := true)
 
 /-- Whether a render of `key` is running. -/
 def State.running (s : State) (key : View.Key) : Bool :=
@@ -2703,6 +2818,7 @@ def raiseJob (st : IO.Ref State) (key : View.Key) (prio : Nat) : IO Unit := do
 result goes into the cache when it is for the open document. A cancelled worker render
 (task 12.2c) gives `none` and counts as a dropped stale result. -/
 def finish (st : IO.Ref State) (j : Job) : IO RenderOut := do
+  releaseTicket st j.ticket
   st.modify fun s => { s with jobs := s.jobs.filter (·.key != j.key) }
   match j.task.get with
   | none =>
@@ -2908,7 +3024,7 @@ def place (st : IO.Ref State) (want : List Nat) (j : Job) (r : Except Error Clip
 /-- Schedules a `poll` event while renders are running (task 8.8). -/
 def ensurePoll (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  if (!s.jobs.isEmpty || !s.thJobs.isEmpty) && !s.pollQueued then
+  if (!s.jobs.isEmpty || !s.thJobs.isEmpty || s.budgetWait) && !s.pollQueued then
     st.modify ({ · with pollQueued := true })
     discard <| run ["after", toString pollMs, "::safepdf::emit poll"]
 
@@ -3123,10 +3239,11 @@ def thumbFocus (st : IO.Ref State) (p : Nat) : IO Unit := do
 
 /-- Starts rendering the thumbnail `key` (as `submit`; priority 2 for the document worker,
 after every page render). -/
-def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
+def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key)
+    (ticket : Option Budget.Ticket := none) : IO Unit := do
   let start ← IO.monoNanosNow
   let (task, id) ← renderTask st doc key 2
-  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task, id⟩ }
+  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task, id, ticket⟩ }
 
 /-- **Lazy thumbnail rendering** (task 9.r9): for the visible band of the panel
 (`thumbBand`), the visible thumbnails and `Sidebar.thumbMargin` more on each side
@@ -3146,9 +3263,15 @@ def thumbView (st : IO.Ref State) : IO Unit := do
     let s ← st.get
     if s.thHave.contains p then continue
     let key : View.Key := ⟨s.gen, p, thumbZoom s doc p, s.rot⟩
-    if s.thJobs.any (·.key == key) then continue
+    if s.thJobs.any (fun j => j.key.page == p && j.key.gen == s.gen && j.key.rot == s.rot) then
+      continue
     if s.thJobs.size ≥ thumbJobs || s.jobs.size ≥ maxJobs then break
-    thumbSubmit st doc key
+    -- Task 12.3: reserved before dispatch; without room at full size the thumbnail is
+    -- rendered at ½, ¼ or ⅛ of its zoom (`Budget.Pool.admit`), else it waits.
+    let (w, h) := keyPixels doc key
+    match ← admit st (.thumb w h) with
+    | .reserved t _ k => thumbSubmit st doc { key with zoom := key.zoom / ((2 ^ k : Nat) : Rat) } t
+    | _ => break
   ensurePoll st
 
 /-- Takes the finished thumbnail renders (task 9.r9) and shows those still laid out for the
@@ -3157,6 +3280,7 @@ open document and rotation: the image in photo `::safepdf::thN` on its frame (ta
 def thumbPoll (st : IO.Ref State) : IO Unit := do
   let done ← (← st.get).thJobs.filterM (IO.hasFinished ·.task)
   for j in done do
+    releaseTicket st j.ticket
     st.modify fun s => { s with thJobs := s.thJobs.filter (·.key != j.key) }
     let s ← st.get
     let p := j.key.page
@@ -3196,6 +3320,11 @@ def syncThumbs (st : IO.Ref State) : IO Unit := do
 def poll (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with pollQueued := false })
   cancelStale st
+  sweepSide st
+  -- Task 12.3: a page that waited for the pool is asked for again.
+  if (← st.get).budgetWait then
+    st.modify ({ · with budgetWait := false })
+    if (← st.get).doc.isSome then renderMore st
   let done ← (← st.get).jobs.filterM (IO.hasFinished ·.task)
   if !done.isEmpty then
     let want ← wantedNow st
@@ -4888,7 +5017,7 @@ def linksOf (st : IO.Ref State) (p : Nat) (wait : Bool := true) : IO (Array Link
   | some (some ls) => return ls
   | _ =>
     if let some (ses, src) ← workerForText st doc then
-      let j ← sideJob st ses src true p (if wait then 0 else 1)
+      let some j ← sideJob st ses src true p (if wait then 0 else 1) | return #[]
       if !wait && !(← IO.hasFinished j.task) then return #[]
       let reply ← IO.wait j.task
       dropSideJob st true j
@@ -6053,16 +6182,42 @@ def scrollToHit (st : IO.Ref State) : IO Unit := do
     discard <| run [".c", "yview", "moveto", fmtFrac (((y0 + y1) / 2 - ch / 2) / (s.regionH : Rat))]
   viewChanged st
 
-/-- The next (`forward`) or previous search hit after the current one, as (page, index on
-the page, hits on the page, wrapped around). Searches the current page, then the following
-(preceding) pages, wrapping around to the current page. -/
-def nextHit (st : IO.Ref State) (forward : Bool) : IO (Option (Nat × Nat × Nat × Bool)) := do
+/-- Whether page `p`'s text index is cached (searching it costs no work). -/
+def textCached (s : State) (p : Nat) : Bool :=
+  match s.texts[p]? with
+  | some (some _) => true
+  | _ => false
+
+/-- How a search ended: a hit (page, index on the page, hits on the page, wrapped around), no
+hit, or (task 12.3) stopped after indexing this many pages because its shared work allowance
+(`Budget.Allowance`) was used up. -/
+inductive SearchEnd where
+  /-- A hit. -/
+  | hit (p k c : Nat) (wrapped : Bool)
+  /-- No hit in the document. -/
+  | none
+  /-- The work allowance ran out after indexing `pages` pages. -/
+  | stopped (pages : Nat)
+
+/-- The next (`forward`) or previous search hit after the current one. Searches the current
+page, then the following (preceding) pages, wrapping around to the current page. Task 12.3:
+the whole search shares **one work allowance** (`Budget.Allowance`: pages to index and wall
+time); a page whose index is cached costs nothing, every other page spends one page of it, and
+when it is used up the search stops (`SearchEnd.stopped`; the next Find goes on from where the
+indexed pages end, since they are cached now). -/
+def nextHit (st : IO.Ref State) (forward : Bool) : IO SearchEnd := do
   let s ← st.get
   let n := s.pageCount
   let q := s.query
   let cur := match s.hit with
     | some (p, k) => if p == s.page then some k else none
     | none => none
+  let mut allow := Budget.Allowance.start Budget.ceilings (← IO.monoMsNow)
+  let mut spent := 0
+  if !textCached s s.page then
+    match allow.spend (← IO.monoMsNow) with
+    | some a => allow := a; spent := spent + 1
+    | none => return .stopped spent
   if let .ok ix ← pageIndex st s.page then
     let c := (ix.hits q).size
     let cand := if forward then some ((cur.map (· + 1)).getD 0)
@@ -6070,15 +6225,21 @@ def nextHit (st : IO.Ref State) (forward : Bool) : IO (Option (Nat × Nat × Nat
         | some k => if k > 0 then some (k - 1) else none
         | none => if c > 0 then some (c - 1) else none
     if let some k := cand then
-      if k < c then return some (s.page, k, c, false)
+      if k < c then return .hit s.page k c false
   for i in [1:n + 1] do
     let p := if forward then (s.page + i) % n else (s.page + n - i % n) % n
+    if !textCached (← st.get) p then
+      match allow.spend (← IO.monoMsNow) with
+      | some a => allow := a; spent := spent + 1
+      | none =>
+        st.modify fun s => { s with searchStops := s.searchStops + 1 }
+        return .stopped spent
     if let .ok ix ← pageIndex st p then
       let c := (ix.hits q).size
       if c > 0 then
         let wrapped := if forward then p ≤ s.page else p ≥ s.page
-        return some (p, if forward then 0 else c - 1, c, wrapped)
-  return none
+        return .hit p (if forward then 0 else c - 1) c wrapped
+  return .none
 
 /-- Handles `find next|prev QUERY` and `find close`. -/
 def find (st : IO.Ref State) (args : List String) : IO Unit := do
@@ -6098,11 +6259,15 @@ def find (st : IO.Ref State) (args : List String) : IO Unit := do
       return
     if q != s.query then st.modify ({ · with query := q, hit := none })
     match ← nextHit st (dir != "prev") with
-    | none =>
+    | .none =>
       st.modify ({ · with hit := none })
       drawOverlay st
       setStatus s!"\"{qs}\": not found"
-    | some (p, k, c, wrapped) =>
+    | .stopped n =>
+      drawOverlay st
+      setStatus s!"\"{qs}\": not found in the {n} pages searched so far (this search's work \
+        allowance is used up); search again to go on"
+    | .hit p k c wrapped =>
       st.modify ({ · with hit := some (p, k) })
       if p != s.page then goTo st p
       drawOverlay st
@@ -9604,6 +9769,82 @@ def smokeThumbPerf (st : IO.Ref State) (dir : String) : IO Unit := do
       rss0-kib: {rss0}\nrss-first-screen-kib: {rss1}\nrss-end-kib: {rss2}\nhwm-kib: {hwm}\n"
   discard <| run ["destroy", "."]
 
+/-- **The interleave scenario** (task 12.3, `SAFEPDF_VIEWER_SMOKE_MODE=interleave`, driven by
+`scripts/interleave.sh`, which samples the resident memory of this process and of its workers
+meanwhile): reopens the start-up file with the thumbnails panel and runs `rounds` rounds of
+zoom in `zoomSteps` steps (from 75 % to 200 %), two searches (a frequent word and one that is nowhere, which indexes every page under
+one work allowance), the thumbnails panel scrolled on, two page changes and zoom out as many steps
+— each
+step followed by 250 ms of the event loop, so renders, thumbnails and text requests overlap.
+Then waits for everything in flight and writes `interleave.txt`: the pool's peak and what it
+holds at the end (must be nothing: no reservation leaks), waits, lowered thumbnails, refusals,
+unreserved text requests, stopped searches, renders and worker statistics. -/
+def smokeInterleave (st : IO.Ref State) (dir : String) (rounds : Nat := 8) (zoomSteps : Nat := 4) :
+    IO Unit := do
+  let path := (← st.get).path.getD ""
+  let t0 ← IO.monoNanosNow
+  st.modify ({ · with panel := .thumbnails })
+  openFile st path
+  if !(← st.get).outlineShown then showSidebar st (some .thumbnails)
+  if (← st.get).panel != .thumbnails then showPanel st .thumbnails
+  let pump (ms : Nat) : IO Unit := do
+    let t ← IO.monoMsNow
+    let stop := t + ms
+    while (← IO.monoMsNow) < stop do
+      discard <| run ["update"]
+      IO.sleep 5
+  let mut log : Array String := #[]
+  pump 500
+  for r in [0:rounds] do
+    for _ in [0:zoomSteps] do
+      discard <| run ["::safepdf::emit", "zoom", "in"]
+      pump 250
+    find st ["next", "the"]
+    pump 250
+    find st ["next", "zqxjkvw"]
+    pump 250
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine ((r : Rat) / (rounds : Rat))]
+    discard <| run ["::safepdf::emit", "thView"]
+    pump 250
+    discard <| run ["::safepdf::emit", "next"]
+    pump 250
+    discard <| run ["::safepdf::emit", "next"]
+    pump 250
+    for _ in [0:zoomSteps] do
+      discard <| run ["::safepdf::emit", "zoom", "out"]
+      pump 250
+    let s ← st.get
+    log := log.push s!"round {r}: page {s.page + 1} pool-used {s.pool.used} held {s.pool.held.length} jobs {s.jobs.size} thumbs {s.thJobs.size} status {← run [".status", "cget", "-text"]}"
+  -- Everything in flight finishes; then the pool must be empty.
+  settle st
+  thumbSettle st
+  for j in (← st.get).textJobs ++ (← st.get).linkJobs do discard <| IO.wait j.task
+  sweepSide st
+  let t1 ← IO.monoNanosNow
+  let s ← st.get
+  let spawns ← match s.worker with
+    | some ses => pure (← ses.state.get).spawns
+    | none => pure 0
+  let timeouts ← match s.worker with
+    | some ses => pure (← ses.state.get).timeouts
+    | none => pure 0
+  let kills ← match s.worker with
+    | some ses => pure (← ses.state.get).kills
+    | none => pure 0
+  let fields : List String := [s!"file: {path}", s!"pages: {s.pageCount}", s!"rounds: {rounds}",
+    s!"elapsed-ms: {formatMs (t1 - t0)}", s!"pool-ceiling: {s.pool.ceiling}",
+    s!"pool-peak: {s.poolPeak}", s!"pool-used-end: {s.pool.used}",
+    s!"pool-held-end: {s.pool.held.length}", s!"waits: {s.budgetWaits}",
+    s!"degraded: {s.budgetDegraded}", s!"refused: {s.budgetRefused}",
+    s!"unreserved: {s.budgetUnreserved}", s!"search-stops: {s.searchStops}",
+    s!"renders: {s.renders}", s!"worker-renders: {s.workerRenders}",
+    s!"worker-texts: {s.workerTexts}", s!"thumbs-rendered: {s.thRendered}",
+    s!"spawns: {spawns}", s!"timeouts: {timeouts}", s!"kills: {kills}",
+    s!"worker: {s.worker.isSome}", "done"]
+  IO.FS.writeFile ((dir : System.FilePath) / "interleave.txt")
+    ("\n".intercalate (log.toList ++ fields) ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of the attachments panel (`SAFEPDF_VIEWER_SMOKE_MODE=attach`, task 9.r10), on
 the generated `att.pdf` (`/PageMode /UseAttachments`, an outline, two files in the
 `/EmbeddedFiles` tree, one external file specification, a file attachment annotation on page
@@ -10352,6 +10593,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / s!"{s.smokeMode}.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "interleave" then
+    try smokeInterleave st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "interleave.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "attach" then
     try smokeAttach st dir
     catch e =>
@@ -10625,7 +10872,8 @@ no environment, so `SAFEPDF_SUBST_FONTS=0`, `$HOME` (for `~/Library/Fonts`) and
 def workerStart : IO Worker.Protocol.StartConfig := do
   let noSubst := (← IO.getEnv "SAFEPDF_SUBST_FONTS") == some "0"
   let home := (← IO.getEnv "HOME").filter (!·.isEmpty)
-  return { limits, noSubst, home, fontDirs := ← Fonts.userDirs }
+  return { limits, noSubst, home, fontDirs := ← Fonts.userDirs,
+           memLimitMiB := Budget.ceilings.workerMemMiB, cpuLimitS := Budget.ceilings.workerCpuS }
 
 /-- Starts the document worker session (task 12.2c), or says why pages render in this process:
 `SAFEPDF_VIEWER_WORKER=0`, or no worker executable (a development build of only the viewer;

@@ -711,8 +711,9 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   before confinement and the worker reads no environment; `Protocol.StartConfig`,
   `Viewer.workerStart`): `--limits=HEX` (the viewer's `Limits`, `limitsC` in hex,
   `limitsOfHex_limitsHex`), `--no-subst` (`SAFEPDF_SUBST_FONTS=0`), `--home=DIR` (`$HOME`, for
-  `~/Library/Fonts`), `--font-dir=DIR` per `$SAFEPDF_FONT_DIR` entry, `--test-stall-ms=N`; an
-  unknown argument ends the worker with status 5. So the worker searches exactly the fonts the
+  `~/Library/Fonts`), `--font-dir=DIR` per `$SAFEPDF_FONT_DIR` entry, `--test-stall-ms=N`,
+  and since 12.3 `--mem-limit-mib=N` / `--cpu-limit-s=N` (the resource fences, "Budgets and
+  ceilings" below) and `--test-spin-ms=N`; an unknown argument ends the worker with status 5. So the worker searches exactly the fonts the
   viewer would, and no render stays in-process for its layers state or font configuration.
 * **Still in this process:**
   * the parse the GUI keeps for layout, page sizes and labels, open settings, attachments, the
@@ -736,6 +737,71 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   worker's `--test-stall-ms=N` flag: it sleeps `N` ms before every render. The worker's own
   environment stays empty (Lean 4.36's `IO.Process.spawn` crashes the child when
   `inheritEnv := false` comes with a non-empty `env`, and the confined worker refuses one).
+
+## Budgets and ceilings (12.3)
+
+**Published ceilings** (the source is `Budget.ceilings` in `SafePdf/Shell/App/Budget.lean`;
+`scripts/interleave.sh` reads its two scenario numbers from there):
+
+| What | Ceiling | Enforced by |
+|---|---|---|
+| Reserved for work in flight (page renders, thumbnails, text and links requests) | **512 MiB** (`poolBytes`), of which images leave **32 MiB** to text (`textReserve`) | `Budget.Pool`: the invariant `used ≤ ceiling` is a field of the structure (`Pool.used_le_ceiling`) |
+| Estimate of one image | `4·w·h` bytes (`imageBytes`; the largest page, 2²⁶ px, is 256 MiB and always fits: `page_fits_pool`) | `Pool.admit` |
+| Estimate of one text or links request | **2 MiB** (`textBytes`) | `Pool.admit` |
+| Render cache (unchanged, 8.2b) | 256 MiB / 64 entries | `View.Cache` |
+| One search (Find Next/Previous) | **400 pages** indexed and **60 s**, shared by all pages it visits (`searchPages`, `searchMs`) | `Budget.Allowance` (`spendAll_le`) |
+| Document worker memory | **2048 MiB** (`workerMemMiB`, flag `--mem-limit-mib=`) | Linux: `RLIMIT_DATA` 2048 MiB + `RLIMIT_AS` 4096 MiB; macOS: `phys_footprint` watchdog (see below) |
+| Document worker CPU time per request | **60 s** (`workerCpuS`, flag `--cpu-limit-s=`), next to the 20 s wall-clock deadline | `RLIMIT_CPU`, re-armed before every request |
+| Interleave scenario, viewer peak RSS | **1024 MiB** (`viewerRssMiB`) | `scripts/interleave.sh` (CI) |
+| Interleave scenario, each worker's peak RSS | **512 MiB** (`workerRssMiB`) | `scripts/interleave.sh` (CI) |
+
+* **Reservation before dispatch.** `Viewer.submit` (pages), `thumbView` (thumbnails) and
+  `sideJob` (text index, links) ask `Viewer.admit` → `Budget.Pool.admit` before a request
+  goes to the worker (or to an in-process render thread). The answer is *reserved* (the
+  ticket is kept in the `Job`/`SideJob`), *wait* (a page: `State.budgetWait`, `poll` runs
+  `renderMore` again; a thumbnail: later, from `thumbView`; a prefetch text/links request:
+  skipped; a text request the user waits for: the GUI waits for the text requests in flight,
+  which release theirs), *lowered quality* (a thumbnail rendered at ½, ¼ or ⅛ of its zoom) or
+  *refused* (an image larger than the pool: cached as `limitExceeded imagePixels`; cannot
+  happen for the viewer's capped pages).
+* **Release exactly once.** A render's ticket is released where its job leaves `jobs`
+  (`finish`) or `thJobs` (`thumbPoll`) — each job leaves its list once; a text/links ticket
+  when its reply is there (`sweepSide`, every `poll` and before every admission), when it is
+  answered (`dropSideJob`) or dropped with an old document generation. `Pool.release_reserve`
+  (a release gives back the pool before the reservation) and `Pool.release_release` (a second
+  release changes nothing) are proven; the interleave scenario checks that the idle viewer
+  holds no reservation at the end.
+* **One work allowance per search.** `Viewer.nextHit` starts one `Budget.Allowance` per Find
+  and spends a page for every page whose text index is not cached; when it is used up the
+  status line says `"…": not found in the N pages searched so far (this search's work
+  allowance is used up); search again to go on` — the next Find continues past the pages
+  indexed (cached) so far. Each page request remains bounded by the worker's deadline and its
+  own `Filter.Budget` (the decode budget still starts fresh per page inside the worker).
+* **Not in the pool (yet):** the Tk photos of the pages in view and the open document's bytes
+  and parse (bounded by `maxInputBytes` and the view's pixel cap, not by the pool), and Save /
+  XFDF export (synchronous, outside the pool; follow-up). Measured: with 600 % zoom on every
+  page of the 15-page Transformer paper the viewer's RSS reached 4.9 GiB on macOS while the
+  pool never exceeded 447 MiB — the photos and the cache, not the work in flight, dominate.
+* **Worker fences outside Lean's cost model** (`c/worker_sandbox.c`, `Sandbox.fence`, applied
+  before confinement): Linux `RLIMIT_DATA`/`RLIMIT_AS` with soft = hard (an allocation beyond
+  them fails and Lean's runtime ends the process); **macOS 26 rejects `setrlimit(RLIMIT_AS)`
+  and `RLIMIT_DATA` with `EINVAL` for every finite value and refuses `memorystatus_control` to
+  an unprivileged process**, so a watchdog thread reads the task's `phys_footprint` every
+  10 ms and ends the worker with status 6 above the ceiling (a fence against runaway inputs,
+  not against a compromised worker, for which the client's deadline kill remains).
+  `RLIMIT_CPU` works on both (`SIGXCPU`, measured on macOS); its soft limit is re-armed before
+  every request to the CPU used so far + 60 s + 1, so a long session is never ended by earlier
+  requests. The `worker` test suite checks both fences: a 64 MiB worker asked for a 124 MB
+  render ends (exit 6 on macOS) while a 2048 MiB one renders it; a 1 s CPU fence ends a 4 s
+  busy request after 2 s (`SIGXCPU`, exit 152) while four 0.6 s requests pass.
+* **The interleave scenario** (`scripts/interleave.sh`, smoke mode `interleave`,
+  `Viewer.smokeInterleave`; CI job `interleave`): on the Transformer paper (15 pages), 8 rounds
+  of zoom in ×4 (75 % → 200 %), a search for `the` and for a word that is nowhere (every page
+  indexed under one allowance), the thumbnails panel scrolled, two page changes and zoom
+  out ×4, with 250 ms of event loop after each step; the sampler reads `ps` RSS (and VmHWM on
+  Linux) of the viewer and of every worker every 0.2 s. macOS 26 (arm64), 2026-11-23: viewer
+  peak 703 MiB, 10 workers (preemption kills and respawns them), worker peak 129 MiB, pool
+  peak 22 MiB, nothing waited, lowered or refused, pool empty at the end; 34 s.
 
 ## Highlights and notes (9.4)
 

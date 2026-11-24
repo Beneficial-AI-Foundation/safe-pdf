@@ -13,7 +13,12 @@ in this order:
    credentials into the process that parses untrusted bytes.
 2. **Fonts**: the substitute fonts are read from the fixed system font directories and the
    directories of the startup flags (`Worker.workerFaces`, task 12.2d), every file in full.
-3. **Confinement** (`confine`): macOS seatbelt (`(deny default)`), Linux seccomp-bpf
+3. **Resource fences** (task 12.3, `fence`): the memory ceiling and the per-request CPU time
+   of the startup flags `--mem-limit-mib=` / `--cpu-limit-s=`, outside Lean's cost model
+   (Linux `RLIMIT_DATA`/`RLIMIT_AS`; macOS, where those are refused, a `phys_footprint`
+   watchdog thread; `RLIMIT_CPU` on both, re-armed before every request by `armCpu`). A fence
+   that cannot be installed is a confinement failure (exit 4).
+4. **Confinement** (`confine`): macOS seatbelt (`(deny default)`), Linux seccomp-bpf
    allowlist with `no_new_privs`; any failure (including an unsupported platform) is an
    error and the worker exits with status 4 — it never serves unconfined. There is no
    debug escape in the `worker` executable (no flag, no environment variable); the
@@ -38,6 +43,22 @@ sandbox cannot be installed or the platform has none. Irreversible. -/
 @[extern "safepdf_worker_confine"]
 opaque confine : IO String
 
+/-- Raw binding (task 12.3): install the memory ceiling `memBytes` (0: none) and the CPU time
+per request `cpuS` (seconds, 0: none); see `c/worker_sandbox.c`. Returns a one-line
+description; throws when a fence cannot be installed. -/
+@[extern "safepdf_worker_fence"]
+opaque fenceRaw (memBytes : UInt64) (cpuS : UInt32) : IO String
+
+/-- Raw binding (task 12.3): re-arm the CPU fence (soft `RLIMIT_CPU` = CPU time used so far +
+the per-request seconds + 1); does nothing without a CPU fence. -/
+@[extern "safepdf_worker_arm_cpu"]
+opaque armCpu : IO Unit
+
+/-- The fences of a startup configuration (task 12.3), capped to what the binding takes. -/
+def fence (start : Protocol.StartConfig) : IO String :=
+  fenceRaw (min (start.memLimitMiB * 1048576) (2 ^ 62)).toUInt64
+    (min start.cpuLimitS (2 ^ 31)).toUInt32
+
 /-- What the worker holds after startup. -/
 structure Prepared where
   /-- The substitute faces, read before confinement. -/
@@ -46,6 +67,8 @@ structure Prepared where
   subst : Raster.Subst.SubstFonts
   /-- How the process is confined (`none`: not confined; only the probe's control mode). -/
   mechanism : Option String
+  /-- The resource fences installed (task 12.3; `none` in the probe's control mode). -/
+  fences : Option String := none
 
 /-- Why startup failed, with the worker's exit status. -/
 inductive Failure where
@@ -66,9 +89,9 @@ def Failure.message : Failure → String
   | .confinement m => s!"safe-pdf worker: refusing to serve unconfined: {m}"
 
 /-- **The worker's startup**: check that the environment is empty, read the substitute
-fonts the startup configuration `start` asks for (task 12.2d), then confine the process.
-`confined := false` (the probe's control mode only) skips the environment check and the
-confinement. -/
+fonts the startup configuration `start` asks for (task 12.2d), install the resource fences
+of `start` (task 12.3), then confine the process. `confined := false` (the probe's control mode
+only) skips the environment check, the fences and the confinement. -/
 def prepare (start : Protocol.StartConfig) (confined : Bool := true) :
     IO (Except Failure Prepared) := do
   if confined then
@@ -78,8 +101,9 @@ def prepare (start : Protocol.StartConfig) (confined : Bool := true) :
   let subst := Fonts.tableOf start.limits faces
   if !confined then return .ok { faces, subst, mechanism := none }
   try
+    let fences ← fence start
     let m ← confine
-    return .ok { faces, subst, mechanism := some m }
+    return .ok { faces, subst, mechanism := some m, fences := some fences }
   catch e => return .error (.confinement (toString e))
 
 end SafePdf.Shell.Worker.Sandbox

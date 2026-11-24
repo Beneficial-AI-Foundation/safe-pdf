@@ -12,6 +12,8 @@ Plan.md §6 Phase 12, "Restricted, stoppable document worker". Test-only behavio
   render runs and that a render past the deadline kills the worker. A flag, not an environment
   variable: the worker refuses a non-empty environment (task 12.2b). The flag can only slow the
   worker down; it changes nothing about its confinement or its answers.
+* **Spin** (task 12.3, `--test-spin-ms=N`): before a `render` the worker busy-loops `N` ms, so
+  the `worker` suite can check the CPU-time fence (`Sandbox.fence`, `RLIMIT_CPU`).
 -/
 
 namespace SafePdf.Shell.Worker.TestHooks
@@ -30,11 +32,19 @@ def stallOfArgs (args : List String) : Nat :=
 #guard stallOfArgs ["--test-stall-ms=1500"] == 1500
 #guard stallOfArgs ["--test-stall-ms=99999999"] == maxStallMs
 
+/-- Busy-loops (uses CPU time) for `ms` milliseconds. -/
+def spin (ms : Nat) : IO Unit := do
+  let deadline := (← IO.monoMsNow) + ms
+  while (← IO.monoMsNow) < deadline do pure ()
+
 /-- **Before answering `req`**: sleep `stallMs` ms before a `render` (the stall hook, see the
-module doc); nothing otherwise. -/
-def beforeRequest (stallMs : Nat) (req : Protocol.Request) : IO Unit := do
+module doc), then busy-loop `spinMs` ms (task 12.3, `--test-spin-ms=N`, capped at
+`maxStallMs`: exercises the worker's CPU-time fence); nothing otherwise. -/
+def beforeRequest (stallMs : Nat) (req : Protocol.Request) (spinMs : Nat := 0) : IO Unit := do
   match req with
-  | .render .. => if stallMs > 0 then IO.sleep stallMs.toUInt32
+  | .render .. =>
+    if stallMs > 0 then IO.sleep stallMs.toUInt32
+    if spinMs > 0 then spin (min spinMs maxStallMs)
   | _ => pure ()
 
 end SafePdf.Shell.Worker.TestHooks
