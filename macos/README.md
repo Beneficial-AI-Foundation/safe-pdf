@@ -1,4 +1,190 @@
-# macOS AppKit spike (task 11.1)
+# macOS: the C API v2 and the AppKit spike
+
+The first half of this file is the C API v2 (current). Everything from "The AppKit spike" on is
+the task 11.1 spike and its v1 C calls, kept for reference and **superseded** by the C API v2; the
+spike app (`main.m`) is being replaced (task 11.3b) and is not described further here.
+
+
+## C API v2 (tasks 11.3a1 to 11.3a5)
+
+The C API is four plain-C headers in this directory. No Lean type appears in any of them. The
+sections below restate what the headers' own comments and the test programs in `tests/` say; where
+a header is silent the text says so. When this text and a header differ, the header is right.
+
+| Header | Implementation | Role | Test program |
+|---|---|---|---|
+| `safepdf_core.h` | `safepdf_core.c` | Document layer over the confined worker: open, reference counting, asynchronous requests (render, page index, links, outline, labels, attachments, layers), cancel, the v1 calls (deprecated) | `tests/core_test.c` (62 checks) |
+| `safepdf_view.h` | `safepdf_view.c` | View and chrome logic: zoom, rotation, re-anchoring, spreads and page layout, zoom and view-mode drop-downs, page field, toolbar, commands, menus, key table, cursor | `tests/view_test.c` (174) |
+| `safepdf_marks.h` | `safepdf_marks.c` | Marks store (highlight, note, free text, ink) with undo/redo, Save (incremental update bytes), XFDF import and export, dialog texts | `tests/marks_test.c` (105) |
+| `safepdf_select.h` | `safepdf_select.c` | Text selection, copy and search over a page's index | `tests/select_test.c` (53) |
+
+The Lean side is `SafePdf/Shell/Ffi.lean`, `Ffi/V2.lean`, `Ffi/Flat.lean`, `FfiView.lean`,
+`FfiMarks.lean` and `FfiSelect.lean`; the headers call the Tk viewer's own Lean functions, so the
+theorems and `#guard`s there hold for these results. Plain-C structs are copied out of Lean
+objects; nothing with a theorem or `#guard` is reimplemented in C.
+
+### Initialisation order
+
+1. `safepdf_init()` (core), once, on the main thread, before anything else. Idempotent. 0 on
+   success.
+2. Then, once each and on the main thread, in any order: `safepdf_view_init()`,
+   `safepdf_marks_init()`, `safepdf_select_init()`. All are idempotent and return 0 on success.
+   `safepdf_marks_init` calls `safepdf_init` itself. The view header says that calls made before
+   `safepdf_view_init` fail (-1, or 0 or an empty result for functions returning a value
+   directly); `tests/view_test.c` checks that. The marks and select headers do not say what an
+   uninitialised call does.
+
+### Threads
+
+* Core: after `safepdf_init`, any thread may call the API. A thread the Lean runtime does not know
+  is registered on its first call and unregistered when it exits. `safepdf_thread_enter` and
+  `safepdf_thread_exit` remain for v1 callers and are optional.
+* View: the header sends other threads to core's rules (`safepdf_thread_enter` /
+  `safepdf_thread_exit`). It says nothing more about concurrent calls.
+* Marks: a store is locked on every call, so it may be used from several threads. The header asks
+  that each such thread be registered with `safepdf_thread_enter`.
+* Select: a page handle is immutable; any thread may call and use handles concurrently.
+* Completion callbacks of core requests: see the next section.
+
+### Requests, callbacks and dispatch queues (core)
+
+* A document (`safepdf_document`) comes from `safepdf_doc_open_file` (capped read, at most
+  `Limits.maxInputBytes + 1` bytes) or `safepdf_doc_open_bytes` (the buffer is copied). Both parse
+  in this process, so `safepdf_doc_page_count`, `safepdf_doc_page_size`,
+  `safepdf_doc_is_repaired` and `safepdf_doc_is_encrypted` are synchronous. Each document gets
+  its own confined `worker` process, spawned on the first request and sent the bytes, never the
+  path.
+* `safepdf_open_options` (NULL means all defaults): `worker_path`, `deadline_ms` (0 means 20000),
+  `strict` (the repair path never runs), `test_stall_ms` (tests only: the worker sleeps before
+  each render).
+* Every `safepdf_doc_<request>` call returns a request id greater than 0 and later calls its
+  callback exactly once, on the dispatch queue the caller passed (`dispatch_async_f`). A call with
+  a NULL document, queue or callback returns 0 and never calls back.
+* The callback gets `SAFEPDF_STATUS_OK` (result non-NULL, owned by the callback),
+  `SAFEPDF_STATUS_ERROR` (`error` is the English message, result NULL) or
+  `SAFEPDF_STATUS_CANCELLED` (cancelled, superseded, or the document closed; result NULL).
+  `error` is borrowed and valid only during the callback. `context` is passed through untouched.
+  A callback never receives the document, so it can run after the document is gone.
+* Callbacks run outside Lean, on the caller's queue, and may call the API again (for example to
+  submit the next request).
+* Worker requests are render, page index, links and outline: they have priorities
+  (`SAFEPDF_PRIO_CURRENT` 0, `SAFEPDF_PRIO_VISIBLE` 1, `SAFEPDF_PRIO_THUMBNAIL` 2; oldest first among
+  equals), cancel and a deadline. Page labels, attachments, attachment bytes and layers are
+  computed in this process on a Lean task, because the worker protocol has no request for them;
+  their priority is ignored. `safepdf_doc_raise` makes a queued worker request more urgent.
+* `safepdf_layers_toggle` is synchronous (0, or -1 with `*error`).
+* The view, marks and select functions are synchronous; they take no queue and call no callback.
+* The header does not state a limit on the number of requests in flight or on queue length.
+
+### Cancel, release, deadline
+
+* `safepdf_doc_cancel(doc, id)`: a queued request is dropped (delivered as CANCELLED). A request in
+  flight for more than 250 ms is stopped by killing its worker (delivered as CANCELLED; the next
+  request starts a fresh worker). An id that was already delivered changes nothing.
+* A request with no answer within the deadline kills the worker and is delivered as
+  `SAFEPDF_STATUS_ERROR` "the document took too long (no answer within 20 s; its worker was
+  stopped)". A crashed worker gives "the document worker stopped: ...". The next request spawns a
+  fresh worker and sends the bytes again.
+* `safepdf_doc_release` drops one reference. The last one closes the document: queued requests are
+  cancelled, a request in flight is stopped, in-process requests that have not started are
+  cancelled, and the call blocks until every outstanding request's callback has been enqueued (not
+  run), so it may be called from a callback's own queue. Then the handle is freed.
+* **Known gap** (ledger, task 11.3a1; the header does not mention it): release can block for up to
+  the deadline while the worker is still starting or opening the document. A caller that must not
+  block (for example the main thread) should release from a background queue.
+
+### Worker path and environment
+
+* The worker executable is, in order: `safepdf_open_options.worker_path`; else the path set by
+  `safepdf_set_worker_path` (copied; NULL clears; 0 on success); else a file named `worker` next to
+  the host executable. If the file does not exist the open fails with the error
+  "no document worker at PATH" (`tests/core_test.c` checks this).
+* The header does not mention the environment. From `SafePdf/Shell/Worker/Client.lean` and the
+  ledger (12.2a, 12.2b): the worker is spawned with an empty environment and `/` as working
+  directory, and refuses to run with a non-empty environment (exit code 3). The host's environment
+  therefore never reaches it, and test settings reach it as command-line flags only (the tests use
+  `test_stall_ms` for that). Build it with `lake build worker`; `lake build macosFfi` does not.
+
+### Ownership and the `safepdf_free_*` functions
+
+* Every struct a core callback delivers is heap-allocated and owned by the receiver with all its
+  arrays and strings. One `safepdf_free_<type>` frees all of it; NULL is allowed. Strings in
+  results are UTF-8 and NUL-terminated (a NUL in document text becomes U+FFFD) and live as long as
+  the struct. Input pointers are borrowed for the duration of the call.
+* Core: `safepdf_free_image`, `_page_index`, `_links`, `_outline`, `_labels`, `_attachments`,
+  `_bytes` (frees the data and the struct), `_layers`. `safepdf_free_layers_state` frees the arrays
+  of a `safepdf_layers_state` in caller storage (written by `safepdf_layers_toggle`) and zeroes it.
+  The v1 `safepdf_image_free` is for caller-storage images and zeroes the struct.
+* View: structs a call fills own their arrays and strings; each type has one free function
+  (`safepdf_free_zoom_presets`, `_layout`, `_page_band`, `_view_choices`, `_commands`,
+  `_menu_table`, `_key_table`, `_toolbar`, `_chrome_states`); NULL allowed, the struct is zeroed.
+  Functions returning `char *` return a malloc'd string for the caller to `free()`.
+* Marks: filled structs are released with `safepdf_free_mark_list`, `_save_result`,
+  `_xfdf_import`, `_marks_bytes` (frees the data only, unlike core's `safepdf_free_bytes`); each
+  zeroes its argument and allows NULL. Returned `char *` strings are `free()`d. The store is
+  reference counted: create gives 1 reference; `safepdf_marks_retain` / `safepdf_marks_release`.
+* Select: returned struct pointers are heap-allocated; free them with
+  `safepdf_select_free_box_list`, `_copy_result`, `_hit_list` (NULL allowed). Returned `char *` are
+  `free()`d. A page handle is reference counted (`safepdf_select_page_retain` / `_release`).
+  `safepdf_select_page_new` converts a `safepdf_page_index` once; the index is borrowed for the
+  call, so you may free it afterwards.
+* Names that must not clash across the four headers: the double box `safepdf_box` is core's;
+  marks' buffer is `safepdf_marks_bytes`; view's rationals are `safepdf_rat`, `safepdf_rat_box`,
+  `safepdf_rat_point`, and its key actions are `safepdf_view_action` (core's
+  `safepdf_action_kind` is the link action). `tests/all_headers.c` includes all four.
+
+### Error strings
+
+* Core: `char **error` out-parameters (open, `safepdf_layers_toggle`) are set on failure to a
+  malloc'd English string; release it with `free()`. In callbacks, `error` is borrowed (above).
+* Marks: `*error` is set only when the call fails and only when `error` is not NULL; malloc'd.
+  Save returns `SAFEPDF_SAVE_OK` or a `SAFEPDF_SAVE_ERR_*` code, with `*error` set and `*out`
+  zeroed on failure. Undo/redo with nothing to do fails with "nothing to undo" / "nothing to redo".
+* Select: `safepdf_select_page_new` sets `*error` (malloc'd). Other functions report failure by -1
+  or NULL (documented per function).
+* View: no strings; failure is -1 (bad input, not initialised, out of memory, unrepresentable
+  result), or NULL for `char *` results.
+
+### Numbers and coordinates
+
+* Core and select coordinates are page space in points (PDF user space, y up) as doubles converted
+  from the core's exact rationals, for display only.
+* View rationals cross as `safepdf_rat {num, den}` with `den > 0`; `den <= 0` is rejected, and a
+  result that does not fit 64 bits is an error. `safepdf_rat_to_double` is for display only: the
+  header says never to feed a rounded value back as a zoom.
+* Marks coordinates must be finite with magnitude at most 2^32, else the call fails. Mark ids are
+  greater than 0; 0 means none.
+
+### v1 calls are deprecated
+
+`safepdf_open`, `safepdf_close`, `safepdf_page_count`, `safepdf_page_size`, `safepdf_render` and
+`safepdf_image_free` (with the `safepdf_doc` type) do an in-process open and a synchronous render
+on the calling thread: no worker, no cancellation. The header keeps them until the spike app is
+retired (task 11.3b) and says to use the v2 calls instead. The section "The v1 C API" below
+describes them and is superseded.
+
+### Building and running the C tests
+
+All need macOS (they use `dispatch` and `clang`), the Lean toolchain, and the Xcode command line
+tools. Never run two of them, or one of them and another `lake build`, at the same time in one
+checkout. The scripts run `lake build macosFfi` (and `lake build worker` where the test starts a
+worker) themselves, compile with `-O2 -Wall -Wextra -I "$(lean --print-prefix)/include"` (the view
+and select scripts add `-Werror -I macos`), link against `.lake/build/lib/libsafepdfffi.a` and
+Lean's runtime libraries, and print `NAME: N checks, 0 failures`.
+
+| Command | What it does |
+|---|---|
+| `macos/tests/run.sh` | `macos/build.sh`, `lake build worker`, then `core_test WORKER Tests/golden`: open, async render byte-equal to v1, cancel (queued and in flight), release with pending requests, the 700 ms deadline against a 3 s stall and respawn, strict mode, error paths |
+| `macos/tests/run_view.sh` | builds `safepdf_view.c` with the core shim, runs `view_test` (zoom, layout, drop-downs, commands, menus, keys, toolbar, cursors, the not-initialised failures) |
+| `macos/tests/run_marks.sh` | runs `marks_test` on three goldens (plain, AES-128, RC4-128), writes `saved.pdf` and `export.xfdf` under `macos/build/marks-test/`, then `lake build inspect`, runs `inspect` on `saved.pdf`, and runs `qpdf --check` on it when `qpdf` is installed (skipped with a message otherwise) |
+| `macos/tests/run_select.sh` | runs `select_test WORKER Tests/golden` (selection, copy, search, Find Next/Previous steps) |
+| `macos/tests/run_all.sh` | compiles `tests/all_headers.c` (all four headers, `-Wall -Wextra -Werror`), runs the four scripts above in turn, then lists the global symbols the four `safepdf_*.o` objects define (`nm -g -U`) and fails on a duplicate. Prints one summary line; exit status is non-zero on any failure |
+
+`lake build macosFfi` is also a step of the Linux CI `build` job, so the `#guard`s of
+`FfiView.lean`, `FfiMarks.lean`, `FfiSelect.lean` and `Ffi/Flat.lean` run there. The C tests
+themselves are not run in CI yet (task 11.4).
+
+# The AppKit spike (task 11.1) — superseded
 
 Plan.md §6 Phase 11: *"Spike first: a minimal Cocoa window (open, render, scroll, zoom) over
 the C API; record the feel delta and the FFI surface in a Decisions entry before committing to
@@ -11,7 +197,7 @@ sidebar, selection, search, links or annotations; that is 11.3).
 | File | Role |
 |---|---|
 | `../SafePdf/Shell/Ffi.lean` | Lean side: `@[export safepdf_lean_*]` functions over `SafePdf.Api` (open, page count, page size, render, error text) |
-| `safepdf_core.h` / `safepdf_core.c` | **The C API**: plain C, no Lean types; runtime initialisation, reference counting, copying pixels out |
+| `safepdf_core.h` / `safepdf_core.c` | The C API (v1 spike calls described below; v2 above): plain C, no Lean types |
 | `main.m` | The AppKit app: `NSWindow` + `NSScrollView` (centring clip view) + a page view that draws every page stacked vertically; one render thread |
 | `build.sh` | `lake build macosFfi`, then `clang` for the C and Objective-C files, then a link against Lean's runtime; writes `build/safepdf-mac` and `build/SafePdf.app` |
 | `selftest.sh` | Headless self-test under a front-app watcher (below) |
@@ -34,7 +220,7 @@ The default `lake build` is unchanged.
 Keys: Cmd+O opens a file, Cmd+ / Cmd= zoom in (×1.25), Cmd- zooms out, Cmd-0 shows the
 actual size. Pinch zooms with the trackpad, and scrolling uses the trackpad or mouse wheel.
 
-## The C API (`safepdf_core.h`)
+## The v1 C API (`safepdf_core.h`) — deprecated, superseded by the C API v2
 
 | Function | Contract |
 |---|---|
@@ -75,7 +261,7 @@ starts, creates **no window**, and never calls `run` or `activate`. It does the 
    and `timings.txt` to DIR, and exits.
 
 `selftest.sh` samples `lsappinfo front` every 0.5 s and checks `lsappinfo list` for a
-Foreground registration. It kills only its own PID if either shows up.
+Foreground registration, both only for the PID the script started (a copy of the app launched by hand is ignored). It kills only that PID if either shows up.
 
 Measured on this Mac (Apple Silicon, macOS 26), 2026-11-23:
 
@@ -115,7 +301,7 @@ all of these in Tcl. Things to try:
 * resize the window (page centring, scroller behaviour);
 * compare the time to first page against `lake exe viewer FILE`.
 
-## Known spike limitations
+## Known spike limitations (the v2 document layer answers the first two)
 
 * One render thread, no cancellation (a generation number only skips stale jobs before they
   start). Visible pages therefore render one after another.
