@@ -271,6 +271,9 @@ import SafePdfC
             pageField.drawsBackground = false
             pageField.focusRingType = .default
             pageField.alignment = .right
+            // The width constraint decides (fitCurrentEntry); the field's own intrinsic size
+            // (it keeps a few points of slack for the caret) must not widen it.
+            pageField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             pageWidth.constant = Self.fieldWidth(for: ["888"], in: pageField)
         }
         pageWidth.isActive = true
@@ -395,6 +398,30 @@ import SafePdfC
         if force || !isEditingPage { pageField.stringValue = entry }
         ofLabel.stringValue = of
         pageField.isEnabled = !of.isEmpty
+        fitCurrentEntry()
+    }
+
+    /// macOS 26: the borderless page field is exactly as wide as the text it shows (at least one
+    /// digit), so the number sits right after the previous/next chevrons and right before "of N"
+    /// — a field sized for the widest entry left blank space between the chevrons and a short
+    /// number (the human's check, 2026-11-24). It widens while the user types.
+    private func fitCurrentEntry() {
+        guard Self.borderlessPageField else { return }
+        let font = pageField.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let text = pageField.currentEditor()?.string ?? pageField.stringValue
+        let w = max((text as NSString).size(withAttributes: [.font: font]).width,
+                    ("8" as NSString).size(withAttributes: [.font: font]).width)
+        let width = min(Self.pageFieldMax, ceil(w + 2))
+        if pageWidth.constant != width {
+            pageWidth.constant = width
+            pageStack?.layoutSubtreeIfNeeded()
+        }
+    }
+
+    /// Typing into the page field: the borderless field follows the text (fitCurrentEntry).
+    func controlTextDidChange(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === pageField else { return }
+        fitCurrentEntry()
     }
 
     /// The width the page field needs for the widest of `entries` (its font, its bezel and
@@ -422,6 +449,10 @@ import SafePdfC
         let key = "\(pages):\(labels.count):\(labels.lazy.map(\.utf16.count).max() ?? 0)"
         guard key != fitKey else { return }
         fitKey = key
+        if Self.borderlessPageField {
+            fitCurrentEntry()
+            return
+        }
         var entries = [String(max(pages, 1))]
         entries += labels.prefix(100_000)
         pageWidth.constant = Self.fieldWidth(for: entries, in: pageField)
@@ -516,11 +547,13 @@ import SafePdfC
     func controlTextDidEndEditing(_ obj: Notification) {
         guard (obj.object as? NSTextField) === pageField else { return }
         onPageLeave?()
+        fitCurrentEntry()
     }
 
     /// Typing into the page field (the self-test's path for Return / Escape without a window).
     func typePage(_ text: String, commit: Bool) {
         pageField.stringValue = text
+        fitCurrentEntry()
         if commit { onPageEntry?(text) } else { onPageCancel?() }
     }
 }

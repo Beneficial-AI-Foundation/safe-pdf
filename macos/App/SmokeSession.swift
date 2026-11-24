@@ -390,6 +390,7 @@ import UniformTypeIdentifiers
         pump(0.2) { false }
         waitIdle()
         let opened = wc.pdf != nil && wc.pdf !== before
+        if opened { SelfTest.toolbarDiag(wc) }
         vars["opened"] = opened ? "1" : "0"
         vars["open_ms"] = String(format: "%.1f", openToFirst ?? -1)
         if let d = wc.pdf, opened {

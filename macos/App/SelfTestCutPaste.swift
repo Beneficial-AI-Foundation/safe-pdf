@@ -67,6 +67,27 @@ extension SelfTest {
 
     // MARK: page field
 
+    /// Diagnostic (SAFEPDF_TOOLBAR_DIAG=1): the toolbar laid out in a window that is never
+    /// ordered in; prints every toolbar-related view's frame in window coordinates.
+    static func toolbarDiag(_ wc: NSWindowController) {
+        guard ProcessInfo.processInfo.environment["SAFEPDF_TOOLBAR_DIAG"] == "1",
+              let w = wc.window, let frameView = w.contentView?.superview else { return }
+        w.layoutIfNeeded()
+        frameView.layoutSubtreeIfNeeded()
+        func walk(_ v: NSView, _ depth: Int) {
+            let name = String(describing: type(of: v))
+            let r = v.convert(v.bounds, to: nil)
+            if r.minY > w.frame.height - 80 && depth < 14 && r.width > 0 {
+                var extra = ""
+                if let t = v as? NSTextField { extra = " text=\"\(t.stringValue)\" align=\(t.alignment.rawValue) bordered=\(t.isBordered) bezeled=\(t.isBezeled)" }
+                if let b = v as? NSButton { extra = " button img=\(b.image?.accessibilityDescription ?? "-")" }
+                print("diag \(String(repeating: " ", count: depth))\(name) x=\(Int(r.minX)) w=\(Int(r.width)) y=\(Int(r.minY)) h=\(Int(r.height))\(extra)")
+            }
+            for s in v.subviews { walk(s, depth + 1) }
+        }
+        walk(frameView, 0)
+    }
+
     private static func pageFieldWidth(_ doc: Document) {
         guard let tb = DocumentToolbar(identifier: "org.safe-pdf.selftest.field") else {
             check(false, "toolbar for the page field")
@@ -80,21 +101,33 @@ extension SelfTest {
         let m = tb.pageFieldMetrics
         check(m.width < 56, "the page field is narrower than the old 56 pt box: \(m.width)")
         check(m.gap >= 0 && m.gap <= DocumentToolbar.pageGap + 1, "\"of N\" follows the field: gap \(m.gap)")
-        // Labels and many pages widen it (up to its maximum); a short document keeps it small.
-        tb.fitPageField(labels: ["i", "ii", "xviii", "xxviii"], pages: 4)
-        let roman = tb.pageFieldMetrics.width
-        tb.fitPageField(labels: [], pages: 12345)
-        let big = tb.pageFieldMetrics.width
-        tb.fitPageField(labels: [], pages: 9)
-        let small = tb.pageFieldMetrics.width
         if DocumentToolbar.borderlessPageField {
-            // macOS 26: no reserved bezel padding — a short document's field is little more than
-            // its two digits, so the number sits by the chevrons and "of N" (human's check).
-            check(small <= 30, "borderless page field fits its digits: \(small)")
+            // macOS 26: the field is exactly as wide as the text it shows — no blank space between
+            // the chevrons and a short number (human's check) — and widens with longer entries.
+            tb.setPage(entry: "7", of: "of 16")
+            let one = tb.pageFieldMetrics.width
+            tb.setPage(entry: "16", of: "of 16")
+            let two = tb.pageFieldMetrics.width
+            tb.setPage(entry: "xxviii", of: "(28 of 40)")
+            let roman = tb.pageFieldMetrics.width
+            tb.setPage(entry: "12345", of: "of 12345")
+            let big = tb.pageFieldMetrics.width
+            check(one <= 16 && one < two && two < roman && roman <= big && big <= DocumentToolbar.pageFieldMax,
+                  "borderless page field follows its text: 7 \(one), 16 \(two), xxviii \(roman), 12345 \(big)")
+            tb.typePage("123", commit: false)
+            check(tb.pageFieldMetrics.width > one, "the field widens while typing: \(tb.pageFieldMetrics.width)")
+            say("page field (borderless): 7 -> \(one) pt, 16 -> \(two), xxviii -> \(roman), 12345 -> \(big); gap \(m.gap)")
+        } else {
+            tb.fitPageField(labels: ["i", "ii", "xviii", "xxviii"], pages: 4)
+            let roman = tb.pageFieldMetrics.width
+            tb.fitPageField(labels: [], pages: 12345)
+            let big = tb.pageFieldMetrics.width
+            tb.fitPageField(labels: [], pages: 9)
+            let small = tb.pageFieldMetrics.width
+            check(small <= roman && roman <= big && big <= DocumentToolbar.pageFieldMax && small >= 12,
+                  "page field widths: 9 pages \(small), roman labels \(roman), 12345 pages \(big)")
+            say("page field: \(m.width) pt wide, gap \(m.gap) to \"\(f.of)\"; 9 pages \(small), xxviii \(roman), 12345 pages \(big)")
         }
-        check(small <= roman && roman <= big && big <= DocumentToolbar.pageFieldMax && small >= 12,
-              "page field widths: 9 pages \(small), roman labels \(roman), 12345 pages \(big)")
-        say("page field: \(m.width) pt wide, gap \(m.gap) to \"\(f.of)\"; 9 pages \(small), xxviii \(roman), 12345 pages \(big)")
     }
 
     // MARK: cut and paste
