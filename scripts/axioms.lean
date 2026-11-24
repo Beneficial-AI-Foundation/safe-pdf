@@ -1383,3 +1383,8 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Shell.Worker.Protocol.hexVal_hexDigit
 #print axioms SafePdf.Shell.Worker.Protocol.hexDec_hexEnc
 #print axioms SafePdf.Shell.Worker.Protocol.limitsOfHex_limitsHex
+-- Phase 12, task 12.7f: exact C4 for compressed entries (SafePdf/Spec/RepairAgreeComp.lean)
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_eq
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_eq_check
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_strip
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_strip_check
