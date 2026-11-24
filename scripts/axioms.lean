@@ -1380,3 +1380,6 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Spec.RepairAgreeExt.getObject_sub2
 #print axioms SafePdf.Spec.RepairAgreeExt.resolve_sub2
 #print axioms SafePdf.Spec.RepairAgreeExt.trailerOk_toComp
+#print axioms SafePdf.Shell.Worker.Protocol.hexVal_hexDigit
+#print axioms SafePdf.Shell.Worker.Protocol.hexDec_hexEnc
+#print axioms SafePdf.Shell.Worker.Protocol.limitsOfHex_limitsHex
