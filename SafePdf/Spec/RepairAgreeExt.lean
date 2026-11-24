@@ -1,7 +1,7 @@
 import SafePdf.Spec.RepairAgreeFree
 
 /-!
-# C4 for encrypted files and for compressed entries (task 12.7c)
+# C4 for encrypted files and for compressed entries (tasks 12.7c, 12.7e)
 
 Plan.md §5 (claim C4), §5.4 (the repair path), §6 Phase 12 "Proof gaps" (task 12.7c);
 `docs/safety.md` §5, gap 1. Extends `Spec.RepairAgree` (12.7) and `Spec.RepairAgreeFree`
@@ -35,43 +35,74 @@ agreement give the **same decryption state** (rule E3), and then the same decryp
   is needed: the strict path opens and decrypts it, the repair path fails with
   `Error.encryption`.
 
-## (a) Compressed entries: an obstacle in `Repair`, and a one-sided result
+## (a) Compressed entries: a one-sided result (tasks 12.7c, 12.7e)
 
-**C4 is false for compressed entries with the current repair algorithm.** `Repair` (rules
-R1–R5) records only classic `N G obj` headers; it never parses object streams, so its section
-has no compressed entry and every object that lives only in an object stream is absent, hence
-`null` (rule G4), after repair. `objStmBytes` is a strictly valid file whose page tree node and
-page live in an object stream: strictly they are dictionaries, after repair `null`. Exact
-agreement therefore needs a change to `Repair` (scan `/Type /ObjStm` containers and add
-compressed entries), which is outside this Spec task (proposed split below).
+Before task 12.7e, `Repair` (rules R1–R5) recorded only classic `N G obj` headers and never
+parsed object streams, so every object that lives only in an object stream was `null` (rule
+G4) after repair, and C4 was false for compressed entries (`objStmBytes`: strictly
+dictionaries, after repair `null`). Task 12.7e added **repair rule R6**
+(`Repair.withObjStm`): classic `/Type /ObjStm` containers are decoded and their members get
+compressed entries (newest container wins, a classic hit always wins, no self-member, not
+for encrypted trailers). On `objStmBytes` the repair path now has the strict entries
+`2 → compressed 4 0`, `3 → compressed 4 1`, and every object agrees.
 
-What does hold (`HypComp`: `HypFree` with compressed entries allowed; decidable, checker
-`checkComp`; `HypFree.toComp`):
+What is proved (`HypComp`: `HypFree` with compressed entries allowed and H5 replaced by H5c,
+`trailerOkComp`: every compressed entry of the repaired section is the strict entry of its
+number; decidable, checker `checkComp`; `HypFree.toComp` via `trailerOk_toComp`):
 
 * `resolve_sub`, `lengthOf_sub`, `parseIndirectResolved_sub`, `getObject_sub`: a successful
   resolution under a lookup without compressed entries transfers to any lookup that extends
-  its in-use entries, with any larger fuel.
+  its in-use entries, with any larger fuel (12.7c, unchanged).
+* `resolve_sub2`, `lengthOf_sub2`, `parseIndirectResolved_sub2`, `fetchCompressed_sub2`,
+  `getObject_sub2` (12.7e): the same when the smaller lookup **has** compressed entries, all
+  of which the larger one has too; `resolve_sub2` gives the identical (count, result) pair,
+  which the object-stream hop needs (the second hop's fuel is `fuel - used`).
 * `c4_comp` / `c4_comp_check`: when both paths open the file, the repaired document has the
   same bytes, in-use entries and `/Root`; for every object number **not compressed** strictly,
-  every success of the repair path's `getObject` is the strict one (repair never returns a
-  different object; it may fail where strict succeeds, through a `/Length` chain that passes
-  through a compressed object); every **compressed** object is `null` after repair.
-* `#guard`s on `objStmBytes`: `checkComp` holds, `checkFree` fails, objects 2 and 3 are
-  `("dict", "null")`, objects 1, 4, 5 agree.
+  every success of the repair path's `getObject` is the strict one; every **compressed**
+  object is `null` after repair **or** has the same compressed entry, and then every success
+  of the repair path is the strict one. **Changed in 12.7e:** the last conjunct used to read
+  "every compressed object is `null` after repair", which R6 makes false by design; and H5
+  (`trailerOk`, which now includes H7: no compressed entry after repair) became H5c.
+* `#guard`s on `objStmBytes`: `checkComp` holds, `checkFree` and `check` fail, objects 2 and
+  3 are `("dict", "dict")`, objects 0–6 agree.
 
-## Open (proposed split)
+The exact theorems (`RepairAgree.c4`, `RepairAgreeFree.c4_free`, `c4_enc`, `c4_bytes`, …)
+gained H7 through `trailerOk` / `trailerOkEnc`: the repaired section has no compressed entry
+(`Repair.repair_scan` then makes it the scanned section, as before). H7 is necessary for
+them: a strictly valid file with an orphan object stream (members free or absent strictly)
+gets the members back after repair, where strict returns `null`.
 
-* **12.7e (Core):** repair rule R6 — parse every scanned `/Type /ObjStm` container (newest
-  hit, generation 0) and add a compressed entry `n → compressed c i` for every member `n`
-  listed in its index that has no classic hit (newest container wins), within the existing
-  failure budget.
-* **12.7f (Spec):** exact C4 for compressed entries after 12.7e, under a hypothesis like:
-  every container is an in-use newest hit, its index lists exactly the strict compressed
-  entries pointing into it, no number is both classic and compressed. The pieces here
-  (`getObject_eq_crypt` with a `LookupRel` that admits equal compressed entries) are the
-  starting point.
-* Encrypted files **with** compressed entries (`HypEnc` requires `SecOk`, i.e. none): needs
-  12.7f, since `encryptDict` treats compressed references specially.
+## Open: notes for 12.7f (exact C4 for compressed entries)
+
+* Hypothesis shape: H1, H3, H4, H6 as in `HypComp`; H2c (in-use strict entries are newest
+  scan hits; compressed strict entries allowed); **H7f: the repaired section equals the
+  strict section up to free entries**, i.e. for every `n`, `strip` of the strict and the
+  repaired lookup agree (compressed entries included). Decidable from `Repair.repair`'s
+  output (compare the two entry lists with free entries dropped). A byte-level replacement
+  for H7f would say: every strict container is a classic newest hit of generation 0 whose
+  decoded header lists exactly the strict compressed entries pointing into it, no number is
+  both classic and compressed, and R6's newest-container rule picks the strict container
+  (this needs a characterization of `Repair.r6Raw`, including its `lastEnd` skip and the
+  failure/decode budgets, which is much more work than H7f).
+* Proof route: generalize `LookupRel` (RepairAgreeFree) to allow **equal** compressed
+  entries on both sides (drop `nc1`/`nc2`, require `strip` equality only), then redo
+  `resolve_agree`/`resolve_eq` with the object-stream branch (as `resolve_sub2` does: the
+  pair (count, result) must be equal, not only the result, because of `fuel - used`); the
+  fuel argument `cnt S V` must also count containers visited through the hop (the hop adds
+  `c :: ref.1` to the visiting list). `getObject_eq_crypt`'s compressed branch then follows
+  from equal `fetchCompressedTrace` (same lookup on the container, same fuel bound).
+* `objectCount` differs when free entries differ, as in 12.7a: compressed entries count on
+  both sides, so `S` (in-use numbers) still bounds the fuel needed.
+* Encrypted files **with** compressed entries (`HypEnc` requires `SecOk`, i.e. none): R6 does
+  not run for an encrypted repaired trailer, so the repaired section never has compressed
+  entries there; exact C4 for them needs R6 to run after `withCrypt` (decrypting containers
+  with the repaired state, `OpenDoc.pre`), a Core change in `Core.Open.repairOpen`, plus
+  `encryptDict`'s special case for a compressed `/Encrypt` reference.
+* Catalog in an object stream: R4 synthesizes `/Root` only from **classic** catalog objects,
+  so a file with no `trailer` keyword (xref-stream files) whose catalog is compressed still
+  fails repair; a follow-up could take `/Root` from the newest `/Type /XRef` dictionary (as
+  R4' does for `/Encrypt`) or search R6 members for `/Type /Catalog`.
 -/
 
 namespace SafePdf.Spec.RepairAgreeExt
@@ -321,15 +352,18 @@ theorem byteArray_eq_of_data {a b : ByteArray} (h : a.data = b.data) : a = b := 
 
 /-- Condition H5e (replaces H5 and H6): the repair path's trailer exists and has the strict
 `/Root`, the same `encrypted` flag, the same `/Encrypt` value and the same first `/ID` string
-as the strict trailer. Rule R4' makes this hold whenever the newest `trailer` dictionary with
+as the strict trailer; and H7 (task 12.7e): the repaired section has no compressed entry
+(always true when the repaired trailer is encrypted: rule R6 then does not run). Rule R4'
+makes the trailer part hold whenever the newest `trailer` dictionary with
 `/Root` is the strict trailer (the usual single-revision classic file). -/
 def trailerOkEnc (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
   match Repair.repair limits bytes with
-  | .ok (_, tr) =>
+  | .ok (sec, tr) =>
     decide (tr.root? = d.trailer.root?) && decide (tr.encrypted = d.trailer.encrypted) &&
       decide (Dict.get? tr.dict Core.Xref.nameEncrypt =
         Dict.get? d.trailer.dict Core.Xref.nameEncrypt) &&
-      decide ((Core.Crypt.id0Of tr.dict).data = (Core.Crypt.id0Of d.trailer.dict).data)
+      decide ((Core.Crypt.id0Of tr.dict).data = (Core.Crypt.id0Of d.trailer.dict).data) &&
+      noComp sec.entries
   | .error _ => false
 
 /-- **The C4 hypothesis for encrypted files**: H1–H4 with free entries (`SecOk`, as in
@@ -384,8 +418,8 @@ theorem c4_enc {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
   split at htr
   · rename_i sec tr hrep
     simp only [Bool.and_eq_true, decide_eq_true_eq] at htr
-    obtain ⟨⟨⟨hroot, henc⟩, hE⟩, hid⟩ := htr
-    have hsec' := (Repair.repair_ok hrep).1
+    obtain ⟨⟨⟨⟨hroot, henc⟩, hE⟩, hid⟩, hnc⟩ := htr
+    have hsec' := Repair.repair_scan hrep (noComp_spec hnc)
     subst hsec'
     let e' := OpenDoc.mk' bytes (scanSection limits bytes) tr 0 true
     have hsecE : SecOk limits bytes e.xref := by rw [hex]; exact hsec
@@ -548,6 +582,217 @@ theorem getObject_null_of {d : OpenDoc} {limits : Limits} {num gen : Nat}
   · exact absurd h (hni off g)
   · exact absurd h (hnc c i)
 
+/-! ## Compressed entries on both sides: one-sided transfer (task 12.7e) -/
+
+/-- **Resolution transfers along a lookup extension with compressed entries.** If every
+in-use and every compressed entry of `l2` is an entry of `l1`, a `/Length` resolution that
+succeeds with `l2` is **identical** (parse count and result) with `l1` and the same fuel. -/
+theorem resolve_sub2 {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefEntry}
+    (hU : ∀ n off g, l2 n = some (.inUse off g) → l1 n = some (.inUse off g))
+    (hC : ∀ n c i, l2 n = some (.compressed c i) → l1 n = some (.compressed c i))
+    (limits : Limits) (bytes : ByteArray) :
+    ∀ f V ref v, (resolveLengthAux pre l2 limits bytes f V ref).2 = .ok v →
+      resolveLengthAux pre l1 limits bytes f V ref =
+        resolveLengthAux pre l2 limits bytes f V ref := by
+  intro f
+  induction f using Nat.strongRecOn with
+  | _ f ih =>
+  intro V ref v hok
+  by_cases hv : ref.1 ∈ V
+  · rw [resolveLengthAux.eq_def] at hok
+    simp [hv] at hok
+  cases f with
+  | zero =>
+    rw [resolveLengthAux.eq_def] at hok
+    simp [hv] at hok
+  | succ k =>
+  rw [resolveLengthAux] at hok
+  rw [resolveLengthAux, resolveLengthAux]
+  simp only [hv, ↓reduceIte] at hok ⊢
+  rcases hl : l2 ref.1 with _ | (⟨a, g⟩ | ⟨off, g'⟩ | ⟨c, idx⟩)
+  · rw [hl] at hok; simp at hok
+  · rw [hl] at hok; simp at hok
+  · rw [hl] at hok
+    rw [hU _ _ _ hl]
+    by_cases hg : g' = ref.2
+    · simp only [hg, ↓reduceIte] at hok ⊢
+      rcases hp : parseLengthObj limits bytes off ref.1 ref.2 with e | o
+      · rfl
+      · rw [hp] at hok
+        cases o
+        all_goals try rfl
+        simp only at hok ⊢
+        rw [ih k (by omega) _ _ v hok]
+    · simp only [hg, ↓reduceIte]
+  · rw [hl] at hok
+    rw [hC _ _ _ hl]
+    by_cases hcy : c = ref.1 ∨ c ∈ V
+    · simp only [hcy, ↓reduceIte] at hok; simp at hok
+    · simp only [hcy, ↓reduceIte] at hok ⊢
+      rcases hc : l2 c with _ | (⟨a, g⟩ | ⟨off, g⟩ | ⟨c', i'⟩)
+      · rw [hc] at hok; simp at hok
+      · rw [hc] at hok; simp at hok
+      · rw [hc] at hok
+        rw [hU _ _ _ hc]
+        by_cases hg : g = 0
+        · simp only [hg, ↓reduceIte] at hok ⊢
+          rcases hph : parseContainerHead limits bytes off c with e | ⟨d, p⟩
+          · rfl
+          · rw [hph] at hok
+            simp only at hok ⊢
+            have hr1 : ∃ x, (containerLength
+                (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                (c :: ref.1 :: V) d p).2 = .ok x := by
+              rcases h1 : (containerLength
+                  (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                  (c :: ref.1 :: V) d p).2 with e | x
+              · rw [h1] at hok; simp [containerMember] at hok
+              · exact ⟨x, rfl⟩
+            have hcl : containerLength
+                (fun v r => resolveLengthAux pre l1 limits bytes k v r) (c :: ref.1 :: V) d p =
+                containerLength
+                (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                (c :: ref.1 :: V) d p := by
+              obtain ⟨x, hx⟩ := hr1
+              unfold containerLength at hx ⊢
+              split
+              · rename_i m hh hm
+                rw [hm] at hx
+                exact ih k (by omega) _ _ x hx
+              · rfl
+            rw [hcl]
+            rcases hm : containerMember pre limits bytes off c ref.1 idx d p
+                (containerLength (fun v r => resolveLengthAux pre l2 limits bytes k v r)
+                  (c :: ref.1 :: V) d p).2 with e | o
+            · rfl
+            · rw [hm] at hok
+              cases o
+              all_goals try rfl
+              simp only at hok ⊢
+              rw [ih _ (by omega) _ _ v hok]
+        · simp only [hg, ↓reduceIte]
+      · rw [hc] at hok; simp at hok
+
+/-- `lengthOf` transfers along a lookup extension with compressed entries when it
+succeeds. -/
+theorem lengthOf_sub2 {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefEntry}
+    (hU : ∀ n off g, l2 n = some (.inUse off g) → l1 n = some (.inUse off g))
+    (hC : ∀ n c i, l2 n = some (.compressed c i) → l1 n = some (.compressed c i))
+    (limits : Limits) (bytes : ByteArray)
+    (f self : Nat) (d : Dict) (at_ x : Nat)
+    (h : lengthOf pre l2 limits bytes f self d at_ = .ok x) :
+    lengthOf pre l1 limits bytes f self d at_ = .ok x := by
+  unfold lengthOf lengthDict at h ⊢
+  rcases hd : Dict.lookup d Core.ObjParse.nameLength with _ | o
+  · rw [hd] at h; exact h
+  · rw [hd] at h
+    cases o
+    case ref m g =>
+      simp only at h ⊢
+      unfold resolveLength at h ⊢
+      rcases hr : (resolveLengthAux pre l2 limits bytes f [self] (m, g)).2 with e | len
+      · rw [hr] at h; cases h
+      · rw [resolve_sub2 hU hC limits bytes f [self] (m, g) len hr, hr]
+        rw [hr] at h; exact h
+    all_goals exact h
+
+/-- **The object parse transfers along a lookup extension with compressed entries and a
+larger fuel** when it succeeds. -/
+theorem parseIndirectResolved_sub2 {l1 l2 : Nat → Option XrefEntry}
+    (hU : ∀ n off g, l2 n = some (.inUse off g) → l1 n = some (.inUse off g))
+    (hC : ∀ n c i, l2 n = some (.compressed c i) → l1 n = some (.compressed c i))
+    {limits : Limits} {bytes : ByteArray}
+    {f f' pos : Nat} {pre : Core.Xref.ObjStm.Pre} {r : IndirectObject × Nat} (hff : f ≤ f')
+    (h : parseIndirectResolved l2 limits bytes f pos pre = .ok r) :
+    parseIndirectResolved l1 limits bytes f' pos pre = .ok r := by
+  apply parseIndirectResolved_mono hff
+  rw [parseIndirectResolved_eq_with] at h ⊢
+  rcases hc : callPoint limits bytes pos with _ | ⟨n, d, p⟩
+  · rw [parseIndirectWith_congr (lenG := lengthOf pre l2 limits bytes f)
+      (fun n d p h' => by rw [hc] at h'; cases h')]
+    exact h
+  · rw [parseIndirectWith_const hc] at h ⊢
+    rcases hle : lengthOf pre l2 limits bytes f n d p with e | x
+    · rw [hle, parseIndirectWith_err hc] at h; cases h
+    · rw [lengthOf_sub2 hU hC limits bytes f n d p x hle]
+      rw [hle] at h; exact h
+
+/-- **`ObjStm.fetchCompressed` transfers along a lookup extension with compressed entries and
+a larger fuel** when it succeeds. -/
+theorem fetchCompressed_sub2 {pre : Core.Xref.ObjStm.Pre} {l1 l2 : Nat → Option XrefEntry}
+    (hU : ∀ n off g, l2 n = some (.inUse off g) → l1 n = some (.inUse off g))
+    (hC : ∀ n c i, l2 n = some (.compressed c i) → l1 n = some (.compressed c i))
+    {limits : Limits} {bytes : ByteArray} {f f' num : Nat} {o : PdfObject} (hff : f ≤ f')
+    (h : (Core.Xref.ObjStm.fetchCompressedTrace pre l2 limits bytes f num).result = .ok o) :
+    (Core.Xref.ObjStm.fetchCompressedTrace pre l1 limits bytes f' num).result = .ok o := by
+  unfold Core.Xref.ObjStm.fetchCompressedTrace at h ⊢
+  rcases hl : l2 num with _ | (⟨a, g⟩ | ⟨off, g⟩ | ⟨c, idx⟩)
+  all_goals rw [hl] at h
+  · simp at h
+  · simp at h
+  · simp at h
+  rw [hC _ _ _ hl]
+  by_cases hcn : c = num
+  · simp only [hcn, ↓reduceIte] at h; simp at h
+  simp only [hcn, ↓reduceIte] at h ⊢
+  rcases hc : l2 c with _ | (⟨a, g⟩ | ⟨off, g⟩ | ⟨c', i'⟩)
+  all_goals rw [hc] at h
+  · simp at h
+  · simp at h
+  · rw [hU _ _ _ hc]
+    by_cases hg : g = 0
+    · simp only [hg, ↓reduceIte] at h ⊢
+      rcases hp : parseIndirectResolved l2 limits bytes f off pre with e | r
+      · rw [hp] at h; simp at h
+      · rw [parseIndirectResolved_sub2 hU hC hff hp]
+        rw [hp] at h; exact h
+    · simp only [hg, ↓reduceIte] at h; simp at h
+  · simp at h
+
+/-- **One-sided `getObject` agreement with compressed entries.** Two documents over the same
+bytes and decryption state, where every in-use and compressed entry of the second's lookup
+is one of the first's, and the second's fuel is at most the first's: for an object number
+**in use or compressed in the second**, every success of the second is a success of the
+first with the same body. -/
+theorem getObject_sub2 {d d' : OpenDoc} (hb : d.bytes = d'.bytes) (hc : d.crypt = d'.crypt)
+    (hU : ∀ n off g, d'.lookup n = some (.inUse off g) → d.lookup n = some (.inUse off g))
+    (hC : ∀ n c i, d'.lookup n = some (.compressed c i) → d.lookup n = some (.compressed c i))
+    (hf : d'.objectCount ≤ d.objectCount) (limits : Limits) (num gen : Nat)
+    (hin : (∃ off g, d'.lookup num = some (.inUse off g)) ∨
+      ∃ c i, d'.lookup num = some (.compressed c i)) (v : IndirectBody)
+    (h : d'.getObject limits num gen = .ok v) : d.getObject limits num gen = .ok v := by
+  have hpre : d.pre = d'.pre := by unfold OpenDoc.pre; rw [hc]
+  have hdec : d.decrypt = d'.decrypt := by
+    funext a b c; unfold OpenDoc.decrypt; rw [hc]
+  unfold OpenDoc.getObject OpenDoc.getObjectTrace at h ⊢
+  rcases hin with ⟨off, g, hin⟩ | ⟨c, i, hin⟩
+  · rw [hin] at h
+    rw [hU _ _ _ hin]
+    simp only at h ⊢
+    by_cases hg : g = gen
+    · simp only [hg, ↓reduceIte] at h ⊢
+      rcases hp : parseIndirectResolved d'.lookup limits d'.bytes d'.objectCount off d'.pre with
+        e | ⟨io, r⟩
+      · rw [hp] at h; cases h
+      · rw [hp] at h
+        rw [hb, hpre, parseIndirectResolved_sub2 hU hC hf hp, hdec]
+        exact h
+    · simp only [hg, ↓reduceIte] at h ⊢
+      exact h
+  · rw [hin] at h
+    rw [hC _ _ _ hin]
+    simp only at h ⊢
+    by_cases hg : gen = 0
+    · simp only [hg, ↓reduceIte] at h ⊢
+      rcases hp : (Core.Xref.ObjStm.fetchCompressedTrace d'.pre d'.lookup limits d'.bytes
+          d'.objectCount num).result with e | o
+      · rw [hp] at h; cases h
+      · rw [hp] at h
+        rw [hb, hpre, fetchCompressed_sub2 hU hC hf hp]
+        exact h
+    · simp only [hg, ↓reduceIte] at h ⊢
+      exact h
+
 /-- Condition H2c on one strict entry: free and **compressed** entries are allowed for every
 object number; an in-use entry points at the newest scan hit of its number. (By H3 a
 compressed number then has no scan hit at all.) -/
@@ -564,14 +809,41 @@ instance (raw : List (Nat × Nat × Nat)) : DecidablePred (EntryOkComp raw) := f
   | (n, .inUse off g) =>
     inferInstanceAs (Decidable (1 ≤ n ∧ newestHit raw n = some (n, g, off)))
 
+/-- Condition H5c (task 12.7e; replaces H5 in `HypComp`): the repair path's trailer exists,
+has the strict `/Root` and no `/Encrypt`; and H7c: every compressed entry of the repaired
+section (repair rule R6) is the strict entry of its number. -/
+def trailerOkComp (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
+  match Repair.repair limits bytes with
+  | .ok (sec, tr) =>
+    !tr.encrypted && tr.root? == d.trailer.root? &&
+      sec.entries.all (fun x => !isComp x.2 || d.lookup x.1 == some x.2)
+  | .error _ => false
+
+/-- H5 (with H7: no compressed entry after repair) implies H5c. -/
+theorem trailerOk_toComp {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+    (h : trailerOk limits bytes d = true) : trailerOkComp limits bytes d = true := by
+  unfold trailerOk at h
+  unfold trailerOkComp
+  rcases hrep : Repair.repair limits bytes with e | ⟨sec, tr⟩
+  · rw [hrep] at h; cases h
+  · rw [hrep] at h
+    simp only [Bool.and_eq_true] at h ⊢
+    obtain ⟨h1, h2⟩ := h
+    refine ⟨h1, List.all_eq_true.mpr (fun x hx => ?_)⟩
+    have := List.all_eq_true.mp h2 x hx
+    simp only [Bool.not_eq_true'] at this
+    simp [this]
+
 /-- **The hypothesis with compressed entries**: `HypFree` with H2 relaxed to `EntryOkComp`
-(compressed entries allowed; H1, H3–H6 unchanged: unencrypted). -/
+(compressed entries allowed) and H5 replaced by H5c (`trailerOkComp`: repair rule R6 may add
+compressed entries, but only ones the strict section has); H1, H3, H4, H6 unchanged
+(unencrypted). -/
 def HypComp (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Prop :=
   (0, XrefEntry.free 0 65535) ∈ d.xref.entries ∧
   (∀ x ∈ d.xref.entries, EntryOkComp (hits limits bytes) x) ∧
   (∀ x ∈ hits limits bytes, ∃ e ∈ d.xref.entries, e.1 = x.1 ∧ isInUse e.2 = true) ∧
   (newestHits (hits limits bytes)).length ≤ limits.maxObjects ∧
-  trailerOk limits bytes d = true ∧
+  trailerOkComp limits bytes d = true ∧
   d.crypt.isNone = true
 
 /-- `HypComp` is decidable. -/
@@ -589,7 +861,7 @@ def checkComp (limits : Limits) (bytes : ByteArray) : Bool :=
 theorem HypFree.toComp {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     (h : HypFree limits bytes d) : HypComp limits bytes d := by
   obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
-  refine ⟨h1, fun x hx => ?_, h3, h4, h5, h6⟩
+  refine ⟨h1, fun x hx => ?_, h3, h4, trailerOk_toComp h5, h6⟩
   have := h2 x hx
   obtain ⟨n, e⟩ := x
   cases e with
@@ -603,11 +875,14 @@ bytes, the same in-use entries and the same `/Root`, and:
 
 * for every object number that is **not compressed** in `d`, every success of `d'.getObject`
   is a success of `d.getObject` with the same body (repair never returns a different object;
-  it may fail where strict succeeds, when a `/Length` chain passes through a compressed
-  object);
-* every **compressed** object of `d` is `null` in `d'`: the repair scan does not read object
-  streams (`Repair` rules R1–R5), so exact agreement fails whenever such an object is not
-  `null` strictly (`objStmBytes`, below). -/
+  it may fail where strict succeeds);
+* every **compressed** object of `d` is `null` in `d'` (repair rule R6 did not find it), or
+  it has the **same** compressed entry in `d'` and every success of `d'.getObject` is a
+  success of `d.getObject` with the same body.
+
+Before task 12.7e (no rule R6) the second point read "every compressed object of `d` is
+`null` in `d'`"; R6 makes that false by design (`objStmBytes`, below), so it is replaced by
+the disjunction, and H5 by H5c. Exact agreement is task 12.7f. -/
 theorem c4_comp {limits : Limits} {bytes : ByteArray} {d d' : OpenDoc}
     (hs : strictOpen limits bytes = .ok d) (hh : HypComp limits bytes d)
     (hr : repairOpen limits bytes = .ok d') :
@@ -618,37 +893,53 @@ theorem c4_comp {limits : Limits} {bytes : ByteArray} {d d' : OpenDoc}
       (∀ num gen v, (∀ c i, d.lookup num ≠ some (.compressed c i)) →
         d'.getObject limits num gen = .ok v → d.getObject limits num gen = .ok v) ∧
       (∀ num gen c i, d.lookup num = some (.compressed c i) →
-        d'.getObject limits num gen = .ok nullBody) := by
+        d'.getObject limits num gen = .ok nullBody ∨
+        (d'.lookup num = some (.compressed c i) ∧
+          ∀ v, d'.getObject limits num gen = .ok v → d.getObject limits num gen = .ok v)) := by
   obtain ⟨hz, hent, hcov, hcap, htr, hpl⟩ := hh
   have hin : ∀ n off g, (n, XrefEntry.inUse off g) ∈ d.xref.entries ↔
       (n, XrefEntry.inUse off g) ∈ (scanSection limits bytes).entries :=
     inUse_mem_iff_of (fun n off g hx => hent _ hx) hcov hcap
   have hbytes := strictOpen_bytes hs
   obtain ⟨sec, tr, hrep, hwc, -⟩ := repairOpen_ok hr
-  have hsec := (Repair.repair_ok hrep).1
-  subst hsec
-  unfold trailerOk at htr
+  obtain ⟨hsup, hsub⟩ := Repair.repair_entries hrep
+  unfold trailerOkComp at htr
   rw [hrep] at htr
   simp only [Bool.and_eq_true, Bool.not_eq_true', beq_iff_eq] at htr
-  obtain ⟨henc, hroot⟩ := htr
-  rw [withCrypt_plain (d := OpenDoc.mk' bytes (scanSection limits bytes) tr 0 true) henc] at hwc
+  obtain ⟨⟨henc, hroot⟩, hcomp⟩ := htr
+  rw [withCrypt_plain (d := OpenDoc.mk' bytes sec tr 0 true) henc] at hwc
   cases hwc
   have hc : d.crypt = none := Option.isNone_iff_eq_none.mp hpl
-  let d' := OpenDoc.mk' bytes (scanSection limits bytes) tr 0 true
+  let d' := OpenDoc.mk' bytes sec tr 0 true
   have hnd1 := d.xref.keys_nodup
-  have hnd2 := (scanSection limits bytes).keys_nodup
+  have hnd2 := sec.keys_nodup
   have hl1 : ∀ m e, d.lookup m = some e ↔ (m, e) ∈ d.xref.entries := fun m e => by
     rw [WritePrefix.lookup_eq d, Unambiguous.lookupEntry_eq_some_iff hnd1]
-  have hl2 : ∀ m e, d'.lookup m = some e ↔ (m, e) ∈ (scanSection limits bytes).entries :=
+  have hl2 : ∀ m e, d'.lookup m = some e ↔ (m, e) ∈ sec.entries :=
     fun m e => by
       rw [WritePrefix.lookup_eq d']; exact Unambiguous.lookupEntry_eq_some_iff hnd2
-  have hsub : ∀ n off g, d'.lookup n = some (.inUse off g) → d.lookup n = some (.inUse off g) :=
-    fun n off g h => (hl1 _ _).mpr ((hin n off g).mpr ((hl2 _ _).mp h))
-  have hnc : ∀ n c i, d'.lookup n ≠ some (.compressed c i) := fun n c i h =>
-    scanSection_no_compressed limits bytes n c i ((hl2 _ _).mp h)
+  have hinS : ∀ n off g, (n, XrefEntry.inUse off g) ∈ sec.entries ↔
+      (n, XrefEntry.inUse off g) ∈ (scanSection limits bytes).entries := by
+    intro n off g
+    constructor
+    · intro h
+      rcases hsub _ h with h | ⟨c, i, hc⟩
+      · exact h
+      · cases hc
+    · exact hsup _
+  have hcd : ∀ n c i, (n, XrefEntry.compressed c i) ∈ sec.entries →
+      d.lookup n = some (.compressed c i) := by
+    intro n c i h
+    have := List.all_eq_true.mp hcomp _ h
+    simpa [isComp] using this
+  have hU : ∀ n off g, d'.lookup n = some (.inUse off g) → d.lookup n = some (.inUse off g) :=
+    fun n off g h => (hl1 _ _).mpr ((hin n off g).mpr ((hinS n off g).mp ((hl2 _ _).mp h)))
+  have hC : ∀ n c i, d'.lookup n = some (.compressed c i) →
+      d.lookup n = some (.compressed c i) :=
+    fun n c i h => hcd n c i ((hl2 _ _).mp h)
   have hf : d'.objectCount ≤ d.objectCount := by
     simp only [OpenDoc.objectCount, d.index_eq, d', OpenDoc.mk', List.size_toArray]
-    have hnd : (scanSection limits bytes).entries.Nodup := by
+    have hnd : sec.entries.Nodup := by
       unfold List.Nodup at hnd2 ⊢
       rw [List.pairwise_map] at hnd2
       exact hnd2.imp (fun h e => h (congrArg Prod.fst e))
@@ -656,34 +947,44 @@ theorem c4_comp {limits : Limits} {bytes : ByteArray} {d d' : OpenDoc}
     obtain ⟨n, e⟩ := x
     cases e with
     | free a g =>
-      simp only [scanSection, toEntries, List.mem_cons, List.mem_map] at hx
-      rcases hx with h0 | ⟨y, -, hy⟩
-      · cases h0; exact hz
-      · cases hy
-    | compressed c i => exact absurd hx (scanSection_no_compressed limits bytes n c i)
-    | inUse off g => exact (hin n off g).mpr hx
-  refine ⟨rfl, by rw [hbytes]; rfl, fun n off g => (hin n off g).symm, hroot, ?_, ?_⟩
+      rcases hsub _ hx with hx | ⟨c, i, hc⟩
+      · simp only [scanSection, toEntries, List.mem_cons, List.mem_map] at hx
+        rcases hx with h0 | ⟨y, -, hy⟩
+        · cases h0; exact hz
+        · cases hy
+      · cases hc
+    | compressed c i => exact (hl1 _ _).mp (hcd n c i hx)
+    | inUse off g => exact (hin n off g).mpr ((hinS n off g).mp hx)
+  refine ⟨rfl, by rw [hbytes]; rfl, fun n off g => (hinS n off g).trans (hin n off g).symm,
+    hroot, ?_, ?_⟩
   · intro num gen v hncs h
     rcases h2 : d'.lookup num with _ | (⟨a, g⟩ | ⟨off, g⟩ | ⟨c, i⟩)
     · have hn : d'.getObject limits num gen = .ok nullBody :=
         getObject_null_of (by simp [h2]) (by simp [h2])
       rw [hn] at h; cases h
       refine getObject_null_of (fun off g h1 => ?_) hncs
-      have := hl2 _ _ |>.mpr ((hin num off g).mp ((hl1 _ _).mp h1))
+      have := (hl2 _ _).mpr ((hinS num off g).mpr ((hin num off g).mp ((hl1 _ _).mp h1)))
       rw [h2] at this; cases this
     · have hn : d'.getObject limits num gen = .ok nullBody :=
         getObject_null_of (by simp [h2]) (by simp [h2])
       rw [hn] at h; cases h
       refine getObject_null_of (fun off g h1 => ?_) hncs
-      have := hl2 _ _ |>.mpr ((hin num off g).mp ((hl1 _ _).mp h1))
+      have := (hl2 _ _).mpr ((hinS num off g).mpr ((hin num off g).mp ((hl1 _ _).mp h1)))
       rw [h2] at this; cases this
-    · exact getObject_sub (d' := d') (by rw [hbytes]; rfl) hc hsub hnc hf limits num gen off g
-        h2 v h
-    · exact absurd h2 (hnc _ _ _)
+    · exact getObject_sub2 (d' := d') (by rw [hbytes]; rfl) hc hU hC hf limits num gen
+        (Or.inl ⟨off, g, h2⟩) v h
+    · exact absurd (hC _ _ _ h2) (hncs c i)
   · intro num gen c i h1
-    refine getObject_null_of (fun off g h2 => ?_) (hnc num)
-    have := hl1 _ _ |>.mpr ((hin num off g).mpr ((hl2 _ _).mp h2))
-    rw [h1] at this; cases this
+    rcases h2 : d'.lookup num with _ | (⟨a, g⟩ | ⟨off, g⟩ | ⟨c', i'⟩)
+    · exact Or.inl (getObject_null_of (d := d') (by simp [h2]) (by simp [h2]))
+    · exact Or.inl (getObject_null_of (d := d') (by simp [h2]) (by simp [h2]))
+    · have := hU _ _ _ h2
+      rw [h1] at this; cases this
+    · have h3 := hC _ _ _ h2
+      rw [h1] at h3
+      cases h3
+      exact Or.inr ⟨rfl, fun v h => getObject_sub2 (d' := d') (by rw [hbytes]; rfl) hc hU hC hf
+        limits num gen (Or.inr ⟨c, i, h2⟩) v h⟩
 
 /-- **C4 with compressed entries, from the checker.** -/
 theorem c4_comp_check {limits : Limits} {bytes : ByteArray} (hc : checkComp limits bytes = true)
@@ -695,7 +996,9 @@ theorem c4_comp_check {limits : Limits} {bytes : ByteArray} (hc : checkComp limi
       (∀ num gen v, (∀ c i, d.lookup num ≠ some (.compressed c i)) →
         d'.getObject limits num gen = .ok v → d.getObject limits num gen = .ok v) ∧
       (∀ num gen c i, d.lookup num = some (.compressed c i) →
-        d'.getObject limits num gen = .ok nullBody) := by
+        d'.getObject limits num gen = .ok nullBody ∨
+        (d'.lookup num = some (.compressed c i) ∧
+          ∀ v, d'.getObject limits num gen = .ok v → d.getObject limits num gen = .ok v)) := by
   unfold checkComp at hc
   split at hc
   · rename_i d hs
@@ -862,10 +1165,18 @@ def bothCrypt (bytes : ByteArray) : Bool :=
   | .error _ => false)
 #guard checkComp Limits.default objStmBytes = true
 #guard checkFree Limits.default objStmBytes = false
--- The compressed objects are lost by repair: exact agreement fails (the obstacle).
-#guard both objStmBytes 2 = some ("dict", "null")
-#guard both objStmBytes 3 = some ("dict", "null")
-#guard sameObj objStmBytes 1 && sameObj objStmBytes 4 && sameObj objStmBytes 5
+-- Before task 12.7e the compressed objects were lost by repair (`("dict", "null")`). Repair
+-- rule R6 reads object stream 4 and gives objects 2 and 3 the strict compressed entries, so
+-- both paths now return the same dictionaries, and every object agrees (`c4_comp`'s second
+-- disjunct; exact C4 for compressed entries is task 12.7f).
+#guard (match repairOpen Limits.default objStmBytes with
+  | .ok d => d.lookup 2 == some (.compressed 4 0) && d.lookup 3 == some (.compressed 4 1)
+  | .error _ => false)
+#guard both objStmBytes 2 = some ("dict", "dict")
+#guard both objStmBytes 3 = some ("dict", "dict")
+#guard (List.range 7).all (sameObj objStmBytes)
+-- R6 adds compressed entries, so H7 (in `trailerOk`) fails: the exact theorems do not apply.
+#guard check Limits.default objStmBytes = false
 -- `checkComp` extends `checkFree` (`HypFree.toComp`).
 #guard checkComp Limits.default freeEntryBytes = true
 #guard checkComp Limits.default repairDiffBytes = false

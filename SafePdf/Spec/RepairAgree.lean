@@ -25,7 +25,13 @@ over (rules R1, R2). For a strictly opened document `d` (`Core.Open.strictOpen`)
   generation (`newestHit hits n = some (n, g, off)`);
 * H3 `covered`: every object number the scan finds has an in-use strict entry;
 * H4 `cap`: the scan's distinct object numbers fit in `limits.maxObjects`;
-* H5 `trailer`: the repaired trailer has the strict `/Root` and no `/Encrypt`;
+* H5 `trailer`: the repaired trailer has the strict `/Root` and no `/Encrypt`; with H7
+  (task 12.7e, checked in the same `trailerOk`): the repaired section has **no compressed
+  entry**, i.e. repair rule R6 (object-stream members) added nothing, so the repaired
+  section is the scanned one (`Repair.repair_scan`). H7 is new: without it, a strictly valid
+  file with an object stream whose members are free or absent in the strict xref (an orphan
+  container) would get those members back after repair, and `getObject` would differ;
+  `RepairAgreeExt.c4_comp` covers files where R6 does add entries;
 * H6 `plain`: the strict document has no decryption state.
 
 `Hyp` is decidable (`instDecidableHyp`); `check limits bytes` runs the strict path and decides
@@ -187,11 +193,27 @@ def isInUse : XrefEntry → Bool
   | .inUse _ _ => true
   | _ => false
 
+/-- Whether an entry is compressed. -/
+def isComp : XrefEntry → Bool
+  | .compressed _ _ => true
+  | _ => false
+
+/-- Whether a list of entries has no compressed entry. -/
+def noComp (es : List (Nat × XrefEntry)) : Bool := es.all (fun x => !isComp x.2)
+
+/-- `noComp` is sound. -/
+theorem noComp_spec {es : List (Nat × XrefEntry)} (h : noComp es = true) (n c i : Nat) :
+    (n, XrefEntry.compressed c i) ∉ es := by
+  intro hm
+  have := List.all_eq_true.mp h _ hm
+  simp [isComp] at this
+
 /-- Condition H5: the repair path's trailer exists, has the strict `/Root`, and no
-`/Encrypt`. -/
+`/Encrypt`; and H7 (task 12.7e): the repaired section has no compressed entry, i.e. repair
+rule R6 (object-stream members) added nothing (`Repair.repair_scan`). -/
 def trailerOk (limits : Limits) (bytes : ByteArray) (d : OpenDoc) : Bool :=
   match Repair.repair limits bytes with
-  | .ok (_, tr) => !tr.encrypted && tr.root? == d.trailer.root?
+  | .ok (sec, tr) => !tr.encrypted && tr.root? == d.trailer.root? && noComp sec.entries
   | .error _ => false
 
 /-- **The C4 hypothesis** for the strictly opened document `d` of `bytes` (H1–H6, see the
@@ -335,8 +357,8 @@ theorem c4 {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
   split at htr
   · rename_i sec tr hrep
     simp only [Bool.and_eq_true, Bool.not_eq_true', beq_iff_eq] at htr
-    obtain ⟨henc, hroot⟩ := htr
-    have hsec := (Repair.repair_ok hrep).1
+    obtain ⟨⟨henc, hroot⟩, hnc⟩ := htr
+    have hsec := Repair.repair_scan hrep (noComp_spec hnc)
     subst hsec
     let d' := OpenDoc.mk' bytes (scanSection limits bytes) tr 0 true
     have hg : ∀ num gen, d'.getObject limits num gen = d.getObject limits num gen :=
