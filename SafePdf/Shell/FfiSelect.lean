@@ -1,4 +1,6 @@
 import SafePdf.Shell.App.Select
+import SafePdf.Shell.App.Links
+import SafePdf.Shell.App.Budget
 import SafePdf.Shell.FfiMarks
 
 /-!
@@ -27,6 +29,11 @@ action; nothing is re-implemented:
   `hitRange`), over one page or over the pages of a document whose indices the caller has
   (highlight-all), and `Select.searchStep` (Find Next/Previous: `Viewer.nextHit`'s order over
   the hit counts known so far; the caller fetches the index a step asks for).
+* **Pointer and links** (task 11.3d1, the gaps the native page view needed): the cursor's text
+  test (`Viewer.pointerHit`: a glyph box contains the point, `Links.Box.contains`), the link
+  under a point (`Links.linkAt`, the topmost one) and its status text (`Links.describe`), and
+  the search's work allowance (`Budget.Allowance.start` / `spend` with `Budget.ceilings`, task
+  12.3), so Find Next stops after the same number of pages and seconds as `Viewer.nextHit`.
 
 **Numbers.** Coordinates cross as `Float`s. Into Lean they become exact rationals
 (`FfiMarks.ratOfFloat`; a box coordinate it refuses — beyond ±2³², infinite, NaN — is clamped
@@ -216,5 +223,80 @@ private def tiny : Except String PageIndex :=
 #guard (nextHit ⟨#[2, -1, 0]⟩ 0 2 1).data == #[1, 1, 0, 0, 0]
 #guard (nextHit ⟨#[2, 0, 1]⟩ 0 2 1).data == #[0, 2, 0, 1, 0]
 #guard (nextHit ⟨#[0, 0]⟩ 0 0 1).data == #[2, 0, 0, 0, 0]
+
+/-! ## Pointer and links (task 11.3d1) -/
+
+/-- **Whether page point `(x, y)` lies in a glyph box** (the cursor's text test of
+`Viewer.pointerHit`: `cells.any (Links.Box.contains ·.box p)`). `1` yes, `0` no (or a refused
+coordinate). -/
+@[export safepdf_select_lean_over_text]
+def overText (h : PageIndex) (x y : Float) : UInt8 :=
+  match ptOf x y with
+  | some p => if h.cells.any (fun c => App.Links.Box.contains c.box p) then 1 else 0
+  | none => 0
+
+/-- Links from four `Float`s per box (`llx lly urx ury`); the action plays no part in
+`Links.linkAt`. -/
+def linksOfBoxes (boxes : FloatArray) : Array App.Links.Link :=
+  let g (i : Nat) : Float := (boxes[i]?).getD 0
+  (Array.range (boxes.size / 4)).map fun i =>
+    { box := ⟨coord (g (4 * i)), coord (g (4 * i + 1)), coord (g (4 * i + 2)),
+        coord (g (4 * i + 3))⟩, action := .none }
+
+/-- **The link at page point `(x, y)`** (`Links.linkAt`: the topmost, last in `/Annots`
+order, whose rectangle contains the point). `i + 1` for link `i`, `0` for none. -/
+@[export safepdf_select_lean_link_at]
+def linkAtW (boxes : FloatArray) (x y : Float) : USize :=
+  match ptOf x y with
+  | some p => match App.Links.linkAt (linksOfBoxes boxes) p with
+    | some (i, _) => satU (i + 1)
+    | none => 0
+  | none => 0
+
+/-- An action from C (`safepdf_action_kind`: 0 go to `page`, 1 URI, 2 page not in the
+document, 3 unresolved name, 4 other action type, else none). The destination's position plays
+no part in `Links.describe`. -/
+def actionOfC (kind page : USize) (text : String) : App.Links.Action :=
+  match kind.toNat with
+  | 0 => .goto { page := page.toNat }
+  | 1 => .uri text
+  | 2 => .badPage
+  | 3 => .unresolved text
+  | 4 => .other text
+  | _ => .none
+
+/-- **A link's status text** (`Links.describe`, as the Tk viewer's hover and activation show
+it), with the page labels `labels` of an `n`-page document. -/
+@[export safepdf_select_lean_link_describe]
+def describeW (kind page : USize) (text : String) (labels : Array String) (n : USize) : String :=
+  App.Links.describe labels n.toNat (actionOfC kind page text)
+
+/-- **The search's work allowance at time `now`** (ms; `Budget.Allowance.start` of
+`Budget.ceilings`). Out: pages, end time (ms). -/
+@[export safepdf_select_lean_allowance_start]
+def allowanceStart (now : UInt64) : FloatArray :=
+  let a := App.Budget.Allowance.start App.Budget.ceilings now.toNat
+  ⟨#[natF a.pages, natF a.endsAt]⟩
+
+/-- **Spend one page of an allowance at time `now`** (`Budget.Allowance.spend`). Out: spent
+flag, pages, end time (unchanged when used up). -/
+@[export safepdf_select_lean_allowance_spend]
+def allowanceSpend (pages endsAt now : UInt64) : FloatArray :=
+  match (App.Budget.Allowance.mk pages.toNat endsAt.toNat).spend now.toNat with
+  | some a => ⟨#[1, natF a.pages, natF a.endsAt]⟩
+  | none => ⟨#[0, natF pages.toNat, natF endsAt.toNat]⟩
+
+#guard match tiny with
+  | .ok h => overText h 5 5 == 1 && overText h 25 5 == 0 && overText h (0.0 / 0.0) 5 == 0
+  | .error _ => false
+#guard linkAtW ⟨#[0, 0, 10, 10, 5, 5, 20, 20]⟩ 6 6 == 2 &&
+  linkAtW ⟨#[0, 0, 10, 10, 5, 5, 20, 20]⟩ 1 1 == 1 && linkAtW ⟨#[0, 0, 10, 10]⟩ 11 1 == 0
+#guard describeW 0 2 "" #["i", "ii", "1"] 3 == "go to page 1 (3/3)" &&
+  describeW 1 0 "http://x" #[] 1 == "external link (click to copy the address): http://x" &&
+  describeW 4 0 "Launch" #[] 1 == "link action /Launch (not followed)"
+#guard (allowanceStart 5).data == #[natF App.Budget.ceilings.searchPages,
+  natF (5 + App.Budget.ceilings.searchMs)]
+#guard (allowanceSpend 2 100 50).data == #[1, 1, 100] && (allowanceSpend 0 100 50).data == #[0, 0, 100] &&
+  (allowanceSpend 2 100 100).data == #[0, 2, 100]
 
 end SafePdf.Shell.FfiSelect

@@ -129,6 +129,8 @@ final class PageViewController: NSViewController {
     private var holdCurrent = 0
     /// The cross-fade's duration in seconds.
     static let crossFadeSeconds: CFTimeInterval = 0.18
+    /// Selection, copy, find and links on the pages (task 11.3d1).
+    let text = TextController()
 
     init(frame: NSRect = NSRect(x: 0, y: 0, width: 800, height: 900)) {
         initialFrame = frame
@@ -187,6 +189,7 @@ final class PageViewController: NSViewController {
                        name: NSScrollView.didEndLiveScrollNotification, object: scrollView)
 
         canvas.onSharpSwap = { [weak self] in self?.crossFade() }
+        text.attach(self)
         canvas.onKeyScroll = { [weak self] dx, dy, pages in self?.keyScroll(dx: dx, dy: dy, pages: pages) }
         scrollView.onCommandScroll = { [weak self] zoomIn, loc in
             guard let self else { return }
@@ -233,6 +236,7 @@ final class PageViewController: NSViewController {
         ownTop = nil
         wasCapped = false
         pill.fadeOut(animated: false)
+        text.reset(doc)
         canvas.setDocument(doc, canvas: canvasSize)
         var target = ScrollTarget.top
         var notes: [String] = []
@@ -460,6 +464,20 @@ final class PageViewController: NSViewController {
     func refresh() {
         updateCurrentPage()
         canvas.updateRenders(visible: canvas.visibleRect)
+        text.visibleChanged()
+    }
+
+    /// Scrolls so that `r` (document-view points) is visible: centred on an axis where it is not
+    /// (Viewer.scrollToHit); the user's scroll (the current-page rule applies after it).
+    func reveal(_ r: NSRect) {
+        commitMagnificationIfNeeded()
+        let ins = scrollView.contentInsets
+        var origin = scrollView.contentView.bounds.origin
+        let size = canvasSize
+        let vx = origin.x + ins.left, vy = origin.y + ins.top
+        if r.minX < vx || vx + size.width < r.maxX { origin.x = r.midX - size.width / 2 - ins.left }
+        if r.minY < vy || vy + size.height < r.maxY { origin.y = r.midY - size.height / 2 - ins.top }
+        scrollClip(to: origin)
     }
 
     /// The zoom percentage shown for the current page (Viewer.showStatus): the chosen

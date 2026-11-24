@@ -232,6 +232,7 @@ import SafePdfC
 
         zoomAndRotation(doc, pv, dir: dir)
         viewingParity(doc, pv, dir: dir)
+        textParity(doc, pv, dir: dir, path: path) // task 11.3d1 (SelfTestText.swift)
 
         pv.show(nil)
         say(String(format: "total self-test time: %.0f ms; failures: %d", Core.nowMs() - processStartMs, failures))

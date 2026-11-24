@@ -4,7 +4,9 @@
 // come from safepdf_view_toolbar (Toolbar.layout), enabled and visible states from
 // safepdf_view_states. The zoom drop-down chooses Toolbar.ZoomChoice presets (task 11.3c1); the
 // page field is editable (Toolbar.pageEntry: Return jumps, Escape restores; page labels) and the
-// view-mode drop-down chooses Toolbar.ViewChoice entries (task 11.3c2); the tools are task 11.3e.
+// view-mode drop-down chooses Toolbar.ViewChoice entries (task 11.3c2); the search field
+// (NSSearchToolbarItem, after the table's items) runs Find (task 11.3d1: Return / ⇧Return find
+// next / previous, Escape returns to the page); the tools are task 11.3e.
 
 import AppKit
 import SafePdfC
@@ -20,7 +22,7 @@ import SafePdfC
     func chooseViewChoice(_ sender: Any?)
 }
 
-@MainActor final class DocumentToolbar: NSObject, NSToolbarDelegate, NSTextFieldDelegate {
+@MainActor final class DocumentToolbar: NSObject, NSToolbarDelegate, NSTextFieldDelegate, NSSearchFieldDelegate {
     static let zoomSelector = #selector(ZoomPresetTarget.chooseZoomPreset(_:))
     static let viewSelector = #selector(ViewChoiceTarget.chooseViewChoice(_:))
     /// Return in the page field, with its text.
@@ -29,6 +31,15 @@ import SafePdfC
     var onPageCancel: (() -> Void)?
     /// The page field lost the focus (leaving it reverts it, as in the Tk viewer).
     var onPageLeave: (() -> Void)?
+    /// Return (forward) or ⇧Return (backward) in the search field, with its text.
+    var onSearch: ((String, Bool) -> Void)?
+    /// Escape in the search field (the window closes the search and focuses the page view).
+    var onSearchCancel: (() -> Void)?
+    /// The search field's clear button (the search closes).
+    var onSearchClear: (() -> Void)?
+    /// The search field's identifier (not in the exported table: the Tk viewer's find bar).
+    static let searchID = NSToolbarItem.Identifier("org.safe-pdf.toolbar.search")
+    private var searchItem: NSSearchToolbarItem?
     private var viewMenuItem: NSMenuToolbarItem?
     private let viewChoices: [ViewChoiceSpec] = Chrome.viewChoices() ?? []
     /// The zoom drop-down's presets (Toolbar.ZoomChoice.presets), in menu order.
@@ -93,9 +104,13 @@ import SafePdfC
     /// Item identifiers in table order (the self-test checks every one builds).
     var identifiers: [NSToolbarItem.Identifier] { order }
 
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { order }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        order + [Self.searchID]
+    }
 
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { order }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        order + [Self.searchID]
+    }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -105,6 +120,11 @@ import SafePdfC
     /// Builds (once) the item for an identifier.
     func makeItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem? {
         if let it = items[id] { return it }
+        if id == Self.searchID {
+            let item = searchToolbarItem()
+            items[id] = item
+            return item
+        }
         guard let i = specOf[id] else { return nil }
         let s = specs[i]
         let item: NSToolbarItem
@@ -323,8 +343,58 @@ import SafePdfC
         pageField.selectText(nil)
     }
 
-    /// Return and Escape in the page field (other keys edit the text).
+    // MARK: search field (task 11.3d1)
+
+    private func searchToolbarItem() -> NSSearchToolbarItem {
+        let item = NSSearchToolbarItem(itemIdentifier: Self.searchID)
+        let f = item.searchField
+        f.placeholderString = "Find"
+        f.sendsWholeSearchString = true
+        f.sendsSearchStringImmediately = false
+        f.delegate = self
+        f.target = self
+        f.action = #selector(searchFieldAction(_:))
+        f.toolTip = "Find in the document (Return: next, ⇧Return: previous, Escape: back to the page)"
+        f.setAccessibilityLabel("Find")
+        item.label = "Find"
+        item.toolTip = f.toolTip
+        searchItem = item
+        return item
+    }
+
+    /// The search field's text ("" without the item).
+    var searchText: String { searchItem?.searchField.stringValue ?? "" }
+
+    /// Whether the search field has the keyboard focus.
+    var isEditingSearch: Bool { searchItem?.searchField.currentEditor() != nil }
+
+    /// Find… (⌘F): the search field takes the focus with its text selected.
+    func focusSearch(in window: NSWindow?) {
+        guard let window, let item = searchItem, item.searchField.window === window else { return }
+        item.beginSearchInteraction()
+        window.makeFirstResponder(item.searchField)
+        item.searchField.selectText(nil)
+    }
+
+    /// The field's action: only its clear button gets here (Return is taken below).
+    @objc private func searchFieldAction(_ sender: NSSearchField) {
+        if sender.stringValue.isEmpty { onSearchClear?() }
+    }
+
+    /// Return and Escape in the page field and the search field (other keys edit the text).
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if let f = searchItem?.searchField, control === f {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let back = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+                onSearch?(f.stringValue, !back)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                onSearchCancel?()
+                return true
+            }
+            return false
+        }
         guard control === pageField else { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             onPageEntry?(pageField.stringValue)

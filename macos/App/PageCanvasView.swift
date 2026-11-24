@@ -35,6 +35,16 @@ struct PagePlace {
     let cropped: Bool
 }
 
+/// Who handles the pointer on the pages (task 11.3d1: selection, links, the cursor). Points
+/// are the canvas's (view points, y down).
+@MainActor protocol CanvasPointer: AnyObject {
+    func pointerDown(at p: CGPoint, clicks: Int, shift: Bool)
+    func pointerDragged(at p: CGPoint)
+    func pointerUp(at p: CGPoint)
+    /// The pointer moved (nil: it left the canvas).
+    func pointerMoved(at p: CGPoint?)
+}
+
 /// A page point under a scroll-region position, in the view it was taken in (C2).
 struct PageAnchor {
     let page: Int
@@ -82,6 +92,11 @@ final class PageCanvasView: NSView {
     /// Scrolls by lines (arrows) or views (space) when no command takes a key: (dx, dy) in
     /// lines, or pages when `pages`.
     var onKeyScroll: ((_ dx: Int, _ dy: Int, _ pages: Bool) -> Void)?
+    /// The pointer's handler (task 11.3d1).
+    weak var pointer: CanvasPointer?
+    /// Draws a page's overlays (search hits, the selection) above its image (task 11.3d1).
+    var drawOverlay: ((Int) -> Void)?
+    private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -356,6 +371,7 @@ final class PageCanvasView: NSView {
                 cg.draw(entry.image, in: CGRect(origin: .zero, size: target.size))
                 cg.restoreGState()
             }
+            drawOverlay?(place.page)
             NSColor.separatorColor.setStroke()
             let frame = NSBezierPath(rect: r.insetBy(dx: -0.5, dy: -0.5))
             frame.lineWidth = 1
@@ -367,7 +383,47 @@ final class PageCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        super.mouseDown(with: event)
+        guard let p = pointer, document != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        p.pointerDown(at: convert(event.locationInWindow, from: nil), clicks: event.clickCount,
+                      shift: event.modifierFlags.contains(.shift))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let p = pointer, document != nil else { return super.mouseDragged(with: event) }
+        p.pointerDragged(at: convert(event.locationInWindow, from: nil))
+        autoscroll(with: event) // a drag past the visible area scrolls it
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let p = pointer, document != nil else { return super.mouseUp(with: event) }
+        p.pointerUp(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        pointer?.pointerMoved(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        pointer?.pointerMoved(at: nil)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        guard let p = pointer, document != nil else { return super.cursorUpdate(with: event) }
+        p.pointerMoved(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// The pointer is tracked over the visible area (moves set the cursor, Toolbar.cursorFor).
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate,
+                                                      .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
     }
 
     override func keyDown(with event: NSEvent) {
