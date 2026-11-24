@@ -99,7 +99,12 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
   | .ok (.image w h data), .ok img =>
     f := f + (← check s!"render size {w}x{h} vs {img.w}x{img.h}" (w == img.w && h == img.h))
     f := f + (← check "render bytes equal the in-process render" (data == img.data))
-    f := f + (← check "render has ink" (data.toList.any (· < 128)))
+    -- Without substitute fonts (e.g. CI without fonts-urw-base35 in the worker's font
+    -- directories) the page's non-embedded text paints nothing on both paths.
+    if subst.faces.isEmpty then
+      IO.println "  worker: no substitute fonts found; ink check skipped (renders still byte-equal)"
+    else
+      f := f + (← check "render has ink" (data.toList.any (· < 128)))
   | r, _ => f := f + (← check s!"render ({describe r})" false)
   -- Rotated render too.
   let localR := (Raster.Glyph.renderDocPage limits d.doc page 1 .r90
