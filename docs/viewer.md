@@ -1218,7 +1218,15 @@ page copies exactly the page text of the text view.
   blending reads the window back per redraw, and a page can have hundreds of hits; the
   selection is one band per line); switching it is the `State.stipple` flag. User
   highlight marks are not affected (multiplied into the page image, below); unsaved drawings
-  with an opacity below 88 % are stippled on X11 and opaque on Aqua.
+  with an opacity below 88 % are stippled on X11 and opaque on Aqua. **Tk 8.6** (task 10.c1;
+  Ubuntu 24.04's `tk-dev`, the Linux CI) takes no `#RRGGBBAA` in `photo put` ("can't parse
+  color") and has no `get -withalpha`: at start the viewer probes `put` once
+  (`::safepdf::tintRgba`); without it `::safepdf::tintFill` builds a one-pixel 8-bit RGBA PNG in
+  Tcl (`zlib`, `binary`; `::safepdf::rgbaPng`) and tiles it over the photo with
+  `copy -to … -compositingrule set`. Tk 8.6 reads PNG alpha and blends partly transparent
+  photos on X11, so the selection looks the same. The smoke probes read pixels through
+  `::safepdf::pixel` (a one-pixel PNG decoded in Tcl on Tk 8.6). `SAFEPDF_TINT_PNG=1` forces
+  both Tk 8.6 paths, so they can be checked on Aqua.
 * **Ctrl+C** (or the right-button menu: Copy, Select all, Find…) copies the selected text
   (`Select.rangeText`) with `clipboard clear; clipboard append -- TEXT`, the text one word
   quoted by `Tcl.quote`. The selection is per page and cleared when the page changes.
@@ -1614,7 +1622,10 @@ open in Vertical Scrolling, No Spreads (state and both radio variables); then th
 described under *Wheel scrolling across pages* must reach page 5 (or the last page) in every
 view mode without going back, without a run of motionless events longer than the page-turn
 push (none in the continuous modes), and without a step longer than one event plus the
-carried push. About 12 s per file.
+carried push. About 12 s per file. Tk 8.6 (the Linux CI) has no `<TouchpadScroll>`: a
+generated one is dropped and each trackpad burst would run its 3000 events without moving (the
+run timed out at 60 s), so there the five trackpad bursts print `skipped` and only the wheel
+bursts are checked (task 10.c1; `tk:` line of `wheelflow.txt`).
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
@@ -1648,7 +1659,12 @@ name with `send -async` and the script creates a file `sent` (10.19). On Aqua th
 tries only `tk`/`viewer`/`safe-pdf` (`winfo interps` lists every Tk interpreter of the user,
 also other runs'), and when the control fails while a baseline `send` between two plain `wish`
 processes fails too (Tk Aqua delivers no AppleEvents in this session, seen with a locked
-screen), the control is skipped, not failed.
+screen), the control is skipped, not failed. On X11 Tk executes a received `send` only when the X
+server is "secure" (access control on and no host-list entries but `SI:localuser`/`localgroup`;
+otherwise "X server insecure", silently for `-async`): the drive run first prints the test
+server's `xhost` list (`xhost:` lines) and removes other entries, and when the file does not
+appear the `wish` tries a synchronous `send` and prints its result (`send-sync`, task 10.c1:
+the first Linux CI run, Tk 8.6, saw the async send accepted and never run).
 
 The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
 (X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`

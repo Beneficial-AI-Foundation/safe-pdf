@@ -102,14 +102,20 @@ jobs:
           "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
 
       # tk provides wish (the viewer-corpus driver); qpdf and mutool are optional checks of
-      # saved files in both scripts.
-      - name: Install Tk, Xvfb, qpdf and mutool
+      # saved files in both scripts. Ubuntu 24.04's tk-dev is Tk 8.6 (not 9): the viewer and
+      # the smoke test take that path (task 10.c1). fonts-urw-base35: the substitute fonts
+      # (SafePdf/Shell/Fonts.lean) the smoke's M9 case expects to paint the Add-text mark;
+      # x11-xserver-utils: xhost, for the 1l drive control's X server access list.
+      - name: Install Tk, Xvfb, fonts, qpdf and mutool
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tk-dev tk xvfb xauth qpdf mupdf-tools
+          sudo apt-get install -y --no-install-recommends tk-dev tk xvfb xauth x11-xserver-utils \
+            fonts-urw-base35 qpdf mupdf-tools
+          dpkg-query -W -f '${Package} ${Version}\n' 'tk*-dev' fonts-urw-base35  || true
 
-      - name: Build viewer
-        run: lake build viewer
+      # The smoke test's 1d case compares against the inspector's text.
+      - name: Build viewer and inspector
+        run: lake build viewer inspect
 
       # Task 12.6: the viewer runs on the pinned corpus subset (scripts/corpus/pinned.txt,
       # each file pinned by SHA-256 in corpus/manifest.json). actions/cache v4.2.0.
