@@ -305,8 +305,16 @@ are in `.github/workflows/ci.yml` since 2026-11-24.
   targets our v4.36.0), SHA-256-verified, builds it from a fresh directory and re-checks every
   `SafePdf.*` module from its `.olean`. lean4lean is derived from the C++ kernel, so this is a
   second implementation, not an independent theory. Local run (2026-11-23): all 114
-  modules re-check, after raising lean4lean's fuel limits; its multi-module mode crashes
-  intermittently (SIGSEGV), so the script checks one module per process.
+  modules re-check, after raising lean4lean's fuel limits. Upstream selects modules by name
+  prefix and replays the matches on parallel tasks; that mode segfaulted (macOS
+  intermittently; Linux CI every time on the four parents `Core.Crypt`, `Core.Doc`,
+  `Core.Xref`, `Core.Filter`, whose submodules it also matches, with the fuel-raised
+  recursion deeper than a task thread's fixed stack). The script now builds a small driver
+  beside lean4lean (`l4lexact`, same `Replay.replayFromImports`) that checks exactly the
+  named modules on the main thread, under `ulimit -s unlimited`, one process per module, so
+  each parent is checked on its own declarations. Run 2026-11-24 (macOS): all 132 modules
+  pass. A kernel rejection prints `FAIL`, a tool crash `CRASH`, a time-out `TIMEOUT` (the
+  job has a time cap); all fail the job.
 * Item 6: `scripts/compiled-vs-interpreted.sh` runs the suites compiled (`lake exe tests`) and
   in the IR interpreter (`scripts/interp-suites.lean`) and diffs them suite by suite.
   Locally the 21 suites of its default set agree (~7 min interpreted); the raster property

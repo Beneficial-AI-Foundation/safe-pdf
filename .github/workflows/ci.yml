@@ -228,8 +228,11 @@ jobs:
   # that skip into a failure so a toolchain bump cannot silently drop the re-check.
   lean4lean:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     env:
+      # The script stops starting modules after this many seconds and fails with TIMEOUT
+      # (the full re-check takes a few minutes; a crash retried 8 times once took 39).
+      L4L_TOTAL_TIMEOUT: 1500
       # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
       ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
     steps:
