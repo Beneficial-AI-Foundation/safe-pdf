@@ -44,6 +44,7 @@ extern lean_object *safepdf_lean_doc_page_geom(lean_object *d, size_t i);
 extern lean_object *safepdf_lean_doc_test_render(lean_object *d, size_t i, size_t num, size_t den,
                                                  uint8_t rot);
 extern uint8_t safepdf_lean_doc_flags(lean_object *d);
+extern lean_object *safepdf_lean_doc_bytes(lean_object *d);
 extern lean_object *safepdf_lean_doc_submit(lean_object *d, size_t token, uint64_t cid,
                                             uint8_t kind, size_t page, size_t num, size_t den,
                                             uint8_t rot, lean_object *layers, uint8_t prio);
@@ -304,6 +305,22 @@ int safepdf_doc_page_geom(const safepdf_document *doc, size_t page, safepdf_page
 
 int safepdf_doc_is_repaired(const safepdf_document *doc) { return doc && (doc->flags & 1); }
 int safepdf_doc_is_encrypted(const safepdf_document *doc) { return doc && (doc->flags & 2); }
+
+safepdf_bytes *safepdf_doc_bytes(const safepdf_document *doc) {
+    if (!doc) return NULL;
+    ensure_thread();
+    lean_inc(doc->handle);
+    lean_object *a = safepdf_lean_doc_bytes(doc->handle);
+    size_t n = lean_sarray_size(a);
+    safepdf_bytes *out = calloc(1, sizeof *out);
+    uint8_t *data = malloc(n ? n : 1);
+    if (!out || !data) { free(out); free(data); lean_dec(a); return NULL; }
+    if (n) memcpy(data, lean_sarray_cptr(a), n);
+    lean_dec(a);
+    out->data = data;
+    out->len = n;
+    return out;
+}
 
 /* ================================================================ v2: open settings */
 

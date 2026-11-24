@@ -364,6 +364,61 @@ int main(int argc, char **argv) {
     }
     free(err); err = NULL;
 
+    /* --- tools, bubble, pop-over parameters (task 11.3e1) ------------------------------- */
+    safepdf_tool_params tp;
+    CHECK(safepdf_marks_tool_params(&tp) == 0, "tool params");
+    CHECK(tp.highlight_rgb[0][0] == 0xFF && tp.highlight_rgb[0][2] == 0x98 &&
+              tp.highlight_rgb[4][1] == 0x4F && tp.editor_count == 6 && tp.editor_rgb[0][0] == 0,
+          "palettes");
+    CHECK(tp.font_min == 5 && tp.font_max == 100 && tp.font_default == 10 && tp.width_min == 1 &&
+              tp.width_max == 20 && tp.opacity_step == 5 && tp.opacity_default == 100 &&
+              tp.ft_pad == 2 && tp.line_factor == 1.35 && tp.note_size == 20,
+          "sliders and metrics");
+    safepdf_tool_ui ui;
+    int hlnow = -1;
+    CHECK(safepdf_marks_ui_step(NULL, SAFEPDF_UI_INIT, 0, &ui, NULL) == 0 && ui.show_all &&
+              !ui.tool && ui.ft_size == 10 && ui.ink_opacity == 100,
+          "initial tool state");
+    CHECK(safepdf_marks_ui_step(&ui, SAFEPDF_UI_TOOL_CLICK, 1, &ui, &hlnow) == 0 && hlnow == 1 &&
+              !ui.tool,
+          "Highlight button with a selection highlights");
+    CHECK(safepdf_marks_ui_step(&ui, SAFEPDF_UI_TOOL_CLICK, 0, &ui, &hlnow) == 1 && hlnow == 0 &&
+              ui.tool && ui.popover,
+          "Highlight button without a selection: the tool and its pop-over");
+    CHECK(safepdf_marks_ui_step(&ui, SAFEPDF_UI_SELECT_EDITOR, SAFEPDF_EDITOR_DRAW, &ui, NULL) == 3 &&
+              !ui.tool && ui.ed_pop,
+          "Draw: the Highlight tool off");
+    CHECK(safepdf_marks_ui_step(&ui, SAFEPDF_UI_ESCAPE, 0, &ui, NULL) == 3 && !ui.ed_pop,
+          "Escape closes the pop-over, the mode stays");
+    CHECK(safepdf_marks_ui_step(&ui, SAFEPDF_UI_SELECT_TOOL, 0, &ui, NULL) == 0 &&
+              ui.editor == SAFEPDF_EDITOR_NONE,
+          "Select text");
+    CHECK(safepdf_marks_ui_step(&ui, 99, 0, &ui, NULL) == -1, "unknown op");
+    CHECK(safepdf_marks_bubble_kind(1, 1, 1) == SAFEPDF_BUBBLE_FLOAT &&
+              safepdf_marks_bubble_kind(0, 1, 1) == SAFEPDF_BUBBLE_EDIT &&
+              safepdf_marks_bubble_kind(0, 1, 0) == -1 && safepdf_marks_bubble_kind(0, 0, 1) == -1,
+          "bubble kinds");
+    safepdf_bubble_layout bl;
+    CHECK(safepdf_marks_bubble_layout(SAFEPDF_BUBBLE_FLOAT, &bl) == 0 && bl.count == 2 &&
+              bl.width == 67 && bl.height == 34 && bl.buttons[0].button == SAFEPDF_BTN_HIGHLIGHT &&
+              bl.buttons[0].cmd == 11 /* SAFEPDF_CMD_HIGHLIGHT */ && bl.buttons[1].x0 == 36 &&
+              strcmp(bl.buttons[1].tip, "Add comment") == 0,
+          "float bubble layout");
+    CHECK(safepdf_marks_bubble_layout(SAFEPDF_BUBBLE_EDIT, &bl) == 0 && bl.count == 3 &&
+              bl.buttons[0].cmd == -1 && bl.buttons[2].button == SAFEPDF_BTN_DELETE,
+          "edit bubble layout");
+    CHECK(safepdf_marks_bubble_layout(9, &bl) == -1, "unknown bubble");
+    safepdf_box sels[2] = {{100, 100, 400, 120}, {100, 122, 300, 142}}, area = {0, 0, 1000, 800},
+                placed;
+    CHECK(safepdf_marks_bubble_place(sels, 2, 112, 34, &area, &placed) == 1 && placed.llx == 188 &&
+              placed.lly == 148 && placed.urx == 300 && placed.ury == 182,
+          "bubble placed (Bubble.place #guard)");
+    CHECK(safepdf_marks_bubble_place(NULL, 0, 112, 34, &area, &placed) == 0, "no selection");
+    CHECK(safepdf_marks_escape_closes(SAFEPDF_TRANSIENT_NOTE | SAFEPDF_TRANSIENT_HL_POP) ==
+                  SAFEPDF_TRANSIENT_NOTE &&
+              safepdf_marks_escape_closes(0) == 0,
+          "Escape closes the topmost transient");
+
     /* --- reference counting -------------------------------------------------------------- */
     safepdf_marks_retain(m);
     safepdf_marks_release(m);

@@ -346,6 +346,106 @@ int safepdf_marks_xfdf_import(safepdf_marks *m, const uint8_t *bytes, size_t len
 /** Release an import report's contents and zero it. NULL is allowed. */
 void safepdf_free_xfdf_import(safepdf_xfdf_import *r);
 
+/* ---- Tools, bubble and pop-over parameters (task 11.3e1) ------------------------------- */
+
+/** The tools' parameters (Marks.Color.all, Bubble.EdPop, Bubble.Ui's defaults,
+    Core.Write.Annots.ftPad / lineFactor, Marks.noteSize). */
+typedef struct {
+    uint8_t highlight_rgb[5][3];    /* SAFEPDF_COLOR_* order */
+    uint8_t editor_rgb[8][3];       /* the Add text / Draw palette (black first) */
+    size_t editor_count;
+    uint32_t font_min, font_max, font_step, font_default;          /* free text font size */
+    uint32_t width_min, width_max, width_step, width_default;      /* ink thickness */
+    uint32_t opacity_min, opacity_max, opacity_step, opacity_default; /* ink opacity % */
+    uint32_t text_rgb_default, ink_rgb_default;                    /* 0xRRGGBB */
+    double ft_pad;       /* free text: padding around the lines (page units) */
+    double line_factor;  /* free text: line height / font size */
+    double note_size;    /* a note icon's side (page units) */
+} safepdf_tool_params;
+
+/** Fill `out`. 0 on success, -1 on failure. Needs no store. */
+int safepdf_marks_tool_params(safepdf_tool_params *out);
+
+/** Add text / Draw modes (Bubble.Editor). */
+enum { SAFEPDF_EDITOR_NONE = 0, SAFEPDF_EDITOR_TEXT = 1, SAFEPDF_EDITOR_DRAW = 2 };
+
+/** The tool state of a window (Bubble.Ui). */
+typedef struct {
+    int tool;          /* the Highlight tool is on */
+    int popover;       /* its pop-over is open */
+    int show_all;      /* highlights are shown */
+    int picker;        /* the edit bubble's colour picker is open */
+    int editor;        /* SAFEPDF_EDITOR_* */
+    int ed_pop;        /* the Add text / Draw pop-over is open */
+    uint32_t thickness;              /* free-highlight thickness (kept, unused) */
+    uint32_t ft_size, ft_rgb;        /* new free text: font size, 0xRRGGBB */
+    uint32_t ink_rgb, ink_thick, ink_opacity; /* new drawings */
+} safepdf_tool_ui;
+
+/** Tool state steps (safepdf_marks_ui_step). */
+enum {
+    SAFEPDF_UI_INIT = 0,          /* the initial state (`in` ignored) */
+    SAFEPDF_UI_TOOL_CLICK = 1,    /* the toolbar's Highlight button; arg: there is a selection */
+    SAFEPDF_UI_TOGGLE_TOOL = 2,   /* Edit -> Highlight tool */
+    SAFEPDF_UI_SELECT_EDITOR = 3, /* the Add text / Draw button; arg: SAFEPDF_EDITOR_* */
+    SAFEPDF_UI_SELECT_TOOL = 4,   /* the Select text button */
+    SAFEPDF_UI_ESCAPE = 5         /* Escape: pop-overs and picker close, the tool stays */
+};
+
+/** One step of the tool state (Bubble.Ui.toolClick / toggleTool / selectEditor,
+    Toolbar.selectTool, Ui.escape): `*out` the new state (may alias `in`), `*highlight` (may be
+    NULL) whether the Highlight button highlights the selection instead. Returns the new state's
+    mode (SAFEPDF_MODE_* of safepdf_view.h, Toolbar.Mode.of), -1 for an unknown op. */
+int safepdf_marks_ui_step(const safepdf_tool_ui *in, int op, int arg, safepdf_tool_ui *out,
+                          int *highlight);
+
+/** Bubbles (Bubble.Kind) and their buttons (Bubble.Btn). */
+enum { SAFEPDF_BUBBLE_FLOAT = 0, SAFEPDF_BUBBLE_EDIT = 1, SAFEPDF_BUBBLE_EDITOR = 2 };
+enum {
+    SAFEPDF_BTN_HIGHLIGHT = 0, SAFEPDF_BTN_COLOR = 1, SAFEPDF_BTN_COMMENT = 2,
+    SAFEPDF_BTN_DELETE = 3
+};
+
+/** The bubble after a selection (`sel_here`) or on a selected highlight (`mark_here`)
+    (Bubble.kindFor): SAFEPDF_BUBBLE_FLOAT / _EDIT, or -1 for none. */
+int safepdf_marks_bubble_kind(int sel_here, int mark_here, int show_all);
+
+/** A bubble's button (Bubble.Kind.layout, Btn.cmd?, Btn.tip). */
+typedef struct {
+    int button;        /* SAFEPDF_BTN_* */
+    int cmd;           /* the safepdf_cmd it runs, -1 for none (the colour button) */
+    double x0, x1;     /* range from the bubble's left edge (canvas pixels) */
+    char tip[48];      /* tooltip */
+} safepdf_bubble_button;
+
+/** A bubble's size and buttons, left to right. */
+typedef struct {
+    double width, height;
+    safepdf_bubble_button buttons[4];
+    size_t count;
+} safepdf_bubble_layout;
+
+/** The layout of bubble `kind`. 0 on success, -1 for an unknown kind. */
+int safepdf_marks_bubble_layout(int kind, safepdf_bubble_layout *out);
+
+/** Where a `w` x `h` bubble goes for the selection rectangles `sel` inside `area`
+    (Bubble.place: right edge at the selection's last point, `gap` below, above the selection
+    when it does not fit, clamped; theorem place_inside). Rectangles are canvas coordinates
+    with y DOWN: llx/lly = left/top, urx/ury = right/bottom. 1 with `*out` set, 0 when there is
+    no place (no rectangles), -1 on bad numbers. */
+int safepdf_marks_bubble_place(const safepdf_box *sel, size_t n, double w, double h,
+                               const safepdf_box *area, safepdf_box *out);
+
+/** Transients (Toolbar.Transient.order), as mask bits. */
+enum {
+    SAFEPDF_TRANSIENT_NOTE = 1, SAFEPDF_TRANSIENT_PICKER = 2, SAFEPDF_TRANSIENT_HL_POP = 4,
+    SAFEPDF_TRANSIENT_ED_POP = 8, SAFEPDF_TRANSIENT_GOTO = 16, SAFEPDF_TRANSIENT_FIND = 32
+};
+
+/** What Escape closes when the transients in `opened` are open (Toolbar.onEscape: the topmost
+    one), as a mask; 0 when none is open. */
+uint32_t safepdf_marks_escape_closes(uint32_t opened);
+
 #ifdef __cplusplus
 }
 #endif

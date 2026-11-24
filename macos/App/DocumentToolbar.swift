@@ -169,13 +169,51 @@ import SafePdfC
         if s.action == SAFEPDF_ACT_COMMAND.rawValue {
             item.action = MainMenu.commandSelector
             item.tag = Int(s.cmd)
+        } else if s.action == SAFEPDF_ACT_TOOL.rawValue {
+            // Task 11.3e1: the tools (Toolbar.Tool; the active mode's button shows pressed).
+            item.action = MainMenu.toolSelector
+            item.tag = Int(s.tool)
+            toolItems[s.tool] = item
+            toolSymbols[s.tool] = Self.symbol(for: s.icon)
         } else {
-            // TODO(11.3e): the tools (Toolbar.Mode, exactly one pressed). Disabled until then.
             item.action = nil
             item.tag = -1
         }
         return item
     }
+
+    /// The tool buttons by tool (safepdf_tool), once built.
+    private var toolItems: [Int32: NSToolbarItem] = [:]
+    private var toolSymbols: [Int32: String] = [:]
+    private var pressed: Int32 = -1
+
+    /// The toolbar item of a tool (a pop-over's anchor).
+    func item(forTool t: Int32) -> NSToolbarItem? {
+        if toolItems[t] == nil, let i = specs.firstIndex(where: { $0.action == SAFEPDF_ACT_TOOL.rawValue && $0.tool == t }),
+           let id = identifierOf[i] {
+            _ = makeItem(id)
+        }
+        return toolItems[t]
+    }
+
+    /// Shows tool `t`'s button pressed (Toolbar.pressed: exactly the active mode's), in the
+    /// accent colour.
+    func setPressedTool(_ t: Int32) {
+        pressed = t
+        for (tool, item) in toolItems {
+            guard let name = toolSymbols[tool],
+                  let base = NSImage(systemSymbolName: name, accessibilityDescription: item.label) else { continue }
+            if tool == t {
+                let cfg = NSImage.SymbolConfiguration(hierarchicalColor: .controlAccentColor)
+                item.image = base.withSymbolConfiguration(cfg) ?? base
+            } else {
+                item.image = base
+            }
+        }
+    }
+
+    /// The tool shown pressed (the self-test reads it).
+    var pressedTool: Int32 { pressed }
 
     /// The overflow menu (Toolbar.overflow) from its exported table.
     private func overflowMenu() -> NSMenu {
@@ -299,8 +337,6 @@ import SafePdfC
         var enabled = i < st.itemEnabled.count ? st.itemEnabled[i] : false
         if s.action == SAFEPDF_ACT_COMMAND.rawValue {
             enabled = enabled && Commands.implemented.contains(Int(s.cmd))
-        } else if s.action == SAFEPDF_ACT_TOOL.rawValue {
-            enabled = false // TODO(11.3e)
         }
         item.isEnabled = enabled
         if #available(macOS 15, *) {

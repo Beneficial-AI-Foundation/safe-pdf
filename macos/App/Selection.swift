@@ -133,6 +133,13 @@ struct TextSelection: Equatable {
     private var hoverLink: (page: Int, index: Int)?
     /// Called when the selection changes (the window's Copy state).
     var onSelectionChange: (() -> Void)?
+    /// Called when a drag, double or triple click has finished selecting text (task 11.3e1:
+    /// the Highlight tool highlights it on release, the bubble shows).
+    var onSelectionFinished: (() -> Void)?
+    /// Draws a page's marks under the search hits and the selection (task 11.3e1).
+    var drawMarks: ((Int, PageTransform, PageCanvasView) -> Void)?
+    /// Whether a mark lies under a page point (the cursor's hit test, task 11.3e1).
+    var markAt: ((Int, Double, Double) -> Bool)?
     /// The window sheets attach to (nil: none; the self-test).
     var sheetWindow: (() -> NSWindow?)?
     /// Pixel distance a press may move and still be a click (in place).
@@ -279,8 +286,31 @@ struct TextSelection: Equatable {
 
     // MARK: pointer (CanvasPointer)
 
+    /// Whether a press (a click or a drag) is going on.
+    var isPressing: Bool { press != nil }
+
+    /// Forgets the press going on (task 11.3e1: the marks took the click).
+    func cancelPress() {
+        press = nil
+        pressMoved = false
+        dragTo = nil
+        interaction += 1
+    }
+
+    /// The highlight boxes of the selection (Select.rangeBoxes: the quads a highlight gets and
+    /// a note anchors to, as in the Tk viewer); empty without a selection or its index.
+    func selectionBoxes() -> [safepdf_box] {
+        guard let s = selection, let sp = store.index(s.page),
+              let l = safepdf_select_range_boxes(sp.handle, s.first, s.last) else { return [] }
+        defer { safepdf_select_free_box_list(l) }
+        var out: [safepdf_box] = []
+        if let bs = l.pointee.boxes { for i in 0..<l.pointee.count { out.append(bs[i]) } }
+        return out
+    }
+
     func pointerDown(at v: CGPoint, clicks: Int, shift: Bool) {
-        guard document != nil, mode == SAFEPDF_MODE_SELECT.rawValue else { return }
+        guard document != nil,
+              mode == SAFEPDF_MODE_SELECT.rawValue || mode == SAFEPDF_MODE_HIGHLIGHT.rawValue else { return }
         interaction += 1
         pressMoved = false
         dragTo = nil
@@ -301,6 +331,7 @@ struct TextSelection: Equatable {
                 self.anchor = (page, x, y)
                 self.setSelection(TextSelection(page: page, first: r.first, last: r.last))
                 self.selStatus()
+                self.onSelectionFinished?()
             }
             return
         }
@@ -385,7 +416,10 @@ struct TextSelection: Equatable {
         var r = safepdf_select_range()
         if safepdf_select_drag(sp.handle, a.0, a.1, b.x, b.y, &r) == 0 {
             setSelection(TextSelection(page: page, first: r.first, last: r.last))
-            if final { selStatus() }
+            if final {
+                selStatus()
+                onSelectionFinished?()
+            }
         }
     }
 
@@ -400,7 +434,9 @@ struct TextSelection: Equatable {
     func updateCursor(at v: CGPoint?) {
         var link: (page: Int, index: Int)? = nil
         var text = false
+        var mark = false
         if let v, document != nil, let (page, x, y) = pagePoint(at: v) {
+            mark = markAt?(page, x, y) ?? false
             if let ls = store.links(page) {
                 if let i = ls.index(at: x, y) { link = (page, i) }
             } else if !store.linksKnown(page) {
@@ -416,7 +452,7 @@ struct TextSelection: Equatable {
                 }
             }
         }
-        let hit = safepdf_view_hit_of(false, link != nil, text)
+        let hit = safepdf_view_hit_of(mark, link != nil, text)
         cursor = safepdf_view_cursor_for(UInt32(mode), hit)
         if canvas?.window != nil { Self.nsCursor(cursor).set() }
         if let l = link {
@@ -453,6 +489,7 @@ struct TextSelection: Equatable {
     /// Draws page `page`'s overlays above its image: the search hits, then the selection.
     private func drawOverlay(_ page: Int) {
         guard let c = canvas, let t = c.transform(ofPage: page) else { return }
+        drawMarks?(page, t, c)
         find.draw(page, t, c)
         if let s = selection, s.page == page, !bands.isEmpty {
             let path = CGMutablePath()

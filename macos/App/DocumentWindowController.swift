@@ -14,7 +14,7 @@ import AppKit
 import SafePdfC
 
 final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation,
-    NSToolbarItemValidation, SafePdfCommandTarget, ZoomPresetTarget, ViewChoiceTarget
+    NSToolbarItemValidation, SafePdfCommandTarget, ZoomPresetTarget, ViewChoiceTarget, MarksCommandTarget
 {
     let pages = PageViewController()
     let sidebar = SidebarViewController()
@@ -132,15 +132,54 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             self.window?.makeFirstResponder(self.pages.canvas)
         }
         chromeToolbar?.onSearchClear = { [weak self] in self?.pages.text.find.close() }
-        pages.text.onSelectionChange = { [weak self] in self?.updateChrome() }
+        let marksSel = pages.text.onSelectionChange
+        pages.text.onSelectionChange = { [weak self] in
+            marksSel?()
+            self?.updateChrome()
+        }
         pages.text.sheetWindow = { [weak self] in self?.window }
+        // Task 11.3e1: marks change the edited dot, the Edit menu and the pressed tool; the
+        // tools' pop-overs anchor to their buttons; Escape goes through the marks first.
+        pages.marks.onChange = { [weak self] in self?.updateChrome() }
+        pages.marks.toolbarItem = { [weak self] t in self?.chromeToolbar?.item(forTool: t) }
+        pages.canvas.onEscape = { [weak self] in
+            self?.escapeKey()
+            return true
+        }
     }
 
-    /// Copy and Select All while a text field is being edited (the search or page field) act
-    /// on its text, not on the page's.
-    private var fieldEditor: NSText? {
-        guard let t = window?.firstResponder as? NSText, t.isFieldEditor else { return nil }
+    /// Copy, Select All, Undo and Redo while text is being edited (the search or page field,
+    /// the note editor, a free-text box) act on that text, not on the page's (task 11.3e1: the
+    /// menu's commands reach this controller from the note popover's window too).
+    private var fieldEditor: NSTextView? {
+        let r = NSApp.keyWindow?.firstResponder ?? window?.firstResponder
+        guard let t = r as? NSTextView, t.isEditable else { return nil }
         return t
+    }
+
+    /// Escape on the page view (Viewer.escape): the marks close their topmost transient and
+    /// dismiss the bubble; when nothing was open, Escape leaves full screen.
+    private func escapeKey() {
+        if !pages.marks.escape(), let w = window, w.styleMask.contains(.fullScreen) {
+            w.toggleFullScreen(nil)
+        }
+    }
+
+    // MARK: marks (task 11.3e1)
+
+    /// An entry of the highlight-colour submenu: `highlight COLOR` (Viewer.highlight).
+    @objc func chooseHighlightColor(_ sender: Any?) {
+        guard pdf != nil, let tag = (sender as? NSMenuItem)?.tag, (0..<5).contains(tag) else { return }
+        pages.marks.highlight(Int32(tag))
+        updateChrome()
+    }
+
+    /// A tool button of the toolbar (Viewer.tool).
+    @objc func performSafePdfTool(_ sender: Any?) {
+        guard pdf != nil, let tag = (sender as? NSToolbarItem)?.tag ?? (sender as? NSMenuItem)?.tag, tag >= 0
+        else { return }
+        pages.marks.tool(Int32(tag))
+        updateChrome()
     }
 
     // MARK: titlebar flags
@@ -219,7 +258,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             c.can_back = pages.history.canBack
             c.can_forward = pages.history.canForward
             c.has_sel = pages.text.selection != nil
-            // TODO(11.3d2/e): outline, marks, undo and dirty flags.
+            // Task 11.3e1: the selected mark, undo / redo and unsaved changes (the store).
+            c.has_mark = pages.marks.markSel != nil
+            if let st = pages.marks.model?.state {
+                c.dirty = st.dirty != 0
+                c.can_undo = st.can_undo != 0
+                c.can_redo = st.can_redo != 0
+            }
         }
         return c
     }
@@ -248,6 +293,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         chromeToolbar?.setViewChoice(pages.canvas.modes.choice)
         sidebar.isShown = !(sidebarItem?.isCollapsed ?? true)
         sidebar.sync()
+        // Task 11.3e1: the edited dot (unsaved marks) and the pressed tool.
+        window?.isDocumentEdited = pdf != nil && pages.marks.dirty
+        chromeToolbar?.setPressedTool(Int32(pages.marks.pressedTool))
     }
 
     // MARK: page field (Toolbar.pageEntry)
@@ -296,6 +344,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         if let ed = fieldEditor {
             if cmd == Commands.id(SAFEPDF_CMD_COPY) { ed.copy(nil); return true }
             if cmd == Commands.id(SAFEPDF_CMD_SELECT_ALL) { ed.selectAll(nil); return true }
+            if cmd == Commands.id(SAFEPDF_CMD_UNDO) { ed.undoManager?.undo(); return true }
+            if cmd == Commands.id(SAFEPDF_CMD_REDO) { ed.undoManager?.redo(); return true }
         }
         guard isEnabled(cmd) else { return false }
         guard pdf != nil else {
@@ -364,6 +414,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             pages.text.copy()
         case Commands.id(SAFEPDF_CMD_SELECT_ALL):
             pages.text.selectAll()
+        case Commands.id(SAFEPDF_CMD_UNDO), Commands.id(SAFEPDF_CMD_REDO):
+            pages.marks.undoRedo(undo: cmd == Commands.id(SAFEPDF_CMD_UNDO))
+        case Commands.id(SAFEPDF_CMD_HIGHLIGHT):
+            pages.marks.highlight(nil)
+        case Commands.id(SAFEPDF_CMD_ADD_NOTE):
+            pages.marks.addNote(at: nil)
+        case Commands.id(SAFEPDF_CMD_DELETE_MARK):
+            pages.marks.deleteSelected()
+        case Commands.id(SAFEPDF_CMD_HL_TOOL):
+            pages.marks.toggleHighlightTool()
+        case Commands.id(SAFEPDF_CMD_SHOW_ALL):
+            pages.marks.toggleShowAll()
         default:
             return false
         }
@@ -417,8 +479,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         }
         if item.action == MainMenu.commandSelector {
             if let ed = fieldEditor {
-                if item.tag == Commands.id(SAFEPDF_CMD_COPY) { return ed.selectedRange.length > 0 }
+                if item.tag == Commands.id(SAFEPDF_CMD_COPY) { return ed.selectedRange().length > 0 }
                 if item.tag == Commands.id(SAFEPDF_CMD_SELECT_ALL) { return true }
+                if item.tag == Commands.id(SAFEPDF_CMD_UNDO) { return ed.undoManager?.canUndo ?? false }
+                if item.tag == Commands.id(SAFEPDF_CMD_REDO) { return ed.undoManager?.canRedo ?? false }
+            }
+            // The Edit menu's check entries (Menu.hlToolVar, showAllVar).
+            if item.tag == Commands.id(SAFEPDF_CMD_HL_TOOL) {
+                item.state = pdf != nil && pages.marks.ui.tool != 0 ? .on : .off
+            }
+            if item.tag == Commands.id(SAFEPDF_CMD_SHOW_ALL) {
+                item.state = pdf != nil && pages.marks.ui.show_all != 0 ? .on : .off
             }
             if let on = Self.radioOn(item.tag, modes: pages.canvas.modes) {
                 item.state = pdf != nil && on ? .on : .off
@@ -429,6 +500,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             return isEnabled(item.tag)
         }
         if item.action == MainMenu.actionSelector { return pdf != nil }
+        if item.action == MainMenu.colorSelector {
+            item.state = pdf != nil && Int32(item.tag) == pages.marks.hlColor ? .on : .off
+            return pdf != nil && pages.marks.model != nil
+        }
         if item.action == DocumentToolbar.zoomSelector || item.action == DocumentToolbar.viewSelector {
             return pdf != nil
         }
@@ -437,6 +512,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
 
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         if item.action == MainMenu.commandSelector { return isEnabled(item.tag) }
+        if item.action == MainMenu.toolSelector { return item.isEnabled && pages.marks.model != nil }
         return item.isEnabled
     }
 
@@ -543,10 +619,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         documentFullScreen = false
     }
 
-    /// Escape leaves full screen (the Tk viewer's escapeWindow).
+    /// Escape: the marks' transients first, then leaving full screen (the Tk viewer's escape and
+    /// escapeWindow).
     override func cancelOperation(_ sender: Any?) {
-        if let w = window, w.styleMask.contains(.fullScreen) {
-            w.toggleFullScreen(nil)
-        }
+        escapeKey()
     }
 }

@@ -2,6 +2,7 @@ import SafePdf.Api
 import SafePdf.Shell.App.Marks
 import SafePdf.Shell.App.Save
 import SafePdf.Shell.App.Xfdf
+import SafePdf.Shell.App.Toolbar
 
 /-!
 # C API v2: marks, save and XFDF (task 11.3a3; Plan.md §6 Phases 9–11, §4 C7, §8)
@@ -600,5 +601,176 @@ def xfdfImport (h : Handle) (bytes : ByteArray) :
 /-- The message of an `IO` error (the only `IO` here is the clock). -/
 @[export safepdf_marks_lean_error_text]
 def errorText (e : IO.Error) : String := toString e
+
+/-! ## Tool state, bubble and parameters (task 11.3e1)
+
+The rules of the Tk viewer's floating toolbars and tool modes (`Bubble`, `Toolbar`), for the
+native shell's tools, selection bubble and pop-overs: nothing here decides anything itself. -/
+
+/-- The bytes of an RGB triple, as numbers. -/
+def rgbNums (c : Marks.Rgb) : List Float := [natF c.1, natF c.2.1, natF c.2.2]
+
+/-- `0xRRGGBB` of an RGB triple. -/
+def rgbWord (c : Marks.Rgb) : Nat := c.1 % 256 * 65536 + c.2.1 % 256 * 256 + c.2.2 % 256
+
+/-- **The tools' parameters** (layout read by `macos/safepdf_marks.c`): the highlight palette
+(`Color.all`, R G B each), the Add text / Draw palette (`Bubble.EdPop.palette`: count, then R G
+B each), the font size, thickness and opacity sliders (`Bubble.EdPop.fontSize`, `thickness`,
+`opacity`: lo, hi, step, the default of `Bubble.Ui`), the default text and line colours
+(`Bubble.Ui`), `Core.Write.Annots.ftPad`, `lineFactor` and `Marks.noteSize`. `_u` is ignored. -/
+@[export safepdf_marks_lean_tool_params]
+def toolParams (_u : UInt8) : FloatArray :=
+  let u : Bubble.Ui := {}
+  let sl (s : Bubble.Slider) (d : Nat) : List Float := [natF s.lo, natF s.hi, natF s.step, natF d]
+  ⟨(Color.all.flatMap (rgbNums ·.rgb) ++ [natF Bubble.EdPop.palette.length] ++
+    Bubble.EdPop.palette.flatMap rgbNums ++ sl Bubble.EdPop.fontSize u.ftSize ++
+    sl Bubble.EdPop.thickness u.inkThick ++ sl Bubble.EdPop.opacity u.inkOpacity ++
+    [natF (rgbWord u.ftColor), natF (rgbWord u.inkColor),
+     toF Core.Write.Annots.ftPad, toF Core.Write.Annots.lineFactor, toF Marks.noteSize]).toArray⟩
+
+/-- The editor mode as a number: 0 none, 1 Add text, 2 Draw. -/
+def editorCode : Bubble.Editor → Nat
+  | .none => 0
+  | .text => 1
+  | .draw => 2
+
+/-- The editor mode of a number (anything else: none). -/
+def editorOf (n : Nat) : Bubble.Editor :=
+  match n with
+  | 1 => .text
+  | 2 => .draw
+  | _ => .none
+
+/-- The mode as `safepdf_tool_mode` (`Toolbar.Mode.of`): 0 select, 1 highlight, 2 text,
+3 draw. -/
+def modeCode (u : Bubble.Ui) : Nat :=
+  match Toolbar.Mode.of u with
+  | .select => 0
+  | .highlight => 1
+  | .text => 2
+  | .draw => 3
+
+/-- A tool state as numbers: tool, pop-over, show all, picker, editor, editor pop-over,
+thickness, font size, text colour, line colour, line thickness, line opacity. -/
+def uiNums (u : Bubble.Ui) : List Float :=
+  let b (x : Bool) : Float := if x then 1 else 0
+  [b u.tool, b u.popover, b u.showAll, b u.picker, natF (editorCode u.editor), b u.edPop,
+   natF u.thickness, natF u.ftSize, natF (rgbWord u.ftColor), natF (rgbWord u.inkColor),
+   natF u.inkThick, natF u.inkOpacity]
+
+/-- A tool state from numbers (`uiNums`'s layout; missing or bad numbers: the defaults). -/
+def uiOf (a : FloatArray) : Bubble.Ui :=
+  let d : Bubble.Ui := {}
+  let n (i : Nat) (dflt : Nat) : Nat :=
+    match a.toList[i]? with
+    | some f => if f.isNaN || f.isInf || f < 0 || f > 4294967295.0 then dflt else f.toUInt32.toNat
+    | none => dflt
+  let b (i : Nat) (dflt : Bool) : Bool := n i (if dflt then 1 else 0) != 0
+  { tool := b 0 d.tool, popover := b 1 d.popover, showAll := b 2 d.showAll,
+    picker := b 3 d.picker, editor := editorOf (n 4 (editorCode d.editor)), edPop := b 5 d.edPop,
+    thickness := n 6 d.thickness, ftSize := n 7 d.ftSize,
+    ftColor := rgbOf (n 8 (rgbWord d.ftColor)).toUInt32,
+    inkColor := rgbOf (n 9 (rgbWord d.inkColor)).toUInt32,
+    inkThick := n 10 d.inkThick, inkOpacity := n 11 d.inkOpacity }
+
+/-- **A step of the tool state** (`op`): 0 the initial state, 1 the toolbar's Highlight button
+(`Ui.toolClick`, `arg` ≠ 0: there is a selection), 2 Edit → Highlight tool (`Ui.toggleTool`),
+3 the Add text / Draw button (`Ui.selectEditor`, `arg` the editor 1 or 2), 4 the Select text
+button (`Toolbar.selectTool`), 5 Escape (`Ui.escape`). The new state (`uiNums`), then its mode
+(`modeCode`) and whether the Highlight button highlights the selection (op 1). Empty for an
+unknown op. -/
+@[export safepdf_marks_lean_ui_step]
+def uiStep (ui : FloatArray) (op arg : UInt8) : FloatArray :=
+  let u := uiOf ui
+  let r : Option (Bubble.Ui × Bool) := match op.toNat with
+    | 0 => some ({}, false)
+    | 1 => some (u.toolClick (arg != 0))
+    | 2 => some (u.toggleTool, false)
+    | 3 => some (u.selectEditor (editorOf arg.toNat), false)
+    | 4 => some (Toolbar.selectTool u, false)
+    | 5 => some (u.escape, false)
+    | _ => none
+  match r with
+  | none => FloatArray.empty
+  | some (u, hl) => ⟨(uiNums u ++ [natF (modeCode u), if hl then 1 else 0]).toArray⟩
+
+#guard (uiStep (uiStep FloatArray.empty 0 0) 1 0).toList.take 2 == [1, 1]
+#guard (uiStep (uiStep FloatArray.empty 0 0) 1 1).toList.getLast? == some 1
+#guard (uiStep (uiStep (uiStep FloatArray.empty 0 0) 3 2) 4 0).toList[12]? == some 0
+
+/-- The bubble kind as a number: 0 float, 1 edit, 2 editor. -/
+def kindNum : Bubble.Kind → Nat
+  | .float => 0
+  | .edit => 1
+  | .editor => 2
+
+/-- The bubble kind of a number. -/
+def kindOfNum : Nat → Option Bubble.Kind
+  | 0 => some .float
+  | 1 => some .edit
+  | 2 => some .editor
+  | _ => none
+
+/-- A bubble button as a number: 0 highlight, 1 colour, 2 comment, 3 delete. -/
+def btnNum : Bubble.Btn → Nat
+  | .highlight => 0
+  | .color => 1
+  | .comment => 2
+  | .delete => 3
+
+/-- **The bubble to show** (`Bubble.kindFor`): 0 float, 1 edit, 255 none. -/
+@[export safepdf_marks_lean_bubble_kind]
+def bubbleKind (selHere markHere showAll : UInt8) : UInt8 :=
+  let u : Bubble.Ui := { showAll := showAll != 0 }
+  match Bubble.kindFor (selHere != 0) (markHere != 0) u with
+  | some k => (kindNum k).toUInt8
+  | none => 255
+
+/-- **A bubble's layout** (`Bubble.Kind.layout`): width and height, then per button its number
+(`btnNum`), its command (`Btn.cmd?`, index in `Menu.Cmd.all`, -1 none) and its range x0 x1
+from the bubble's left edge; the tooltips (`Btn.tip`) in the same order. Empty for an unknown
+kind. -/
+@[export safepdf_marks_lean_bubble_layout]
+def bubbleLayout (kind : UInt8) : FloatArray × Array String :=
+  match kindOfNum kind.toNat with
+  | none => (FloatArray.empty, #[])
+  | some k =>
+    let cmd (b : Bubble.Btn) : Float :=
+      match b.cmd? with
+      | some c => natF (Menu.Cmd.all.idxOf c)
+      | none => -1
+    (⟨(#[toF k.width, toF Bubble.height] ++ (k.layout.flatMap fun (b, x0, x1) =>
+        [natF (btnNum b), cmd b, toF x0, toF x1]).toArray)⟩,
+     (k.layout.map fun (b, _, _) => b.tip).toArray)
+
+/-- **Where a bubble goes** (`Bubble.place`): `sel` the selection's rectangles in canvas
+coordinates (`x0 y0 x1 y1` each, y down), the bubble's size `w × h`, the area `x0 y0 x1 y1`.
+The rectangle (4 numbers), or empty when there is none or a number is refused. -/
+@[export safepdf_marks_lean_bubble_place]
+def bubblePlace (sel : FloatArray) (w h : Float) (area : FloatArray) : FloatArray :=
+  let r : Option Bubble.Rect := do
+    let rs ← boxesOf sel
+    let ar ← boxesOf area
+    let a ← ar.head?
+    let w ← ratOfFloat w
+    let h ← ratOfFloat h
+    Bubble.place (rs.map fun b => ⟨b.llx, b.lly, b.urx, b.ury⟩) w h ⟨a.llx, a.lly, a.urx, a.ury⟩
+  match r with
+  | some r => ⟨#[toF r.x0, toF r.y0, toF r.x1, toF r.y1]⟩
+  | none => FloatArray.empty
+
+/-- **Escape over the open transients** (`Toolbar.onEscape`): `opened` and the result are bit
+masks over `Toolbar.Transient.order` (bit 0 the note popup, 1 the colour picker, 2 the
+Highlight pop-over, 3 the Add text / Draw pop-over, 4 the go-to bar, 5 the find bar). -/
+@[export safepdf_marks_lean_escape_closes]
+def escapeCloses (opened : UInt32) : UInt32 :=
+  let order := Toolbar.Transient.order
+  let idx := List.range order.length
+  let open_ := (idx.zip order).filterMap fun (i, t) =>
+    if (opened.toNat / 2 ^ i) % 2 == 1 then some t else none
+  let closed := Toolbar.onEscape open_
+  ((idx.zip order).foldl (fun acc (i, t) => if closed.contains t then acc + 2 ^ i else acc) 0).toUInt32
+
+#guard escapeCloses 0b101 == 0b1 && escapeCloses 0b110100 == 0b100 && escapeCloses 0 == 0
 
 end SafePdf.Shell.FfiMarks

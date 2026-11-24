@@ -131,6 +131,8 @@ final class PageViewController: NSViewController {
     static let crossFadeSeconds: CFTimeInterval = 0.18
     /// Selection, copy, find and links on the pages (task 11.3d1).
     let text = TextController()
+    /// Marks: the tools, highlights and notes, free text and drawings, the bubble (task 11.3e1).
+    let marks = MarksController()
 
     init(frame: NSRect = NSRect(x: 0, y: 0, width: 800, height: 900)) {
         initialFrame = frame
@@ -190,6 +192,7 @@ final class PageViewController: NSViewController {
 
         canvas.onSharpSwap = { [weak self] in self?.crossFade() }
         text.attach(self)
+        marks.attach(self)
         canvas.onKeyScroll = { [weak self] dx, dy, pages in self?.keyScroll(dx: dx, dy: dy, pages: pages) }
         scrollView.onCommandScroll = { [weak self] zoomIn, loc in
             guard let self else { return }
@@ -238,6 +241,7 @@ final class PageViewController: NSViewController {
         pill.fadeOut(animated: false)
         text.reset(doc)
         canvas.setDocument(doc, canvas: canvasSize)
+        marks.reset(doc)
         var target = ScrollTarget.top
         var notes: [String] = []
         if let doc {

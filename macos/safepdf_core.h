@@ -372,6 +372,11 @@ typedef struct {
     size_t len;
 } safepdf_bytes;
 
+/** A copy of the bytes the document was opened from (the capped read's, or the buffer given to
+    safepdf_doc_open_bytes; task 11.3e1: the GUI creates the marks store from them, see
+    safepdf_marks.h). NULL when `doc` is NULL or out of memory; free with safepdf_free_bytes. */
+safepdf_bytes *safepdf_doc_bytes(const safepdf_document *doc);
+
 /** A row of the layers panel (the Tk viewer's `Sidebar.layerRows`). */
 typedef struct {
     size_t depth;

@@ -1,5 +1,5 @@
 // Commands.swift — which exported commands this shell implements yet (tasks 11.3b, 11.3c1,
-// 11.3c2, 11.3d1).
+// 11.3c2, 11.3d1, 11.3e1).
 // Plan.md §6 Phase 11; docs/macos-design.md §4 (the 11.3c/d/e split). Every Menu.Cmd is in the
 // menubar; a command not implemented yet stays disabled, and `pendingTask` names the task that
 // implements it.
@@ -26,18 +26,20 @@ enum Commands {
         id(SAFEPDF_CMD_SPREAD_NONE), id(SAFEPDF_CMD_SPREAD_ODD), id(SAFEPDF_CMD_SPREAD_EVEN),
         id(SAFEPDF_CMD_GOTO_PAGE), id(SAFEPDF_CMD_BACK), id(SAFEPDF_CMD_FORWARD),
         id(SAFEPDF_CMD_COPY), id(SAFEPDF_CMD_SELECT_ALL), id(SAFEPDF_CMD_FIND),
+        // Task 11.3e1: marks on the page, the tools, undo / redo (MarksController).
+        id(SAFEPDF_CMD_UNDO), id(SAFEPDF_CMD_REDO), id(SAFEPDF_CMD_HIGHLIGHT),
+        id(SAFEPDF_CMD_ADD_NOTE), id(SAFEPDF_CMD_DELETE_MARK), id(SAFEPDF_CMD_HL_TOOL),
+        id(SAFEPDF_CMD_SHOW_ALL),
     ]
 
     /// The task that implements a command not implemented yet (nil when implemented).
     static func pendingTask(_ cmd: Int) -> String? {
         if implemented.contains(cmd) { return nil }
-        let marks: Set<Int> = [
+        let save: Set<Int> = [
             id(SAFEPDF_CMD_SAVE), id(SAFEPDF_CMD_SAVE_AS), id(SAFEPDF_CMD_IMPORT_XFDF),
-            id(SAFEPDF_CMD_EXPORT_XFDF), id(SAFEPDF_CMD_UNDO), id(SAFEPDF_CMD_REDO),
-            id(SAFEPDF_CMD_HIGHLIGHT), id(SAFEPDF_CMD_ADD_NOTE), id(SAFEPDF_CMD_DELETE_MARK),
-            id(SAFEPDF_CMD_HL_TOOL), id(SAFEPDF_CMD_SHOW_ALL),
+            id(SAFEPDF_CMD_EXPORT_XFDF),
         ]
-        if marks.contains(cmd) { return "11.3e" }
+        if save.contains(cmd) { return "11.3e2" }
         return "11.3d" // the rest (none today: every viewing and text command is implemented)
     }
 }
