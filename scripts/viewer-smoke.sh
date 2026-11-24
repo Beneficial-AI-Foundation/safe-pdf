@@ -1324,7 +1324,14 @@ if {$vname ne ""} {
   puts $f "send-async $vname: $code $r"
   while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50 }
   puts $f "sent-file: [file exists $dir/sent] after [expr {[clock milliseconds] - $t1}] ms"
-  if {[file exists $dir/sent]} { incr ok }
+  if {[file exists $dir/sent]} { incr ok } elseif {$plat ne "aqua"} {
+    # Task 10.c1 diagnostic (X11): a synchronous send reports why the viewer refused the
+    # script (Tk ignores sends when the X server's host list lets other hosts in: "X server
+    # insecure"); one the viewer never services returns once it exits (at most ~20 s).
+    flush $f
+    set code [catch {send $vname {list [package provide Tk] [tk appname]}} r]
+    puts $f "send-sync $vname: $code $r"
+  }
 } else {
   set cands [expr {$plat eq "aqua" ? {tk viewer safe-pdf} : [concat [winfo interps] tk viewer safe-pdf]}]
   foreach i [lsort -unique $cands] {
@@ -1354,8 +1361,24 @@ TCL
 *Entry.textVariable: ::safepdf::btn(cmd,.bar.save)
 *Toplevel.container: 1
 XD
+    # X11 (task 10.c1): Tk executes a received send only when the X server is "secure" (access
+    # control on, no host-based entries but SI:localuser/localgroup). The test's own server
+    # gets its host list printed (xhost.txt) and cleared of other entries first; the
+    # lockdown run's expectations do not depend on it (its viewer has no send at all).
     env HOME="$d/home" SAFEPDF_VIEWER_SMOKE="$d" SAFEPDF_VIEWER_SMOKE_MODE=lockdown "$@" \
-      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5" "$6"; wait $v' _ \
+      timeout 60 "${wrap[@]}" bash -c '
+        if [ "$6" != aqua ] && command -v xhost >/dev/null 2>&1; then
+          { echo "before:"; xhost; } > "$5/xhost.txt" 2>&1
+          xhost - >/dev/null 2>&1
+          xhost 2>/dev/null | tail -n +2 | while read -r h; do
+            case "$h" in
+              SI:localuser:*|SI:localgroup:*|"") ;;
+              *) xhost "-$(printf %s "${h%%:*}" | tr "[:upper:]" "[:lower:]"):${h#*:}" >/dev/null 2>&1 ;;
+            esac
+          done
+          { echo "after:"; xhost; } >> "$5/xhost.txt" 2>&1
+        fi
+        "$1" "$2" & v=$!; "$3" "$4" "$5" "$6"; wait $v' _ \
       "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d" "$platform"
   }
   # aqua_send_works: two plain wish processes, one asynchronous send between them (15 s).
@@ -1420,6 +1443,7 @@ sys.exit(1 if errs else 0)
 ' "$work/out-lock" "$platform" || fail=1
   lock_run "$work/out-drive" SAFEPDF_VIEWER_DRIVE=1 || { echo "FAIL: drive-hook run failed" >&2; fail=1; }
   cat "$work/out-drive/attack.txt" 2>/dev/null || true
+  [ ! -f "$work/out-drive/xhost.txt" ] || sed 's/^/xhost: /' "$work/out-drive/xhost.txt"
   if ! grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null; then
     # The control failed. If Tk Aqua cannot deliver a send between two plain wish processes
     # either (task 10.19: AppleEvents are not dispatched in a session with a locked screen),
@@ -1689,7 +1713,8 @@ case_begin "1o wheelflow"
 #     (or the last page) without going back; the longest run of events that move nothing is at
 #     most the page-turn push (a quarter view of trackpad travel on a page that fits, a notch
 #     for the wheel) and zero in the vertical modes; no step jumps further than one event plus
-#     the push carried onto a new page.
+#     the push carried onto a new page. Tk 8.6 (Ubuntu's tk-dev, the Linux CI) has no
+#     <TouchpadScroll>: there the trackpad bursts are skipped (task 10.c1).
 wheelflow_case() {  # wheelflow_case NAME PDF
   local d="$work/wheelflow-$1"
   SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2" \
@@ -1703,10 +1728,17 @@ v = dict(l.split(": ", 1) for l in lines if ": " in l)
 if v.get("default") != "scroll=vertical spread=none radio=vertical none continuous=1":
     errs.append("a fresh file is not in Vertical Scrolling: %r" % v.get("default"))
 seen = 0
+tk = v.get("tk", "")
 for l in lines:
     if not l.startswith("flow-"): continue
     seen += 1
     label, rest = l[5:].split(": ", 1)
+    # Task 10.c1: Tk 8.6 (Ubuntu) has no <TouchpadScroll>; only the trackpad bursts may skip.
+    if rest.startswith("skipped"):
+        if not label.endswith("-pad") or "touchpad=false" not in tk:
+            errs.append("%s skipped with %r" % (label, tk))
+        print("wheelflow %s: %s" % (name, l))
+        continue
     f = dict(t.split("=", 1) for t in rest.split())
     view = int(f["view"])
     pad = label.endswith("-pad")
@@ -1720,9 +1752,10 @@ for l in lines:
     if int(f["max-step"]) > step_max: errs.append("%s jumped %s px (max %d)" % (label, f["max-step"], step_max))
     print("wheelflow %s: %s" % (name, l))
 if seen != 10: errs.append("expected 10 bursts, got %d (%r)" % (seen, lines[:3]))
+if "touchpad=false" in tk and sys.argv[3] == "aqua": errs.append("Tk Aqua without <TouchpadScroll>: %r" % tk)
 for e in errs: print("FAIL: wheelflow %s: %s" % (name, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
-' "$1" "$d/wheelflow.txt" || fail=1
+' "$1" "$d/wheelflow.txt" "$platform" || fail=1
 }
 wheelflow_case four "$work/m9four.pdf"
 for p in $m9papers; do

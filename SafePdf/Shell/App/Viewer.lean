@@ -947,15 +947,80 @@ proc ::safepdf::rrect {c x0 y0 x1 y1 r args} {
 # Translucent highlight fills (task 10.10; Tk Aqua has no stipples): a canvas image item showing
 # a photo filled with colour rgb (6 hex digits) at alpha a (2 hex digits), one photo per colour,
 # alpha and size, shared by every item of that size (search hits of one word, full lines).
+# Task 10.c1: Tk 9 takes `#RRGGBBAA` in `photo put`; Tk 8.6 (Ubuntu's tk-dev) does not (\"can't
+# parse color\") and has no `get -withalpha`. There the fill tiles a one-pixel RGBA PNG (built
+# here; Tk 8.6 reads PNG alpha and blends partly transparent photos on X11) with `copy -to`,
+# and `::safepdf::pixel` reads a pixel back as a one-pixel PNG. Decided once, at start;
+# SAFEPDF_TINT_PNG=1 forces the Tk 8.6 paths (the smoke test runs them on Aqua).
+set ::safepdf::tintRgba [expr {![catch {
+  image create photo ::safepdf::tintProbe -width 1 -height 1
+  ::safepdf::tintProbe put {{#3874f25a}}
+}]}]
+catch {image delete ::safepdf::tintProbe}
+set ::safepdf::getAlpha [expr {![catch {
+  image create photo ::safepdf::tintProbe -width 1 -height 1
+  ::safepdf::tintProbe get 0 0 -withalpha
+}]}]
+catch {image delete ::safepdf::tintProbe}
+if {[info exists ::env(SAFEPDF_TINT_PNG)] && $::env(SAFEPDF_TINT_PNG) eq \"1\"} {
+  set ::safepdf::tintRgba 0; set ::safepdf::getAlpha 0
+}
+# A PNG chunk: length, type, data, CRC-32 of type and data.
+proc ::safepdf::pngChunk {type data} {
+  set td [encoding convertto iso8859-1 $type]$data
+  return [binary format I [string length $data]]$td[binary format I [zlib crc32 $td]]
+}
+# A one-pixel PNG (8-bit RGBA, colour type 6) of colour rgb (6 hex digits) at alpha a (2 hex
+# digits).
+proc ::safepdf::rgbaPng {rgb a} {
+  scan $rgb$a %2x%2x%2x%2x r g b al
+  set px [binary format c5 [list 0 $r $g $b $al]]
+  return [binary format H* 89504e470d0a1a0a][::safepdf::pngChunk IHDR [binary format IIc5 1 1 {8 6 0 0 0}]][::safepdf::pngChunk IDAT [zlib compress $px]][::safepdf::pngChunk IEND {}]
+}
+# Fills photo img (w x h) with colour rgb at alpha a.
+proc ::safepdf::tintFill {img rgb a w h} {
+  if {$::safepdf::tintRgba} {
+    $img put [list [list #$rgb$a]] -to 0 0 $w $h
+    return
+  }
+  set src ::safepdf::tintpx_${rgb}_$a
+  if {[catch {image type $src}]} {
+    image create photo $src -format png -data [binary encode base64 [::safepdf::rgbaPng $rgb $a]]
+  }
+  $img copy $src -to 0 0 $w $h -compositingrule set
+}
 proc ::safepdf::tint {c x0 y0 x1 y1 rgb a tags} {
   set w [expr {$x1 - $x0}]; set h [expr {$y1 - $y0}]
   if {$w < 1 || $h < 1} return
   set img ::safepdf::tint_${rgb}_${a}_${w}_$h
   if {[catch {image type $img}]} {
     image create photo $img -width $w -height $h
-    $img put [list [list #$rgb$a]] -to 0 0 $w $h
+    ::safepdf::tintFill $img $rgb $a $w $h
   }
   $c create image $x0 $y0 -anchor nw -image $img -tags $tags
+}
+# The pixel (x, y) of photo img as `R G B A` (smoke probes): Tk 9's `get -withalpha`; on Tk 8.6
+# the pixel written as a one-pixel PNG and decoded (IHDR colour type, inflated IDAT; with one
+# pixel every PNG filter leaves the bytes as they are).
+proc ::safepdf::pixel {img x y} {
+  if {$::safepdf::getAlpha} { return [$img get $x $y -withalpha] }
+  set d [$img data -format png -from $x $y [expr {$x + 1}] [expr {$y + 1}]]
+  if {[string range $d 1 3] ne \"PNG\"} { set d [binary decode base64 $d] }
+  set i 8; set idat {}; set ct 6
+  while {$i + 12 <= [string length $d]} {
+    binary scan $d @${i}Iua4 n t
+    set body [string range $d [expr {$i + 8}] [expr {$i + 7 + $n}]]
+    if {$t eq \"IHDR\"} { binary scan $body @9cu ct }
+    if {$t eq \"IDAT\"} { append idat $body }
+    incr i [expr {12 + $n}]
+  }
+  binary scan [zlib decompress $idat] @1cu* px
+  switch -- $ct {
+    0 { return [list [lindex $px 0] [lindex $px 0] [lindex $px 0] 255] }
+    4 { return [list [lindex $px 0] [lindex $px 0] [lindex $px 0] [lindex $px 1]] }
+    2 { return [concat [lrange $px 0 2] 255] }
+    default { return [lrange $px 0 3] }
+  }
 }
 # Deletes the tint photos no canvas item shows any more (after a redraw of the overlays).
 proc ::safepdf::tintGc {} {
@@ -7841,6 +7906,12 @@ def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
     radio={← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} \
     continuous={← run ["set", "::safepdf::continuous"]}"
   let trace ← IO.mkRef (#[] : Array String)
+  let tk ← run ["package", "provide", "Tk"]
+  let touchpad ← try
+      discard <| run ["bind", ".c", "<TouchpadScroll>"]
+      pure true
+    catch _ => pure false
+  out := out.push s!"tk: {tk} touchpad={touchpad}"
   let pad (i : Nat) : IO Unit :=
     sendEvent ".c" "<TouchpadScroll>"
       ["-delta", toString (touchpadDelta ([0, 1, 0, -1].getD (i % 4) 0) (-12)), "-x", "300", "-y", "300"]
@@ -7855,7 +7926,10 @@ def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
     setViewMode st "spread" sp
     setMode st z none
     settle st
-    out := out.push (← flowBurst st trace s!"{label}-pad" pad 4 3000)
+    -- Task 10.c1: Tk 8.6 has no `<TouchpadScroll>` (generated ones are dropped, and the
+    -- burst would run its 3000 events without moving).
+    if touchpad then out := out.push (← flowBurst st trace s!"{label}-pad" pad 4 3000)
+    else out := out.push s!"flow-{label}-pad: skipped (Tk {tk} has no <TouchpadScroll>)"
     out := out.push (← flowBurst st trace s!"{label}-fine" fine 4 3000)
   IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") ("\n".intercalate out.toList ++ "\n")
   IO.FS.writeFile ((dir : System.FilePath) / "wheelflow-trace.txt")
@@ -10315,6 +10389,7 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   settle st
   discard <| run ["update"]
   out := out.push s!"aqua: {!(← st.get).stipple}"
+  out := out.push s!"tk: {← run ["package", "provide", "Tk"]} rgba-put={← run ["set", "::safepdf::tintRgba"]} get-alpha={← run ["set", "::safepdf::getAlpha"]}"
   let .ok ix ← pageIndex st (← st.get).page | do
     IO.FS.writeFile (file "tint.txt") "error: no text index\n"
     discard <| run ["destroy", "."]
@@ -10343,7 +10418,7 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
         let img ← run [".c", "itemcget", id, "-image"]
         let px ← match ((← run [".c", "coords", id]).splitOn " ").filterMap View.parseDecimal with
           | [ix0, iy0] =>
-            try run [img, "get", toString (x - ix0.floor), toString (y - iy0.floor), "-withalpha"]
+            try run ["::safepdf::pixel", img, toString (x - ix0.floor), toString (y - iy0.floor)]
             catch _ => pure "outside"
           | _ => pure "?"
         parts := parts.push s!"{tag}={kind}({px})"
@@ -10416,7 +10491,7 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   let (w, h) := (← run ["image", "width", pg], ← run ["image", "height", pg])
   let fill : IO Unit := do
     discard <| run ["image", "create", "photo", "::safepdf::tintProbe", "-width", w, "-height", h]
-    discard <| run ["::safepdf::tintProbe", "put", "{#3874f25a}", "-to", "0", "0", w, h]
+    discard <| run ["::safepdf::tintFill", "::safepdf::tintProbe", Tint.sel.rgb, Tint.sel.alphaHex, w, h]
     discard <| run ["image", "delete", "::safepdf::tintProbe"]
   out := out.push s!"ms-fullpage-photo: {← timeMs 5 fill} size={w}x{h}"
   -- 5. Closing the search and dropping the selection leaves no fill and no photo.
