@@ -1,4 +1,4 @@
-// Document.swift — an open PDF over the C API v2 (task 11.3b).
+// Document.swift — an open PDF over the C API v2 (task 11.3b; exact page geometry, 11.3c1).
 // Plan.md §6 Phase 11; docs/macos-design.md §3 decision 4 (rendering through the confined
 // document worker; the GUI only reads the file through the capped read and holds the handle).
 
@@ -15,6 +15,11 @@ import SafePdfC
     let pageCount: Int
     /// Displayed page sizes in points (CropBox, /Rotate applied).
     let pageSizes: [CGSize]
+    /// The pages' geometry for `safepdf_view_layout`, read once at open: each page's exact
+    /// CropBox and /Rotate (`safepdf_doc_page_geom`, task 11.3c1). A page whose geometry the C
+    /// API cannot give (a coordinate beyond 64 bits) falls back to its displayed size as a box at
+    /// the origin, rounded to 1/64 pt, with rotation 0.
+    let geometry: [safepdf_page_geom]
     let repaired: Bool
     let encrypted: Bool
 
@@ -46,24 +51,25 @@ import SafePdfC
             }
         }
         pageSizes = sizes
+        var geoms: [safepdf_page_geom] = []
+        geoms.reserveCapacity(n)
+        for i in 0..<n {
+            var g = safepdf_page_geom()
+            if safepdf_doc_page_geom(h, i, &g) != 0 {
+                let zero = safepdf_rat(num: 0, den: 1)
+                g = safepdf_page_geom(box: safepdf_rat_box(llx: zero, lly: zero,
+                                                           urx: Core.rat(Double(sizes[i].width)),
+                                                           ury: Core.rat(Double(sizes[i].height))),
+                                      rotate: 0)
+            }
+            geoms.append(g)
+        }
+        geometry = geoms
         repaired = safepdf_doc_is_repaired(h) != 0
         encrypted = safepdf_doc_is_encrypted(h) != 0
     }
 
     deinit {
         safepdf_doc_release(handle)
-    }
-
-    /// The pages' geometry for `safepdf_view_layout`. The C API reports displayed sizes as
-    /// doubles with /Rotate already applied, so each page is given as a box at the origin with
-    /// rotation 0, its sides rounded to 1/64 pt. TODO(11.3c): an exact CropBox and /Rotate per
-    /// page (needs a C API addition, `safepdf_doc_page_geom`) for user rotation.
-    func geometry() -> [safepdf_page_geom] {
-        pageSizes.map { s in
-            let zero = safepdf_rat(num: 0, den: 1)
-            let box = safepdf_rat_box(llx: zero, lly: zero, urx: Core.rat(Double(s.width)),
-                                      ury: Core.rat(Double(s.height)))
-            return safepdf_page_geom(box: box, rotate: 0)
-        }
     }
 }

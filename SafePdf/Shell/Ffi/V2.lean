@@ -368,4 +368,70 @@ def layersToggle (d : Handle) (state : ByteArray) (row : USize) : IO ByteArray :
       | none => throw (IO.userError "malformed layers state")
     return Flat.state (App.Sidebar.layerToggle c st (App.Sidebar.layerRows c) row.toNat)
 
+/-! ## Page geometry (task 11.3c1) -/
+
+/-- Whether `v` fits a 64-bit signed integer. -/
+def fitsI64 (v : Int) : Bool := decide (-(2 ^ 63) ≤ v) && decide (v < 2 ^ 63)
+
+/-- Appends `v` as eight little-endian bytes in two's complement (callers check `fitsI64`). -/
+def putI64 (b : ByteArray) (v : Int) : ByteArray := Flat.putU64 b (v % 2 ^ 64).toNat
+
+/-- Degrees of a rotation (0, 90, 180, 270). -/
+def rotDeg : Doc.Rotation → Nat
+  | .r0 => 0 | .r90 => 90 | .r180 => 180 | .r270 => 270
+
+/-- The integers of a page's geometry, as `safepdf_page_geom` (`macos/safepdf_view.h`) holds
+it: the CropBox's `llx lly urx ury`, each as numerator and (positive) denominator of the exact
+rational, then `/Rotate` in degrees — what `FfiView.layoutW` reads per page. -/
+def geomInts (b : Raster.Geom.Box) (r : Doc.Rotation) : List Int :=
+  [b.llx.num, b.llx.den, b.lly.num, b.lly.den, b.urx.num, b.urx.den, b.ury.num, b.ury.den,
+    rotDeg r]
+
+#guard geomInts ⟨0, 0, 601 / 2, 400⟩ .r180 == [0, 1, 0, 1, 601, 2, 400, 1, 180]
+#guard geomInts ⟨-10, 0, 148819 / 250, 84189 / 100⟩ .r270 ==
+  [-10, 1, 0, 1, 148819, 250, 84189, 100, 270]
+#guard (geomInts ⟨(2 : Rat) ^ 64, 0, 1, 1⟩ .r0).all fitsI64 == false
+
+/-- **The geometry of page `i`** for layout (`safepdf_doc_page_geom`): its effective CropBox
+(`Box.ofRect` of the page's crop rectangle, exactly the box `Api.pageInfo`, the renderer and the
+Tk viewer's layout use) and its effective `/Rotate`, as `geomInts` in the wire format (nine
+64-bit little-endian integers). Empty when `i` is out of range or a coordinate does not fit
+64 bits. -/
+@[export safepdf_lean_doc_page_geom]
+def pageGeom (d : Handle) (i : USize) : ByteArray :=
+  match d.api.page i.toNat with
+  | .error _ => .empty
+  | .ok p =>
+    let xs := geomInts (Raster.Geom.Box.ofRect p.cropBox) p.rotate
+    if xs.all fitsI64 then xs.foldl putI64 .empty else .empty
+
+/-- The rotation of `q` quarter turns clockwise (`none` above 3). -/
+def rotOfQuarters : Nat → Option Doc.Rotation
+  | 0 => some .r0 | 1 => some .r90 | 2 => some .r180 | 3 => some .r270 | _ => none
+
+/-- **TESTS ONLY** (`safepdf_test_render_sync`, `macos/tests/core_test.c`): renders page `i` in
+this process, on the calling thread, with the call the worker answers a render with
+(`Raster.Glyph.renderDocPage` at `num / den` with `rot` extra quarter turns, a fresh decode
+budget, the substitute fonts found on this system, the default layers state). Returns the
+width and height (eight bytes each, `Flat.putU64`) followed by the RGBA bytes; throws an
+`IO.userError` for a bad page, zoom or rotation, or a core error. The C test compares it with
+the worker's answer to `safepdf_doc_render` byte for byte. -/
+@[export safepdf_lean_doc_test_render]
+def testRender (d : Handle) (i : USize) (num den : USize) (rot : UInt8) : IO ByteArray := do
+  if num == 0 || den == 0 then throw (IO.userError "zoom must be positive")
+  let some r := rotOfQuarters rot.toNat
+    | throw (IO.userError s!"rotation must be 0–3 quarter turns (got {rot})")
+  let zoom : Rat := (num.toNat : Rat) / (den.toNat : Rat)
+  match d.api.page i.toNat with
+  | .error e => throw (IO.userError e.message)
+  | .ok p =>
+    let a := d.api
+    let subst ← Fonts.loadSubstFonts a.limits
+    let res ← IO.lazyPure fun _ =>
+      (Raster.Glyph.renderDocPage a.limits a.doc p zoom r (Filter.Budget.init a.limits)
+        (subst := subst)).1
+    match res with
+    | .ok img => return Flat.putU64 (Flat.putU64 .empty img.w) img.h ++ img.data
+    | .error e => throw (IO.userError (Api.Error.pdf e).message)
+
 end SafePdf.Shell.Ffi.V2

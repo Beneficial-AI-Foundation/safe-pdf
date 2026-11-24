@@ -1,6 +1,7 @@
 /*
  * safepdf_core.c — the C API of safepdf_core.h over the Lean exports of
- * SafePdf/Shell/Ffi.lean (v1, task 11.1) and SafePdf/Shell/Ffi/V2.lean (v2, task 11.3a1).
+ * SafePdf/Shell/Ffi.lean (the error text) and SafePdf/Shell/Ffi/V2.lean (v2, task 11.3a1; page
+ * geometry and the test-only in-process render, task 11.3c1, which also retired v1).
  *
  * Reference counting: Lean v4.36 `@[export]` functions take every object argument as
  * OWNED (they consume one reference), so each call below that keeps using an object
@@ -27,14 +28,7 @@ extern void lean_initialize_thread(void);
 extern void lean_finalize_thread(void);
 extern lean_object *initialize_safe_x2dpdf_SafePdf_Shell_Ffi(uint8_t builtin);
 
-/* Lean exports (SafePdf/Shell/Ffi.lean, v1). */
-extern lean_object *safepdf_lean_open(lean_object *path);
-extern size_t safepdf_lean_page_count(lean_object *h);
-extern lean_object *safepdf_lean_page_size(lean_object *h, size_t i);
-extern lean_object *safepdf_lean_render(lean_object *h, size_t i, size_t num, size_t den);
-extern size_t safepdf_lean_image_width(lean_object *img);
-extern size_t safepdf_lean_image_height(lean_object *img);
-extern lean_object *safepdf_lean_image_data(lean_object *img);
+/* Lean exports (SafePdf/Shell/Ffi.lean). */
 extern lean_object *safepdf_lean_error_text(lean_object *e);
 
 /* Lean exports (SafePdf/Shell/Ffi/V2.lean, v2). */
@@ -46,6 +40,9 @@ extern lean_object *safepdf_lean_doc_open_file(lean_object *path, lean_object *w
                                                size_t stall_ms);
 extern size_t safepdf_lean_doc_page_count(lean_object *d);
 extern lean_object *safepdf_lean_doc_page_size(lean_object *d, size_t i);
+extern lean_object *safepdf_lean_doc_page_geom(lean_object *d, size_t i);
+extern lean_object *safepdf_lean_doc_test_render(lean_object *d, size_t i, size_t num, size_t den,
+                                                 uint8_t rot);
 extern uint8_t safepdf_lean_doc_flags(lean_object *d);
 extern lean_object *safepdf_lean_doc_submit(lean_object *d, size_t token, uint64_t cid,
                                             uint8_t kind, size_t page, size_t num, size_t den,
@@ -117,105 +114,6 @@ static void set_error(char **error, char *msg) {
     if (error) *error = msg; else free(msg);
 }
 
-/* ================================================================ v1 (deprecated) */
-
-struct safepdf_doc {
-    lean_object *handle; /* SafePdf.Shell.Ffi.Handle, one reference owned, thread-shared */
-    size_t pages;
-    double *sizes;       /* 2 * pages: width, height in points (-1 when unknown) */
-};
-
-safepdf_doc *safepdf_open(const char *path, char **error) {
-    ensure_thread();
-    lean_object *r = safepdf_lean_open(lean_mk_string(path));
-    if (!lean_io_result_is_ok(r)) {
-        set_error(error, error_of(r));
-        lean_dec(r);
-        return NULL;
-    }
-    lean_object *h = lean_io_result_get_value(r);
-    lean_inc(h);
-    lean_dec(r);
-    /* The document is shared with render threads: switch its whole object graph to
-       atomic reference counts before any other thread can see it. */
-    lean_mark_mt(h);
-    safepdf_doc *doc = calloc(1, sizeof *doc);
-    if (!doc) { lean_dec(h); set_error(error, strdup("out of memory")); return NULL; }
-    doc->handle = h;
-    lean_inc(h);
-    doc->pages = safepdf_lean_page_count(h);
-    doc->sizes = malloc(sizeof(double) * 2 * (doc->pages ? doc->pages : 1));
-    for (size_t i = 0; i < doc->pages; i++) {
-        lean_inc(h);
-        lean_object *a = safepdf_lean_page_size(h, i);
-        if (lean_sarray_size(a) == 2) {
-            doc->sizes[2 * i] = lean_float_array_cptr(a)[0];
-            doc->sizes[2 * i + 1] = lean_float_array_cptr(a)[1];
-        } else {
-            doc->sizes[2 * i] = doc->sizes[2 * i + 1] = -1;
-        }
-        lean_dec(a);
-    }
-    return doc;
-}
-
-void safepdf_close(safepdf_doc *doc) {
-    if (!doc) return;
-    ensure_thread();
-    lean_dec(doc->handle);
-    free(doc->sizes);
-    free(doc);
-}
-
-size_t safepdf_page_count(const safepdf_doc *doc) { return doc->pages; }
-
-int safepdf_page_size(const safepdf_doc *doc, size_t page, double *width, double *height) {
-    if (page >= doc->pages || doc->sizes[2 * page] < 0) return -1;
-    if (width) *width = doc->sizes[2 * page];
-    if (height) *height = doc->sizes[2 * page + 1];
-    return 0;
-}
-
-int safepdf_render(const safepdf_doc *doc, size_t page, uint32_t zoom_num, uint32_t zoom_den,
-                   safepdf_image *out, char **error) {
-    memset(out, 0, sizeof *out);
-    ensure_thread();
-    lean_inc(doc->handle);
-    lean_object *r = safepdf_lean_render(doc->handle, page, zoom_num, zoom_den);
-    if (!lean_io_result_is_ok(r)) {
-        set_error(error, error_of(r));
-        lean_dec(r);
-        return -1;
-    }
-    lean_object *img = lean_io_result_get_value(r);
-    lean_inc(img); lean_inc(img); lean_inc(img);
-    lean_dec(r);
-    size_t w = safepdf_lean_image_width(img);
-    size_t h = safepdf_lean_image_height(img);
-    lean_object *data = safepdf_lean_image_data(img); /* consumes the last reference */
-    size_t n = lean_sarray_size(data);
-    if (n != 4 * w * h) { /* renderPage_size: cannot happen */
-        lean_dec(data);
-        set_error(error, strdup("internal error: image size mismatch"));
-        return -1;
-    }
-    uint8_t *buf = malloc(n ? n : 1);
-    if (!buf) { lean_dec(data); set_error(error, strdup("out of memory")); return -1; }
-    memcpy(buf, lean_sarray_cptr(data), n);
-    lean_dec(data);
-    out->rgba = buf;
-    out->width = w;
-    out->height = h;
-    out->stride = 4 * w;
-    return 0;
-}
-
-void safepdf_image_free(safepdf_image *img) {
-    if (!img) return;
-    free(img->rgba);
-    memset(img, 0, sizeof *img);
-}
-
 /* ================================================================ v2: documents */
 
 struct safepdf_document {
@@ -223,6 +121,7 @@ struct safepdf_document {
     atomic_long refs;      /* C references (safepdf_doc_retain / release) */
     size_t pages;
     double *sizes;         /* 2 * pages: width, height in points (-1 when unknown) */
+    safepdf_page_geom *geoms; /* per page: CropBox and /Rotate (den 0 when unknown) */
     uint8_t flags;         /* bit 0 repaired, bit 1 encrypted */
     pthread_mutex_t mu;
     pthread_cond_t drained;
@@ -250,6 +149,13 @@ static lean_object *worker_arg(const safepdf_open_options *opts) {
     lean_object *s = lean_mk_string(worker_default ? worker_default : "");
     pthread_mutex_unlock(&worker_mu);
     return s;
+}
+
+/* Eight little-endian bytes at `p`. */
+static uint64_t rd64le(const uint8_t *p) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
 }
 
 /* Wraps the Lean handle in the IO result `r` (consumed) into a document. */
@@ -290,6 +196,23 @@ static safepdf_document *doc_of_result(lean_object *r, char **error) {
         } else if (doc->sizes) {
             doc->sizes[2 * i] = doc->sizes[2 * i + 1] = -1;
         }
+        lean_dec(a);
+    }
+    doc->geoms = calloc(doc->pages ? doc->pages : 1, sizeof *doc->geoms);
+    for (size_t i = 0; doc->geoms && i < doc->pages; i++) {
+        lean_inc(h);
+        lean_object *a = safepdf_lean_doc_page_geom(h, i);
+        if (lean_sarray_size(a) == 9 * 8) {
+            const uint8_t *b = lean_sarray_cptr(a);
+            int64_t v[9];
+            for (size_t k = 0; k < 9; k++) v[k] = (int64_t)rd64le(b + 8 * k);
+            safepdf_page_geom *g = &doc->geoms[i];
+            g->box.llx = (safepdf_rat){ v[0], v[1] };
+            g->box.lly = (safepdf_rat){ v[2], v[3] };
+            g->box.urx = (safepdf_rat){ v[4], v[5] };
+            g->box.ury = (safepdf_rat){ v[6], v[7] };
+            g->rotate = (uint32_t)v[8];
+        } /* else: left zeroed (den 0), reported as -1 by safepdf_doc_page_geom */
         lean_dec(a);
     }
     return doc;
@@ -335,6 +258,7 @@ void safepdf_doc_release(safepdf_document *doc) {
     pthread_cond_destroy(&doc->drained);
     pthread_mutex_destroy(&doc->mu);
     free(doc->sizes);
+    free(doc->geoms);
     free(doc);
 }
 
@@ -348,8 +272,49 @@ int safepdf_doc_page_size(const safepdf_document *doc, size_t page, double *widt
     return 0;
 }
 
+int safepdf_doc_page_geom(const safepdf_document *doc, size_t page, safepdf_page_geom *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!doc || !doc->geoms || page >= doc->pages) return -1;
+    const safepdf_page_geom *g = &doc->geoms[page];
+    if (g->box.llx.den <= 0 || g->box.lly.den <= 0 || g->box.urx.den <= 0 || g->box.ury.den <= 0)
+        return -1;
+    *out = *g;
+    return 0;
+}
+
 int safepdf_doc_is_repaired(const safepdf_document *doc) { return doc && (doc->flags & 1); }
 int safepdf_doc_is_encrypted(const safepdf_document *doc) { return doc && (doc->flags & 2); }
+
+/* ================================================================ tests only */
+
+static void *copy_image(const uint8_t *p, size_t n, size_t w, size_t h);
+
+safepdf_image *safepdf_test_render_sync(safepdf_document *doc, size_t page, uint32_t zoom_num,
+                                        uint32_t zoom_den, unsigned rotation, char **error) {
+    if (!doc) { set_error(error, strdup("no document")); return NULL; }
+    if (rotation > 3) { set_error(error, strdup("rotation must be 0-3 quarter turns")); return NULL; }
+    ensure_thread();
+    lean_inc(doc->handle);
+    lean_object *r = safepdf_lean_doc_test_render(doc->handle, page, zoom_num, zoom_den,
+                                                  (uint8_t)rotation);
+    if (!lean_io_result_is_ok(r)) {
+        set_error(error, error_of(r));
+        lean_dec(r);
+        return NULL;
+    }
+    lean_object *a = lean_io_result_get_value(r);
+    size_t n = lean_sarray_size(a);
+    const uint8_t *b = lean_sarray_cptr(a);
+    safepdf_image *img = NULL;
+    if (n >= 16) {
+        uint64_t w = rd64le(b), h = rd64le(b + 8);
+        img = copy_image(b + 16, n - 16, (size_t)w, (size_t)h);
+    }
+    lean_dec(r);
+    if (!img) set_error(error, strdup("malformed or oversized image"));
+    return img;
+}
 
 /* ================================================================ v2: flat blobs */
 
