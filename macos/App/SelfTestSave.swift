@@ -9,7 +9,8 @@
 // check (Cancel, and Save As… to another file); the unsaved-marks question's Cancel / Don't
 // Save / Save paths and a failed save aborting the close; XFDF export, import (one undo step,
 // already present on a second import), a malformed file refused with the store unchanged, and
-// the export refused onto a folder.
+// the export refused onto a folder. Task 11.3f: the thumbnails follow the preview (rendered from
+// it while a saved mark is deleted, from the file again after the undo).
 // Plan.md §4 S8/C7, §6 Phases 9–12; docs/macos-design.md §3 ("Save stays in the GUI process").
 
 import AppKit
@@ -93,6 +94,12 @@ extension SelfTest {
             }
         }
         return n > 0 ? (sr / n, sg / n, sb / n) : nil
+    }
+
+    /// The pixels of a thumbnail (to compare two renders).
+    private static func thumbBytes(_ img: CGImage?) -> Data? {
+        guard let img, let d = img.dataProvider?.data else { return nil }
+        return d as Data
     }
 
     private static func fileBytes(_ path: String) -> Data { FileManager.default.contents(atPath: path) ?? Data() }
@@ -219,11 +226,39 @@ extension SelfTest {
 
         // 4. Delete the saved highlight: the preview no longer shows it; Save notes the retention.
         guard let m2 = pv.marks.model else { return }
+        // Task 11.3f: a sidebar next to the page view, its thumbnails shown.
+        let side = SidebarViewController()
+        side.view.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
+        side.show(host.pdf, pages: pv)
+        // The page mode's panel is chosen once the panels' content is there: wait for it first.
+        pump(limit: 30) { side.pending == 0 }
+        let th = side.thumbnails
+        th.scaleOverride = 2
+        side.isShown = true
+        side.showPanel(SAFEPDF_PANEL_THUMBNAILS)
+        th.frame = NSRect(x: 0, y: 0, width: 220, height: 560)
+        th.scroll.frame = th.bounds
+        th.collection.layoutSubtreeIfNeeded()
+        let clip = th.scroll.contentView
+        if let f = th.itemFrame(page) {
+            clip.scroll(to: NSPoint(x: 0, y: max(0, f.minY - 8)))
+            th.scroll.reflectScrolledClipView(clip)
+        }
+        th.updateRenders()
+        pump(limit: 60) { th.inflight.isEmpty && th.images[page] != nil }
+        let thumbWith = thumbBytes(th.images[page])
+        let changesBefore = th.sourceChanges
         let builtBefore = pv.marks.preview.built
         check(m2.delete(hl) == nil, "delete the saved highlight")
         waitPreview(pv)
         check(pv.marks.preview.built > builtBefore && pv.canvas.renderSource != nil,
               "the pages are rendered from the preview after deleting a saved mark")
+        check(th.renderSource != nil && th.renderSource === pv.canvas.renderSource && th.sourceChanges > changesBefore,
+              "the thumbnails are rendered from the same preview (task 11.3f)")
+        pump(limit: 60) { th.inflight.isEmpty && th.images[page] != nil }
+        let thumbWithout = thumbBytes(th.images[page])
+        check(thumbWith != nil && thumbWithout != nil && thumbWith != thumbWithout,
+              "page \(page + 1)'s thumbnail changes when its saved highlight is deleted")
         let m2Deleted = bandRect().flatMap { meanColor(pv, $0) }
         if let before = m0Before, let withHl = m1Saved, let after = m2Deleted {
             say(String(format: "save: band green %.3f (file) -> %.3f (saved highlight) -> %.3f (preview after delete)",
@@ -237,6 +272,15 @@ extension SelfTest {
         pv.marks.undoRedo(undo: true)
         waitPreview(pv)
         check(pv.canvas.renderSource == nil, "undoing the delete renders from the file again")
+        check(th.renderSource == nil, "undoing the delete renders the thumbnails from the file again")
+        pump(limit: 60) { th.inflight.isEmpty && th.images[page] != nil }
+        check(thumbBytes(th.images[page]) == thumbWith, "page \(page + 1)'s thumbnail shows the saved highlight again")
+        say("save: thumbnails follow the preview (\(th.sourceChanges - changesBefore) source changes)")
+        // Detached before the save reopens the file.
+        side.show(nil, pages: pv)
+        pv.canvas.onRenderSource = nil
+        pv.text.attachmentAt = nil
+        pv.text.onAttachmentIcon = nil
         pv.marks.undoRedo(undo: false)
         waitPreview(pv)
         result = nil

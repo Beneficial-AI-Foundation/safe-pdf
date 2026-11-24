@@ -53,6 +53,9 @@ final class SidebarViewController: NSViewController {
     var onExternalLink: ((String) -> Void)?
     /// Something changed that the window's chrome shows (content flags, the current page).
     var onChange: (() -> Void)?
+    /// Asks the window to open the sidebar on the panel chosen (task 11.3f: an attachment icon
+    /// was clicked); without a window (the self-test) `isShown` is set instead.
+    var onReveal: (() -> Void)?
 
     override func loadView() {
         let v = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 600))
@@ -167,12 +170,29 @@ final class SidebarViewController: NSViewController {
         outline.onActivate = { [weak self] a in self?.activate(a) }
         attachments.onStatus = { [weak self] s in self?.status(s) }
         layers.onStatus = { [weak self] s in self?.status(s) }
+        // Task 11.3f: the thumbnails are rendered from the pages' preview of edited saved marks
+        // (the Tk viewer's State.view); a click on a file attachment annotation's icon selects
+        // its row (Viewer.attSelect).
+        pv.canvas.onRenderSource = { [weak self] s in self?.thumbnails.setRenderSource(s) }
+        pv.text.attachmentAt = { [weak self] page, x, y in self?.attachments.iconAt(page: page, x: x, y: y) }
+        pv.text.onAttachmentIcon = { [weak self] i in self?.revealAttachment(i) }
         layers.onChanged = { [weak self, weak pv] in
             pv?.canvas.layersChanged()
             pv?.text.layersChanged()
             self?.thumbnails.layersChanged()
             self?.onChange?()
         }
+    }
+
+    /// Selects attachment `i` (a click on its annotation's icon on the page, Viewer.attSelect):
+    /// the attachments panel is chosen, the window opens the sidebar (`onReveal`), the row is
+    /// selected and shown, and the pill describes it. The attachment is never opened.
+    func revealAttachment(_ i: Int) {
+        guard attachments.rows.indices.contains(i) else { return }
+        if SidebarRules.available(SAFEPDF_PANEL_ATTACHMENTS, content) { choose(SAFEPDF_PANEL_ATTACHMENTS) }
+        if let onReveal { onReveal() } else { isShown = true }
+        attachments.select(i)
+        status(attachments.selectedText(i))
     }
 
     private func status(_ s: String) {

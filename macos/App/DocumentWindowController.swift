@@ -604,6 +604,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         sidebar.onStatus = { [weak self] s in self?.pages.pill.show(s) }
         sidebar.onChange = { [weak self] in self?.updateChrome() }
         sidebar.onExternalLink = { [weak self] uri in self?.confirmUri(uri) }
+        sidebar.onReveal = { [weak self] in self?.setSidebar(shown: true) }
     }
 
     /// Opens (with its panel already chosen) or closes the sidebar.

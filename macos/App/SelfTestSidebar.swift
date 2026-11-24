@@ -36,9 +36,11 @@ extension SelfTest {
     static let hello = "Hello from an attachment.\n"
     static let dataBin = String(repeating: "0123456789abcdef", count: 64)
 
-    /// att.pdf (the Tk smoke case 1v's shape, without compression): `/PageMode /UseAttachments`,
-    /// an outline, a name tree with hello.txt (/Desc, /Params /Size, text/plain), data.bin and an
-    /// external file specification, two pages.
+    /// att.pdf (the Tk smoke case 1v's shape): `/PageMode /UseAttachments`, an outline, a name
+    /// tree with hello.txt (/Desc, /Params /Size, text/plain), data.bin (filtered with
+    /// /ASCIIHexDecode instead of Tk's /FlateDecode, so its size is known only once decoded) and
+    /// an external file specification, two pages; page 2 has a file attachment annotation
+    /// (icon.txt) at [400 600 430 640] (task 11.3f).
     static func attachmentsPDF() -> Data {
         func stream(_ d: String, _ s: String) -> String { "<< \(d) /Length \(s.utf8.count) >>\nstream\n\(s)\nendstream" }
         let c = "0.6 g 72 600 300 100 re f"
@@ -46,14 +48,18 @@ extension SelfTest {
             1: "<< /Type /Catalog /Pages 2 0 R /PageMode /UseAttachments /Outlines 20 0 R /Names << /EmbeddedFiles 10 0 R >> >>",
             2: "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 612 792] >>",
             3: "<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>",
-            4: "<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>",
+            4: "<< /Type /Page /Parent 2 0 R /Contents 9 0 R /Annots [18 0 R] >>",
             9: stream("", c),
             10: "<< /Names [(data.bin) 14 0 R (hello.txt) 13 0 R (z) 15 0 R] >>",
             13: "<< /Type /Filespec /F (hello.txt) /UF (hello.txt) /Desc (A greeting) /EF << /F 16 0 R >> >>",
             14: "<< /Type /Filespec /F (data.bin) /EF << /F 17 0 R >> >>",
             15: "<< /Type /Filespec /F (external.pdf) >>",
             16: stream("/Type /EmbeddedFile /Subtype /text#2Fplain /Params << /Size \(hello.utf8.count) /CreationDate (D:20251123101500Z) >>", hello),
-            17: stream("/Type /EmbeddedFile", dataBin),
+            17: stream("/Type /EmbeddedFile /Filter /ASCIIHexDecode",
+                       dataBin.utf8.map { String(format: "%02X", $0) }.joined() + ">"),
+            18: "<< /Type /Annot /Subtype /FileAttachment /Rect [400 600 430 640] /FS 19 0 R /Contents (attached) >>",
+            19: "<< /Type /Filespec /F (icon.txt) /EF << /F 23 0 R >> >>",
+            23: stream("/Type /EmbeddedFile", hello),
             20: "<< /Type /Outlines /First 21 0 R /Last 21 0 R /Count 1 >>",
             21: "<< /Title (Start) /Parent 20 0 R /Dest [3 0 R /Fit] >>",
         ])
@@ -237,7 +243,55 @@ extension SelfTest {
             check(sb.buttons == [SAFEPDF_PANEL_THUMBNAILS, SAFEPDF_PANEL_OUTLINE, SAFEPDF_PANEL_ATTACHMENTS],
                   "att.pdf: switcher \(sb.buttons.map(\.rawValue))")
             let names = at.rows.map(\.name)
-            check(names == ["data.bin", "hello.txt", "external.pdf"], "attachments listed: \(names)")
+            check(names == ["data.bin", "hello.txt", "external.pdf", "icon.txt"], "attachments listed: \(names)")
+            // Task 11.3f: the tooltip's size probe (Viewer.attProbe), once, only for a size
+            // unknown without decoding.
+            if let d = at.rows.firstIndex(where: { $0.name == "data.bin" }),
+               let h = at.rows.firstIndex(where: { $0.name == "hello.txt" }) {
+                check(at.rows[d].sizeText == "?" && at.needsProbe(d) && !at.needsProbe(h),
+                      "data.bin's size unknown before decoding (\(at.rows[d].sizeText)), hello.txt's listed")
+                check(!at.probe(h) && at.probes == 0, "no probe for a listed size")
+                at.table.reloadData()
+                at.table.layoutSubtreeIfNeeded()
+                let cell = at.table.view(atColumn: 0, row: d, makeIfNecessary: true) ?? at.table
+                let tip = at.view(cell, stringForToolTip: 0, point: .zero, userData: nil)
+                check(at.probes == 1 && at.probing?.row == d, "the tooltip about to show starts one probe (\(at.probes))")
+                check(!at.probe(d) && at.probes == 1, "one probe at a time")
+                pump(limit: 30) { at.probing == nil }
+                check(at.rows[d].sizeText == "1.0 KB" && at.decoded[d] == true && !at.needsProbe(d),
+                      "probed: data.bin \(at.rows[d].sizeText) [tooltip \(tip.replacingOccurrences(of: "\n", with: " / "))]")
+                _ = at.view(cell, stringForToolTip: 0, point: .zero, userData: nil)
+                check(at.probes == 1 && at.probing == nil, "the probe's result is kept (no second probe)")
+                say("attachments: tooltip probe of data.bin -> \(at.rows[d].sizeText) (\(at.probes) probe)")
+            }
+            // Task 11.3f: a click on the file attachment annotation's icon on page 2, with the
+            // sidebar closed on the outline panel, opens the attachments panel and selects its row.
+            if let ic = at.icons.first, let i = at.rows.firstIndex(where: { $0.name == "icon.txt" }) {
+                check(ic.page == 1 && ic.entry == i && at.iconAt(page: 1, x: 415, y: 620) == i &&
+                      at.iconAt(page: 1, x: 300, y: 620) == nil && at.iconAt(page: 0, x: 415, y: 620) == nil,
+                      "icon of icon.txt on page \(ic.page + 1) -> row \(ic.entry)")
+                sb.choose(SAFEPDF_PANEL_OUTLINE)
+                sb.isShown = false
+                pv.goTo(1)
+                waitRenders(pv)
+                pv.text.setSelection(nil)
+                let before = pv.pill.message
+                if let t = pv.canvas.transform(ofPage: 1) {
+                    let r = t.rect(ic.rect)
+                    let v = CGPoint(x: r.midX, y: r.midY)
+                    pv.canvas.pointer?.pointerDown(at: v, clicks: 1, shift: false)
+                    pv.canvas.pointer?.pointerUp(at: v)
+                    check(sb.isShown && sb.panel == SAFEPDF_PANEL_ATTACHMENTS && at.table.selectedRow == i,
+                          "icon click: sidebar \(sb.isShown), panel \(sb.panel.rawValue), row \(at.table.selectedRow) (want \(i))")
+                    check(pv.pill.message != before && pv.pill.message.hasPrefix("attachment icon.txt (") &&
+                          pv.text.links.pendingAlert == nil, "icon click status: \(pv.pill.message)")
+                    say("attachments: icon click on page 2 -> \(pv.pill.message)")
+                } else {
+                    check(false, "att.pdf: page 2 not laid out")
+                }
+            } else {
+                check(false, "att.pdf: no file attachment icon (\(at.icons.count))")
+            }
             if let h = at.rows.firstIndex(where: { $0.name == "hello.txt" }) {
                 check(at.rows[h].sizeText == "26 B" && at.rows[h].tooltip.contains("A greeting") &&
                       at.rows[h].tooltip.contains("Type: text/plain"), "hello.txt row: \(at.rows[h].sizeText) [\(at.rows[h].tooltip)]")

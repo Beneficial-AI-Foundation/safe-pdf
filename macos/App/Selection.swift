@@ -123,6 +123,11 @@ struct TextSelection: Equatable {
     private var dragWaiting = false
     /// Bumped on every press: work waiting for an index belongs to the press that started it.
     private var interaction = 0
+    /// The row of the file attachment annotation icon at page point (x, y) of a page, if any
+    /// (task 11.3f, Attach.iconAt; the sidebar's attachments panel answers).
+    var attachmentAt: ((Int, Double, Double) -> Int?)?
+    /// A click in place on a file attachment annotation's icon (Viewer.attSelect): its row.
+    var onAttachmentIcon: ((Int) -> Void)?
     /// The active tool (Toolbar.Mode; Select text until the tools of task 11.3e).
     var mode = UInt32(SAFEPDF_MODE_SELECT.rawValue)
     /// The pasteboard Copy and Copy Address write (the self-test uses a private one).
@@ -362,9 +367,15 @@ struct TextSelection: Equatable {
     func pointerUp(at v: CGPoint) {
         guard let p = press else { return }
         if !pressMoved {
-            // A click in place: follow the link under it (Viewer.dragTo).
+            // A click in place: a file attachment annotation's icon selects its row in the
+            // attachments panel (task 11.3f; never opened), else follow the link under it
+            // (Viewer.dragTo).
             press = nil
             if let c = canvas, let t = c.transform(ofPage: p.page), let q = t.page(v) {
+                if let i = attachmentAt?(p.page, q.x, q.y) {
+                    onAttachmentIcon?(i)
+                    return
+                }
                 links.click(page: p.page, x: q.x, y: q.y)
             }
             return
