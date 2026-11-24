@@ -158,6 +158,15 @@ struct MenuStats {
         for m in menus {
             while let last = m.items.last, last.isSeparatorItem { m.removeItem(last) }
         }
+        // Native full screen (task 11.3d2; the standard ⌃⌘F entry at the end of View).
+        if let view = menus.first(where: { $0.title == "View" }) {
+            view.addItem(.separator())
+            let fs = NSMenuItem(title: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)),
+                                keyEquivalent: "f")
+            fs.keyEquivalentModifierMask = [.control, .command]
+            view.addItem(fs)
+            stats.items += 1
+        }
 
         // Window menu (standard) before Help.
         let windowMenu = NSMenu(title: "Window")

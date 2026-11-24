@@ -218,23 +218,20 @@ struct OpenSettings {
         return s
     }
 
+    /// The note while the document is shown in full screen (Viewer.fullScreenNote).
+    static let fullScreenNote = "full screen (Escape leaves)"
+
     /// Notes for what this shell does not honour yet (the Tk viewer does): the hiding
-    /// preferences, full screen, fitting the window, and the sidebar panel a page mode opens
-    /// (the sidebar is task 11.3d).
+    /// preferences and fitting the window. Task 11.3d2: `/PageMode` opens its sidebar panel
+    /// (SidebarViewController, Sidebar.onLoad) and `/FullScreen` enters native full screen with
+    /// the identity line, noted as the Tk viewer notes it.
     var shellNotes: [String] {
         var out: [String] = []
         if hideToolbar || hideMenubar || hideWindowUI {
             out.append("the document asks to hide parts of the window (not honoured)")
         }
-        if pageMode == SAFEPDF_PAGE_MODE_FULL_SCREEN.rawValue {
-            out.append("the document asks for full screen (not honoured)")
-        }
+        if pageMode == SAFEPDF_PAGE_MODE_FULL_SCREEN.rawValue { out.append(Self.fullScreenNote) }
         if fitWindow { out.append("the document asks to fit the window to the page (not honoured)") }
-        let panelModes: [Int32] = [SAFEPDF_PAGE_MODE_USE_OUTLINES.rawValue, SAFEPDF_PAGE_MODE_USE_THUMBS.rawValue,
-                                   SAFEPDF_PAGE_MODE_USE_OC.rawValue, SAFEPDF_PAGE_MODE_USE_ATTACHMENTS.rawValue]
-        if panelModes.contains(pageMode) {
-            out.append("the document's sidebar panel is not opened yet")
-        }
         return out
     }
 }

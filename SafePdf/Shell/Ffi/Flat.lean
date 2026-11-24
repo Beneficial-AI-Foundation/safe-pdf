@@ -1,6 +1,7 @@
 import SafePdf.Shell.Worker.Protocol
 import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Sidebar
+import SafePdf.Shell.App.Attach
 import SafePdf.Core.Doc.Attachments
 
 /-!
@@ -215,17 +216,21 @@ def problemNum : Option Doc.Attachments.Problem → Nat
 
 /-- **The attachments** (`Core.Doc.Attachments.list`): table 0 one row per entry — name, file
 name, description (2), size as listed (2, `Attachments.listedSize`), MIME type (2), created
-(2), modified (2), page (2), in the name tree, problem, problem text; table 1 one row per
-icon — page, rectangle (4), entry; table 2 one row: truncated, warnings. -/
+(2), modified (2), page (2), in the name tree, problem, problem text, then (task 11.3d2) the
+size column and the tooltip before any decoding (`Attach.sizeColumn`, `Attach.tooltip` without
+a probe) and whether it has an embedded stream; table 1 one row per icon — page, rectangle
+(4), entry; table 2 one row: truncated, warnings. -/
 def attachments (l : Doc.Attachments.Listing) : ByteArray :=
   let ents := l.entries.toArray.map fun a =>
     #[.s a.name, .s a.fileName] ++ optS a.desc ++ optU (Doc.Attachments.listedSize a) ++
       optS a.mime ++ optS a.created ++ optS a.modified ++ optU a.page ++
       #[.u (if a.inTree then 1 else 0), .u (problemNum a.problem),
-        .s ((a.problem.map Doc.Attachments.Problem.message).getD "")]
+        .s ((a.problem.map Doc.Attachments.Problem.message).getD ""),
+        .s (Attach.sizeColumn a none), .s (Attach.tooltip a none),
+        .u (if a.stream.isSome then 1 else 0)]
   let icons := l.icons.toArray.map fun i =>
     #[.u i.page] ++ boxFields (Raster.Geom.Box.ofRect i.rect) ++ #[.u i.entry]
-  encode [{ cols := 17, rows := ents }, { cols := 6, rows := icons },
+  encode [{ cols := 20, rows := ents }, { cols := 6, rows := icons },
           { cols := 2, rows := #[#[.u (if l.truncated then 1 else 0), .u l.warnings]] }]
 
 /-- The rows of a list of group keys. -/

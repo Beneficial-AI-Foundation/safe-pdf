@@ -29,6 +29,9 @@ import SafePdfC
     /// The page labels (safepdf_doc_page_labels, asynchronous: empty until they arrive; one per
     /// page, "" where the document gives none).
     private(set) var labels: [String] = []
+    /// The layers state renders use (task 11.3d2; nil: the document's default state). The
+    /// layers panel sets it; every open starts with the default (9.r8).
+    var layers: LayersState?
 
     /// Why an open failed.
     struct OpenError: Error {

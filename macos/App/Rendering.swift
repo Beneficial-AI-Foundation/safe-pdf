@@ -47,8 +47,17 @@ enum Rendering {
                                   deliver: @escaping @MainActor (RenderResult) -> Void) -> safepdf_request_id {
         let ticket = RenderTicket(page: page, key: key, deliver: deliver)
         let ctx = Unmanaged.passRetained(ticket).toOpaque()
-        let id = safepdf_doc_render(doc.handle, page, key.num, key.den, key.rotation, nil, priority,
+        // Under the document's layers state (task 11.3d2; nil: its default state).
+        let id: safepdf_request_id
+        if let layers = doc.layers {
+            id = layers.withC { st in
+                safepdf_doc_render(doc.handle, page, key.num, key.den, key.rotation, st, priority,
+                                   DispatchQueue.main, renderCallback, ctx)
+            }
+        } else {
+            id = safepdf_doc_render(doc.handle, page, key.num, key.den, key.rotation, nil, priority,
                                     DispatchQueue.main, renderCallback, ctx)
+        }
         if id == 0 { Unmanaged<RenderTicket>.fromOpaque(ctx).release() }
         return id
     }
