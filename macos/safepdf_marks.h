@@ -39,6 +39,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "safepdf_core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,8 +72,7 @@ enum {
     SAFEPDF_MARK_SAVED_CHANGED = 2 /* in the file, edited since (Save supersedes it) */
 };
 
-/** A page-space box. */
-typedef struct { double llx, lly, urx, ury; } safepdf_box;
+/* safepdf_box (page-space box, doubles) comes from safepdf_core.h. */
 
 /** A page-space point. */
 typedef struct { double x, y; } safepdf_point;
@@ -124,7 +124,7 @@ typedef struct {
 typedef struct {
     uint8_t *data;
     size_t size;
-} safepdf_bytes;
+} safepdf_marks_bytes;
 
 /** Save note flags (safepdf_save_result.flags). */
 enum {
@@ -332,10 +332,10 @@ size_t safepdf_marks_xfdf_estimate(safepdf_marks *m);
 /** Every mark as XFDF (UTF-8). `href`: the PDF's file name for <f href> (NULL: none); `date`
     as for save (NULL: now); `max_output` 0: no ceiling. 0 on success, -1 with *error. */
 int safepdf_marks_xfdf_export(safepdf_marks *m, const char *href, const char *date,
-                              size_t max_output, safepdf_bytes *out, char **error);
+                              size_t max_output, safepdf_marks_bytes *out, char **error);
 
 /** Release a byte buffer and zero it. NULL is allowed. */
-void safepdf_free_bytes(safepdf_bytes *b);
+void safepdf_free_marks_bytes(safepdf_marks_bytes *b);
 
 /** Import XFDF `bytes` (bounded reader: no DTDs or entities, limits on size, depth, nodes,
     marks; pages checked against the document). Marks already present are not added again.

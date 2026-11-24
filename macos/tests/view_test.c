@@ -18,8 +18,8 @@ static int checks = 0, failures = 0;
 
 static safepdf_rat R(int64_t n, int64_t d) { safepdf_rat q = { n, d }; return q; }
 static int req(safepdf_rat a, int64_t n, int64_t d) { return a.num == n && a.den == d; }
-static safepdf_box box(int64_t w, int64_t h) {
-    safepdf_box b = { R(0, 1), R(0, 1), R(w, 1), R(h, 1) };
+static safepdf_rat_box box(int64_t w, int64_t h) {
+    safepdf_rat_box b = { R(0, 1), R(0, 1), R(w, 1), R(h, 1) };
     return b;
 }
 
@@ -48,7 +48,7 @@ static void test_zoom(void) {
     CHECK(safepdf_view_fit_zoom(false, 100, 100, R(10000, 1), R(10000, 1), &z) == 0 &&
           req(z, 1, 16));
     /* capZoom #guards. */
-    safepdf_box b100 = box(100, 100);
+    safepdf_rat_box b100 = box(100, 100);
     bool lowered = true;
     CHECK(safepdf_view_cap_zoom(10000, R(1, 1), 0, &b100, &z, &lowered) == 0 && req(z, 1, 1) &&
           !lowered);
@@ -56,7 +56,7 @@ static void test_zoom(void) {
     safepdf_pixel_size px;
     CHECK(safepdf_view_pixel_size(16384, z, 0, &b100, &px) == 0 &&
           px.width * px.height <= 2500 && px.width * px.height >= 2000);
-    safepdf_box tall = box(100, 20000);
+    safepdf_rat_box tall = box(100, 20000);
     CHECK(safepdf_view_pixel_size(16384, R(1, 1), 0, &tall, &px) == 0 && px.cropped &&
           px.image_height == 16384 && px.height == 20000);
     uint32_t steps[32];
@@ -70,20 +70,20 @@ static void test_zoom(void) {
 }
 
 static void test_rotation(void) {
-    safepdf_box letter = box(612, 792);
+    safepdf_rat_box letter = box(612, 792);
     safepdf_rotation_info ri;
     CHECK(safepdf_view_rotation(270, &letter, &ri) == 0 && ri.cw == 0 && ri.ccw == 180 &&
           req(ri.width, 792, 1) && req(ri.height, 612, 1));
     CHECK(safepdf_view_rotation(90, &letter, &ri) == 0 && ri.cw == 180 && ri.ccw == 0);
     /* View.lean: reanchor 1 .r0 2 .r90 Letter (306, 396) = (792, 612); (100, 50) → (200, 100). */
-    safepdf_point q = { R(306, 1), R(396, 1) }, p;
+    safepdf_rat_point q = { R(306, 1), R(396, 1) }, p;
     CHECK(safepdf_view_reanchor(R(1, 1), 0, R(2, 1), 90, &letter, q, &p) == 0 &&
           req(p.x, 792, 1) && req(p.y, 612, 1));
-    safepdf_point q2 = { R(100, 1), R(50, 1) };
+    safepdf_rat_point q2 = { R(100, 1), R(50, 1) };
     CHECK(safepdf_view_reanchor(R(1, 1), 0, R(2, 1), 0, &letter, q2, &p) == 0 &&
           req(p.x, 200, 1) && req(p.y, 100, 1));
     /* reanchor_self: nothing changed, the point stays. */
-    safepdf_point q3 = { R(7, 3), R(-5, 2) };
+    safepdf_rat_point q3 = { R(7, 3), R(-5, 2) };
     CHECK(safepdf_view_reanchor(R(85, 64), 180, R(85, 64), 180, &letter, q3, &p) == 0 &&
           req(p.x, 7, 3) && req(p.y, -5, 2));
 }

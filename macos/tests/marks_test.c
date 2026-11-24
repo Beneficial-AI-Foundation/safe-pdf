@@ -269,7 +269,7 @@ int main(int argc, char **argv) {
     safepdf_free_save_result(&sr);
 
     /* --- XFDF round trip ----------------------------------------------------------------- */
-    safepdf_bytes x;
+    safepdf_marks_bytes x;
     CHECK(safepdf_marks_xfdf_export(m, "paper.pdf", fixed_date, 10, &x, &err) == -1,
           "export ceiling refused");
     free(err); err = NULL;
@@ -320,7 +320,7 @@ int main(int argc, char **argv) {
         safepdf_free_xfdf_import(&ir);
         safepdf_marks_release(mx);
     }
-    safepdf_free_bytes(&x);
+    safepdf_free_marks_bytes(&x);
 
     /* --- encrypted documents: IV seed required; RC4 note -------------------------------- */
     size_t alen, rlen;

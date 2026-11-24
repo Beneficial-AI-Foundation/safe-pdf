@@ -60,9 +60,9 @@ int safepdf_view_init(void);
 /** An exact rational num / den, den > 0. */
 typedef struct { int64_t num; int64_t den; } safepdf_rat;
 /** A page box in page units (CropBox: lower-left, upper-right). */
-typedef struct { safepdf_rat llx, lly, urx, ury; } safepdf_box;
+typedef struct { safepdf_rat llx, lly, urx, ury; } safepdf_rat_box;
 /** A point (screen pixels or page units, as the function says). */
-typedef struct { safepdf_rat x, y; } safepdf_point;
+typedef struct { safepdf_rat x, y; } safepdf_rat_point;
 
 /** num / den as a double (display only). */
 double safepdf_rat_to_double(safepdf_rat q);
@@ -106,7 +106,7 @@ int safepdf_view_fit_zoom(bool width_only, uint32_t cw, uint32_t ch, safepdf_rat
 /** View.capZoom: `z` lowered so the page image has at most `max_pixels` pixels;
     `*lowered` says whether it was. The Tk viewer uses constants.page_pixels. */
 int safepdf_view_cap_zoom(uint64_t max_pixels, safepdf_rat z, uint32_t rotation,
-                          const safepdf_box *box, safepdf_rat *out, bool *lowered);
+                          const safepdf_rat_box *box, safepdf_rat *out, bool *lowered);
 
 /** Pixel sizes of a page box at a zoom. */
 typedef struct {
@@ -117,7 +117,7 @@ typedef struct {
 
 /** Pixel sizes at zoom `z`; `side` is the renderer's side cap (constants.max_page_side). */
 int safepdf_view_pixel_size(uint32_t side, safepdf_rat z, uint32_t rotation,
-                            const safepdf_box *box, safepdf_pixel_size *out);
+                            const safepdf_rat_box *box, safepdf_pixel_size *out);
 
 /* ---------------------------------------------------------------- rotation, anchoring */
 
@@ -128,14 +128,14 @@ typedef struct {
     safepdf_rat width, height; /* View.boxSize: displayed size in page units */
 } safepdf_rotation_info;
 
-int safepdf_view_rotation(uint32_t rotation, const safepdf_box *box, safepdf_rotation_info *out);
+int safepdf_view_rotation(uint32_t rotation, const safepdf_rat_box *box, safepdf_rotation_info *out);
 
 /** View.reanchor (C2): the screen position, in the view (z2, rot2), of the page point shown
     at `q` (screen pixels relative to the page image's top-left) in the view (z, rot). With
     nothing changed it is `q` (theorem reanchor_self). Zoom about the pointer: scroll so that
     the result lies under the pointer again. */
 int safepdf_view_reanchor(safepdf_rat z, uint32_t rot, safepdf_rat z2, uint32_t rot2,
-                          const safepdf_box *box, safepdf_point q, safepdf_point *out);
+                          const safepdf_rat_box *box, safepdf_rat_point q, safepdf_rat_point *out);
 
 /* ---------------------------------------------------------------- view modes, spreads */
 
@@ -189,7 +189,7 @@ int safepdf_view_zoom_with(safepdf_zoom_choice c, uint32_t cw, uint32_t ch, safe
 /* ---------------------------------------------------------------- layout */
 
 /** A page's geometry: its CropBox and /Rotate (degrees). */
-typedef struct { safepdf_box box; uint32_t rotate; } safepdf_page_geom;
+typedef struct { safepdf_rat_box box; uint32_t rotate; } safepdf_page_geom;
 
 /** Layout parameters (the Tk viewer's state). */
 typedef struct {
@@ -304,7 +304,7 @@ typedef enum {
 } safepdf_cmd;
 
 /** Menu.Action (keys that are not menu commands), in Menu.Action.all order. */
-typedef enum { SAFEPDF_ACTION_FIND_NEXT, SAFEPDF_ACTION_FIND_PREV, SAFEPDF_ACTION_COUNT } safepdf_action;
+typedef enum { SAFEPDF_ACTION_FIND_NEXT, SAFEPDF_ACTION_FIND_PREV, SAFEPDF_ACTION_COUNT } safepdf_view_action;
 
 /** Modifier mask bits. */
 enum {
@@ -322,7 +322,7 @@ typedef struct { safepdf_command *items; size_t count; } safepdf_commands;
 
 /** The commands, in safepdf_cmd order. */
 int safepdf_view_commands(safepdf_commands *out);
-/** The key actions, in safepdf_action order (label = Action.name). */
+/** The key actions, in safepdf_view_action order (label = Action.name). */
 int safepdf_view_actions(safepdf_commands *out);
 void safepdf_free_commands(safepdf_commands *c);
 

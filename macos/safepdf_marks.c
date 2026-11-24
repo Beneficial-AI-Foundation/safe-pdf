@@ -583,14 +583,14 @@ size_t safepdf_marks_xfdf_estimate(safepdf_marks *m) {
     return n;
 }
 
-void safepdf_free_bytes(safepdf_bytes *b) {
+void safepdf_free_marks_bytes(safepdf_marks_bytes *b) {
     if (!b) return;
     free(b->data);
     memset(b, 0, sizeof *b);
 }
 
 int safepdf_marks_xfdf_export(safepdf_marks *m, const char *href, const char *date,
-                              size_t max_output, safepdf_bytes *out, char **error) {
+                              size_t max_output, safepdf_marks_bytes *out, char **error) {
     memset(out, 0, sizeof *out);
     lock(m);
     lean_object *io = safepdf_marks_lean_xfdf_export(h_arg(m), mk_str(href), mk_str(date),

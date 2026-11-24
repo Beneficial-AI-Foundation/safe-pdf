@@ -99,7 +99,7 @@ static void push_rat(ints *b, safepdf_rat q) {
     push(b, q.den);
 }
 
-static void push_box(ints *b, const safepdf_box *bx) {
+static void push_box(ints *b, const safepdf_rat_box *bx) {
     if (!bx) { b->bad = 1; return; }
     push_rat(b, bx->llx); push_rat(b, bx->lly); push_rat(b, bx->urx); push_rat(b, bx->ury);
 }
@@ -269,7 +269,7 @@ int safepdf_view_fit_zoom(bool width_only, uint32_t cw, uint32_t ch, safepdf_rat
 }
 
 int safepdf_view_cap_zoom(uint64_t max_pixels, safepdf_rat z, uint32_t rotation,
-                          const safepdf_box *box, safepdf_rat *out, bool *lowered) {
+                          const safepdf_rat_box *box, safepdf_rat *out, bool *lowered) {
     ints in = {0};
     push(&in, u64(max_pixels)); push_rat(&in, z); push(&in, rotation); push_box(&in, box);
     lean_object *r = call(safepdf_lean_view_cap_zoom, &in, 3);
@@ -281,7 +281,7 @@ int safepdf_view_cap_zoom(uint64_t max_pixels, safepdf_rat z, uint32_t rotation,
 }
 
 int safepdf_view_pixel_size(uint32_t side, safepdf_rat z, uint32_t rotation,
-                            const safepdf_box *box, safepdf_pixel_size *out) {
+                            const safepdf_rat_box *box, safepdf_pixel_size *out) {
     ints in = {0};
     push(&in, side); push_rat(&in, z); push(&in, rotation); push_box(&in, box);
     lean_object *r = call(safepdf_lean_view_pixel_size, &in, 5);
@@ -297,7 +297,7 @@ int safepdf_view_pixel_size(uint32_t side, safepdf_rat z, uint32_t rotation,
 
 /* ---------------------------------------------------------------- rotation, anchoring */
 
-int safepdf_view_rotation(uint32_t rotation, const safepdf_box *box, safepdf_rotation_info *out) {
+int safepdf_view_rotation(uint32_t rotation, const safepdf_rat_box *box, safepdf_rotation_info *out) {
     ints in = {0};
     push(&in, rotation); push_box(&in, box);
     lean_object *r = call(safepdf_lean_view_rotate, &in, 6);
@@ -313,13 +313,13 @@ int safepdf_view_rotation(uint32_t rotation, const safepdf_box *box, safepdf_rot
 }
 
 int safepdf_view_reanchor(safepdf_rat z, uint32_t rot, safepdf_rat z2, uint32_t rot2,
-                          const safepdf_box *box, safepdf_point q, safepdf_point *out) {
+                          const safepdf_rat_box *box, safepdf_rat_point q, safepdf_rat_point *out) {
     ints in = {0};
     push_rat(&in, z); push(&in, rot); push_rat(&in, z2); push(&in, rot2); push_box(&in, box);
     push_rat(&in, q.x); push_rat(&in, q.y);
     lean_object *r = call(safepdf_lean_view_reanchor, &in, 4);
     if (!r) return -1;
-    safepdf_point p;
+    safepdf_rat_point p;
     int rc = rat_at(r, 0, &p.x) | rat_at(r, 2, &p.y);
     lean_dec(r);
     if (rc) return -1;
