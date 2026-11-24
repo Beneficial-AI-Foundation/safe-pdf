@@ -1,4 +1,5 @@
 import SafePdf.Shell.Worker.Serve
+import SafePdf.Shell.Worker.TestHooks
 import SafePdf.Shell.Worker.Sandbox
 
 /-!
@@ -13,7 +14,7 @@ itself exits (status 3: non-empty environment, 4: no sandbox) without reading a 
 
 /-- The worker: confine, then serve requests on stdin/stdout until end of input, `quit` or an
 oversized frame. Exits through `IO.Process.exit` (no dedicated tasks to join). -/
-def main : IO UInt32 := do
+def main (args : List String) : IO UInt32 := do
   let limits := SafePdf.Limits.default
   match ← SafePdf.Shell.Worker.Sandbox.prepare limits with
   | .error f =>
@@ -21,4 +22,5 @@ def main : IO UInt32 := do
     IO.Process.exit f.exitCode
   | .ok p =>
     let code ← SafePdf.Shell.Worker.Serve.loop limits p.subst
+      (SafePdf.Shell.Worker.TestHooks.stallOfArgs args)
     IO.Process.exit code.toUInt8

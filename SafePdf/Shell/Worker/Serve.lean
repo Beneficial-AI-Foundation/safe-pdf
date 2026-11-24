@@ -1,5 +1,6 @@
 import SafePdf.Api
 import SafePdf.Shell.Worker.Wire
+import SafePdf.Shell.Worker.TestHooks
 
 /-!
 # The document worker: request handling and loop (task 12.2a)
@@ -108,7 +109,8 @@ def answer (st : State) (req : Request) : State × Response :=
 
 /-- The request loop, starting with the substitute fonts `subst`. Its only effects are reading
 stdin and writing stdout. Returns the exit status. -/
-def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) : IO UInt32 := do
+def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) (stallMs : Nat := 0) :
+    IO UInt32 := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   let mut st : State := { subst }
@@ -125,6 +127,7 @@ def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) : IO UInt32 := do
       | .error e =>
         writeAll stdout (Protocol.frameResponse limits (.error .malformed (reprStr e)))
       | .ok req =>
+        TestHooks.beforeRequest stallMs req
         let (st', resp) := answer st req
         st := st'
         writeAll stdout (Protocol.frameResponse limits resp)

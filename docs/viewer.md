@@ -651,6 +651,79 @@ mode, an animated spinner (the placeholder is a static "Rendering…").
 * Smoke mode waits for every render (`syncWaitMs = none`, `settle` waits for all running
   renders), so its steps see the pages at once; the `async` case runs with no wait at all.
 
+## The document worker (12.2c)
+
+Since task 12.2c the viewer renders pages and thumbnails, and reads the outline, in a separate
+process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confinement task
+12.2b), found next to the viewer (`.lake/build/bin/worker`; `lake build` builds it,
+`scripts/viewer-smoke.sh` builds `viewer worker`). The client side is
+`Worker.Session` (`SafePdf/Shell/Worker/Client.lean`).
+
+* **One process per open document.** The viewer still reads the file itself (capped at
+  `maxInputBytes`, task 12.1) and parses it for the page layout, labels, open settings,
+  attachments, layers and Save; the worker gets **the same bytes** in an `openDoc` request, never
+  a path. A new file, Close, or a preview of edited saved marks (9.5g, the preview's bytes)
+  gives the session a new document id (`State.srcSerial`): the old worker is killed and the next
+  request spawns a new one. Save keeps using the bytes the viewer read.
+* **Asynchronous, queued.** `Viewer.renderTask` queues a `render` request and returns a task (a
+  promise the session resolves), so `poll`, `showNow` and `settle` work exactly as with the
+  8.8 render threads and no event waits on the worker's pipes. The worker answers one request
+  at a time; the session's dispatcher thread picks the most urgent: priority 0 for the
+  current page or spread (and the outline), 1 for other pages in view and the prefetch, 2 for
+  thumbnails; a queued neighbour that becomes the current page is raised to 0
+  (`Viewer.raiseJob`).
+* **Cancellation.** Renders whose result would be dropped (another document generation, or a
+  page now laid out at another zoom or rotation; thumbnails of another rotation) are cancelled
+  (`Viewer.cancelStale`, at every `poll`, `renderMore`, `showNow`, `settle`): dropped while
+  queued; a running one is killed (and the worker restarted for the next request) once it ran
+  `preemptMs` = 250 ms. A render that blocks a more urgent one (lower priority, or a current
+  page asked for at least 100 ms later) is preempted the same way and queued again. Unlike the
+  8.8 threads, a superseded render no longer keeps a CPU busy until it ends.
+* **Deadline.** A request (or a spawned worker's `openDoc`) without an answer within
+  `Viewer.workerDeadlineMs` = 20 s kills the worker. The page shows, and for the current page
+  the status line says, `rendering stopped: the document took too long (no answer within 20 s;
+  its worker was stopped)` (cached for that zoom, so it is not retried in a loop); the next
+  request spawns a fresh worker and sends the bytes again, and another file opens normally.
+  20 s is far above the slowest corpus page (about 3 s) and the slowest decompression bomb
+  under the default limits (about 3.3 s).
+* **Images are checked** before Tk sees them: `4·w·h` bytes or the page shows an error
+  (`Viewer.outOfReply`). Worker errors show their own text (`Viewer.workerErr`, `pageErr`).
+* **Outline**: asked for right after the `openDoc` and waited for during the open (after
+  labels, attachments and layers are read here); items become `Links.Entry`s with the same
+  display rules (`safeText`: controls and bidi overrides as spaces, 500 characters; URIs
+  percent-encoded by `Links.uriText`). A worker without an outline answer falls back to the
+  in-process outline with a status note.
+* **Still in this process** (the protocol does not carry what they need; a later task can
+  extend it):
+  * text extraction for selection, copy and search (`pageIndex`): the protocol's `text` gives
+    the content-order glyphs and the page text, not the reading-order lines
+    (`Text.Line` with `lineOrder`, directions, and the CropBox/clip filtering) that
+    `Select.PageIndex` is built from, nor the layers state;
+  * links (`linksOf`: read synchronously on hover; the single worker may be busy with a
+    render for seconds), page labels, open settings, attachments, layers, the 9.5c marks
+    read from the file;
+  * renders under a layers state other than the document's default (the protocol has no
+    layers state), and with a font configuration the worker does not share
+    (`SAFEPDF_SUBST_FONTS=0`, `SAFEPDF_FONT_DIR`; the worker searches only the system font
+    directories, not `~/Library/Fonts`);
+  * everything, when the worker executable is missing (a build of only `viewer`; the status
+    line says `no document worker at …: pages render in this process`) or with
+    `SAFEPDF_VIEWER_WORKER=0` (for comparisons). This fallback keeps development builds
+    usable; a release should ship the worker and could refuse instead.
+  * The macOS FFI shell (`SafePdf/Shell/Ffi`, task 11.x) keeps rendering in-process until 11.2
+    decides.
+* **Measurements** (macOS, the smoke case 12.2c, medians of 3): page 1 of the two-page fixture
+  at 124 % (1014×1312 px) 8.2 ms in-process, 9.1 ms through the worker; page 1 of the
+  Transformer paper at 82 % (670×867 px) 64.6 ms in-process, 58.1 ms through the worker. The
+  1m `async` case's slow page at 150 % finished after 4.1 s through the worker, 4.3 s on the
+  8.8 threads. While a render runs the Tk event loop keeps going: the smoke's 10 ms heartbeat
+  never missed more than 16 ms.
+* **Test hook** (`SafePdf/Shell/Worker/TestHooks.lean`): with `SAFEPDF_WORKER_TEST_STALL_MS=N`
+  in its environment the worker sleeps `N` ms before every render; only the smoke step sets it
+  (`Worker.Session.setEnv`). Lean 4.36's `IO.Process.spawn` crashes the child when
+  `inheritEnv := false` comes with a non-empty `env`, so such a spawn goes through
+  `/usr/bin/env -i NAME=VALUE worker`.
+
 ## Highlights and notes (9.4)
 
 Pure model in `SafePdf/Shell/App/Marks.lean` (Tk-free, `#guard` checks, `Store.add_id` /

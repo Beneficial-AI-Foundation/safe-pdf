@@ -16,6 +16,7 @@ import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
+import SafePdf.Shell.Worker.Client
 
 /-!
 # Native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.7, 9.8; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
@@ -226,6 +227,25 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   attached: every change of the marks is reported (`marksChanged`), Save is "Save to library"
   (`saveToLibrary`: `Save.build`'s bytes to the library, then reopened from memory), Save As…
   writes a local copy and stays on the library's document, Close flushes the library.
+* **Document worker** (task 12.2c, Plan.md §6 Phase 12; `Worker.Session` in
+  `SafePdf/Shell/Worker/Client.lean`). Pages and thumbnails are rendered, and the outline is
+  read, by the `worker` executable found next to the viewer's (`workerExe`): one process per
+  open document, sent the bytes the viewer read (capped, task 12.1; Save keeps using them).
+  `submit`/`thumbSubmit` queue a render (`renderTask`: priority 0 for the current page or
+  spread, 1 for other pages and the prefetch, 2 for thumbnails) and get a task, so `poll` and
+  `showNow` work as with the render threads of task 8.8 and no event waits on the worker's
+  pipes (except where it did before: `showNow`'s 100 ms and smoke mode). Superseded renders
+  (an old zoom, rotation or document) are cancelled (`cancelStale`): dropped while queued,
+  the worker killed and restarted when one runs longer than `preemptMs`; a page that blocks
+  the current page is preempted the same way and rendered again later. A render without an
+  answer within `workerDeadlineMs` (20 s) kills the worker: the page shows "rendering stopped:
+  the document took too long", and the next request starts a fresh worker with the bytes
+  again. In-process (as in task 8.8) remain: renders under a layers state other than the
+  document's default and with a font configuration the worker does not share
+  (`SAFEPDF_SUBST_FONTS`, `SAFEPDF_FONT_DIR`), the whole viewer when the worker executable is
+  missing (status note) or `SAFEPDF_VIEWER_WORKER=0`; text extraction, links, page labels,
+  open settings, attachments and layers (the protocol has no reading-order lines, layers
+  state or those objects; `docs/viewer.md`).
 * **Smoke mode** (`SAFEPDF_VIEWER_SMOKE=DIR`, used by `scripts/viewer-smoke.sh`): drives the
   viewer with Tk key events (`event generate`) and writes photos and state files into `DIR`
   (see `smoke`), then exits.
@@ -318,16 +338,22 @@ structure Library where
   everything was sent (Close; `Main.lean` calls it again after the window closed). -/
   flush : IO Bool
 
-/-- A page render running on a worker thread (task 8.8): what it renders, when it was asked
-for (`IO.monoNanosNow`) and the task, which returns the result and the render time in
-nanoseconds. -/
+/-- What a render job gives: the result and the render time (ns), or `none` when it was
+cancelled (task 12.2c: superseded before the worker answered; nothing is shown or cached). -/
+abbrev RenderOut := Option (Except Error Clip.Image × Nat)
+
+/-- A page render running on a worker thread (task 8.8) or queued for the document worker
+(task 12.2c): what it renders, when it was asked for (`IO.monoNanosNow`), the task, which
+returns the result and the render time in nanoseconds, and the worker request id. -/
 structure Job where
   /-- Document generation, page, zoom and rotation rendered. -/
   key : View.Key
   /-- Submission time (ns). -/
   start : Nat
-  /-- The render (`IO.asTask` on a dedicated thread). -/
-  task : Task (Except IO.Error (Except Error Clip.Image × Nat))
+  /-- The render (`IO.asTask` on a dedicated thread, or the worker's reply). -/
+  task : Task RenderOut
+  /-- The worker request (`Worker.Session.cancel`); `none` for an in-process render. -/
+  id : Option Nat := none
 
 /-- The free-text editor open on the canvas (task 9.9). -/
 structure FtEdit where
@@ -580,6 +606,25 @@ structure State where
   moveFrom : Option (Nat × Pt × Pt) := none
   /-- The pop-over slider row being dragged (task 9.9). -/
   edSlide : Option Nat := none
+  /-- The document worker session (task 12.2c); `none`: everything renders in this process. -/
+  worker : Option Worker.Session := none
+  /-- Why there is no worker session (shown in the status line after every open). -/
+  workerNote : String := ""
+  /-- The worker renders with the same substitute fonts (`SAFEPDF_SUBST_FONTS` and
+  `SAFEPDF_FONT_DIR` unset: the worker searches only the system font directories). -/
+  workerFonts : Bool := true
+  /-- Bumped whenever the document the pages are rendered from changes (an open, a preview of
+  edited saved marks, Close): the worker's document id. -/
+  srcSerial : Nat := 0
+  /-- The `srcSerial` whose bytes the worker session has (`Worker.Session.setDoc`). -/
+  workerSrc : Option Nat := none
+  /-- Renders the worker answered and their total time (ns, request to answer; smoke
+  measurements). -/
+  workerRenders : Nat := 0
+  /-- See `workerRenders`. -/
+  workerNs : Nat := 0
+  /-- Worker renders cancelled (superseded) before they were answered. -/
+  cancelledRenders : Nat := 0
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -2442,38 +2487,148 @@ def cached (st : IO.Ref State) (key : View.Key) : IO (Option (Except Error Clip.
   st.modify ({ · with cache })
   return hit
 
-/-- Starts rendering `key` on a dedicated worker thread (task 8.8), unless a render of it is
-already running. The task only runs the pure renderer on the document (`State.view`, else
-`doc`) and the substitute fonts; it never touches Tk or the state. -/
-def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
+/-! ## The document worker (task 12.2c) -/
+
+/-- How long a worker request may run before the worker is killed (ms). Smoke mode may set
+another value with `SAFEPDF_WORKER_DEADLINE_MS`. -/
+def workerDeadlineMs : Nat := 20000
+
+/-- Marks an error text that comes from the document worker (`workerErr`, `pageErr`). -/
+def workerTag : String := "\x00worker:"
+
+/-- An error the document worker reported (or the failure of a worker request), as an `Error`
+whose text `pageErr` shows as it is. -/
+def workerErr (msg : String) : Error := .unsupported (workerTag ++ msg)
+
+/-- The text of a page's render error: `renderError`, or the worker's own text. -/
+def pageErr (e : Error) : String :=
+  match e with
+  | .unsupported w =>
+    if w.startsWith workerTag then String.ofList (w.toList.drop workerTag.length)
+    else renderError e
+  | _ => renderError e
+
+/-- What went wrong with a worker request, as text. -/
+def failText : Worker.ClientError → String
+  | .notEncodable => "the request does not fit the protocol"
+  | .timeout => "no answer in time"
+  | .exited d => d
+  | .tooLong n => s!"its answer of {n} bytes is above the cap"
+  | .badFrame _ => "its answer does not decode"
+
+/-- The status text of a render that hit the deadline. -/
+def timeoutText (deadlineMs : Nat) : String :=
+  let t := if deadlineMs % 1000 == 0 then s!"{deadlineMs / 1000} s" else s!"{deadlineMs} ms"
+  s!"rendering stopped: the document took too long (no answer within {t}; its worker was stopped)"
+
+/-- A render job's outcome from the worker's reply. The image is checked against its size
+before Tk sees it (`Shim.photoPut` reads `4·w·h` bytes). -/
+def outOfReply (deadlineMs : Nat) : Worker.Reply → RenderOut
+  | .response (.image w h data) ns =>
+    if data.size == 4 * w * h then some (.ok ⟨w, h, data⟩, ns)
+    else some (.error (workerErr
+      s!"the document worker sent a malformed image ({w}x{h}, {data.size} bytes)"), ns)
+  | .response (.error _ msg) ns => some (.error (workerErr msg), ns)
+  | .response _ ns => some (.error (workerErr "the document worker answered with another message"), ns)
+  | .failed .timeout => some (.error (workerErr (timeoutText deadlineMs)), 0)
+  | .failed e => some (.error (workerErr s!"the document worker stopped: {failText e}"), 0)
+  | .cancelled => none
+
+/-- The worker session and document id to render `doc`'s pages with, when the worker can
+render them as this process would (task 12.2c): a session exists, the layers are in the
+document's default state (the protocol carries no layers state), the worker has the same
+substitute fonts, and the bytes fit the protocol. Sends the bytes (`State.view`'s when saved
+marks are previewed) to the session when the document changed (`srcSerial`). -/
+def workerFor (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session × Nat)) := do
   let s ← st.get
-  if s.jobs.any (·.key == key) then return
+  let some ses := s.worker | return none
+  if !s.workerFonts || s.oc != s.ocCfg.map (·.initial) then return none
+  let d := s.view.getD doc
+  if d.file.bytes.size > limits.maxInputBytes then return none
+  if s.workerSrc != some s.srcSerial then
+    ses.setDoc (some (s.srcSerial, d.file.bytes, true))
+    st.modify ({ · with workerSrc := some s.srcSerial })
+  return some (ses, s.srcSerial)
+
+/-- Starts rendering `key`: queued for the document worker with priority `prio` when it can
+render it (`workerFor`), else on a dedicated thread in this process (task 8.8: the task only
+runs the pure renderer on the document (`State.view`, else `doc`) and the substitute fonts; it
+never touches Tk or the state). Returns the task and the worker request id. -/
+def renderTask (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat) :
+    IO (Task RenderOut × Option Nat) := do
+  if let some (ses, src) ← workerFor st doc then
+    let (id, t) ← ses.submit src (.render key.page key.zoom (Worker.rotationToNat key.rot)) prio
+    return (t.map (sync := true) (outOfReply ses.cfg.deadlineMs), some id)
+  let s ← st.get
   let d := s.view.getD doc
   let subst := s.subst
   let oc := s.oc
-  let start ← IO.monoNanosNow
   let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
     let r ← renderPage d key.page key.zoom key.rot subst oc
     let t1 ← IO.monoNanosNow
     return (r, t1 - t0)
-  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task⟩ }
+  let out : Except IO.Error (Except Error Clip.Image × Nat) → RenderOut
+    | .ok v => some v
+    | .error e => some (.error (.malformed 0 s!"render failed: {e}"), 0)
+  return (task.map (sync := true) out, none)
+
+/-- Starts rendering `key` (`renderTask`, priority `prio`: 0 for the page that must be shown
+now), unless a render of it is already running. -/
+def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat := 1) : IO Unit := do
+  let s ← st.get
+  if s.jobs.any (·.key == key) then return
+  let start ← IO.monoNanosNow
+  let (task, id) ← renderTask st doc key prio
+  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task, id⟩ }
 
 /-- Whether a render of `key` is running. -/
 def State.running (s : State) (key : View.Key) : Bool :=
   s.jobs.any (·.key == key)
 
+/-- Raises the worker render of `key`, if one is queued, to priority `prio` (task 12.2c: a
+neighbour that became the current page). -/
+def raiseJob (st : IO.Ref State) (key : View.Key) (prio : Nat) : IO Unit := do
+  let s ← st.get
+  let some ses := s.worker | return
+  for j in s.jobs do
+    if j.key == key then
+      if let some id := j.id then ses.raise id prio
+
 /-- Takes the finished job `j` out of `jobs` and returns its result and render time; the
-result goes into the cache when it is for the open document. -/
-def finish (st : IO.Ref State) (j : Job) : IO (Except Error Clip.Image × Nat) := do
-  let (r, ns) : Except Error Clip.Image × Nat := match j.task.get with
-    | .ok v => v
-    | .error e => (.error (.malformed 0 s!"render failed: {e}"), 0)
+result goes into the cache when it is for the open document. A cancelled worker render
+(task 12.2c) gives `none` and counts as a dropped stale result. -/
+def finish (st : IO.Ref State) (j : Job) : IO RenderOut := do
   st.modify fun s => { s with jobs := s.jobs.filter (·.key != j.key) }
-  if j.key.gen == (← st.get).gen then
-    st.modify fun s => { s with cache := s.cache.insert j.key r, renderNs := s.renderNs + ns,
-                                renders := s.renders + 1 }
-  return (r, ns)
+  match j.task.get with
+  | none =>
+    st.modify fun s => { s with staleDropped := s.staleDropped + 1,
+                                cancelledRenders := s.cancelledRenders + 1 }
+    return none
+  | some (r, ns) =>
+    if j.key.gen == (← st.get).gen then
+      let w := if j.id.isSome then 1 else 0
+      st.modify fun s => { s with cache := s.cache.insert j.key r, renderNs := s.renderNs + ns,
+                                  renders := s.renders + 1, workerRenders := s.workerRenders + w,
+                                  workerNs := s.workerNs + w * ns }
+    return some (r, ns)
+
+/-- Cancels the worker renders whose result would be dropped (task 12.2c): pages of another
+document generation or now laid out at another zoom or rotation, thumbnails of another
+generation or rotation. Queued ones are dropped; a running one is killed after
+`Worker.SessionConfig.preemptMs`. -/
+def cancelStale (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let some ses := s.worker | return
+  for j in s.jobs do
+    if let some id := j.id then
+      let stale := j.key.gen != s.gen || (match slotOf s j.key.page with
+        | some sl => keyOf s sl != j.key
+        | none => false)
+      if stale then ses.cancel id
+  for j in s.thJobs do
+    if let some id := j.id then
+      if j.key.gen != s.gen || j.key.rot != s.rot then ses.cancel id
 
 /-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view). -/
 def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
@@ -2525,12 +2680,12 @@ def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : 
     dropPhoto st p
     let pl := sl.place
     discard <| run [".c", "create", "text", toString (pl.x + pl.w / 2), toString (pl.y + pl.h / 2),
-      "-text", s!"page {p + 1}: cannot render: {renderError e}", "-width",
+      "-text", s!"page {p + 1}: cannot render: {pageErr e}", "-width",
       toString (max 40 (pl.w - 20)), "-fill", "#5b5b66", "-justify", "center",
       "-tags", s!"perr e{p}"]
     discard <| run [".c", "lower", s!"e{p}"]
     discard <| run [".c", "lower", "pageframe"]
-    st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .error (renderError e)) }
+    st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .error (pageErr e)) }
 
 /-- The placeholder of a page whose render is pending (task 8.8, after PDF.js's loading
 state): its white frame (`buildCanvas`) with a small grey "Rendering…" in the middle (tag
@@ -2660,6 +2815,7 @@ workers (`submit`, within `maxJobs`). The event waits for those renders at most 
 still missing get the placeholder (`showWaiting`) and arrive through `poll`. -/
 def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit := do
   let some doc := (← st.get).doc | return
+  cancelStale st
   let t0 ← IO.monoNanosNow
   for _ in [0:64] do
     let mut keys : List View.Key := []
@@ -2674,7 +2830,8 @@ def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit
         showPhoto st sl r
         if p == s.page then showStatus st "from cache"
       | none =>
-        if !s.running key && s.jobs.size < maxJobs then submit st doc key
+        if !s.running key && s.jobs.size < maxJobs then submit st doc key 0
+        else raiseJob st key 0
         if (← st.get).running key then keys := key :: keys else blocked := true
     -- Wait for the renders of these pages (or, without a time limit and with a page still
     -- waiting for a slot, for every running render).
@@ -2684,8 +2841,7 @@ def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit
       if js.isEmpty then break
       let fin ← js.filterM (IO.hasFinished ·.task)
       for j in fin do
-        let (r, ns) ← finish st j
-        discard <| place st pages j r ns
+        if let some (r, ns) ← finish st j then discard <| place st pages j r ns
       if fin.size == js.size then break
       match wait with
       | none =>
@@ -2734,6 +2890,7 @@ worker render while slots are free (task 8.8: the current page may use every slo
 def renderMore (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with renderQueued := false })
   let some doc := (← st.get).doc | return
+  cancelStale st
   let mut shown := false
   for p in ← missingPages st do
     let s ← st.get
@@ -2746,7 +2903,8 @@ def renderMore (st : IO.Ref State) : IO Unit := do
       if p == s.page then showStatus st "from cache"
     | none =>
       let slots := if p == s.page then maxJobs else maxJobs - 1
-      if !s.running key && s.jobs.size < slots then submit st doc key
+      if !s.running key && s.jobs.size < slots then submit st doc key (if p == s.page then 0 else 1)
+      else if p == s.page then raiseJob st key 0
       showWaiting sl
   if shown then drawOverlay st
   ensurePoll st
@@ -2859,19 +3017,12 @@ def thumbFocus (st : IO.Ref State) (p : Nat) : IO Unit := do
     "-width", "2", "-tags", "thfocus"]
   thumbSee st t
 
-/-- Starts rendering the thumbnail `key` on a dedicated worker thread (as `submit`). -/
+/-- Starts rendering the thumbnail `key` (as `submit`; priority 2 for the document worker,
+after every page render). -/
 def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
-  let s ← st.get
-  let d := s.view.getD doc
-  let subst := s.subst
-  let oc := s.oc
   let start ← IO.monoNanosNow
-  let task ← IO.asTask (prio := .dedicated) do
-    let t0 ← IO.monoNanosNow
-    let r ← renderPage d key.page key.zoom key.rot subst oc
-    let t1 ← IO.monoNanosNow
-    return (r, t1 - t0)
-  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task⟩ }
+  let (task, id) ← renderTask st doc key 2
+  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task, id⟩ }
 
 /-- **Lazy thumbnail rendering** (task 9.r9): for the visible band of the panel
 (`thumbBand`), the visible thumbnails and `Sidebar.thumbMargin` more on each side
@@ -2908,8 +3059,10 @@ def thumbPoll (st : IO.Ref State) : IO Unit := do
     if s.thKey != some (j.key.gen, j.key.rot) || j.key.gen != s.gen || s.thHave.contains p then
       continue
     let some t := s.thSlots[p]? | continue
-    match j.task.get with
-    | .ok (.ok img, _) =>
+    -- A cancelled worker render (task 12.2c) leaves the thumbnail to be asked for again.
+    let some out := j.task.get | continue
+    match out with
+    | (.ok img, _) =>
       discard <| run ["image", "create", "photo", thumbPhoto p]
       Shim.photoPut (thumbPhoto p) img.w.toUInt32 img.h.toUInt32 img.data
       let x0 : Int := -((img.w / 2 : Nat) : Int)
@@ -2938,13 +3091,14 @@ def syncThumbs (st : IO.Ref State) : IO Unit := do
 (`finish`, into the cache), shows those still wanted (`place`), starts more (`renderMore`). -/
 def poll (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with pollQueued := false })
+  cancelStale st
   let done ← (← st.get).jobs.filterM (IO.hasFinished ·.task)
   if !done.isEmpty then
     let want ← wantedNow st
     let mut shown := false
     for j in done do
-      let (r, ns) ← finish st j
-      if ← place st want j r ns then shown := true
+      if let some (r, ns) ← finish st j then
+        if ← place st want j r ns then shown := true
     if shown then drawOverlay st
     if (← st.get).doc.isSome then renderMore st
   -- Thumbnails (task 9.r9): finished ones shown, more started while page renders leave room.
@@ -2955,13 +3109,13 @@ def poll (st : IO.Ref State) : IO Unit := do
 /-- Renders every missing page now and waits for every running render (smoke tests and
 benchmarks). -/
 def settle (st : IO.Ref State) : IO Unit := do
+  cancelStale st
   viewChanged st
   for _ in [0:256] do
     let want ← wantedNow st
     for j in (← st.get).jobs do
       discard <| IO.wait j.task
-      let (r, ns) ← finish st j
-      discard <| place st want j r ns
+      if let some (r, ns) ← finish st j then discard <| place st want j r ns
     match ← missingPages st with
     | [] => break
     | miss => showNow st miss none
@@ -3584,6 +3738,70 @@ def escapeWindow (st : IO.Ref State) : IO Bool := do
     return true
   return false
 
+/-! ## The document worker at open and close (task 12.2c) -/
+
+/-- Display text from the worker (outline titles, names): unsafe characters
+(`Links.unsafeChar`: controls, bidi overrides) as spaces, at most `Links.maxTitle` characters,
+as `Links.textString` does for the titles read in this process. -/
+def safeText (s : String) : String :=
+  String.ofList ((s.toList.take Links.maxTitle).map fun c => if Links.unsafeChar c then ' ' else c)
+
+/-- What activating an outline item of the worker does (as `Links.actionOf`; a URI is shown
+percent-encoded by `Links.uriText`). -/
+def actionOfTarget : Worker.Protocol.Target → Links.Action
+  | .none => .none
+  | .page i f => let (l, t) := Links.fitPos f; .goto ⟨i, l, t⟩
+  | .danglingDest _ => .badPage
+  | .unresolved n => .unresolved (safeText n)
+  | .uri u => .uri (Links.uriText u.toUTF8.toList)
+  | .action k => if k == "URI" then .other "URI (no address)" else .other (Links.uriText k.toUTF8.toList)
+
+/-- An outline item of the worker as an outline entry (as `Links.outlineEntries`). -/
+def entryOfItem (it : Worker.Protocol.OutlineItem) : Links.Entry :=
+  { title := safeText it.title, depth := it.depth,
+    isOpen := match it.count with | some c => decide (0 < c) | none => false,
+    action := actionOfTarget it.target }
+
+/-- Hands a newly opened document to the worker session (task 12.2c): a new `srcSerial`, the
+bytes the viewer read (a new worker process for them) and a request for the outline. Returns
+the outline reply's task (`none` without a session, or when the bytes do not fit the
+protocol). -/
+def workerOpen (st : IO.Ref State) (bytes : ByteArray) : IO (Option (Task Worker.Reply)) := do
+  st.modify fun s => { s with srcSerial := s.srcSerial + 1, workerSrc := none }
+  let s ← st.get
+  let some ses := s.worker | return none
+  if bytes.size > limits.maxInputBytes then
+    ses.setDoc none
+    return none
+  ses.setDoc (some (s.srcSerial, bytes, true))
+  st.modify ({ · with workerSrc := some s.srcSerial })
+  let (_, t) ← ses.submit s.srcSerial .outline 0
+  return some t
+
+/-- No document any more (a failed open, Close): the worker is stopped. -/
+def workerStop (st : IO.Ref State) : IO Unit := do
+  st.modify fun s => { s with srcSerial := s.srcSerial + 1, workerSrc := none }
+  if let some ses := (← st.get).worker then ses.setDoc none
+
+/-- The outline of the open document: from the worker's reply `t?` (waits for it, at most the
+worker deadline), else read in this process (`Links.outlineEntries`) — without a session, or
+with a note when the worker gave no outline. -/
+def outlineFor (doc : Doc) (t? : Option (Task Worker.Reply)) :
+    IO (Array Links.Entry × Option String) := do
+  let here : IO (Array Links.Entry) :=
+    IO.lazyPure fun _ => (Links.outlineEntries doc limits).toArray
+  let some t := t? | return (← here, none)
+  match ← IO.wait t with
+  | .response (.outline items) _ =>
+    return ((Links.clampDepths 0 (items.map entryOfItem)).toArray, none)
+  | .response (.error _ m) _ =>
+    return (← here, some s!"outline read in this process (the document worker: {m})")
+  | .response _ _ =>
+    return (← here, some "outline read in this process (the document worker answered with another message)")
+  | .failed e =>
+    return (← here, some s!"outline read in this process (the document worker: {failText e})")
+  | .cancelled => return (← here, none)
+
 /-- Opens the document `load` gives under the name `path`: builds the page tree, shows page 1.
 A failure (`load`'s message, e.g. `cannot read: …`) ends up in the status line with an empty
 page. Shared by `openFile` and `openBytes`.
@@ -3624,17 +3842,18 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
   st.modify ({ · with toggleShown := none })
   match ← load with
   | .error msg =>
+    workerStop st
     refresh st
     setStatus s!"{path}: {msg}"
   | .ok doc =>
+    -- Task 12.2c: the worker opens the same bytes meanwhile and reads the outline.
+    let outlineT ← workerOpen st doc.file.bytes
     -- Our marks already in the file (task 9.5c): restored with their ids, saved.
     let marks ← IO.lazyPure fun _ => Marks.Store.load (Save.readMarks doc limits)
     st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none,
                         marks, markHist := Marks.History.start marks.marks })
-    let (labels, outline) ← IO.lazyPure fun _ =>
-      (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
-    st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
-    fillOutline st
+    let labels ← IO.lazyPure fun _ => Links.labels doc limits
+    st.modify ({ · with labels, links := Array.replicate doc.pages.size none })
     -- Task 9.r10: the attachments, listed without decoding any.
     let att ← IO.lazyPure fun _ => Core.Doc.Attachments.list doc limits
     st.modify ({ · with attList := att.entries.toArray, attIcons := att.icons,
@@ -3643,11 +3862,17 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
     -- Task 9.r11b: the layers, in the document's default state (kept on the reopen after a
     -- save).
     loadLayers st doc prevOC
+    -- Task 12.2c: the outline, from the worker (waited for here, after the work above).
+    let (outline, olNote) ← outlineFor doc outlineT
+    st.modify ({ · with outline })
+    fillOutline st
     -- Task 9.r8: the document's open settings, on every open except the reopen after a save
     -- (`keepView`: the user's view stays, outline included).
     let (mode, prefs, notes) ← if keepView then pure (none, {}, [])
       else applyOpenSettings st doc
     -- Before anything lays the window out: a `<Configure>` refresh shows the status line.
+    let wNote := (← st.get).workerNote
+    let notes := notes ++ olNote.toList ++ (if wNote.isEmpty then [] else [wNote])
     st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
     -- Task 9.r9: the panel buttons for this document, the sidebar as the page mode says.
     let s1 ← st.get
@@ -3887,7 +4112,7 @@ def updatePreview (st : IO.Ref State) : IO Bool := do
       setStatus s!"cannot show the change of a saved mark: {e}"
       return false
   st.modify fun s => { s with view := v, gen := s.gen + 1, cache := ({} : View.Cache),
-                              shown := none }
+                              shown := none, srcSerial := s.srcSerial + 1 }
   for (p, _) in (← st.get).photos do dropPhoto st p
   refresh st
   return true
@@ -4350,6 +4575,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                                                 picker := false },
                               bubble := none, pickerAt := none, bubblePress := false,
                               ocCfg := none, oc := none, lyRows := [] }
+  workerStop st
   fillLayers st
   discard <| run ["pack", "forget", ".find", ".goto"]
   discard <| run ["destroy", ".note"]
@@ -7391,6 +7617,151 @@ def smokeAsync (st : IO.Ref State) (dir : String) : IO Unit := do
     append "done"
     discard <| run ["destroy", "."]
 
+/-- Median of a non-empty list of numbers (0 for none). -/
+def median (xs : List Nat) : Nat :=
+  let ys := xs.mergeSort
+  ys.getD (ys.length / 2) 0
+
+/-- Times the render of page `p` at its current zoom and rotation three times in this process
+(`renderPage`) and three times through the document worker (request to answer, the image
+sent over the pipe and decoded), and returns the medians (task 12.2c's measurement; blocks the
+event loop: smoke mode only). -/
+def measureRender (st : IO.Ref State) (p : Nat) : IO String := do
+  let s ← st.get
+  let some doc := s.doc | return "no document"
+  let some sl := slotOf s p | return "no slot"
+  let key := keyOf s sl
+  let mut here : List Nat := []
+  for _ in [0:3] do
+    let t0 ← IO.monoNanosNow
+    let r ← renderPage doc p key.zoom key.rot s.subst s.oc
+    let ok := match r with | .ok _ => true | .error _ => false
+    let t1 ← IO.monoNanosNow
+    if ok then here := (t1 - t0) :: here
+  let some (ses, src) ← workerFor st doc | return "no worker"
+  let mut viaWorker : List Nat := []
+  for _ in [0:3] do
+    let (_, t) ← ses.submit src (.render p key.zoom (Worker.rotationToNat key.rot)) 0
+    if let .response (.image ..) ns ← IO.wait t then viaWorker := ns :: viaWorker
+  return s!"page {p + 1} {sl.place.w}x{sl.place.h} px: in-process {formatMs (median here)} ms, \
+    worker {formatMs (median viaWorker)} ms (medians of {here.length} and {viaWorker.length})"
+
+/-- What page `p` shows: `image WxH`, `error: …` or `none`. -/
+def photoKind (s : State) (p : Nat) : String :=
+  match s.photos.find? (·.1 == p) with
+  | some (_, .ok img) => s!"image {img.w}x{img.h}"
+  | some (_, .error e) => s!"error: {e}"
+  | none => "none"
+
+/-- Smoke steps of the document worker (`SAFEPDF_VIEWER_SMOKE_MODE=worker`, task 12.2c; run
+with `SAFEPDF_WORKER_DEADLINE_MS`, e.g. 4000, and a second file `next.pdf` in the output
+directory). Step 0: the opened pages came from the worker; render times in this process and
+through the worker (`measureRender`); then **no-block** (a): the next workers sleep 1.5 s
+before each render (`Worker.TestHooks`, through a new document id, so a new worker), no event
+waits for renders (`syncWaitMs := some 0`), a 10 ms Tcl heartbeat records its largest gap, and
+`+` zooms. Phase a waits for that render: the gap, the photo. **Kill/restart** (b): workers
+sleep ten minutes, `+` again; phase b waits until the render ends: after the deadline the page
+shows the timeout and the status says so. (c) the stall is lifted, `+` again: the same document
+in a fresh worker (spawned with the bytes again). (d) `next.pdf` opens and renders through a
+new worker; its render times. Writes `worker.txt`. -/
+def smokeWorker (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file : System.FilePath := (dir : System.FilePath) / "worker.txt"
+  let append (l : String) : IO Unit := do
+    let old ← try IO.FS.readFile file catch _ => pure ""
+    IO.FS.writeFile file (old ++ l ++ "\n")
+  let s ← st.get
+  st.modify ({ · with smokeStep := s.smokeStep + 1 })
+  let next (ms : Nat) : IO Unit := discard <| run ["after", toString ms, "::safepdf::emit smoke"]
+  let finish : IO Unit := do
+    append "done"
+    discard <| run ["destroy", "."]
+  let some ses := s.worker | do
+    append "error: no worker session"
+    finish
+  let stats : IO String := do
+    let w ← ses.state.get
+    return s!"spawns {w.spawns} timeouts {w.timeouts} kills {w.kills}"
+  let timed (act : IO Unit) : IO Nat := do
+    let t0 ← IO.monoNanosNow
+    act
+    return ((← IO.monoNanosNow) - t0) / 1000000
+  let nowMs : IO Nat := return (← IO.monoNanosNow) / 1000000
+  let hbReset : IO Unit := do
+    discard <| run ["set", "::safepdf::hbMax", "0"]
+    discard <| Shim.eval "set ::safepdf::hbLast [clock milliseconds]"
+  let hbMax : IO String := run ["set", "::safepdf::hbMax"]
+  let status : IO String := run [".status", "cget", "-text"]
+  let phase ← Shim.eval "expr {[info exists ::safepdf::wkPhase] ? $::safepdf::wkPhase : {}}"
+  let setPhase (p : String) : IO Unit := discard <| run ["set", "::safepdf::wkPhase", p]
+  let waiting : Bool := !s.jobs.isEmpty && s.smokeStep < 200
+  match phase with
+  | "" =>
+    append s!"open: page {s.page + 1} {photoKind s s.page} worker-renders {s.workerRenders} \
+      renders {s.renders} {← stats}"
+    append s!"measure-a: {← measureRender st s.page}"
+    -- (a) no-block: a 10 ms heartbeat, renders that take 1.5 s longer, a zoom.
+    discard <| Shim.eval "proc ::safepdf::hb {} {
+  set n [clock milliseconds]
+  set d [expr {$n - $::safepdf::hbLast}]
+  if {$d > $::safepdf::hbMax} { set ::safepdf::hbMax $d }
+  set ::safepdf::hbLast $n
+  incr ::safepdf::hbTicks
+  after 10 ::safepdf::hb
+}"
+    discard <| run ["set", "::safepdf::hbTicks", "0"]
+    hbReset
+    discard <| run ["::safepdf::hb"]
+    ses.setEnv #[("SAFEPDF_WORKER_TEST_STALL_MS", some "1500")]
+    st.modify fun s => { s with srcSerial := s.srcSerial + 1, syncWaitMs := some 0 }
+    discard <| run ["set", "::safepdf::wkT0", toString (← nowMs)]
+    let ms ← timed (sendKey "plus")
+    append s!"a-event-ms: {ms}"
+    setPhase "a"
+    next 300
+  | "a" =>
+    if waiting then next 300; return
+    let t0 := ((← run ["set", "::safepdf::wkT0"]).toNat?).getD 0
+    append s!"noblock: {photoKind s s.page} elapsed-ms {(← nowMs) - t0} max-gap-ms {← hbMax} \
+      ticks {← run ["set", "::safepdf::hbTicks"]} {← stats}"
+    append s!"noblock-status: {← status}"
+    -- (b) a render that never ends: killed after the deadline.
+    ses.setEnv #[("SAFEPDF_WORKER_TEST_STALL_MS", some "600000")]
+    st.modify fun s => { s with srcSerial := s.srcSerial + 1 }
+    hbReset
+    discard <| run ["set", "::safepdf::wkT0", toString (← nowMs)]
+    let ms ← timed (sendKey "plus")
+    append s!"b-event-ms: {ms}"
+    setPhase "b"
+    next 300
+  | "b" =>
+    if waiting then next 300; return
+    let t0 := ((← run ["set", "::safepdf::wkT0"]).toNat?).getD 0
+    append s!"stalled: {photoKind s s.page} elapsed-ms {(← nowMs) - t0} max-gap-ms {← hbMax} \
+      deadline-ms {ses.cfg.deadlineMs} {← stats}"
+    append s!"stalled-status: {← status}"
+    -- (c) the same document again, in a fresh worker (no stall).
+    ses.setEnv #[]
+    let ms ← timed (sendKey "plus")
+    append s!"c-event-ms: {ms}"
+    setPhase "c"
+    next 300
+  | "c" =>
+    if waiting then next 300; return
+    append s!"respawn: {photoKind s s.page} {← stats}"
+    -- (d) the next file.
+    let path := ((dir : System.FilePath) / "next.pdf").toString
+    let ms ← timed (openFile st path)
+    append s!"d-open-ms: {ms}"
+    setPhase "d"
+    next 300
+  | _ =>
+    if waiting then next 300; return
+    append s!"next: page {s.page + 1}/{s.pageCount} {photoKind s s.page} outline {s.outline.size} {← stats}"
+    append s!"next-status: {← status}"
+    append s!"measure-b: {← measureRender st s.page}"
+    append s!"cancelled: {s.cancelledRenders} stale {s.staleDropped}"
+    finish
+
 /-- Tcl probes of the outline-toggle check of `smokeR4` (task 9.r4): `r4sample WHY` appends
 `{WHY canvas-width x y screen-x}` to `::safepdf::r4log`, where x and y are the canvas-window
 position of the first page frame and screen-x its x on the screen (`none` without one); it runs at every `<Configure>` of the canvas (after
@@ -9727,6 +10098,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some dir := s.smokeDir | return
   if s.smokeMode == "text" then smokeText st dir; return
+  if s.smokeMode == "worker" then
+    try smokeWorker st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "worker.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "nav" then smokeNav st dir; return
   if s.smokeMode == "menu" then smokeMenu st dir; return
   if s.smokeMode == "toolbar" then smokeToolbar st dir; return
@@ -10072,6 +10449,28 @@ def safeHandle (st : IO.Ref State) (args : Array String) : IO Unit := do
   guarded (handle st args)
   guarded (syncMenus st)
 
+/-- The document worker executable (task 12.2c): `worker` next to the viewer's executable
+(`.lake/build/bin/worker` after `lake build`). -/
+def workerExe : IO System.FilePath := do
+  return (← IO.appDir) / "worker"
+
+/-- Starts the document worker session (task 12.2c), or says why pages render in this process:
+`SAFEPDF_VIEWER_WORKER=0`, or no worker executable (a development build of only the viewer;
+the viewer keeps working, with the reason in the status line). In smoke mode
+`SAFEPDF_WORKER_DEADLINE_MS` sets the deadline (`smokeWorker` sets the test hook's variable of
+the workers it starts, `Worker.TestHooks`). -/
+def startWorker (smoke : Bool) : IO (Option Worker.Session × String) := do
+  if (← IO.getEnv "SAFEPDF_VIEWER_WORKER") == some "0" then
+    return (none, "pages render in this process (SAFEPDF_VIEWER_WORKER=0)")
+  let exe ← workerExe
+  if !(← exe.pathExists) then
+    return (none, s!"no document worker at {exe}: pages render in this process")
+  let deadlineMs ← if smoke then
+      pure (((← IO.getEnv "SAFEPDF_WORKER_DEADLINE_MS").bind String.toNat?).getD workerDeadlineMs)
+    else pure workerDeadlineMs
+  let ses ← Worker.Session.start { exe, limits, deadlineMs }
+  return (some ses, "")
+
 /-- Parses a window size `WxH` (`SAFEPDF_VIEWER_GEOMETRY`), each side 200–10000 pixels. -/
 def parseGeometry (g : String) : Option (Nat × Nat) :=
   match g.splitOn "x" with
@@ -10166,7 +10565,11 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   -- mode until they are done (the steps look at the pages at once), except in the `async` test.
   let syncWaitMs := if smokeDir.isNone || smokeMode == "async" then
     some (if smokeMode == "async" then 0 else 100) else none
-  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs } : State)
+  let (worker, workerNote) ← startWorker smokeDir.isSome
+  let workerFonts := (← IO.getEnv "SAFEPDF_SUBST_FONTS") != some "0" &&
+    (← IO.getEnv "SAFEPDF_FONT_DIR").isNone
+  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs, worker, workerNote,
+                       workerFonts } : State)
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
@@ -10213,6 +10616,8 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   guarded (syncMenus st)
   if smokeDir.isSome then discard <| run ["after", "300", "::safepdf::emit smoke"]
   Shim.mainLoop
+  -- Task 12.2c: the worker is killed with the window (waited for at most 2 s).
+  if let some w := (← st.get).worker then w.shutdown
   return 0
 
 /-- Runs the viewer (`mainWith` without an `init`): opens the file named in `args`, else asks
