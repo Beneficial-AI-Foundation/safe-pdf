@@ -170,6 +170,86 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  # Task 11.4: the native macOS shell (Swift/AppKit, macos/). macos-26 is the arm64 macOS 26
+  # image (also `macos-latest` in Nov 2026); its Xcode has Swift 6 and the macOS 26 SDK the app
+  # is written against (26-only calls are gated by `#if compiler(>=6.2)` + `#available`, so an
+  # older SDK would compile them out rather than fail). Steps mirror macos/README.md:
+  # `lake build macosFfi worker`, macos/build.sh, the headless C API suites, the headless
+  # self-test (activation policy Prohibited, no window) and the bundle's ad-hoc signature.
+  # Tk is not installed here: the Linux `viewer` job covers the Tk shell.
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
+          restore-keys: |
+            macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+            macos-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+          "$HOME/.elan/bin/lean" --version
+          "$HOME/.elan/bin/lake" --version
+
+      - name: Toolchain versions (Swift, SDK, OS)
+        run: |
+          sw_vers
+          xcode-select -p
+          swiftc --version
+          xcrun --show-sdk-version
+          clang --version | head -n1
+
+      - name: Build library and inspector
+        run: lake build
+
+      - name: Build the C API library and the worker
+        run: lake build macosFfi worker
+
+      # macos/build.sh is the source of truth for the clang/swiftc flags (`lake build macosApp`
+      # runs the same script after building macosFfi and worker).
+      - name: Build the app (macos/build.sh)
+        run: macos/build.sh
+
+      - name: C API suites (headless)
+        run: macos/tests/run_all.sh
+
+      - name: Headless self-test of the app
+        run: macos/selftest.sh Tests/golden/text/latin.pdf "$RUNNER_TEMP/selftest"
+
+      - name: Verify the bundle's ad-hoc signature
+        run: |
+          codesign -v --strict --verbose=2 macos/build/SafePdf.app
+          codesign -v --verbose=2 macos/build/SafePdf.app/Contents/Helpers/worker
+
+      # actions/upload-artifact v4.6.2
+      - name: Upload the link log and self-test output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-app-logs
+          path: |
+            macos/build/swift-link.log
+            ${{ runner.temp }}/selftest/
+          if-no-files-found: warn
+          retention-days: 30
+
   # Task 12.6 (docs/safety.md §5 item 6): the test suites run natively compiled
   # (`lake exe tests`) and in Lean's IR interpreter (scripts/interp-suites.lean); their
   # outputs must agree suite by suite, wall-clock figures aside. Probes the Lean -> C code

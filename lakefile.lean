@@ -209,3 +209,39 @@ target macosFfi pkg : FilePath := do
     let objs := is.foldl (fun acc i => i.objs.foldl
       (fun a o => if a.contains o then a else a.push o) acc) #[]
     buildStaticLib (pkg.staticLibDir / "libsafepdfffi.a") (objs.map pure)
+
+/-! ## Platform viewer selection (task 11.4; not default targets)
+
+`lake build macosApp` builds the native macOS shell (`macos/build/SafePdf.app`, Swift/AppKit,
+`docs/macos-design.md` §3 decision 6) and fails with a clear message off macOS.
+`lake build app` is the platform viewer: `macosApp` on macOS, the Tk `viewer` (plus the
+`worker` it starts) elsewhere. The Tk `viewer` stays buildable on macOS by name
+(`lake build viewer worker`). None of these is a default target: `lake build`,
+`lake build tests fuzz` and `lake exe tests` compile neither Tk nor Swift. -/
+
+/-- The native macOS app bundle `macos/build/SafePdf.app`. Lake builds `macosFfi` and `worker`,
+then runs `macos/build.sh` with `SAFEPDF_MACOS_LAKE_DONE=1` (the script then skips its own
+`lake build` step, so no `lake build` runs inside this one). `macos/build.sh` stays the single
+source of the clang/swiftc flags; it also writes `macos/build/safepdf-mac`,
+`macos/build/safepdf_core.o` and `macos/build/core_test`. Not traced: the script runs on every
+`lake build macosApp`. Off macOS this target fails before building anything. -/
+target macosApp pkg : FilePath := do
+  unless Platform.isOSX do
+    error "macosApp: the native shell (Swift/AppKit) builds on macOS only; \
+      elsewhere use `lake build viewer worker` (Tcl/Tk) or `lake build app`"
+  let ffi ← macosFfi.fetch
+  let wrk ← worker.fetch
+  (ffi.mix wrk).mapM fun _ => do
+    let buildSh := pkg.dir / "macos" / "build.sh"
+    proc { cmd := "bash", args := #[buildSh.toString], cwd := pkg.dir,
+           env := #[("SAFEPDF_MACOS_LAKE_DONE", some "1")] }
+    return pkg.dir / "macos" / "build" / "SafePdf.app"
+
+/-- The platform viewer: on macOS the native app (`macosApp`; its output is the bundle's path),
+elsewhere the Tk `viewer` executable together with the `worker` it starts (output: the viewer's
+path; `lake build viewer` alone does not build `worker`). -/
+target app : FilePath := do
+  if Platform.isOSX then
+    macosApp.fetch
+  else
+    return (← viewer.fetch).add (← worker.fetch)
