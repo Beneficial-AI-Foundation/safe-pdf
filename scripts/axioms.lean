@@ -19,6 +19,7 @@ import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Toolbar
 import SafePdf.Shell.App.Budget
+import SafePdf.Shell.Worker.Serve
 import SafePdf.Shell.Worker.Protocol
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
@@ -1416,3 +1417,15 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Core.Xref.Length.lengthHop_fuel
 #print axioms SafePdf.Spec.RepairAgreeComp.resolve_fuel
 #print axioms SafePdf.Spec.RepairAgreeComp.getObject_strip_cnt
+-- Phase 12, task 12.3b: photo pool, outputs, one decode budget per request
+#print axioms SafePdf.Shell.App.Budget.plan_fits
+#print axioms SafePdf.Shell.App.Budget.Pool.makeRoom_fits
+#print axioms SafePdf.Shell.App.Budget.Pool.makeRoom_released
+#print axioms SafePdf.Shell.App.Budget.Pool.makeRoom_ceiling
+#print axioms SafePdf.Shell.App.Budget.Pool.admitPhoto_iff
+#print axioms SafePdf.Shell.App.Budget.Pool.admitPhoto_evicts
+#print axioms SafePdf.Shell.App.Budget.two_pages_fit_photos
+#print axioms SafePdf.Shell.App.Budget.thumbs_fit_reserve
+#print axioms SafePdf.Shell.Worker.Serve.answerDocB_init
+#print axioms SafePdf.Shell.Worker.Serve.pageTextB_init
+#print axioms SafePdf.Shell.Worker.Serve.pageIndexB_init
