@@ -10,11 +10,13 @@ is exactly `Protocol.decodeFrame` split into its two steps — the 4-byte header
 (`Protocol.readHeader`, checked against the cap **before** any payload byte is read, so an
 over-long header costs nothing) and then the payload (`Protocol.decodeBody`).
 
-`workerFonts` is the substitute-font table the worker renders with. It searches only the
-fixed system font directories (`Shell.Fonts.findFacesIn` with an empty `SearchConfig`: no
-`$HOME`, no `$SAFEPDF_FONT_DIR`), so it does not depend on the environment, which the client
-clears (`inheritEnv := false`). The worker reads these files once at startup, before it
-confines itself (task 12.2b). Tests render in-process with the same table to compare pixels.
+`workerFonts` is the substitute-font table the worker renders with. It searches the fixed
+system font directories plus what the startup configuration names (task 12.2d: flags
+`--home=DIR` for `DIR/Library/Fonts`, `--font-dir=DIR`, `--no-subst`; the viewer passes its
+`$HOME`, `$SAFEPDF_FONT_DIR` and `$SAFEPDF_SUBST_FONTS=0` this way), so it does not depend on
+the environment, which the client clears (`inheritEnv := false`). The worker reads these files
+once at startup, before it confines itself (task 12.2b). Tests render in-process with the same
+table to compare pixels.
 -/
 
 namespace SafePdf.Shell.Worker
@@ -59,18 +61,23 @@ def writeAll (s : IO.FS.Stream) (b : ByteArray) : IO Unit := do
   s.write b
   s.flush
 
-/-- The substitute faces the worker uses (file, bytes, face index): those found in the fixed
-system font directories only (no `$HOME`, no `$SAFEPDF_FONT_DIR`; environment-independent).
-Every file is read here, in full; the worker calls this once, **before** it confines itself
-(task 12.2b, `SafePdf.Shell.Worker.Sandbox.prepare`), and opens no file afterwards. -/
-def workerFaces : IO (List Fonts.Found) := do
-  let cfg ← Fonts.listVersions {}
+/-- The substitute faces the worker uses (file, bytes, face index): none with `noSubst`,
+else those found in the fixed system font directories and in the directories the startup
+configuration names (`home`'s `Library/Fonts`, `fontDirs`) — the viewer's own search
+(`Fonts.systemConfig`) when the viewer passes its environment as flags (task 12.2d). Every
+file is read here, in full; the worker calls this once, **before** it confines itself (task
+12.2b, `SafePdf.Shell.Worker.Sandbox.prepare`), and opens no file afterwards. -/
+def workerFaces (c : Protocol.StartConfig := {}) : IO (List Fonts.Found) := do
+  if c.noSubst then return []
+  let cfg ← Fonts.listVersions
+    { home := c.home.map System.FilePath.mk, userDirs := c.fontDirs }
   Fonts.findFacesIn cfg
 
-/-- **The worker's substitute fonts**: the table of `workerFaces` (parsed lazily, purely,
+/-- **The worker's substitute fonts**: the table of `workerFaces c` (parsed lazily, purely,
 under `limits`). Tests render in-process with the same table. -/
-def workerFonts (limits : Limits) : IO Raster.Subst.SubstFonts := do
-  return Fonts.tableOf limits (← workerFaces)
+def workerFonts (limits : Limits) (c : Protocol.StartConfig := {}) :
+    IO Raster.Subst.SubstFonts := do
+  return Fonts.tableOf limits (← workerFaces c)
 
 /-- `Core.Doc.Rotation` as quarter turns. -/
 def rotationToNat : Doc.Rotation → Nat

@@ -240,12 +240,15 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   the current page is preempted the same way and rendered again later. A render without an
   answer within `workerDeadlineMs` (20 s) kills the worker: the page shows "rendering stopped:
   the document took too long", and the next request starts a fresh worker with the bytes
-  again. In-process (as in task 8.8) remain: renders under a layers state other than the
-  document's default and with a font configuration the worker does not share
-  (`SAFEPDF_SUBST_FONTS`, `SAFEPDF_FONT_DIR`), the whole viewer when the worker executable is
-  missing (status note) or `SAFEPDF_VIEWER_WORKER=0`; text extraction, links, page labels,
-  open settings, attachments and layers (the protocol has no reading-order lines, layers
-  state or those objects; `docs/viewer.md`).
+  again. Task 12.2d: renders carry the layers state (`State.oc`); the worker is started with
+  the viewer's limits and font search as flags (`workerStart`: `SAFEPDF_SUBST_FONTS=0`,
+  `$HOME`, `$SAFEPDF_FONT_DIR`); the selection/search text index (`pageIndex`) and the links
+  (`linksOf`) come from the worker while the pages are rendered from the opened document
+  itself (`workerForText`), asked for when a page is rendered so that pointer motion never
+  waits (`wait := false`). In-process (as in task 8.8) remain: the whole viewer when the worker
+  executable is missing (status note) or `SAFEPDF_VIEWER_WORKER=0`; the text index and links
+  while edited saved marks are previewed (`State.view`); the parse the GUI keeps for layout,
+  page labels, open settings, attachments, the layers panel and Save (`docs/viewer.md`).
 * **Smoke mode** (`SAFEPDF_VIEWER_SMOKE=DIR`, used by `scripts/viewer-smoke.sh`): drives the
   viewer with Tk key events (`event generate`) and writes photos and state files into `DIR`
   (see `smoke`), then exits.
@@ -354,6 +357,18 @@ structure Job where
   task : Task RenderOut
   /-- The worker request (`Worker.Session.cancel`); `none` for an in-process render. -/
   id : Option Nat := none
+
+/-- A text-index or links request queued for the document worker (task 12.2d): the page, the
+document generation it was asked for, the worker request id and the reply. -/
+structure SideJob where
+  /-- Page index. -/
+  page : Nat
+  /-- `State.gen` when it was asked for (a reply for another generation is not cached). -/
+  gen : Nat
+  /-- The worker request (`Worker.Session.cancel`, `raise`). -/
+  id : Nat
+  /-- The worker's reply. -/
+  task : Task Worker.Reply
 
 /-- The free-text editor open on the canvas (task 9.9). -/
 structure FtEdit where
@@ -610,9 +625,6 @@ structure State where
   worker : Option Worker.Session := none
   /-- Why there is no worker session (shown in the status line after every open). -/
   workerNote : String := ""
-  /-- The worker renders with the same substitute fonts (`SAFEPDF_SUBST_FONTS` and
-  `SAFEPDF_FONT_DIR` unset: the worker searches only the system font directories). -/
-  workerFonts : Bool := true
   /-- Bumped whenever the document the pages are rendered from changes (an open, a preview of
   edited saved marks, Close): the worker's document id. -/
   srcSerial : Nat := 0
@@ -625,6 +637,14 @@ structure State where
   workerNs : Nat := 0
   /-- Worker renders cancelled (superseded) before they were answered. -/
   cancelledRenders : Nat := 0
+  /-- Text-index requests queued for the document worker (task 12.2d, `pageIndex`). -/
+  textJobs : Array SideJob := #[]
+  /-- Links requests queued for the document worker (task 12.2d, `linksOf`). -/
+  linkJobs : Array SideJob := #[]
+  /-- Text indexes and link lists the worker answered (smoke measurements, task 12.2d). -/
+  workerTexts : Nat := 0
+  /-- See `workerTexts`. -/
+  workerLinks : Nat := 0
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -2116,19 +2136,154 @@ bind all <ButtonPress-1> {+::safepdf::clickAway %W}
 focus .c
 "
 
+/-! ## The document worker (task 12.2c) -/
+
+/-- How long a worker request may run before the worker is killed (ms). Smoke mode may set
+another value with `SAFEPDF_WORKER_DEADLINE_MS`. -/
+def workerDeadlineMs : Nat := 20000
+
+/-- Marks an error text that comes from the document worker (`workerErr`, `pageErr`). -/
+def workerTag : String := "\x00worker:"
+
+/-- An error the document worker reported (or the failure of a worker request), as an `Error`
+whose text `pageErr` shows as it is. -/
+def workerErr (msg : String) : Error := .unsupported (workerTag ++ msg)
+
+/-- The text of a page's render error: `renderError`, or the worker's own text. -/
+def pageErr (e : Error) : String :=
+  match e with
+  | .unsupported w =>
+    if w.startsWith workerTag then String.ofList (w.toList.drop workerTag.length)
+    else renderError e
+  | _ => renderError e
+
+/-- What went wrong with a worker request, as text. -/
+def failText : Worker.ClientError → String
+  | .notEncodable => "the request does not fit the protocol"
+  | .timeout => "no answer in time"
+  | .exited d => d
+  | .tooLong n => s!"its answer of {n} bytes is above the cap"
+  | .badFrame _ => "its answer does not decode"
+
+/-- The status text of a render that hit the deadline. -/
+def timeoutText (deadlineMs : Nat) : String :=
+  let t := if deadlineMs % 1000 == 0 then s!"{deadlineMs / 1000} s" else s!"{deadlineMs} ms"
+  s!"rendering stopped: the document took too long (no answer within {t}; its worker was stopped)"
+
+/-- A render job's outcome from the worker's reply. The image is checked against its size
+before Tk sees it (`Shim.photoPut` reads `4·w·h` bytes). -/
+def outOfReply (deadlineMs : Nat) : Worker.Reply → RenderOut
+  | .response (.image w h data) ns =>
+    if data.size == 4 * w * h then some (.ok ⟨w, h, data⟩, ns)
+    else some (.error (workerErr
+      s!"the document worker sent a malformed image ({w}x{h}, {data.size} bytes)"), ns)
+  | .response (.error _ msg) ns => some (.error (workerErr msg), ns)
+  | .response _ ns => some (.error (workerErr "the document worker answered with another message"), ns)
+  | .failed .timeout => some (.error (workerErr (timeoutText deadlineMs)), 0)
+  | .failed e => some (.error (workerErr s!"the document worker stopped: {failText e}"), 0)
+  | .cancelled => none
+
+/-- The worker session and document id to render `doc`'s pages with (task 12.2c): a session
+exists and the bytes fit the protocol. Since task 12.2d the worker renders under the layers
+state of the request and with the viewer's own font search (`workerStart`), so neither keeps a
+render in this process. Sends the bytes (`State.view`'s when saved marks are previewed) to the
+session when the document changed (`srcSerial`). -/
+def workerFor (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session × Nat)) := do
+  let s ← st.get
+  let some ses := s.worker | return none
+  let d := s.view.getD doc
+  if d.file.bytes.size > limits.maxInputBytes then return none
+  if s.workerSrc != some s.srcSerial then
+    ses.setDoc (some (s.srcSerial, d.file.bytes, true))
+    st.modify ({ · with workerSrc := some s.srcSerial })
+  return some (ses, s.srcSerial)
+
+/-- The worker session for the open document's text index and links (task 12.2d): as
+`workerFor`, but only while the pages are rendered from `doc` itself (`State.view` none) —
+the text index and the links are read from `doc`, never from a preview of edited saved marks
+(those are read in this process, as before). -/
+def workerForText (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session × Nat)) := do
+  if (← st.get).view.isSome then return none
+  workerFor st doc
+
+/-- The worker request of page `p`'s text index (`links := false`) or links: the one queued for
+the current generation, raised to `prio` when that is more urgent, else a new one with priority
+`prio`. Requests of other generations are cancelled and forgotten. -/
+def sideJob (st : IO.Ref State) (ses : Worker.Session) (src : Nat) (links : Bool) (p prio : Nat) :
+    IO SideJob := do
+  let s ← st.get
+  let jobs := if links then s.linkJobs else s.textJobs
+  let (old, cur) := jobs.partition (·.gen != s.gen)
+  for j in old do ses.cancel j.id
+  let set (js : Array SideJob) (s : State) : State :=
+    if links then { s with linkJobs := js } else { s with textJobs := js }
+  match cur.find? (·.page == p) with
+  | some j =>
+    ses.raise j.id prio
+    st.modify (set cur)
+    return j
+  | none =>
+    let req := if links then Worker.Protocol.Request.viewLinks p else .pageIndex p s.oc
+    let (id, task) ← ses.submit src req prio
+    let j : SideJob := ⟨p, s.gen, id, task⟩
+    st.modify (set (cur.push j))
+    return j
+
+/-- Takes the answered request `j` out of the queued text or links requests. -/
+def dropSideJob (st : IO.Ref State) (links : Bool) (j : SideJob) : IO Unit :=
+  st.modify fun s => if links then { s with linkJobs := s.linkJobs.filter (·.id != j.id) }
+    else { s with textJobs := s.textJobs.filter (·.id != j.id) }
+
+/-- Shown while a page's text index is still with the worker (`pageIndex … (wait := false)`). -/
+def pendingText : String := "the page text is being read"
+
+/-- A page's text index from the worker's reply (task 12.2d): the cells, line directions and
+hidden flags it sent, with the normalised search text computed here (`Select.normChars`); an
+error text for a failed request; `none` when the request was cancelled (not cached). -/
+def indexOfReply : Worker.Reply → Option (Except String Select.PageIndex)
+  | .response (.pageIndex cs ds hs) _ =>
+    if hs.length != cs.length then
+      some (.error "the document worker sent a malformed text index")
+    else
+      let cells := (cs.map fun c =>
+        ({ text := c.text, sep := c.sep, box := c.box, line := c.line } : Select.Cell)).toArray
+      some (.ok { cells, hay := Select.normChars cells, lineDirs := ds.toArray,
+                  hidden := hs.toArray })
+  | .response (.error _ m) _ => some (.error m)
+  | .response _ _ => some (.error "the document worker answered with another message")
+  | .failed e => some (.error s!"the document worker stopped: {failText e}")
+  | .cancelled => none
+
 /-! ## Text index and highlights (task 8.2c) -/
 
 /-- The text index of page `p`: extracted on first use (`Annot.extractDocPageAnnots` with a
 fresh budget, as the text view and the renderer) and cached for the open document. Content
 hidden by the layers' state (`State.oc`, task 9.r11b) is not in it, so it can be neither
-selected nor found. -/
-def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex) := do
+selected nor found. Task 12.2d: with a document worker (`workerForText`) the worker extracts it
+(`Worker.Protocol.Request.pageIndex`, the same calls under the same layers state) and this
+process only waits for the reply — with `wait := false` (pointer motion) it does not wait and
+gives `pendingText` until the reply is there. A request that failed (the worker stopped, the
+deadline passed) is cached as an error: the page's text is then never parsed in this process. -/
+def pageIndex (st : IO.Ref State) (p : Nat) (wait : Bool := true) :
+    IO (Except String Select.PageIndex) := do
   let s ← st.get
   let some doc := s.doc | return .error "no document"
   match s.texts[p]? with
   | some (some r) => return r
   | _ =>
     let some page := doc.pages[p]? | return .error "page index out of range"
+    if let some (ses, src) ← workerForText st doc then
+      let j ← sideJob st ses src false p (if wait then 0 else 1)
+      if !wait && !(← IO.hasFinished j.task) then return .error pendingText
+      let reply ← IO.wait j.task
+      dropSideJob st false j
+      match indexOfReply reply with
+      | none => return .error "the page text request was cancelled"
+      | some r =>
+        st.modify fun s =>
+          if s.gen == j.gen then { s with texts := s.texts.modify p (fun _ => some r),
+                                          workerTexts := s.workerTexts + 1 } else s
+        return r
     let r ← IO.lazyPure fun _ =>
       match (SafePdf.Core.Annot.extractDocPageAnnots limits doc page
           (SafePdf.Core.Filter.Budget.init limits) (oc := s.oc)).1 with
@@ -2487,68 +2642,6 @@ def cached (st : IO.Ref State) (key : View.Key) : IO (Option (Except Error Clip.
   st.modify ({ · with cache })
   return hit
 
-/-! ## The document worker (task 12.2c) -/
-
-/-- How long a worker request may run before the worker is killed (ms). Smoke mode may set
-another value with `SAFEPDF_WORKER_DEADLINE_MS`. -/
-def workerDeadlineMs : Nat := 20000
-
-/-- Marks an error text that comes from the document worker (`workerErr`, `pageErr`). -/
-def workerTag : String := "\x00worker:"
-
-/-- An error the document worker reported (or the failure of a worker request), as an `Error`
-whose text `pageErr` shows as it is. -/
-def workerErr (msg : String) : Error := .unsupported (workerTag ++ msg)
-
-/-- The text of a page's render error: `renderError`, or the worker's own text. -/
-def pageErr (e : Error) : String :=
-  match e with
-  | .unsupported w =>
-    if w.startsWith workerTag then String.ofList (w.toList.drop workerTag.length)
-    else renderError e
-  | _ => renderError e
-
-/-- What went wrong with a worker request, as text. -/
-def failText : Worker.ClientError → String
-  | .notEncodable => "the request does not fit the protocol"
-  | .timeout => "no answer in time"
-  | .exited d => d
-  | .tooLong n => s!"its answer of {n} bytes is above the cap"
-  | .badFrame _ => "its answer does not decode"
-
-/-- The status text of a render that hit the deadline. -/
-def timeoutText (deadlineMs : Nat) : String :=
-  let t := if deadlineMs % 1000 == 0 then s!"{deadlineMs / 1000} s" else s!"{deadlineMs} ms"
-  s!"rendering stopped: the document took too long (no answer within {t}; its worker was stopped)"
-
-/-- A render job's outcome from the worker's reply. The image is checked against its size
-before Tk sees it (`Shim.photoPut` reads `4·w·h` bytes). -/
-def outOfReply (deadlineMs : Nat) : Worker.Reply → RenderOut
-  | .response (.image w h data) ns =>
-    if data.size == 4 * w * h then some (.ok ⟨w, h, data⟩, ns)
-    else some (.error (workerErr
-      s!"the document worker sent a malformed image ({w}x{h}, {data.size} bytes)"), ns)
-  | .response (.error _ msg) ns => some (.error (workerErr msg), ns)
-  | .response _ ns => some (.error (workerErr "the document worker answered with another message"), ns)
-  | .failed .timeout => some (.error (workerErr (timeoutText deadlineMs)), 0)
-  | .failed e => some (.error (workerErr s!"the document worker stopped: {failText e}"), 0)
-  | .cancelled => none
-
-/-- The worker session and document id to render `doc`'s pages with, when the worker can
-render them as this process would (task 12.2c): a session exists, the layers are in the
-document's default state (the protocol carries no layers state), the worker has the same
-substitute fonts, and the bytes fit the protocol. Sends the bytes (`State.view`'s when saved
-marks are previewed) to the session when the document changed (`srcSerial`). -/
-def workerFor (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session × Nat)) := do
-  let s ← st.get
-  let some ses := s.worker | return none
-  if !s.workerFonts || s.oc != s.ocCfg.map (·.initial) then return none
-  let d := s.view.getD doc
-  if d.file.bytes.size > limits.maxInputBytes then return none
-  if s.workerSrc != some s.srcSerial then
-    ses.setDoc (some (s.srcSerial, d.file.bytes, true))
-    st.modify ({ · with workerSrc := some s.srcSerial })
-  return some (ses, s.srcSerial)
 
 /-- Starts rendering `key`: queued for the document worker with priority `prio` when it can
 render it (`workerFor`), else on a dedicated thread in this process (task 8.8: the task only
@@ -2557,7 +2650,8 @@ never touches Tk or the state). Returns the task and the worker request id. -/
 def renderTask (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat) :
     IO (Task RenderOut × Option Nat) := do
   if let some (ses, src) ← workerFor st doc then
-    let (id, t) ← ses.submit src (.render key.page key.zoom (Worker.rotationToNat key.rot)) prio
+    let (id, t) ← ses.submit src
+      (.render key.page key.zoom (Worker.rotationToNat key.rot) (← st.get).oc) prio
     return (t.map (sync := true) (outOfReply ses.cfg.deadlineMs), some id)
   let s ← st.get
   let d := s.view.getD doc
@@ -2581,6 +2675,16 @@ def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat := 1) : 
   let start ← IO.monoNanosNow
   let (task, id) ← renderTask st doc key prio
   st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task, id⟩ }
+  -- Task 12.2d: with the worker, a page in view also gets its links asked for (after the
+  -- renders of its priority), so that pointer motion finds them without waiting; the current
+  -- page (priority 0) its text index too.
+  if id.isSome && prio ≤ 1 then
+    if let some (ses, src) ← workerForText st doc then
+      let s ← st.get
+      if !(s.links[key.page]?.any (·.isSome)) then
+        discard <| sideJob st ses src true key.page 1
+      if prio == 0 && !(s.texts[key.page]?.any (·.isSome)) then
+        discard <| sideJob st ses src false key.page 1
 
 /-- Whether a render of `key` is running. -/
 def State.running (s : State) (key : View.Key) : Bool :=
@@ -4751,13 +4855,52 @@ def syncMenus (st : IO.Ref State) : IO Unit := do
 
 /-! ## Links, jumps, history, go to page (task 8.2d) -/
 
-/-- The links of page `p`, read on first use (`Links.pageLinks`) and cached. -/
-def linksOf (st : IO.Ref State) (p : Nat) : IO (Array Links.Link) := do
+/-- A shown string from the worker that must be printable ASCII (`lo` = 0x21 for a URI as
+`Links.uriText` makes it, 0x20 for an action name): kept when it is, else percent-encoded again
+(`Links.uriText`), so a misbehaving worker cannot put control or bidi characters in the status
+line or the URI dialog. An honest worker's strings are kept as they are. -/
+def asciiOr (lo : Nat) (u : String) : String :=
+  if u.toList.all (fun c => lo ≤ c.toNat && c.toNat ≤ 0x7E) then u
+  else Links.uriText u.toUTF8.toList
+
+/-- A link from the worker's reply (task 12.2d, `Worker.Protocol.ViewLink`) as a link of this
+process: strings re-checked (`asciiOr`, `safeText`), a jump to a page outside the document is
+`badPage`. Equal to `Links.pageLinks`' link for an honest worker. -/
+def linkOfWire (n : Nat) (l : Worker.Protocol.ViewLink) : Links.Link :=
+  { box := l.box,
+    action := match l.action with
+      | .goto pg lf tp => if pg < n then .goto ⟨pg, lf, tp⟩ else .badPage
+      | .uri u => .uri (asciiOr 0x21 u)
+      | .badPage => .badPage
+      | .unresolved nm => .unresolved (safeText nm)
+      | .other k => .other (asciiOr 0x20 k)
+      | .none => .none }
+
+/-- The links of page `p`, read on first use (`Links.pageLinks`) and cached. Task 12.2d: with a
+document worker (`workerForText`) the worker reads them (`Request.viewLinks`; `submit` asks for
+them when the page is rendered); with `wait := false` (pointer motion) nothing waits: `#[]`
+until the reply is there. A failed request is cached as no links (never read in this
+process). -/
+def linksOf (st : IO.Ref State) (p : Nat) (wait : Bool := true) : IO (Array Links.Link) := do
   let s ← st.get
   let some doc := s.doc | return #[]
   match s.links[p]? with
   | some (some ls) => return ls
   | _ =>
+    if let some (ses, src) ← workerForText st doc then
+      let j ← sideJob st ses src true p (if wait then 0 else 1)
+      if !wait && !(← IO.hasFinished j.task) then return #[]
+      let reply ← IO.wait j.task
+      dropSideJob st true j
+      let ls? : Option (Array Links.Link) := match reply with
+        | .response (.viewLinks ls) _ => some (ls.map (linkOfWire doc.pages.size)).toArray
+        | .cancelled => none
+        | _ => some #[]
+      let some ls := ls? | return #[]
+      st.modify fun s =>
+        if s.gen == j.gen then { s with links := s.links.modify p (fun _ => some ls),
+                                        workerLinks := s.workerLinks + 1 } else s
+      return ls
     let ls ← IO.lazyPure fun _ => Links.pageLinks doc limits p
     let gen := s.gen
     st.modify fun s =>
@@ -4868,7 +5011,7 @@ def pointerHit (st : IO.Ref State) (pos : Option (Int × Int)) :
   let some (x, y) := pos | return (.empty, none)
   let some (pg, p) ← pagePointAt st x y | return (.empty, none)
   let s ← st.get
-  let l := (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
+  let l := (Links.linkAt (← linksOf st pg (wait := false)) p).map fun (i, l) => ((pg, i), l)
   let store := if s.ui.showAll then s.marks
     else { s.marks with marks := s.marks.marks.filter (!·.isHighlight) }
   let mark := match slotOf s pg with
@@ -4876,7 +5019,7 @@ def pointerHit (st : IO.Ref State) (pos : Option (Int × Int)) :
     | none => false
   let mode := Toolbar.Mode.of s.ui
   let text ← if mark || l.isSome || mode == .draw || mode == .text then pure false else
-    match ← pageIndex st pg with
+    match ← pageIndex st pg (wait := false) with
     | .ok ix => pure (ix.cells.any fun c => Links.Box.contains c.box p)
     | .error _ => pure false
   return (Toolbar.hitOf mark l.isSome text, l)
@@ -7641,7 +7784,7 @@ def measureRender (st : IO.Ref State) (p : Nat) : IO String := do
   let some (ses, src) ← workerFor st doc | return "no worker"
   let mut viaWorker : List Nat := []
   for _ in [0:3] do
-    let (_, t) ← ses.submit src (.render p key.zoom (Worker.rotationToNat key.rot)) 0
+    let (_, t) ← ses.submit src (.render p key.zoom (Worker.rotationToNat key.rot) (← st.get).oc) 0
     if let .response (.image ..) ns ← IO.wait t then viaWorker := ns :: viaWorker
   return s!"page {p + 1} {sl.place.w}x{sl.place.h} px: in-process {formatMs (median here)} ms, \
     worker {formatMs (median viaWorker)} ms (medians of {here.length} and {viaWorker.length})"
@@ -7699,6 +7842,27 @@ def smokeWorker (st : IO.Ref State) (dir : String) : IO Unit := do
     append s!"open: page {s.page + 1} {photoKind s s.page} worker-renders {s.workerRenders} \
       renders {s.renders} {← stats}"
     append s!"measure-a: {← measureRender st s.page}"
+    -- Task 12.2d: the page's text index and links come from the worker and equal the ones
+    -- read in this process.
+    let t0 ← IO.monoNanosNow
+    let ix ← pageIndex st s.page
+    let ls ← linksOf st s.page
+    let t1 ← IO.monoNanosNow
+    let s1 ← st.get
+    let here := match s1.doc with
+      | some d => match d.pages[s.page]? with
+        | some pg => match (SafePdf.Core.Annot.extractDocPageAnnots limits d pg
+            (SafePdf.Core.Filter.Budget.init limits) (oc := s1.oc)).1 with
+          | .ok pt => some (Select.fullText (Select.PageIndex.ofText pt).cells)
+          | .error _ => none
+        | none => none
+      | none => none
+    let wtext := match ix with | .ok i => some (Select.fullText i.cells) | .error _ => none
+    let hereLinks := (s1.doc.map fun d => (Links.pageLinks d limits s.page).size).getD 0
+    append s!"text: worker-texts {s1.workerTexts} worker-links {s1.workerLinks} \
+      same-text {decide (wtext.isSome && wtext == here)} chars {(wtext.map (·.length)).getD 0} \
+      links {ls.size} same-links {decide (ls.size == hereLinks)} \
+      ms {(t1 - t0) / 1000000}"
     -- (a) no-block: a 10 ms heartbeat, renders that take 1.5 s longer, a zoom.
     discard <| Shim.eval "proc ::safepdf::hb {} {
   set n [clock milliseconds]
@@ -10454,6 +10618,15 @@ def safeHandle (st : IO.Ref State) (args : Array String) : IO Unit := do
 def workerExe : IO System.FilePath := do
   return (← IO.appDir) / "worker"
 
+/-- The worker's font search, from this process's environment (task 12.2d): the worker reads
+no environment, so `SAFEPDF_SUBST_FONTS=0`, `$HOME` (for `~/Library/Fonts`) and
+`$SAFEPDF_FONT_DIR` become its flags `--no-subst`, `--home=`, `--font-dir=` — the search
+`Fonts.loadSubstFonts` makes here, so both render with the same substitute fonts. -/
+def workerStart : IO Worker.Protocol.StartConfig := do
+  let noSubst := (← IO.getEnv "SAFEPDF_SUBST_FONTS") == some "0"
+  let home := (← IO.getEnv "HOME").filter (!·.isEmpty)
+  return { limits, noSubst, home, fontDirs := ← Fonts.userDirs }
+
 /-- Starts the document worker session (task 12.2c), or says why pages render in this process:
 `SAFEPDF_VIEWER_WORKER=0`, or no worker executable (a development build of only the viewer;
 the viewer keeps working, with the reason in the status line). In smoke mode
@@ -10468,7 +10641,7 @@ def startWorker (smoke : Bool) : IO (Option Worker.Session × String) := do
   let deadlineMs ← if smoke then
       pure (((← IO.getEnv "SAFEPDF_WORKER_DEADLINE_MS").bind String.toNat?).getD workerDeadlineMs)
     else pure workerDeadlineMs
-  let ses ← Worker.Session.start { exe, limits, deadlineMs }
+  let ses ← Worker.Session.start { exe, limits, deadlineMs, start := ← workerStart }
   return (some ses, "")
 
 /-- Parses a window size `WxH` (`SAFEPDF_VIEWER_GEOMETRY`), each side 200–10000 pixels. -/
@@ -10566,10 +10739,7 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   let syncWaitMs := if smokeDir.isNone || smokeMode == "async" then
     some (if smokeMode == "async" then 0 else 100) else none
   let (worker, workerNote) ← startWorker smokeDir.isSome
-  let workerFonts := (← IO.getEnv "SAFEPDF_SUBST_FONTS") != some "0" &&
-    (← IO.getEnv "SAFEPDF_FONT_DIR").isNone
-  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs, worker, workerNote,
-                       workerFonts } : State)
+  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs, worker, workerNote } : State)
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript

@@ -11,8 +11,8 @@ in this order:
    (the client spawns it with `env := #[]`, `inheritEnv := false`). A worker started by
    hand from a shell therefore exits with status 3 instead of carrying `$HOME`, tokens or
    credentials into the process that parses untrusted bytes.
-2. **Fonts**: the substitute fonts are read from the fixed system font directories
-   (`Worker.workerFaces`), every file in full.
+2. **Fonts**: the substitute fonts are read from the fixed system font directories and the
+   directories of the startup flags (`Worker.workerFaces`, task 12.2d), every file in full.
 3. **Confinement** (`confine`): macOS seatbelt (`(deny default)`), Linux seccomp-bpf
    allowlist with `no_new_privs`; any failure (including an unsupported platform) is an
    error and the worker exits with status 4 — it never serves unconfined. There is no
@@ -66,14 +66,16 @@ def Failure.message : Failure → String
   | .confinement m => s!"safe-pdf worker: refusing to serve unconfined: {m}"
 
 /-- **The worker's startup**: check that the environment is empty, read the substitute
-fonts, then confine the process. `confined := false` (the probe's control mode only) skips
-the environment check and the confinement. -/
-def prepare (limits : Limits) (confined : Bool := true) : IO (Except Failure Prepared) := do
+fonts the startup configuration `start` asks for (task 12.2d), then confine the process.
+`confined := false` (the probe's control mode only) skips the environment check and the
+confinement. -/
+def prepare (start : Protocol.StartConfig) (confined : Bool := true) :
+    IO (Except Failure Prepared) := do
   if confined then
     let n ← envCount
     if n != 0 then return .error (.environment n.toNat)
-  let faces ← workerFaces
-  let subst := Fonts.tableOf limits faces
+  let faces ← workerFaces start
+  let subst := Fonts.tableOf start.limits faces
   if !confined then return .ok { faces, subst, mechanism := none }
   try
     let m ← confine

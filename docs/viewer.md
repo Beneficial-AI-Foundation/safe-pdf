@@ -651,7 +651,7 @@ mode, an animated spinner (the placeholder is a static "Rendering…").
 * Smoke mode waits for every render (`syncWaitMs = none`, `settle` waits for all running
   renders), so its steps see the pages at once; the `async` case runs with no wait at all.
 
-## The document worker (12.2c)
+## The document worker (12.2c, 12.2d)
 
 Since task 12.2c the viewer renders pages and thumbnails, and reads the outline, in a separate
 process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confinement task
@@ -693,19 +693,32 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   display rules (`safeText`: controls and bidi overrides as spaces, 500 characters; URIs
   percent-encoded by `Links.uriText`). A worker without an outline answer falls back to the
   in-process outline with a status note.
-* **Still in this process** (the protocol does not carry what they need; a later task can
-  extend it):
-  * text extraction for selection, copy and search (`pageIndex`): the protocol's `text` gives
-    the content-order glyphs and the page text, not the reading-order lines
-    (`Text.Line` with `lineOrder`, directions, and the CropBox/clip filtering) that
-    `Select.PageIndex` is built from, nor the layers state;
-  * links (`linksOf`: read synchronously on hover; the single worker may be busy with a
-    render for seconds), page labels, open settings, attachments, layers, the 9.5c marks
-    read from the file;
-  * renders under a layers state other than the document's default (the protocol has no
-    layers state), and with a font configuration the worker does not share
-    (`SAFEPDF_SUBST_FONTS=0`, `SAFEPDF_FONT_DIR`; the worker searches only the system font
-    directories, not `~/Library/Fonts`);
+* **Text, links, layers, fonts and limits (12.2d).** The protocol gained `pageIndex PAGE OC`
+  (answered with the viewer's selection/search index: `Select.PageIndex.ofText` of
+  `Annot.extractDocPageAnnots` — cells in reading order with text, separator, page-space box
+  and line, line directions, hidden flags; CropBox and clip filtering and the layers state
+  applied in the worker), `viewLinks PAGE` (`Links.pageLinks`, actions included) and a layers
+  state on `render`; all with round-trip and framing proofs (`Protocol.lean`). The viewer
+  rebuilds the index (`Viewer.indexOfReply`: search text by `Select.normChars` here) and
+  re-checks link strings (`linkOfWire`: URIs and action names must be printable ASCII, else
+  percent-encoded again; names through `safeText`; a jump outside the document is `badPage`).
+  `submit` asks for the links of every page in view and the text index of the current page
+  right after its render (priority 1); pointer motion uses `linksOf`/`pageIndex` with
+  `wait := false` and never waits (no link or I-beam until the reply is there); selection,
+  copy, search and clicks wait for the reply (raised to priority 0; bounded by the deadline).
+  A failed request is cached as an error / no links: the page is then not parsed in this
+  process. Startup data are **flags** parsed before `Sandbox.prepare` (the fonts are read
+  before confinement and the worker reads no environment; `Protocol.StartConfig`,
+  `Viewer.workerStart`): `--limits=HEX` (the viewer's `Limits`, `limitsC` in hex,
+  `limitsOfHex_limitsHex`), `--no-subst` (`SAFEPDF_SUBST_FONTS=0`), `--home=DIR` (`$HOME`, for
+  `~/Library/Fonts`), `--font-dir=DIR` per `$SAFEPDF_FONT_DIR` entry, `--test-stall-ms=N`; an
+  unknown argument ends the worker with status 5. So the worker searches exactly the fonts the
+  viewer would, and no render stays in-process for its layers state or font configuration.
+* **Still in this process:**
+  * the parse the GUI keeps for layout, page sizes and labels, open settings, attachments, the
+    layers panel, the 9.5c marks read from the file and Save;
+  * the text index and links while edited saved marks are previewed (`State.view`: the worker
+    then holds the preview's bytes, while text and links are read from the opened document);
   * everything, when the worker executable is missing (a build of only `viewer`; the status
     line says `no document worker at …: pages render in this process`) or with
     `SAFEPDF_VIEWER_WORKER=0` (for comparisons). This fallback keeps development builds
@@ -718,11 +731,11 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   1m `async` case's slow page at 150 % finished after 4.1 s through the worker, 4.3 s on the
   8.8 threads. While a render runs the Tk event loop keeps going: the smoke's 10 ms heartbeat
   never missed more than 16 ms.
-* **Test hook** (`SafePdf/Shell/Worker/TestHooks.lean`): with `SAFEPDF_WORKER_TEST_STALL_MS=N`
-  in its environment the worker sleeps `N` ms before every render; only the smoke step sets it
-  (`Worker.Session.setEnv`). Lean 4.36's `IO.Process.spawn` crashes the child when
-  `inheritEnv := false` comes with a non-empty `env`, so such a spawn goes through
-  `/usr/bin/env -i NAME=VALUE worker`.
+* **Test hook** (`SafePdf/Shell/Worker/TestHooks.lean`): `SAFEPDF_WORKER_TEST_STALL_MS=N` in a
+  session's test environment (`Worker.Session.setEnv`, only the smoke step) becomes the
+  worker's `--test-stall-ms=N` flag: it sleeps `N` ms before every render. The worker's own
+  environment stays empty (Lean 4.36's `IO.Process.spawn` crashes the child when
+  `inheritEnv := false` comes with a non-empty `env`, and the confined worker refuses one).
 
 ## Highlights and notes (9.4)
 

@@ -121,7 +121,8 @@
 #   12.2c. the document worker (SAFEPDF_VIEWER_SMOKE_MODE=worker): pages rendered by the worker
 #      process, no event blocked while a (test-hook) slow render runs, a stalled render killed
 #      after the deadline with the status saying so, a fresh worker for the same document and
-#      for the next file, render times in-process vs through the worker.
+#      for the next file, render times in-process vs through the worker; (12.2d) the page text
+#      index and links read by the worker equal the in-process ones.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
 # natively on Tk Aqua (task 10.11, docs/viewer.md "Smoke test on macOS"). Ends with a summary of
 # the cases passed / skipped / failed. Exit 0 on success.
@@ -2921,6 +2922,12 @@ if "error" in v: errs.append("smoke step failed: %s" % v["error"])
 need(re.match(r"page 1 image \d+x\d+ worker-renders [1-9]", v.get("open", "")), "open: %r" % v.get("open"))
 need(num("open", r"spawns (\d+)") == 1, "open: one worker expected: %r" % v.get("open"))
 need("worker" in v.get("measure-a", ""), "measure-a: %r" % v.get("measure-a"))
+# Task 12.2d: the page text index and links came from the worker and equal the in-process ones.
+need(num("text", r"worker-texts (\d+)") >= 1 and "same-text true" in v.get("text", "")
+     and num("text", r"chars (\d+)") >= 0, "text: %r" % v.get("text"))
+need(num("text", r"worker-links (\d+)") >= 1 and "same-links true" in v.get("text", ""),
+     "links: %r" % v.get("text"))
+print("worker: text: %s" % v.get("text"))
 need(0 <= num("a-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v.get("a-event-ms"))
 need(v.get("noblock", "").startswith("image "), "no-block: no page image: %r" % v.get("noblock"))
 need(num("noblock", r"elapsed-ms (\d+)") >= 1500, "no-block: the stall did not happen: %r" % v.get("noblock"))

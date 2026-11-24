@@ -2,6 +2,7 @@ import SafePdf.Core.Limits
 import SafePdf.Core.Object
 import SafePdf.Core.Doc.Nav
 import SafePdf.Core.Raster.Geom
+import SafePdf.Core.Doc.OptionalContent
 
 /-!
 # Document worker protocol (task 12.2a; Plan.md §6 Phase 12 "Restricted, stoppable document worker")
@@ -34,7 +35,13 @@ structurally bounded by the frame: malformed input gives a `DecodeError`, never 
   messages decodes back to the list;
 * `decodeFrame_prefix`, `request_prefix`, `response_prefix`: a strict prefix of a frame is
   `incomplete`, never a complete message;
-* `decodeFrame_tooLong`, `decodeFrame_next_le`, `frame_bounded`: bounded message sizes.
+* `decodeFrame_tooLong`, `decodeFrame_next_le`, `frame_bounded`: bounded message sizes;
+* task 12.2d: the requests `render` (now with a layers state), `pageIndex` (the viewer's
+  selection/search index: cells with text, separator, page-space box and line; line
+  directions; hidden flags) and `viewLinks` (the viewer's links, `Action`), and their
+  responses, are covered by the same round-trip and framing theorems (their codecs carry
+  `rt`); the startup configuration (`StartConfig`, command-line flags) carries the limits as
+  hexadecimal `limitsC` bytes: `hexDec_hexEnc`, `limitsOfHex_limitsHex` (round trip).
 
 The proofs track one invariant, `At bs p e` (the bytes `e` occur in `bs` at `p`); every
 combinator (`pair`, `iso`, `sigma`, `list`, …) carries its round trip, so a message type's
@@ -916,6 +923,246 @@ theorem outlineItem_ne (o : OutlineItem) : 0 < (outlineItem.enc o).size :=
 theorem link_ne (l : Link) : 0 < (link.enc l).size :=
   iso_ne _ _ _ _ (pair_ne_left _ _ (iso_ne _ _ _ _ (pair_ne_left _ _ rat_ne))) l
 
+/-! ## Task 12.2d: selection index, viewer links, layers state, limits -/
+
+/-- One cell of a page's selection and search index (`App.Select.Cell`, task 12.2d): a glyph's
+text in reading order, the separator the layout puts before it, its page-space box and the
+index of its line. -/
+structure Cell where
+  /-- The glyph's text (`""` for an overprinted duplicate). -/
+  text : String
+  /-- The separator before it (`""`, a space or a line break). -/
+  sep : String
+  /-- Page-space box (`Select.glyphBox`). -/
+  box : Raster.Geom.Box
+  /-- Index of its line. -/
+  line : Nat
+  deriving DecidableEq, Repr, Inhabited
+
+/-- `Cell`. -/
+def cell : Codec Cell :=
+  iso (pair string (pair string (pair box nat))) (fun c => (c.text, c.sep, c.box, c.line))
+    (fun x => ⟨x.1, x.2.1, x.2.2.1, x.2.2.2⟩) (fun _ => rfl)
+
+/-- Cells encode non-empty. -/
+theorem cell_ne (c : Cell) : 0 < (cell.enc c).size :=
+  iso_ne _ _ _ _ (pair_ne_left _ _ string_ne) c
+
+/-- Booleans encode non-empty. -/
+theorem bool_ne (b : Bool) : 0 < (bool.enc b).size := partialIso_ne _ _ _ _ u8_ne b
+
+/-- What activating a link does, as the viewer sees it (`App.Links.Action`, task 12.2d). -/
+inductive Action where
+  /-- Jump to page `page` (0-based), optionally to a page-space left edge and top edge. -/
+  | goto (page : Nat) (left top : Option Rat)
+  /-- A `/URI` action with its address as shown (percent-encoded). -/
+  | uri (s : String)
+  /-- A destination whose page is not in the document. -/
+  | badPage
+  /-- A named destination that was not found. -/
+  | unresolved (name : String)
+  /-- Another action type (never followed). -/
+  | other (kind : String)
+  /-- No destination or action. -/
+  | none
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The payload of each `Action` tag. -/
+def ActionP : Nat → Type
+  | 0 => Nat × Option Rat × Option Rat
+  | 1 => String
+  | 2 => Unit
+  | 3 => String
+  | 4 => String
+  | 5 => Unit
+  | _ => Empty
+
+/-- The payload codec of each `Action` tag. -/
+def actionCs : (t : Nat) → Codec (ActionP t)
+  | 0 => pair nat (pair (option rat) (option rat))
+  | 1 => string
+  | 2 => unit
+  | 3 => string
+  | 4 => string
+  | 5 => unit
+  | t + 6 => reject (t + 6)
+
+/-- `Action` as a tagged payload. -/
+def Action.toSig : Action → (t : Nat) × ActionP t
+  | .goto p l t => ⟨0, (p, l, t)⟩
+  | .uri s => ⟨1, s⟩
+  | .badPage => ⟨2, ()⟩
+  | .unresolved n => ⟨3, n⟩
+  | .other k => ⟨4, k⟩
+  | .none => ⟨5, ()⟩
+
+/-- The inverse of `Action.toSig`. -/
+def Action.ofSig : (t : Nat) × ActionP t → Action
+  | ⟨0, (p, l, t)⟩ => .goto p l t
+  | ⟨1, s⟩ => .uri s
+  | ⟨2, _⟩ => .badPage
+  | ⟨3, n⟩ => .unresolved n
+  | ⟨4, k⟩ => .other k
+  | ⟨5, _⟩ => .none
+  | ⟨_ + 6, e⟩ => e.elim
+
+/-- `Action`. -/
+def action : Codec Action :=
+  iso (sigma actionCs) Action.toSig Action.ofSig (fun x => by cases x <;> rfl)
+
+/-- A link of a page as the viewer reads it (`App.Links.Link`, task 12.2d). -/
+structure ViewLink where
+  /-- `/Rect`, normalized, page space. -/
+  box : Raster.Geom.Box
+  /-- What clicking it does. -/
+  action : Action
+  deriving DecidableEq, Repr, Inhabited
+
+/-- `ViewLink`. -/
+def viewLink : Codec ViewLink :=
+  iso (pair box action) (fun l => (l.box, l.action)) (fun x => ⟨x.1, x.2⟩) (fun _ => rfl)
+
+/-- Viewer links encode non-empty. -/
+theorem viewLink_ne (l : ViewLink) : 0 < (viewLink.enc l).size :=
+  iso_ne _ _ _ _ (pair_ne_left _ _ (iso_ne _ _ _ _ (pair_ne_left _ _ rat_ne))) l
+
+/-- An optional content group key (object number, generation). -/
+def ocKey : Codec (Nat × Nat) := pair nat nat
+
+/-- Keys encode non-empty. -/
+theorem ocKey_ne (k : Nat × Nat) : 0 < (ocKey.enc k).size := pair_ne_left _ _ nat_ne k
+
+/-- **A layers state** (`Core.Doc.OptionalContent.State`, task 12.2d): the known groups and the
+groups that are OFF. -/
+def ocState : Codec Doc.OptionalContent.State :=
+  iso (pair (list ocKey ocKey_ne) (list ocKey ocKey_ne)) (fun s => (s.known, s.off))
+    (fun x => ⟨x.1, x.2⟩) (fun _ => rfl)
+
+/-- The fields of `Limits`, in declaration order. -/
+def Limits.toList (l : Limits) : List Nat :=
+  [l.maxInputBytes, l.maxDecodedStreamBytes, l.maxDecodedTotalBytes, l.maxImagePixels,
+   l.maxObjectDepth, l.maxObjects, l.maxXObjectDepth, l.maxGStateDepth, l.maxOpsPerPage,
+   l.maxRevisions, l.maxRepairFailures, l.maxFilters, l.maxFontGlyphs, l.maxFontSubrs,
+   l.glyphFuel, l.maxFormsPerPage, l.maxCFFGlyphs, l.fontFuel, l.maxFontDicts, l.curveSegCap,
+   l.coordLimit, l.maxDashSteps, l.arcSegCap, l.maxPageSide, l.clipCacheSize, l.maxMarkedDepth,
+   l.maxFormCacheEntries, l.maxFormCacheBytes, l.maxOCGroups, l.maxOCDepth]
+
+/-- `Limits` from its fields (`none` unless there are exactly 30). -/
+def Limits.ofList? : List Nat → Option Limits
+  | [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20,
+     a21, a22, a23, a24, a25, a26, a27, a28, a29, a30] =>
+    some ⟨a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19,
+      a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30⟩
+  | _ => none
+
+/-- **`Limits`** (task 12.2d: the viewer's limits, passed to the worker at startup). -/
+def limitsC : Codec Limits :=
+  partialIso (list nat nat_ne) Limits.toList Limits.ofList? (fun _ => rfl)
+
+/-! ### Startup arguments (task 12.2d)
+
+The worker reads no environment, and it reads its fonts **before** it confines itself, so its
+configuration arrives as command-line flags, parsed before `Sandbox.prepare`:
+`--limits=HEX` (the `limitsC` encoding in lower-case hexadecimal), `--no-subst` (no
+substitute fonts), `--home=DIR` (search `DIR/Library/Fonts`, as the viewer does for `$HOME`),
+`--font-dir=DIR` (repeatable; the viewer's `$SAFEPDF_FONT_DIR` entries, in order) and the
+test hook `--test-stall-ms=N`. -/
+
+/-- A hexadecimal digit (lower case) of `n < 16`. -/
+def hexDigit (n : Nat) : Char := if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
+
+/-- The value of a lower-case hexadecimal digit. -/
+def hexVal? (c : Char) : Option Nat :=
+  if 48 ≤ c.toNat ∧ c.toNat ≤ 57 then some (c.toNat - 48)
+  else if 97 ≤ c.toNat ∧ c.toNat ≤ 102 then some (c.toNat - 87) else none
+
+/-- Bytes as hexadecimal digits, two per byte. -/
+def hexEnc : List UInt8 → List Char
+  | [] => []
+  | b :: bs => hexDigit (b.toNat / 16) :: hexDigit (b.toNat % 16) :: hexEnc bs
+
+/-- Hexadecimal digits as bytes (`none`: odd length or a non-digit). -/
+def hexDec : List Char → Option (List UInt8)
+  | [] => some []
+  | [_] => none
+  | h :: l :: rest =>
+    match hexVal? h, hexVal? l, hexDec rest with
+    | some a, some b, some r => some ((a * 16 + b).toUInt8 :: r)
+    | _, _, _ => none
+
+/-- Every digit reads back. -/
+theorem hexVal_hexDigit : ∀ n : Fin 16, hexVal? (hexDigit n.val) = some n.val := by decide
+
+/-- **Hexadecimal round trip**. -/
+theorem hexDec_hexEnc : ∀ bs : List UInt8, hexDec (hexEnc bs) = some bs
+  | [] => rfl
+  | b :: bs => by
+    have h1 := hexVal_hexDigit ⟨b.toNat / 16, by have := b.toNat_lt; omega⟩
+    have h2 := hexVal_hexDigit ⟨b.toNat % 16, by omega⟩
+    simp only at h1 h2
+    simp only [hexEnc, hexDec, h1, h2, hexDec_hexEnc bs]
+    have : b.toNat / 16 * 16 + b.toNat % 16 = b.toNat := by omega
+    rw [this]
+    simp
+
+/-- The `--limits=` value of `l`. -/
+def limitsHex (l : Limits) : String := String.ofList (hexEnc (limitsC.enc l).data.toList)
+
+/-- The limits of a `--limits=` value. -/
+def limitsOfHex? (s : String) : Option Limits :=
+  (hexDec s.toList).bind fun bs => (decodeBody limitsC ⟨bs.toArray⟩).toOption
+
+/-- **Limits round trip** (startup argument): the worker reads back exactly the limits the
+client passed (numbers below `2^140`). -/
+theorem limitsOfHex_limitsHex (l : Limits) (hv : limitsC.valid l = true) :
+    limitsOfHex? (limitsHex l) = some l := by
+  simp only [limitsOfHex?, limitsHex, String.toList_ofList, hexDec_hexEnc, Option.bind_some,
+    Array.toArray_toList]
+  rw [decodeBody_rt limitsC l hv]
+  rfl
+
+/-- The worker's startup configuration (task 12.2d). -/
+structure StartConfig where
+  /-- Limits for parsing, rendering and the frame caps. -/
+  limits : Limits := {}
+  /-- No substitute fonts (the viewer's `SAFEPDF_SUBST_FONTS=0`). -/
+  noSubst : Bool := false
+  /-- The home directory whose `Library/Fonts` is searched (the viewer's `$HOME`). -/
+  home : Option String := none
+  /-- Extra font directories (the viewer's `$SAFEPDF_FONT_DIR`), in order. -/
+  fontDirs : List String := []
+  /-- Test hook: sleep before each render (ms, capped by the worker). -/
+  stallMs : Nat := 0
+  deriving Inhabited
+
+/-- The command-line flags of a configuration. -/
+def StartConfig.toArgs (c : StartConfig) : Array String :=
+  #[s!"--limits={limitsHex c.limits}"] ++ (if c.noSubst then #["--no-subst"] else #[]) ++
+    (c.home.map (fun h => #[s!"--home={h}"])).getD #[] ++
+    (c.fontDirs.map (s!"--font-dir={·}")).toArray ++
+    (if c.stallMs > 0 then #[s!"--test-stall-ms={c.stallMs}"] else #[])
+
+/-- One flag applied to a configuration (`.error`: an argument the worker does not
+understand). -/
+def StartConfig.applyArg (c : StartConfig) (a : String) : Except String StartConfig :=
+  if a == "--no-subst" then .ok { c with noSubst := true }
+  else if let some v := a.dropPrefix? "--limits=" then
+    match limitsOfHex? v.toString with
+    | some l => .ok { c with limits := l }
+    | none => .error "bad --limits value"
+  else if let some v := a.dropPrefix? "--home=" then .ok { c with home := some v.toString }
+  else if let some v := a.dropPrefix? "--font-dir=" then
+    .ok { c with fontDirs := c.fontDirs ++ [v.toString] }
+  else if let some v := a.dropPrefix? "--test-stall-ms=" then
+    match v.toString.toNat? with
+    | some n => .ok { c with stallMs := n }
+    | none => .error "bad --test-stall-ms value"
+  else .error s!"unknown argument: {a}"
+
+/-- Parse the worker's flags (`.error`: the first argument it does not understand). -/
+def StartConfig.ofArgs (args : List String) : Except String StartConfig :=
+  args.foldlM StartConfig.applyArg {}
+
 /-! ## Requests and responses -/
 
 /-- **A request** from the client (the GUI) to the worker. The worker holds at most one open
@@ -929,8 +1176,9 @@ inductive Request where
   /-- Page `page` (0-based): label and displayed size. Answered by `pageInfo`. -/
   | pageInfo (page : Nat)
   /-- Render page `page` at `zoom` pixels per point with an extra clockwise rotation of
-  `rotation` quarter turns. Answered by `image`. -/
-  | render (page : Nat) (zoom : Rat) (rotation : Nat)
+  `rotation` quarter turns, under the layers state `oc` (task 12.2d; `none`: the document's
+  default configuration). Answered by `image`. -/
+  | render (page : Nat) (zoom : Rat) (rotation : Nat) (oc : Option Doc.OptionalContent.State)
   /-- The text and glyphs of page `page` (with annotation text when `withAnnots`). Answered by
   `text`. -/
   | text (page : Nat) (withAnnots : Bool)
@@ -940,18 +1188,27 @@ inductive Request where
   | links (page : Nat)
   /-- End the worker. Answered by `bye`. -/
   | quit
+  /-- Task 12.2d: the selection and search index of page `page` (the viewer's text: page and
+  annotations, CropBox and clip filtering, under the layers state `oc`). Answered by
+  `pageIndex`. -/
+  | pageIndex (page : Nat) (oc : Option Doc.OptionalContent.State)
+  /-- Task 12.2d: the links of page `page` as the viewer reads them (`App.Links.pageLinks`).
+  Answered by `viewLinks`. -/
+  | viewLinks (page : Nat)
   deriving DecidableEq, Inhabited
 
-/-- The payload of each request tag (tag 0 and tags above 8 are invalid). -/
+/-- The payload of each request tag (tag 0 and tags above 10 are invalid). -/
 def RequestP : Nat → Type
   | 1 => ByteArray × Bool
   | 2 => Unit
   | 3 => Nat
-  | 4 => Nat × Rat × Nat
+  | 4 => Nat × Rat × Nat × Option Doc.OptionalContent.State
   | 5 => Nat × Bool
   | 6 => Unit
   | 7 => Nat
   | 8 => Unit
+  | 9 => Nat × Option Doc.OptionalContent.State
+  | 10 => Nat
   | _ => Empty
 
 /-- The payload codec of each request tag. -/
@@ -960,23 +1217,27 @@ def requestCs : (t : Nat) → Codec (RequestP t)
   | 1 => pair bytes bool
   | 2 => unit
   | 3 => nat
-  | 4 => pair nat (pair rat nat)
+  | 4 => pair nat (pair rat (pair nat (option ocState)))
   | 5 => pair nat bool
   | 6 => unit
   | 7 => nat
   | 8 => unit
-  | t + 9 => reject (t + 9)
+  | 9 => pair nat (option ocState)
+  | 10 => nat
+  | t + 11 => reject (t + 11)
 
 /-- `Request` as a tagged payload. -/
 def Request.toSig : Request → (t : Nat) × RequestP t
   | .openDoc b r => ⟨1, (b, r)⟩
   | .info => ⟨2, ()⟩
   | .pageInfo i => ⟨3, i⟩
-  | .render i z r => ⟨4, (i, z, r)⟩
+  | .render i z r oc => ⟨4, (i, z, r, oc)⟩
   | .text i a => ⟨5, (i, a)⟩
   | .outline => ⟨6, ()⟩
   | .links i => ⟨7, i⟩
   | .quit => ⟨8, ()⟩
+  | .pageIndex i oc => ⟨9, (i, oc)⟩
+  | .viewLinks i => ⟨10, i⟩
 
 /-- The inverse of `Request.toSig`. -/
 def Request.ofSig : (t : Nat) × RequestP t → Request
@@ -984,12 +1245,14 @@ def Request.ofSig : (t : Nat) × RequestP t → Request
   | ⟨1, (b, r)⟩ => .openDoc b r
   | ⟨2, _⟩ => .info
   | ⟨3, i⟩ => .pageInfo i
-  | ⟨4, (i, z, r)⟩ => .render i z r
+  | ⟨4, (i, z, r, oc)⟩ => .render i z r oc
   | ⟨5, (i, a)⟩ => .text i a
   | ⟨6, _⟩ => .outline
   | ⟨7, i⟩ => .links i
   | ⟨8, _⟩ => .quit
-  | ⟨_ + 9, e⟩ => e.elim
+  | ⟨9, (i, oc)⟩ => .pageIndex i oc
+  | ⟨10, i⟩ => .viewLinks i
+  | ⟨_ + 11, e⟩ => e.elim
 
 /-- **The request codec**: one tag byte, then the fields. -/
 def request : Codec Request :=
@@ -1044,9 +1307,14 @@ inductive Response where
   | error (kind : ErrorKind) (message : String)
   /-- Answer to `quit`. -/
   | bye
+  /-- Task 12.2d: a page's selection index — its cells in reading order, the direction of each
+  line and, per cell, whether its glyph is not painted (`App.Select.PageIndex`). -/
+  | pageIndex (cells : List Cell) (lineDirs : List Nat) (hidden : List Bool)
+  /-- Task 12.2d: a page's links as the viewer reads them. -/
+  | viewLinks (links : List ViewLink)
   deriving DecidableEq, Inhabited
 
-/-- The payload of each response tag (tag 0 and tags above 8 are invalid). -/
+/-- The payload of each response tag (tag 0 and tags above 10 are invalid). -/
 def ResponseP : Nat → Type
   | 1 => Nat × Bool × Bool
   | 2 => String × Rat × Rat × Nat
@@ -1056,6 +1324,8 @@ def ResponseP : Nat → Type
   | 6 => List Link
   | 7 => ErrorKind × String
   | 8 => Unit
+  | 9 => List Cell × List Nat × List Bool
+  | 10 => List ViewLink
   | _ => Empty
 
 /-- The payload codec of each response tag. -/
@@ -1069,7 +1339,9 @@ def responseCs : (t : Nat) → Codec (ResponseP t)
   | 6 => list link link_ne
   | 7 => pair errorKind string
   | 8 => unit
-  | t + 9 => reject (t + 9)
+  | 9 => pair (list cell cell_ne) (pair (list nat nat_ne) (list bool bool_ne))
+  | 10 => list viewLink viewLink_ne
+  | t + 11 => reject (t + 11)
 
 /-- `Response` as a tagged payload. -/
 def Response.toSig : Response → (t : Nat) × ResponseP t
@@ -1081,6 +1353,8 @@ def Response.toSig : Response → (t : Nat) × ResponseP t
   | .links ls => ⟨6, ls⟩
   | .error k m => ⟨7, (k, m)⟩
   | .bye => ⟨8, ()⟩
+  | .pageIndex cs ds hs => ⟨9, (cs, ds, hs)⟩
+  | .viewLinks ls => ⟨10, ls⟩
 
 /-- The inverse of `Response.toSig`. -/
 def Response.ofSig : (t : Nat) × ResponseP t → Response
@@ -1093,7 +1367,9 @@ def Response.ofSig : (t : Nat) × ResponseP t → Response
   | ⟨6, ls⟩ => .links ls
   | ⟨7, (k, m)⟩ => .error k m
   | ⟨8, _⟩ => .bye
-  | ⟨_ + 9, e⟩ => e.elim
+  | ⟨9, (cs, ds, hs)⟩ => .pageIndex cs ds hs
+  | ⟨10, ls⟩ => .viewLinks ls
+  | ⟨_ + 11, e⟩ => e.elim
 
 /-- **The response codec**: one tag byte, then the fields. -/
 def response : Codec Response :=
@@ -1204,11 +1480,18 @@ private def sampleResponses : List Response :=
      ⟨"Odd", 2, .danglingDest (.unknown [70, 111, 111]), some 0⟩],
    .links [⟨⟨1, 2, 3, 4⟩, .uri "https://example.org"⟩, ⟨⟨0, 0, 0, 0⟩, .action "Launch"⟩,
      ⟨⟨5, 5, 6, 6⟩, .unresolved "chap1"⟩, ⟨⟨1, 1, 2, 2⟩, .none⟩],
-   .error .malformed "bad", .bye]
+   .error .malformed "bad", .bye,
+   .pageIndex [⟨"H", "", ⟨100, 698, 107, 708⟩, 0⟩, ⟨"i", " ", ⟨1/3, -2, 5, 7/2⟩, 1⟩] [0, 1]
+     [false, true],
+   .viewLinks [⟨⟨1, 2, 3, 4⟩, .goto 3 (some (-1/2)) none⟩, ⟨⟨0, 0, 1, 1⟩, .uri "https://a.b/%20"⟩,
+     ⟨⟨0, 0, 1, 1⟩, .badPage⟩, ⟨⟨0, 0, 1, 1⟩, .unresolved "x"⟩, ⟨⟨0, 0, 1, 1⟩, .other "Launch"⟩,
+     ⟨⟨0, 0, 1, 1⟩, .none⟩]]
 
 private def sampleRequests : List Request :=
-  [.openDoc ⟨#[37, 80, 68, 70]⟩ false, .info, .pageInfo 0, .render 2 (3/2) 1, .text 0 true,
-   .outline, .links 300, .quit]
+  [.openDoc ⟨#[37, 80, 68, 70]⟩ false, .info, .pageInfo 0, .render 2 (3/2) 1 none,
+   .render 0 1 0 (some { known := [(5, 0), (6, 0)], off := [(6, 0)] }), .text 0 true,
+   .outline, .links 300, .quit, .pageIndex 4 none, .pageIndex 0 (some { known := [(1, 2)] }),
+   .viewLinks 7]
 
 #guard sampleRequests.all fun m => roundTrip request (requestCap {}) m == some m
 #guard sampleResponses.all fun m => roundTrip response (responseCap {}) m == some m
@@ -1223,7 +1506,7 @@ private def sampleRequests : List Request :=
 -- Malformed payloads are errors: tag 0, unknown tag 9, truncated field, trailing byte, bad UTF-8,
 -- zero denominator, an over-long number, a list count above the bytes left.
 #guard errOf (decodeBody request ⟨#[0]⟩) == some (.badTag 1 0)
-#guard errOf (decodeBody request ⟨#[9]⟩) == some (.badTag 1 9)
+#guard errOf (decodeBody request ⟨#[11]⟩) == some (.badTag 1 11)
 #guard errOf (decodeBody request ⟨#[3]⟩) == some (.truncated 1)
 #guard errOf (decodeBody request ⟨#[2, 0]⟩) == some (.trailing 1)
 #guard errOf (decodeBody request ⟨#[1, 5, 1, 2]⟩) == some (.truncated 2)
@@ -1236,6 +1519,25 @@ private def sampleRequests : List Request :=
 #guard match decodeFrame request 10 (header 11 ++ ⟨#[2]⟩) 0 with
   | .error (.tooLong 11 10) => true
   | _ => false
+-- Startup arguments: the default limits and a changed one round-trip through `--limits=`;
+-- flags parse back; unknown flags and bad values are refused.
+#guard (limitsOfHex? (limitsHex {})).map (·.maxPageSide) == some 16384
+#guard (limitsOfHex? (limitsHex { maxPageSide := 77, maxOCDepth := 3 })).map
+  (fun l => (l.maxPageSide, l.maxOCDepth, l.maxInputBytes)) == some (77, 3, 1 <<< 30)
+#guard (limitsOfHex? "zz").isNone && (limitsOfHex? "0").isNone && (limitsOfHex? "").isNone
+private def sampleStart : StartConfig :=
+  { noSubst := true, home := some "/Users/a b", fontDirs := ["/x", "/y=z"], stallMs := 5,
+    limits := { maxPageSide := 9 } }
+
+#guard match StartConfig.ofArgs sampleStart.toArgs.toList with
+  | .ok c => c.noSubst && c.home == some "/Users/a b" && c.fontDirs == ["/x", "/y=z"] &&
+      c.stallMs == 5 && c.limits.maxPageSide == 9
+  | .error _ => false
+#guard match StartConfig.ofArgs [] with
+  | .ok c => !c.noSubst && c.home.isNone && c.fontDirs.isEmpty && c.stallMs == 0
+  | .error _ => false
+#guard (match StartConfig.ofArgs ["--evil"] with | .error _ => true | .ok _ => false)
+#guard (match StartConfig.ofArgs ["--limits=abc"] with | .error _ => true | .ok _ => false)
 -- Out-of-range numbers are not valid (so the worker never sends them).
 #guard !request.valid (.pageInfo (2 ^ 140)) && request.valid (.pageInfo (2 ^ 140 - 1))
 #guard (frameRequest {} (.pageInfo (2 ^ 140))).isNone
