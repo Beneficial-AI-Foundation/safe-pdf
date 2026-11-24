@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
-# Headless self-test of the AppKit spike (task 11.1). Never shows a window or activates:
+# Headless self-test of the native macOS shell (task 11.1 spike, 11.3b app). Never shows a
+# window or activates:
 #   macos/selftest.sh FILE.pdf [OUTDIR]     (OUTDIR defaults to macos/build/selftest)
-# Runs `SAFEPDF_MACOS_SELFTEST=OUTDIR macos/build/safepdf-mac FILE` under a watcher that
+# Binary: by default macos/build/safepdf-mac. SAFEPDF_SELFTEST_BUNDLE=1 runs the bundle's binary
+# macos/build/SafePdf.app/Contents/MacOS/SafePdf instead (the same code, run in place; the
+# bundle is executed directly, never opened through LaunchServices).
+# Runs `SAFEPDF_MACOS_SELFTEST=OUTDIR <binary> FILE` under a watcher that
 # samples the front application every 0.5 s (`lsappinfo`, no Automation permission needed);
 # if that PID ever becomes the front app or a Foreground app it is killed (only that PID) and
 # the test fails; other processes with the same name (e.g. a copy launched by hand) are ignored.
+# The watcher matches by PID, so it covers every name the process can have (safepdf-mac,
+# SafePdf, SafePDF, bundle id org.safe-pdf.SafePDF); those names only label the messages.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bin="$here/build/safepdf-mac"
+if [ "${SAFEPDF_SELFTEST_BUNDLE:-0}" = 1 ]; then
+  bin="$here/build/SafePdf.app/Contents/MacOS/SafePdf"
+else
+  bin="$here/build/safepdf-mac"
+fi
 pdf="${1:?usage: $0 FILE.pdf [OUTDIR]}"
 out="${2:-$here/build/selftest}"
 mkdir -p "$out"
@@ -24,13 +34,13 @@ while kill -0 "$pid" 2>/dev/null; do
   front="$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null || true)"
   printf '%s %s (pid %s)\n' "$(date +%T)" "$front" "$front_pid" >> "$watch"
   if [ "$front_pid" = "$pid" ]; then
-    echo "selftest: the spike became the front app; killing PID $pid" >&2
+    echo "selftest: the app became the front app; killing PID $pid" >&2
     kill "$pid" 2>/dev/null || true
     leaked=1
   fi
   # A Prohibited app never appears in lsappinfo's list as Foreground: look at our PID's entry.
   if lsappinfo list 2>/dev/null | grep -E "pid = $pid[^0-9].*type=\"Foreground\"" >/dev/null; then
-    echo "selftest: the spike registered as a Foreground app; killing PID $pid" >&2
+    echo "selftest: the app registered as a Foreground app; killing PID $pid" >&2
     kill "$pid" 2>/dev/null || true
     leaked=1
   fi
