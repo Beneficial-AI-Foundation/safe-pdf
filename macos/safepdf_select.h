@@ -170,6 +170,36 @@ safepdf_select_hit_list *safepdf_select_find_doc(const safepdf_select_page *cons
 int safepdf_select_next_hit(const int64_t *counts, size_t n, size_t page, int64_t current,
                             int forward, safepdf_select_step *out);
 
+/* ---------------------------------------------------------------- pointer and links (11.3d1) */
+
+/** Whether page point (x, y) lies in a glyph box of the page (the cursor's text test, as the
+    Tk viewer's pointerHit). 1 yes, 0 no (also for a coordinate nearest refuses). */
+int safepdf_select_over_text(const safepdf_select_page *page, double x, double y);
+
+/** The link at page point (x, y) (Links.linkAt: the topmost, last in the list, whose box
+    contains the point). 0 with `*index` set; -1 for none (or a refused coordinate). */
+int safepdf_select_link_at(const safepdf_link_list *links, double x, double y, size_t *index);
+
+/** A link's status text (Links.describe: "go to page iii (3/120)", "external link (click to
+    copy the address): …", "link action /Launch (not followed)", …) in a document of `pages`
+    pages with page labels `labels` (NULL / 0: numbers). malloc'd; NULL when out of memory. */
+char *safepdf_select_link_describe(const safepdf_action *action, const char *const *labels,
+                                   size_t nlabels, size_t pages);
+
+/** A search's work allowance (Budget.Allowance, task 12.3): pages it may still index and when
+    it ends (ms on the caller's monotonic clock). */
+typedef struct {
+    uint64_t pages;
+    uint64_t ends_at_ms;
+} safepdf_select_allowance;
+
+/** A fresh allowance at `now_ms` (Allowance.start with Budget.ceilings: 400 pages, 60 s). */
+void safepdf_select_allowance_start(uint64_t now_ms, safepdf_select_allowance *out);
+
+/** Spend one page at `now_ms` (Allowance.spend): 0 spent (`*a` updated), -1 used up (no page
+    left or its time is over; `*a` unchanged) or bad arguments. */
+int safepdf_select_allowance_spend(safepdf_select_allowance *a, uint64_t now_ms);
+
 /* ---------------------------------------------------------------- frees */
 
 void safepdf_select_free_box_list(safepdf_select_box_list *list);

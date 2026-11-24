@@ -352,6 +352,67 @@ static void test_edges(void) {
     safepdf_select_page_release(NULL);
 }
 
+/* ---- pointer and links (task 11.3d1) ---- */
+static void test_over_text(const safepdf_page_index *x, const safepdf_select_page *p) {
+    size_t bad = 0;
+    for (size_t i = 0; i < x->cell_count; i++) {
+        safepdf_box b = x->cells[i].box;
+        if (!safepdf_select_over_text(p, (b.llx + b.urx) / 2, (b.lly + b.ury) / 2)) bad++;
+    }
+    CHECK(bad == 0, "over_text at every glyph centre (%zu missed)", bad);
+    CHECK(!safepdf_select_over_text(p, -500, -500), "over_text far off the page");
+    CHECK(!safepdf_select_over_text(p, 0.0 / 0.0, 1), "over_text NaN");
+    CHECK(!safepdf_select_over_text(NULL, 1, 1), "over_text NULL page");
+}
+
+static void test_links(void) {
+    safepdf_link l[2];
+    memset(l, 0, sizeof l);
+    l[0].box = (safepdf_box){ 10, 10, 50, 50 };
+    l[0].action.kind = SAFEPDF_ACTION_GOTO;
+    l[0].action.page = 2;
+    l[0].action.text = "";
+    l[1].box = (safepdf_box){ 10, 10, 60, 60 };
+    l[1].action.kind = SAFEPDF_ACTION_URI;
+    l[1].action.text = "http://x";
+    safepdf_link_list list = { l, 2, NULL };
+    size_t i = 99;
+    CHECK(safepdf_select_link_at(&list, 30, 30, &i) == 0 && i == 1, "link_at: topmost (%zu)", i);
+    CHECK(safepdf_select_link_at(&list, 55, 55, &i) == 0 && i == 1, "link_at: second only");
+    CHECK(safepdf_select_link_at(&list, 70, 70, &i) == -1, "link_at: none");
+    list.count = 1;
+    CHECK(safepdf_select_link_at(&list, 30, 30, &i) == 0 && i == 0, "link_at: first");
+    CHECK(safepdf_select_link_at(NULL, 30, 30, &i) == -1, "link_at: NULL");
+    const char *labels[] = { "i", "ii", "1" };
+    char *d = safepdf_select_link_describe(&l[0].action, labels, 3, 3);
+    CHECK(d && strcmp(d, "go to page 1 (3/3)") == 0, "describe goto: %s", d ? d : "NULL");
+    free(d);
+    d = safepdf_select_link_describe(&l[0].action, NULL, 0, 3);
+    CHECK(d && strcmp(d, "go to page 3") == 0, "describe goto without labels: %s", d ? d : "NULL");
+    free(d);
+    d = safepdf_select_link_describe(&l[1].action, NULL, 0, 3);
+    CHECK(d && strcmp(d, "external link (click to copy the address): http://x") == 0,
+          "describe uri: %s", d ? d : "NULL");
+    free(d);
+    safepdf_action other = { SAFEPDF_ACTION_OTHER, 0, 0, 0, 0, 0, "Launch" };
+    d = safepdf_select_link_describe(&other, NULL, 0, 1);
+    CHECK(d && strcmp(d, "link action /Launch (not followed)") == 0, "describe other: %s", d ? d : "NULL");
+    free(d);
+}
+
+static void test_allowance(void) {
+    safepdf_select_allowance a;
+    safepdf_select_allowance_start(1000, &a);
+    CHECK(a.pages == 400 && a.ends_at_ms == 61000, "allowance start %llu %llu",
+          (unsigned long long)a.pages, (unsigned long long)a.ends_at_ms);
+    size_t spent = 0;
+    while (safepdf_select_allowance_spend(&a, 2000) == 0 && spent < 1000) spent++;
+    CHECK(spent == 400 && a.pages == 0, "allowance: 400 pages (%zu)", spent);
+    safepdf_select_allowance_start(0, &a);
+    CHECK(safepdf_select_allowance_spend(&a, 60000) == -1 && a.pages == 400, "allowance: time over");
+    CHECK(safepdf_select_allowance_spend(NULL, 0) == -1, "allowance: NULL");
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s WORKER GOLDEN_DIR\n", argv[0]);
@@ -379,10 +440,13 @@ int main(int argc, char **argv) {
         test_bands(x, p);
         test_copy(x, p);
         test_search(p);
+        test_over_text(x, p);
         safepdf_select_page_release(p);
     }
     safepdf_free_page_index(x);
     test_edges();
+    test_links();
+    test_allowance();
     printf("select_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

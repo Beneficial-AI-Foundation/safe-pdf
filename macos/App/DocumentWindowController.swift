@@ -2,7 +2,8 @@
 // sidebar and the page area, command routing and enabled states (task 11.3b); the zoom and
 // rotation commands, the zoom drop-down and the page view's keys (task 11.3c1); view modes and
 // spreads, the page field, back/forward, open settings, the subtitle `page k/n · zoom`, the
-// titlebar flags for repaired and encrypted files (task 11.3c2).
+// titlebar flags for repaired and encrypted files (task 11.3c2); Copy, Select All, Find and Find
+// next / previous, the search field and the external-link sheet's window (task 11.3d1).
 // Plan.md §6 Phase 11; docs/macos-design.md §2 (window with full-size content view, unified
 // toolbar, title = document name with proxy icon; NSSplitViewController sidebar) and §3
 // decision 1 (enabled rules from the exported Menu.Ctx table).
@@ -63,6 +64,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         chromeToolbar?.onPageCancel = { [weak self] in self?.pageFieldDone() }
         chromeToolbar?.onPageLeave = { [weak self] in self?.revertPageField() }
         pages.onViewChange = { [weak self] in self?.updateChrome() }
+        wireText()
         pages.canvas.onKeyCommand = { [weak self] cmd in self?.run(cmd) ?? false }
         pages.canvas.onError = { [weak self] message in
             guard let self else { return }
@@ -102,6 +104,30 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             self.updateChrome()
         }
         updateChrome()
+    }
+
+    /// Task 11.3d1: the search field runs Find; the selection's changes update Copy's state;
+    /// the external-link sheet attaches to this window.
+    private func wireText() {
+        chromeToolbar?.onSearch = { [weak self] text, forward in
+            guard let self, self.pdf != nil else { return }
+            self.pages.text.find.step(raw: text, forward: forward)
+        }
+        chromeToolbar?.onSearchCancel = { [weak self] in
+            guard let self else { return }
+            self.pages.text.find.close()
+            self.window?.makeFirstResponder(self.pages.canvas)
+        }
+        chromeToolbar?.onSearchClear = { [weak self] in self?.pages.text.find.close() }
+        pages.text.onSelectionChange = { [weak self] in self?.updateChrome() }
+        pages.text.sheetWindow = { [weak self] in self?.window }
+    }
+
+    /// Copy and Select All while a text field is being edited (the search or page field) act
+    /// on its text, not on the page's.
+    private var fieldEditor: NSText? {
+        guard let t = window?.firstResponder as? NSText, t.isFieldEditor else { return nil }
+        return t
     }
 
     // MARK: titlebar flags
@@ -177,7 +203,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             }
             c.can_back = pages.history.canBack
             c.can_forward = pages.history.canForward
-            // TODO(11.3d/e): outline, selection, marks, undo and dirty flags.
+            c.has_sel = pages.text.selection != nil
+            // TODO(11.3d2/e): outline, marks, undo and dirty flags.
         }
         return c
     }
@@ -249,6 +276,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
     /// whether it ran. Zoom and rotation from the menu and keys anchor at the window centre.
     @discardableResult
     func run(_ cmd: Int) -> Bool {
+        if let ed = fieldEditor {
+            if cmd == Commands.id(SAFEPDF_CMD_COPY) { ed.copy(nil); return true }
+            if cmd == Commands.id(SAFEPDF_CMD_SELECT_ALL) { ed.selectAll(nil); return true }
+        }
         guard isEnabled(cmd) else { return false }
         guard pdf != nil else {
             AppDelegate.shared?.perform(cmd)
@@ -262,6 +293,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
                 split.toggleSidebar(nil)
             case Commands.id(SAFEPDF_CMD_GOTO_PAGE):
                 chromeToolbar?.focusPageField(in: window)
+            case Commands.id(SAFEPDF_CMD_FIND):
+                chromeToolbar?.focusSearch(in: window)
             default:
                 AppDelegate.shared?.perform(cmd)
             }
@@ -310,6 +343,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
             pages.setZoom(safepdf_zoom_choice(kind: SAFEPDF_ZOOM_PAGE_WIDTH.rawValue, pct: 0))
         case Commands.id(SAFEPDF_CMD_ROTATE_CW), Commands.id(SAFEPDF_CMD_ROTATE_CCW):
             pages.rotate(clockwise: cmd == Commands.id(SAFEPDF_CMD_ROTATE_CW))
+        case Commands.id(SAFEPDF_CMD_COPY):
+            pages.text.copy()
+        case Commands.id(SAFEPDF_CMD_SELECT_ALL):
+            pages.text.selectAll()
         default:
             return false
         }
@@ -345,24 +382,33 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSMe
         updateChrome()
     }
 
+    /// Find next / Find previous (⌘G / ⇧⌘G, Menu.Action): the search field's text, as the Tk
+    /// key bindings use the find bar's.
     @objc func performSafePdfAction(_ sender: Any?) {
-        // TODO(11.3d): Find next / Find previous.
+        guard pdf != nil, let tag = (sender as? NSMenuItem)?.tag else { return }
+        let forward = tag == Int(SAFEPDF_ACTION_FIND_NEXT.rawValue)
+        guard forward || tag == Int(SAFEPDF_ACTION_FIND_PREV.rawValue) else { return }
+        pages.text.find.step(raw: chromeToolbar?.searchText ?? "", forward: forward)
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         // While the page field has the focus, keys without Command or Control (Page Up/Down,
         // function keys) belong to it, not to the menu.
-        if chromeToolbar?.isEditingPage == true, !item.keyEquivalent.isEmpty,
+        if chromeToolbar?.isEditingPage == true || chromeToolbar?.isEditingSearch == true, !item.keyEquivalent.isEmpty,
            item.keyEquivalentModifierMask.intersection([.command, .control]).isEmpty {
             return false
         }
         if item.action == MainMenu.commandSelector {
+            if let ed = fieldEditor {
+                if item.tag == Commands.id(SAFEPDF_CMD_COPY) { return ed.selectedRange.length > 0 }
+                if item.tag == Commands.id(SAFEPDF_CMD_SELECT_ALL) { return true }
+            }
             if let on = Self.radioOn(item.tag, modes: pages.canvas.modes) {
                 item.state = pdf != nil && on ? .on : .off
             }
             return isEnabled(item.tag)
         }
-        if item.action == MainMenu.actionSelector { return false } // TODO(11.3d)
+        if item.action == MainMenu.actionSelector { return pdf != nil }
         if item.action == DocumentToolbar.zoomSelector || item.action == DocumentToolbar.viewSelector {
             return pdf != nil
         }

@@ -155,6 +155,18 @@ struct MenuStats {
                 stats.hiddenAlternates += 1
             }
         }
+        // Cut and Paste for the text fields (the search and page fields; task 11.3d1): hidden,
+        // sent to the first responder (the field editor validates them; the page view has none).
+        if let edit = menus.first(where: { $0.title == "Edit" }) ?? menus.dropFirst().first {
+            for (title, sel, key) in [("Cut", #selector(NSText.cut(_:)), "x"), ("Paste", #selector(NSText.paste(_:)), "v")]
+            where !used.contains(keyId(key, [.command])) {
+                let item = NSMenuItem(title: title, action: sel, keyEquivalent: key)
+                item.isHidden = true
+                item.allowsKeyEquivalentWhenHidden = true
+                edit.addItem(item)
+                used.insert(keyId(key, [.command]))
+            }
+        }
         for m in menus {
             while let last = m.items.last, last.isSeparatorItem { m.removeItem(last) }
         }

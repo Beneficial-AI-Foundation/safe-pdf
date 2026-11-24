@@ -39,6 +39,13 @@ extern lean_object *safepdf_select_lean_find(lean_object *h, lean_object *q);
 extern lean_object *safepdf_select_lean_find_doc(lean_object *hs, lean_object *q);
 extern lean_object *safepdf_select_lean_next_hit(lean_object *counts, size_t page, size_t cur,
                                                  uint8_t forward);
+extern uint8_t safepdf_select_lean_over_text(lean_object *h, double x, double y);
+extern size_t safepdf_select_lean_link_at(lean_object *boxes, double x, double y);
+extern lean_object *safepdf_select_lean_link_describe(size_t kind, size_t page, lean_object *text,
+                                                      lean_object *labels, size_t n);
+extern lean_object *safepdf_select_lean_allowance_start(uint64_t now);
+extern lean_object *safepdf_select_lean_allowance_spend(uint64_t pages, uint64_t ends_at,
+                                                        uint64_t now);
 
 struct safepdf_select_page {
     atomic_size_t refs;
@@ -370,6 +377,73 @@ int safepdf_select_next_hit(const int64_t *counts, size_t n, size_t page, int64_
     out->wrapped = fval(r, 4) != 0;
     lean_dec(r);
     return 0;
+}
+
+/* ---- Pointer and links (task 11.3d1) --------------------------------------------------- */
+
+int safepdf_select_over_text(const safepdf_select_page *p, double x, double y) {
+    if (!p) return 0;
+    safepdf_thread_enter();
+    return safepdf_select_lean_over_text(h_arg(p), x, y) != 0;
+}
+
+int safepdf_select_link_at(const safepdf_link_list *links, double x, double y, size_t *index) {
+    if (!select_initialised || !links || (links->count && !links->links)) return -1;
+    safepdf_thread_enter();
+    size_t n = links->count;
+    lean_object *boxes = mk_floats(4 * n);
+    double *d = lean_float_array_cptr(boxes);
+    for (size_t i = 0; i < n; i++) {
+        const safepdf_box *b = &links->links[i].box;
+        d[4 * i] = b->llx;
+        d[4 * i + 1] = b->lly;
+        d[4 * i + 2] = b->urx;
+        d[4 * i + 3] = b->ury;
+    }
+    size_t r = safepdf_select_lean_link_at(boxes, x, y);
+    if (r == 0 || r > n) return -1;
+    if (index) *index = r - 1;
+    return 0;
+}
+
+char *safepdf_select_link_describe(const safepdf_action *a, const char *const *labels,
+                                   size_t nlabels, size_t pages) {
+    if (!select_initialised || !a) return strdup("");
+    safepdf_thread_enter();
+    if (!labels) nlabels = 0;
+    lean_object *ls = lean_alloc_array(nlabels, nlabels);
+    for (size_t i = 0; i < nlabels; i++)
+        lean_array_cptr(ls)[i] = lean_mk_string(labels[i] ? labels[i] : "");
+    lean_object *s = safepdf_select_lean_link_describe((size_t)a->kind, a->page,
+                                                       lean_mk_string(a->text ? a->text : ""),
+                                                       ls, pages);
+    char *out = dup_lean_string(s);
+    lean_dec(s);
+    return out;
+}
+
+void safepdf_select_allowance_start(uint64_t now_ms, safepdf_select_allowance *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!select_initialised) return;
+    safepdf_thread_enter();
+    lean_object *r = safepdf_select_lean_allowance_start(now_ms);
+    out->pages = fnat(r, 0);
+    out->ends_at_ms = fnat(r, 1);
+    lean_dec(r);
+}
+
+int safepdf_select_allowance_spend(safepdf_select_allowance *a, uint64_t now_ms) {
+    if (!select_initialised || !a) return -1;
+    safepdf_thread_enter();
+    lean_object *r = safepdf_select_lean_allowance_spend(a->pages, a->ends_at_ms, now_ms);
+    int spent = fval(r, 0) != 0;
+    if (spent) {
+        a->pages = fnat(r, 1);
+        a->ends_at_ms = fnat(r, 2);
+    }
+    lean_dec(r);
+    return spent ? 0 : -1;
 }
 
 /* ---- Frees ----------------------------------------------------------------------------- */
