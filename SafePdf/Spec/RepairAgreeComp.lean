@@ -669,6 +669,7 @@ theorem c4_comp_strip {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
       rw [hrep]
       simp only
       rw [withCrypt_plain (d := d') henc]
+      rfl
     rw [hro]
     -- `validate` reads one object, the `/Root`
     rcases hr : d.trailer.root? with _ | ⟨n, g⟩
