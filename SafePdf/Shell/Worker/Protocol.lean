@@ -1066,7 +1066,9 @@ configuration arrives as command-line flags, parsed before `Sandbox.prepare`:
 `--limits=HEX` (the `limitsC` encoding in lower-case hexadecimal), `--no-subst` (no
 substitute fonts), `--home=DIR` (search `DIR/Library/Fonts`, as the viewer does for `$HOME`),
 `--font-dir=DIR` (repeatable; the viewer's `$SAFEPDF_FONT_DIR` entries, in order) and the
-test hook `--test-stall-ms=N`. -/
+test hook `--test-stall-ms=N`. Task 12.3 adds the worker's resource ceilings
+`--mem-limit-mib=N` and `--cpu-limit-s=N` (applied before confinement, `Sandbox.fence`) and
+the test hook `--test-spin-ms=N`. -/
 
 /-- A hexadecimal digit (lower case) of `n < 16`. -/
 def hexDigit (n : Nat) : Char := if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
@@ -1133,6 +1135,15 @@ structure StartConfig where
   fontDirs : List String := []
   /-- Test hook: sleep before each render (ms, capped by the worker). -/
   stallMs : Nat := 0
+  /-- Task 12.3: the worker's memory ceiling in MiB (`0`: none), enforced by the operating
+  system or a watchdog outside Lean's cost model (`Sandbox.fence`). -/
+  memLimitMiB : Nat := 0
+  /-- Task 12.3: the CPU time one request may use, in seconds (`0`: none), enforced with
+  `RLIMIT_CPU`, re-armed before every request (`Sandbox.fence`). -/
+  cpuLimitS : Nat := 0
+  /-- Task 12.3, test hook: busy-loop this many ms before each render (capped by the worker),
+  to exercise the CPU fence. -/
+  spinMs : Nat := 0
   deriving Inhabited
 
 /-- The command-line flags of a configuration. -/
@@ -1140,7 +1151,10 @@ def StartConfig.toArgs (c : StartConfig) : Array String :=
   #[s!"--limits={limitsHex c.limits}"] ++ (if c.noSubst then #["--no-subst"] else #[]) ++
     (c.home.map (fun h => #[s!"--home={h}"])).getD #[] ++
     (c.fontDirs.map (s!"--font-dir={·}")).toArray ++
-    (if c.stallMs > 0 then #[s!"--test-stall-ms={c.stallMs}"] else #[])
+    (if c.stallMs > 0 then #[s!"--test-stall-ms={c.stallMs}"] else #[]) ++
+    (if c.memLimitMiB > 0 then #[s!"--mem-limit-mib={c.memLimitMiB}"] else #[]) ++
+    (if c.cpuLimitS > 0 then #[s!"--cpu-limit-s={c.cpuLimitS}"] else #[]) ++
+    (if c.spinMs > 0 then #[s!"--test-spin-ms={c.spinMs}"] else #[])
 
 /-- One flag applied to a configuration (`.error`: an argument the worker does not
 understand). -/
@@ -1157,11 +1171,31 @@ def StartConfig.applyArg (c : StartConfig) (a : String) : Except String StartCon
     match v.toString.toNat? with
     | some n => .ok { c with stallMs := n }
     | none => .error "bad --test-stall-ms value"
+  else if let some v := a.dropPrefix? "--mem-limit-mib=" then
+    match v.toString.toNat? with
+    | some n => .ok { c with memLimitMiB := n }
+    | none => .error "bad --mem-limit-mib value"
+  else if let some v := a.dropPrefix? "--cpu-limit-s=" then
+    match v.toString.toNat? with
+    | some n => .ok { c with cpuLimitS := n }
+    | none => .error "bad --cpu-limit-s value"
+  else if let some v := a.dropPrefix? "--test-spin-ms=" then
+    match v.toString.toNat? with
+    | some n => .ok { c with spinMs := n }
+    | none => .error "bad --test-spin-ms value"
   else .error s!"unknown argument: {a}"
 
 /-- Parse the worker's flags (`.error`: the first argument it does not understand). -/
 def StartConfig.ofArgs (args : List String) : Except String StartConfig :=
   args.foldlM StartConfig.applyArg {}
+
+#guard match StartConfig.ofArgs ["--mem-limit-mib=2048", "--cpu-limit-s=60", "--test-spin-ms=5"] with
+  | .ok c => c.memLimitMiB == 2048 && c.cpuLimitS == 60 && c.spinMs == 5
+  | .error _ => false
+#guard match StartConfig.ofArgs ({ memLimitMiB := 7, cpuLimitS := 3 } : StartConfig).toArgs.toList with
+  | .ok c => c.memLimitMiB == 7 && c.cpuLimitS == 3 && c.spinMs == 0
+  | .error _ => false
+#guard (StartConfig.ofArgs ["--mem-limit-mib=x"]).toOption.isNone
 
 /-! ## Requests and responses -/
 

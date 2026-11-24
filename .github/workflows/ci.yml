@@ -127,6 +127,14 @@ jobs:
       - name: Viewer smoke test (Xvfb)
         run: env -u DISPLAY scripts/viewer-smoke.sh --no-build
 
+      # Task 12.3 / M12: zoom, search and thumbnails interleaved on the pinned Transformer
+      # paper; the peak RSS of the viewer and of every document worker must stay within the
+      # published ceilings (docs/viewer.md "Budgets and ceilings"), and the viewer's
+      # reservation pool must be empty at the end. Builds `viewer worker` (the worker is not
+      # built by `lake build viewer`).
+      - name: Interleave scenario within the memory ceilings (Xvfb)
+        run: env -u DISPLAY scripts/interleave.sh
+
       # Task 12.6 / M8 on the pinned subset: every page of every pinned file through the
       # viewer, plus the three-paper session (scripts/viewer-corpus.sh, docs/viewer-corpus.md).
       # Report only for now: its timing thresholds were measured on macOS, not on a shared

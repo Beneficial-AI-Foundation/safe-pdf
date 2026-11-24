@@ -80,6 +80,11 @@ def child (start : Protocol.StartConfig := {}) : IO UInt32 := do
     {p.faces.length} substitute faces read before confinement"
   let want := !confined
   let mut ok := true
+  -- Task 12.3: the confined child is started with the viewer's resource fences.
+  IO.println s!"fences: {p.fences.getD "none (control)"}"
+  if confined && (p.fences.isNone || p.fences == some "no resource fence") then
+    IO.println "probe fences: MISSING"
+    ok := false
   ok := (← report "read /etc/hosts" want (← attempt do
     let b ← IO.FS.readBinFile "/etc/hosts"; return s!"{b.size} bytes")) && ok
   match p.faces.head? with
@@ -138,8 +143,9 @@ def parent (pdf : String) : IO UInt32 := do
   if port == 0 then IO.println "parent: could not listen on 127.0.0.1"; return 2
   IO.println s!"parent: {tokenVar} is set ({tokenVal.length} chars); listening on \
     127.0.0.1:{port}"
-  -- Confined: exactly the client's spawn (empty environment, cwd `/`).
-  let c ← Worker.spawn self
+  -- Confined: exactly the client's spawn (empty environment, cwd `/`), with resource fences
+  -- (task 12.3; the viewer's are `App.Budget.ceilings`).
+  let c ← Worker.spawn self (start := { memLimitMiB := 2048, cpuLimitS := 60 })
   let (out1, code1) ← runChild c.child s!"confined {port} {tokenVar} {pdf}"
   IO.println s!"--- confined child (Worker.spawn: empty environment, cwd /), exit {code1}"
   IO.print out1

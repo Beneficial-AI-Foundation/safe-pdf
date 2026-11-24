@@ -153,9 +153,10 @@ def answer (st : State) (req : Request) (limits : Limits := {}) : State × Respo
     | some d => (st, answerDoc d st.subst req)
 
 /-- The request loop, starting with the substitute fonts `subst`. Its only effects are reading
-stdin and writing stdout. Returns the exit status. -/
-def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) (stallMs : Nat := 0) :
-    IO UInt32 := do
+stdin and writing stdout, and `beforeEach`, run before every decoded request (task 12.3: the
+worker re-arms its CPU-time fence there, `Sandbox.armCpu`). Returns the exit status. -/
+def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) (stallMs : Nat := 0)
+    (beforeEach : IO Unit := pure ()) (spinMs : Nat := 0) : IO UInt32 := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   let mut st : State := { subst }
@@ -172,7 +173,8 @@ def loop (limits : Limits) (subst : Raster.Subst.SubstFonts) (stallMs : Nat := 0
       | .error e =>
         writeAll stdout (Protocol.frameResponse limits (.error .malformed (reprStr e)))
       | .ok req =>
-        TestHooks.beforeRequest stallMs req
+        beforeEach
+        TestHooks.beforeRequest stallMs req spinMs
         let (st', resp) := answer st req limits
         st := st'
         writeAll stdout (Protocol.frameResponse limits resp)

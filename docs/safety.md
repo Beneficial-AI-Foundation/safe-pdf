@@ -37,7 +37,7 @@ no panics, no `sorry` — and the properties are machine-checked theorems, not g
 |---|---|---|
 | S1 memory safety | holds | Lean type system; CI hygiene guard; axiom audit (`propext`/`Classical.choice`/`Quot.sound` only) |
 | S2 totality on **any** input | **proven** | `loadChain_terminates` (no fuel); xref `/Prev` cycles, cyclic `/Length`, self-containing object streams, `/Kids` cycles all rejected with `Error.cycle` in < 0.01 ms (M2) |
-| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; no bound spans a whole user operation yet (§5) |
+| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; since 12.3 the viewer's work in flight is reserved in one pool and a search shares one allowance, and the worker has OS memory/CPU fences (§5 item 0c) |
 | S4 no ambient authority | holds | the core's type contains no `IO` — compiler-checked |
 | S5 unverified-code isolation | holds (vacuously strong) | no FFI decoders at all: even JPEG is pure Lean in `Quarantine/`, held to core hygiene rules — a source-code boundary, not a process one: everything runs in the viewer process (§5) |
 | S6 unambiguity | **proven** | one winner per object id across incremental updates, newest-revision-wins (`Spec.Unambiguous`) — the *ambiguity* half of shadow attacks: it settles which revision we display; signatures and other viewers' precedence rules are out of scope |
@@ -209,6 +209,13 @@ security review; those items protect the user even if every current theorem is c
 0c. **Budget a whole user operation**: reserve memory for concurrent page buffers, thumbnails
     and caches before dispatch, and carry one shared work allowance through a search, export
     or render — per-call budgets reset today, so concurrency multiplies them.
+    *Status (task 12.3):* the viewer reserves every render, thumbnail and text request in one
+    pool (512 MiB, proven never exceeded, releases proven idempotent) before dispatch; a search
+    shares one allowance (400 pages, 60 s); the worker has a memory ceiling (Linux rlimits;
+    macOS, where `RLIMIT_AS`/`RLIMIT_DATA` are refused, a footprint watchdog) and a per-request
+    `RLIMIT_CPU` next to the 20 s deadline; a CI scenario checks the published RSS ceilings
+    (`docs/viewer.md`, "Budgets and ceilings"). Still open: Tk photos, Save/export and the
+    per-page decode budget inside the worker are outside the pool.
 0d. **Fresh IVs for encrypted updates**: supply OS randomness at the shell boundary and pass
     it into the pure writer; set an explicit policy for legacy RC4 writes.
 
