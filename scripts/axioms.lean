@@ -1410,3 +1410,9 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Repair.withObjStm_eq_of_noComp
 #print axioms SafePdf.Repair.withObjStm_length_le
 #print axioms SafePdf.Repair.repair_encrypted
+-- Phase 12, task 12.7g: fuel independent of free entries
+#print axioms SafePdf.Core.Xref.Length.lengthHop_calls_le
+#print axioms SafePdf.Core.Xref.Length.lengthHop_aux
+#print axioms SafePdf.Core.Xref.Length.lengthHop_fuel
+#print axioms SafePdf.Spec.RepairAgreeComp.resolve_fuel
+#print axioms SafePdf.Spec.RepairAgreeComp.getObject_strip_cnt
