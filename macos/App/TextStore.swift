@@ -194,8 +194,17 @@ enum TextOutcome<T> {
             self.indexDone(page, status: status, error: error, index: index)
         }
         let ctx = Unmanaged.passRetained(ticket).toOpaque()
-        let id = safepdf_doc_page_index(doc.handle, page, nil, priority, DispatchQueue.main,
+        // Under the document's layers state, as the renders (Tk `applyLayers`; nil: default).
+        let id: safepdf_request_id
+        if let layers = doc.layers {
+            id = layers.withC { st in
+                safepdf_doc_page_index(doc.handle, page, st, priority, DispatchQueue.main,
+                                       TextStore.indexCallback, ctx)
+            }
+        } else {
+            id = safepdf_doc_page_index(doc.handle, page, nil, priority, DispatchQueue.main,
                                         TextStore.indexCallback, ctx)
+        }
         if id == 0 {
             Unmanaged<TextTicket>.fromOpaque(ctx).release()
             let ws = indexWaiters.removeValue(forKey: page) ?? []

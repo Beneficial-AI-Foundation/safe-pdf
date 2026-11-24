@@ -157,6 +157,7 @@ final class SidebarViewController: NSViewController {
         layers.onStatus = { [weak self] s in self?.status(s) }
         layers.onChanged = { [weak self, weak pv] in
             pv?.canvas.layersChanged()
+            pv?.text.layersChanged()
             self?.thumbnails.layersChanged()
             self?.onChange?()
         }

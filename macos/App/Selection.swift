@@ -166,6 +166,10 @@ struct TextSelection: Equatable {
         onSelectionChange?()
     }
 
+    /// The layers state changed (task 11.3d2): the text indexes were built under the old state,
+    /// so drop them with the selection and the search hit, as Tk's `applyLayers` does.
+    func layersChanged() { reset(store.document) }
+
     /// The pill (status line).
     func status(_ text: String) { pages?.pill.show(text) }
 
