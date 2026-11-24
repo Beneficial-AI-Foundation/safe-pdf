@@ -1,0 +1,33 @@
+// Commands.swift — which exported commands this shell implements yet (task 11.3b).
+// Plan.md §6 Phase 11; docs/macos-design.md §4 (the 11.3c/d/e split). Every Menu.Cmd is in the
+// menubar; a command not implemented yet stays disabled, and `pendingTask` names the task that
+// implements it.
+
+import Foundation
+import SafePdfC
+
+enum Commands {
+    static func id(_ c: safepdf_cmd) -> Int { Int(c.rawValue) }
+
+    /// Commands the scaffold performs.
+    static let implemented: Set<Int> = [
+        id(SAFEPDF_CMD_OPEN_FILE), id(SAFEPDF_CMD_CLOSE), id(SAFEPDF_CMD_QUIT),
+        id(SAFEPDF_CMD_ABOUT), id(SAFEPDF_CMD_OUTLINE), id(SAFEPDF_CMD_PREV_PAGE),
+        id(SAFEPDF_CMD_NEXT_PAGE), id(SAFEPDF_CMD_FIRST_PAGE), id(SAFEPDF_CMD_LAST_PAGE),
+    ]
+
+    /// The task that implements a command not implemented yet (nil when implemented).
+    static func pendingTask(_ cmd: Int) -> String? {
+        if implemented.contains(cmd) { return nil }
+        let marks: Set<Int> = [
+            id(SAFEPDF_CMD_SAVE), id(SAFEPDF_CMD_SAVE_AS), id(SAFEPDF_CMD_IMPORT_XFDF),
+            id(SAFEPDF_CMD_EXPORT_XFDF), id(SAFEPDF_CMD_UNDO), id(SAFEPDF_CMD_REDO),
+            id(SAFEPDF_CMD_HIGHLIGHT), id(SAFEPDF_CMD_ADD_NOTE), id(SAFEPDF_CMD_DELETE_MARK),
+            id(SAFEPDF_CMD_HL_TOOL), id(SAFEPDF_CMD_SHOW_ALL),
+        ]
+        let text: Set<Int> = [id(SAFEPDF_CMD_COPY), id(SAFEPDF_CMD_SELECT_ALL), id(SAFEPDF_CMD_FIND)]
+        if marks.contains(cmd) { return "11.3e" }
+        if text.contains(cmd) { return "11.3d" }
+        return "11.3c" // zoom, rotation, view modes, go to page, back/forward
+    }
+}
