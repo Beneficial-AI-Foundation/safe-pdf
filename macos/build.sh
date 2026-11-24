@@ -34,6 +34,14 @@ clang -o "$out/safepdf-mac" "$out/main.o" "$out/safepdf_core.o" "$out/safepdf_ma
   -framework AppKit -framework CoreGraphics \
   -Wl,-dead_strip
 
+# 3b. The C API v2 test program (task 11.3a1; run it with macos/tests/run.sh): plain C over
+#     the same shim and library, no AppKit.
+clang "${cflags[@]}" -c "$here/tests/core_test.c" -o "$out/core_test.o"
+clang -o "$out/core_test" "$out/core_test.o" "$out/safepdf_core.o" "$ffi" \
+  -L "$prefix/lib/lean" -L "$prefix/lib" \
+  -lleancpp -lInit -lStd -lleanrt -lcadical -lc++ -lgmp -luv \
+  -Wl,-dead_strip
+
 # 4. A minimal bundle around the same binary (for Finder/Dock; never opened by scripts).
 app="$out/SafePdf.app/Contents"
 mkdir -p "$app/MacOS"
@@ -52,4 +60,4 @@ cat > "$app/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-echo "built $out/safepdf-mac and $out/SafePdf.app"
+echo "built $out/safepdf-mac, $out/SafePdf.app and $out/core_test"

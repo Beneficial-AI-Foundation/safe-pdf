@@ -1,5 +1,6 @@
 import SafePdf.Api
 import SafePdf.Shell.Fonts
+import SafePdf.Shell.Ffi.V2
 
 /-!
 # A first C ABI over `safe-pdf-core` (task 11.1, AppKit spike)
@@ -21,6 +22,14 @@ The handle holds the opened `SafePdf.Api.Document` and the substitute fonts foun
 system (`SafePdf.Shell.Fonts.loadSubstFonts`, as the Tk viewer does), so non-embedded text is
 painted the same way in both shells. Rendering is `Core.Raster.Glyph.renderDocPage`, the
 verified renderer behind `SafePdf.Api.renderPage` and the Tk viewer (`App.Viewer.renderPage`).
+
+**Task 11.3a1: C API v2.** The document layer over the worker lives in
+`SafePdf.Shell.Ffi.V2` (refcounted handles, asynchronous requests through `Worker.Session`,
+completion through the `safepdf_c_deliver` callback) and `SafePdf.Shell.Ffi.Flat` (the pure
+conversions to the flat layout the C structs are copied from); this module imports both, so
+`lake build macosFfi` archives them. The v1 exports below (in-process open and synchronous
+render) stay until task 11.3b retires the spike's `macos/main.m`; `safepdf_core.h` marks them
+deprecated.
 -/
 
 namespace SafePdf.Shell.Ffi

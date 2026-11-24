@@ -1,38 +1,104 @@
 /*
- * safepdf_core.h — a first, minimal C API over safe-pdf-core (task 11.1, AppKit spike).
+ * safepdf_core.h — the C API over safe-pdf-core.
  *
- * Plain C: no Lean types leak through. Implemented in safepdf_core.c over the Lean
- * exports of SafePdf/Shell/Ffi.lean; link with libsafepdfffi.a (`lake build macosFfi`) and
- * Lean's runtime libraries (see macos/build.sh).
+ * v1 (task 11.1, AppKit spike) and v2 (task 11.3a1, the document layer over the worker).
+ * Plain C: no Lean types leak through. Implemented in safepdf_core.c over the Lean exports
+ * of SafePdf/Shell/Ffi.lean, SafePdf/Shell/Ffi/V2.lean and SafePdf/Shell/Ffi/Flat.lean; link
+ * with libsafepdfffi.a (`lake build macosFfi`) and Lean's runtime libraries (macos/build.sh).
+ * Design: docs/macos-design.md §3 (decisions 2 and 4).
  *
- * Ownership rules
- *   - safepdf_open returns a document the caller owns; release it with safepdf_close.
- *   - safepdf_render fills a safepdf_image whose `rgba` buffer the caller owns (malloc'd);
- *     release it with safepdf_image_free (or free(img->rgba)).
- *   - Error strings (`char **error` out-parameters) are malloc'd; release with free().
- *     They are set only when the call fails, and only when `error` is not NULL.
- *   - Input strings and pointers are borrowed for the duration of the call.
+ * ===== v2: documents over the confined worker =====
+ *
+ * Documents
+ *   safepdf_doc_open_file reads the file through the capped read (task 12.1: at most
+ *   Limits.maxInputBytes + 1 bytes through a handle); safepdf_doc_open_bytes takes a caller
+ *   buffer (copied; the caller keeps its buffer). Both parse the document in this process (page
+ *   count and sizes are answered synchronously from that parse) and start the document's
+ *   worker session: one confined `worker` process per document, spawned on the first request,
+ *   sent the bytes (never the path).
+ *
+ * The worker executable
+ *   safepdf_open_options.worker_path, else the path set by safepdf_set_worker_path, else
+ *   `worker` next to the host executable. Opening fails (error "no document worker at …")
+ *   when the file does not exist.
+ *
+ * Reference counting
+ *   An open returns a document with one reference. safepdf_doc_retain adds one,
+ *   safepdf_doc_release drops one. The LAST release closes the document: queued requests are
+ *   cancelled, a request in flight is stopped (its worker is killed), in-process requests that
+ *   have not started are cancelled — and release BLOCKS until every outstanding request's
+ *   callback has been enqueued on its queue (it does not wait for the callbacks to run, so it
+ *   may be called from a callback's own queue). Then the handle is freed. A callback never
+ *   receives the document, so it may run after the document is gone.
+ *
+ * Requests (asynchronous)
+ *   Every safepdf_doc_<request> call returns a request id (> 0) and later calls its callback
+ *   EXACTLY ONCE, on the caller's dispatch queue (dispatch_async_f), with
+ *     SAFEPDF_STATUS_OK        result non-NULL, owned by the callback: free it with the
+ *                              matching safepdf_free_* (or keep it);
+ *     SAFEPDF_STATUS_ERROR     `error` is the English message, result NULL;
+ *     SAFEPDF_STATUS_CANCELLED cancelled, superseded or the document closed; result NULL.
+ *   `error` is borrowed: valid only during the callback (copy it to keep it). `context` is
+ *   passed through untouched. A call with a NULL document, queue or callback returns 0 and
+ *   never calls back.
+ *
+ *   Where they run: render, page index, links and outline go to the worker (priorities,
+ *   cancel, deadline). The worker protocol has no request for page labels, attachments or the
+ *   layers configuration, so those (and an attachment's bytes) are computed from the
+ *   in-process parse on a Lean task, as the Tk viewer does; their priority is ignored.
+ *
+ * Priorities (worker requests): 0 most urgent (the current page or spread, the outline),
+ *   1 other visible pages and the prefetch, 2 thumbnails; oldest first among equals.
+ *   safepdf_doc_raise makes a queued request more urgent.
+ *
+ * Cancel: safepdf_doc_cancel(doc, id). A queued request is dropped (CANCELLED); one in flight
+ *   for more than 250 ms is stopped by killing its worker (CANCELLED; the next request starts
+ *   a fresh worker). An id already delivered changes nothing.
+ *
+ * Worker crash or deadline: a request without an answer within the deadline
+ *   (safepdf_open_options.deadline_ms, default 20000) kills the worker and is delivered as
+ *   SAFEPDF_STATUS_ERROR "the document took too long (no answer within 20 s; its worker was
+ *   stopped)"; a crashed worker gives "the document worker stopped: …". The next request
+ *   spawns a fresh worker and sends the bytes again.
+ *
+ * Ownership of the structs
+ *   Every result struct handed to a callback is heap-allocated and owned by the receiver,
+ *   with all its arrays and strings: one safepdf_free_<type> frees all of it (NULL allowed).
+ *   Strings inside results are UTF-8, NUL-terminated (a NUL in document text becomes
+ *   U+FFFD) and live as long as the struct. safepdf_layers_state values written by
+ *   safepdf_layers_toggle live in caller storage; release their arrays with
+ *   safepdf_free_layers_state. Input pointers are borrowed for the duration of the call.
+ *   Error strings from `char **error` out-parameters are malloc'd; release them with free().
+ *
+ * Coordinates: page space in points (PDF user space: origin at the lower left, y up), as
+ *   doubles converted from the core's exact rationals (display only).
  *
  * Threads
- *   - safepdf_init must run once, on the main thread, before any other call.
- *   - A document may be used from several threads at once (it is marked thread-shared).
- *   - Every thread other than the one that called safepdf_init must call
- *     safepdf_thread_enter before its first call and safepdf_thread_exit when done.
- *   - Each call runs on the calling thread and blocks until done (a render can take
- *     hundreds of milliseconds): call safepdf_render off the UI thread.
+ *   safepdf_init runs once, on the main thread, before anything else. Any thread may then call
+ *   the API: a thread that is not registered with the Lean runtime is registered on its first
+ *   call and unregistered when it exits (safepdf_thread_enter/exit remain for v1 callers).
+ *   The worker session runs its own Lean task threads; completion is reported from one of them
+ *   to the C shim (an @[extern] callback), which copies the result into the C structs and
+ *   enqueues the caller's callback with dispatch_async_f. Callbacks therefore run outside Lean
+ *   and may call the API again (e.g. submit the next request).
+ *
+ * ===== v1 (DEPRECATED: kept until task 11.3b retires macos/main.m) =====
+ *   safepdf_open / safepdf_close / safepdf_page_count / safepdf_page_size / safepdf_render /
+ *   safepdf_image_free: in-process open and a synchronous render on the calling thread, no
+ *   worker, no cancellation. Use the v2 calls instead.
  */
 #ifndef SAFEPDF_CORE_H
 #define SAFEPDF_CORE_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <dispatch/dispatch.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/** An open document (opaque). */
-typedef struct safepdf_doc safepdf_doc;
+/* ----------------------------------------------------------------- common */
 
 /** A rendered page: `height` rows of `stride` bytes, each pixel R, G, B, A (A = 255;
     white background), rows from the top. */
@@ -46,30 +112,345 @@ typedef struct {
 /** Initialise the Lean runtime and the core's modules. 0 on success. Idempotent. */
 int safepdf_init(void);
 
-/** Register / unregister the calling (non-main) thread with the Lean runtime. */
+/** Register / unregister the calling (non-main) thread with the Lean runtime. Optional since
+    v2 (threads are registered on their first call). */
 void safepdf_thread_enter(void);
 void safepdf_thread_exit(void);
 
-/** Open the PDF at `path` (UTF-8). NULL on failure, with `*error` set. */
+/* ----------------------------------------------------------------- v1 (deprecated) */
+
+/** DEPRECATED (v1). An open document (opaque), parsed and rendered in this process. */
+typedef struct safepdf_doc safepdf_doc;
+
+/** DEPRECATED (v1). Open the PDF at `path` (UTF-8). NULL on failure, with `*error` set. */
 safepdf_doc *safepdf_open(const char *path, char **error);
 
-/** Release a document. NULL is allowed. */
+/** DEPRECATED (v1). Release a document. NULL is allowed. */
 void safepdf_close(safepdf_doc *doc);
 
-/** Number of pages. */
+/** DEPRECATED (v1). Number of pages. */
 size_t safepdf_page_count(const safepdf_doc *doc);
 
-/** Displayed size of page `page` (0-based) in points (CropBox, /Rotate applied).
-    0 on success, -1 when `page` is out of range. */
+/** DEPRECATED (v1). Displayed size of page `page` (0-based) in points (CropBox, /Rotate
+    applied). 0 on success, -1 when `page` is out of range. */
 int safepdf_page_size(const safepdf_doc *doc, size_t page, double *width, double *height);
 
-/** Render page `page` at zoom `zoom_num / zoom_den` pixels per point (1 = 72 dpi).
-    0 on success (`*out` filled), -1 on failure (`*error` set, `*out` zeroed). */
+/** DEPRECATED (v1). Render page `page` at zoom `zoom_num / zoom_den` pixels per point on the
+    calling thread (blocks). 0 on success (`*out` filled), -1 on failure (`*error` set). */
 int safepdf_render(const safepdf_doc *doc, size_t page, uint32_t zoom_num, uint32_t zoom_den,
                    safepdf_image *out, char **error);
 
-/** Release the buffer of a rendered image and zero it. NULL is allowed. */
+/** Release the buffer of a rendered image and zero the struct (v1 images, caller storage).
+    NULL is allowed. */
 void safepdf_image_free(safepdf_image *img);
+
+/* ----------------------------------------------------------------- v2: documents */
+
+/** A document over the worker (opaque, reference counted). */
+typedef struct safepdf_document safepdf_document;
+
+/** A request id; 0 means "not submitted". */
+typedef uint64_t safepdf_request_id;
+
+/** How a request ended. */
+typedef enum {
+    SAFEPDF_STATUS_OK = 0,
+    SAFEPDF_STATUS_ERROR = 1,
+    SAFEPDF_STATUS_CANCELLED = 2
+} safepdf_status;
+
+/** Worker priorities (lower is more urgent). */
+enum {
+    SAFEPDF_PRIO_CURRENT = 0,
+    SAFEPDF_PRIO_VISIBLE = 1,
+    SAFEPDF_PRIO_THUMBNAIL = 2
+};
+
+/** Options of an open (NULL options: all defaults). */
+typedef struct {
+    /** The worker executable; NULL: safepdf_set_worker_path's, else `worker` next to the
+        host executable. */
+    const char *worker_path;
+    /** Request deadline in ms; 0: 20000. */
+    uint32_t deadline_ms;
+    /** Nonzero: strict mode, the repair path never runs (task 12.1). */
+    int strict;
+    /** TESTS ONLY: the worker sleeps this many ms before each render (0: off). */
+    uint32_t test_stall_ms;
+} safepdf_open_options;
+
+/** Set the default worker executable for later opens (copied; NULL clears). 0 on success. */
+int safepdf_set_worker_path(const char *path);
+
+/** Open the PDF at `path` (UTF-8) through the capped read. NULL on failure, `*error` set. */
+safepdf_document *safepdf_doc_open_file(const char *path, const safepdf_open_options *opts,
+                                        char **error);
+
+/** Open a PDF from `len` bytes at `bytes` (copied). NULL on failure, `*error` set. */
+safepdf_document *safepdf_doc_open_bytes(const uint8_t *bytes, size_t len,
+                                         const safepdf_open_options *opts, char **error);
+
+/** Add a reference; returns `doc`. NULL is allowed. */
+safepdf_document *safepdf_doc_retain(safepdf_document *doc);
+
+/** Drop a reference; the last one closes the document (see the header comment: cancels and
+    drains pending requests, blocks until their callbacks are enqueued). NULL is allowed. */
+void safepdf_doc_release(safepdf_document *doc);
+
+/** Number of pages (synchronous). */
+size_t safepdf_doc_page_count(const safepdf_document *doc);
+
+/** Displayed size of page `page` (0-based) in points (CropBox, /Rotate applied; synchronous).
+    0 on success, -1 when `page` is out of range. */
+int safepdf_doc_page_size(const safepdf_document *doc, size_t page, double *width,
+                          double *height);
+
+/** Nonzero when the file opened only through the repair path. */
+int safepdf_doc_is_repaired(const safepdf_document *doc);
+
+/** Nonzero when the file is encrypted (opened with the empty user password). */
+int safepdf_doc_is_encrypted(const safepdf_document *doc);
+
+/* ----------------------------------------------------------------- v2: result structs */
+
+/** A page-space box (points, y up). */
+typedef struct { double llx, lly, urx, ury; } safepdf_box;
+
+/** An optional content group (object number, generation). */
+typedef struct { uint64_t num, gen; } safepdf_oc_key;
+
+/** A layers state: the document's groups and those that are OFF. Input to renders and the
+    page index (NULL: the document's default state). */
+typedef struct {
+    safepdf_oc_key *known;
+    size_t known_count;
+    safepdf_oc_key *off;
+    size_t off_count;
+} safepdf_layers_state;
+
+/** One cell of a page's selection and search index (the Tk viewer's `Select.Cell`). */
+typedef struct {
+    const char *text;   /**< the glyph's text in reading order ("" for an overprinted duplicate) */
+    const char *sep;    /**< the separator the layout puts before it ("", " " or "\n") */
+    safepdf_box box;    /**< page-space box */
+    size_t line;        /**< index of its line (into `line_dirs`) */
+    int hidden;         /**< nonzero: the page does not paint it (Tr 3 / Tr 7) */
+} safepdf_cell;
+
+/** A page's selection and search index (the worker's `pageIndex` answer). */
+typedef struct {
+    safepdf_cell *cells;
+    size_t cell_count;
+    uint32_t *line_dirs;   /**< per line: baseline direction in quarter turns (0–3) */
+    size_t line_count;
+    char *strings_;        /**< internal: the string storage */
+} safepdf_page_index;
+
+/** What activating a link or an outline item does. */
+typedef enum {
+    SAFEPDF_ACTION_GOTO = 0,        /**< page, optional left/top */
+    SAFEPDF_ACTION_URI = 1,         /**< text: the address as shown (percent-encoded) */
+    SAFEPDF_ACTION_BAD_PAGE = 2,    /**< a destination whose page is not in the document */
+    SAFEPDF_ACTION_UNRESOLVED = 3,  /**< text: a named destination that was not found */
+    SAFEPDF_ACTION_OTHER = 4,       /**< text: another action type (never followed) */
+    SAFEPDF_ACTION_NONE = 5
+} safepdf_action_kind;
+
+/** An action. */
+typedef struct {
+    safepdf_action_kind kind;
+    size_t page;          /**< GOTO: 0-based page */
+    int has_left;         /**< GOTO: `left` is given (page-space x of the left edge) */
+    double left;
+    int has_top;          /**< GOTO: `top` is given (page-space y of the top edge) */
+    double top;
+    const char *text;     /**< URI / UNRESOLVED / OTHER; "" otherwise */
+} safepdf_action;
+
+/** A link of a page (the Tk viewer's `Links.Link`). */
+typedef struct { safepdf_box box; safepdf_action action; } safepdf_link;
+
+/** A page's links. */
+typedef struct {
+    safepdf_link *links;
+    size_t count;
+    char *strings_;
+} safepdf_link_list;
+
+/** An outline row (preorder; each depth at most one more than the previous row's). */
+typedef struct {
+    const char *title;
+    size_t depth;
+    int is_open;          /**< starts expanded (/Count > 0) */
+    safepdf_action action;
+} safepdf_outline_item;
+
+/** The outline. */
+typedef struct {
+    safepdf_outline_item *items;
+    size_t count;
+    char *strings_;
+} safepdf_outline;
+
+/** Page labels, one per page ("" where the document gives the page no label). */
+typedef struct {
+    const char **labels;
+    size_t count;
+    char *strings_;
+} safepdf_label_list;
+
+/** One attachment (Core.Doc.Attachments; nothing is decoded to list it). */
+typedef struct {
+    const char *name;          /**< display name */
+    const char *file_name;     /**< default file name for saving */
+    const char *description;   /**< NULL when absent */
+    int has_size;
+    uint64_t size;             /**< the listed size (/Params /Size, /DL, or stored unfiltered) */
+    const char *mime;          /**< NULL when absent */
+    const char *created;       /**< NULL when absent (PDF date string) */
+    const char *modified;      /**< NULL when absent */
+    int has_page;
+    size_t page;               /**< page of its (first) file attachment annotation */
+    int in_tree;               /**< from the /EmbeddedFiles name tree */
+    int problem;               /**< 0 none; 1 not embedded; 2 bad /EF; 3 not a stream */
+    const char *problem_text;  /**< "" when problem == 0 */
+} safepdf_attachment;
+
+/** A file attachment annotation's icon. */
+typedef struct {
+    size_t page;
+    safepdf_box rect;
+    size_t entry;              /**< index into `items` */
+} safepdf_attachment_icon;
+
+/** The document's attachments. */
+typedef struct {
+    safepdf_attachment *items;
+    size_t count;
+    safepdf_attachment_icon *icons;
+    size_t icon_count;
+    int truncated;             /**< entries beyond the cap were dropped */
+    size_t warnings;           /**< problems skipped */
+    char *strings_;
+} safepdf_attachment_list;
+
+/** Bytes (an attachment's decoded content). */
+typedef struct {
+    uint8_t *data;
+    size_t len;
+} safepdf_bytes;
+
+/** A row of the layers panel (the Tk viewer's `Sidebar.layerRows`). */
+typedef struct {
+    size_t depth;
+    const char *label;
+    int has_group;          /**< 0 for a heading */
+    safepdf_oc_key group;
+    int italic;             /**< the "Additional Layers" heading */
+    int locked;             /**< the checkbox is disabled */
+    int on;                 /**< checked in `initial` */
+} safepdf_layer_row;
+
+/** The layers panel and the document's default state (no optional content: no rows, an
+    empty state). */
+typedef struct {
+    safepdf_layer_row *rows;
+    size_t count;
+    safepdf_layers_state initial;
+    char *strings_;
+} safepdf_layers;
+
+/* ----------------------------------------------------------------- v2: callbacks */
+
+typedef void (*safepdf_render_fn)(void *context, safepdf_request_id id, safepdf_status status,
+                                  const char *error, safepdf_image *image);
+typedef void (*safepdf_page_index_fn)(void *context, safepdf_request_id id,
+                                      safepdf_status status, const char *error,
+                                      safepdf_page_index *index);
+typedef void (*safepdf_links_fn)(void *context, safepdf_request_id id, safepdf_status status,
+                                 const char *error, safepdf_link_list *links);
+typedef void (*safepdf_outline_fn)(void *context, safepdf_request_id id, safepdf_status status,
+                                   const char *error, safepdf_outline *outline);
+typedef void (*safepdf_labels_fn)(void *context, safepdf_request_id id, safepdf_status status,
+                                  const char *error, safepdf_label_list *labels);
+typedef void (*safepdf_attachments_fn)(void *context, safepdf_request_id id,
+                                       safepdf_status status, const char *error,
+                                       safepdf_attachment_list *attachments);
+typedef void (*safepdf_bytes_fn)(void *context, safepdf_request_id id, safepdf_status status,
+                                 const char *error, safepdf_bytes *bytes);
+typedef void (*safepdf_layers_fn)(void *context, safepdf_request_id id, safepdf_status status,
+                                  const char *error, safepdf_layers *layers);
+
+/* ----------------------------------------------------------------- v2: requests */
+
+/** Render `page` at `zoom_num / zoom_den` pixels per point with an extra clockwise
+    `rotation` (quarter turns, 0–3) under `layers` (NULL: the default state). Worker. */
+safepdf_request_id safepdf_doc_render(safepdf_document *doc, size_t page, uint32_t zoom_num,
+                                      uint32_t zoom_den, unsigned rotation,
+                                      const safepdf_layers_state *layers, int priority,
+                                      dispatch_queue_t queue, safepdf_render_fn fn,
+                                      void *context);
+
+/** The selection and search index of `page` under `layers` (NULL: default). Worker. */
+safepdf_request_id safepdf_doc_page_index(safepdf_document *doc, size_t page,
+                                          const safepdf_layers_state *layers, int priority,
+                                          dispatch_queue_t queue, safepdf_page_index_fn fn,
+                                          void *context);
+
+/** The links of `page`. Worker. */
+safepdf_request_id safepdf_doc_links(safepdf_document *doc, size_t page, int priority,
+                                     dispatch_queue_t queue, safepdf_links_fn fn,
+                                     void *context);
+
+/** The outline. Worker. */
+safepdf_request_id safepdf_doc_outline(safepdf_document *doc, int priority,
+                                       dispatch_queue_t queue, safepdf_outline_fn fn,
+                                       void *context);
+
+/** The page labels. In process. */
+safepdf_request_id safepdf_doc_page_labels(safepdf_document *doc, dispatch_queue_t queue,
+                                           safepdf_labels_fn fn, void *context);
+
+/** The attachments (listed, none decoded). In process. */
+safepdf_request_id safepdf_doc_attachments(safepdf_document *doc, dispatch_queue_t queue,
+                                           safepdf_attachments_fn fn, void *context);
+
+/** The decoded bytes of attachment `index` (of safepdf_doc_attachments' list). In process
+    (the worker protocol has no such request). */
+safepdf_request_id safepdf_doc_attachment_bytes(safepdf_document *doc, size_t index,
+                                                dispatch_queue_t queue, safepdf_bytes_fn fn,
+                                                void *context);
+
+/** The layers panel (optional content groups) and the default layers state. In process. */
+safepdf_request_id safepdf_doc_layers(safepdf_document *doc, dispatch_queue_t queue,
+                                      safepdf_layers_fn fn, void *context);
+
+/** Cancel request `id` (see the header comment). */
+void safepdf_doc_cancel(safepdf_document *doc, safepdf_request_id id);
+
+/** Make queued worker request `id` more urgent (`priority` below its current one). */
+void safepdf_doc_raise(safepdf_document *doc, safepdf_request_id id, int priority);
+
+/** Toggle row `row` of the layers panel in state `current` (NULL: the default state), with
+    the panel's rules (radio-button groups, locked groups unchanged, headings inert). Writes
+    the new state to `*out` (caller storage; free with safepdf_free_layers_state).
+    Synchronous. 0 on success, -1 on failure (`*error` set, `*out` zeroed). */
+int safepdf_layers_toggle(safepdf_document *doc, const safepdf_layers_state *current,
+                          size_t row, safepdf_layers_state *out, char **error);
+
+/* ----------------------------------------------------------------- v2: frees */
+
+/** Free a rendered image delivered to a callback (buffer and struct). NULL is allowed. */
+void safepdf_free_image(safepdf_image *image);
+void safepdf_free_page_index(safepdf_page_index *index);
+void safepdf_free_links(safepdf_link_list *links);
+void safepdf_free_outline(safepdf_outline *outline);
+void safepdf_free_labels(safepdf_label_list *labels);
+void safepdf_free_attachments(safepdf_attachment_list *attachments);
+void safepdf_free_bytes(safepdf_bytes *bytes);
+void safepdf_free_layers(safepdf_layers *layers);
+/** Free the arrays of a layers state in caller storage and zero it. NULL is allowed. */
+void safepdf_free_layers_state(safepdf_layers_state *state);
 
 #ifdef __cplusplus
 }
