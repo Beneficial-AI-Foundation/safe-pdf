@@ -53,6 +53,11 @@ jobs:
       - name: Build library and inspector
         run: lake build
 
+      - name: Build the C API's Lean modules (runs their #guards)
+        # Non-default target (task 11.3a5): SafePdf/Shell/Ffi*.lean and Ffi/Flat.lean hold
+        # #guards that only run when this builds. Lean code only (no macOS code).
+        run: lake build macosFfi
+
       - name: Build test and fuzz executables
         run: lake build tests fuzz
 
