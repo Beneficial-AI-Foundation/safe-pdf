@@ -78,6 +78,13 @@ extern lean_object *safepdf_marks_lean_xfdf_export(lean_object *h, lean_object *
                                                    lean_object *date, size_t max_out);
 extern lean_object *safepdf_marks_lean_xfdf_import(lean_object *h, lean_object *bytes);
 extern lean_object *safepdf_marks_lean_error_text(lean_object *e);
+extern lean_object *safepdf_marks_lean_tool_params(uint8_t u);
+extern lean_object *safepdf_marks_lean_ui_step(lean_object *ui, uint8_t op, uint8_t arg);
+extern uint8_t safepdf_marks_lean_bubble_kind(uint8_t sel, uint8_t mark, uint8_t show_all);
+extern lean_object *safepdf_marks_lean_bubble_layout(uint8_t kind);
+extern lean_object *safepdf_marks_lean_bubble_place(lean_object *sel, double w, double h,
+                                                    lean_object *area);
+extern uint32_t safepdf_marks_lean_escape_closes(uint32_t opened);
 
 struct safepdf_marks {
     atomic_size_t refs;
@@ -671,4 +678,133 @@ oom:
     safepdf_free_xfdf_import(out);
     set_error(error, strdup("out of memory (the marks were imported; the report was lost)"));
     return -1;
+}
+
+/* ---- Tools, bubble and pop-over parameters (task 11.3e1) ------------------------------- */
+
+static uint32_t u32_of(double v) {
+    if (!(v >= 0)) return 0;
+    if (v > 4294967295.0) return UINT32_MAX;
+    return (uint32_t)v;
+}
+
+int safepdf_marks_tool_params(safepdf_tool_params *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!marks_initialised) return -1;
+    lean_object *a = safepdf_marks_lean_tool_params(0);
+    size_t n = lean_sarray_size(a);
+    double *d = lean_float_array_cptr(a);
+    int rc = -1;
+    if (n >= 16) {
+        size_t i = 0;
+        for (int c = 0; c < 5; c++)
+            for (int k = 0; k < 3; k++) out->highlight_rgb[c][k] = (uint8_t)u32_of(d[i++]);
+        size_t ec = (size_t)u32_of(d[i++]);
+        if (ec <= 8 && n == i + 3 * ec + 12 + 2 + 3) {
+            out->editor_count = ec;
+            for (size_t c = 0; c < ec; c++)
+                for (int k = 0; k < 3; k++) out->editor_rgb[c][k] = (uint8_t)u32_of(d[i++]);
+            uint32_t *sl[12] = {&out->font_min, &out->font_max, &out->font_step, &out->font_default,
+                                &out->width_min, &out->width_max, &out->width_step,
+                                &out->width_default, &out->opacity_min, &out->opacity_max,
+                                &out->opacity_step, &out->opacity_default};
+            for (int k = 0; k < 12; k++) *sl[k] = u32_of(d[i++]);
+            out->text_rgb_default = u32_of(d[i++]);
+            out->ink_rgb_default = u32_of(d[i++]);
+            out->ft_pad = d[i++];
+            out->line_factor = d[i++];
+            out->note_size = d[i++];
+            rc = 0;
+        }
+    }
+    lean_dec(a);
+    if (rc != 0) memset(out, 0, sizeof *out);
+    return rc;
+}
+
+int safepdf_marks_ui_step(const safepdf_tool_ui *in, int op, int arg, safepdf_tool_ui *out,
+                          int *highlight) {
+    if (!out || op < 0 || op > 255 || arg < 0 || arg > 255 || !marks_initialised) return -1;
+    double v[12] = {0};
+    if (in) {
+        v[0] = in->tool != 0; v[1] = in->popover != 0; v[2] = in->show_all != 0;
+        v[3] = in->picker != 0; v[4] = in->editor; v[5] = in->ed_pop != 0;
+        v[6] = in->thickness; v[7] = in->ft_size; v[8] = in->ft_rgb; v[9] = in->ink_rgb;
+        v[10] = in->ink_thick; v[11] = in->ink_opacity;
+    }
+    lean_object *a = safepdf_marks_lean_ui_step(mk_floats(v, in ? 12 : 0), (uint8_t)op,
+                                                (uint8_t)arg);
+    size_t n = lean_sarray_size(a);
+    double *d = lean_float_array_cptr(a);
+    if (n != 14) { lean_dec(a); return -1; }
+    safepdf_tool_ui r;
+    r.tool = d[0] != 0; r.popover = d[1] != 0; r.show_all = d[2] != 0; r.picker = d[3] != 0;
+    r.editor = (int)u32_of(d[4]); r.ed_pop = d[5] != 0; r.thickness = u32_of(d[6]);
+    r.ft_size = u32_of(d[7]); r.ft_rgb = u32_of(d[8]); r.ink_rgb = u32_of(d[9]);
+    r.ink_thick = u32_of(d[10]); r.ink_opacity = u32_of(d[11]);
+    int mode = (int)u32_of(d[12]);
+    if (highlight) *highlight = d[13] != 0;
+    lean_dec(a);
+    *out = r;
+    return mode;
+}
+
+int safepdf_marks_bubble_kind(int sel_here, int mark_here, int show_all) {
+    if (!marks_initialised) return -1;
+    uint8_t r = safepdf_marks_lean_bubble_kind(sel_here != 0, mark_here != 0, show_all != 0);
+    return r == 255 ? -1 : r;
+}
+
+int safepdf_marks_bubble_layout(int kind, safepdf_bubble_layout *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (kind < 0 || kind > 255 || !marks_initialised) return -1;
+    lean_object *r = safepdf_marks_lean_bubble_layout((uint8_t)kind);
+    lean_object *nums = lean_ctor_get(r, 0), *tips = lean_ctor_get(r, 1);
+    size_t n = lean_sarray_size(nums);
+    double *d = lean_float_array_cptr(nums);
+    size_t count = n >= 2 ? (n - 2) / 4 : 0;
+    int rc = -1;
+    if (n >= 2 && (n - 2) % 4 == 0 && count <= 4 && lean_array_size(tips) == count) {
+        out->width = d[0];
+        out->height = d[1];
+        out->count = count;
+        for (size_t i = 0; i < count; i++) {
+            safepdf_bubble_button *b = &out->buttons[i];
+            b->button = (int)u32_of(d[2 + 4 * i]);
+            b->cmd = d[3 + 4 * i] < 0 ? -1 : (int)u32_of(d[3 + 4 * i]);
+            b->x0 = d[4 + 4 * i];
+            b->x1 = d[5 + 4 * i];
+            lean_object *t = lean_array_get_core(tips, i);
+            size_t len = lean_string_size(t) - 1;
+            if (len >= sizeof b->tip) len = sizeof b->tip - 1;
+            memcpy(b->tip, lean_string_cstr(t), len);
+            b->tip[len] = 0;
+        }
+        rc = 0;
+    }
+    lean_dec(r);
+    if (rc != 0) memset(out, 0, sizeof *out);
+    return rc;
+}
+
+int safepdf_marks_bubble_place(const safepdf_box *sel, size_t n, double w, double h,
+                               const safepdf_box *area, safepdf_box *out) {
+    if (!area || !out || (!sel && n) || !marks_initialised) return -1;
+    lean_object *a = safepdf_marks_lean_bubble_place(mk_boxes(sel, n), w, h, mk_boxes(area, 1));
+    size_t k = lean_sarray_size(a);
+    double *d = lean_float_array_cptr(a);
+    int rc = 0;
+    if (k == 4) {
+        out->llx = d[0]; out->lly = d[1]; out->urx = d[2]; out->ury = d[3];
+        rc = 1;
+    }
+    lean_dec(a);
+    return rc;
+}
+
+uint32_t safepdf_marks_escape_closes(uint32_t opened) {
+    if (!marks_initialised) return 0;
+    return safepdf_marks_lean_escape_closes(opened);
 }

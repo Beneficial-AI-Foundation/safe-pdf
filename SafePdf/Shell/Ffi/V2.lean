@@ -67,6 +67,9 @@ structure Pending where
 structure Handle where
   /-- The in-process parse (page count, sizes, labels, attachments, layers). -/
   api : Api.Document
+  /-- The bytes the document was opened from (task 11.3e1: the marks store is created from
+  them, `safepdf_doc_bytes`). -/
+  bytes : ByteArray
   /-- The worker session of this document (one worker process per document). -/
   session : Session
   /-- The deadline the session runs with (for the error text). -/
@@ -318,7 +321,7 @@ def openBytes (bytes : ByteArray) (worker : String) (deadlineMs : USize) (strict
   if stallMs != 0 then session.setEnv #[("SAFEPDF_WORKER_TEST_STALL_MS", some (toString stallMs))]
   session.setDoc (some (docId, bytes, allowRepair))
   let doc := api.doc
-  return { api, session, deadlineMs,
+  return { api, bytes, session, deadlineMs,
            labels := Thunk.mk fun _ => App.Links.labels doc limits
            listing := Thunk.mk fun _ => Core.Doc.Attachments.list doc limits
            ocCfg := Thunk.mk fun _ =>
@@ -347,6 +350,12 @@ def pageSize (d : Handle) (i : USize) : FloatArray :=
   match Api.pageInfo d.api i.toNat with
   | .ok info => ⟨#[Flat.ratToFloat info.size.1, Flat.ratToFloat info.size.2]⟩
   | .error _ => FloatArray.empty
+
+/-- **The bytes the document was opened from** (the capped read's, or the caller's buffer;
+task 11.3e1: the GUI creates the document's marks store from them, as the Tk viewer keeps the
+bytes it read for Save). -/
+@[export safepdf_lean_doc_bytes]
+def docBytes (d : Handle) : ByteArray := d.bytes
 
 /-- Bit 0: the file was opened by the repair path; bit 1: it is encrypted. -/
 @[export safepdf_lean_doc_flags]

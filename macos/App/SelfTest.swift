@@ -234,6 +234,7 @@ import SafePdfC
         viewingParity(doc, pv, dir: dir)
         textParity(doc, pv, dir: dir, path: path) // task 11.3d1 (SelfTestText.swift)
         sidebarChecks(doc, pv, dir: dir) // task 11.3d2 (SelfTestSidebar.swift)
+        marksParity(doc, pv, dir: dir, path: path) // task 11.3e1 (SelfTestMarks.swift)
 
         pv.show(nil)
         say(String(format: "total self-test time: %.0f ms; failures: %d", Core.nowMs() - processStartMs, failures))

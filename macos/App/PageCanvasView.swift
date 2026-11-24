@@ -96,6 +96,12 @@ final class PageCanvasView: NSView {
     weak var pointer: CanvasPointer?
     /// Draws a page's overlays (search hits, the selection) above its image (task 11.3d1).
     var drawOverlay: ((Int) -> Void)?
+    /// Called after every layout (task 11.3e1: the bubble and the text box are placed again).
+    var onLayout: (() -> Void)?
+    /// Escape on the page view (task 11.3e1, Viewer.escape); returns whether it was taken.
+    var onEscape: (() -> Bool)?
+    /// The context menu at a view point (task 11.3e1: the Tk viewer's mark menu).
+    var contextMenu: ((CGPoint) -> NSMenu?)?
     private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
@@ -151,6 +157,7 @@ final class PageCanvasView: NSView {
             placeOf = [:]
             setFrameSize(canvas)
             needsDisplay = true
+            onLayout?()
             return
         }
         let b = backing
@@ -196,6 +203,7 @@ final class PageCanvasView: NSView {
         setFrameSize(CGSize(width: max(canvas.width, CGFloat(holder.raw.region_w) / b),
                             height: max(canvas.height, CGFloat(holder.raw.region_h) / b)))
         needsDisplay = true
+        onLayout?()
     }
 
     /// Makes `page` the current page (the controller's rule) and reports a change. In the page
@@ -443,7 +451,17 @@ final class PageCanvasView: NSView {
         tracking = t
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard document != nil, let make = contextMenu else { return super.menu(for: event) }
+        return make(convert(event.locationInWindow, from: nil))
+    }
+
     override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers == "\u{1b}",
+           event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty,
+           onEscape?() == true {
+            return
+        }
         if document != nil, let cmd = PageKeys.shared.command(for: event), onKeyCommand?(cmd) == true {
             return
         }

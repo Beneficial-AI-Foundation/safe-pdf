@@ -17,6 +17,13 @@ import SafePdfC
     func performSafePdfAction(_ sender: Any?)
 }
 
+/// The highlight-colour entries (tag = SAFEPDF_COLOR_*) and the toolbar's tools (tag =
+/// safepdf_tool) send these up the responder chain (task 11.3e1).
+@MainActor @objc protocol MarksCommandTarget {
+    func chooseHighlightColor(_ sender: Any?)
+    func performSafePdfTool(_ sender: Any?)
+}
+
 /// What building the menubar produced (printed by the self-test).
 struct MenuStats {
     var menus = 0
@@ -25,11 +32,14 @@ struct MenuStats {
     var hiddenAlternates = 0
     var commandsPresent = Set<Int>()
     var skippedKeys: [String] = []
+    var colorItems = 0
 }
 
 @MainActor enum MainMenu {
     static let commandSelector = #selector(SafePdfCommandTarget.performSafePdfCommand(_:))
     static let actionSelector = #selector(SafePdfCommandTarget.performSafePdfAction(_:))
+    static let colorSelector = #selector(MarksCommandTarget.chooseHighlightColor(_:))
+    static let toolSelector = #selector(MarksCommandTarget.performSafePdfTool(_:))
 
     /// Builds the menubar. nil when a table cannot be read from the C API.
     static func build() -> (NSMenu, MenuStats)? {
@@ -112,12 +122,13 @@ struct MenuStats {
             case SAFEPDF_ENTRY_SEPARATOR.rawValue:
                 if let last = m.items.last, !last.isSeparatorItem { m.addItem(.separator()) }
             case SAFEPDF_ENTRY_COLORS.rawValue:
-                // The highlight-colour submenu (TODO 11.3e: the five colours from the marks API).
+                // The highlight-colour submenu (task 11.3e1): the five colours (Marks.Color.all),
+                // each `highlight COLOR` (Viewer.highlight) up the responder chain.
                 let item = NSMenuItem(title: e.label, action: nil, keyEquivalent: "")
-                item.submenu = NSMenu(title: e.label)
-                item.isEnabled = false
+                item.submenu = MarksMenus.colorMenu(target: nil, action: colorSelector, current: nil)
                 m.addItem(item)
                 stats.items += 1
+                stats.colorItems += item.submenu?.items.count ?? 0
             default:
                 guard e.cmd >= 0 else { continue }
                 if e.cmd == quit || e.cmd == about { continue }
