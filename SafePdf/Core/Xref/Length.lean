@@ -28,8 +28,11 @@ not depend on how the xref chain is merged (task 2.2).
   number of objects in the cross-reference data; along a chain of `inUse` objects every hop
   adds a distinct object number to `visiting`, so a chain longer than that revisits an object
   (L1) or misses the table (L3). Through object streams (L6) the budget is shared between the
-  container's `/Length` and the member's value, so pathological files that need the same
-  objects on both paths can run out of budget (`limitExceeded`, never unbounded work).
+  container's `/Length` and the member's value. Since task 12.7g no resolution parses an
+  in-use object twice (L6 below), so the parses number at most the in-use objects not being
+  visited, the fuel is never exhausted when it exceeds that number, and the result does not
+  depend on the fuel above it (`Spec.RepairAgreeComp.resolve_fuel`): in particular free
+  entries, which change the section length, are never observed.
 * L3. The entry for `n` must be `inUse off g` with the generation of the reference, or
   `compressed c idx` (L6); a missing or free entry or a generation mismatch is `malformed`.
 * L4. The object at `off` is parsed (`n g obj <object> endobj`, header numbers must match the
@@ -48,12 +51,18 @@ not depend on how the xref chain is merged (task 2.2).
   entry of `c` must be `inUse off 0` (as in `ObjStm.fetchCompressed`: a compressed container
   is an error, `Error.cycle` when it lies in `n` or in an object being resolved). The head of
   `c` is parsed (`parseContainerHead`: `c 0 obj << … >> stream`, one parse); the container's
-  own `/Length`, if a reference, is resolved recursively with `c` and `n` added to
-  `visiting` (`containerLength`), so a `/Length` cycle through the object stream, such as
+  own `/Length`, if a reference, is resolved in **one hop** (`lengthHop`, task 12.7g; ISO
+  32000-2 §7.5.7: the value of an object stream's `/Length` shall not be in an object stream)
+  with `c` and `n` added to `visiting` (`containerLength`): it must name an in-use object
+  holding a non-negative integer, a reference there or a compressed entry is an error;
+  so a `/Length` cycle through the object stream, such as
   `length-mutual.pdf` (stream 4 → object 6 in object stream 5 → `/Length 4 0 R`), is an
   `Error.cycle`. Then the body, `ObjStm.decodeObjStm`, `ObjStm.findObject` (must be `idx`)
   and `ObjStm.getObject` (`containerMember`); the member is then treated as in L4, a
-  reference being followed with the budget left over and `n` added to `visiting`.
+  reference being followed with the budget left over and `c`, `n` and the container's
+  `/Length` object added to `visiting` (`hopVis`, task 12.7g; before, only `n`, so the
+  member's value could re-walk objects the hop had parsed and the outcome depended on the
+  fuel).
   (Task 4.6.) Between the body and `decodeObjStm` the container passes through the pre-pass
   `pre` (`ObjStm.Pre`, rule O7 of `Core.Xref.ObjStm`): `Core.Open` passes the decryption of
   an encrypted file's object streams (`OpenDoc.pre`), so a `/Length` stored in an object
@@ -110,6 +119,12 @@ open SafePdf.Core.Filter (Budget)
 (`Filter.decodeBytesB`). It lives here (it was in `Core.Xref.ObjStm` until task 4.5) so that
 the budgeted `/Length` resolver below (rule L6) can charge the object streams it decodes;
 `Core.Xref.ObjStm` imports this module. Names are unchanged. -/
+
+/-- The error message for an object stream `c` whose xref entry is free or absent (task 12.7d:
+both cases give the same message, so a free entry and a missing one are indistinguishable,
+as they are to `OpenDoc.getObject`, rule G4). -/
+def containerMissingMsg (c : Nat) : String :=
+  s!"object stream {c} is free or not in the xref"
 
 /-- `decodeObjStm` with the budget: the decode is `Filter.decodeBytesB` (rules O1–O4). -/
 def decodeObjStmB (limits : Limits) (budget : Budget) (st : Stream) :
@@ -227,6 +242,12 @@ def errOffset (lookup : Nat → Option XrefEntry) (n : Nat) : Nat :=
   | some (.inUse off _) => off
   | _ => 0
 
+/-- The error message for a `/Length` reference to object `n` whose xref entry is free or
+absent (task 12.7d: one message for both, so that the strict and repaired paths, which differ
+only there, fail alike; `Spec.RepairAgreeFree.c4_free_eq`). -/
+def lengthMissingMsg (n : Nat) : String :=
+  s!"/Length refers to object {n}, which is free or not in the xref"
+
 /-- The length denoted by the integer `l` found at `off` (rule L4): `l ≥ 0`, else an error. -/
 def intLength (off : Nat) (l : Int) : Except Error Nat :=
   if 0 ≤ l then .ok l.toNat else .error (.malformed off "negative /Length")
@@ -255,13 +276,49 @@ def parseContainerHead (limits : Limits) (bytes : ByteArray) (off c : Nat) :
     else .error (.malformed off "object header does not match the cross-reference entry")
 
 /-- The container's own data length (rule L6): a reference `/Length` is resolved by `res`
-(the recursive resolver, with the visiting list `vis`), anything else by the direct rule
-`ObjParse.streamLength` (no object parse). -/
+(since task 12.7g the one-hop resolver `lengthHop`, with the visiting list `vis`), anything
+else by the direct rule `ObjParse.streamLength` (no object parse). -/
 def containerLength (res : List Nat → Nat × Nat → Nat × Except Error Nat) (vis : List Nat)
     (d : Dict) (p : Nat) : Nat × Except Error Nat :=
   match Dict.lookup d ObjParse.nameLength with
   | some (.ref m h) => res vis (m, h)
   | _ => (0, ObjParse.streamLength d p)
+
+/-- The message for an object stream whose own `/Length` names an object that is itself in
+an object stream (rule L6, task 12.7g; ISO 32000-2 §7.5.7 forbids it). -/
+def hopCompressedMsg (n : Nat) : String :=
+  s!"the /Length of an object stream refers to object {n}, which is in an object stream"
+
+/-- **One-hop resolution of an object stream's own `/Length`** (rule L6, task 12.7g): the
+reference must name an in-use object (ISO 32000-2 §7.5.7: the value of an object stream's
+`/Length` shall not be stored in an object stream) holding a non-negative integer. Cycle
+check first, then fuel `0` is `limitExceeded .objects` (as `resolveLengthAux`), then at most
+one object parse; a reference found there is not followed (an error). -/
+def lengthHop (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
+    (fuel : Nat) (vis : List Nat) (ref : Nat × Nat) : Nat × Except Error Nat :=
+  if ref.1 ∈ vis then (0, .error (.cycle (errOffset lookup ref.1) "cyclic /Length"))
+  else
+    match fuel with
+    | 0 => (0, .error (.limitExceeded .objects))
+    | _ + 1 =>
+      match lookup ref.1 with
+      | some (.inUse off g') =>
+        if g' = ref.2 then
+          match parseLengthObj limits bytes off ref.1 ref.2 with
+          | .error e => (1, .error e)
+          | .ok (.int l) => (1, intLength off l)
+          | .ok _ => (1, .error (.malformed off "object stream /Length is not an integer"))
+        else (0, .error (.malformed off "/Length reference generation mismatch"))
+      | some (.compressed _ _) => (0, .error (.malformed 0 (hopCompressedMsg ref.1)))
+      | _ => (0, .error (.malformed 0 (lengthMissingMsg ref.1)))
+
+/-- The visiting list of the member's value in rule L6 (task 12.7g): `vis` (the container,
+the member and the objects being resolved) plus the container's `/Length` object when that
+is a reference, so the member's value can never re-read an object the hop has parsed. -/
+def hopVis (d : Dict) (vis : List Nat) : List Nat :=
+  match Dict.lookup d ObjParse.nameLength with
+  | some (.ref m _) => m :: vis
+  | _ => vis
 
 /-- Member `num` (index `idx`) of the object-stream container whose head was read at `off`
 (dictionary `d`, `stream` keyword ending at `p`) with data length `len` (rule L6): the stream
@@ -301,8 +358,8 @@ def resolveLengthAux (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (lim
     | 0 => (0, .error (.limitExceeded .objects))
     | fuel + 1 =>
       match lookup ref.1 with
-      | none => (0, .error (.malformed 0 s!"/Length refers to object {ref.1}, not in the xref"))
-      | some (.free _ _) => (0, .error (.malformed 0 s!"/Length refers to free object {ref.1}"))
+      | none => (0, .error (.malformed 0 (lengthMissingMsg ref.1)))
+      | some (.free _ _) => (0, .error (.malformed 0 (lengthMissingMsg ref.1)))
       | some (.compressed c idx) =>
         if c = ref.1 ∨ c ∈ visiting then
           (0, .error (.cycle (errOffset lookup c)
@@ -314,15 +371,14 @@ def resolveLengthAux (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (lim
               match parseContainerHead limits bytes off c with
               | .error e => (1, .error e)
               | .ok (d, p) =>
-                let r1 := containerLength
-                  (fun v r => resolveLengthAux pre lookup limits bytes fuel v r)
+                let r1 := containerLength (lengthHop lookup limits bytes fuel)
                   (c :: ref.1 :: visiting) d p
                 match containerMember pre limits bytes off c ref.1 idx d p r1.2 with
                 | .error e => (r1.1 + 1, .error e)
                 | .ok (.int l) => (r1.1 + 1, intLength off l)
                 | .ok (.ref m h) =>
                   let r2 := resolveLengthAux pre lookup limits bytes (fuel - r1.1)
-                    (ref.1 :: visiting) (m, h)
+                    (hopVis d (c :: ref.1 :: visiting)) (m, h)
                   (r1.1 + 1 + r2.1, r2.2)
                 | .ok _ => (r1.1 + 1, .error (.malformed off "/Length is not an integer"))
             else (0, .error (.malformed off s!"object stream {c} has a non-zero generation"))
@@ -330,8 +386,8 @@ def resolveLengthAux (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (lim
             (0, .error (if c' = ref.1 ∨ c' ∈ visiting then
               .cycle 0 s!"cyclic /Length through object stream {c}"
               else .malformed 0 s!"object stream {c} is itself in an object stream"))
-          | some (.free _ _) => (0, .error (.malformed 0 s!"object stream {c} is free"))
-          | none => (0, .error (.malformed 0 s!"object stream {c} is not in the xref"))
+          | some (.free _ _) => (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)))
+          | none => (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)))
       | some (.inUse off g') =>
         if g' = ref.2 then
           match parseLengthObj limits bytes off ref.1 ref.2 with
@@ -410,6 +466,141 @@ theorem containerLength_calls_le {res : List Nat → Nat × Nat → Nat × Excep
   · exact h _ _
   · simp
 
+/-- `lengthHop` performs at most `fuel` parses (none with fuel `0`). -/
+theorem lengthHop_calls_le (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) (vis : List Nat) (ref : Nat × Nat) :
+    (lengthHop lookup limits bytes fuel vis ref).1 ≤ fuel := by
+  unfold lengthHop
+  split
+  · simp
+  · split
+    · simp
+    · split
+      · split
+        · split <;> simp
+        · simp
+      · simp
+      · simp
+
+/-- `lengthHop` performs at most one parse. -/
+theorem lengthHop_calls_le_one (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel : Nat) (vis : List Nat) (ref : Nat × Nat) :
+    (lengthHop lookup limits bytes fuel vis ref).1 ≤ 1 := by
+  unfold lengthHop
+  split
+  · simp
+  · split
+    · simp
+    · split
+      · split
+        · split <;> simp
+        · simp
+      · simp
+      · simp
+
+/-- A successful `lengthHop` parsed exactly one in-use, not-visited object holding a
+non-negative integer, with non-zero fuel. -/
+theorem lengthHop_ok {lookup : Nat → Option XrefEntry} {limits : Limits} {bytes : ByteArray}
+    {fuel : Nat} {vis : List Nat} {ref : Nat × Nat} {c x : Nat}
+    (h : lengthHop lookup limits bytes fuel vis ref = (c, .ok x)) :
+    ∃ off l, ref.1 ∉ vis ∧ 0 < fuel ∧ lookup ref.1 = some (.inUse off ref.2) ∧
+      parseLengthObj limits bytes off ref.1 ref.2 = .ok (.int l) ∧ intLength off l = .ok x ∧
+      c = 1 := by
+  unfold lengthHop at h
+  by_cases hv : ref.1 ∈ vis
+  · simp [hv] at h
+  simp only [hv, ↓reduceIte] at h
+  rcases fuel with _ | f
+  · simp at h
+  simp only at h
+  rcases hl : lookup ref.1 with _ | (⟨a, g⟩ | ⟨off, g'⟩ | ⟨cc, i⟩)
+  · rw [hl] at h; simp at h
+  · rw [hl] at h; simp at h
+  · rw [hl] at h
+    simp only at h
+    by_cases hg : g' = ref.2
+    · simp only [hg, ↓reduceIte] at h
+      rcases hp : parseLengthObj limits bytes off ref.1 ref.2 with e | o
+      · rw [hp] at h; simp at h
+      · rw [hp] at h
+        cases o with
+        | int l =>
+          simp only [Prod.mk.injEq] at h
+          exact ⟨off, l, hv, by omega, by rw [hg], hp, h.2, h.1.symm⟩
+        | _ => simp at h
+    · simp [hg] at h
+  · rw [hl] at h; simp at h
+
+/-- A successful `lengthHop` is a successful `resolveLengthAux` (same parse count and value,
+same fuel and visiting list). -/
+theorem lengthHop_aux (pre : ObjStm.Pre) {lookup : Nat → Option XrefEntry} {limits : Limits}
+    {bytes : ByteArray} {fuel : Nat} {vis : List Nat} {ref : Nat × Nat} {c x : Nat}
+    (h : lengthHop lookup limits bytes fuel vis ref = (c, .ok x)) :
+    resolveLengthAux pre lookup limits bytes fuel vis ref = (c, .ok x) := by
+  obtain ⟨off, l, hv, hf, hl, hp, hi, rfl⟩ := lengthHop_ok h
+  obtain ⟨k, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+  rw [resolveLengthAux]
+  simp only [hv, ↓reduceIte, hl, hp, hi]
+
+/-- `lengthHop` is deterministic: two successes (any fuels and visiting lists) give the same
+length. -/
+theorem lengthHop_det {lookup : Nat → Option XrefEntry} {limits : Limits} {bytes : ByteArray}
+    {f1 f2 : Nat} {v1 v2 : List Nat} {ref : Nat × Nat} {c1 c2 x y : Nat}
+    (h1 : lengthHop lookup limits bytes f1 v1 ref = (c1, .ok x))
+    (h2 : lengthHop lookup limits bytes f2 v2 ref = (c2, .ok y)) : x = y := by
+  obtain ⟨o1, l1, -, -, hl1, hp1, hi1, -⟩ := lengthHop_ok h1
+  obtain ⟨o2, l2, -, -, hl2, hp2, hi2, -⟩ := lengthHop_ok h2
+  rw [hl1] at hl2
+  cases hl2
+  rw [hp1] at hp2
+  cases hp2
+  rw [hi1] at hi2
+  exact Except.ok.inj hi2
+
+/-- A `lengthHop` whose result is a success made one parse, with non-zero fuel. -/
+theorem lengthHop_snd_ok {lookup : Nat → Option XrefEntry} {limits : Limits}
+    {bytes : ByteArray} {fuel : Nat} {vis : List Nat} {ref : Nat × Nat} {x : Nat}
+    (h : (lengthHop lookup limits bytes fuel vis ref).2 = .ok x) :
+    lengthHop lookup limits bytes fuel vis ref = (1, .ok x) ∧ 0 < fuel := by
+  have h' : lengthHop lookup limits bytes fuel vis ref =
+      ((lengthHop lookup limits bytes fuel vis ref).1, .ok x) := by
+    rw [← h]
+  obtain ⟨_, _, _, hf, _, _, _, hc⟩ := lengthHop_ok h'
+  rw [hc] at h'
+  exact ⟨h', hf⟩
+
+/-- `lengthHop` reads its fuel only to tell `0` from non-zero. -/
+theorem lengthHop_fuel (lookup : Nat → Option XrefEntry) (limits : Limits) (bytes : ByteArray)
+    {f f' : Nat} (hf : 0 < f) (hf' : 0 < f') :
+    lengthHop lookup limits bytes f = lengthHop lookup limits bytes f' := by
+  obtain ⟨k, rfl⟩ : ∃ k, f = k + 1 := ⟨f - 1, by omega⟩
+  obtain ⟨k', rfl⟩ : ∃ k', f' = k' + 1 := ⟨f' - 1, by omega⟩
+  rfl
+
+/-- A successful `lengthHop` is unchanged by a lookup that keeps the in-use entry it read. -/
+theorem lengthHop_sub {l1 l2 : Nat → Option XrefEntry} {limits : Limits} {bytes : ByteArray}
+    {fuel : Nat} {vis : List Nat} {ref : Nat × Nat} {x : Nat}
+    (h : (lengthHop l2 limits bytes fuel vis ref).2 = .ok x)
+    (hU : ∀ off g, l2 ref.1 = some (.inUse off g) → l1 ref.1 = some (.inUse off g)) :
+    lengthHop l1 limits bytes fuel vis ref = lengthHop l2 limits bytes fuel vis ref := by
+  obtain ⟨h', -⟩ := lengthHop_snd_ok h
+  obtain ⟨off, l, hv, hf, hl, hp, hi, -⟩ := lengthHop_ok h'
+  rw [h']
+  obtain ⟨k, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+  unfold lengthHop
+  simp only [hv, ↓reduceIte, hU _ _ hl, hp, hi]
+
+/-- `lengthHop` with more fuel is unchanged unless it ran out of fuel. -/
+theorem lengthHop_mono_ne {lookup : Nat → Option XrefEntry} {limits : Limits}
+    {bytes : ByteArray} {f f' : Nat} {vis : List Nat} {ref : Nat × Nat} (hff : f ≤ f')
+    (hne : (lengthHop lookup limits bytes f vis ref).2 ≠ .error (.limitExceeded .objects)) :
+    lengthHop lookup limits bytes f' vis ref = lengthHop lookup limits bytes f vis ref := by
+  by_cases hv : ref.1 ∈ vis
+  · unfold lengthHop; simp [hv]
+  rcases f with _ | k
+  · unfold lengthHop at hne; simp [hv] at hne
+  · rw [lengthHop_fuel lookup limits bytes (f := f') (f' := k + 1) (by omega) (by omega)]
+
 /-- **Bounded work.** Resolving one `/Length` parses at most `fuel` objects (length objects
 and object-stream containers), also through object streams (task 2.14). -/
 theorem resolveLength_calls_le (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
@@ -437,17 +628,17 @@ theorem resolveLength_calls_le (pre : ObjStm.Pre) (lookup : Nat → Option XrefE
               · split
                 · simp
                 · rename_i d p _
-                  have hc : (containerLength
-                      (fun v r => resolveLengthAux pre lookup limits bytes f v r)
-                      (c :: ref.1 :: visiting) d p).1 ≤ f := containerLength_calls_le h1 _ d p
+                  have hc : (containerLength (lengthHop lookup limits bytes f)
+                      (c :: ref.1 :: visiting) d p).1 ≤ f :=
+                    containerLength_calls_le (lengthHop_calls_le lookup limits bytes f) _ d p
                   dsimp only
                   split
                   · omega
                   · omega
                   · rename_i m hh _
-                    have h2 := ih (f - (containerLength
-                      (fun v r => resolveLengthAux pre lookup limits bytes f v r)
-                      (c :: ref.1 :: visiting) d p).1) (by omega) (ref.1 :: visiting) (m, hh)
+                    have h2 := ih (f - (containerLength (lengthHop lookup limits bytes f)
+                      (c :: ref.1 :: visiting) d p).1) (by omega)
+                      (hopVis d (c :: ref.1 :: visiting)) (m, hh)
                     omega
                   · omega
               · simp
@@ -741,9 +932,9 @@ def resolveLengthAuxB (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (li
     | fuel + 1 =>
       match lookup ref.1 with
       | none =>
-        (0, .error (.malformed 0 s!"/Length refers to object {ref.1}, not in the xref"), budget)
+        (0, .error (.malformed 0 (lengthMissingMsg ref.1)), budget)
       | some (.free _ _) =>
-        (0, .error (.malformed 0 s!"/Length refers to free object {ref.1}"), budget)
+        (0, .error (.malformed 0 (lengthMissingMsg ref.1)), budget)
       | some (.compressed c idx) =>
         if c = ref.1 ∨ c ∈ visiting then
           (0, .error (.cycle (errOffset lookup c)
@@ -755,16 +946,15 @@ def resolveLengthAuxB (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (li
               match parseContainerHead limits bytes off c with
               | .error e => (1, .error e, budget)
               | .ok (d, p) =>
-                let r1 := containerLengthB
-                  (fun b v r => resolveLengthAuxB pre lookup limits bytes fuel b v r)
-                  budget (c :: ref.1 :: visiting) d p
-                let m := containerMemberB pre limits bytes off c ref.1 idx d p r1.2.1 r1.2.2
+                let r1 := containerLength (lengthHop lookup limits bytes fuel)
+                  (c :: ref.1 :: visiting) d p
+                let m := containerMemberB pre limits bytes off c ref.1 idx d p r1.2 budget
                 match m.1 with
                 | .error e => (r1.1 + 1, .error e, m.2)
                 | .ok (.int l) => (r1.1 + 1, intLength off l, m.2)
                 | .ok (.ref m' h) =>
                   let r2 := resolveLengthAuxB pre lookup limits bytes (fuel - r1.1) m.2
-                    (ref.1 :: visiting) (m', h)
+                    (hopVis d (c :: ref.1 :: visiting)) (m', h)
                   (r1.1 + 1 + r2.1, r2.2.1, r2.2.2)
                 | .ok _ => (r1.1 + 1, .error (.malformed off "/Length is not an integer"), m.2)
             else
@@ -774,8 +964,9 @@ def resolveLengthAuxB (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry) (li
             (0, .error (if c' = ref.1 ∨ c' ∈ visiting then
               .cycle 0 s!"cyclic /Length through object stream {c}"
               else .malformed 0 s!"object stream {c} is itself in an object stream"), budget)
-          | some (.free _ _) => (0, .error (.malformed 0 s!"object stream {c} is free"), budget)
-          | none => (0, .error (.malformed 0 s!"object stream {c} is not in the xref"), budget)
+          | some (.free _ _) =>
+            (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)), budget)
+          | none => (0, .error (.malformed 0 (ObjStm.containerMissingMsg c)), budget)
       | some (.inUse off g') =>
         if g' = ref.2 then
           match parseLengthObj limits bytes off ref.1 ref.2 with
@@ -817,18 +1008,20 @@ theorem resolveLengthB_calls_le (pre : ObjStm.Pre) (lookup : Nat → Option Xref
               · split
                 · simp
                 · rename_i d p _
-                  have hc := containerLengthB_calls_le h1 budget (c :: ref.1 :: visiting) d p
-                  generalize containerLengthB
-                    (fun b v r => resolveLengthAuxB pre lookup limits bytes f b v r)
-                    budget (c :: ref.1 :: visiting) d p = X at hc ⊢
+                  have hc : (containerLength (lengthHop lookup limits bytes f)
+                      (c :: ref.1 :: visiting) d p).1 ≤ f :=
+                    containerLength_calls_le (lengthHop_calls_le lookup limits bytes f) _ d p
+                  generalize containerLength (lengthHop lookup limits bytes f)
+                    (c :: ref.1 :: visiting) d p = X at hc ⊢
                   dsimp only
-                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
+                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2 budget
                     = M
                   split
                   · omega
                   · omega
                   · rename_i m' hh _
-                    have h2 := ih (f - X.1) (by omega) M.2 (ref.1 :: visiting) (m', hh)
+                    have h2 := ih (f - X.1) (by omega) M.2 (hopVis d (c :: ref.1 :: visiting))
+                      (m', hh)
                     omega
                   · omega
               · simp
@@ -874,19 +1067,18 @@ theorem resolveLengthB_le (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry)
               · split
                 · simp
                 · rename_i d p _
-                  have hc := containerLengthB_le h1 budget (c :: ref.1 :: visiting) d p
-                  generalize containerLengthB
-                    (fun b v r => resolveLengthAuxB pre lookup limits bytes f b v r)
-                    budget (c :: ref.1 :: visiting) d p = X at hc ⊢
+                  generalize containerLength (lengthHop lookup limits bytes f)
+                    (c :: ref.1 :: visiting) d p = X
                   dsimp only
-                  have hm := containerMemberB_le pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
-                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
+                  have hm := containerMemberB_le pre limits bytes off c ref.1 idx d p X.2 budget
+                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2 budget
                     = M at hm ⊢
                   split
                   · dsimp only; omega
                   · dsimp only; omega
                   · rename_i m' hh _
-                    have h2 := ih (f - X.1) (by omega) M.2 (ref.1 :: visiting) (m', hh)
+                    have h2 := ih (f - X.1) (by omega) M.2 (hopVis d (c :: ref.1 :: visiting))
+                      (m', hh)
                     dsimp only; omega
                   · dsimp only; omega
               · simp
@@ -935,19 +1127,18 @@ theorem resolveLengthB_cost (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntr
               · split
                 · simp
                 · rename_i d p _
-                  have hc := containerLengthB_cost h1 budget (c :: ref.1 :: visiting) d p
-                  generalize containerLengthB
-                    (fun b v r => resolveLengthAuxB pre lookup limits bytes f b v r)
-                    budget (c :: ref.1 :: visiting) d p = X at hc ⊢
+                  generalize containerLength (lengthHop lookup limits bytes f)
+                    (c :: ref.1 :: visiting) d p = X
                   dsimp only
-                  have hm := containerMemberB_cost pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
-                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
+                  have hm := containerMemberB_cost pre limits bytes off c ref.1 idx d p X.2 budget
+                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2 budget
                     = M at hm ⊢
                   split
                   · simp only [Nat.add_mul, Nat.one_mul]; omega
                   · simp only [Nat.add_mul, Nat.one_mul]; omega
                   · rename_i m' hh _
-                    have h2 := ih (f - X.1) (by omega) M.2 (ref.1 :: visiting) (m', hh)
+                    have h2 := ih (f - X.1) (by omega) M.2 (hopVis d (c :: ref.1 :: visiting))
+                      (m', hh)
                     simp only [Nat.add_mul, Nat.one_mul]; omega
                   · simp only [Nat.add_mul, Nat.one_mul]; omega
               · simp
@@ -1032,26 +1223,13 @@ theorem resolveLengthB_eq (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry)
                 rcases hh : parseContainerHead limits bytes off c with e | ⟨d, p⟩
                 · simp
                 · simp only
-                  have hXle := containerLengthB_le
-                    (res := fun b v r => resolveLengthAuxB pre lookup limits bytes f b v r)
-                    (fun b v r => resolveLengthB_le pre lookup limits bytes f b v r)
-                    budget (c :: ref.1 :: visiting) d p
-                  have hXeq := fun hk => containerLengthB_eq
-                    (res := fun b v r => resolveLengthAuxB pre lookup limits bytes f b v r)
-                    (res' := fun v r => resolveLengthAux pre lookup limits bytes f v r)
-                    (fun b v r hk => ih f (by omega) b v r hk)
-                    (budget := budget) (vis := c :: ref.1 :: visiting) (d := d) (p := p) hk
-                  generalize containerLengthB
-                    (fun b v r => resolveLengthAuxB pre lookup limits bytes f b v r)
-                    budget (c :: ref.1 :: visiting) d p = X at hXle hXeq ⊢
-                  generalize containerLength
-                    (fun v r => resolveLengthAux pre lookup limits bytes f v r)
-                    (c :: ref.1 :: visiting) d p = Y at hXeq ⊢
-                  have hMle := containerMemberB_le pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
-                  have hMeq := fun hk => containerMemberB_eq (pre := pre) (limits := limits) (bytes := bytes) (off := off) (c := c)
-                    (num := ref.1) (idx := idx) (d := d) (p := p) (len := X.2.1)
-                    (budget := X.2.2) hk
-                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2.1 X.2.2
+                  generalize containerLength (lengthHop lookup limits bytes f)
+                    (c :: ref.1 :: visiting) d p = X
+                  have hMle := containerMemberB_le pre limits bytes off c ref.1 idx d p X.2 budget
+                  have hMeq := fun hk => containerMemberB_eq (pre := pre) (limits := limits)
+                    (bytes := bytes) (off := off) (c := c) (num := ref.1) (idx := idx) (d := d)
+                    (p := p) (len := X.2) (budget := budget) hk
+                  generalize containerMemberB pre limits bytes off c ref.1 idx d p X.2 budget
                     = M at hMle hMeq ⊢
                   intro hA
                   have hAM : allowance limits bytes ≤ M.2.remaining := by
@@ -1061,21 +1239,20 @@ theorem resolveLengthB_eq (pre : ObjStm.Pre) (lookup : Nat → Option XrefEntry)
                     · exact id
                     · rename_i m' hh' _
                       have := resolveLengthB_le pre lookup limits bytes (f - X.1) M.2
-                        (ref.1 :: visiting) (m', hh')
+                        (hopVis d (c :: ref.1 :: visiting)) (m', hh')
                       dsimp only
                       omega
                     · exact id
-                  obtain ⟨hx1, hx2⟩ := hXeq (by omega)
                   have hm := hMeq (by omega)
-                  rw [hx2] at hm
-                  rw [← hm, ← hx1]
+                  rw [← hm]
                   revert hA
                   split
                   · simp
                   · simp
                   · rename_i m' hh' _
                     intro hA
-                    obtain ⟨e1, e2⟩ := ih (f - X.1) (by omega) M.2 (ref.1 :: visiting) (m', hh') hA
+                    obtain ⟨e1, e2⟩ := ih (f - X.1) (by omega) M.2
+                      (hopVis d (c :: ref.1 :: visiting)) (m', hh') hA
                     exact ⟨by rw [e1], e2⟩
                   · simp
               · simp [hg]

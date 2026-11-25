@@ -92,6 +92,10 @@ def tkLinkArgs : Array String := run_io do
 package «safe-pdf» where
   version := v!"0.1.0"
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
+  -- macOS: compile Lean's C output for the app's minimum, macOS 15 (decided 2026-11-24, task
+  -- 11.6a), so `libsafepdfffi.a` links into `SafePdf.app` without "built for newer macOS"
+  -- warnings; no effect elsewhere.
+  moreLeancArgs := if System.Platform.isOSX then #["-mmacosx-version-min=15.0"] else #[]
 
 /-- The verified core and the unverified shell modules it umbrella-imports (`SafePdf.lean`). -/
 @[default_target] lean_lib SafePdf
@@ -100,7 +104,7 @@ package «safe-pdf» where
 quoting is injection-free. A default target so that `scripts/axioms.lean` can audit its
 theorems after a plain `lake build`. -/
 @[default_target] lean_lib SafePdfApp where
-  roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas, `SafePdf.Shell.App.View, `SafePdf.Shell.App.Select, `SafePdf.Shell.App.Links, `SafePdf.Shell.App.Menu, `SafePdf.Shell.App.Icons, `SafePdf.Shell.App.Toolbar, `SafePdf.Shell.App.Sidebar, `SafePdf.Shell.App.BibLean.Http, `SafePdf.Shell.App.BibLean.Launch, `SafePdf.Shell.App.BibLean.Text, `SafePdf.Shell.App.BibLean.Annots, `SafePdf.Shell.App.BibLean.SelfTest, `SafePdf.Shell.App.Marks, `SafePdf.Shell.App.Bubble, `SafePdf.Shell.App.Save, `SafePdf.Shell.App.Xfdf]
+  roots := #[`SafePdf.Shell.App.Tcl, `SafePdf.Shell.App.TclLemmas, `SafePdf.Shell.App.View, `SafePdf.Shell.App.Select, `SafePdf.Shell.App.Links, `SafePdf.Shell.App.Menu, `SafePdf.Shell.App.Icons, `SafePdf.Shell.App.Toolbar, `SafePdf.Shell.App.Sidebar, `SafePdf.Shell.App.BibLean.Http, `SafePdf.Shell.App.BibLean.Launch, `SafePdf.Shell.App.BibLean.Text, `SafePdf.Shell.App.BibLean.Annots, `SafePdf.Shell.App.BibLean.SelfTest, `SafePdf.Shell.App.Marks, `SafePdf.Shell.App.Bubble, `SafePdf.Shell.App.Save, `SafePdf.Shell.App.Xfdf, `SafePdf.Shell.App.Budget]
 
 /-- `safe-pdf-core` (task 8.4, Plan.md §6 Phase 8): the public library API `SafePdf.Api` and
 the verified core it imports, without the shell (inspector, viewer). A separate target so
@@ -122,6 +126,38 @@ lean_lib Tests where
 /-- The inspector CLI. -/
 @[default_target] lean_exe inspect where
   root := `SafePdf.Shell.Main
+
+/-- `c/worker_sandbox.c` (task 12.2b): the worker's confinement (macOS seatbelt, Linux
+seccomp). Plain C with Lean's include directory; no pkg-config. Attached only to `worker`
+(like `tkShim` to `viewer`: an `extern_lib` would be linked into every executable). -/
+target workerSandbox pkg : FilePath := do
+  let src ← inputTextFile <| pkg.dir / "c" / "worker_sandbox.c"
+  let oFile := pkg.buildDir / "c" / "worker_sandbox.o"
+  buildO oFile src #["-I", (← getLeanIncludeDir).toString] #["-fPIC", "-O2", "-Wall", "-Wextra"]
+    "cc" getLeanTrace
+
+/-- The same file compiled with `-DSAFEPDF_WORKER_PROBE` (adds the TCP probe), for the
+test-only `worker-probe` executable. -/
+target workerSandboxProbe pkg : FilePath := do
+  let src ← inputTextFile <| pkg.dir / "c" / "worker_sandbox.c"
+  let oFile := pkg.buildDir / "c" / "worker_sandbox_probe.o"
+  buildO oFile src #["-I", (← getLeanIncludeDir).toString]
+    #["-fPIC", "-O2", "-Wall", "-Wextra", "-DSAFEPDF_WORKER_PROBE"] "cc" getLeanTrace
+
+/-- The document worker (tasks 12.2a, 12.2b): confines itself, then serves a document received
+as bytes over stdin/stdout. -/
+@[default_target] lean_exe worker where
+  root := `SafePdf.Shell.Worker.Main
+  moreLinkObjs := #[workerSandbox]
+
+/-- Test-only (task 12.2b): the worker's startup and confinement followed by probes that must
+fail (open a file, connect to 127.0.0.1, read the parent's environment, spawn a process).
+A default target so that the `worker-confinement` suite always finds it after `lake build`;
+`scripts/worker-confinement-test.sh` runs it verbosely. Never shipped: it is not the
+`worker` the client starts. -/
+@[default_target] lean_exe «worker-probe» where
+  root := `SafePdf.Shell.Worker.Probe
+  moreLinkObjs := #[workerSandboxProbe]
 
 /-- The test runner. -/
 lean_exe tests where
@@ -150,3 +186,66 @@ lean_exe viewer where
   root := `SafePdf.Shell.App.Main
   moreLinkObjs := #[tkShim]
   moreLinkArgs := tkLinkArgs
+
+/-! ## macOS AppKit spike (task 11.1; not a default target) -/
+
+/-- The modules of the C API (`macos/README.md`): the first C ABI over the core
+(`SafePdf.Shell.Ffi`, task 11.1), the view/chrome logic (`SafePdf.Shell.FfiView`, task 11.3a2),
+the marks/save/XFDF exports (`SafePdf.Shell.FfiMarks`, task 11.3a3) and the selection and
+search exports (`SafePdf.Shell.FfiSelect`, task 11.3a4). -/
+def ffiModules : Array Lean.Name :=
+  #[`SafePdf.Shell.Ffi, `SafePdf.Shell.FfiView, `SafePdf.Shell.FfiMarks, `SafePdf.Shell.FfiSelect]
+
+/-- The C API's modules (`ffiModules`). Not a default
+target: `lake build macosFfi` builds it. -/
+lean_lib SafePdfFfi where
+  roots := ffiModules
+
+/-- `libsafepdfffi.a`: the object files of the `ffiModules` and of every module they import
+(the closure Lake would link into an executable, without duplicates), for `macos/build.sh` to
+link with Lean's runtime libraries. -/
+target macosFfi pkg : FilePath := do
+  let mut infos := #[]
+  for n in ffiModules do
+    let some mod ← findModule? n | error s!"module {n} not found"
+    infos := infos.push (← mod.linkInfoNoExport.fetch)
+  (Job.collectArray infos).bindM fun is => do
+    let objs := is.foldl (fun acc i => i.objs.foldl
+      (fun a o => if a.contains o then a else a.push o) acc) #[]
+    buildStaticLib (pkg.staticLibDir / "libsafepdfffi.a") (objs.map pure)
+
+/-! ## Platform viewer selection (task 11.4; not default targets)
+
+`lake build macosApp` builds the native macOS shell (`macos/build/SafePdf.app`, Swift/AppKit,
+`docs/macos-design.md` §3 decision 6) and fails with a clear message off macOS.
+`lake build app` is the platform viewer: `macosApp` on macOS, the Tk `viewer` (plus the
+`worker` it starts) elsewhere. The Tk `viewer` stays buildable on macOS by name
+(`lake build viewer worker`). None of these is a default target: `lake build`,
+`lake build tests fuzz` and `lake exe tests` compile neither Tk nor Swift. -/
+
+/-- The native macOS app bundle `macos/build/SafePdf.app`. Lake builds `macosFfi` and `worker`,
+then runs `macos/build.sh` with `SAFEPDF_MACOS_LAKE_DONE=1` (the script then skips its own
+`lake build` step, so no `lake build` runs inside this one). `macos/build.sh` stays the single
+source of the clang/swiftc flags; it also writes `macos/build/safepdf-mac`,
+`macos/build/safepdf_core.o` and `macos/build/core_test`. Not traced: the script runs on every
+`lake build macosApp`. Off macOS this target fails before building anything. -/
+target macosApp pkg : FilePath := do
+  unless Platform.isOSX do
+    error "macosApp: the native shell (Swift/AppKit) builds on macOS only; \
+      elsewhere use `lake build viewer worker` (Tcl/Tk) or `lake build app`"
+  let ffi ← macosFfi.fetch
+  let wrk ← worker.fetch
+  (ffi.mix wrk).mapM fun _ => do
+    let buildSh := pkg.dir / "macos" / "build.sh"
+    proc { cmd := "bash", args := #[buildSh.toString], cwd := pkg.dir,
+           env := #[("SAFEPDF_MACOS_LAKE_DONE", some "1")] }
+    return pkg.dir / "macos" / "build" / "SafePdf.app"
+
+/-- The platform viewer: on macOS the native app (`macosApp`; its output is the bundle's path),
+elsewhere the Tk `viewer` executable together with the `worker` it starts (output: the viewer's
+path; `lake build viewer` alone does not build `worker`). -/
+target app : FilePath := do
+  if Platform.isOSX then
+    macosApp.fetch
+  else
+    return (← viewer.fetch).add (← worker.fetch)

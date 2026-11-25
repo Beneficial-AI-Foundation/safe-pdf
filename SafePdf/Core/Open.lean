@@ -37,6 +37,14 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   re-reads the same objects through a scanned section, would at best rediscover the same
   cycle and at worst "succeed" by picking a different object, silently accepting the attack.
   Other strict errors (broken offsets, missing keywords) still fall back to repair (P3).
+* P6. **True strict mode** (task 12.1, Plan.md §6 Phase 12): `openFileWith … (allowRepair :=
+  false)`, `openFileBLogged`, `Session.openLogged` never run the repair path: a non-final
+  strict error is returned as is, with `RepairLog.refused`. Each logged open returns a
+  `RepairLog` counting its repair-path runs; `openFileLogged_strictOnly`,
+  `openFileBLogged_false`, `Session.openLogged_false` prove the count is 0 with repair off,
+  and `openFileWith_false` that the strict-only open *is* `strictOpen`. With repair on, the
+  logged opens are `openFile`/`openFileB`/`Session.open` (`openFileWith_true`,
+  `openFileBLogged_true`, `Session.openLogged_true`), so every earlier theorem applies.
 
 ## Object resolution (`OpenDoc.getObject`)
 
@@ -70,6 +78,19 @@ strict validation, `repaired := true`), §6 Phase 2 (milestone M2).
   (e.g. `/Encrypt` names an object the scan did not find); it never opens undecrypted. When
   both paths fail and the repair path's error is `Error.encryption`, `openFile` reports that
   error instead of the strict one (`bothFailed`, `openFile_repair_encryption`).
+* E4. (Task 12.7h.) Repair rule R6 (object-stream members) runs in `Repair.repair` only for
+  an unencrypted trailer. For an encrypted one, `repairOpen` runs it after `withCrypt`
+  (`OpenDoc.withObjStmEnc`) with the repaired document's container pre-pass `OpenDoc.pre`
+  (rule G5), so the containers are decrypted as `getObject` decrypts them; `/Size` is raised
+  to cover the added numbers, the decryption state is kept (it was derived from the classic
+  section, and R6 never replaces a classic entry, `Repair.objStmAdds_new`). An `/Encrypt`
+  reference to an object that exists only inside an object stream (forbidden by ISO 32000-2
+  §7.5.7) is not found by `withCrypt` on the scanned section, so repair fails with
+  `Error.encryption`, as the strict path does (`encryptDict` rejects a compressed `/Encrypt`).
+  Bounds: those of `Repair.r6Raw_bounds` (one attempt per classic entry, the failure budget, a
+  separate `Filter.Budget.init limits` for the decodes; the open's budget in `repairOpenB` is
+  not charged), and at most `min maxObjects bytes.size + 1` entries
+  (`Repair.withObjStm_length_le`).
 * G5. `getObject` decrypts what it returns (`OpenDoc.decrypt` → `Crypt.decryptBody`): strings
   everywhere and stream data, except the encryption dictionary, xref streams and the other
   §7.6.2 exceptions (`Core.Crypt`, rule C7). An object in an object stream is not decrypted:
@@ -326,6 +347,59 @@ theorem decrypt_none {d : OpenDoc} (h : d.crypt = none) (num gen : Nat) (b : Ind
     d.decrypt num gen b = .ok b := by
   simp [OpenDoc.decrypt, h]
 
+/-- **Repair rule R6 for encrypted files** (task 12.7h, rule E4): on a document with a
+decryption state, the object-stream pass `Repair.withObjStm` runs over its (classic, scanned)
+section with the document's container pre-pass `d.pre`, so the containers are decrypted
+exactly as `getObject` decrypts them (rule G5), and `/Size` is raised to cover the added
+numbers. Without a decryption state the document is unchanged (an unencrypted repaired file
+already went through R6 in `Repair.repair`). Only `xref`, `index` and the trailer's `/Size`
+change (`withObjStmEnc_bytes` … `withObjStmEnc_xref`); the decryption state is kept. -/
+def OpenDoc.withObjStmEnc (d : OpenDoc) (limits : Limits) : OpenDoc :=
+  match d.crypt with
+  | none => d
+  | some st =>
+    let sec := SafePdf.Repair.withObjStm limits d.bytes d.pre d.xref
+    { OpenDoc.mk' d.bytes sec
+        { d.trailer with size := max d.trailer.size (SafePdf.Repair.scanSize sec.entries) }
+        d.revisions d.repaired with crypt := some st }
+
+/-- Without a decryption state, `withObjStmEnc` is the identity. -/
+theorem withObjStmEnc_none {d : OpenDoc} {limits : Limits} (h : d.crypt = none) :
+    d.withObjStmEnc limits = d := by
+  unfold OpenDoc.withObjStmEnc; rw [h]
+
+/-- `withObjStmEnc` keeps the bytes, the `repaired` flag, the revision count, the decryption
+state, and the trailer up to `/Size` (dictionary, `/Root`, `encrypted`). -/
+theorem withObjStmEnc_fields (d : OpenDoc) (limits : Limits) :
+    (d.withObjStmEnc limits).bytes = d.bytes ∧ (d.withObjStmEnc limits).repaired = d.repaired ∧
+    (d.withObjStmEnc limits).revisions = d.revisions ∧
+    (d.withObjStmEnc limits).crypt = d.crypt ∧
+    (d.withObjStmEnc limits).trailer.dict = d.trailer.dict ∧
+    (d.withObjStmEnc limits).trailer.root? = d.trailer.root? ∧
+    (d.withObjStmEnc limits).trailer.encrypted = d.trailer.encrypted := by
+  unfold OpenDoc.withObjStmEnc
+  split
+  · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  · rename_i st h
+    exact ⟨rfl, rfl, rfl, h.symm, rfl, rfl, rfl⟩
+
+/-- The section after `withObjStmEnc`: R6 (with `d.pre`) on `d`'s section when `d` has a
+decryption state, else `d`'s section. -/
+theorem withObjStmEnc_xref (d : OpenDoc) (limits : Limits) :
+    (d.withObjStmEnc limits).xref =
+      if d.crypt.isSome then SafePdf.Repair.withObjStm limits d.bytes d.pre d.xref
+      else d.xref := by
+  unfold OpenDoc.withObjStmEnc
+  split
+  · rename_i h; simp [h]
+  · rename_i st h; simp [h, OpenDoc.mk']
+
+/-- `withObjStmEnc` keeps the container pre-pass. -/
+theorem withObjStmEnc_pre (d : OpenDoc) (limits : Limits) :
+    (d.withObjStmEnc limits).pre = d.pre := by
+  unfold OpenDoc.pre
+  rw [(withObjStmEnc_fields d limits).2.2.2.1]
+
 /-- The document of a loaded chain (newest revision first), with its decryption state
 (`withCrypt`), before validation. -/
 def ofChain (limits : Limits) (bytes : ByteArray) :
@@ -358,15 +432,15 @@ def strictOpen (limits : Limits) (bytes : ByteArray) : Except Error OpenDoc :=
       | .error e => .error e
       | .ok d => validate limits d
 
-/-- The repair path (rule P3): scanned section, decryption state (`withCrypt`), same
-validation, `repaired := true`. -/
+/-- The repair path (rule P3): scanned section, decryption state (`withCrypt`), object-stream
+members of an encrypted file (`withObjStmEnc`, rule E4), same validation, `repaired := true`. -/
 def repairOpen (limits : Limits) (bytes : ByteArray) : Except Error OpenDoc :=
   match SafePdf.Repair.repair limits bytes with
   | .error e => .error e
   | .ok (sec, tr) =>
     match (OpenDoc.mk' bytes sec tr 0 true).withCrypt limits with
     | .error e => .error e
-    | .ok d => validate limits d
+    | .ok d => validate limits (d.withObjStmEnc limits)
 
 /-- The error of `openFile` when both paths fail (rule P4): the strict error `e`, unless the
 repair path failed with an encryption error `e'` (rule E3: the file is encrypted and cannot
@@ -455,11 +529,14 @@ theorem strictOpen_lt_size {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     exact checkSize_ok hc
 
 /-- **The repair path, unfolded.** A repaired document is a scanned section with its
-decryption state that validates. -/
+decryption state, then the object-stream members of an encrypted file (`withObjStmEnc`), that
+validates. (*Restated by task 12.7h*: the `withObjStmEnc` step is new; it is the identity
+without a decryption state, `withObjStmEnc_none`.) -/
 theorem repairOpen_ok {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     (h : repairOpen limits bytes = .ok d) :
-    ∃ sec tr, SafePdf.Repair.repair limits bytes = .ok (sec, tr) ∧
-      (OpenDoc.mk' bytes sec tr 0 true).withCrypt limits = .ok d ∧ validate limits d = .ok d := by
+    ∃ sec tr d0, SafePdf.Repair.repair limits bytes = .ok (sec, tr) ∧
+      (OpenDoc.mk' bytes sec tr 0 true).withCrypt limits = .ok d0 ∧
+      d = d0.withObjStmEnc limits ∧ validate limits d = .ok d := by
   unfold repairOpen at h
   split at h
   · cases h
@@ -469,14 +546,14 @@ theorem repairOpen_ok {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     · rename_i d0 hw
       have := validate_eq h
       subst this
-      exact ⟨sec, tr, hr, hw, h⟩
+      exact ⟨sec, tr, d0, hr, hw, rfl, h⟩
 
 /-- Every repaired document is flagged as such. -/
 theorem repairOpen_repaired {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     (h : repairOpen limits bytes = .ok d) : d.repaired = true := by
-  obtain ⟨sec, tr, -, hw, -⟩ := repairOpen_ok h
+  obtain ⟨sec, tr, d0, -, hw, rfl, -⟩ := repairOpen_ok h
   obtain ⟨c, rfl⟩ := withCrypt_ok hw
-  rfl
+  exact (withObjStmEnc_fields _ limits).2.1
 
 /-- **S7: repaired documents are flagged.** A document with `repaired = false` came from the
 strict path: `loadChain` succeeded with a non-empty chain, the section is the merge of the
@@ -576,7 +653,7 @@ theorem openFile_root {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
     · split at h
       · cases h
         rename_i d1 hrep
-        obtain ⟨-, -, -, -, hv⟩ := repairOpen_ok hrep
+        obtain ⟨-, -, -, -, -, -, hv⟩ := repairOpen_ok hrep
         exact validate_root hv
       · cases h
 
@@ -1003,7 +1080,7 @@ def repairOpenB (limits : Limits) (budget : Budget) (bytes : ByteArray) :
   | .ok (sec, tr) =>
     match (OpenDoc.mk' bytes sec tr 0 true).withCrypt limits with
     | .error e => (.error e, budget, [])
-    | .ok d => validateB limits budget [] d
+    | .ok d => validateB limits budget [] (d.withObjStmEnc limits)
 
 /-- **Budgeted entry point** (task 3.13): `openFile` with the xref-stream decodes of the chain
 and the object-stream decode of the root validation charged against `budget`. The cache of the
@@ -1051,9 +1128,9 @@ theorem repairOpenB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) :
 validated with the budget it was given and an empty cache. -/
 theorem repairOpenB_ok {limits : Limits} {budget : Budget} {bytes : ByteArray} {d : OpenDoc}
     (h : (repairOpenB limits budget bytes).1 = .ok d) :
-    ∃ sec tr, SafePdf.Repair.repair limits bytes = .ok (sec, tr) ∧
-      (OpenDoc.mk' bytes sec tr 0 true).withCrypt limits = .ok d ∧
-      (validateB limits budget [] d).1 = .ok d := by
+    ∃ sec tr d0, SafePdf.Repair.repair limits bytes = .ok (sec, tr) ∧
+      (OpenDoc.mk' bytes sec tr 0 true).withCrypt limits = .ok d0 ∧
+      d = d0.withObjStmEnc limits ∧ (validateB limits budget [] d).1 = .ok d := by
   unfold repairOpenB at h
   split at h
   · cases h
@@ -1063,7 +1140,7 @@ theorem repairOpenB_ok {limits : Limits} {budget : Budget} {bytes : ByteArray} {
     · rename_i d0 hw
       have := validateB_eq_self h
       subst this
-      exact ⟨sec, tr, hr, hw, h⟩
+      exact ⟨sec, tr, d0, hr, hw, rfl, h⟩
 
 /-- **Budget monotone**: `openFileB` never increases the budget. -/
 theorem openFileB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) :
@@ -1140,7 +1217,7 @@ theorem openFileB_root {limits : Limits} {budget : Budget} {bytes : ByteArray} {
       · simp only [Except.ok.injEq] at h
         subst h
         have hr1 : (repairOpenB limits b1 bytes).1 = .ok d1 := by rw [hr]
-        obtain ⟨-, -, -, -, hv⟩ := repairOpenB_ok hr1
+        obtain ⟨-, -, -, -, -, -, hv⟩ := repairOpenB_ok hr1
         obtain ⟨n, g, dict, h1, h2⟩ := validateB_root hv
         exact ⟨n, g, dict, b1, h1, h2⟩
   · simp only [Except.ok.injEq] at h
@@ -1184,8 +1261,9 @@ theorem openFileB_repaired {limits : Limits} {budget : Budget} {bytes : ByteArra
       · simp only [Except.ok.injEq] at h
         subst h
         have hr1 : (repairOpenB limits b1 bytes).1 = .ok d1 := by rw [hrp]
-        obtain ⟨_, _, -, hw, -⟩ := repairOpenB_ok hr1
+        obtain ⟨_, _, _, -, hw, rfl, -⟩ := repairOpenB_ok hr1
         obtain ⟨c, rfl⟩ := withCrypt_ok hw
+        rw [(withObjStmEnc_fields _ limits).2.1] at hr
         cases hr
   · simp only [Except.ok.injEq] at h
     subst h
@@ -1276,10 +1354,13 @@ theorem repairOpenB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
     · exact fun _ => ⟨rfl, fun d hd => by cases hd⟩
     · rename_i d0 hw
       intro h
-      have hb : d0.bytes = bytes := by obtain ⟨c, rfl⟩ := withCrypt_ok hw; rfl
-      have hal : d0.allowance limits ≤ (validateB limits budget [] d0).2.1.remaining := by
+      have hb : (d0.withObjStmEnc limits).bytes = bytes := by
+        rw [(withObjStmEnc_fields d0 limits).1]
+        obtain ⟨c, rfl⟩ := withCrypt_ok hw; rfl
+      have hal : (d0.withObjStmEnc limits).allowance limits ≤
+          (validateB limits budget [] (d0.withObjStmEnc limits)).2.1.remaining := by
         unfold OpenDoc.allowance; rw [hb]; exact h
-      obtain ⟨hv, hcx⟩ := validateB_eq_post (cacheExact_nil d0 limits) hal
+      obtain ⟨hv, hcx⟩ := validateB_eq_post (cacheExact_nil (d0.withObjStmEnc limits) limits) hal
       refine ⟨hv, fun d hd => ?_⟩
       have := validateB_eq_self hd
       subst this
@@ -1457,9 +1538,9 @@ theorem openFileB_bytes {limits : Limits} {budget : Budget} {bytes : ByteArray} 
       · simp only [Except.ok.injEq] at h
         subst h
         have hr1 : (repairOpenB limits b1 bytes).1 = .ok d1 := by rw [hr]
-        obtain ⟨_, _, -, hw, -⟩ := repairOpenB_ok hr1
+        obtain ⟨_, _, _, -, hw, rfl, -⟩ := repairOpenB_ok hr1
         obtain ⟨c, rfl⟩ := withCrypt_ok hw
-        rfl
+        exact (withObjStmEnc_fields _ limits).1
   · simp only [Except.ok.injEq] at h
     subst h
     unfold strictOpenB at hs
@@ -1495,6 +1576,205 @@ theorem Session.open_bytes {limits : Limits} {bytes : ByteArray} {s : Session}
     subst h
     exact openFileB_bytes (by rw [hf])
 
+
+/-! ### True strict mode (task 12.1, rule P6) -/
+
+/-- What the repair switch did during one open (task 12.1, rule P6). -/
+structure RepairLog where
+  /-- Runs of the repair path (`repairOpen` / `repairOpenB`): 0 or 1. -/
+  attempts : Nat
+  /-- The strict path failed with a non-final error and repair was off: the error returned
+  is the strict path's and the repair path did not run. -/
+  refused : Bool
+  deriving Repr, DecidableEq
+
+/-- **Open with the repair switch, logged** (rule P6): `openFile` when `allowRepair`; else the
+strict path alone, a non-final strict error being returned with `refused := true`. The log
+counts the repair-path runs of *this* computation. -/
+def openFileLogged (limits : Limits) (bytes : ByteArray) (allowRepair : Bool) :
+    Except Error OpenDoc × RepairLog :=
+  match strictOpen limits bytes with
+  | .ok d => (.ok d, ⟨0, false⟩)
+  | .error e =>
+    if e.isFinal then (.error e, ⟨0, false⟩)
+    else if !allowRepair then (.error e, ⟨0, true⟩)
+    else
+      match repairOpen limits bytes with
+      | .ok d => (.ok d, ⟨1, false⟩)
+      | .error e' => (.error (bothFailed e e'), ⟨1, false⟩)
+
+/-- **Open with the repair switch** (rule P6): `openFileLogged` without the log. -/
+def openFileWith (limits : Limits) (bytes : ByteArray) (allowRepair : Bool := true) :
+    Except Error OpenDoc :=
+  (openFileLogged limits bytes allowRepair).1
+
+/-- With repair on, `openFileWith` is `openFile`. -/
+theorem openFileWith_true (limits : Limits) (bytes : ByteArray) :
+    openFileWith limits bytes true = openFile limits bytes := by
+  unfold openFileWith openFileLogged openFile
+  rcases strictOpen limits bytes with e | d
+  · simp only
+    by_cases hf : e.isFinal = true
+    · simp [hf]
+    · simp only [hf, Bool.false_eq_true, ite_false, Bool.not_true]
+      rcases repairOpen limits bytes with e' | d' <;> rfl
+  · rfl
+
+/-- **Strict only is the strict path** (rule P6): with repair off, `openFileWith` is
+`strictOpen`, whose definition does not mention the repair path. -/
+theorem openFileWith_false (limits : Limits) (bytes : ByteArray) :
+    openFileWith limits bytes false = strictOpen limits bytes := by
+  unfold openFileWith openFileLogged
+  rcases strictOpen limits bytes with e | d
+  · simp only
+    by_cases hf : e.isFinal = true <;> simp [hf]
+  · rfl
+
+/-- **Zero repair attempts in strict mode** (rule P6, M12 "a strict-only open records zero
+repair attempts"). -/
+theorem openFileLogged_strictOnly (limits : Limits) (bytes : ByteArray) :
+    (openFileLogged limits bytes false).2.attempts = 0 := by
+  unfold openFileLogged
+  rcases strictOpen limits bytes with e | d
+  · simp only
+    by_cases hf : e.isFinal = true <;> simp [hf]
+  · rfl
+
+/-- A refused open (`refused = true`) had repair off and returned the strict path's
+non-final error. -/
+theorem openFileLogged_refused {limits : Limits} {bytes : ByteArray} {allowRepair : Bool}
+    (h : (openFileLogged limits bytes allowRepair).2.refused = true) :
+    allowRepair = false ∧ ∃ e, strictOpen limits bytes = .error e ∧ e.isFinal = false ∧
+      (openFileLogged limits bytes allowRepair).1 = .error e := by
+  unfold openFileLogged at h ⊢
+  rcases hs : strictOpen limits bytes with e | d
+  · rw [hs] at h
+    simp only at h ⊢
+    by_cases hf : e.isFinal = true
+    · simp [hf] at h
+    · cases allowRepair
+      · refine ⟨rfl, e, rfl, by simpa using hf, ?_⟩
+        simp [hf]
+      · simp only [hf, Bool.false_eq_true, ite_false, Bool.not_true] at h
+        split at h <;> simp at h
+  · rw [hs] at h
+    simp at h
+
+/-- A strictly opened document is not flagged repaired. -/
+theorem strictOpen_not_repaired {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+    (h : strictOpen limits bytes = .ok d) : d.repaired = false := by
+  obtain ⟨revs, -, -, hc, -⟩ := strictOpen_ok h
+  unfold ofChain at hc
+  split at hc
+  · cases hc
+  · obtain ⟨c, rfl⟩ := withCrypt_ok hc
+    rfl
+
+/-- **S7 in strict mode**: a document opened with repair off is not repaired. -/
+theorem openFileWith_false_repaired {limits : Limits} {bytes : ByteArray} {d : OpenDoc}
+    (h : openFileWith limits bytes false = .ok d) : d.repaired = false := by
+  rw [openFileWith_false] at h
+  exact strictOpen_not_repaired h
+
+/-- **Budgeted open with the repair switch, logged** (rule P6): `openFileB` when
+`allowRepair`; else `strictOpenB` alone (a non-final error is returned with
+`refused := true`, the strict attempt's cache dropped as in `openFileB`). -/
+def openFileBLogged (limits : Limits) (budget : Budget) (bytes : ByteArray)
+    (allowRepair : Bool) : ((Except Error OpenDoc) × Budget × Cache) × RepairLog :=
+  match strictOpenB limits budget bytes with
+  | (.ok d, b1, c1) => ((.ok d, b1, c1), ⟨0, false⟩)
+  | (.error e, b1, _) =>
+    if e.isFinal then ((.error e, b1, []), ⟨0, false⟩)
+    else if !allowRepair then ((.error e, b1, []), ⟨0, true⟩)
+    else
+      match repairOpenB limits b1 bytes with
+      | (.ok d, b2, c2) => ((.ok d, b2, c2), ⟨1, false⟩)
+      | (.error e', b2, _) => ((.error (bothFailed e e'), b2, []), ⟨1, false⟩)
+
+/-- With repair on, the logged budgeted open is `openFileB`. -/
+theorem openFileBLogged_true (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    (openFileBLogged limits budget bytes true).1 = openFileB limits budget bytes := by
+  unfold openFileBLogged openFileB
+  rcases strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
+  rcases r1 with e | d
+  · simp only
+    by_cases hf : e.isFinal = true
+    · simp [hf]
+    · simp only [hf, Bool.false_eq_true, ite_false, Bool.not_true]
+      rcases repairOpenB limits b1 bytes with ⟨r2, b2, c2⟩
+      rcases r2 with e' | d' <;> rfl
+  · rfl
+
+/-- **Budgeted strict only** (rule P6): with repair off the result is `strictOpenB`'s, the
+budget left is `strictOpenB`'s, and the repair path ran zero times. -/
+theorem openFileBLogged_false (limits : Limits) (budget : Budget) (bytes : ByteArray) :
+    (openFileBLogged limits budget bytes false).1.1 = (strictOpenB limits budget bytes).1 ∧
+    (openFileBLogged limits budget bytes false).1.2.1 = (strictOpenB limits budget bytes).2.1 ∧
+    (openFileBLogged limits budget bytes false).2.attempts = 0 := by
+  unfold openFileBLogged
+  rcases strictOpenB limits budget bytes with ⟨r1, b1, c1⟩
+  rcases r1 with e | d
+  · simp only
+    by_cases hf : e.isFinal = true <;> simp [hf]
+  · simp
+
+/-- A document of the budgeted strict path is not flagged repaired. -/
+theorem strictOpenB_not_repaired {limits : Limits} {budget : Budget} {bytes : ByteArray}
+    {d : OpenDoc} (h : (strictOpenB limits budget bytes).1 = .ok d) : d.repaired = false := by
+  unfold strictOpenB at h
+  rcases hl : Core.Xref.Chain.loadChainB limits budget bytes with ⟨r0, b0⟩
+  rw [hl] at h
+  rcases r0 with e | revs
+  · cases h
+  · simp only at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · rename_i d2 hd
+        have := validateB_eq_self h
+        subst this
+        unfold ofChain at hd
+        split at hd
+        · cases hd
+        · obtain ⟨c, rfl⟩ := withCrypt_ok hd
+          rfl
+
+/-- **Open a session with the repair switch, logged** (rule P6): `openFileBLogged` from the
+full budget `Budget.init limits`. -/
+def Session.openLogged (limits : Limits) (bytes : ByteArray) (allowRepair : Bool) :
+    Except Error Session × RepairLog :=
+  match openFileBLogged limits (Budget.init limits) bytes allowRepair with
+  | ((.ok d, b, c), log) => (.ok ⟨d, b, c⟩, log)
+  | ((.error e, _, _), log) => (.error e, log)
+
+/-- With repair on, the logged session open is `Session.open`. -/
+theorem Session.openLogged_true (limits : Limits) (bytes : ByteArray) :
+    (Session.openLogged limits bytes true).1 = Session.open limits bytes := by
+  have h := openFileBLogged_true limits (Budget.init limits) bytes
+  unfold Session.openLogged Session.open
+  rcases hl : openFileBLogged limits (Budget.init limits) bytes true with ⟨⟨r, b, c⟩, log⟩
+  rw [hl] at h
+  simp only at h
+  rw [← h]
+  rcases r with e | d <;> rfl
+
+/-- **Strict-only session** (rule P6, M12): with repair off the repair path runs zero times,
+and an opened session's document is not repaired. -/
+theorem Session.openLogged_false (limits : Limits) (bytes : ByteArray) :
+    (Session.openLogged limits bytes false).2.attempts = 0 ∧
+    ∀ s, (Session.openLogged limits bytes false).1 = .ok s → s.doc.repaired = false := by
+  obtain ⟨h1, -, h3⟩ := openFileBLogged_false limits (Budget.init limits) bytes
+  unfold Session.openLogged
+  rcases hl : openFileBLogged limits (Budget.init limits) bytes false with ⟨⟨r, b, c⟩, log⟩
+  rw [hl] at h1 h3
+  simp only at h1 h3
+  rcases r with e | d
+  · exact ⟨h3, fun s hs => by cases hs⟩
+  · refine ⟨h3, fun s hs => ?_⟩
+    simp only [Except.ok.injEq] at hs
+    subst hs
+    exact strictOpenB_not_repaired h1.symm
 
 /-! ## Tests -/
 
@@ -1549,6 +1829,15 @@ private def isNull : Except Error IndirectBody → Bool
 
 -- A broken xref is repaired.
 #guard os minimalBroken == "ok repaired=true revs=0 n=3"
+
+-- Rule P6: strict only, the broken xref is refused with zero repair attempts; with repair
+-- on, one attempt.
+#guard (openFileLogged Limits.default minimalBroken false).2 == ⟨0, true⟩ &&
+  (match (openFileLogged Limits.default minimalBroken false).1 with
+    | .error e => !e.isFinal | .ok _ => false)
+#guard (openFileLogged Limits.default minimalBroken true).2 == ⟨1, false⟩
+#guard (Session.openLogged Limits.default minimalBroken false).2 == ⟨0, true⟩
+#guard (openFileLogged Limits.default minimalValid false).2 == ⟨0, false⟩
 
 -- A `/Prev` cycle is final: no repair (rule P5), although the scan would find the objects.
 #guard os minimalPrevSelf == "cycle@110 xref /Prev cycle"

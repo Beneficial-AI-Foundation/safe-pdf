@@ -231,7 +231,7 @@ def run (argPage : Option Nat) : IO UInt32 := do
   if s.unsaved.isEmpty then
     IO.println "put: skipped (every mark is already in the file)"
   else
-    match Save.build d.limits d.doc s (← Save.nowDate) with
+    match ← Save.buildNow d.limits d.doc s with
     | .error e => failed "put" s!"cannot re-save: {e}"
     | .ok (bytes, got, _) =>
       if bytes.size > Annots.maxPutBytes then

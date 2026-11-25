@@ -1,5 +1,6 @@
 import SafePdf.Shell.App.Marks
 import SafePdf.Core.Annot
+import SafePdf.Shell.Read
 
 /-!
 # XFDF import and export of user marks (tasks 9.5d, 9.11; Plan.md §6 Phase 9 "Persistence — annotations inside the PDF", §10 `SafePdf/Shell/`)
@@ -744,6 +745,20 @@ def markXml (pb : Box) (date : String) (m : Mark) (comment : Option Mark := none
         "><inklist>" ++ String.join (ss.map fun st => "<gesture>" ++ gestureXml st ++ "</gesture>") ++
         "</inklist></ink>"
 
+/-- **A bound on the size of the XFDF text `toXfdf` writes for `s`** (task 12.3b; the viewer
+reserves it in its work pool before building the text, `Budget.Op.output`): 4 KiB of header
+and footer, and per mark 2 KiB of element and attributes, 6 bytes per text byte (escaped:
+`&#xHHHH;` is at most 8 characters for a 1–4-byte character) and 48 bytes per page point
+(`coords`, `rect`, `<gesture>` numbers). -/
+def exportEstimate (s : Store) : Nat :=
+  4096 + s.marks.foldl (fun n m =>
+    let (t, p) : Nat × Nat := match m.kind with
+      | .highlight qs => (0, 4 * qs.length)
+      | .note t _ => (t.utf8ByteSize, 1)
+      | .freeText t _ _ _ => (t.utf8ByteSize, 1)
+      | .ink ss _ _ _ => (0, ss.foldl (fun k st => k + st.length) 0)
+    n + 2048 + 6 * t + 48 * p) 0
+
 /-- **Export**: the XFDF document of every mark of `s` (creation order; a highlight's comment
 inside the highlight's element, not on its own); `box` gives page boxes for note icons (US
 Letter when `none`), `date` the `date` attribute (omitted when empty), `href` the PDF's file
@@ -761,6 +776,15 @@ def toXfdf (s : Store) (box : Nat → Option Box) (date : String) (href : Option
     if m.isNote && comments.any (·.id == m.id) then none
     else markXml ((box m.page).getD letter) date m (s.commentOf m)
   head ++ "<annots>\n" ++ annots.foldl (fun acc x => acc ++ x ++ "\n") "" ++ "</annots>\n</xfdf>\n"
+
+-- The bound holds for a highlight with a comment and a note full of characters to escape.
+#guard
+  let s : Store := {}
+  let (s, h) := (s.addHighlight 0 .yellow [⟨100, 698, 166, 708⟩, ⟨100, 686, 111, 696⟩]).getD (s, 0)
+  let (s, _) := s.addNote 0 .yellow "a <comment> & \"more\" é 😀" (.quads [⟨100, 698, 166, 708⟩])
+  let (s, _) := s.addNote 1 .green (String.ofList (List.replicate 300 '<')) (.point ⟨300, 400⟩)
+  h > 0 && (toXfdf s (fun _ => some letter) "D:20261123000000Z" (some "paper.pdf")).utf8ByteSize ≤
+    exportEstimate s
 
 /-! ## Import -/
 
@@ -985,16 +1009,19 @@ def importItems (s : Store) (items : List Item) : Store × List Nat × Nat :=
 
 /-! ## Files -/
 
-/-- Reads and imports the XFDF file `path` (the size is checked before reading); an error
-message for the status bar otherwise. -/
+/-- Reads and imports the XFDF file `path` through the shared capped read
+(`Shell.Read.readFile`, task 12.1: at most `lim.maxBytes + 1` bytes through a handle, so a
+file that grows while it is read is still refused); an error message for the status bar
+otherwise. -/
 def readFile (lim : Limits) (path : String) (pages : Option Nat := none) :
     IO (Except String Report) := do
   try
-    let md ← System.FilePath.metadata path
-    if md.byteSize.toNat > lim.maxBytes then
-      return .error (Error.tooLarge md.byteSize.toNat lim.maxBytes).message
-    let bytes ← IO.FS.readBinFile path
-    return (readXfdf lim bytes pages).mapError Error.message
+    match ← Shell.Read.readFile path lim.maxBytes .inputBytes with
+    | .error _ =>
+      -- The size for the message: the file system's, at least the bytes the read saw.
+      let size ← try pure (← System.FilePath.metadata path).byteSize.toNat catch _ => pure 0
+      return .error (Error.tooLarge (max size (lim.maxBytes + 1)) lim.maxBytes).message
+    | .ok bytes => return (readXfdf lim bytes pages).mapError Error.message
   catch e => return .error s!"cannot read {path}: {e}"
 
 /-! ## Checks -/
@@ -1201,5 +1228,26 @@ private def roundTrip (s : Store) : Option Store :=
     "</annots></xfdf>").toUTF8 with
   | .ok r => r.count == 1 && r.skipped == [⟨"highlight", "too many marks"⟩]
   | .error _ => false
+
+/-! ## Texts shared by the shells (task 11.3e2) -/
+
+/-- **The proposed export file** of the PDF `path`: `STEM.xfdf` next to it. -/
+def exportTarget (path : String) : String :=
+  ((path : System.FilePath).withExtension "xfdf").toString
+
+#guard exportTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && exportTarget "a.b.PDF" == "a.b.xfdf"
+
+/-- **The status after an import** of `name`: added, already present and skipped counts, and
+the first skipped annotation (`first`: its element and reason). -/
+def importStatus (name : String) (added dups skipped : Nat) (first : Option (String × String)) :
+    String :=
+  let f := match first with
+    | some (e, r) => s!" (first skipped: <{e}>: {r})"
+    | none => ""
+  s!"{name}: {added} imported, {dups} already present, {skipped} skipped{f}"
+
+#guard importStatus "a.xfdf" 3 1 0 none == "a.xfdf: 3 imported, 1 already present, 0 skipped"
+#guard importStatus "a.xfdf" 0 0 2 (some ("ink", "no page")) ==
+  "a.xfdf: 0 imported, 0 already present, 2 skipped (first skipped: <ink>: no page)"
 
 end SafePdf.Shell.App.Xfdf

@@ -1,0 +1,10 @@
+// The C API of safe-pdf-core as one Clang module for the Swift shell (task 11.3b;
+// docs/macos-design.md §3 decision 6). `swiftc -I macos` finds this file; Swift code says
+// `import SafePdfC`. The four headers compile together (shared types live in safepdf_core.h).
+module SafePdfC {
+    header "safepdf_core.h"
+    header "safepdf_view.h"
+    header "safepdf_marks.h"
+    header "safepdf_select.h"
+    export *
+}

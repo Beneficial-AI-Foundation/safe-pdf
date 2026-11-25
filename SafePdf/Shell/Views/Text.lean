@@ -29,15 +29,23 @@ page is followed by `--- glyphs page N (item seq x y width size text)` and one l
 in content order: display-list item index, index in the run, page-space origin, width, font
 size (exact decimals, `Fixed.toDecimal`) and the glyph's text as a JSON string literal. These
 are the glyphs as shown (`PageText.shown`): inside `/ActualText` marked content they carry the
-ActualText characters (task 6.8d; unused characters as zero-width glyphs at the pen). Then a
-`total:` line.
+ActualText characters (task 6.8d; unused characters as zero-width glyphs at the pen). When the page has
+text it extracts but does not visibly show (task 12.5, `Core.Text.hiddenRuns`: glyphs shown with
+text rendering mode 3 or 7, or lying entirely outside the CropBox), the page is followed by
+`--- hidden page N: K of C chars of the text are not painted, R hidden run(s)` and one line per
+hidden run: `item reason in-text|not-in-text "text"` (`reason` is `render-mode` or
+`outside-cropbox`). Pages without hidden text print nothing extra. Then a `total:` line.
 
 ## `--json`
 
 One object per page `{"page","chars","glyphs","replacement","warnings","error","text"}`
 (`chars` counts Unicode scalar values of `text`, `replacement` the U+FFFD among them, `error`
 is `null` or a message), with `"glyphList": [[item, seq, x, y, width, size, text], …]` added
-when `SAFEPDF_TEXT_GLYPHS=1`; then `{"summary": {"path","open","pages","extracted","chars",
+when `SAFEPDF_TEXT_GLYPHS=1`. A page with hidden text (task 12.5) adds
+`"invisibleChars": K` (characters of `text` the page does not paint, `Core.Text.hiddenChars`)
+and `"hidden": [{"item", "reason", "invisible": true, "inText", "glyphs", "text"}, …]`, one
+object per hidden run, so differential tooling (which reads `text`) is unaffected and can still
+tell invisible text apart; then `{"summary": {"path","open","pages","extracted","chars",
 "glyphs","replacement","warnings","errors"}}` (`pages` is the document's page count,
 `extracted` the number of pages printed), or `{"summary": {"path","open","error"}}` when the
 document does not open. Strings are UTF-8 JSON (`Common.jsonString`: control characters
@@ -49,7 +57,7 @@ namespace SafePdf.Shell.Views.Text
 open SafePdf.Shell
 open SafePdf.Core.Doc
 open SafePdf.Core.Filter (Budget)
-open SafePdf.Core.Text (PageText Glyph)
+open SafePdf.Core.Text (PageText Glyph HiddenRun)
 
 /-- What the view prints for one page. -/
 structure PageOut where
@@ -63,6 +71,10 @@ structure PageOut where
   warnings : Nat := 0
   /-- Error decoding the page contents. -/
   error : Option Error := none
+  /-- Task 12.5: runs of glyphs the page does not visibly show (`PageText.hiddenRunsOn`). -/
+  hidden : List HiddenRun := []
+  /-- Task 12.5: characters of `text` the page does not paint (`PageText.hiddenChars`). -/
+  hiddenChars : Nat := 0
 
 /-- Number of Unicode scalar values of the text. -/
 def PageOut.chars (p : PageOut) : Nat := p.text.length
@@ -71,9 +83,10 @@ def PageOut.chars (p : PageOut) : Nat := p.text.length
 def PageOut.replacement (p : PageOut) : Nat :=
   (p.text.toList.filter (· == SafePdf.Core.Font.CMap.replacement)).length
 
-/-- The view's record of an extraction result. -/
-def pageOut (number : Nat) : Except Error PageText → PageOut
-  | .ok pt => { number, text := pt.text, glyphs := pt.shown, warnings := pt.warnings }
+/-- The view's record of an extraction result for page `page`. -/
+def pageOut (number : Nat) (page : Page) : Except Error PageText → PageOut
+  | .ok pt => { number, text := pt.text, glyphs := pt.shown, warnings := pt.warnings,
+                hidden := pt.hiddenRunsOn page, hiddenChars := pt.hiddenChars }
   | .error e => { number, error := some e }
 
 /-- Extract every page in document order under one document budget. -/
@@ -83,7 +96,7 @@ def extractAll (limits : Limits) (doc : Doc) : Array PageOut := Id.run do
   for h : k in [0:doc.pages.size] do
     let (r, b) := SafePdf.Core.Annot.extractDocPageAnnots limits doc (doc.pages[k]'h.upper) budget
     budget := b
-    out := out.push (pageOut (k + 1) r)
+    out := out.push (pageOut (k + 1) (doc.pages[k]'h.upper) r)
   return out
 
 /-- Extract page `n` (1-based) with a fresh budget; `none` when out of range. -/
@@ -92,7 +105,7 @@ def extractOne (limits : Limits) (doc : Doc) (n : Nat) : Option PageOut :=
   | 0 => none
   | k + 1 =>
     if h : k < doc.pages.size then
-      some (pageOut n (SafePdf.Core.Annot.extractDocPageAnnots limits doc doc.pages[k]
+      some (pageOut n doc.pages[k] (SafePdf.Core.Annot.extractDocPageAnnots limits doc doc.pages[k]
         (Budget.init limits)).1)
     else none
 
@@ -107,6 +120,23 @@ def glyphText (g : Glyph) : String :=
 def glyphJson (g : Glyph) : String :=
   s!"[{g.item}, {g.seq}, {num g.x}, {num g.y}, {num g.width}, {num g.fontSize}, {jsonString g.text}]"
 
+/-- One hidden run as a text line: `item reason in-text|not-in-text "text"`. -/
+def hiddenText (r : HiddenRun) : String :=
+  s!"{r.item} {r.why.key} {if r.inText then "in-text" else "not-in-text"} {jsonString r.text}"
+
+/-- One hidden run as a JSON object (`invisible` is always `true`: the marker differential
+tooling looks for). -/
+def hiddenJson (r : HiddenRun) : String :=
+  jsonObject [ ("item", toString r.item), ("reason", jsonString r.why.key),
+    ("invisible", "true"), ("inText", toString r.inText), ("glyphs", toString r.glyphs),
+    ("text", jsonString r.text) ]
+
+/-- The hidden-text lines of a page in the text form (none without hidden runs). -/
+def hiddenLines (p : PageOut) : List String :=
+  if p.hidden.isEmpty then []
+  else [s!"--- hidden page {p.number}: {p.hiddenChars} of {p.chars} chars of the text are not painted, {p.hidden.length} hidden run(s)"] ++
+    p.hidden.map hiddenText
+
 /-- Header line of a page in the text form. -/
 def pageHeader (p : PageOut) : String :=
   let err := match p.error with
@@ -116,7 +146,7 @@ def pageHeader (p : PageOut) : String :=
 
 /-- Text form of one page. -/
 def pageLines (glyphs : Bool) (p : PageOut) : List String :=
-  [pageHeader p] ++ (if p.text.isEmpty then [] else [p.text]) ++
+  [pageHeader p] ++ (if p.text.isEmpty then [] else [p.text]) ++ hiddenLines p ++
   (if glyphs then
     [s!"--- glyphs page {p.number} (item seq x y width size text)"] ++ p.glyphs.map glyphText
   else [])
@@ -131,6 +161,9 @@ def pageJson (glyphs : Bool) (p : PageOut) : String :=
         | some e => jsonString (renderError e)
         | none => "null"),
       ("text", jsonString p.text) ] ++
+    (if p.hidden.isEmpty then []
+     else [("invisibleChars", toString p.hiddenChars),
+           ("hidden", "[" ++ ", ".intercalate (p.hidden.map hiddenJson) ++ "]")]) ++
     (if glyphs then [("glyphList", "[" ++ ", ".intercalate (p.glyphs.map glyphJson) ++ "]")]
      else []))
 

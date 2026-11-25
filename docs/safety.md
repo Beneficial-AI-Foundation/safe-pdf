@@ -37,7 +37,7 @@ no panics, no `sorry` — and the properties are machine-checked theorems, not g
 |---|---|---|
 | S1 memory safety | holds | Lean type system; CI hygiene guard; axiom audit (`propext`/`Classical.choice`/`Quot.sound` only) |
 | S2 totality on **any** input | **proven** | `loadChain_terminates` (no fuel); xref `/Prev` cycles, cyclic `/Length`, self-containing object streams, `/Kids` cycles all rejected with `Error.cycle` in < 0.01 ms (M2) |
-| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; no bound spans a whole user operation yet (§5) |
+| S3 resource bounds | **proven**, per operation | decode output + work bounds (`decodeStream_size_le`, `flateDecodeW_steps_le`), a decode budget threaded through the open, ops/page bounds; 74 decompression-bomb cases rejected with `limitExceeded` (M3). Each per-page API call starts a **fresh** budget, so repeated calls (concurrent renders, thumbnails) multiply it; since 12.3 the viewer's work in flight is reserved in one pool and a search shares one allowance, and the worker has OS memory/CPU fences; since 12.3b the live Tk photos have their own pool, Save and XFDF export reserve their output, a page image is capped at 10 Mpx and each worker request has one decode budget (§5 item 0c) |
 | S4 no ambient authority | holds | the core's type contains no `IO` — compiler-checked |
 | S5 unverified-code isolation | holds (vacuously strong) | no FFI decoders at all: even JPEG is pure Lean in `Quarantine/`, held to core hygiene rules — a source-code boundary, not a process one: everything runs in the viewer process (§5) |
 | S6 unambiguity | **proven** | one winner per object id across incremental updates, newest-revision-wins (`Spec.Unambiguous`) — the *ambiguity* half of shadow attacks: it settles which revision we display; signatures and other viewers' precedence rules are out of scope |
@@ -65,7 +65,97 @@ no panics, no `sorry` — and the properties are machine-checked theorems, not g
   C7; encrypted files are annotated with the document's own handler; the result is strictly
   re-parsed before a byte reaches disk.
 
-### 2.4 Evidence beyond the proofs
+### 2.4 The confined document worker (tasks 12.2a, 12.2b)
+
+The `worker` executable (`SafePdf/Shell/Worker/`) receives a document as **bytes** over
+stdin and answers render, text, outline and link requests over stdout; the client starts it
+with an empty environment and `/` as working directory, and can kill it at any time. Since
+12.2b it confines itself before it reads its first request (`Sandbox.prepare`,
+`c/worker_sandbox.c`):
+
+1. **Environment**: a non-empty environment makes it refuse to serve (exit 3). The client
+   passes none (`inheritEnv := false`), so `$HOME`, bib-lean's token and any credential of
+   the GUI never reach the process that parses untrusted bytes.
+2. **Fonts first**: the substitute fonts are read from the fixed system font directories,
+   every file in full, *before* confinement (measured: worker startup 7.8 → 13.0 ms median
+   on an M-series Mac, i.e. ~5 ms for 14 faces plus the sandbox; the first `openDoc` no longer
+   reads them). Parsing them stays lazy and pure.
+3. **Sandbox**, irreversible, before any request:
+   * **macOS**: `sandbox_init` with the SBPL profile `(version 1) (deny default)` — nothing
+     is allowed: no file read or write (not even of the font files already read), no
+     directory listing, no network, no process exec/fork, no Mach/XPC lookup, no POSIX IPC,
+     no IOKit, no sysctl. Reading and writing the descriptors it already holds
+     (stdin/stdout/stderr), allocating memory and starting threads are not sandbox
+     operations and keep working. `sandbox_init` is deprecated API but works on macOS 26
+     (Chromium's renderer sandbox uses the same mechanism).
+   * **Linux** (**untested**: written on macOS, never run on Linux yet): `PR_SET_NO_NEW_PRIVS`
+     and a seccomp-bpf allowlist applied to every thread (`SECCOMP_FILTER_FLAG_TSYNC`):
+     read/write/readv/writev/close/lseek/fstat on existing descriptors, memory
+     (mmap/munmap/mremap/mprotect/madvise/brk), threads (futex, `clone` only with
+     `CLONE_THREAD`, `clone3` → ENOSYS so glibc falls back), signals to itself only,
+     clocks/sleep/getrandom, exit. Everything else — `open`/`openat`/`openat2`, `socket`,
+     `connect`, `execve`, `fork`, `ptrace`, `kill`, `ioctl`, `pipe` … — fails with EPERM;
+     a foreign architecture or an x32 call kills the process. `newfstatat`/`statx` are
+     allowed because glibc implements `fstat` with them, so a compromised worker can learn a
+     path's *metadata* (existence, size, times), never its contents. Landlock and `bwrap`
+     are not used: seccomp already removes every call that opens a path, and Landlock
+     cannot be applied to the runtime's existing threads. Before the filter (task 12.c1) the
+     worker sets `RLIMIT_CORE` to 0 and `PR_SET_DUMPABLE` to 0 — no core dump, and no
+     `ptrace` attach or `/proc/<pid>/mem` read by other processes of the same user — and
+     installs `SIGXCPU`/`SIGABRT` handlers that write one line to stderr and re-raise the
+     signal with its default action.
+   * **Resource fences** (task 12.3; Linux redone in 12.c1), installed before the sandbox:
+     a **watchdog thread** reads the process's private resident memory every 10 ms and ends
+     it (exit 6, one stderr line) above the ceiling — macOS `phys_footprint` (`task_info`),
+     Linux resident − shared pages of `/proc/self/statm`, read through a descriptor opened
+     before confinement (`lseek` + `read`; it shows the worker its own memory counters and
+     nothing else). Linux adds a kernel backstop relative to the mappings at startup:
+     `RLIMIT_DATA` = startup + 2 × ceiling, `RLIMIT_AS` = startup + 4 × ceiling. Absolute
+     limits (12.3's `RLIMIT_DATA` = ceiling, `RLIMIT_AS` = 2 × ceiling) broke the worker on
+     Linux CI: the Lean runtime's allocator (mimalloc 3, eager commit on overcommit systems)
+     maps 1 GiB arenas read-write up front, so every later mapping failed (the probe child
+     aborted, a 2048 MiB worker died on a 124 MB render). The watchdog measures pages
+     actually used; its overshoot is what the worker can touch in 10 ms, and a compromised
+     worker could stop it — the client's 20 s deadline kill does not depend on the worker.
+     **CPU**: `RLIMIT_CPU`, re-armed before every request to the time used so far + the
+     per-request seconds + 1; crossing it sends `SIGXCPU`. On Linux the worker is
+     non-dumpable for this reason too: with a pipe `core_pattern` (apport, systemd-coredump)
+     the kernel streamed the dying worker's reserved arenas to the helper and the fenced
+     request "timed out" at 20 s instead of ending at ~2 s (CI run 45303741160).
+   * **Diagnostics** (12.c1): a confined worker writes one stderr line naming its
+     confinement and fences; a failed startup step, the watchdog, `SIGXCPU` and `SIGABRT`
+     each write one line too. The client discards stderr; the probe and the `worker` suite's
+     fence checks print it.
+   * **Anything else** (another OS, a Linux build without the kernel headers or on an
+     architecture other than x86-64/arm64): confinement fails.
+4. **No unconfined fallback**: if any step fails the worker exits (3: environment, 4:
+   sandbox) without reading a request. There is **no debug escape** in `worker` — no flag
+   and no environment variable (the environment is empty anyway). The unconfined *control*
+   mode exists only in the separate test executable `worker-probe`.
+
+**Evidence** (`scripts/worker-confinement-test.sh`, suite `worker-confinement`): a probe
+child started exactly as the client starts the worker is denied reading `/etc/hosts`,
+re-reading a font file it read at startup, creating a file in `/tmp`, listing `/`,
+connecting to a listening socket on 127.0.0.1, seeing the parent's `SAFEPDF_PROBE_TOKEN`
+and spawning `/bin/echo`, while a thread and a render still work; an unconfined control
+child is allowed all of these, so the probes detect access. The `worker` suite renders
+byte-equal to in-process rendering through the confined worker.
+
+**What is not confined, or not yet**:
+* Font files on disk are parsed after confinement but were *read* before it: a malicious
+  file planted in a system font directory is still parsed — by the verified font code, in
+  the confined process.
+* The confined worker can still burn CPU and memory up to the core's limits, write
+  anything to its stdout (the client caps and decodes every frame) and to stderr; the
+  client's deadline kill is the bound on time.
+* Descriptors inherited from the parent stay usable; the client passes only
+  stdin/stdout/stderr.
+* The GUI process itself (Tk, the C shim, clipboard, saves, bib-lean's token) is not
+  sandboxed (item 7 below), and until task 12.2c the Tk viewer still renders in-process.
+* Running the worker inside an already sandboxed app (e.g. a future App-Sandboxed macOS
+  shell) may make `sandbox_init` fail; the worker then refuses to serve (task 11.x decides).
+
+### 2.5 Evidence beyond the proofs
 
 Proofs show we meet *our* spec; testing ties the spec to the world (§7): differential
 testing against qpdf (71,854/71,854 objects, 2,450/2,450 pages agree), MuPDF and pdftotext
@@ -108,6 +198,9 @@ provenance (C6), a repair path proven total and bounded that never overrides a s
   could break a "proven" property at runtime.
 * **The C shim and Tk.** `c/tk_shim.c` and the Tcl/Tk libraries are C in the shell process.
   They never parse document bytes, but they share the address space with everything else.
+* **The OS sandboxes.** The worker's confinement (§2.4) trusts the macOS seatbelt (a
+  deprecated, undocumented profile language) and Linux seccomp, plus the small
+  `c/worker_sandbox.c` that installs them; the Linux filter has not been run yet.
 * **Our spec of ISO 32000.** Proofs are against our reading of a loose spec; differential
   testing and `deviations-from-spec.md` are the mitigation, not a proof.
 * **Floats in the rasterizer.** The ℚ model is the proven reference; the compiled float
@@ -136,10 +229,30 @@ security review; those items protect the user even if every current theorem is c
     parsing (`repairRefused` rejects post-parse today).
 0b. **A stoppable, restricted document worker**: run the core plus document-derived font and
     image processing in a child process the GUI can kill; broker file, clipboard, save and
-    bib-lean access in the GUI; keep the library token out of the child.
+    bib-lean access in the GUI; keep the library token out of the child. *Status:* the
+    worker exists and confines itself (macOS tested, Linux untested; §2.4); the viewer moves
+    onto it in task 12.2c.
 0c. **Budget a whole user operation**: reserve memory for concurrent page buffers, thumbnails
     and caches before dispatch, and carry one shared work allowance through a search, export
     or render — per-call budgets reset today, so concurrency multiplies them.
+    *Status (task 12.3):* the viewer reserves every render, thumbnail and text request in one
+    pool (512 MiB, proven never exceeded, releases proven idempotent) before dispatch; a search
+    shares one allowance (400 pages, 60 s); the worker has a memory ceiling (a private
+    resident memory watchdog on macOS and Linux, plus baseline-relative `RLIMIT_DATA` /
+    `RLIMIT_AS` on Linux; §2.4) and a per-request
+    `RLIMIT_CPU` next to the 20 s deadline; a CI scenario checks the published RSS ceilings
+    (`docs/viewer.md`, "Budgets and ceilings").
+    *Status (task 12.3b):* the live Tk photos (page photos, thumbnails) are reserved in a
+    second pool (352 MiB; a page in view evicts photos of pages not in view, proven to fit
+    afterwards, else is refused with a message; neighbours wait); a page image is capped at
+    10 Mpx, so the interleave scenario's 600–800 % phase stays under the viewer's 1024 MiB
+    (measured 816–931 MiB on macOS; 2.6 GiB before); Save and XFDF export reserve their expected
+    output (original bytes plus the update) in the work pool and are refused cleanly when it
+    does not fit; each worker request makes one `Filter.Budget` and threads it through
+    everything it decodes (no request spans pages; the budget is deliberately not carried
+    across requests, which would break the equality of worker and in-process results).
+    Still open: the open document's bytes and parse are bounded by `maxInputBytes`, not a pool;
+    the allocator's retention of freed memory is measured, not modelled.
 0d. **Fresh IVs for encrypted updates**: supply OS randomness at the shell boundary and pass
     it into the pure writer; set an explicit policy for legacy RC4 writes.
 
@@ -184,6 +297,32 @@ security review; those items protect the user even if every current theorem is c
 11. **Hostile corpus**: extend the adversarial suite with in-the-wild exploit samples
     (FORCEDENTRY-class JBIG2, shadow-attack suites, polyglots) — all should die on the
     excluded-feature or limit paths; document each.
+
+**What exists now (task 12.6).** The rig for items 5, 6 and 10 is in `scripts/`; its CI jobs
+(`lean4lean`, `compiled-vs-interpreted`, `viewer`, and the pinned-corpus positions/pixels steps)
+are in `.github/workflows/ci.yml` since 2026-11-24.
+* Item 5: `scripts/lean4lean-check.sh` fetches lean4lean at a pinned commit (its `master`
+  targets our v4.36.0), SHA-256-verified, builds it from a fresh directory and re-checks every
+  `SafePdf.*` module from its `.olean`. lean4lean is derived from the C++ kernel, so this is a
+  second implementation, not an independent theory. Local run (2026-11-23): all 114
+  modules re-check, after raising lean4lean's fuel limits. Upstream selects modules by name
+  prefix and replays the matches on parallel tasks; that mode segfaulted (macOS
+  intermittently; Linux CI every time on the four parents `Core.Crypt`, `Core.Doc`,
+  `Core.Xref`, `Core.Filter`, whose submodules it also matches, with the fuel-raised
+  recursion deeper than a task thread's fixed stack). The script now builds a small driver
+  beside lean4lean (`l4lexact`, same `Replay.replayFromImports`) that checks exactly the
+  named modules on the main thread, under `ulimit -s unlimited`, one process per module, so
+  each parent is checked on its own declarations. Run 2026-11-24 (macOS): all 132 modules
+  pass. A kernel rejection prints `FAIL`, a tool crash `CRASH`, a time-out `TIMEOUT` (the
+  job has a time cap); all fail the job.
+* Item 6: `scripts/compiled-vs-interpreted.sh` runs the suites compiled (`lake exe tests`) and
+  in the IR interpreter (`scripts/interp-suites.lean`) and diffs them suite by suite.
+  Locally the 21 suites of its default set agree (~7 min interpreted); the raster property
+  suites are too slow interpreted for CI so far, and `adversarial` asserts wall-clock bounds.
+* Pinned corpus: `scripts/corpus/pinned.txt` (16 manifest ids, every producer family, ~15 MB)
+  feeds the pixel and glyph-position comparators and the viewer smoke and corpus runs.
+* Item 10: `docs/oss-fuzz.md` is the onboarding plan (targets, harness, `build.sh`,
+  `project.yaml` draft, blockers); nothing is fuzzed under libFuzzer yet.
 
 ### Guard the growth edges
 12. **The write path is the newest surface**: keep every new annotation kind behind C7

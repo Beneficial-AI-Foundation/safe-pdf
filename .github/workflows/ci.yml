@@ -30,9 +30,9 @@ jobs:
           path: |
             ~/.elan
             .lake
-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
           restore-keys: |
-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
+            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
             lean-${{ runner.os }}-
 
       - name: Install elan and the pinned toolchain
@@ -53,6 +53,11 @@ jobs:
       - name: Build library and inspector
         run: lake build
 
+      - name: Build the C API's Lean modules (runs their #guards)
+        # Non-default target (task 11.3a5): SafePdf/Shell/Ffi*.lean and Ffi/Flat.lean hold
+        # #guards that only run when this builds. Lean code only (no macOS code).
+        run: lake build macosFfi
+
       - name: Build test and fuzz executables
         run: lake build tests fuzz
 
@@ -67,6 +72,282 @@ jobs:
 
       - name: Fuzz smoke
         run: scripts/fuzz.sh
+
+  # Task 8.2a: the native viewer (Tcl/Tk shim, `lake build viewer`) builds and
+  # passes its headless smoke test (scripts/viewer-smoke.sh under xvfb-run).
+  # Separate job: the `build` job's default targets do not need Tk.
+  # ubuntu-24.04's tk-dev is Tk 8.6 (the shim builds against 8.6 and 9.0).
+  viewer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
+          restore-keys: |
+            viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+            viewer-${{ runner.os }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+
+      # tk provides wish (the viewer-corpus driver); qpdf and mutool are optional checks of
+      # saved files in both scripts. Ubuntu 24.04's tk-dev is Tk 8.6 (not 9): the viewer and
+      # the smoke test take that path (task 10.c1). fonts-urw-base35: the substitute fonts
+      # (SafePdf/Shell/Fonts.lean) the smoke's M9 case expects to paint the Add-text mark;
+      # x11-xserver-utils: xhost, for the 1l drive control's X server access list.
+      - name: Install Tk, Xvfb, fonts, qpdf and mutool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tk-dev tk xvfb xauth x11-xserver-utils \
+            fonts-urw-base35 qpdf mupdf-tools
+          dpkg-query -W -f '${Package} ${Version}\n' 'tk*-dev' fonts-urw-base35  || true
+
+      # The smoke test's 1d case compares against the inspector's text.
+      - name: Build viewer and inspector
+        run: lake build viewer inspect worker
+
+      # Task 12.6: the viewer runs on the pinned corpus subset (scripts/corpus/pinned.txt,
+      # each file pinned by SHA-256 in corpus/manifest.json). actions/cache v4.2.0.
+      - name: Cache pinned corpus files
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: corpus/files
+          key: corpus-pinned-${{ hashFiles('corpus/manifest.json', 'scripts/corpus/pinned.txt') }}
+
+      - name: Fetch and verify the pinned corpus subset
+        run: python3 -I scripts/corpus/pinned.py --fetch
+
+      # With corpus/files/arxiv-1706.03762.pdf present (pinned), the M9 / wheel-flow parts
+      # also run on that real paper (viewer-smoke.sh SAFEPDF_SMOKE_PAPERS default).
+      - name: Viewer smoke test (Xvfb)
+        run: env -u DISPLAY scripts/viewer-smoke.sh --no-build
+
+      # Task 12.3 / M12: zoom, search and thumbnails interleaved on the pinned Transformer
+      # paper; the peak RSS of the viewer and of every document worker must stay within the
+      # published ceilings (docs/viewer.md "Budgets and ceilings"), and the viewer's
+      # reservation pool must be empty at the end. Builds `viewer worker` (the worker is not
+      # built by `lake build viewer`).
+      - name: Interleave scenario within the memory ceilings (Xvfb)
+        run: env -u DISPLAY scripts/interleave.sh
+
+      # Task 12.6 / M8 on the pinned subset: every page of every pinned file through the
+      # viewer, plus the three-paper session (scripts/viewer-corpus.sh, docs/viewer-corpus.md).
+      # Report only for now: its timing thresholds were measured on macOS, not on a shared
+      # runner under Xvfb; the JSON is uploaded for comparison.
+      - name: Viewer corpus run on the pinned subset (Xvfb)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mapfile -t pinned < <(python3 -I scripts/corpus/pinned.py --paths)
+          env -u DISPLAY scripts/viewer-corpus.sh --no-build --timeout 600 \
+            --json viewer-corpus.json "${pinned[@]}" 2>&1 | tee viewer-corpus.log
+
+      # actions/upload-artifact v4.6.2
+      - name: Upload viewer corpus results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: viewer-corpus
+          path: |
+            viewer-corpus.json
+            viewer-corpus.log
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Task 11.4: the native macOS shell (Swift/AppKit, macos/). macos-26 is the arm64 macOS 26
+  # image (also `macos-latest` in Nov 2026); its Xcode has Swift 6 and the macOS 26 SDK the app
+  # is written against (26-only calls are gated by `#if compiler(>=6.2)` + `#available`, so an
+  # older SDK would compile them out rather than fail). Steps mirror macos/README.md:
+  # `lake build macosFfi worker`, macos/build.sh, the headless C API suites, the headless
+  # self-test (activation policy Prohibited, no window) and the bundle's ad-hoc signature.
+  # Tk is not installed here: the Linux `viewer` job covers the Tk shell.
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
+          restore-keys: |
+            macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+            macos-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+          "$HOME/.elan/bin/lean" --version
+          "$HOME/.elan/bin/lake" --version
+
+      - name: Toolchain versions (Swift, SDK, OS)
+        run: |
+          sw_vers
+          xcode-select -p
+          swiftc --version
+          xcrun --show-sdk-version
+          clang --version | head -n1
+
+      - name: Build library and inspector
+        run: lake build
+
+      - name: Build the C API library and the worker
+        run: lake build macosFfi worker
+
+      # macos/build.sh is the source of truth for the clang/swiftc flags (`lake build macosApp`
+      # runs the same script after building macosFfi and worker).
+      - name: Build the app (macos/build.sh)
+        run: macos/build.sh
+
+      - name: C API suites (headless)
+        run: macos/tests/run_all.sh
+
+      - name: Headless self-test of the app
+        run: macos/selftest.sh Tests/golden/text/latin.pdf "$RUNNER_TEMP/selftest"
+
+      - name: Verify the bundle's ad-hoc signature
+        run: |
+          codesign -v --strict --verbose=2 macos/build/SafePdf.app
+          codesign -v --verbose=2 macos/build/SafePdf.app/Contents/Helpers/worker
+
+      # actions/upload-artifact v4.6.2
+      - name: Upload the link log and self-test output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-app-logs
+          path: |
+            macos/build/swift-link.log
+            ${{ runner.temp }}/selftest/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Task 12.6 (docs/safety.md §5 item 6): the test suites run natively compiled
+  # (`lake exe tests`) and in Lean's IR interpreter (scripts/interp-suites.lean); their
+  # outputs must agree suite by suite, wall-clock figures aside. Probes the Lean -> C code
+  # generator and the C compiler on our hot paths.
+  compiled-vs-interpreted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+          restore-keys: |
+            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+            lean-${{ runner.os }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+
+      - name: Build library and test executable
+        run: |
+          lake build
+          lake build tests
+
+      # Default: the 21 deterministic suites that finish interpreted in ~7 min locally
+      # (DEFAULT_SUITES in the script). `--suites all` (every suite; wall-clock-bounded
+      # suites reported, not failed) did not finish within 14 min locally: a candidate for
+      # a scheduled job once its cost on a runner is known.
+      - name: Compiled vs interpreted test suites
+        run: scripts/compiled-vs-interpreted.sh --no-build --out compiled-vs-interpreted
+
+      # actions/upload-artifact v4.6.2
+      - name: Upload both outputs and the diff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compiled-vs-interpreted
+          path: compiled-vs-interpreted/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Task 12.6 (docs/safety.md §5 item 5): re-check every SafePdf.* declaration from the
+  # .olean files with lean4lean, a second kernel implementation written in Lean. The
+  # checker is fetched at a pinned commit, SHA-256-verified and built from a fresh directory
+  # by scripts/lean4lean-check.sh (no Lake dependency of this project). The script skips with
+  # a message when lean-toolchain moves past the pinned lean4lean's toolchain; --strict turns
+  # that skip into a failure so a toolchain bump cannot silently drop the re-check.
+  lean4lean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # The script stops starting modules after this many seconds and fails with TIMEOUT
+      # (the full re-check takes a few minutes; a crash retried 8 times once took 39).
+      L4L_TOTAL_TIMEOUT: 1500
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache elan toolchains and Lake build
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: |
+            ~/.elan
+            .lake
+          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+          restore-keys: |
+            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
+            lean-${{ runner.os }}-
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+
+      - name: Build library
+        run: lake build
+
+      - name: lean4lean re-check of SafePdf.*
+        run: scripts/lean4lean-check.sh --strict --work "$RUNNER_TEMP/lean4lean" SafePdf
 
   # Phase 1 exit M1 clause 3: object-level differential test against
   # `qpdf --json=2` over the corpus (Tests/differential/objects.py).
@@ -113,9 +394,9 @@ jobs:
           path: |
             ~/.elan
             .lake
-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
+          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
           restore-keys: |
-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.toml') }}-
+            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
             lean-${{ runner.os }}-
 
       - name: Install elan and the pinned toolchain
@@ -202,6 +483,41 @@ jobs:
             --json differential-text.json \
             2>&1 | tee differential-text.log
 
+      # Task 12.6: the slow comparators (positions, pixels) run on the pinned corpus
+      # subset (scripts/corpus/pinned.txt), staged as symlinks so one glob selects it.
+      - name: Stage the pinned corpus subset
+        if: always()
+        run: python3 -I scripts/corpus/pinned.py --stage "$RUNNER_TEMP/pinned"
+
+      # Task 6.10 / M6 "all glyph positions within tolerance": per-glyph origins
+      # (SAFEPDF_TEXT_GLYPHS=1) vs MuPDF `mutool draw -F stext` char origins
+      # (Tests/differential/positions.py). Offline self-test on the fixtures, then
+      # the pinned subset. Report only: no --min-within threshold yet.
+      - name: Glyph-position comparison on the pinned subset
+        if: always()
+        run: |
+          set -o pipefail
+          python3 -I Tests/differential/positions.py --selftest
+          python3 -I Tests/differential/run.py --comparator positions \
+            --files "$RUNNER_TEMP/pinned/*.pdf" \
+            --json differential-positions.json \
+            2>&1 | tee differential-positions.log
+
+      # Task 7.4 / M7 ">= 95% of corpus pages within perceptual threshold; median
+      # page < 100 ms compiled": rendered pages (inspect --view raster, 72 dpi) vs
+      # MuPDF `mutool draw -F pnm` (Tests/differential/pixels.py; metric in
+      # docs/raster.md). Offline self-test on the fixtures, then the pinned subset.
+      # Report only: no --min-within threshold yet.
+      - name: Pixel comparison on the pinned subset
+        if: always()
+        run: |
+          set -o pipefail
+          python3 -I Tests/differential/pixels.py --selftest
+          python3 -I Tests/differential/run.py --comparator pixels \
+            --files "$RUNNER_TEMP/pinned/*.pdf" \
+            --json differential-pixels.json \
+            2>&1 | tee differential-pixels.log
+
       # actions/upload-artifact v4.6.2
       - name: Upload comparison results
         if: always()
@@ -217,5 +533,9 @@ jobs:
             differential-pages.log
             differential-text.json
             differential-text.log
+            differential-positions.json
+            differential-positions.log
+            differential-pixels.json
+            differential-pixels.log
           if-no-files-found: warn
           retention-days: 30

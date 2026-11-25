@@ -12,10 +12,12 @@ import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Save
 import SafePdf.Shell.App.Xfdf
 import SafePdf.Shell.App.Icons
+import SafePdf.Shell.App.Budget
 import SafePdf.Core.Annot
 import SafePdf.Shell.Inspect
 import SafePdf.Shell.Views.Pages
 import SafePdf.Shell.Fonts
+import SafePdf.Shell.Worker.Client
 
 /-!
 # Native viewer (tasks 8.2a–8.2d, 9.1–9.4, 9.5c, 9.7, 9.8; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
@@ -41,12 +43,12 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   fresh decoded-bytes budget per page (as the inspector's `raster` view), at the zoom of the
   current `View.Mode` (fit page, fit width, or a percentage of actual size: 100 % = 72 dpi ×
   `tk scaling`) and the user rotation (added to the page's `/Rotate` by the renderer through
-  `rotAdd`). Zoom is capped at `View.maxViewPixels` pixels per page image (status line says
+  `rotAdd`). Zoom is capped at `Budget.Ceilings.pagePixels` (task 12.3b) pixels per page image (status line says
   so); a side above `Limits.maxPageSide` is cropped by the renderer (status line says so).
   Non-embedded fonts are painted with the substitute programs `Shell.Fonts.loadSubstFonts`
   finds at start-up (task 7.7, `docs/raster.md`; `State.subst`).
 * **Page cache** (`View.Cache`): render results keyed by (document generation, page, zoom,
-  rotation), LRU, at most `View.cacheBytes` (256 MiB) of images. After a page is shown the
+  rotation), LRU, at most `Budget.Ceilings.cacheBytes` (96 MiB) of images. After a page is shown the
   next page is prefetched 100 ms later (on a worker, below) when it is at most
   `prefetchPixels` pixels.
 * **Rendering on worker threads** (task 8.8). Every render runs on a dedicated thread
@@ -226,6 +228,28 @@ Ledger Decisions 8.1 chose Tcl/Tk through the C shim `c/tk_shim.c`.
   attached: every change of the marks is reported (`marksChanged`), Save is "Save to library"
   (`saveToLibrary`: `Save.build`'s bytes to the library, then reopened from memory), Save As…
   writes a local copy and stays on the library's document, Close flushes the library.
+* **Document worker** (task 12.2c, Plan.md §6 Phase 12; `Worker.Session` in
+  `SafePdf/Shell/Worker/Client.lean`). Pages and thumbnails are rendered, and the outline is
+  read, by the `worker` executable found next to the viewer's (`workerExe`): one process per
+  open document, sent the bytes the viewer read (capped, task 12.1; Save keeps using them).
+  `submit`/`thumbSubmit` queue a render (`renderTask`: priority 0 for the current page or
+  spread, 1 for other pages and the prefetch, 2 for thumbnails) and get a task, so `poll` and
+  `showNow` work as with the render threads of task 8.8 and no event waits on the worker's
+  pipes (except where it did before: `showNow`'s 100 ms and smoke mode). Superseded renders
+  (an old zoom, rotation or document) are cancelled (`cancelStale`): dropped while queued,
+  the worker killed and restarted when one runs longer than `preemptMs`; a page that blocks
+  the current page is preempted the same way and rendered again later. A render without an
+  answer within `workerDeadlineMs` (20 s) kills the worker: the page shows "rendering stopped:
+  the document took too long", and the next request starts a fresh worker with the bytes
+  again. Task 12.2d: renders carry the layers state (`State.oc`); the worker is started with
+  the viewer's limits and font search as flags (`workerStart`: `SAFEPDF_SUBST_FONTS=0`,
+  `$HOME`, `$SAFEPDF_FONT_DIR`); the selection/search text index (`pageIndex`) and the links
+  (`linksOf`) come from the worker while the pages are rendered from the opened document
+  itself (`workerForText`), asked for when a page is rendered so that pointer motion never
+  waits (`wait := false`). In-process (as in task 8.8) remain: the whole viewer when the worker
+  executable is missing (status note) or `SAFEPDF_VIEWER_WORKER=0`; the text index and links
+  while edited saved marks are previewed (`State.view`); the parse the GUI keeps for layout,
+  page labels, open settings, attachments, the layers panel and Save (`docs/viewer.md`).
 * **Smoke mode** (`SAFEPDF_VIEWER_SMOKE=DIR`, used by `scripts/viewer-smoke.sh`): drives the
   viewer with Tk key events (`event generate`) and writes photos and state files into `DIR`
   (see `smoke`), then exits.
@@ -268,7 +292,7 @@ structure ViewParams where
   rot : SafePdf.Core.Doc.Rotation
   /-- CropBox. -/
   box : Box
-  /-- The zoom was lowered to `View.maxViewPixels`. -/
+  /-- The zoom was lowered to `Budget.Ceilings.pagePixels`. -/
   capped : Bool
   /-- The image is cropped to `Limits.maxPageSide`. -/
   cropped : Bool
@@ -318,16 +342,39 @@ structure Library where
   everything was sent (Close; `Main.lean` calls it again after the window closed). -/
   flush : IO Bool
 
-/-- A page render running on a worker thread (task 8.8): what it renders, when it was asked
-for (`IO.monoNanosNow`) and the task, which returns the result and the render time in
-nanoseconds. -/
+/-- What a render job gives: the result and the render time (ns), or `none` when it was
+cancelled (task 12.2c: superseded before the worker answered; nothing is shown or cached). -/
+abbrev RenderOut := Option (Except Error Clip.Image × Nat)
+
+/-- A page render running on a worker thread (task 8.8) or queued for the document worker
+(task 12.2c): what it renders, when it was asked for (`IO.monoNanosNow`), the task, which
+returns the result and the render time in nanoseconds, and the worker request id. -/
 structure Job where
   /-- Document generation, page, zoom and rotation rendered. -/
   key : View.Key
   /-- Submission time (ns). -/
   start : Nat
-  /-- The render (`IO.asTask` on a dedicated thread). -/
-  task : Task (Except IO.Error (Except Error Clip.Image × Nat))
+  /-- The render (`IO.asTask` on a dedicated thread, or the worker's reply). -/
+  task : Task RenderOut
+  /-- The worker request (`Worker.Session.cancel`); `none` for an in-process render. -/
+  id : Option Nat := none
+  /-- Its reservation in `State.pool` (task 12.3), released when the job leaves its list. -/
+  ticket : Option Budget.Ticket := none
+
+/-- A text-index or links request queued for the document worker (task 12.2d): the page, the
+document generation it was asked for, the worker request id and the reply. -/
+structure SideJob where
+  /-- Page index. -/
+  page : Nat
+  /-- `State.gen` when it was asked for (a reply for another generation is not cached). -/
+  gen : Nat
+  /-- The worker request (`Worker.Session.cancel`, `raise`). -/
+  id : Nat
+  /-- The worker's reply. -/
+  task : Task Worker.Reply
+  /-- Its reservation in `State.pool` (task 12.3), released when the reply is there or the
+  request is dropped (`sweepSide`, `dropSideJob`). -/
+  ticket : Option Budget.Ticket := none
 
 /-- The free-text editor open on the canvas (task 9.9). -/
 structure FtEdit where
@@ -374,8 +421,8 @@ structure State where
   rot : SafePdf.Core.Doc.Rotation := .r0
   /-- Screen scale: pixels per point (`tk scaling`). -/
   scaling : Rat := 4 / 3
-  /-- Rendered pages. -/
-  cache : View.Cache := {}
+  /-- Rendered pages (task 12.3b: at most `Budget.ceilings.cacheBytes`). -/
+  cache : View.Cache := { budget := Budget.ceilings.cacheBytes }
   /-- Substitute programs for non-embedded fonts (task 7.7, `Shell.Fonts`), found at start-up
   and parsed on first use. -/
   subst : SafePdf.Core.Raster.Subst.SubstFonts := {}
@@ -536,6 +583,42 @@ structure State where
   renderQueued : Bool := false
   /-- Renders running on worker threads (task 8.8), at most `maxJobs`. -/
   jobs : Array Job := #[]
+  /-- Task 12.3: the reservations of the work in flight (`Budget.Pool`, ceiling
+  `Budget.ceilings.poolBytes`): every render, thumbnail and text or links request reserves its
+  bytes before it is dispatched and releases them where its job leaves its list. -/
+  pool : Budget.Pool := Budget.Pool.empty Budget.ceilings.poolBytes
+  /-- A page render waits for the pool (`renderMore` runs again from `poll`). -/
+  budgetWait : Bool := false
+  /-- Most bytes ever reserved at once (the interleave scenario's measurement). -/
+  poolPeak : Nat := 0
+  /-- Operations that waited for the pool, thumbnails rendered smaller for it, operations
+  refused by it, text requests dispatched without a reservation (expected 0), searches stopped
+  by their work allowance. -/
+  budgetWaits : Nat := 0
+  /-- See `budgetWaits`. -/
+  budgetDegraded : Nat := 0
+  /-- See `budgetWaits`. -/
+  budgetRefused : Nat := 0
+  /-- See `budgetWaits`. -/
+  budgetUnreserved : Nat := 0
+  /-- See `budgetWaits`. -/
+  searchStops : Nat := 0
+  /-- Task 12.3b: the reservations of the live Tk photos (`Budget.Pool`, ceiling
+  `Budget.ceilings.photoPoolBytes`): every page photo and thumbnail holds one
+  (`Budget.photoBytes`) from its `put` until its `image delete`. -/
+  photoPool : Budget.Pool := Budget.Pool.empty Budget.ceilings.photoPoolBytes
+  /-- The photo each ticket of `photoPool` belongs to (its Tk image name). -/
+  photoTix : Array (String × Budget.Ticket) := #[]
+  /-- Most bytes the live photos ever held at once (the interleave scenario's measurement). -/
+  photoPeak : Nat := 0
+  /-- Page photos evicted to make room for a page in view, and page photos refused for lack of
+  room (pages in view: a message in the page frame; neighbours: deferred). -/
+  photoEvicted : Nat := 0
+  /-- See `photoEvicted`. -/
+  photoRefused : Nat := 0
+  /-- Neighbouring pages (not in view) whose photo did not fit: not rendered or shown again
+  until a photo is released (`missingPages` leaves them out). -/
+  photoDeferred : List Nat := []
   /-- A `poll` event is scheduled (`ensurePoll`). -/
   pollQueued : Bool := false
   /-- How long (ms) an event that must show pages now (`showNow`) waits for their renders
@@ -580,6 +663,30 @@ structure State where
   moveFrom : Option (Nat × Pt × Pt) := none
   /-- The pop-over slider row being dragged (task 9.9). -/
   edSlide : Option Nat := none
+  /-- The document worker session (task 12.2c); `none`: everything renders in this process. -/
+  worker : Option Worker.Session := none
+  /-- Why there is no worker session (shown in the status line after every open). -/
+  workerNote : String := ""
+  /-- Bumped whenever the document the pages are rendered from changes (an open, a preview of
+  edited saved marks, Close): the worker's document id. -/
+  srcSerial : Nat := 0
+  /-- The `srcSerial` whose bytes the worker session has (`Worker.Session.setDoc`). -/
+  workerSrc : Option Nat := none
+  /-- Renders the worker answered and their total time (ns, request to answer; smoke
+  measurements). -/
+  workerRenders : Nat := 0
+  /-- See `workerRenders`. -/
+  workerNs : Nat := 0
+  /-- Worker renders cancelled (superseded) before they were answered. -/
+  cancelledRenders : Nat := 0
+  /-- Text-index requests queued for the document worker (task 12.2d, `pageIndex`). -/
+  textJobs : Array SideJob := #[]
+  /-- Links requests queued for the document worker (task 12.2d, `linksOf`). -/
+  linkJobs : Array SideJob := #[]
+  /-- Text indexes and link lists the worker answered (smoke measurements, task 12.2d). -/
+  workerTexts : Nat := 0
+  /-- See `workerTexts`. -/
+  workerLinks : Nat := 0
 
 /-- The limits the viewer parses and renders with. -/
 def limits : Limits := Limits.default
@@ -609,12 +716,12 @@ def State.pageCount (s : State) : Nat :=
   | none => 0
 
 /-- View parameters of page `p` of `doc` at the layout zoom `z0` (capped per page at
-`View.maxViewPixels`). -/
+`Budget.Ceilings.pagePixels`, task 12.3b). -/
 def viewParamsAt (s : State) (doc : Doc) (p : Nat) (z0 : Rat) : Option ViewParams :=
   doc.pages[p]?.map fun page =>
     let r := rotAdd page.rotate s.rot
     let bx := Box.ofRect page.cropBox
-    let (z, capped) := View.capZoom View.maxViewPixels z0 r bx
+    let (z, capped) := View.capZoom Budget.ceilings.pagePixels z0 r bx
     ⟨z, r, bx, capped, View.cropped limits.maxPageSide z r bx⟩
 
 /-- The zoom of a layout, chosen (`Toolbar.ZoomChoice.zoomWith`) for page `basis`: its size,
@@ -856,15 +963,80 @@ proc ::safepdf::rrect {c x0 y0 x1 y1 r args} {
 # Translucent highlight fills (task 10.10; Tk Aqua has no stipples): a canvas image item showing
 # a photo filled with colour rgb (6 hex digits) at alpha a (2 hex digits), one photo per colour,
 # alpha and size, shared by every item of that size (search hits of one word, full lines).
+# Task 10.c1: Tk 9 takes `#RRGGBBAA` in `photo put`; Tk 8.6 (Ubuntu's tk-dev) does not (\"can't
+# parse color\") and has no `get -withalpha`. There the fill tiles a one-pixel RGBA PNG (built
+# here; Tk 8.6 reads PNG alpha and blends partly transparent photos on X11) with `copy -to`,
+# and `::safepdf::pixel` reads a pixel back as a one-pixel PNG. Decided once, at start;
+# SAFEPDF_TINT_PNG=1 forces the Tk 8.6 paths (the smoke test runs them on Aqua).
+set ::safepdf::tintRgba [expr {![catch {
+  image create photo ::safepdf::tintProbe -width 1 -height 1
+  ::safepdf::tintProbe put {{#3874f25a}}
+}]}]
+catch {image delete ::safepdf::tintProbe}
+set ::safepdf::getAlpha [expr {![catch {
+  image create photo ::safepdf::tintProbe -width 1 -height 1
+  ::safepdf::tintProbe get 0 0 -withalpha
+}]}]
+catch {image delete ::safepdf::tintProbe}
+if {[info exists ::env(SAFEPDF_TINT_PNG)] && $::env(SAFEPDF_TINT_PNG) eq \"1\"} {
+  set ::safepdf::tintRgba 0; set ::safepdf::getAlpha 0
+}
+# A PNG chunk: length, type, data, CRC-32 of type and data.
+proc ::safepdf::pngChunk {type data} {
+  set td [encoding convertto iso8859-1 $type]$data
+  return [binary format I [string length $data]]$td[binary format I [zlib crc32 $td]]
+}
+# A one-pixel PNG (8-bit RGBA, colour type 6) of colour rgb (6 hex digits) at alpha a (2 hex
+# digits).
+proc ::safepdf::rgbaPng {rgb a} {
+  scan $rgb$a %2x%2x%2x%2x r g b al
+  set px [binary format c5 [list 0 $r $g $b $al]]
+  return [binary format H* 89504e470d0a1a0a][::safepdf::pngChunk IHDR [binary format IIc5 1 1 {8 6 0 0 0}]][::safepdf::pngChunk IDAT [zlib compress $px]][::safepdf::pngChunk IEND {}]
+}
+# Fills photo img (w x h) with colour rgb at alpha a.
+proc ::safepdf::tintFill {img rgb a w h} {
+  if {$::safepdf::tintRgba} {
+    $img put [list [list #$rgb$a]] -to 0 0 $w $h
+    return
+  }
+  set src ::safepdf::tintpx_${rgb}_$a
+  if {[catch {image type $src}]} {
+    image create photo $src -format png -data [binary encode base64 [::safepdf::rgbaPng $rgb $a]]
+  }
+  $img copy $src -to 0 0 $w $h -compositingrule set
+}
 proc ::safepdf::tint {c x0 y0 x1 y1 rgb a tags} {
   set w [expr {$x1 - $x0}]; set h [expr {$y1 - $y0}]
   if {$w < 1 || $h < 1} return
   set img ::safepdf::tint_${rgb}_${a}_${w}_$h
   if {[catch {image type $img}]} {
     image create photo $img -width $w -height $h
-    $img put [list [list #$rgb$a]] -to 0 0 $w $h
+    ::safepdf::tintFill $img $rgb $a $w $h
   }
   $c create image $x0 $y0 -anchor nw -image $img -tags $tags
+}
+# The pixel (x, y) of photo img as `R G B A` (smoke probes): Tk 9's `get -withalpha`; on Tk 8.6
+# the pixel written as a one-pixel PNG and decoded (IHDR colour type, inflated IDAT; with one
+# pixel every PNG filter leaves the bytes as they are).
+proc ::safepdf::pixel {img x y} {
+  if {$::safepdf::getAlpha} { return [$img get $x $y -withalpha] }
+  set d [$img data -format png -from $x $y [expr {$x + 1}] [expr {$y + 1}]]
+  if {[string range $d 1 3] ne \"PNG\"} { set d [binary decode base64 $d] }
+  set i 8; set idat {}; set ct 6
+  while {$i + 12 <= [string length $d]} {
+    binary scan $d @${i}Iua4 n t
+    set body [string range $d [expr {$i + 8}] [expr {$i + 7 + $n}]]
+    if {$t eq \"IHDR\"} { binary scan $body @9cu ct }
+    if {$t eq \"IDAT\"} { append idat $body }
+    incr i [expr {12 + $n}]
+  }
+  binary scan [zlib decompress $idat] @1cu* px
+  switch -- $ct {
+    0 { return [list [lindex $px 0] [lindex $px 0] [lindex $px 0] 255] }
+    4 { return [list [lindex $px 0] [lindex $px 0] [lindex $px 0] [lindex $px 1]] }
+    2 { return [concat [lrange $px 0 2] 255] }
+    default { return [lrange $px 0 3] }
+  }
 }
 # Deletes the tint photos no canvas item shows any more (after a redraw of the overlays).
 proc ::safepdf::tintGc {} {
@@ -1534,6 +1706,10 @@ grid columnconfigure .v 0 -weight 1
 label .status -text {} -anchor w -background $::safepdf::col(bar) \\
   -foreground $::safepdf::col(dim) -font ::safepdf::fBar -padx 6 -pady 2 -borderwidth 0
 frame .statusline -height 1 -background $::safepdf::col(line)
+# Task 12.5: the trusted identity line (`syncIdentity`), packed above the status line while
+# the document has the window in full screen or hides parts of it.
+label .ident -text {} -anchor w -background $::safepdf::col(text) -foreground #ffffff \\
+  -font ::safepdf::fBar -padx 6 -pady 3 -borderwidth 0
 pack .bar -side top -fill x
 pack .barline -side top -fill x
 pack .status -side bottom -fill x
@@ -2067,19 +2243,258 @@ bind all <ButtonPress-1> {+::safepdf::clickAway %W}
 focus .c
 "
 
+/-! ## The document worker (task 12.2c) -/
+
+/-- How long a worker request may run before the worker is killed (ms). Smoke mode may set
+another value with `SAFEPDF_WORKER_DEADLINE_MS`. -/
+def workerDeadlineMs : Nat := 20000
+
+/-- Marks an error text that comes from the document worker (`workerErr`, `pageErr`). -/
+def workerTag : String := "\x00worker:"
+
+/-- An error the document worker reported (or the failure of a worker request), as an `Error`
+whose text `pageErr` shows as it is. -/
+def workerErr (msg : String) : Error := .unsupported (workerTag ++ msg)
+
+/-- The text of a page's render error: `renderError`, or the worker's own text. -/
+def pageErr (e : Error) : String :=
+  match e with
+  | .unsupported w =>
+    if w.startsWith workerTag then String.ofList (w.toList.drop workerTag.length)
+    else renderError e
+  | _ => renderError e
+
+/-- What went wrong with a worker request, as text. -/
+def failText : Worker.ClientError → String
+  | .notEncodable => "the request does not fit the protocol"
+  | .timeout => "no answer in time"
+  | .exited d => d
+  | .tooLong n => s!"its answer of {n} bytes is above the cap"
+  | .badFrame _ => "its answer does not decode"
+
+/-- The status text of a render that hit the deadline. -/
+def timeoutText (deadlineMs : Nat) : String :=
+  let t := if deadlineMs % 1000 == 0 then s!"{deadlineMs / 1000} s" else s!"{deadlineMs} ms"
+  s!"rendering stopped: the document took too long (no answer within {t}; its worker was stopped)"
+
+/-- A render job's outcome from the worker's reply. The image is checked against its size
+before Tk sees it (`Shim.photoPut` reads `4·w·h` bytes). -/
+def outOfReply (deadlineMs : Nat) : Worker.Reply → RenderOut
+  | .response (.image w h data) ns =>
+    if data.size == 4 * w * h then some (.ok ⟨w, h, data⟩, ns)
+    else some (.error (workerErr
+      s!"the document worker sent a malformed image ({w}x{h}, {data.size} bytes)"), ns)
+  | .response (.error _ msg) ns => some (.error (workerErr msg), ns)
+  | .response _ ns => some (.error (workerErr "the document worker answered with another message"), ns)
+  | .failed .timeout => some (.error (workerErr (timeoutText deadlineMs)), 0)
+  | .failed e => some (.error (workerErr s!"the document worker stopped: {failText e}"), 0)
+  | .cancelled => none
+
+/-- The worker session and document id to render `doc`'s pages with (task 12.2c): a session
+exists and the bytes fit the protocol. Since task 12.2d the worker renders under the layers
+state of the request and with the viewer's own font search (`workerStart`), so neither keeps a
+render in this process. Sends the bytes (`State.view`'s when saved marks are previewed) to the
+session when the document changed (`srcSerial`). -/
+def workerFor (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session × Nat)) := do
+  let s ← st.get
+  let some ses := s.worker | return none
+  let d := s.view.getD doc
+  if d.file.bytes.size > limits.maxInputBytes then return none
+  if s.workerSrc != some s.srcSerial then
+    ses.setDoc (some (s.srcSerial, d.file.bytes, true))
+    st.modify ({ · with workerSrc := some s.srcSerial })
+  return some (ses, s.srcSerial)
+
+/-- The worker session for the open document's text index and links (task 12.2d): as
+`workerFor`, but only while the pages are rendered from `doc` itself (`State.view` none) —
+the text index and the links are read from `doc`, never from a preview of edited saved marks
+(those are read in this process, as before). -/
+def workerForText (st : IO.Ref State) (doc : Doc) : IO (Option (Worker.Session × Nat)) := do
+  if (← st.get).view.isSome then return none
+  workerFor st doc
+
+/-! ## The reservation pool (task 12.3, `Budget`) -/
+
+/-- Releases reservation `t` (none: nothing). Releasing a ticket twice changes nothing
+(`Budget.Pool.release_release`). -/
+def releaseTicket (st : IO.Ref State) (t : Option Budget.Ticket) : IO Unit :=
+  if let some t := t then st.modify fun s => { s with pool := s.pool.release t } else pure ()
+
+/-- Releases the reservations of the text and links requests whose reply is there (the reply
+is a small value; the reservation covered the request in flight). -/
+def sweepSide (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let sweep (js : Array SideJob) : IO (Array SideJob × List Budget.Ticket) := do
+    let mut out := #[]
+    let mut freed := []
+    for j in js do
+      if let some t := j.ticket then
+        if ← IO.hasFinished j.task then
+          out := out.push { j with ticket := none }
+          freed := t :: freed
+          continue
+      out := out.push j
+    return (out, freed)
+  let (ts, f1) ← sweep s.textJobs
+  let (ls, f2) ← sweep s.linkJobs
+  st.modify fun s => { s with textJobs := ts, linkJobs := ls,
+                              pool := (f1 ++ f2).foldl Budget.Pool.release s.pool }
+
+/-- **Asks the pool for operation `o`** (after `sweepSide`): on `reserved` the new pool is
+kept and the peak updated; waits, lowered quality and refusals are counted. -/
+def admit (st : IO.Ref State) (o : Budget.Op) : IO Budget.Outcome := do
+  sweepSide st
+  let s ← st.get
+  let out := s.pool.admit Budget.ceilings o
+  match out with
+  | .reserved _ q k =>
+    st.modify fun s => { s with pool := q, poolPeak := max s.poolPeak q.used,
+                                budgetDegraded := s.budgetDegraded + (if k > 0 then 1 else 0) }
+  | .wait => st.modify fun s => { s with budgetWaits := s.budgetWaits + 1 }
+  | .refuse => st.modify fun s => { s with budgetRefused := s.budgetRefused + 1 }
+  return out
+
+/-- `b` bytes in MiB, rounded up. -/
+def mibOf (b : Nat) : Nat := (b + 1048575) / 1048576
+
+/-- **Reserves an output of `bytes`** (task 12.3b: Save, XFDF export, `Budget.Op.output`) in
+the work pool: its ticket, or why not — larger than the whole pool (refused), or the work in
+flight leaves too little now. -/
+def reserveOutput (st : IO.Ref State) (bytes : Nat) : IO (Except String Budget.Ticket) := do
+  match ← admit st (.output bytes) with
+  | .reserved t _ _ => return .ok t
+  | .refuse =>
+    return .error s!"it needs about {mibOf bytes} MiB in memory, more than the viewer's \
+      {mibOf (← st.get).pool.ceiling} MiB budget for work in flight"
+  | .wait =>
+    let p := (← st.get).pool
+    return .error s!"it needs about {mibOf bytes} MiB in memory and the pages being rendered \
+      hold {mibOf p.used} of the viewer's {mibOf p.ceiling} MiB budget for work in flight; \
+      try again when they are done"
+
+/-- Runs `k` with an output of `bytes` reserved (`reserveOutput`), released afterwards
+whatever happens; `refused` with the reason when it cannot be reserved. -/
+def withOutput {α : Type} (st : IO.Ref State) (bytes : Nat) (refused : String → IO α)
+    (k : IO α) : IO α := do
+  match ← reserveOutput st bytes with
+  | .error m => refused m
+  | .ok t =>
+    try k finally releaseTicket st (some t)
+
+/-- The pixel size of the render `key` of `doc` (the renderer crops at `Limits.maxPageSide`). -/
+def keyPixels (doc : Doc) (key : View.Key) : Nat × Nat :=
+  match doc.pages[key.page]? with
+  | some page =>
+    let (w, h) := View.pixelSize key.zoom (rotAdd page.rotate key.rot) (Box.ofRect page.cropBox)
+    (min w limits.maxPageSide, min h limits.maxPageSide)
+  | none => (0, 0)
+
+/-- The reservation of a text or links request: reserved at once, or (`optional`) `none` when
+the pool says wait; otherwise the GUI waits for text requests in flight to answer (they release
+their reservations) and asks again. Images leave `Budget.Ceilings.textReserve` to text, so only
+text requests can make text wait; should none be in flight, the request goes without a
+reservation and is counted (`budgetUnreserved`, expected 0). -/
+def textTicket (st : IO.Ref State) (optional : Bool) : IO (Option (Option Budget.Ticket)) := do
+  for _ in [0:64] do
+    match ← admit st .text with
+    | .reserved t _ _ => return some (some t)
+    | .refuse => break
+    | .wait =>
+      if optional then return none
+      let s ← st.get
+      let busy := (s.textJobs ++ s.linkJobs).filter (·.ticket.isSome)
+      let some j := busy[0]? | break
+      discard <| IO.wait j.task
+  st.modify fun s => { s with budgetUnreserved := s.budgetUnreserved + 1 }
+  return some none
+
+/-- The worker request of page `p`'s text index (`links := false`) or links: the one queued for
+the current generation, raised to `prio` when that is more urgent, else a new one with priority
+`prio`, which first reserves its bytes in the pool (task 12.3, `textTicket`; `optional`: give
+up, `none`, rather than wait for the pool). Requests of other generations are cancelled and
+forgotten (their reservations released). -/
+def sideJob (st : IO.Ref State) (ses : Worker.Session) (src : Nat) (links : Bool) (p prio : Nat)
+    (optional : Bool := false) : IO (Option SideJob) := do
+  let s ← st.get
+  let jobs := if links then s.linkJobs else s.textJobs
+  let (old, cur) := jobs.partition (·.gen != s.gen)
+  for j in old do
+    ses.cancel j.id
+    releaseTicket st j.ticket
+  let set (js : Array SideJob) (s : State) : State :=
+    if links then { s with linkJobs := js } else { s with textJobs := js }
+  match cur.find? (·.page == p) with
+  | some j =>
+    ses.raise j.id prio
+    st.modify (set cur)
+    return some j
+  | none =>
+    st.modify (set cur)
+    let some ticket ← textTicket st optional | return none
+    let req := if links then Worker.Protocol.Request.viewLinks p else .pageIndex p s.oc
+    let (id, task) ← ses.submit src req prio
+    let j : SideJob := ⟨p, s.gen, id, task, ticket⟩
+    st.modify fun s => set ((if links then s.linkJobs else s.textJobs).push j) s
+    return some j
+
+/-- Takes the answered request `j` out of the queued text or links requests. -/
+def dropSideJob (st : IO.Ref State) (links : Bool) (j : SideJob) : IO Unit := do
+  let s ← st.get
+  let held := ((if links then s.linkJobs else s.textJobs).find? (·.id == j.id)).bind (·.ticket)
+  releaseTicket st held
+  st.modify fun s => if links then { s with linkJobs := s.linkJobs.filter (·.id != j.id) }
+    else { s with textJobs := s.textJobs.filter (·.id != j.id) }
+
+/-- Shown while a page's text index is still with the worker (`pageIndex … (wait := false)`). -/
+def pendingText : String := "the page text is being read"
+
+/-- A page's text index from the worker's reply (task 12.2d): the cells, line directions and
+hidden flags it sent, with the normalised search text computed here (`Select.normChars`); an
+error text for a failed request; `none` when the request was cancelled (not cached). -/
+def indexOfReply : Worker.Reply → Option (Except String Select.PageIndex)
+  | .response (.pageIndex cs ds hs) _ =>
+    if hs.length != cs.length then
+      some (.error "the document worker sent a malformed text index")
+    else
+      let cells := (cs.map fun c =>
+        ({ text := c.text, sep := c.sep, box := c.box, line := c.line } : Select.Cell)).toArray
+      some (.ok (Select.PageIndex.ofCells cells ds.toArray hs.toArray))
+  | .response (.error _ m) _ => some (.error m)
+  | .response _ _ => some (.error "the document worker answered with another message")
+  | .failed e => some (.error s!"the document worker stopped: {failText e}")
+  | .cancelled => none
+
 /-! ## Text index and highlights (task 8.2c) -/
 
 /-- The text index of page `p`: extracted on first use (`Annot.extractDocPageAnnots` with a
 fresh budget, as the text view and the renderer) and cached for the open document. Content
 hidden by the layers' state (`State.oc`, task 9.r11b) is not in it, so it can be neither
-selected nor found. -/
-def pageIndex (st : IO.Ref State) (p : Nat) : IO (Except String Select.PageIndex) := do
+selected nor found. Task 12.2d: with a document worker (`workerForText`) the worker extracts it
+(`Worker.Protocol.Request.pageIndex`, the same calls under the same layers state) and this
+process only waits for the reply — with `wait := false` (pointer motion) it does not wait and
+gives `pendingText` until the reply is there. A request that failed (the worker stopped, the
+deadline passed) is cached as an error: the page's text is then never parsed in this process. -/
+def pageIndex (st : IO.Ref State) (p : Nat) (wait : Bool := true) :
+    IO (Except String Select.PageIndex) := do
   let s ← st.get
   let some doc := s.doc | return .error "no document"
   match s.texts[p]? with
   | some (some r) => return r
   | _ =>
     let some page := doc.pages[p]? | return .error "page index out of range"
+    if let some (ses, src) ← workerForText st doc then
+      let some j ← sideJob st ses src false p (if wait then 0 else 1)
+        | return .error "the page text request was not made"
+      if !wait && !(← IO.hasFinished j.task) then return .error pendingText
+      let reply ← IO.wait j.task
+      dropSideJob st false j
+      match indexOfReply reply with
+      | none => return .error "the page text request was cancelled"
+      | some r =>
+        st.modify fun s =>
+          if s.gen == j.gen then { s with texts := s.texts.modify p (fun _ => some r),
+                                          workerTexts := s.workerTexts + 1 } else s
+        return r
     let r ← IO.lazyPure fun _ =>
       match (SafePdf.Core.Annot.extractDocPageAnnots limits doc page
           (SafePdf.Core.Filter.Budget.init limits) (oc := s.oc)).1 with
@@ -2438,53 +2853,183 @@ def cached (st : IO.Ref State) (key : View.Key) : IO (Option (Except Error Clip.
   st.modify ({ · with cache })
   return hit
 
-/-- Starts rendering `key` on a dedicated worker thread (task 8.8), unless a render of it is
-already running. The task only runs the pure renderer on the document (`State.view`, else
-`doc`) and the substitute fonts; it never touches Tk or the state. -/
-def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
+
+/-- Starts rendering `key`: queued for the document worker with priority `prio` when it can
+render it (`workerFor`), else on a dedicated thread in this process (task 8.8: the task only
+runs the pure renderer on the document (`State.view`, else `doc`) and the substitute fonts; it
+never touches Tk or the state). Returns the task and the worker request id. -/
+def renderTask (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat) :
+    IO (Task RenderOut × Option Nat) := do
+  if let some (ses, src) ← workerFor st doc then
+    let (id, t) ← ses.submit src
+      (.render key.page key.zoom (Worker.rotationToNat key.rot) (← st.get).oc) prio
+    return (t.map (sync := true) (outOfReply ses.cfg.deadlineMs), some id)
   let s ← st.get
-  if s.jobs.any (·.key == key) then return
   let d := s.view.getD doc
   let subst := s.subst
   let oc := s.oc
-  let start ← IO.monoNanosNow
   let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
     let r ← renderPage d key.page key.zoom key.rot subst oc
     let t1 ← IO.monoNanosNow
     return (r, t1 - t0)
-  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task⟩ }
+  let out : Except IO.Error (Except Error Clip.Image × Nat) → RenderOut
+    | .ok v => some v
+    | .error e => some (.error (.malformed 0 s!"render failed: {e}"), 0)
+  return (task.map (sync := true) out, none)
+
+/-- Starts rendering `key` (`renderTask`, priority `prio`: 0 for the page that must be shown
+now), unless a render of it is already running. -/
+def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat := 1) : IO Unit := do
+  let s ← st.get
+  if s.jobs.any (·.key == key) then return
+  -- Task 12.3: the image's bytes are reserved before dispatch; without room the page waits
+  -- (`poll` asks again after a release); an image larger than the pool is refused.
+  let (w, h) := keyPixels doc key
+  let ticket ← match ← admit st (.page w h) with
+    | .reserved t _ _ => pure t
+    | .wait =>
+      st.modify ({ · with budgetWait := true })
+      return
+    | .refuse =>
+      st.modify fun s => { s with cache := s.cache.insert key (.error (.limitExceeded .imagePixels)) }
+      return
+  let start ← IO.monoNanosNow
+  let (task, id) ← renderTask st doc key prio
+  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task, id, some ticket⟩ }
+  -- Task 12.2d: with the worker, a page in view also gets its links asked for (after the
+  -- renders of its priority), so that pointer motion finds them without waiting; the current
+  -- page (priority 0) its text index too.
+  if id.isSome && prio ≤ 1 then
+    if let some (ses, src) ← workerForText st doc then
+      let s ← st.get
+      if !(s.links[key.page]?.any (·.isSome)) then
+        discard <| sideJob st ses src true key.page 1 (optional := true)
+      if prio == 0 && !(s.texts[key.page]?.any (·.isSome)) then
+        discard <| sideJob st ses src false key.page 1 (optional := true)
 
 /-- Whether a render of `key` is running. -/
 def State.running (s : State) (key : View.Key) : Bool :=
   s.jobs.any (·.key == key)
 
-/-- Takes the finished job `j` out of `jobs` and returns its result and render time; the
-result goes into the cache when it is for the open document. -/
-def finish (st : IO.Ref State) (j : Job) : IO (Except Error Clip.Image × Nat) := do
-  let (r, ns) : Except Error Clip.Image × Nat := match j.task.get with
-    | .ok v => v
-    | .error e => (.error (.malformed 0 s!"render failed: {e}"), 0)
-  st.modify fun s => { s with jobs := s.jobs.filter (·.key != j.key) }
-  if j.key.gen == (← st.get).gen then
-    st.modify fun s => { s with cache := s.cache.insert j.key r, renderNs := s.renderNs + ns,
-                                renders := s.renders + 1 }
-  return (r, ns)
+/-- Raises the worker render of `key`, if one is queued, to priority `prio` (task 12.2c: a
+neighbour that became the current page). -/
+def raiseJob (st : IO.Ref State) (key : View.Key) (prio : Nat) : IO Unit := do
+  let s ← st.get
+  let some ses := s.worker | return
+  for j in s.jobs do
+    if j.key == key then
+      if let some id := j.id then ses.raise id prio
 
-/-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view). -/
-def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
+/-- Takes the finished job `j` out of `jobs` and returns its result and render time; the
+result goes into the cache when it is for the open document. A cancelled worker render
+(task 12.2c) gives `none` and counts as a dropped stale result. -/
+def finish (st : IO.Ref State) (j : Job) : IO RenderOut := do
+  releaseTicket st j.ticket
+  st.modify fun s => { s with jobs := s.jobs.filter (·.key != j.key) }
+  match j.task.get with
+  | none =>
+    st.modify fun s => { s with staleDropped := s.staleDropped + 1,
+                                cancelledRenders := s.cancelledRenders + 1 }
+    return none
+  | some (r, ns) =>
+    if j.key.gen == (← st.get).gen then
+      let w := if j.id.isSome then 1 else 0
+      st.modify fun s => { s with cache := s.cache.insert j.key r, renderNs := s.renderNs + ns,
+                                  renders := s.renders + 1, workerRenders := s.workerRenders + w,
+                                  workerNs := s.workerNs + w * ns }
+    return some (r, ns)
+
+/-- Cancels the worker renders whose result would be dropped (task 12.2c): pages of another
+document generation or now laid out at another zoom or rotation, thumbnails of another
+generation or rotation. Queued ones are dropped; a running one is killed after
+`Worker.SessionConfig.preemptMs`. -/
+def cancelStale (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let some ses := s.worker | return
+  for j in s.jobs do
+    if let some id := j.id then
+      let stale := j.key.gen != s.gen || (match slotOf s j.key.page with
+        | some sl => keyOf s sl != j.key
+        | none => false)
+      if stale then ses.cancel id
+  for j in s.thJobs do
+    if let some id := j.id then
+      if j.key.gen != s.gen || j.key.rot != s.rot then ses.cancel id
+
+/-! ## Live photos (task 12.3b, `Budget.Pool.admitPhoto`) -/
+
+/-- Releases the photo reservation of Tk image `name`; whether it held one. -/
+def photoUnreserve (st : IO.Ref State) (name : String) : IO Bool := do
+  match (← st.get).photoTix.find? (·.1 == name) with
+  | some (_, t) =>
+    st.modify fun s => { s with photoPool := s.photoPool.release t,
+                                photoTix := s.photoTix.filter (·.1 != name) }
+    return true
+  | none => return false
+
+/-- Reserves `bytes` for Tk image `name` in the photo pool (`Budget.Pool.admitPhoto`, after
+releasing `name`'s own reservation), evicting from `cands` (photo names, in eviction order)
+as needed: the names whose reservations were released for it (the caller deletes those
+photos), or `none` when it does not fit (nothing else is released). -/
+def photoAdmit (st : IO.Ref State) (name : String) (bytes : Nat) (thumb : Bool)
+    (cands : List String) : IO (Option (List String)) := do
+  discard <| photoUnreserve st name
+  let s ← st.get
+  let tix := cands.filterMap fun n => (s.photoTix.find? (·.1 == n)).map (·.2)
+  match s.photoPool.admitPhoto Budget.ceilings bytes thumb tix with
+  | some (es, t, q) =>
+    let names := es.filterMap fun e => (s.photoTix.find? (·.2 == e)).map (·.1)
+    let tix := (s.photoTix.filter (fun x => !names.contains x.1)).push (name, t)
+    st.modify fun s => { s with photoPool := q, photoTix := tix,
+                                photoPeak := max s.photoPeak q.used,
+                                photoEvicted := s.photoEvicted + names.length }
+    return some names
+  | none => return none
+
+-- The kept thumbnails are those `Budget.thumbs_fit_reserve` counts (98 px wide).
+#guard Sidebar.thumbBudget ≤ Budget.ceilings.thumbsKept && Sidebar.thumbW == 98
+
+/-- The prefix of the message a page in view shows when its photo was refused. -/
+def photoRefusal : String := "not shown"
+
+/-- The pages in view now (`View.visiblePages` of the canvas's view band). -/
+def inView (s : State) : IO (List Nat) := do
+  let some (a, b) := viewFracs (← run [".c", "yview"]) | return [s.page]
+  let px (f : Rat) : Nat := (f * (s.regionH : Rat) + 1 / 2).floor.toNat
+  return View.visiblePages s.places (px a) (px b)
+
+/-- Removes page `p`'s photo and its canvas items without asking for the deferred pages
+again (`dropPhoto`). -/
+def dropPhotoOnly (st : IO.Ref State) (p : Nat) : IO Unit := do
   discard <| run [".c", "delete", s!"w{p}"]
   if (← st.get).hasPhoto p then
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
     discard <| run [".c", "delete", s!"p{p}", s!"e{p}"]
     st.modify fun s => { s with photos := s.photos.filter (·.1 != p) }
 
-/-- Removes every page photo and page item from the canvas (task 9.3). -/
+/-- Removes page `p`'s photo and its canvas items (task 9.3: pages that left the view) and
+releases its reservation (task 12.3b). A release may make room: the deferred neighbours and
+the pages in view whose photo was refused are asked for again (their refusal messages go). -/
+def dropPhoto (st : IO.Ref State) (p : Nat) : IO Unit := do
+  dropPhotoOnly st p
+  if ← photoUnreserve st (photoOf p) then
+    let ds := (← st.get).photoDeferred
+    st.modify ({ · with photoDeferred := [] })
+    for q in ds do
+      if (← st.get).photos.any fun (r, x) => r == q && (match x with
+          | .error m => m.startsWith photoRefusal
+          | .ok _ => false) then
+        dropPhotoOnly st q
+
+/-- Removes every page photo and page item from the canvas (task 9.3) and releases their
+reservations. -/
 def clearPages (st : IO.Ref State) : IO Unit := do
   for (p, _) in (← st.get).photos do
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
+    discard <| photoUnreserve st (photoOf p)
   discard <| run [".c", "delete", "pageframe", "pimg", "perr", "pwait"]
-  st.modify ({ · with photos := #[] })
+  st.modify ({ · with photos := #[], photoDeferred := [] })
 
 /-- Draws the layout on the canvas (task 9.3): a white page frame with a 1 px grey border per
 slot (tags `pageframe fN`; the placeholder until the page's photo arrives) and the scroll
@@ -2508,6 +3053,40 @@ def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : 
   let s ← st.get
   match res with
   | .ok img =>
+    -- Task 12.3b: the photo's bytes are reserved in the photo pool first. A page in view may
+    -- evict the photos of pages not in view (farthest from the current page first); a
+    -- neighbour may not, and waits (deferred) instead; a page in view that still does not fit
+    -- shows a message.
+    let vis ← inView s
+    let visible := p == s.page || vis.contains p
+    let dist (q : Nat) : Nat := if q ≥ s.page then q - s.page else s.page - q
+    let cands : List Nat := if !visible then [] else
+      ((s.photos.toList.map (·.1)).filter fun q => q != p && q != s.page && !vis.contains q)
+        |>.mergeSort fun a b => dist a ≥ dist b
+    let bytes := Budget.photoBytes img.w img.h
+    match ← photoAdmit st (photoOf p) bytes false (cands.map photoOf) with
+    | none =>
+      st.modify fun s => { s with photoRefused := s.photoRefused + 1,
+                                  photoDeferred := p :: s.photoDeferred.filter (· != p) }
+      dropPhotoOnly st p
+      if visible then
+        let pl := sl.place
+        let s ← st.get
+        let msg := s!"{photoRefusal}: its image ({img.w}x{img.h} px) needs {bytes / 1048576} MiB \
+          and the page images in view already hold {s.photoPool.used / 1048576} of the \
+          {s.photoPool.ceiling / 1048576} MiB for page images; zoom out or scroll"
+        discard <| run [".c", "create", "text", toString (pl.x + pl.w / 2),
+          toString (pl.y + pl.h / 2), "-text", s!"page {p + 1}: {msg}", "-width",
+          toString (max 40 (pl.w - 20)), "-fill", "#5b5b66", "-justify", "center",
+          "-tags", s!"perr e{p}"]
+        discard <| run [".c", "lower", s!"e{p}"]
+        discard <| run [".c", "lower", "pageframe"]
+        st.modify fun s => { s with photos := s.photos.push (p, .error msg) }
+      return
+    | some evicted =>
+      for q in cands do
+        if evicted.contains (photoOf q) then dropPhotoOnly st q
+    let s ← st.get
     if !s.hasPhoto p then
       discard <| run ["image", "create", "photo", photoOf p]
       discard <| run [".c", "create", "image", toString sl.place.x, toString sl.place.y,
@@ -2521,12 +3100,12 @@ def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : 
     dropPhoto st p
     let pl := sl.place
     discard <| run [".c", "create", "text", toString (pl.x + pl.w / 2), toString (pl.y + pl.h / 2),
-      "-text", s!"page {p + 1}: cannot render: {renderError e}", "-width",
+      "-text", s!"page {p + 1}: cannot render: {pageErr e}", "-width",
       toString (max 40 (pl.w - 20)), "-fill", "#5b5b66", "-justify", "center",
       "-tags", s!"perr e{p}"]
     discard <| run [".c", "lower", s!"e{p}"]
     discard <| run [".c", "lower", "pageframe"]
-    st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .error (renderError e)) }
+    st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .error (pageErr e)) }
 
 /-- The placeholder of a page whose render is pending (task 8.8, after PDF.js's loading
 state): its white frame (`buildCanvas`) with a small grey "Rendering…" in the middle (tag
@@ -2569,7 +3148,7 @@ def showStatus (st : IO.Ref State) (how : String) : IO Unit := do
       | some (.scale p) => if vp.capped then View.zoomPct vp.zoom s.scaling else p
       | _ => View.zoomPct vp.zoom s.scaling
     let notes := (if vp.capped then
-        s!"; zoom limited to {View.maxViewPixels / 1048576} Mpx per page" else "") ++
+        s!"; zoom limited to {Budget.ceilings.pagePixels / 1048576} Mpx per page" else "") ++
       (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
     setStatus s!"{path}: {page}, {pct}% ({modeName s.zoomSel}), \
       rotation {View.rotDeg s.rot}, {w}x{h} px, {how}{notes}{modeNote s}{s.openNote}"
@@ -2601,12 +3180,16 @@ def viewBand (s : State) : IO (Option (Nat × Nat × Nat × Nat)) := do
   return some (px a s.regionH, px b s.regionH, px xa s.regionW, px xb s.regionW)
 
 /-- The pages to show for the view (`View.wantedPages`: visible, and one more each side) that
-have no photo yet, nearest to the current page first. -/
+have no photo yet, nearest to the current page first; neighbours deferred for lack of photo
+room (task 12.3b) are left out until a photo is released. -/
 def missingPages (st : IO.Ref State) : IO (List Nat) := do
   let s ← st.get
   if s.doc.isNone || s.shown.isNone then return []
   let some (top, bot, _, _) ← viewBand s | return []
-  let miss := (View.wantedPages s.places top bot).filter (!s.hasPhoto ·)
+  -- Task 12.3b: neighbours whose photo did not fit wait for a release (`photoDeferred`).
+  let vis := View.visiblePages s.places top bot
+  let miss := (View.wantedPages s.places top bot).filter fun p =>
+    !s.hasPhoto p && (!s.photoDeferred.contains p || vis.contains p || p == s.page)
   let d (p : Nat) : Nat := if p ≥ s.page then p - s.page else s.page - p
   return miss.mergeSort fun a b => d a ≤ d b
 
@@ -2645,7 +3228,7 @@ def place (st : IO.Ref State) (want : List Nat) (j : Job) (r : Except Error Clip
 /-- Schedules a `poll` event while renders are running (task 8.8). -/
 def ensurePoll (st : IO.Ref State) : IO Unit := do
   let s ← st.get
-  if (!s.jobs.isEmpty || !s.thJobs.isEmpty) && !s.pollQueued then
+  if (!s.jobs.isEmpty || !s.thJobs.isEmpty || s.budgetWait) && !s.pollQueued then
     st.modify ({ · with pollQueued := true })
     discard <| run ["after", toString pollMs, "::safepdf::emit poll"]
 
@@ -2656,6 +3239,7 @@ workers (`submit`, within `maxJobs`). The event waits for those renders at most 
 still missing get the placeholder (`showWaiting`) and arrive through `poll`. -/
 def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit := do
   let some doc := (← st.get).doc | return
+  cancelStale st
   let t0 ← IO.monoNanosNow
   for _ in [0:64] do
     let mut keys : List View.Key := []
@@ -2670,7 +3254,8 @@ def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit
         showPhoto st sl r
         if p == s.page then showStatus st "from cache"
       | none =>
-        if !s.running key && s.jobs.size < maxJobs then submit st doc key
+        if !s.running key && s.jobs.size < maxJobs then submit st doc key 0
+        else raiseJob st key 0
         if (← st.get).running key then keys := key :: keys else blocked := true
     -- Wait for the renders of these pages (or, without a time limit and with a page still
     -- waiting for a slot, for every running render).
@@ -2680,8 +3265,7 @@ def showNow (st : IO.Ref State) (pages : List Nat) (wait : Option Nat) : IO Unit
       if js.isEmpty then break
       let fin ← js.filterM (IO.hasFinished ·.task)
       for j in fin do
-        let (r, ns) ← finish st j
-        discard <| place st pages j r ns
+        if let some (r, ns) ← finish st j then discard <| place st pages j r ns
       if fin.size == js.size then break
       match wait with
       | none =>
@@ -2730,6 +3314,7 @@ worker render while slots are free (task 8.8: the current page may use every slo
 def renderMore (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with renderQueued := false })
   let some doc := (← st.get).doc | return
+  cancelStale st
   let mut shown := false
   for p in ← missingPages st do
     let s ← st.get
@@ -2742,7 +3327,8 @@ def renderMore (st : IO.Ref State) : IO Unit := do
       if p == s.page then showStatus st "from cache"
     | none =>
       let slots := if p == s.page then maxJobs else maxJobs - 1
-      if !s.running key && s.jobs.size < slots then submit st doc key
+      if !s.running key && s.jobs.size < slots then submit st doc key (if p == s.page then 0 else 1)
+      else if p == s.page then raiseJob st key 0
       showWaiting sl
   if shown then drawOverlay st
   ensurePoll st
@@ -2770,6 +3356,7 @@ def thumbZoom (s : State) (doc : Doc) (p : Nat) : Rat :=
 /-- Removes the thumbnail image of page `p` (eviction, task 9.r9). -/
 def dropThumb (st : IO.Ref State) (p : Nat) : IO Unit := do
   try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+  discard <| photoUnreserve st (thumbPhoto p)
   discard <| run [".ol.th", "delete", s!"thi{p}"]
   st.modify fun s => { s with thHave := s.thHave.filter (· != p) }
 
@@ -2778,6 +3365,7 @@ thumbnail renders finish on their own; `thumbPoll` drops their results. -/
 def clearThumbs (st : IO.Ref State) : IO Unit := do
   for p in (← st.get).thHave do
     try discard <| run ["image", "delete", thumbPhoto p] catch _ => pure ()
+    discard <| photoUnreserve st (thumbPhoto p)
   discard <| run [".ol.th", "delete", "all"]
   st.modify ({ · with thHave := [], thSlots := #[], thHeight := 0, thKey := none,
                       thMarked := none, thSel := none })
@@ -2855,19 +3443,13 @@ def thumbFocus (st : IO.Ref State) (p : Nat) : IO Unit := do
     "-width", "2", "-tags", "thfocus"]
   thumbSee st t
 
-/-- Starts rendering the thumbnail `key` on a dedicated worker thread (as `submit`). -/
-def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key) : IO Unit := do
-  let s ← st.get
-  let d := s.view.getD doc
-  let subst := s.subst
-  let oc := s.oc
+/-- Starts rendering the thumbnail `key` (as `submit`; priority 2 for the document worker,
+after every page render). -/
+def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key)
+    (ticket : Option Budget.Ticket := none) : IO Unit := do
   let start ← IO.monoNanosNow
-  let task ← IO.asTask (prio := .dedicated) do
-    let t0 ← IO.monoNanosNow
-    let r ← renderPage d key.page key.zoom key.rot subst oc
-    let t1 ← IO.monoNanosNow
-    return (r, t1 - t0)
-  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task⟩ }
+  let (task, id) ← renderTask st doc key 2
+  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task, id, ticket⟩ }
 
 /-- **Lazy thumbnail rendering** (task 9.r9): for the visible band of the panel
 (`thumbBand`), the visible thumbnails and `Sidebar.thumbMargin` more on each side
@@ -2887,9 +3469,15 @@ def thumbView (st : IO.Ref State) : IO Unit := do
     let s ← st.get
     if s.thHave.contains p then continue
     let key : View.Key := ⟨s.gen, p, thumbZoom s doc p, s.rot⟩
-    if s.thJobs.any (·.key == key) then continue
+    if s.thJobs.any (fun j => j.key.page == p && j.key.gen == s.gen && j.key.rot == s.rot) then
+      continue
     if s.thJobs.size ≥ thumbJobs || s.jobs.size ≥ maxJobs then break
-    thumbSubmit st doc key
+    -- Task 12.3: reserved before dispatch; without room at full size the thumbnail is
+    -- rendered at ½, ¼ or ⅛ of its zoom (`Budget.Pool.admit`), else it waits.
+    let (w, h) := keyPixels doc key
+    match ← admit st (.thumb w h) with
+    | .reserved t _ k => thumbSubmit st doc { key with zoom := key.zoom / ((2 ^ k : Nat) : Rat) } t
+    | _ => break
   ensurePoll st
 
 /-- Takes the finished thumbnail renders (task 9.r9) and shows those still laid out for the
@@ -2898,14 +3486,22 @@ open document and rotation: the image in photo `::safepdf::thN` on its frame (ta
 def thumbPoll (st : IO.Ref State) : IO Unit := do
   let done ← (← st.get).thJobs.filterM (IO.hasFinished ·.task)
   for j in done do
+    releaseTicket st j.ticket
     st.modify fun s => { s with thJobs := s.thJobs.filter (·.key != j.key) }
     let s ← st.get
     let p := j.key.page
     if s.thKey != some (j.key.gen, j.key.rot) || j.key.gen != s.gen || s.thHave.contains p then
       continue
     let some t := s.thSlots[p]? | continue
-    match j.task.get with
-    | .ok (.ok img, _) =>
+    -- A cancelled worker render (task 12.2c) leaves the thumbnail to be asked for again.
+    let some out := j.task.get | continue
+    match out with
+    | (.ok img, _) =>
+      -- Task 12.3b: a thumbnail reserves its photo in the photo pool (in the thumbnails'
+      -- reserve, which the kept thumbnails always fit: `Budget.thumbs_fit_reserve`).
+      if (← photoAdmit st (thumbPhoto p) (Budget.photoBytes img.w img.h) true []).isNone then
+        st.modify fun s => { s with photoRefused := s.photoRefused + 1 }
+        continue
       discard <| run ["image", "create", "photo", thumbPhoto p]
       Shim.photoPut (thumbPhoto p) img.w.toUInt32 img.h.toUInt32 img.data
       let x0 : Int := -((img.w / 2 : Nat) : Int)
@@ -2934,13 +3530,19 @@ def syncThumbs (st : IO.Ref State) : IO Unit := do
 (`finish`, into the cache), shows those still wanted (`place`), starts more (`renderMore`). -/
 def poll (st : IO.Ref State) : IO Unit := do
   st.modify ({ · with pollQueued := false })
+  cancelStale st
+  sweepSide st
+  -- Task 12.3: a page that waited for the pool is asked for again.
+  if (← st.get).budgetWait then
+    st.modify ({ · with budgetWait := false })
+    if (← st.get).doc.isSome then renderMore st
   let done ← (← st.get).jobs.filterM (IO.hasFinished ·.task)
   if !done.isEmpty then
     let want ← wantedNow st
     let mut shown := false
     for j in done do
-      let (r, ns) ← finish st j
-      if ← place st want j r ns then shown := true
+      if let some (r, ns) ← finish st j then
+        if ← place st want j r ns then shown := true
     if shown then drawOverlay st
     if (← st.get).doc.isSome then renderMore st
   -- Thumbnails (task 9.r9): finished ones shown, more started while page renders leave room.
@@ -2951,13 +3553,13 @@ def poll (st : IO.Ref State) : IO Unit := do
 /-- Renders every missing page now and waits for every running render (smoke tests and
 benchmarks). -/
 def settle (st : IO.Ref State) : IO Unit := do
+  cancelStale st
   viewChanged st
   for _ in [0:256] do
     let want ← wantedNow st
     for j in (← st.get).jobs do
       discard <| IO.wait j.task
-      let (r, ns) ← finish st j
-      discard <| place st want j r ns
+      if let some (r, ns) ← finish st j then discard <| place st want j r ns
     match ← missingPages st with
     | [] => break
     | miss => showNow st miss none
@@ -3327,7 +3929,7 @@ render cache, running renders and the thumbnails are stale: `syncThumbs` lays th
 when the panel shows), the text indexes dropped (hidden text is neither selectable nor
 found), the selection and the search hit cleared. -/
 def applyLayers (st : IO.Ref State) : IO Unit := do
-  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), shown := none,
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache), shown := none,
                               texts := Array.replicate s.texts.size none, sel := none,
                               hit := none, pressPt := none }
   for (p, _) in (← st.get).photos do dropPhoto st p
@@ -3376,9 +3978,55 @@ def syncViewVars (s : State) : IO Unit := do
   discard <| run ["set", "::safepdf::continuous", if s.scroll == .vertical then "1" else "0"]
   showViewChoice s s.doc.isSome
 
+/-- A file name or path as shown in the identity line: controls and bidi overrides
+(`Links.unsafeChar`, which could reorder or hide the surrounding text) become spaces. -/
+def identityClean (t : String) : String :=
+  t.map fun c => if Links.unsafeChar c then ' ' else c
+
+/-- **The trusted identity line** (task 12.5, Plan.md §6 Phase 12 "Honest UI for
+degraded/hidden content"): which application shows which file — the file name and its path
+(for a document opened from memory, bib-lean's, only its name), never anything the document
+says about itself (no `/Title`). -/
+def identityLine (path : Option String) (inMemory : Bool) : String :=
+  match path with
+  | none => s!"{Menu.appName}: no document"
+  | some p =>
+    let src := if inMemory then "opened from the library, not from a file" else identityClean p
+    s!"{Menu.appName} is showing {identityClean (baseName p)} ({src}) - this line is drawn by \
+      {Menu.appName}, never by the document"
+
+#guard identityLine none false == "SafePDF: no document"
+#guard identityLine (some "/a/b.pdf") false == "SafePDF is showing b.pdf (/a/b.pdf) - this line \
+  is drawn by SafePDF, never by the document"
+#guard identityLine (some "x\u202Eftp.pdf") true == "SafePDF is showing x ftp.pdf (opened from the \
+  library, not from a file) - this line is drawn by SafePDF, never by the document"
+
+/-- Whether the identity line is shown: a document is open and has the window in full screen
+or hides parts of it (toolbar, menubar or scroll bars), where it could imitate another
+application or a system dialog over the whole window. -/
+def State.showsIdentity (s : State) : Bool :=
+  s.doc.isSome && (s.fullScreen || s.hidden != (false, false, false))
+
+#guard !({} : State).showsIdentity && !({ fullScreen := true } : State).showsIdentity
+
+/-- Task 12.5: shows (with the current file) or hides the identity line `.ident`, a strip of
+the viewer's own window above the status line, outside the page canvas, so nothing the
+document draws can cover or imitate it in place (`identityLine`, `State.showsIdentity`).
+`setFullScreen` calls it before the window enters full screen, `applyChrome` after hiding. -/
+def syncIdentity (st : IO.Ref State) : IO Unit := do
+  let s ← st.get
+  let packed := (← run ["winfo", "manager", ".ident"]) == "pack"
+  if s.showsIdentity then
+    discard <| run [".ident", "configure", "-text", identityLine s.path s.inMemory]
+    if !packed then
+      discard <| run ["pack", ".ident", "-side", "bottom", "-fill", "x", "-after", ".statusline"]
+  else if packed then
+    discard <| run ["pack", "forget", ".ident"]
+
 /-- Shows or hides the toolbar, the menubar and the scroll bars (task 9.r8,
 `/ViewerPreferences /HideToolbar`, `/HideMenubar`, `/HideWindowUI`; `(false, false, false)`
-shows them all). On aqua the menubar cannot be removed (Tk keeps a default one there). -/
+shows them all). On aqua the menubar cannot be removed (Tk keeps a default one there). Task
+12.5: the identity line follows (`syncIdentity`). -/
 def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit := do
   let (tb, mb, ui) := hidden
   let old := (← st.get).hidden
@@ -3393,16 +4041,20 @@ def applyChrome (st : IO.Ref State) (hidden : Bool × Bool × Bool) : IO Unit :=
     else discard <| run ["grid", ".ys", ".xs"]
   discard <| run ["::safepdf::resizeSoon"]
   st.modify ({ · with hidden })
+  syncIdentity st
 
 /-- Enters or leaves full screen (task 9.r8, `/PageMode /FullScreen`): `wm attributes .
 -fullscreen`. Leaving applies the document's `/NonFullScreenPageMode` to the sidebar (task
-9.r9: UseThumbs opens the thumbnails). -/
+9.r9: UseThumbs opens the thumbnails). Task 12.5: the identity line is shown before the window
+enters full screen and hidden after it leaves (`syncIdentity`). -/
 def setFullScreen (st : IO.Ref State) (on : Bool) : IO Unit := do
   let s ← st.get
   if on == s.fullScreen then return
   discard <| run ["::safepdf::resizeSoon"]
-  discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
   st.modify ({ · with fullScreen := on })
+  if on then syncIdentity st
+  discard <| run ["wm", "attributes", ".", "-fullscreen", if on then "1" else "0"]
+  if !on then syncIdentity st
   if !on && s.doc.isSome then
     showSidebar st (Sidebar.onLoad (some s.afterFullScreen) (contentOf s))
 
@@ -3415,35 +4067,6 @@ def resetOpenView (st : IO.Ref State) : IO Unit := do
                               zoomSel := .auto, docTitle := none, openNote := "",
                               afterFullScreen := .useNone }
   syncViewVars (← st.get)
-
-/-- The zoom choice for an open destination's zoom (task 9.r8, rule O5 of
-`Core.Doc.OpenSettings`): a percentage clamped to the viewer's 25–800 %; Fit and FitR → Page
-Fit; FitH → Page Width; FitV → Page Fit (best effort: there is no fit-height choice; for a
-portrait page in a landscape window it is the same zoom); `keep` → unchanged. -/
-def zoomChoiceOf (z : Core.Doc.OpenSettings.Zoom) (cur : Toolbar.ZoomChoice) :
-    Toolbar.ZoomChoice :=
-  match z with
-  | .keep => cur
-  | .percent p => .pct (max View.minPct (min View.maxPct p))
-  | .fitPage | .fitHeight => .pageFit
-  | .fitWidth => .pageWidth
-
-#guard zoomChoiceOf (.percent 150) .auto == .pct 150 && zoomChoiceOf (.percent 5) .auto == .pct 25 &&
-  zoomChoiceOf (.percent 6400) .auto == .pct 800 && zoomChoiceOf .keep .auto == .auto &&
-  zoomChoiceOf .fitHeight .auto == .pageFit && zoomChoiceOf .fitWidth .auto == .pageWidth
-
-/-- The view modes of a `/PageLayout` (PDF.js `apiPageLayoutToViewerModes`; Odd Spreads put
-the odd pages on the left, Even Spreads on the right). -/
-def modesOf (l : Core.Doc.OpenSettings.PageLayout) : View.ScrollMode × View.SpreadMode :=
-  (if l.continuous then .vertical else .page,
-   match l.spread with
-   | .none => .none
-   | .oddLeft => .odd
-   | .oddRight => .even)
-
-#guard modesOf .singlePage == (.page, .none) && modesOf .oneColumn == (.vertical, .none) &&
-  modesOf .twoColumnLeft == (.vertical, .odd) && modesOf .twoColumnRight == (.vertical, .even) &&
-  modesOf .twoPageLeft == (.page, .odd) && modesOf .twoPageRight == (.page, .even)
 
 /-- `/FitWindow` (task 9.r8): sizes the window so that the canvas shows page `p` at the zoom
 choice's percentage (100 % for the fit choices), both pages of a spread side by side, at most
@@ -3489,7 +4112,7 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
   let o ← IO.lazyPure fun _ => Core.Doc.OpenSettings.read doc limits
   let pr := o.prefs
   if let some l := o.layout then
-    let (sc, sp) := modesOf l
+    let (sc, sp) := View.modesOf l
     st.modify ({ · with scroll := sc, spread := sp })
   let docTitle := if pr.displayDocTitle then
       (o.title.map Links.textString).filter (·.any (· != ' ')) else none
@@ -3499,7 +4122,7 @@ def applyOpenSettings (st : IO.Ref State) (doc : Doc) :
     if let some j := Links.jumpOf d then
       let z := Core.Doc.OpenSettings.zoomOf d.fit
       st.modify fun s => { s with page := j.page, pending := some (.dest j.left j.top),
-                                  zoomSel := zoomChoiceOf z s.zoomSel }
+                                  zoomSel := Toolbar.zoomChoiceOf z s.zoomSel }
   syncViewVars (← st.get)
   applyChrome st (pr.hideToolbar, pr.hideMenubar, pr.hideWindowUI)
   let mut notes := o.issues.map (·.message)
@@ -3530,6 +4153,70 @@ def escapeWindow (st : IO.Ref State) : IO Bool := do
     return true
   return false
 
+/-! ## The document worker at open and close (task 12.2c) -/
+
+/-- Display text from the worker (outline titles, names): unsafe characters
+(`Links.unsafeChar`: controls, bidi overrides) as spaces, at most `Links.maxTitle` characters,
+as `Links.textString` does for the titles read in this process. -/
+def safeText (s : String) : String :=
+  String.ofList ((s.toList.take Links.maxTitle).map fun c => if Links.unsafeChar c then ' ' else c)
+
+/-- What activating an outline item of the worker does (as `Links.actionOf`; a URI is shown
+percent-encoded by `Links.uriText`). -/
+def actionOfTarget : Worker.Protocol.Target → Links.Action
+  | .none => .none
+  | .page i f => let (l, t) := Links.fitPos f; .goto ⟨i, l, t⟩
+  | .danglingDest _ => .badPage
+  | .unresolved n => .unresolved (safeText n)
+  | .uri u => .uri (Links.uriText u.toUTF8.toList)
+  | .action k => if k == "URI" then .other "URI (no address)" else .other (Links.uriText k.toUTF8.toList)
+
+/-- An outline item of the worker as an outline entry (as `Links.outlineEntries`). -/
+def entryOfItem (it : Worker.Protocol.OutlineItem) : Links.Entry :=
+  { title := safeText it.title, depth := it.depth,
+    isOpen := match it.count with | some c => decide (0 < c) | none => false,
+    action := actionOfTarget it.target }
+
+/-- Hands a newly opened document to the worker session (task 12.2c): a new `srcSerial`, the
+bytes the viewer read (a new worker process for them) and a request for the outline. Returns
+the outline reply's task (`none` without a session, or when the bytes do not fit the
+protocol). -/
+def workerOpen (st : IO.Ref State) (bytes : ByteArray) : IO (Option (Task Worker.Reply)) := do
+  st.modify fun s => { s with srcSerial := s.srcSerial + 1, workerSrc := none }
+  let s ← st.get
+  let some ses := s.worker | return none
+  if bytes.size > limits.maxInputBytes then
+    ses.setDoc none
+    return none
+  ses.setDoc (some (s.srcSerial, bytes, true))
+  st.modify ({ · with workerSrc := some s.srcSerial })
+  let (_, t) ← ses.submit s.srcSerial .outline 0
+  return some t
+
+/-- No document any more (a failed open, Close): the worker is stopped. -/
+def workerStop (st : IO.Ref State) : IO Unit := do
+  st.modify fun s => { s with srcSerial := s.srcSerial + 1, workerSrc := none }
+  if let some ses := (← st.get).worker then ses.setDoc none
+
+/-- The outline of the open document: from the worker's reply `t?` (waits for it, at most the
+worker deadline), else read in this process (`Links.outlineEntries`) — without a session, or
+with a note when the worker gave no outline. -/
+def outlineFor (doc : Doc) (t? : Option (Task Worker.Reply)) :
+    IO (Array Links.Entry × Option String) := do
+  let here : IO (Array Links.Entry) :=
+    IO.lazyPure fun _ => (Links.outlineEntries doc limits).toArray
+  let some t := t? | return (← here, none)
+  match ← IO.wait t with
+  | .response (.outline items) _ =>
+    return ((Links.clampDepths 0 (items.map entryOfItem)).toArray, none)
+  | .response (.error _ m) _ =>
+    return (← here, some s!"outline read in this process (the document worker: {m})")
+  | .response _ _ =>
+    return (← here, some "outline read in this process (the document worker answered with another message)")
+  | .failed e =>
+    return (← here, some s!"outline read in this process (the document worker: {failText e})")
+  | .cancelled => return (← here, none)
+
 /-- Opens the document `load` gives under the name `path`: builds the page tree, shows page 1.
 A failure (`load`'s message, e.g. `cannot read: …`) ends up in the status line with an empty
 page. Shared by `openFile` and `openBytes`.
@@ -3551,7 +4238,7 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
   st.modify ({ · with thRendered := 0, thFirstNs := none, thOpenNs := t0 })
   st.modify fun s => { s with path := some path, doc := none, view := none, page := 0,
                               shown := none }
-  st.modify fun s => { s with gen := s.gen + 1, cache := ({} : View.Cache), pending := some .top,
+  st.modify fun s => { s with gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache), pending := some .top,
                               texts := #[], sel := none, pressPt := none, hit := none,
                               labels := #[], outline := #[], links := #[], hover := none,
                               history := {}, marks := {}, markSel := none, markHist := {},
@@ -3570,17 +4257,18 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
   st.modify ({ · with toggleShown := none })
   match ← load with
   | .error msg =>
+    workerStop st
     refresh st
     setStatus s!"{path}: {msg}"
   | .ok doc =>
+    -- Task 12.2c: the worker opens the same bytes meanwhile and reads the outline.
+    let outlineT ← workerOpen st doc.file.bytes
     -- Our marks already in the file (task 9.5c): restored with their ids, saved.
     let marks ← IO.lazyPure fun _ => Marks.Store.load (Save.readMarks doc limits)
     st.modify ({ · with doc := some doc, texts := Array.replicate doc.pages.size none,
                         marks, markHist := Marks.History.start marks.marks })
-    let (labels, outline) ← IO.lazyPure fun _ =>
-      (Links.labels doc limits, (Links.outlineEntries doc limits).toArray)
-    st.modify ({ · with labels, outline, links := Array.replicate doc.pages.size none })
-    fillOutline st
+    let labels ← IO.lazyPure fun _ => Links.labels doc limits
+    st.modify ({ · with labels, links := Array.replicate doc.pages.size none })
     -- Task 9.r10: the attachments, listed without decoding any.
     let att ← IO.lazyPure fun _ => Core.Doc.Attachments.list doc limits
     st.modify ({ · with attList := att.entries.toArray, attIcons := att.icons,
@@ -3589,11 +4277,17 @@ def openWith (st : IO.Ref State) (path : String) (load : IO (Except String Doc))
     -- Task 9.r11b: the layers, in the document's default state (kept on the reopen after a
     -- save).
     loadLayers st doc prevOC
+    -- Task 12.2c: the outline, from the worker (waited for here, after the work above).
+    let (outline, olNote) ← outlineFor doc outlineT
+    st.modify ({ · with outline })
+    fillOutline st
     -- Task 9.r8: the document's open settings, on every open except the reopen after a save
     -- (`keepView`: the user's view stays, outline included).
     let (mode, prefs, notes) ← if keepView then pure (none, {}, [])
       else applyOpenSettings st doc
     -- Before anything lays the window out: a `<Configure>` refresh shows the status line.
+    let wNote := (← st.get).workerNote
+    let notes := notes ++ olNote.toList ++ (if wNote.isEmpty then [] else [wNote])
     st.modify ({ · with openNote := String.join (notes.map ("; " ++ ·)) })
     -- Task 9.r9: the panel buttons for this document, the sidebar as the page mode says.
     let s1 ← st.get
@@ -3832,8 +4526,8 @@ def updatePreview (st : IO.Ref State) : IO Bool := do
     | .error e =>
       setStatus s!"cannot show the change of a saved mark: {e}"
       return false
-  st.modify fun s => { s with view := v, gen := s.gen + 1, cache := ({} : View.Cache),
-                              shown := none }
+  st.modify fun s => { s with view := v, gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache),
+                              shown := none, srcSerial := s.srcSerial + 1 }
   for (p, _) in (← st.get).photos do dropPhoto st p
   refresh st
   return true
@@ -3874,21 +4568,30 @@ def keepPermissions (target : String) (tmp : System.FilePath) : IO Unit := do
   let mode ← run ["file", "attributes", target, "-permissions"]
   discard <| run ["file", "attributes", tmp.toString, "-permissions", mode]
 
+/-- **Revision-retention notice** (task 12.5): appended to the status of a Save that deleted
+`n` saved marks. The update is incremental — the original bytes stay a prefix of the file
+(C7) — so the earlier revision, with the deleted annotations, is still inside the written
+file and can be recovered from it; a user deleting a mark to remove what it says must know.
+Empty when nothing saved was deleted. -/
+def retentionNote (n : Nat) : String := Save.retentionNote n
+
+#guard retentionNote 0 == ""
+#guard retentionNote 2 == "; note: the 2 deleted mark(s) are still in the file's earlier \
+  revision (Save only appends an update) and can be recovered from it"
+
 /-- After a save wrote `o.path`: remembers it as written by this session (a further Save into
 it asks nothing), reopens it on page `page` (the viewer goes on with the new bytes, so a second
-Save works) and reports. -/
+Save works) and reports — with the revision-retention notice (`retentionNote`, task 12.5) when
+saved marks were deleted. -/
 def afterWrite (st : IO.Ref State) (page : Nat) (o : Save.Outcome) : IO Unit := do
+  let deleted := (← st.get).marks.deletedSaved.length
   let own := (← st.get).ownFiles
   st.modify ({ · with ownFiles := o.path :: own.filter (· != o.path) })
   -- Task 9.r8: the reopen keeps the user's view (the document's open settings are not
   -- applied again).
   openFile st o.path (keepView := true)
   goTo st page
-  let what := if o.marks == 0 then "a copy (no changed marks)"
-    else s!"{o.marks} new, changed or deleted mark(s) as an incremental update \
-      ({o.appended} bytes appended)"
-  setStatus s!"saved {what} to {o.path}; {o.total} marks in the file, the original bytes \
-    unchanged at its start"
+  setStatus (Save.savedStatus o.path o.marks o.appended o.total o.notes deleted)
 
 /-- Writes the document with its unsaved marks to another file `target` (Save As…;
 `Save.write`: the incremental update, checked by a strict reopen before anything is written,
@@ -3898,6 +4601,9 @@ error) go to the status line; returns whether the file was written. -/
 def saveTo (st : IO.Ref State) (target : String) : IO Bool := do
   let s ← st.get
   let some doc := s.doc | return false
+  -- Task 12.3b: the output (original bytes plus the update) is reserved in the work pool.
+  withOutput st (Save.outputEstimate doc s.marks)
+    (fun m => do setStatus s!"cannot save to {baseName target}: {m}"; return false) do
   setStatus s!"saving to {target}..."
   match ← Save.write limits doc s.marks target (keepPermissions target) with
   | .error e =>
@@ -3920,7 +4626,10 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
   let s ← st.get
   let some doc := s.doc | return some false
   let name := baseName path
-  match Save.build limits doc s.marks (← Save.nowDate) with
+  -- Task 12.3b: the output (original bytes plus the update) is reserved in the work pool.
+  withOutput st (Save.outputEstimate doc s.marks)
+    (fun m => do setStatus s!"cannot save to {name}: {m}"; return some false) do
+  match ← Save.buildNow limits doc s.marks with
   | .error e =>
     setStatus s!"cannot save to {name}: {e}"
     return some false
@@ -3935,9 +4644,7 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
       if let some p := Save.writeProblem name fw dw then
         setStatus s!"cannot save: {p}"
         return some false
-    let disk : IO Save.DiskState := do
-      let d ← try pure (some (← IO.FS.readBinFile real)) catch _ => pure none
-      return Save.diskState doc.file.bytes d
+    let disk : IO Save.DiskState := Save.diskStateAt doc.file.bytes real
     let changed (ds : Save.DiskState) : IO (Option Bool) := do
       let a ← choose "File changed on disk" (Save.changedQuestion name ds) "saveas"
         (Save.changedButtons (← isAqua))
@@ -3963,7 +4670,8 @@ def overwriteInto (st : IO.Ref State) (path : String) (ask : Bool) : IO (Option 
       setStatus s!"cannot save to {name}: {Save.oneLine (toString e)}"
       return some false
     afterWrite st s.page { path, marks := n, appended := bytes.size - doc.file.bytes.size,
-                           size := bytes.size, total := got.length }
+                           size := bytes.size, total := got.length,
+                           notes := Save.notesFor limits doc n }
     return some true
 
 /-- **Save to library** (task 10.1b, Save in bib-lean's reader mode): `Save.build`'s bytes (the
@@ -3974,8 +4682,11 @@ nothing is written to disk; then the window reopens those bytes from memory on t
 (`Library.onMarksChanged`, posted after the file). Errors go to the status line. -/
 def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc) : IO Bool := do
   let s ← st.get
+  -- Task 12.3b: the output (original bytes plus the update) is reserved in the work pool.
+  withOutput st (Save.outputEstimate doc s.marks)
+    (fun m => do setStatus s!"cannot save to the library: {m}"; return false) do
   setStatus "saving to the library..."
-  match Save.build limits doc s.marks (← Save.nowDate) with
+  match ← Save.buildNow limits doc s.marks with
   | .error e =>
     setStatus s!"cannot save to the library: {e}"
     return false
@@ -3986,7 +4697,8 @@ def saveToLibrary (st : IO.Ref State) (lib : Library) (name : String) (doc : Doc
     marksChanged st
     let appended := bytes.size - doc.file.bytes.size
     setStatus s!"saved {n} new, changed or deleted mark(s) to the library ({appended} bytes \
-      appended; {got.length} marks in its file)"
+      appended; {got.length} marks in its file){Save.notesText (Save.notesFor limits doc n)}\
+      {retentionNote s.marks.deletedSaved.length}"
     return true
 
 /-- The directory of `path` for a file dialog (`.` when it has none). -/
@@ -4064,18 +4776,19 @@ def saveAsOnce (st : IO.Ref State) : IO (Option Bool) := do
   -- document and its marks stay unsaved there (Save sends them to the library).
   if s.library.isSome then
     let some doc := s.doc | return some false
-    match ← Save.write limits doc s.marks chosen (keepPermissions chosen) with
+    let r ← withOutput st (Save.outputEstimate doc s.marks) (fun m => pure (.error m))
+      (Save.write limits doc s.marks chosen (keepPermissions chosen))
+    match r with
     | .error e =>
       setStatus s!"cannot save to {baseName chosen}: {e}"
       return some false
     | .ok o =>
       setStatus s!"saved a local copy with {o.total} mark(s) to {o.path}; the library's file \
-        is unchanged (Save to library sends the marks there)"
+        is unchanged (Save to library sends the marks there){retentionNote s.marks.deletedSaved.length}"
       return some true
   if !s.inMemory && (← samePath chosen path) then
     if !(← isOwn st chosen) then
-      let a ← ask "yesno" "Save As" s!"Overwrite the opened file {baseName path}? The marks \
-        are added to it; its present content is kept unchanged inside it as the first revision."
+      let a ← ask "yesno" "Save As" (Save.openedOverwriteQuestion (baseName path))
       if a != "yes" then
         setStatus "save cancelled"
         return some false
@@ -4137,18 +4850,15 @@ def confirmDiscard (st : IO.Ref State) (what : String) : IO Bool := do
 /-! ## XFDF import and export (task 9.11) -/
 
 /-- The proposed export file of the PDF `path`: `STEM.xfdf` next to it. -/
-def xfdfTarget (path : String) : String :=
-  ((path : System.FilePath).withExtension "xfdf").toString
+def xfdfTarget (path : String) : String := Xfdf.exportTarget path
 
 #guard xfdfTarget "/tmp/x/paper.pdf" == "/tmp/x/paper.xfdf" && xfdfTarget "a.b.PDF" == "a.b.xfdf"
 
 /-- The status line after an import of `name`: added, already present and skipped counts, and
 the first skipped annotation's reason. -/
 def importStatus (name : String) (added dups : Nat) (rep : Xfdf.Report) : String :=
-  let first := match rep.skipped with
-    | k :: _ => s!" (first skipped: <{k.element}>: {k.reason})"
-    | [] => ""
-  s!"{name}: {added} imported, {dups} already present, {rep.skippedCount} skipped{first}"
+  Xfdf.importStatus name added dups rep.skippedCount
+    (rep.skipped.head?.map fun k => (k.element, k.reason))
 
 #guard importStatus "a.xfdf" 3 1 {} == "a.xfdf: 3 imported, 1 already present, 0 skipped"
 
@@ -4194,6 +4904,9 @@ def exportXfdf (st : IO.Ref State) (path : Option String := none) : IO Unit := d
     setStatus "export cancelled"
     return
   let some path ← checkTarget st path "xfdf" true | return
+  -- Task 12.3b: the text (and its UTF-8 bytes) is reserved in the work pool first.
+  withOutput st (2 * Xfdf.exportEstimate s.marks)
+    (fun m => setStatus s!"cannot export to {baseName path}: {m}") do
   let xml := Xfdf.toXfdf s.marks (Save.pageBox doc) (← Save.nowDate) (some (baseName pdf))
   try
     Save.writeAtomic path xml.toUTF8 (keepPermissions path)
@@ -4270,7 +4983,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
     setSaveLabels false
   st.modify fun s => { s with path := none, inMemory := false, titleOverride := none,
                               library := none, doc := none, view := none, page := 0, shown := none,
-                              gen := s.gen + 1, cache := ({} : View.Cache), pending := none,
+                              gen := s.gen + 1, cache := ({ budget := Budget.ceilings.cacheBytes } : View.Cache), pending := none,
                               texts := #[], sel := none, pressPt := none, query := #[],
                               hit := none, labels := #[], outline := #[], links := #[],
                               hover := none, history := {}, toggleShown := none,
@@ -4280,6 +4993,7 @@ def closeFile (st : IO.Ref State) : IO Unit := do
                                                 picker := false },
                               bubble := none, pickerAt := none, bubblePress := false,
                               ocCfg := none, oc := none, lyRows := [] }
+  workerStop st
   fillLayers st
   discard <| run ["pack", "forget", ".find", ".goto"]
   discard <| run ["destroy", ".note"]
@@ -4455,13 +5169,52 @@ def syncMenus (st : IO.Ref State) : IO Unit := do
 
 /-! ## Links, jumps, history, go to page (task 8.2d) -/
 
-/-- The links of page `p`, read on first use (`Links.pageLinks`) and cached. -/
-def linksOf (st : IO.Ref State) (p : Nat) : IO (Array Links.Link) := do
+/-- A shown string from the worker that must be printable ASCII (`lo` = 0x21 for a URI as
+`Links.uriText` makes it, 0x20 for an action name): kept when it is, else percent-encoded again
+(`Links.uriText`), so a misbehaving worker cannot put control or bidi characters in the status
+line or the URI dialog. An honest worker's strings are kept as they are. -/
+def asciiOr (lo : Nat) (u : String) : String :=
+  if u.toList.all (fun c => lo ≤ c.toNat && c.toNat ≤ 0x7E) then u
+  else Links.uriText u.toUTF8.toList
+
+/-- A link from the worker's reply (task 12.2d, `Worker.Protocol.ViewLink`) as a link of this
+process: strings re-checked (`asciiOr`, `safeText`), a jump to a page outside the document is
+`badPage`. Equal to `Links.pageLinks`' link for an honest worker. -/
+def linkOfWire (n : Nat) (l : Worker.Protocol.ViewLink) : Links.Link :=
+  { box := l.box,
+    action := match l.action with
+      | .goto pg lf tp => if pg < n then .goto ⟨pg, lf, tp⟩ else .badPage
+      | .uri u => .uri (asciiOr 0x21 u)
+      | .badPage => .badPage
+      | .unresolved nm => .unresolved (safeText nm)
+      | .other k => .other (asciiOr 0x20 k)
+      | .none => .none }
+
+/-- The links of page `p`, read on first use (`Links.pageLinks`) and cached. Task 12.2d: with a
+document worker (`workerForText`) the worker reads them (`Request.viewLinks`; `submit` asks for
+them when the page is rendered); with `wait := false` (pointer motion) nothing waits: `#[]`
+until the reply is there. A failed request is cached as no links (never read in this
+process). -/
+def linksOf (st : IO.Ref State) (p : Nat) (wait : Bool := true) : IO (Array Links.Link) := do
   let s ← st.get
   let some doc := s.doc | return #[]
   match s.links[p]? with
   | some (some ls) => return ls
   | _ =>
+    if let some (ses, src) ← workerForText st doc then
+      let some j ← sideJob st ses src true p (if wait then 0 else 1) | return #[]
+      if !wait && !(← IO.hasFinished j.task) then return #[]
+      let reply ← IO.wait j.task
+      dropSideJob st true j
+      let ls? : Option (Array Links.Link) := match reply with
+        | .response (.viewLinks ls) _ => some (ls.map (linkOfWire doc.pages.size)).toArray
+        | .cancelled => none
+        | _ => some #[]
+      let some ls := ls? | return #[]
+      st.modify fun s =>
+        if s.gen == j.gen then { s with links := s.links.modify p (fun _ => some ls),
+                                        workerLinks := s.workerLinks + 1 } else s
+      return ls
     let ls ← IO.lazyPure fun _ => Links.pageLinks doc limits p
     let gen := s.gen
     st.modify fun s =>
@@ -4572,7 +5325,7 @@ def pointerHit (st : IO.Ref State) (pos : Option (Int × Int)) :
   let some (x, y) := pos | return (.empty, none)
   let some (pg, p) ← pagePointAt st x y | return (.empty, none)
   let s ← st.get
-  let l := (Links.linkAt (← linksOf st pg) p).map fun (i, l) => ((pg, i), l)
+  let l := (Links.linkAt (← linksOf st pg (wait := false)) p).map fun (i, l) => ((pg, i), l)
   let store := if s.ui.showAll then s.marks
     else { s.marks with marks := s.marks.marks.filter (!·.isHighlight) }
   let mark := match slotOf s pg with
@@ -4580,7 +5333,7 @@ def pointerHit (st : IO.Ref State) (pos : Option (Int × Int)) :
     | none => false
   let mode := Toolbar.Mode.of s.ui
   let text ← if mark || l.isSome || mode == .draw || mode == .text then pure false else
-    match ← pageIndex st pg with
+    match ← pageIndex st pg (wait := false) with
     | .ok ix => pure (ix.cells.any fun c => Links.Box.contains c.box p)
     | .error _ => pure false
   return (Toolbar.hitOf mark l.isSome text, l)
@@ -5567,7 +6320,9 @@ def selectAll (st : IO.Ref State) : IO Unit := do
       selStatus st
   | .error e => setStatus s!"page {s.page + 1}: no text: {e}"
 
-/-- Copies the selected text to the clipboard (Ctrl+C); the text is one quoted Tcl word. -/
+/-- Copies the selected text to the clipboard (Ctrl+C); the text is one quoted Tcl word.
+Invisible text (`Tr 3`/`Tr 7`) is copied and counted in the status (`copyStatus`, task 12.5);
+text outside the CropBox or clipped away is never in the selection. -/
 def copySel (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   match s.sel with
@@ -5576,7 +6331,7 @@ def copySel (st : IO.Ref State) : IO Unit := do
       let t := Select.rangeText ix.cells a b
       discard <| run ["clipboard", "clear"]
       discard <| run ["clipboard", "append", "--", t]
-      setStatus s!"copied {t.length} characters"
+      setStatus (Select.copyStatus t.length (ix.hiddenChars a b))
   | none => setStatus (← keyText "nothing selected (drag over text, double-click a word, or Ctrl+A)")
 
 /-- Scrolls the current search hit into view (centred on an axis where it is not visible). -/
@@ -5599,32 +6354,57 @@ def scrollToHit (st : IO.Ref State) : IO Unit := do
     discard <| run [".c", "yview", "moveto", fmtFrac (((y0 + y1) / 2 - ch / 2) / (s.regionH : Rat))]
   viewChanged st
 
-/-- The next (`forward`) or previous search hit after the current one, as (page, index on
-the page, hits on the page, wrapped around). Searches the current page, then the following
-(preceding) pages, wrapping around to the current page. -/
-def nextHit (st : IO.Ref State) (forward : Bool) : IO (Option (Nat × Nat × Nat × Bool)) := do
+/-- Whether page `p`'s text index is cached (searching it costs no work). -/
+def textCached (s : State) (p : Nat) : Bool :=
+  match s.texts[p]? with
+  | some (some _) => true
+  | _ => false
+
+/-- How a search ended: a hit (page, index on the page, hits on the page, wrapped around), no
+hit, or (task 12.3) stopped after indexing this many pages because its shared work allowance
+(`Budget.Allowance`) was used up. -/
+inductive SearchEnd where
+  /-- A hit. -/
+  | hit (p k c : Nat) (wrapped : Bool)
+  /-- No hit in the document. -/
+  | none
+  /-- The work allowance ran out after indexing `pages` pages. -/
+  | stopped (pages : Nat)
+
+/-- The next (`forward`) or previous search hit after the current one. Searches the current
+page, then the following (preceding) pages, wrapping around to the current page. Task 12.3:
+the whole search shares **one work allowance** (`Budget.Allowance`: pages to index and wall
+time); a page whose index is cached costs nothing, every other page spends one page of it, and
+when it is used up the search stops (`SearchEnd.stopped`; the next Find goes on from where the
+indexed pages end, since they are cached now). -/
+def nextHit (st : IO.Ref State) (forward : Bool) : IO SearchEnd := do
   let s ← st.get
   let n := s.pageCount
   let q := s.query
   let cur := match s.hit with
     | some (p, k) => if p == s.page then some k else none
     | none => none
+  let mut allow := Budget.Allowance.start Budget.ceilings (← IO.monoMsNow)
+  let mut spent := 0
+  if !textCached s s.page then
+    match allow.spend (← IO.monoMsNow) with
+    | some a => allow := a; spent := spent + 1
+    | none => return .stopped spent
   if let .ok ix ← pageIndex st s.page then
     let c := (ix.hits q).size
-    let cand := if forward then some ((cur.map (· + 1)).getD 0)
-      else match cur with
-        | some k => if k > 0 then some (k - 1) else none
-        | none => if c > 0 then some (c - 1) else none
-    if let some k := cand then
-      if k < c then return some (s.page, k, c, false)
-  for i in [1:n + 1] do
-    let p := if forward then (s.page + i) % n else (s.page + n - i % n) % n
+    if let some k := Select.hitOnCurrent c cur forward then return .hit s.page k c false
+  for p in Select.searchPages n s.page forward do
+    if !textCached (← st.get) p then
+      match allow.spend (← IO.monoMsNow) with
+      | some a => allow := a; spent := spent + 1
+      | none =>
+        st.modify fun s => { s with searchStops := s.searchStops + 1 }
+        return .stopped spent
     if let .ok ix ← pageIndex st p then
       let c := (ix.hits q).size
       if c > 0 then
-        let wrapped := if forward then p ≤ s.page else p ≥ s.page
-        return some (p, if forward then 0 else c - 1, c, wrapped)
-  return none
+        return .hit p (Select.firstHitOn forward c) c (Select.wrappedTo forward s.page p)
+  return .none
 
 /-- Handles `find next|prev QUERY` and `find close`. -/
 def find (st : IO.Ref State) (args : List String) : IO Unit := do
@@ -5644,11 +6424,15 @@ def find (st : IO.Ref State) (args : List String) : IO Unit := do
       return
     if q != s.query then st.modify ({ · with query := q, hit := none })
     match ← nextHit st (dir != "prev") with
-    | none =>
+    | .none =>
       st.modify ({ · with hit := none })
       drawOverlay st
       setStatus s!"\"{qs}\": not found"
-    | some (p, k, c, wrapped) =>
+    | .stopped n =>
+      drawOverlay st
+      setStatus s!"\"{qs}\": not found in the {n} pages searched so far (this search's work \
+        allowance is used up); search again to go on"
+    | .hit p k c wrapped =>
       st.modify ({ · with hit := some (p, k) })
       if p != s.page then goTo st p
       drawOverlay st
@@ -7153,17 +7937,34 @@ packs them as `dx << 16 | dy & 0xffff`; `tk::PreciseScrollDeltas` unpacks them).
 def touchpadDelta (dx dy : Int) : Int :=
   dx * 65536 + (if dy < 0 then dy + 65536 else dy)
 
+/-- Appends the line `l` to the file `f` (created if missing) and flushes it, so that a run
+killed by the smoke script's timeout keeps what it wrote (task 10.c2). -/
+def appendLine (f : System.FilePath) (l : String) : IO Unit := do
+  let h ← IO.FS.Handle.mk f .append
+  h.putStrLn l
+  h.flush
+
+/-- Prints `l` on stdout and flushes it (smoke progress lines that the smoke script shows even
+when it kills the run, task 10.c2). -/
+def progressLine (l : String) : IO Unit := do
+  let o ← IO.getStdout
+  o.putStrLn l
+  o.flush
+
 /-- One burst of wheel events for `smokeWheelFlow` (task 9.r1): from the top of page 1 in
 the current view mode, sends `ev i` for `i = 0, 1, …` 8 ms apart with no pause (a trackpad
 gesture or a fast wheel; between events only Tk's event loop runs, as for a user, no settling
 of renders) until the current spread reaches the spread of page `target + 1`, or `maxEv`
-events. Appends `label event ms page top` lines to `trace` and returns a summary line:
-`reached`, `events`, the longest run of events that moved nothing (`max-stall`), moves
+events. Task 10.c2: the burst also stops after `stallCap` consecutive events that move nothing
+(an event type the platform drops) or once it has run `budgetMs` (a slow display), and says
+why (`stopped=`). Appends `label event ms page top` lines to `trace` and returns a summary
+line: `reached`, `events`, the longest run of events that moved nothing (`max-stall`), moves
 backwards (`back`), the largest move between two events on one page or, in the vertical
 modes, in the document (`max-step`, pixels), and the largest top of a page just turned to in
 the page modes (`turn-top`). -/
 def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : String)
-    (ev : Nat → IO Unit) (target maxEv : Nat) : IO String := do
+    (ev : Nat → IO Unit) (target maxEv : Nat) (stallCap : Nat := 300)
+    (budgetMs : Nat := 8000) : IO String := do
   sendKey "Home"
   settle st
   let s0 ← st.get
@@ -7180,8 +7981,15 @@ def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : Strin
   let mut maxStep := 0
   let mut turnTop := 0
   let mut events := 0
+  let mut stopped := "none"
   for i in [0:maxEv] do
     if View.spreadOf sp (← st.get).page ≥ goal then break
+    if stall ≥ stallCap then
+      stopped := "stall"
+      break
+    if (← IO.monoMsNow) - t0 > budgetMs then
+      stopped := "time"
+      break
     ev i
     events := i + 1
     discard <| run ["update"]
@@ -7203,44 +8011,79 @@ def flowBurst (st : IO.Ref State) (trace : IO.Ref (Array String)) (label : Strin
   let s ← st.get
   return s!"flow-{label}: reached={decide (View.spreadOf sp s.page ≥ goal)} page={s.page + 1} \
     events={events} max-stall={maxStall} back={back} max-step={maxStep} turn-top={turnTop} \
-    view={s.canvasH} ms={(← IO.monoMsNow) - t0}"
+    view={s.canvasH} ms={(← IO.monoMsNow) - t0} stopped={stopped}"
 
 /-- Wheel flow across page boundaries (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, task 9.r1): first
 the view mode a freshly opened file is in (`default:`, the state and the View menu's radio
 variables); then, in each of the four view modes at Page Width and in the single-page mode at
 Page Fit, a trackpad-like burst of small `<TouchpadScroll>` deltas (12 px down, with ±1 px
-of sideways jitter, as Tk 9 on macOS delivers them) and a burst of third-notch
-`<MouseWheel>` deltas (high-resolution wheels) from page 1 to page 5 (`flowBurst`). Writes
-`wheelflow.txt` and the per-event trace `wheelflow-trace.txt`. -/
-def smokeWheelFlow (st : IO.Ref State) (dir : String) : IO Unit := do
+of sideways jitter, as Tk 9 on macOS delivers them), a burst of third-notch `<MouseWheel>`
+deltas (high-resolution wheels) and (task 10.c2) a burst of `<Button-5>` presses (the X11
+wheel of Tk 8.6, one notch each) from page 1 to page 5 (`flowBurst`). Task 10.c2: every line
+of `wheelflow.txt` and each burst's part of the per-event trace `wheelflow-trace.txt` are
+written as soon as they are known, progress goes to stdout (`wheelflow-progress:`), and past
+`totalMs` the run stops with an `error:` line instead of running into the smoke script's
+timeout. -/
+def smokeWheelFlow (st : IO.Ref State) (dir : String) (totalMs : Nat := 140000) : IO Unit := do
+  let file := (dir : System.FilePath) / "wheelflow.txt"
+  let traceFile := (dir : System.FilePath) / "wheelflow-trace.txt"
+  IO.FS.writeFile file ""
+  IO.FS.writeFile traceFile ""
+  let tStart ← IO.monoMsNow
+  let out (l : String) : IO Unit := appendLine file l
+  let progress (l : String) : IO Unit := do
+    progressLine s!"wheelflow-progress: {(← IO.monoMsNow) - tStart} ms {l}"
+  progress "start"
   discard <| run ["update"]
   settle st
   let s0 ← st.get
-  let mut out : Array String := #[]
-  out := out.push s!"pages: {s0.pageCount}"
-  out := out.push s!"default: scroll={s0.scroll.key} spread={s0.spread.key} \
+  out s!"pages: {s0.pageCount}"
+  out s!"default: scroll={s0.scroll.key} spread={s0.spread.key} \
     radio={← run ["set", Menu.scrollVar]} {← run ["set", Menu.spreadVar]} \
     continuous={← run ["set", "::safepdf::continuous"]}"
   let trace ← IO.mkRef (#[] : Array String)
+  let tk ← run ["package", "provide", "Tk"]
+  -- `<TouchpadScroll>` exists from Tk 8.7 on; on Tk 8.6 (Ubuntu's tk-dev) `bind` does not fail
+  -- through `run`, so probing the binding reported a touchpad there (CI 50d5dd9) — test the
+  -- version instead.
+  let touchpad := (← run ["package", "vsatisfies", tk, "8.7-"]) == "1"
+  let ws ← run ["tk", "windowingsystem"]
+  out s!"tk: {tk} touchpad={touchpad} ws={ws}"
+  progress s!"tk {tk} touchpad={touchpad} ws={ws}"
   let pad (i : Nat) : IO Unit :=
     sendEvent ".c" "<TouchpadScroll>"
       ["-delta", toString (touchpadDelta ([0, 1, 0, -1].getD (i % 4) 0) (-12)), "-x", "300", "-y", "300"]
   let fine (_ : Nat) : IO Unit :=
     sendEvent ".c" "<MouseWheel>" ["-delta", "-40", "-x", "300", "-y", "300"]
+  let button (_ : Nat) : IO Unit := do
+    sendEvent ".c" "<Button-5>" ["-x", "300", "-y", "300"]
+    sendEvent ".c" "<ButtonRelease-5>" ["-x", "300", "-y", "300"]
   let cases : List (String × String × String × Toolbar.ZoomChoice) :=
     [("single", "page", "none", .pageWidth), ("continuous", "vertical", "none", .pageWidth),
      ("facing", "page", "odd", .pageWidth), ("continuous-facing", "vertical", "odd", .pageWidth),
      ("single-fit", "page", "none", .pageFit)]
+  let burst (name : String) (ev : Nat → IO Unit) : IO Unit := do
+    if (← IO.monoMsNow) - tStart > totalMs then
+      throw <| IO.userError s!"time budget of {totalMs} ms used up before flow-{name}"
+    progress s!"flow-{name} begins"
+    trace.set #[]
+    let l ← flowBurst st trace name ev 4 3000
+    out l
+    for t in (← trace.get) do appendLine traceFile t
+    progress l
   for (label, sc, sp, z) in cases do
+    progress s!"mode {label}"
     setViewMode st "scroll" sc
     setViewMode st "spread" sp
     setMode st z none
     settle st
-    out := out.push (← flowBurst st trace s!"{label}-pad" pad 4 3000)
-    out := out.push (← flowBurst st trace s!"{label}-fine" fine 4 3000)
-  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") ("\n".intercalate out.toList ++ "\n")
-  IO.FS.writeFile ((dir : System.FilePath) / "wheelflow-trace.txt")
-    ("\n".intercalate (← trace.get).toList ++ "\n")
+    -- Task 10.c1: Tk 8.6 has no `<TouchpadScroll>` (generated ones are dropped, and the
+    -- burst would run its 3000 events without moving).
+    if touchpad then burst s!"{label}-pad" pad
+    else out s!"flow-{label}-pad: skipped (Tk {tk} has no <TouchpadScroll>)"
+    burst s!"{label}-fine" fine
+    burst s!"{label}-button" button
+  progress "done"
   discard <| run ["destroy", "."]
 
 /-- Smoke steps of non-blocking rendering (`SAFEPDF_VIEWER_SMOKE_MODE=async`, task 8.8; the
@@ -7305,6 +8148,172 @@ def smokeAsync (st : IO.Ref State) (dir : String) : IO Unit := do
     append s!"ticks-end: {← run ["set", "::safepdf::smkTicks"]}"
     append "done"
     discard <| run ["destroy", "."]
+
+/-- Median of a non-empty list of numbers (0 for none). -/
+def median (xs : List Nat) : Nat :=
+  let ys := xs.mergeSort
+  ys.getD (ys.length / 2) 0
+
+/-- Times the render of page `p` at its current zoom and rotation three times in this process
+(`renderPage`) and three times through the document worker (request to answer, the image
+sent over the pipe and decoded), and returns the medians (task 12.2c's measurement; blocks the
+event loop: smoke mode only). -/
+def measureRender (st : IO.Ref State) (p : Nat) : IO String := do
+  let s ← st.get
+  let some doc := s.doc | return "no document"
+  let some sl := slotOf s p | return "no slot"
+  let key := keyOf s sl
+  let mut here : List Nat := []
+  for _ in [0:3] do
+    let t0 ← IO.monoNanosNow
+    let r ← renderPage doc p key.zoom key.rot s.subst s.oc
+    let ok := match r with | .ok _ => true | .error _ => false
+    let t1 ← IO.monoNanosNow
+    if ok then here := (t1 - t0) :: here
+  let some (ses, src) ← workerFor st doc | return "no worker"
+  let mut viaWorker : List Nat := []
+  for _ in [0:3] do
+    let (_, t) ← ses.submit src (.render p key.zoom (Worker.rotationToNat key.rot) (← st.get).oc) 0
+    if let .response (.image ..) ns ← IO.wait t then viaWorker := ns :: viaWorker
+  return s!"page {p + 1} {sl.place.w}x{sl.place.h} px: in-process {formatMs (median here)} ms, \
+    worker {formatMs (median viaWorker)} ms (medians of {here.length} and {viaWorker.length})"
+
+/-- What page `p` shows: `image WxH`, `error: …` or `none`. -/
+def photoKind (s : State) (p : Nat) : String :=
+  match s.photos.find? (·.1 == p) with
+  | some (_, .ok img) => s!"image {img.w}x{img.h}"
+  | some (_, .error e) => s!"error: {e}"
+  | none => "none"
+
+/-- Smoke steps of the document worker (`SAFEPDF_VIEWER_SMOKE_MODE=worker`, task 12.2c; run
+with `SAFEPDF_WORKER_DEADLINE_MS`, e.g. 4000, and a second file `next.pdf` in the output
+directory). Step 0: the opened pages came from the worker; render times in this process and
+through the worker (`measureRender`); then **no-block** (a): the next workers sleep 1.5 s
+before each render (`Worker.TestHooks`, through a new document id, so a new worker), no event
+waits for renders (`syncWaitMs := some 0`), a 10 ms Tcl heartbeat records its largest gap, and
+`+` zooms. Phase a waits for that render: the gap, the photo. **Kill/restart** (b): workers
+sleep ten minutes, `+` again; phase b waits until the render ends: after the deadline the page
+shows the timeout and the status says so. (c) the stall is lifted, `+` again: the same document
+in a fresh worker (spawned with the bytes again). (d) `next.pdf` opens and renders through a
+new worker; its render times. Writes `worker.txt`. -/
+def smokeWorker (st : IO.Ref State) (dir : String) : IO Unit := do
+  let file : System.FilePath := (dir : System.FilePath) / "worker.txt"
+  let append (l : String) : IO Unit := do
+    let old ← try IO.FS.readFile file catch _ => pure ""
+    IO.FS.writeFile file (old ++ l ++ "\n")
+  let s ← st.get
+  st.modify ({ · with smokeStep := s.smokeStep + 1 })
+  let next (ms : Nat) : IO Unit := discard <| run ["after", toString ms, "::safepdf::emit smoke"]
+  let finish : IO Unit := do
+    append "done"
+    discard <| run ["destroy", "."]
+  let some ses := s.worker | do
+    append "error: no worker session"
+    finish
+  let stats : IO String := do
+    let w ← ses.state.get
+    return s!"spawns {w.spawns} timeouts {w.timeouts} kills {w.kills}"
+  let timed (act : IO Unit) : IO Nat := do
+    let t0 ← IO.monoNanosNow
+    act
+    return ((← IO.monoNanosNow) - t0) / 1000000
+  let nowMs : IO Nat := return (← IO.monoNanosNow) / 1000000
+  let hbReset : IO Unit := do
+    discard <| run ["set", "::safepdf::hbMax", "0"]
+    discard <| Shim.eval "set ::safepdf::hbLast [clock milliseconds]"
+  let hbMax : IO String := run ["set", "::safepdf::hbMax"]
+  let status : IO String := run [".status", "cget", "-text"]
+  let phase ← Shim.eval "expr {[info exists ::safepdf::wkPhase] ? $::safepdf::wkPhase : {}}"
+  let setPhase (p : String) : IO Unit := discard <| run ["set", "::safepdf::wkPhase", p]
+  let waiting : Bool := !s.jobs.isEmpty && s.smokeStep < 200
+  match phase with
+  | "" =>
+    append s!"open: page {s.page + 1} {photoKind s s.page} worker-renders {s.workerRenders} \
+      renders {s.renders} {← stats}"
+    append s!"measure-a: {← measureRender st s.page}"
+    -- Task 12.2d: the page's text index and links come from the worker and equal the ones
+    -- read in this process.
+    let t0 ← IO.monoNanosNow
+    let ix ← pageIndex st s.page
+    let ls ← linksOf st s.page
+    let t1 ← IO.monoNanosNow
+    let s1 ← st.get
+    let here := match s1.doc with
+      | some d => match d.pages[s.page]? with
+        | some pg => match (SafePdf.Core.Annot.extractDocPageAnnots limits d pg
+            (SafePdf.Core.Filter.Budget.init limits) (oc := s1.oc)).1 with
+          | .ok pt => some (Select.fullText (Select.PageIndex.ofText pt).cells)
+          | .error _ => none
+        | none => none
+      | none => none
+    let wtext := match ix with | .ok i => some (Select.fullText i.cells) | .error _ => none
+    let hereLinks := (s1.doc.map fun d => (Links.pageLinks d limits s.page).size).getD 0
+    append s!"text: worker-texts {s1.workerTexts} worker-links {s1.workerLinks} \
+      same-text {decide (wtext.isSome && wtext == here)} chars {(wtext.map (·.length)).getD 0} \
+      links {ls.size} same-links {decide (ls.size == hereLinks)} \
+      ms {(t1 - t0) / 1000000}"
+    -- (a) no-block: a 10 ms heartbeat, renders that take 1.5 s longer, a zoom.
+    discard <| Shim.eval "proc ::safepdf::hb {} {
+  set n [clock milliseconds]
+  set d [expr {$n - $::safepdf::hbLast}]
+  if {$d > $::safepdf::hbMax} { set ::safepdf::hbMax $d }
+  set ::safepdf::hbLast $n
+  incr ::safepdf::hbTicks
+  after 10 ::safepdf::hb
+}"
+    discard <| run ["set", "::safepdf::hbTicks", "0"]
+    hbReset
+    discard <| run ["::safepdf::hb"]
+    ses.setEnv #[("SAFEPDF_WORKER_TEST_STALL_MS", some "1500")]
+    st.modify fun s => { s with srcSerial := s.srcSerial + 1, syncWaitMs := some 0 }
+    discard <| run ["set", "::safepdf::wkT0", toString (← nowMs)]
+    let ms ← timed (sendKey "plus")
+    append s!"a-event-ms: {ms}"
+    setPhase "a"
+    next 300
+  | "a" =>
+    if waiting then next 300; return
+    let t0 := ((← run ["set", "::safepdf::wkT0"]).toNat?).getD 0
+    append s!"noblock: {photoKind s s.page} elapsed-ms {(← nowMs) - t0} max-gap-ms {← hbMax} \
+      ticks {← run ["set", "::safepdf::hbTicks"]} {← stats}"
+    append s!"noblock-status: {← status}"
+    -- (b) a render that never ends: killed after the deadline.
+    ses.setEnv #[("SAFEPDF_WORKER_TEST_STALL_MS", some "600000")]
+    st.modify fun s => { s with srcSerial := s.srcSerial + 1 }
+    hbReset
+    discard <| run ["set", "::safepdf::wkT0", toString (← nowMs)]
+    let ms ← timed (sendKey "plus")
+    append s!"b-event-ms: {ms}"
+    setPhase "b"
+    next 300
+  | "b" =>
+    if waiting then next 300; return
+    let t0 := ((← run ["set", "::safepdf::wkT0"]).toNat?).getD 0
+    append s!"stalled: {photoKind s s.page} elapsed-ms {(← nowMs) - t0} max-gap-ms {← hbMax} \
+      deadline-ms {ses.cfg.deadlineMs} {← stats}"
+    append s!"stalled-status: {← status}"
+    -- (c) the same document again, in a fresh worker (no stall).
+    ses.setEnv #[]
+    let ms ← timed (sendKey "plus")
+    append s!"c-event-ms: {ms}"
+    setPhase "c"
+    next 300
+  | "c" =>
+    if waiting then next 300; return
+    append s!"respawn: {photoKind s s.page} {← stats}"
+    -- (d) the next file.
+    let path := ((dir : System.FilePath) / "next.pdf").toString
+    let ms ← timed (openFile st path)
+    append s!"d-open-ms: {ms}"
+    setPhase "d"
+    next 300
+  | _ =>
+    if waiting then next 300; return
+    append s!"next: page {s.page + 1}/{s.pageCount} {photoKind s s.page} outline {s.outline.size} {← stats}"
+    append s!"next-status: {← status}"
+    append s!"measure-b: {← measureRender st s.page}"
+    append s!"cancelled: {s.cancelledRenders} stale {s.staleDropped}"
+    finish
 
 /-- Tcl probes of the outline-toggle check of `smokeR4` (task 9.r4): `r4sample WHY` appends
 `{WHY canvas-width x y screen-x}` to `::safepdf::r4log`, where x and y are the canvas-window
@@ -8984,6 +9993,132 @@ def smokeThumbPerf (st : IO.Ref State) (dir : String) : IO Unit := do
       rss0-kib: {rss0}\nrss-first-screen-kib: {rss1}\nrss-end-kib: {rss2}\nhwm-kib: {hwm}\n"
   discard <| run ["destroy", "."]
 
+/-- Task 12.3b: the live photos without a reservation plus the reservations without a live
+photo (expected 0): page photos with an image and kept thumbnails against `photoTix`, and
+each reservation against its Tk image's present size (`Budget.photoBytes`). -/
+def photoMismatch (st : IO.Ref State) : IO Nat := do
+  let s ← st.get
+  let live := (s.photos.toList.filterMap fun (p, r) => match r with
+    | .ok _ => some (photoOf p) | .error _ => none) ++ s.thHave.map thumbPhoto
+  let mut bad := (live.filter fun n => !s.photoTix.any (·.1 == n)).length
+  for (n, t) in s.photoTix do
+    if !live.contains n then bad := bad + 1; continue
+    let w := (← run ["image", "width", n]).toNat?.getD 0
+    let h := (← run ["image", "height", n]).toNat?.getD 0
+    if Budget.photoBytes w h != t.bytes then bad := bad + 1
+  if s.photoPool.used != s.photoTix.foldl (fun a (_, t) => a + t.bytes) 0 then bad := bad + 1
+  return bad
+
+/-- **The interleave scenario** (task 12.3, `SAFEPDF_VIEWER_SMOKE_MODE=interleave`, driven by
+`scripts/interleave.sh`, which samples the resident memory of this process and of its workers
+meanwhile): reopens the start-up file with the thumbnails panel and runs `rounds` rounds of
+zoom in `zoomSteps` steps (from 75 % to 200 %), two searches (a frequent word and one that is nowhere, which indexes every page under
+one work allowance), the thumbnails panel scrolled on, two page changes and zoom out as many steps
+— each
+step followed by 250 ms of the event loop, so renders, thumbnails and text requests overlap.
+Task 12.3b adds the deep zoom phase: 600 % and then 800 %, each scrolled through the whole
+document in 12 steps of 400 ms (the zoom is limited to `Budget.Ceilings.pagePixels` per page;
+the resident memory after each step is logged). Then waits for everything in flight and writes
+`interleave.txt`: the pool's peak and what it holds at the end (must be nothing: no
+reservation leaks), waits, lowered thumbnails, refusals, unreserved text requests, stopped
+searches, renders and worker statistics; the photo pool's peak, evictions, refusals and
+`photoMismatch` (expected 0), the deep zoom steps, status line and peak. -/
+def smokeInterleave (st : IO.Ref State) (dir : String) (rounds : Nat := 8) (zoomSteps : Nat := 4) :
+    IO Unit := do
+  let mut deepSteps := 0
+  let path := (← st.get).path.getD ""
+  let t0 ← IO.monoNanosNow
+  st.modify ({ · with panel := .thumbnails })
+  openFile st path
+  if !(← st.get).outlineShown then showSidebar st (some .thumbnails)
+  if (← st.get).panel != .thumbnails then showPanel st .thumbnails
+  let pump (ms : Nat) : IO Unit := do
+    let t ← IO.monoMsNow
+    let stop := t + ms
+    while (← IO.monoMsNow) < stop do
+      discard <| run ["update"]
+      IO.sleep 5
+  let rssNow : IO Nat := do
+    let (r, _) ← memKiB
+    if r > 0 then return r
+    try
+      let o ← IO.Process.output { cmd := "ps", args := #["-o", "rss=", "-p", toString (← IO.Process.getPID)] }
+      return o.stdout.trimAscii.toString.toNat?.getD 0
+    catch _ => return 0
+  let mut log : Array String := #[]
+  pump 500
+  for r in [0:rounds] do
+    for _ in [0:zoomSteps] do
+      discard <| run ["::safepdf::emit", "zoom", "in"]
+      pump 250
+    find st ["next", "the"]
+    pump 250
+    find st ["next", "zqxjkvw"]
+    pump 250
+    discard <| run [".ol.th", "yview", "moveto", fmtFracFine ((r : Rat) / (rounds : Rat))]
+    discard <| run ["::safepdf::emit", "thView"]
+    pump 250
+    discard <| run ["::safepdf::emit", "next"]
+    pump 250
+    discard <| run ["::safepdf::emit", "next"]
+    pump 250
+    for _ in [0:zoomSteps] do
+      discard <| run ["::safepdf::emit", "zoom", "out"]
+      pump 250
+    let s ← st.get
+    log := log.push s!"round {r}: page {s.page + 1} pool-used {s.pool.used} held {s.pool.held.length} jobs {s.jobs.size} thumbs {s.thJobs.size} rss-kib {← rssNow} photo-pool {s.photoPool.used} cache {s.cache.bytes} status {← run [".status", "cget", "-text"]}"
+  -- Task 12.3b: the deep zoom phase — 600 % and 800 %, scrolled through the document.
+  let mut rssPeak := 0
+  for pct in ["600", "800"] do
+    zoomChoose st pct
+    pump 600
+    for k in [0:12] do
+      discard <| run [".c", "yview", "moveto", fmtFracFine ((k : Rat) / 12)]
+      viewChanged st
+      pump 400
+      let s ← st.get
+      let rss ← rssNow
+      deepSteps := deepSteps + 1
+      rssPeak := max rssPeak rss
+      let px := s.photos.foldl (fun n (_, r) => match r with | .ok i => n + i.w * i.h | _ => n) 0
+      log := log.push s!"zoom {pct} step {k}: page {s.page + 1} photos {s.photos.size} photo-px {px} photo-pool {s.photoPool.used} cache {s.cache.bytes} pool-used {s.pool.used} jobs {s.jobs.size} rss-kib {rss}"
+  log := log.push s!"zoom-status: {← run [".status", "cget", "-text"]}"
+  zoomChoose st "auto"
+  pump 500
+  log := log.push s!"zoom-rss-peak-kib: {rssPeak}"
+  -- Everything in flight finishes; then the pool must be empty.
+  settle st
+  thumbSettle st
+  for j in (← st.get).textJobs ++ (← st.get).linkJobs do discard <| IO.wait j.task
+  sweepSide st
+  let t1 ← IO.monoNanosNow
+  let s ← st.get
+  let spawns ← match s.worker with
+    | some ses => pure (← ses.state.get).spawns
+    | none => pure 0
+  let timeouts ← match s.worker with
+    | some ses => pure (← ses.state.get).timeouts
+    | none => pure 0
+  let kills ← match s.worker with
+    | some ses => pure (← ses.state.get).kills
+    | none => pure 0
+  let fields : List String := [s!"file: {path}", s!"pages: {s.pageCount}", s!"rounds: {rounds}",
+    s!"elapsed-ms: {formatMs (t1 - t0)}", s!"pool-ceiling: {s.pool.ceiling}",
+    s!"pool-peak: {s.poolPeak}", s!"pool-used-end: {s.pool.used}",
+    s!"pool-held-end: {s.pool.held.length}", s!"waits: {s.budgetWaits}",
+    s!"degraded: {s.budgetDegraded}", s!"refused: {s.budgetRefused}",
+    s!"unreserved: {s.budgetUnreserved}", s!"search-stops: {s.searchStops}",
+    s!"renders: {s.renders}", s!"worker-renders: {s.workerRenders}",
+    s!"worker-texts: {s.workerTexts}", s!"thumbs-rendered: {s.thRendered}",
+    s!"spawns: {spawns}", s!"timeouts: {timeouts}", s!"kills: {kills}",
+    s!"worker: {s.worker.isSome}", s!"photo-ceiling: {s.photoPool.ceiling}",
+    s!"photo-peak: {s.photoPeak}", s!"photo-used-end: {s.photoPool.used}",
+    s!"photo-evicted: {s.photoEvicted}", s!"photo-refused: {s.photoRefused}",
+    s!"photo-mismatch: {← photoMismatch st}", s!"deep-zoom-steps: {deepSteps}", "done"]
+  IO.FS.writeFile ((dir : System.FilePath) / "interleave.txt")
+    ("\n".intercalate (log.toList ++ fields) ++ "\n")
+  discard <| run ["destroy", "."]
+
 /-- Smoke steps of the attachments panel (`SAFEPDF_VIEWER_SMOKE_MODE=attach`, task 9.r10), on
 the generated `att.pdf` (`/PageMode /UseAttachments`, an outline, two files in the
 `/EmbeddedFiles` tree, one external file specification, a file attachment annotation on page
@@ -9454,6 +10589,7 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   settle st
   discard <| run ["update"]
   out := out.push s!"aqua: {!(← st.get).stipple}"
+  out := out.push s!"tk: {← run ["package", "provide", "Tk"]} rgba-put={← run ["set", "::safepdf::tintRgba"]} get-alpha={← run ["set", "::safepdf::getAlpha"]}"
   let .ok ix ← pageIndex st (← st.get).page | do
     IO.FS.writeFile (file "tint.txt") "error: no text index\n"
     discard <| run ["destroy", "."]
@@ -9482,7 +10618,7 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
         let img ← run [".c", "itemcget", id, "-image"]
         let px ← match ((← run [".c", "coords", id]).splitOn " ").filterMap View.parseDecimal with
           | [ix0, iy0] =>
-            try run [img, "get", toString (x - ix0.floor), toString (y - iy0.floor), "-withalpha"]
+            try run ["::safepdf::pixel", img, toString (x - ix0.floor), toString (y - iy0.floor)]
             catch _ => pure "outside"
           | _ => pure "?"
         parts := parts.push s!"{tag}={kind}({px})"
@@ -9555,7 +10691,7 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   let (w, h) := (← run ["image", "width", pg], ← run ["image", "height", pg])
   let fill : IO Unit := do
     discard <| run ["image", "create", "photo", "::safepdf::tintProbe", "-width", w, "-height", h]
-    discard <| run ["::safepdf::tintProbe", "put", "{#3874f25a}", "-to", "0", "0", w, h]
+    discard <| run ["::safepdf::tintFill", "::safepdf::tintProbe", Tint.sel.rgb, Tint.sel.alphaHex, w, h]
     discard <| run ["image", "delete", "::safepdf::tintProbe"]
   out := out.push s!"ms-fullpage-photo: {← timeMs 5 fill} size={w}x{h}"
   -- 5. Closing the search and dropping the selection leaves no fill and no photo.
@@ -9565,6 +10701,65 @@ def smokeTint (st : IO.Ref State) (dir : String) : IO Unit := do
   out := out.push s!"closed: items={(← tagCount "sel") + (← tagCount "hit")} photos={← tintImages}"
   out := out.push "done"
   IO.FS.writeFile (file "tint.txt") ("\n".intercalate out.toList ++ "\n")
+  discard <| run ["destroy", "."]
+
+/-- The smoke test of task 12.5 (`SAFEPDF_VIEWER_SMOKE_MODE=honest`, honest UI for hidden
+content). The viewer opens `ocr.pdf` (a visible line and a `Tr 3` line); `full.pdf`
+(`/PageMode /FullScreen`) and `prefs.pdf` (`/HideToolbar`) lie next to it. Writes `honest.txt`:
+* `copy`: select all + copy: the status (it counts the invisible characters) and whether the
+  clipboard holds the invisible text;
+* `full` / `full-escape`, `prefs` / `prefs-escape`, `plain`: whether the identity line `.ident`
+  is packed, its text, and the status (the full-screen note stays, task 10.13);
+* `save1`: a highlight saved into `ocr.pdf` (no deleted mark: no notice); `save2`: that saved
+  highlight deleted and saved again: the revision-retention notice. -/
+def smokeHonest (st : IO.Ref State) (dir : String) : IO Unit := do
+  let base := dirOf ((← st.get).path.getD "")
+  let mut out : Array String := #[]
+  let status : IO String := run [".status", "cget", "-text"]
+  let ident : IO String := do
+    discard <| run ["update"]
+    return s!"ident={← run ["winfo", "manager", ".ident"]} full={(← st.get).fullScreen} \
+      text={← run [".ident", "cget", "-text"]}"
+  settle st
+  -- 1. Copy with invisible text.
+  selectAll st
+  copySel st
+  let clip ← try run ["clipboard", "get"] catch _ => pure "<empty>"
+  out := out.push s!"copy: hidden-in-clipboard={decide ((clip.splitOn "hidden words").length > 1)} \
+    status={← status}"
+  out := out.push s!"plain: {← ident}"
+  -- 2. The identity line in document full screen and with hidden chrome.
+  let ocr := (← st.get).path.getD ""
+  for f in ["full", "prefs"] do
+    openFile st s!"{base}/{f}.pdf"
+    settle st
+    out := out.push s!"{f}: {← ident} status={← status}"
+    if f == "full" && (← isAqua) then
+      discard <| run ["after", "1000"]
+      discard <| run ["update"]
+    discard <| escapeWindow st
+    settle st
+    out := out.push s!"{f}-escape: {← ident}"
+  -- 3. Delete a saved mark, save: the revision-retention notice.
+  discard <| run ["set", "::safepdf::autoAnswer", "overwrite"]
+  openFile st ocr
+  settle st
+  selectAll st
+  highlight st none
+  discard <| save st (confirmed := true)
+  out := out.push s!"save1: marks={(← st.get).marks.marks.size} saved={(← st.get).marks.saved.length} \
+    status={← status}"
+  match (← st.get).marks.marks[0]? with
+  | some m =>
+    st.modify fun s => { s with marks := s.marks.remove m.id }
+    marksChanged st
+  | none => pure ()
+  out := out.push s!"deleted: dirty={(← st.get).marks.dirty} \
+    deletedSaved={(← st.get).marks.deletedSaved.length}"
+  discard <| save st (confirmed := true)
+  out := out.push s!"save2: marks={(← st.get).marks.marks.size} status={← status}"
+  out := out.push "done"
+  IO.FS.writeFile ((dir : System.FilePath) / "honest.txt") ("\n".intercalate out.toList ++ "\n")
   discard <| run ["destroy", "."]
 
 /-- One step of the smoke test. Every step but the last schedules the next one 300 ms later
@@ -9583,6 +10778,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
   let s ← st.get
   let some dir := s.smokeDir | return
   if s.smokeMode == "text" then smokeText st dir; return
+  if s.smokeMode == "worker" then
+    try smokeWorker st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "worker.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "nav" then smokeNav st dir; return
   if s.smokeMode == "menu" then smokeMenu st dir; return
   if s.smokeMode == "toolbar" then smokeToolbar st dir; return
@@ -9627,7 +10828,9 @@ def smoke (st : IO.Ref State) : IO Unit := do
   if s.smokeMode == "wheelflow" then
     try smokeWheelFlow st dir
     catch e =>
-      IO.FS.writeFile ((dir : System.FilePath) / "wheelflow.txt") s!"error: {e}\n"
+      -- Task 10.c2: appended, after the lines already written.
+      appendLine ((dir : System.FilePath) / "wheelflow.txt") s!"error: {e}"
+      progressLine s!"wheelflow-progress: error: {e}"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "async" then
@@ -9648,6 +10851,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       IO.FS.writeFile ((dir : System.FilePath) / "r4.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
+  if s.smokeMode == "honest" then
+    try smokeHonest st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "honest.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
   if s.smokeMode == "opensettings" then
     try smokeOpenSettings st dir
     catch e =>
@@ -9659,6 +10868,12 @@ def smoke (st : IO.Ref State) : IO Unit := do
       if s.smokeMode == "thumbs" then smokeThumbs st dir else smokeThumbPerf st dir
     catch e =>
       IO.FS.writeFile ((dir : System.FilePath) / s!"{s.smokeMode}.txt") s!"error: {e}\n"
+      discard <| run ["destroy", "."]
+    return
+  if s.smokeMode == "interleave" then
+    try smokeInterleave st dir
+    catch e =>
+      IO.FS.writeFile ((dir : System.FilePath) / "interleave.txt") s!"error: {e}\n"
       discard <| run ["destroy", "."]
     return
   if s.smokeMode == "attach" then
@@ -9922,6 +11137,38 @@ def safeHandle (st : IO.Ref State) (args : Array String) : IO Unit := do
   guarded (handle st args)
   guarded (syncMenus st)
 
+/-- The document worker executable (task 12.2c): `worker` next to the viewer's executable
+(`.lake/build/bin/worker` after `lake build`). -/
+def workerExe : IO System.FilePath := do
+  return (← IO.appDir) / "worker"
+
+/-- The worker's font search, from this process's environment (task 12.2d): the worker reads
+no environment, so `SAFEPDF_SUBST_FONTS=0`, `$HOME` (for `~/Library/Fonts`) and
+`$SAFEPDF_FONT_DIR` become its flags `--no-subst`, `--home=`, `--font-dir=` — the search
+`Fonts.loadSubstFonts` makes here, so both render with the same substitute fonts. -/
+def workerStart : IO Worker.Protocol.StartConfig := do
+  let noSubst := (← IO.getEnv "SAFEPDF_SUBST_FONTS") == some "0"
+  let home := (← IO.getEnv "HOME").filter (!·.isEmpty)
+  return { limits, noSubst, home, fontDirs := ← Fonts.userDirs,
+           memLimitMiB := Budget.ceilings.workerMemMiB, cpuLimitS := Budget.ceilings.workerCpuS }
+
+/-- Starts the document worker session (task 12.2c), or says why pages render in this process:
+`SAFEPDF_VIEWER_WORKER=0`, or no worker executable (a development build of only the viewer;
+the viewer keeps working, with the reason in the status line). In smoke mode
+`SAFEPDF_WORKER_DEADLINE_MS` sets the deadline (`smokeWorker` sets the test hook's variable of
+the workers it starts, `Worker.TestHooks`). -/
+def startWorker (smoke : Bool) : IO (Option Worker.Session × String) := do
+  if (← IO.getEnv "SAFEPDF_VIEWER_WORKER") == some "0" then
+    return (none, "pages render in this process (SAFEPDF_VIEWER_WORKER=0)")
+  let exe ← workerExe
+  if !(← exe.pathExists) then
+    return (none, s!"no document worker at {exe}: pages render in this process")
+  let deadlineMs ← if smoke then
+      pure (((← IO.getEnv "SAFEPDF_WORKER_DEADLINE_MS").bind String.toNat?).getD workerDeadlineMs)
+    else pure workerDeadlineMs
+  let ses ← Worker.Session.start { exe, limits, deadlineMs, start := ← workerStart }
+  return (some ses, "")
+
 /-- Parses a window size `WxH` (`SAFEPDF_VIEWER_GEOMETRY`), each side 200–10000 pixels. -/
 def parseGeometry (g : String) : Option (Nat × Nat) :=
   match g.splitOn "x" with
@@ -10016,7 +11263,8 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   -- mode until they are done (the steps look at the pages at once), except in the `async` test.
   let syncWaitMs := if smokeDir.isNone || smokeMode == "async" then
     some (if smokeMode == "async" then 0 else 100) else none
-  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs } : State)
+  let (worker, workerNote) ← startWorker smokeDir.isSome
+  let st ← IO.mkRef ({ smokeDir, smokeMode, subst, syncWaitMs, worker, workerNote } : State)
   Shim.setEmitHandler (safeHandle st)
   try
     discard <| Shim.eval setupScript
@@ -10063,6 +11311,8 @@ def mainWith (args : List String) (init : IO.Ref State → IO Unit) : IO UInt32 
   guarded (syncMenus st)
   if smokeDir.isSome then discard <| run ["after", "300", "::safepdf::emit smoke"]
   Shim.mainLoop
+  -- Task 12.2c: the worker is killed with the window (waited for at most 2 s).
+  if let some w := (← st.get).worker then w.shutdown
   return 0
 
 /-- Runs the viewer (`mainWith` without an `init`): opens the file named in `args`, else asks

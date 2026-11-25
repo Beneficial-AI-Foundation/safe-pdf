@@ -1,6 +1,7 @@
 import SafePdf.Core.Raster.Geom
 import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Limits
+import SafePdf.Core.Doc.OpenSettings
 
 /-!
 # Viewer geometry, wheel, view modes and page cache (tasks 8.2b, 9.2, 9.3; Plan.md §6 Phases 8–9, §8 native app, §10 `SafePdf/Shell/`)
@@ -915,6 +916,20 @@ def viewModeOf : String → Option (ScrollMode × SpreadMode)
   | _ => none
 
 #guard viewModeOf "continuous" == some (.vertical, .none) && viewModeOf "x" == none
+
+/-- The view modes of a `/PageLayout` (task 9.r8; PDF.js `apiPageLayoutToViewerModes`; Odd
+Spreads put the odd pages on the left, Even Spreads on the right). Moved here from the Tk
+viewer (`Viewer.applyOpenSettings`) for the native shell (task 11.3c2). -/
+def modesOf (l : Core.Doc.OpenSettings.PageLayout) : ScrollMode × SpreadMode :=
+  (if l.continuous then .vertical else .page,
+   match l.spread with
+   | .none => .none
+   | .oddLeft => .odd
+   | .oddRight => .even)
+
+#guard modesOf .singlePage == (.page, .none) && modesOf .oneColumn == (.vertical, .none) &&
+  modesOf .twoColumnLeft == (.vertical, .odd) && modesOf .twoColumnRight == (.vertical, .even) &&
+  modesOf .twoPageLeft == (.page, .odd) && modesOf .twoPageRight == (.page, .even)
 
 /-- The page size (page units) that the fit zooms use in spread mode `sp`: a page alone, or
 twice its width in the facing modes, as PDF.js (`#pageWidthScaleFactor` 2), so that every

@@ -3,6 +3,7 @@ import SafePdf.Shell.Views.Common
 import SafePdf.Core.Write.Annots
 import SafePdf.Core.Doc.Nav
 import SafePdf.Api
+import SafePdf.Shell.Read
 import Std.Time.DateTime.Timestamp
 
 /-!
@@ -55,6 +56,33 @@ checks and stores.
   and icon box within 1/500 of a unit — the writer rounds coordinates to 1/1000; a comment
   note takes its highlight's colour), each written id exactly once, and no deleted id. Only
   then is the file written.
+* **Fresh AES IVs** (task 12.4, `Core.Write.Encrypt` rule E3'): every save of an encrypted
+  document takes fresh bytes from the operating system (`freshSeed`: 32 bytes of
+  `/dev/urandom` followed by 32 bytes of Lean's `IO.getRandomBytes` — libuv's `uv_random`,
+  `getentropy` on macOS; a source that fails is left out, and an encrypted document is not
+  saved when both fail) and passes them to the pure writer as its IV seed (`build … ivSeed`,
+  `buildNow`, `seedFor`). Saving the same marks twice thus gives different ciphertexts. The
+  preview (never written) uses the empty seed.
+* **Protection policy** (task 12.4; `protection`, `notes`, `refusal`): what Save says or does
+  about the document's encryption and signatures.
+  - *AES-128 / AES-256* (`/AESV2`, `/AESV3`): written with the document's own handler and
+    fresh IVs; nothing to say.
+  - *Legacy RC4* (`/V 1`, `/V 2`, or a `/V 4` crypt filter with `/CFM /V2`): **written, with a
+    note** (`rc4Note`). An incremental update must use the document's own handler (the
+    original revision is kept byte for byte and readers apply one `/Encrypt` to the whole
+    file), so the alternatives are refusing or writing a decrypted copy — and a decrypted
+    copy would silently drop the protection the author chose. Since only files that open
+    with the empty user password are supported, RC4 here protects nothing against anyone
+    holding the file; the note says so.
+  - *Signed* (`/AcroForm /SigFlags` bit 1, or a signature field whose `/V` is a signature
+    dictionary): **written, with a note** (`signedNote`): the signature still covers the
+    original revision, which stays byte for byte at the start of the file; the annotations
+    are a later revision outside it, which signature checkers list as changes after signing.
+  - *Certified with no annotation changes permitted* (`/Perms /DocMDP` whose signature's
+    `/Reference` has a `/DocMDP` transform with `/P` 1 or 2, default 2, ISO 32000-2
+    §12.8.2.2): **refused** (`certifiedRefusal`): adding annotations would invalidate the
+    certification; the marks can still be exported as XFDF. `/P 3` (annotations permitted)
+    is written with the signed note.
 * **Atomic write** (`writeAtomic`): the bytes go into a new temporary file in the target's
   directory (`.NAME.safepdf-N.tmp`, `tmpName`: `NAME` cut to 100 bytes, created
   exclusively), are read back and compared, get the
@@ -64,7 +92,8 @@ checks and stores.
 * **Save overwrites the opened file** (task 9.r2, Decision 2026-11-23, Plan.md S8 amended):
   the pure decisions of the viewer's Save and close paths are here — `route` (library,
   Save As…, or overwrite with or without the first-overwrite question), `diskState` (the file
-  on disk still holds the bytes we opened, else Save refuses and offers Save As…),
+  on disk still holds the bytes we opened, else Save refuses and offers Save As…; read through
+  the shared capped read by `diskStateAt`, task 12.1),
   `writeProblem` (read-only file or folder: refused before anything is written), the dialog
   texts (`overwriteQuestion`, `changedQuestion`, `unsavedQuestion`), the button orders
   (`overwriteButtons`, `unsavedButtons`, `changedButtons`: on aqua the macOS order, the
@@ -450,8 +479,11 @@ def writeAtomic (path : String) (bytes : ByteArray)
     IO.FS.withFile tmp .writeNew fun h => do
       h.write bytes
       h.flush
-    let back ← IO.FS.readBinFile tmp
-    if back.data != bytes.data then
+    -- Capped read-back (task 12.1): more than `bytes.size` bytes is already a mismatch.
+    let back ← match ← Shell.Read.readFile tmp bytes.size .inputBytes with
+      | .ok b => pure b
+      | .error _ => pure ByteArray.empty
+    if back.size != bytes.size || back.data != bytes.data then
       throw (IO.userError s!"the temporary file {tmp} does not read back as written")
     prepare tmp
     IO.FS.rename tmp fp
@@ -504,6 +536,17 @@ def diskState (opened : ByteArray) (onDisk : Option ByteArray) : DiskState :=
   match onDisk with
   | none => .missing
   | some d => if d.size == opened.size && d.data == opened.data then .same else .changed
+
+/-- **The overwrite comparison on disk** (task 12.1): `diskState` of the file `path` against
+the `opened` bytes, read through the shared capped read (`Shell.Read.readFile`) with the cap
+`opened.size`, so a file that grew on disk (even one that keeps growing) is read only up to
+`opened.size + 1` bytes and reported `.changed`; `.missing` when it cannot be read. -/
+def diskStateAt (opened : ByteArray) (path : System.FilePath) : IO DiskState := do
+  try
+    match ← Shell.Read.readFile path opened.size .inputBytes with
+    | .ok b => return diskState opened (some b)
+    | .error _ => return .changed
+  catch _ => return .missing
 
 #guard diskState "abc".toUTF8 (some "abc".toUTF8) == .same
 #guard diskState "abc".toUTF8 (some "abd".toUTF8) == .changed
@@ -694,6 +737,8 @@ structure Outcome where
   size : Nat
   /-- All marks the written file holds (read back). -/
   total : Nat
+  /-- What the user should know about the written file's protection (task 12.4, `notes`). -/
+  notes : List String := []
 
 /-- Whether `pre` is a prefix of `bs`. -/
 def isPrefix (pre bs : ByteArray) : Bool :=
@@ -774,15 +819,232 @@ def edits (doc : Doc.Doc) (file : List Entry) (store : Store) (date : String)
 def Plan.isEmpty (p : Plan) : Bool :=
   p.edits.adds.isEmpty && p.edits.sups.isEmpty && p.edits.removes.isEmpty
 
+/-! ## Protection policy (task 12.4) -/
+
+/-- The signature state of a document (ISO 32000-2 §12.8). -/
+inductive SigState where
+  /-- No signature found. -/
+  | unsigned
+  /-- Signed (approval signatures), not certified. -/
+  | signed
+  /-- Certified with `/DocMDP` permission level `p` (1: no changes, 2: form filling and
+  signing, 3: also annotations; §12.8.2.2). -/
+  | certified (p : Nat)
+  deriving DecidableEq, Repr
+
+/-- What Save knows about the document's protection. -/
+structure Protection where
+  /-- The string and stream methods (`/StrF`, `/StmF`), when encrypted. -/
+  methods : Option (Crypt.Method × Crypt.Method) := none
+  /-- The signature state. -/
+  sig : SigState := .unsigned
+  deriving Repr
+
+/-- A value of `d` resolved one level; `null` on an error or when absent. -/
+def keyOr (doc : Doc.Doc) (limits : Limits) (d : Dict) (k : String) : PdfObject :=
+  match Doc.key doc.file limits d k with
+  | .ok o => o
+  | .error _ => .null
+
+/-- At most this many `/AcroForm /Fields` entries are inspected for a signature value. -/
+def maxSigFields : Nat := 1000
+
+/-- Whether the document carries a signature: `/AcroForm /SigFlags` bit 1
+(`SignaturesExist`), or a top-level field with `/FT /Sig` whose `/V` is a signature
+dictionary (the first `maxSigFields` fields; kids are not walked). -/
+def isSigned (doc : Doc.Doc) (limits : Limits) : Bool :=
+  match keyOr doc limits doc.catalog "AcroForm" with
+  | .dict af =>
+    let flags := match keyOr doc limits af "SigFlags" with
+      | .int i => i.toNat % 2 == 1
+      | _ => false
+    let fields := match keyOr doc limits af "Fields" with
+      | .array xs => xs.take maxSigFields
+      | _ => []
+    flags || fields.any fun f =>
+      match Doc.resolve doc.file limits f with
+      | .ok (.dict fd) =>
+        Dict.get? fd (Name.ofString "FT") == some (.name (Name.ofString "Sig")) &&
+        (match keyOr doc limits fd "V" with
+          | .dict v => Crypt.isSigDict v
+          | _ => false)
+      | _ => false
+  | _ => false
+
+/-- The `/DocMDP` permission level of the certification signature, if any: catalog
+`/Perms /DocMDP` → signature dictionary → the first of its (at most 16) `/Reference` entries
+with `/TransformMethod /DocMDP` → `/TransformParams /P` (1 or 3; 2 when absent or other,
+the ISO default). A `/DocMDP` signature without such an entry counts as level 2. -/
+def docMdp (doc : Doc.Doc) (limits : Limits) : Option Nat :=
+  match keyOr doc limits doc.catalog "Perms" with
+  | .dict perms =>
+    match keyOr doc limits perms "DocMDP" with
+    | .dict sig =>
+      let refs := match keyOr doc limits sig "Reference" with
+        | .array xs => xs.take 16
+        | _ => []
+      let level (r : PdfObject) : Option Nat :=
+        match Doc.resolve doc.file limits r with
+        | .ok (.dict rd) =>
+          if Dict.get? rd (Name.ofString "TransformMethod") ==
+              some (.name (Name.ofString "DocMDP")) then
+            match keyOr doc limits rd "TransformParams" with
+            | .dict tp =>
+              match keyOr doc limits tp "P" with
+              | .int 1 => some 1
+              | .int 3 => some 3
+              | _ => some 2
+            | _ => some 2
+          else none
+        | _ => none
+      some ((refs.findSome? level).getD 2)
+    | _ => none
+  | _ => none
+
+/-- **The document's protection** (task 12.4). -/
+def protection (doc : Doc.Doc) (limits : Limits) : Protection :=
+  { methods := doc.file.crypt.map fun st => (st.handler.strF, st.handler.stmF)
+    sig := match docMdp doc limits with
+      | some p => .certified p
+      | none => if isSigned doc limits then .signed else .unsigned }
+
+/-- The note for a document encrypted with RC4 (task 12.4). -/
+def rc4Note : String :=
+  "this file uses the legacy RC4 encryption: the new annotations are encrypted with it, as \
+  the file requires (it opens without a password, so its encryption keeps nothing \
+  confidential)"
+
+/-- The note for a signed document (task 12.4). -/
+def signedNote : String :=
+  "this file is digitally signed: the signature still covers the original revision, which \
+  is kept byte for byte; the annotations are a later revision outside it, which signature \
+  checkers list as changes made after signing"
+
+/-- The refusal for a certified document that permits no annotation changes (task 12.4). -/
+def certifiedRefusal (p : Nat) : String :=
+  s!"this document is certified and its certification (/DocMDP /P {p}) permits no \
+  annotation changes: saving would invalidate it. Export the marks as XFDF instead"
+
+/-- **The refusal**, if Save must not write into a document with protection `pr`. -/
+def refusal (pr : Protection) : Option String :=
+  match pr.sig with
+  | .certified p => if p ≤ 2 then some (certifiedRefusal p) else none
+  | _ => none
+
+/-- **The notes** Save shows after writing into a document with protection `pr`. -/
+def notes (pr : Protection) : List String :=
+  let isRc4 : Bool := match pr.methods with
+    | some (a, b) => a == .rc4 || b == .rc4
+    | none => false
+  let signed := match pr.sig with
+    | .unsigned => false
+    | _ => true
+  (if isRc4 then [rc4Note] else []) ++ (if signed then [signedNote] else [])
+
+/-- The notes after a save into `doc` that wrote or deleted `n` marks (none when `n = 0`:
+nothing was written into the file's protection). -/
+def notesFor (limits : Limits) (doc : Doc.Doc) (n : Nat) : List String :=
+  if n == 0 then [] else notes (protection doc limits)
+
+/-- The notes as one status-line suffix (`""` when there are none). -/
+def notesText (ns : List String) : String :=
+  String.join (ns.map fun n => s!"; {n}")
+
+#guard notes {} == []
+#guard refusal {} == none
+#guard notes { methods := some (.rc4, .rc4) } == [rc4Note]
+#guard notes { methods := some (.aesv2, .rc4) } == [rc4Note]
+#guard notes { methods := some (.aesv2, .aesv2) } == []
+#guard notes { methods := some (.aesv3, .aesv3), sig := .signed } == [signedNote]
+#guard refusal { sig := .signed } == none
+#guard refusal { sig := .certified 1 } == some (certifiedRefusal 1)
+#guard refusal { sig := .certified 2 } == some (certifiedRefusal 2)
+#guard refusal { sig := .certified 3 } == none
+#guard notes { sig := .certified 3 } == [signedNote]
+#guard notesText [] == ""
+
+/-- **The revision-retention text** (task 12.5) for a Save that deleted `n` saved marks: the
+update is incremental — the original bytes stay a prefix of the file (C7) — so the earlier
+revision, with the deleted annotations, is still inside the written file. The Tk viewer appends
+it to its status line (`Viewer.retentionNote`); the C API (`Shell.FfiMarks`) returns it as a
+save note. -/
+def retentionText (n : Nat) : String :=
+  s!"the {n} deleted mark(s) are still in the file's earlier revision (Save only appends an \
+    update) and can be recovered from it"
+
+#guard retentionText 2 == "the 2 deleted mark(s) are still in the file's earlier revision \
+  (Save only appends an update) and can be recovered from it"
+
+/-! ## Fresh IV seeds (task 12.4) -/
+
+/-- The size of one randomness source's contribution to an IV seed, in bytes. -/
+def seedSize : Nat := 32
+
+/-- **Fresh randomness from the operating system** for the writer's AES IVs (task 12.4):
+`seedSize` bytes of `/dev/urandom` followed by `seedSize` bytes of `IO.getRandomBytes`
+(libuv `uv_random`: `getentropy` on macOS, `getrandom` on Linux); a source that fails or
+delivers fewer bytes is left out, and an error is raised when both are. -/
+def freshSeed : IO ByteArray := do
+  let dev ← try
+      some <$> IO.FS.withFile "/dev/urandom" .read fun h => h.read seedSize.toUSize
+    catch _ => pure none
+  let rt ← try some <$> IO.getRandomBytes seedSize.toUSize catch _ => pure none
+  let parts := [dev, rt].filterMap fun o => o.filter (·.size == seedSize)
+  if parts.isEmpty then
+    throw (IO.userError "no randomness from the operating system")
+  return parts.foldl (· ++ ·) ByteArray.empty
+
+/-- The IV seed for saving `doc`: fresh randomness (`freshSeed`) when it is encrypted, empty
+otherwise (nothing uses it); an error when an encrypted document gets no randomness. -/
+def seedFor (doc : Doc.Doc) : IO (Except String ByteArray) := do
+  if doc.file.crypt.isNone then return .ok ByteArray.empty
+  try return .ok (← freshSeed)
+  catch e => return .error s!"cannot save an encrypted document: {oneLine (toString e)}"
+
+/-! ## The expected output size (task 12.3b) -/
+
+/-- The text bytes and the page points a mark carries (what its annotation's size grows with). -/
+def markWeight (m : Mark) : Nat × Nat :=
+  match m.kind with
+  | .highlight qs => (0, 4 * qs.length)
+  | .note t _ => (t.utf8ByteSize, 1)
+  | .freeText t _ _ _ => (t.utf8ByteSize, 1)
+  | .ink ss _ _ _ => (0, ss.foldl (fun n st => n + st.length) 0)
+
+/-- **A bound on the update one Save appends** for `store`: 64 KiB (cross-reference section,
+trailer, rewritten page dictionaries' share) plus, per mark, 16 KiB (dictionary, appearance
+stream, popup), 8 bytes per text byte (escaped twice: `/Contents` and the appearance) and
+96 bytes per page point (quad corners, ink points: in `/QuadPoints` or `/InkList` and in the
+appearance), plus 16 KiB per deleted saved mark (its page's rewritten `/Annots`). Every mark
+of the store is counted, written or not. -/
+def updateEstimate (store : Store) : Nat :=
+  65536 + store.marks.foldl (fun n m =>
+    let (t, p) := markWeight m
+    n + 16384 + 8 * t + 96 * p) 0 + 16384 * store.deletedSaved.length
+
+/-- **The expected output of a Save** (task 12.3b; the viewer reserves it in its work pool
+before building, `Budget.Op.output`): the original bytes plus the update (`updateEstimate`). -/
+def outputEstimate (doc : Doc.Doc) (store : Store) : Nat :=
+  doc.file.bytes.size + updateEstimate store
+
+#guard updateEstimate {} == 65536
+#guard
+  let s : Store := {}
+  let (s, _) := (s.addHighlight 0 .yellow [⟨100, 698, 166, 708⟩]).getD (s, 0)
+  updateEstimate s == 65536 + 16384 + 96 * 4
+
 /-- The bytes Save would write for the store's changes (`bytes` unchanged when there are
-none), checked as described in the module doc; an error message otherwise. Also returns the
-marks read back and the number of marks written or deleted. -/
-def build (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
-    Except String (ByteArray × List Mark × Nat) := do
+none), checked as described in the module doc; an error message otherwise (also the
+protection policy's refusal, task 12.4). `ivSeed` feeds the AES IVs (`seedFor`). Also returns
+the marks read back and the number of marks written or deleted. -/
+def build (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String)
+    (ivSeed : ByteArray) : Except String (ByteArray × List Mark × Nat) := do
   let plan ← edits doc (scan doc limits) store date
   let orig := doc.file.bytes
+  if !plan.isEmpty then
+    if let some why := refusal (protection doc limits) then throw why
   let out ← if plan.isEmpty then pure orig
-    else match Write.Annots.writeEdits limits doc plan.edits with
+    else match Write.Annots.writeEdits limits doc plan.edits ivSeed with
       | .ok b => pure b
       | .error e => throw (renderError e)
   if !isPrefix orig out then throw "internal: the original bytes are not a prefix of the result"
@@ -793,6 +1055,14 @@ def build (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
   match verify (pageBox d.doc) (normalize store) plan.written got plan.gone with
   | some msg => throw msg
   | none => return (out, got, plan.written.length + plan.gone.length)
+
+/-- **`build` now**: with the current date (`nowDate`) and a fresh IV seed (`seedFor`). -/
+def buildNow (limits : Limits) (doc : Doc.Doc) (store : Store) :
+    IO (Except String (ByteArray × List Mark × Nat)) := do
+  let date ← nowDate
+  match ← seedFor doc with
+  | .error e => return .error e
+  | .ok seed => return build limits doc store date seed
 
 /-- **The preview** (task 9.5g): `doc` with only the changes of saved marks applied (an
 in-memory incremental update, reopened strictly); `none` when there are none. -/
@@ -807,20 +1077,57 @@ def preview (limits : Limits) (doc : Doc.Doc) (store : Store) (date : String) :
   | .ok d => return some d.doc
   | .error e => throw s!"the preview does not reopen strictly: {e.message}"
 
-/-- **Save**: builds and checks the bytes for the store's changes (`build`), then writes
-them to `target` atomically. -/
+/-- **Save**: builds and checks the bytes for the store's changes (`buildNow`: fresh IV
+seed, protection policy), then writes them to `target` atomically; the outcome carries the
+policy's notes. -/
 def write (limits : Limits) (doc : Doc.Doc) (store : Store) (target : String)
     (prepare : System.FilePath → IO Unit := fun _ => pure ()) :
     IO (Except String Outcome) := do
-  let date ← nowDate
-  match build limits doc store date with
+  match ← buildNow limits doc store with
   | .error e => return .error e
   | .ok (bytes, got, n) =>
     try
       writeAtomic target bytes prepare
       return .ok { path := target, marks := n,
                    appended := bytes.size - doc.file.bytes.size, size := bytes.size,
-                   total := got.length }
+                   total := got.length,
+                   notes := notesFor limits doc n }
     catch e => return .error s!"cannot write {target}: {oneLine (toString e)}"
+
+/-! ## Status texts shared by the shells (task 11.3e2)
+
+Pure texts the Tk viewer shows after a save and in Save As…, moved here from `Viewer` so the
+native macOS shell shows the same words through the C API (`Shell.FfiMarks`). -/
+
+/-- **The revision-retention suffix** (task 12.5) of a save status that deleted `n` saved
+marks: `"; note: "` and `retentionText`; empty when nothing saved was deleted. -/
+def retentionNote (n : Nat) : String :=
+  if n == 0 then "" else "; note: " ++ retentionText n
+
+#guard retentionNote 0 == ""
+
+/-- **The status after a save** wrote `path`: `marks` new, changed or deleted marks (`0`: a
+plain copy), `appended` bytes appended, `total` marks in the written file, the protection
+`notes` (`notesFor`) and the retention suffix for `deleted` saved marks. -/
+def savedStatus (path : String) (marks appended total : Nat) (notes : List String)
+    (deleted : Nat) : String :=
+  let what := if marks == 0 then "a copy (no changed marks)"
+    else s!"{marks} new, changed or deleted mark(s) as an incremental update \
+      ({appended} bytes appended)"
+  s!"saved {what} to {path}; {total} marks in the file, the original bytes \
+    unchanged at its start{notesText notes}{retentionNote deleted}"
+
+#guard savedStatus "/d/a.pdf" 0 0 3 [] 0 ==
+  "saved a copy (no changed marks) to /d/a.pdf; 3 marks in the file, the original bytes \
+  unchanged at its start"
+#guard (savedStatus "a.pdf" 2 900 2 [] 1).endsWith (retentionNote 1)
+
+/-- The question when Save As… names the opened file `name` itself (not yet written by this
+session). -/
+def openedOverwriteQuestion (name : String) : String :=
+  s!"Overwrite the opened file {name}? The marks are added to it; its present content is \
+    kept unchanged inside it as the first revision."
+
+#guard (openedOverwriteQuestion "a.pdf").startsWith "Overwrite the opened file a.pdf?"
 
 end SafePdf.Shell.App.Save

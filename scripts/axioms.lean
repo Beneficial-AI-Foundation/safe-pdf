@@ -18,6 +18,9 @@ import SafePdf.Shell.App.Bubble
 import SafePdf.Shell.App.Select
 import SafePdf.Shell.App.Links
 import SafePdf.Shell.App.Toolbar
+import SafePdf.Shell.App.Budget
+import SafePdf.Shell.Worker.Serve
+import SafePdf.Shell.Worker.Protocol
 
 -- Smoke check on a definition that exists today; replace/extend as theorems land.
 #print axioms SafePdf.Limits.default
@@ -1269,3 +1272,160 @@ import SafePdf.Shell.App.Toolbar
 #print axioms SafePdf.Shell.App.Select.meetAt_spec
 #print axioms SafePdf.Shell.App.Select.bandAt_meet
 #print axioms SafePdf.Shell.App.Select.bandAt_covers
+-- Phase 12, task 12.7: C4 with explicit hypotheses (SafePdf/Spec/RepairAgree.lean)
+#print axioms SafePdf.Spec.RepairAgree.c4
+#print axioms SafePdf.Spec.RepairAgree.c4_check
+#print axioms SafePdf.Spec.RepairAgree.entries_eq
+#print axioms SafePdf.Spec.RepairAgree.newestHits_mem_iff
+#print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_prefix
+#print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_extract
+#print axioms SafePdf.Core.Write.Encrypt.aesEncrypt_iv_ne
+-- Phase 12, task 12.7a: C4 with free entries (SafePdf/Spec/RepairAgreeFree.lean)
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free_check
+#print axioms SafePdf.Spec.RepairAgreeFree.resolveLengthAux_mono
+#print axioms SafePdf.Spec.RepairAgreeFree.parseIndirectResolved_mono
+#print axioms SafePdf.Spec.RepairAgreeFree.fetchCompressed_mono
+#print axioms SafePdf.Spec.RepairAgreeFree.resolve_agree
+#print axioms SafePdf.Spec.RepairAgreeFree.getObject_agree
+-- Phase 12, task 12.1: true strict mode
+#print axioms SafePdf.Core.Open.openFileWith_true
+#print axioms SafePdf.Core.Open.openFileWith_false
+#print axioms SafePdf.Core.Open.openFileLogged_strictOnly
+#print axioms SafePdf.Core.Open.openFileLogged_refused
+#print axioms SafePdf.Core.Open.strictOpen_not_repaired
+#print axioms SafePdf.Core.Open.openFileWith_false_repaired
+#print axioms SafePdf.Core.Open.openFileBLogged_true
+#print axioms SafePdf.Core.Open.openFileBLogged_false
+#print axioms SafePdf.Core.Open.strictOpenB_not_repaired
+#print axioms SafePdf.Core.Open.Session.openLogged_true
+#print axioms SafePdf.Core.Open.Session.openLogged_false
+#print axioms SafePdf.parseLogged_strictOnly
+#print axioms SafePdf.parseLogged_refused
+#print axioms SafePdf.Api.openBytes_strict_no_repair
+-- Phase 12, task 12.5: invisible-text provenance
+#print axioms SafePdf.Core.Text.runGlyphs_visible
+#print axioms SafePdf.Core.Text.extract_visible
+#print axioms SafePdf.Core.Text.Options.keeps_hiddenWhy
+#print axioms SafePdf.Core.Text.Options.hiddenWhy_isSome_of_invisible
+-- Phase 12, task 12.7b: C4 with a byte-level hypothesis (SafePdf/Spec/RepairAgreeBytes.lean)
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_bytes
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_bytes_check
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_free_bytes
+#print axioms SafePdf.Spec.RepairAgreeBytes.c4_free_bytes_check
+#print axioms SafePdf.Spec.RepairAgreeBytes.hits_eq_headers
+#print axioms SafePdf.Spec.RepairAgreeBytes.hits_sublist_headers
+#print axioms SafePdf.Spec.RepairAgreeBytes.mem_headers
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free_eq
+#print axioms SafePdf.Spec.RepairAgreeFree.c4_free_eq_check
+#print axioms SafePdf.Spec.RepairAgreeFree.getObject_eq
+-- Phase 12, task 12.8: raster error bounds
+#print axioms SafePdf.Spec.RasterError.mul_err
+#print axioms SafePdf.Spec.RasterError.ctm_err
+#print axioms SafePdf.Spec.RasterError.ctm_err_linear
+#print axioms SafePdf.Spec.RasterError.ctm_apply_err
+#print axioms SafePdf.Spec.RasterError.ofDecimal_err
+#print axioms SafePdf.Spec.RasterError.toSub_err
+#print axioms SafePdf.Spec.RasterError.polyline_tol
+#print axioms SafePdf.Spec.RasterError.device_curve_err
+#print axioms SafePdf.Spec.RasterError.qd_err
+
+-- Phase 12, task 12.2a: document worker protocol (SafePdf/Shell/Worker/Protocol.lean)
+#print axioms SafePdf.Shell.Worker.Protocol.Codec.decNatAux_rt
+#print axioms SafePdf.Shell.Worker.Protocol.Codec.decItems_rt
+#print axioms SafePdf.Shell.Worker.Protocol.decodeBody_rt
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_at
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_encodeFrame
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_tooLong
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_next_le
+#print axioms SafePdf.Shell.Worker.Protocol.decodeStream_encodeFrames
+#print axioms SafePdf.Shell.Worker.Protocol.decodeFrame_prefix
+#print axioms SafePdf.Shell.Worker.Protocol.requestCap_lt
+#print axioms SafePdf.Shell.Worker.Protocol.responseCap_lt
+#print axioms SafePdf.Shell.Worker.Protocol.request_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.response_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.request_frame_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.response_frame_roundtrip
+#print axioms SafePdf.Shell.Worker.Protocol.request_stream
+#print axioms SafePdf.Shell.Worker.Protocol.response_stream
+#print axioms SafePdf.Shell.Worker.Protocol.request_prefix
+#print axioms SafePdf.Shell.Worker.Protocol.response_prefix
+#print axioms SafePdf.Shell.Worker.Protocol.frame_bounded
+-- Phase 12, task 12.7c: C4 for encrypted files and compressed entries (SafePdf/Spec/RepairAgreeExt.lean)
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_enc
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_enc_check
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_comp
+#print axioms SafePdf.Spec.RepairAgreeExt.c4_comp_check
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_eq_crypt
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_sec
+#print axioms SafePdf.Spec.RepairAgreeExt.withCrypt_congr
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_sub
+-- Phase 12, task 12.8b: remaining raster error bounds (SafePdf/Spec/RasterError2.lean)
+#print axioms SafePdf.Spec.RasterError2.weightI_near
+#print axioms SafePdf.Spec.RasterError2.smoothI_near
+#print axioms SafePdf.Spec.RasterError2.dist_down
+#print axioms SafePdf.Spec.RasterError2.dist_up
+#print axioms SafePdf.Spec.RasterError2.sum_near
+#print axioms SafePdf.Spec.RasterError2.checkWeightsB_sum
+#print axioms SafePdf.Spec.RasterError2.weightsAtI_eq
+#print axioms SafePdf.Spec.RasterError2.step_near
+#print axioms SafePdf.Spec.RasterError2.stepI_toInt_clamped
+#print axioms SafePdf.Spec.RasterError2.isqrtFrom_bound
+#print axioms SafePdf.Spec.RasterError2.powNat_near
+#print axioms SafePdf.Spec.RasterError2.exp_component_near
+#print axioms SafePdf.Spec.RasterError2.bil_near
+-- Phase 12, task 12.7e: repair rule R6 (object streams)
+#print axioms SafePdf.Repair.r6Raw_bounds
+#print axioms SafePdf.Repair.repair_scan
+#print axioms SafePdf.Repair.repair_entries
+#print axioms SafePdf.Repair.objStmAdds_new
+#print axioms SafePdf.Spec.RepairAgreeExt.getObject_sub2
+#print axioms SafePdf.Spec.RepairAgreeExt.resolve_sub2
+#print axioms SafePdf.Spec.RepairAgreeExt.trailerOk_toComp
+#print axioms SafePdf.Shell.Worker.Protocol.hexVal_hexDigit
+#print axioms SafePdf.Shell.Worker.Protocol.hexDec_hexEnc
+#print axioms SafePdf.Shell.Worker.Protocol.limitsOfHex_limitsHex
+-- Phase 12, task 12.7f: exact C4 for compressed entries (SafePdf/Spec/RepairAgreeComp.lean)
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_eq
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_eq_check
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_strip
+#print axioms SafePdf.Spec.RepairAgreeComp.c4_comp_strip_check
+-- Phase 12, task 12.3: per-operation budget
+#print axioms SafePdf.Shell.App.Budget.Pool.used_le_ceiling
+#print axioms SafePdf.Shell.App.Budget.Pool.reserve_used
+#print axioms SafePdf.Shell.App.Budget.Pool.reserve_none
+#print axioms SafePdf.Shell.App.Budget.Pool.release_reserve
+#print axioms SafePdf.Shell.App.Budget.Pool.release_release
+#print axioms SafePdf.Shell.App.Budget.Pool.release_used_le
+#print axioms SafePdf.Shell.App.Budget.Pool.admit_reserved
+#print axioms SafePdf.Shell.App.Budget.page_fits_pool
+#print axioms SafePdf.Shell.App.Budget.Allowance.spendAll_le
+-- Phase 12, task 12.7h: R6 after withCrypt, exact C4 for encrypted files with compressed entries
+#print axioms SafePdf.Spec.RepairAgreeEncComp.c4_enc_comp
+#print axioms SafePdf.Spec.RepairAgreeEncComp.c4_enc_comp_check
+#print axioms SafePdf.Spec.RepairAgreeEncComp.encryptDict_transfer
+#print axioms SafePdf.Spec.RepairAgreeEncComp.parseIndirectWith_obj
+#print axioms SafePdf.Core.Open.withObjStmEnc_fields
+#print axioms SafePdf.Core.Open.withObjStmEnc_xref
+#print axioms SafePdf.Core.Open.repairOpen_ok
+#print axioms SafePdf.Repair.withObjStm_eq_of_noComp
+#print axioms SafePdf.Repair.withObjStm_length_le
+#print axioms SafePdf.Repair.repair_encrypted
+-- Phase 12, task 12.7g: fuel independent of free entries
+#print axioms SafePdf.Core.Xref.Length.lengthHop_calls_le
+#print axioms SafePdf.Core.Xref.Length.lengthHop_aux
+#print axioms SafePdf.Core.Xref.Length.lengthHop_fuel
+#print axioms SafePdf.Spec.RepairAgreeComp.resolve_fuel
+#print axioms SafePdf.Spec.RepairAgreeComp.getObject_strip_cnt
+-- Phase 12, task 12.3b: photo pool, outputs, one decode budget per request
+#print axioms SafePdf.Shell.App.Budget.plan_fits
+#print axioms SafePdf.Shell.App.Budget.Pool.makeRoom_fits
+#print axioms SafePdf.Shell.App.Budget.Pool.makeRoom_released
+#print axioms SafePdf.Shell.App.Budget.Pool.makeRoom_ceiling
+#print axioms SafePdf.Shell.App.Budget.Pool.admitPhoto_iff
+#print axioms SafePdf.Shell.App.Budget.Pool.admitPhoto_evicts
+#print axioms SafePdf.Shell.App.Budget.two_pages_fit_photos
+#print axioms SafePdf.Shell.App.Budget.thumbs_fit_reserve
+#print axioms SafePdf.Shell.Worker.Serve.answerDocB_init
+#print axioms SafePdf.Shell.Worker.Serve.pageTextB_init
+#print axioms SafePdf.Shell.Worker.Serve.pageIndexB_init

@@ -238,6 +238,10 @@ def expectations : String → List (String × Expect)
      ("parseObjectAt obj 6", .errLimit .objectDepth),
      ("openFile", .okEq "strict revs=1 objects=7"), ("parse", .okEq "strict root=(1, 0)"),
      ("getObject obj 6", .errLimit .objectDepth)]
+  -- repair rule R6 (task 12.7e): object streams found only by the scan (no xref data); repair
+  -- must open each within its budgets
+  | "objstm-n-overflow.pdf" | "objstm-dup-claim.pdf" | "objstm-nested.pdf" | "objstm-huge-n.pdf" =>
+    [("repair", .ok), ("openFile", .ok)]
   | _ => []
 
 /-- The files the table is about; each must exist in the corpus. -/
@@ -245,7 +249,8 @@ def knownFiles : List String :=
   ["minimal-valid.pdf", "xref-prev-cycle.pdf", "xref-prev-self.pdf", "length-self-ref.pdf",
    "length-mutual.pdf", "pages-kids-cycle.pdf", "xobject-recursive.pdf", "xobject-mutual.pdf",
    "xobject-fanout.pdf",
-   "objstm-self-container.pdf", "deep-nesting.pdf"]
+   "objstm-self-container.pdf", "deep-nesting.pdf",
+   "objstm-n-overflow.pdf", "objstm-dup-claim.pdf", "objstm-nested.pdf", "objstm-huge-n.pdf"]
 
 /-! ## Timed calls -/
 

@@ -39,6 +39,10 @@ import Tests.DCT
 import Tests.OpenSettings
 import Tests.OptionalContent
 import Tests.Attachments
+import Tests.WriteConfidentiality
+import Tests.CappedRead
+import Tests.Worker
+import Tests.WorkerConfinement
 
 /-!
 # Test runner
@@ -97,7 +101,11 @@ def suites : List Suite :=
     { name := "dct", run := SafePdf.Tests.DCT.run },
     { name := "open-settings", run := SafePdf.Tests.OpenSettings.run },
     { name := "optional-content", run := SafePdf.Tests.OptionalContent.run },
-    { name := "attachments", run := SafePdf.Tests.Attachments.run } ]
+    { name := "attachments", run := SafePdf.Tests.Attachments.run },
+    { name := "write-confidentiality", run := SafePdf.Tests.WriteConfidentiality.run },
+    { name := "capped-read", run := SafePdf.Tests.CappedRead.run },
+    { name := "worker", run := SafePdf.Tests.Worker.run },
+    { name := "worker-confinement", run := SafePdf.Tests.WorkerConfinement.run } ]
 
 end SafePdf.Tests
 

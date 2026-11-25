@@ -7,6 +7,7 @@ import SafePdf.Core.Text
 import SafePdf.Core.Annot
 import SafePdf.Core.Raster.Geom
 import SafePdf.Core.Raster.Glyph
+import SafePdf.Shell.Read
 
 /-!
 # `safe-pdf-core`: the public library API (task 8.4; Plan.md §6 Phase 8, §4, §10)
@@ -67,23 +68,29 @@ inductive Error where
   /-- An error of the core (malformed input, limit exceeded, unsupported feature, reference
   cycle, undecryptable file). -/
   | pdf (e : SafePdf.Error)
-  /-- The file opened only through the repair path (Plan.md §4 S7) and strict mode was asked
-  for (`OpenOptions.allowRepair := false`). -/
-  | repairRefused
+  /-- Strict mode (`OpenOptions.allowRepair := false`) and the strict path failed with the
+  non-final error `strict` (damaged cross-reference data, Plan.md §4 S7): the repair path
+  was not run (task 12.1). -/
+  | repairRefused (strict : SafePdf.Error)
   /-- A page index past the end of the document (`count` pages). -/
   | pageOutOfRange (index count : Nat)
   /-- A zoom that is not positive. -/
   | badZoom (zoom : Rat)
   deriving Repr, Inhabited
 
+/-- A one-line English description of a core error. -/
+def pdfMessage : SafePdf.Error → String
+  | .malformed off msg => s!"malformed input at byte {off}: {msg}"
+  | .limitExceeded k => s!"resource limit exceeded: {reprStr k}"
+  | .unsupported what => s!"unsupported: {what}"
+  | .cycle off what => s!"reference cycle at byte {off}: {what}"
+  | .encryption what => s!"encryption: {what}"
+
 /-- A one-line English description of an error. -/
 def Error.message : Error → String
-  | .pdf (.malformed off msg) => s!"malformed input at byte {off}: {msg}"
-  | .pdf (.limitExceeded k) => s!"resource limit exceeded: {reprStr k}"
-  | .pdf (.unsupported what) => s!"unsupported: {what}"
-  | .pdf (.cycle off what) => s!"reference cycle at byte {off}: {what}"
-  | .pdf (.encryption what) => s!"encryption: {what}"
-  | .repairRefused => "the file is damaged and opens only through the repair path (strict mode)"
+  | .pdf e => pdfMessage e
+  | .repairRefused e =>
+    s!"the file does not open strictly and repair is off (strict mode): {pdfMessage e}"
   | .pageOutOfRange i n => s!"page index {i} out of range (the document has {n} pages)"
   | .badZoom z => s!"zoom must be positive (got {z})"
 
@@ -118,7 +125,8 @@ structure OpenOptions where
   /-- Resource limits for parsing and every later call on the document. -/
   limits : Limits := {}
   /-- Accept files that open only through the repair path (Plan.md §5.4). `false`: strict
-  mode, such files are rejected with `Error.repairRefused`. -/
+  mode, the repair path never runs and a file whose strict open fails with a non-final error
+  is rejected with `Error.repairRefused` (task 12.1, `openBytes_strict_no_repair`). -/
   allowRepair : Bool := true
 
 /-- An opened document. -/
@@ -134,26 +142,24 @@ structure Document where
 chain else the repair path (`SafePdf.parseWith`), decryption (empty user password), page
 tree (`Core.Doc.ofSession`, in the same decoded-bytes budget as the open). Pure and total:
 every input gives a document or an `Error`, within `limits` (S1, S3). Cyclic files are
-rejected, never repaired (`Error.pdf (.cycle …)`). -/
+rejected, never repaired (`Error.pdf (.cycle …)`). In strict mode (`allowRepair := false`)
+the repair path is skipped, not run and then rejected (`SafePdf.parseLogged`, task 12.1). -/
 def openBytes (bytes : ByteArray) (o : OpenOptions := {}) : Except Error Document :=
-  match SafePdf.parseWith o.limits bytes with
-  | .error e => .error (.pdf e)
-  | .ok d =>
-    if d.repaired && !o.allowRepair then .error .repairRefused
-    else
-      match (Doc.ofSession d.session o.limits).1 with
-      | .error e => .error (.pdf e)
-      | .ok doc => .ok ⟨o.limits, d, doc⟩
+  match SafePdf.parseLogged o.limits bytes o.allowRepair with
+  | (.error e, log) => .error (if log.refused then .repairRefused e else .pdf e)
+  | (.ok d, _) =>
+    match (Doc.ofSession d.session o.limits).1 with
+    | .error e => .error (.pdf e)
+    | .ok doc => .ok ⟨o.limits, d, doc⟩
 
-/-- **Open a PDF file** (the only `IO` in this module): reads at most
-`Limits.maxInputBytes + 1` bytes (a larger file is rejected before reading), then
+/-- **Open a PDF file** (the only `IO` in this module): the capped read `Shell.Read.readFile`
+(at most `Limits.maxInputBytes + 1` bytes through a handle, so a file that grows while it is
+read is still rejected; a file already larger is rejected before reading, task 12.1), then
 `openBytes`. File-system errors are thrown as `IO` errors. -/
 def openFile (path : System.FilePath) (o : OpenOptions := {}) : IO (Except Error Document) := do
-  let md ← path.metadata
-  if md.byteSize.toNat > o.limits.maxInputBytes then
-    return .error (.pdf (.limitExceeded .inputBytes))
-  let bytes ← IO.FS.readBinFile path
-  return openBytes bytes o
+  match ← Shell.Read.readFile path o.limits.maxInputBytes .inputBytes with
+  | .error e => return .error (.pdf e)
+  | .ok bytes => return openBytes bytes o
 
 namespace Document
 
@@ -179,18 +185,27 @@ end Document
 /-- **Strict mode (S7)**: a document opened with `allowRepair := false` was not repaired. -/
 theorem openBytes_strict {bytes : ByteArray} {o : OpenOptions} {d : Document}
     (hs : o.allowRepair = false) (h : openBytes bytes o = .ok d) : d.repaired = false := by
+  have hr := (SafePdf.parseLogged_strictOnly o.limits bytes).2
   unfold openBytes at h
-  split at h
+  rw [hs] at h
+  rcases hp : SafePdf.parseLogged o.limits bytes false with ⟨r, log⟩
+  rw [hp] at h hr
+  rcases r with e | p
   · cases h
-  · split at h
+  · simp only at h
+    split at h
     · cases h
-    · rename_i hc
-      split at h
-      · cases h
-      · simp only [Except.ok.injEq] at h
-        subst h
-        simp only [hs, Bool.not_false, Bool.and_true] at hc
-        simpa [Document.repaired] using hc
+    · simp only [Except.ok.injEq] at h
+      subst h
+      exact hr p rfl
+
+/-- **True strict mode** (task 12.1, M12 "a strict-only open records zero repair attempts"):
+with `allowRepair := false`, the parse `openBytes` runs (`SafePdf.parseLogged`) runs the
+repair path zero times. -/
+theorem openBytes_strict_no_repair {bytes : ByteArray} {o : OpenOptions}
+    (hs : o.allowRepair = false) : (SafePdf.parseLogged o.limits bytes o.allowRepair).2.attempts = 0 := by
+  rw [hs]
+  exact (SafePdf.parseLogged_strictOnly o.limits bytes).1
 
 /-! ## Pages -/
 
@@ -758,7 +773,7 @@ private def tinyDoc (_ : Unit) : Except Error Document := openBytes (tiny ())
     openBytes ("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" ++
     "2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n").toUTF8
     { allowRepair := false } with
-  | .ok d, .error .repairRefused => d.repaired
+  | .ok d, .error (.repairRefused _) => d.repaired
   | _, _ => false
 
 end SafePdf.Api

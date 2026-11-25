@@ -48,8 +48,9 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   (Ctrl+wheel) or at the window centre (keys, toolbar) is computed with `Geom.toPage` before
   the change and put back under the same window position with `Geom.toScreen` after it
   (C2; `View.reanchor`). Window resizes re-render in the fit modes (debounced 100 ms).
-* **Huge zooms are bounded**: a page image above `View.maxViewPixels` (2²⁶ px = 256 MiB RGBA)
-  gets a smaller zoom ("zoom limited" in the status line); a side above `Limits.maxPageSide`
+* **Huge zooms are bounded**: a page image above `Budget.Ceilings.pagePixels` (10 Mpx = 40 MiB
+  RGBA since task 12.3b; `View.maxViewPixels`, 2²⁶ px, before) gets a smaller zoom ("zoom
+  limited to 10 Mpx per page" in the status line; "Budgets and ceilings"); a side above `Limits.maxPageSide`
   (16384) is cropped by the renderer ("cropped" in the status line).
 * **Rotation**: view rotation in 90° steps, combined with each page's `/Rotate`; the window
   centre's page point stays at the centre.
@@ -58,7 +59,8 @@ never compile the shim or link Tk (the shim is a custom `target` attached only t
   top of the next page; past the top, to the bottom of the previous page. The mouse wheel does
   the same (9.2, below). In the continuous modes the canvas holds the whole document (9.3).
 * **Page cache** (`View.Cache`): render results keyed by (document, page, zoom, rotation), LRU,
-  at most `View.cacheBytes` = 256 MiB of images and `View.cacheEntries` = 64 entries; results
+  at most `Budget.Ceilings.cacheBytes` = 96 MiB of images (256 MiB, `View.cacheBytes`, until task
+  12.3b) and `View.cacheEntries` = 64 entries; results
   above half the budget are not cached. 100 ms after a page is shown, the next page (in the
   facing view: the next spread) is rendered into the cache when it is at most
   `Viewer.prefetchPixels` (2²² px), on a worker thread (8.8). Each page on the canvas has its own Tk photo
@@ -375,6 +377,27 @@ cannot disappear on macOS); full screen on aqua uses the native full-screen spac
 window manager (Xvfb) `wm attributes . -fullscreen` reads back 0, so the smoke test checks the
 viewer's state only.
 
+## Honest UI for hidden content (12.5)
+
+* **Trusted identity line.** While a document has the window in full screen (`/PageMode
+  /FullScreen`) or hides parts of it (`/HideToolbar`, `/HideMenubar`, `/HideWindowUI`), a dark
+  strip `.ident` above the status line, outside the page canvas, reads `SafePDF is showing
+  NAME (PATH) - this line is drawn by SafePDF, never by the document` (`identityLine`: file
+  name and path with controls and bidi overrides blanked, never the document's `/Title`; a
+  bib-lean document says "opened from the library"). It is packed before the window enters
+  full screen and removed when Escape leaves it / shows the chrome (`syncIdentity`); the
+  10.13 rule (the full-screen note is stored before entering full screen) is unchanged.
+* **Invisible text in copies.** Copy keeps text drawn with text rendering mode 3/7 (an OCR
+  layer is the page's text) but says so: `copied N characters; the copied text includes K
+  characters that are not visible on the page (invisible text, e.g. an OCR layer)`
+  (`copyStatus`, `Select.PageIndex.hiddenChars`, from `Core.Text`'s per-glyph `visible`).
+  Text outside the CropBox and text the clip hides is never in the selection. The inspector's
+  `text` view lists hidden runs (`"hidden": [{…, "invisible": true, …}]`, `reason`
+  `render-mode` or `outside-cropbox`). White-on-white and transparent text are not detected.
+* **Revision-retention notice.** A Save that deletes saved marks appends `; note: the N
+  deleted mark(s) are still in the file's earlier revision (Save only appends an update) and
+  can be recovered from it` to its status (`retentionNote`; Save, Save As…, the library).
+
 ## Attachments panel (9.r10)
 
 Files embedded in the PDF (ISO 32000-2 §7.11.4) are listed in a sidebar panel after PDF.js's
@@ -515,7 +538,7 @@ edges are for the page scroll modes (single page, facing).
   turns pages (the `Left`/`Right` keys still do).
 * **Smoke** (`SAFEPDF_VIEWER_SMOKE_MODE=wheelflow`, case 1o): bursts of 12 px
   `<TouchpadScroll>` events with sideways jitter and of third-notch `<MouseWheel>` events, 8 ms
-  apart, through five pages in every view mode at Page Width and in the single page at Page
+  apart (and, since 10.c2, of `<Button-5>` presses), through five pages in every view mode at Page Width and in the single page at Page
   Fit; trace of (event, ms, page, top) in `wheelflow-trace.txt`. On `arxiv-1706.03762.pdf`
   (882 px view) before 9.r1 the trackpad bursts never left page 1 in the page modes; after,
   the longest run of events that moved nothing is 3 (single, Page Width), 18 (Page Fit and
@@ -558,7 +581,7 @@ starts).
   its width (and the window less the 10 px gap) in the facing modes, as PDF.js does
   (`View.fitBox`, `#pageWidthScaleFactor` 2), so every spread of a paper shows at the same zoom;
   Automatic Zoom still asks whether the page itself is portrait. Each page is capped at
-  `View.maxViewPixels` separately. A new layout is computed when the document, mode, zoom,
+  `Budget.Ceilings.pagePixels` separately. A new layout is computed when the document, mode, zoom,
   rotation, window size or (page scroll mode) the spread shown changes — never by scrolling in
   the continuous modes; there it keeps the view's place in the current page.
 * **Current page**: in the continuous modes the page under the window centre
@@ -581,7 +604,8 @@ starts).
   rendering runs on worker threads (next section), so no page blocks the window; a page not
   rendered yet shows its white frame with "Rendering…". Photos of pages that leave that set
   are deleted (`image delete`), so Tk holds at most the pages in view plus two; the rendered
-  images stay in the LRU cache (256 MiB, 64 entries) at the current zoom.
+  images stay in the LRU cache (96 MiB since task 12.3b, 64 entries) at the current zoom. Since
+  task 12.3b every photo holds a reservation in the photo pool ("Budgets and ceilings").
 * **Everything per page works in every mode**: positions are mapped through the slot of the
   page under the pointer (`Viewer.pagePointAt`; a drag stays on the page where it started),
   so selection, double click, links and their hover, highlights and notes (drawn on every page
@@ -629,6 +653,224 @@ mode, an animated spinner (the placeholder is a static "Rendering…").
   overlays are redrawn whenever a page arrives.
 * Smoke mode waits for every render (`syncWaitMs = none`, `settle` waits for all running
   renders), so its steps see the pages at once; the `async` case runs with no wait at all.
+
+## The document worker (12.2c, 12.2d)
+
+Since task 12.2c the viewer renders pages and thumbnails, and reads the outline, in a separate
+process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confinement task
+12.2b), found next to the viewer (`.lake/build/bin/worker`; `lake build` builds it,
+`scripts/viewer-smoke.sh` builds `viewer worker`). The client side is
+`Worker.Session` (`SafePdf/Shell/Worker/Client.lean`).
+
+* **One process per open document.** The viewer still reads the file itself (capped at
+  `maxInputBytes`, task 12.1) and parses it for the page layout, labels, open settings,
+  attachments, layers and Save; the worker gets **the same bytes** in an `openDoc` request, never
+  a path. A new file, Close, or a preview of edited saved marks (9.5g, the preview's bytes)
+  gives the session a new document id (`State.srcSerial`): the old worker is killed and the next
+  request spawns a new one. Save keeps using the bytes the viewer read.
+* **Asynchronous, queued.** `Viewer.renderTask` queues a `render` request and returns a task (a
+  promise the session resolves), so `poll`, `showNow` and `settle` work exactly as with the
+  8.8 render threads and no event waits on the worker's pipes. The worker answers one request
+  at a time; the session's dispatcher thread picks the most urgent: priority 0 for the
+  current page or spread (and the outline), 1 for other pages in view and the prefetch, 2 for
+  thumbnails; a queued neighbour that becomes the current page is raised to 0
+  (`Viewer.raiseJob`).
+* **Cancellation.** Renders whose result would be dropped (another document generation, or a
+  page now laid out at another zoom or rotation; thumbnails of another rotation) are cancelled
+  (`Viewer.cancelStale`, at every `poll`, `renderMore`, `showNow`, `settle`): dropped while
+  queued; a running one is killed (and the worker restarted for the next request) once it ran
+  `preemptMs` = 250 ms. A render that blocks a more urgent one (lower priority, or a current
+  page asked for at least 100 ms later) is preempted the same way and queued again. Unlike the
+  8.8 threads, a superseded render no longer keeps a CPU busy until it ends.
+* **Deadline.** A request (or a spawned worker's `openDoc`) without an answer within
+  `Viewer.workerDeadlineMs` = 20 s kills the worker. The page shows, and for the current page
+  the status line says, `rendering stopped: the document took too long (no answer within 20 s;
+  its worker was stopped)` (cached for that zoom, so it is not retried in a loop); the next
+  request spawns a fresh worker and sends the bytes again, and another file opens normally.
+  20 s is far above the slowest corpus page (about 3 s) and the slowest decompression bomb
+  under the default limits (about 3.3 s).
+* **Images are checked** before Tk sees them: `4·w·h` bytes or the page shows an error
+  (`Viewer.outOfReply`). Worker errors show their own text (`Viewer.workerErr`, `pageErr`).
+* **Outline**: asked for right after the `openDoc` and waited for during the open (after
+  labels, attachments and layers are read here); items become `Links.Entry`s with the same
+  display rules (`safeText`: controls and bidi overrides as spaces, 500 characters; URIs
+  percent-encoded by `Links.uriText`). A worker without an outline answer falls back to the
+  in-process outline with a status note.
+* **Text, links, layers, fonts and limits (12.2d).** The protocol gained `pageIndex PAGE OC`
+  (answered with the viewer's selection/search index: `Select.PageIndex.ofText` of
+  `Annot.extractDocPageAnnots` — cells in reading order with text, separator, page-space box
+  and line, line directions, hidden flags; CropBox and clip filtering and the layers state
+  applied in the worker), `viewLinks PAGE` (`Links.pageLinks`, actions included) and a layers
+  state on `render`; all with round-trip and framing proofs (`Protocol.lean`). The viewer
+  rebuilds the index (`Viewer.indexOfReply`: search text by `Select.normChars` here) and
+  re-checks link strings (`linkOfWire`: URIs and action names must be printable ASCII, else
+  percent-encoded again; names through `safeText`; a jump outside the document is `badPage`).
+  `submit` asks for the links of every page in view and the text index of the current page
+  right after its render (priority 1); pointer motion uses `linksOf`/`pageIndex` with
+  `wait := false` and never waits (no link or I-beam until the reply is there); selection,
+  copy, search and clicks wait for the reply (raised to priority 0; bounded by the deadline).
+  A failed request is cached as an error / no links: the page is then not parsed in this
+  process. Startup data are **flags** parsed before `Sandbox.prepare` (the fonts are read
+  before confinement and the worker reads no environment; `Protocol.StartConfig`,
+  `Viewer.workerStart`): `--limits=HEX` (the viewer's `Limits`, `limitsC` in hex,
+  `limitsOfHex_limitsHex`), `--no-subst` (`SAFEPDF_SUBST_FONTS=0`), `--home=DIR` (`$HOME`, for
+  `~/Library/Fonts`), `--font-dir=DIR` per `$SAFEPDF_FONT_DIR` entry, `--test-stall-ms=N`,
+  and since 12.3 `--mem-limit-mib=N` / `--cpu-limit-s=N` (the resource fences, "Budgets and
+  ceilings" below) and `--test-spin-ms=N`; an unknown argument ends the worker with status 5. So the worker searches exactly the fonts the
+  viewer would, and no render stays in-process for its layers state or font configuration.
+* **Still in this process:**
+  * the parse the GUI keeps for layout, page sizes and labels, open settings, attachments, the
+    layers panel, the 9.5c marks read from the file and Save;
+  * the text index and links while edited saved marks are previewed (`State.view`: the worker
+    then holds the preview's bytes, while text and links are read from the opened document);
+  * everything, when the worker executable is missing (a build of only `viewer`; the status
+    line says `no document worker at …: pages render in this process`) or with
+    `SAFEPDF_VIEWER_WORKER=0` (for comparisons). This fallback keeps development builds
+    usable; a release should ship the worker and could refuse instead.
+  * The macOS FFI shell (`SafePdf/Shell/Ffi`, task 11.x) keeps rendering in-process until 11.2
+    decides.
+* **Measurements** (macOS, the smoke case 12.2c, medians of 3): page 1 of the two-page fixture
+  at 124 % (1014×1312 px) 8.2 ms in-process, 9.1 ms through the worker; page 1 of the
+  Transformer paper at 82 % (670×867 px) 64.6 ms in-process, 58.1 ms through the worker. The
+  1m `async` case's slow page at 150 % finished after 4.1 s through the worker, 4.3 s on the
+  8.8 threads. While a render runs the Tk event loop keeps going: the smoke's 10 ms heartbeat
+  never missed more than 16 ms.
+* **Test hook** (`SafePdf/Shell/Worker/TestHooks.lean`): `SAFEPDF_WORKER_TEST_STALL_MS=N` in a
+  session's test environment (`Worker.Session.setEnv`, only the smoke step) becomes the
+  worker's `--test-stall-ms=N` flag: it sleeps `N` ms before every render. The worker's own
+  environment stays empty (Lean 4.36's `IO.Process.spawn` crashes the child when
+  `inheritEnv := false` comes with a non-empty `env`, and the confined worker refuses one).
+
+## Budgets and ceilings (12.3, 12.3b)
+
+**Published ceilings** (the source is `Budget.ceilings` in `SafePdf/Shell/App/Budget.lean`;
+`scripts/interleave.sh` reads its two scenario numbers from there):
+
+| What | Ceiling | Enforced by |
+|---|---|---|
+| Reserved for work in flight (page renders, thumbnails, text and links requests; since 12.3b Save and XFDF export) | **192 MiB** (`poolBytes`; 512 MiB in 12.3), of which images leave **32 MiB** to text (`textReserve`) | `Budget.Pool`: the invariant `used ≤ ceiling` is a field of the structure (`Pool.used_le_ceiling`) |
+| Estimate of one image in flight | `8·w·h` bytes (`workBytes`: the reply frame and the decoded image; `4·w·h` in 12.3; the largest page is 80 MiB and always fits: `page_fits_pool`) | `Pool.admit` |
+| Estimate of one text or links request | **2 MiB** (`textBytes`) | `Pool.admit` |
+| Estimate of one Save / XFDF export | the original bytes plus a bound on the update (`Save.outputEstimate`) / twice a bound on the XFDF text (`Xfdf.exportEstimate`, `#guard`ed against `toXfdf`) | `Pool.admit` (`Op.output`; room: the whole pool) |
+| One page image in the view | **10 Mpx** (`pagePixels`; 2²⁶ px before 12.3b): a larger zoom is lowered with a status note | `Viewer.viewParamsAt` (`View.capZoom`) |
+| Live Tk photos (page photos on the canvas, thumbnails) | **352 MiB** (`photoPoolBytes`), of which page photos leave **32 MiB** to thumbnails (`thumbReserve`); a photo is estimated at `16·w·h` (`photoBytes`) | a second `Budget.Pool` (`Pool.admitPhoto`, `makeRoom_fits`, `two_pages_fit_photos`, `thumbs_fit_reserve`) |
+| Render cache | **96 MiB** (`cacheBytes`; 256 MiB until 12.3b) / 64 entries | `View.Cache` |
+| The viewer's plan | base 160 MiB (`baseBytes`) + work pool + photo pool + cache = 800 MiB ≤ 1024 MiB | `plan_fits` (`decide`) |
+| One search (Find Next/Previous) | **400 pages** indexed and **60 s**, shared by all pages it visits (`searchPages`, `searchMs`) | `Budget.Allowance` (`spendAll_le`) |
+| Document worker memory | **2048 MiB** (`workerMemMiB`, flag `--mem-limit-mib=`) | Linux: watchdog on private resident memory (`/proc/self/statm`) plus a `RLIMIT_DATA`/`RLIMIT_AS` backstop relative to the startup mappings (12.c1); macOS: `phys_footprint` watchdog (see below) |
+| Document worker CPU time per request | **60 s** (`workerCpuS`, flag `--cpu-limit-s=`), next to the 20 s wall-clock deadline | `RLIMIT_CPU`, re-armed before every request |
+| Interleave scenario, viewer peak RSS | **1024 MiB** (`viewerRssMiB`) | `scripts/interleave.sh` (CI) |
+| Interleave scenario, each worker's peak RSS | **512 MiB** (`workerRssMiB`) | `scripts/interleave.sh` (CI) |
+
+* **Reservation before dispatch.** `Viewer.submit` (pages), `thumbView` (thumbnails) and
+  `sideJob` (text index, links) ask `Viewer.admit` → `Budget.Pool.admit` before a request
+  goes to the worker (or to an in-process render thread). The answer is *reserved* (the
+  ticket is kept in the `Job`/`SideJob`), *wait* (a page: `State.budgetWait`, `poll` runs
+  `renderMore` again; a thumbnail: later, from `thumbView`; a prefetch text/links request:
+  skipped; a text request the user waits for: the GUI waits for the text requests in flight,
+  which release theirs), *lowered quality* (a thumbnail rendered at ½, ¼ or ⅛ of its zoom) or
+  *refused* (an image larger than the pool: cached as `limitExceeded imagePixels`; cannot
+  happen for the viewer's capped pages).
+* **Release exactly once.** A render's ticket is released where its job leaves `jobs`
+  (`finish`) or `thJobs` (`thumbPoll`) — each job leaves its list once; a text/links ticket
+  when its reply is there (`sweepSide`, every `poll` and before every admission), when it is
+  answered (`dropSideJob`) or dropped with an old document generation. `Pool.release_reserve`
+  (a release gives back the pool before the reservation) and `Pool.release_release` (a second
+  release changes nothing) are proven; the interleave scenario checks that the idle viewer
+  holds no reservation at the end.
+* **One work allowance per search.** `Viewer.nextHit` starts one `Budget.Allowance` per Find
+  and spends a page for every page whose text index is not cached; when it is used up the
+  status line says `"…": not found in the N pages searched so far (this search's work
+  allowance is used up); search again to go on` — the next Find continues past the pages
+  indexed (cached) so far. Each page request remains bounded by the worker's deadline and its
+  own `Filter.Budget` — one per worker request (below).
+* **Live photos (12.3b).** Every Tk photo the viewer keeps holds a reservation in the photo
+  pool from its `put` to its `image delete` (`Viewer.photoAdmit`, `photoUnreserve`): page
+  photos (`showPhoto`, released by `dropPhoto`/`clearPages`) and thumbnails (`thumbPoll`,
+  released by `dropThumb`/`clearThumbs`). The estimate, 16 bytes per pixel, is measured: on
+  macOS 26 with Tk 9 a displayed 3558 × 4604 photo raised the viewer's footprint by 172 MB
+  (≈ 10.5 B/px: Tk's own 32-bit copy and its display buffers), plus the viewer's copy of the
+  image kept for repainting the marks (4 B/px). When a page photo does not fit, a page **in
+  view** evicts the photos of pages not in view, farthest from the current page first
+  (`Budget.Pool.makeRoom`, proven: afterwards it fits, and only a prefix of the candidates is
+  released); if it still does not fit, it is **refused** and its frame says `page N: not
+  shown: its image (W x H px) needs … MiB and the page images in view already hold … of the
+  … MiB for page images; zoom out or scroll`. A **neighbour** (not in view) never evicts: it is
+  deferred (`State.photoDeferred`, left out of `missingPages`, so not rendered again) until a
+  photo is released. Two pages at the pixel cap always fit (`two_pages_fit_photos`), so in the
+  vertical modes the pages in view are never refused; four pages in view at the cap (the
+  facing modes at deep zoom) can be. Tint photos (`::safepdf::tint_*`, at most a dozen
+  box-sized ones) and the icons are not counted.
+* **Pixel cap (12.3b).** A page image has at most 10 Mpx (`pagePixels`). Measured on the
+  Transformer paper at `tk scaling` 1.334 (macOS 26): with 2²⁶ px a 600 % page was 31 Mpx and
+  the viewer's RSS reached 2.6 GiB (4.9 GiB in the run of 12.3), workers 1.2 GiB; with 16 Mpx
+  (PDF.js's `maxCanvasPixels`) 1.39 GiB; with 12 Mpx 1.04 GiB; with 10 Mpx and the 96 MiB
+  cache 816–931 MiB over five runs. So 600 % and 800 % show at 344 % on that screen, with the note `zoom
+  limited to 10 Mpx per page` (a deliberate trade: PDF.js renders larger zooms at a lower
+  resolution and stretches the canvas; Tk photos cannot be stretched without a copy of the
+  full size).
+* **Reply frames (12.3b).** The client reads a reply of up to `Client.presizeMax` (a page at
+  the pixel cap plus 1 MiB) into one buffer of its announced size (`readFrameSized`), instead
+  of growing it by appending (which briefly held up to three times the frame); a longer frame
+  still grows with the data received, so a worker cannot make the viewer allocate more than an
+  honest page reply by announcing a long frame.
+* **Save and XFDF export (12.3b).** Save (`saveTo`, `overwriteInto`, `saveToLibrary`, the
+  library's Save As… copy) reserves `Save.outputEstimate` — the original bytes plus a bound on
+  the update (`Save.updateEstimate`: 64 KiB, and per mark 16 KiB + 8 B per text byte + 96 B
+  per page point, 16 KiB per deleted saved mark) — and XFDF export twice
+  `Xfdf.exportEstimate` (the text and its UTF-8 bytes) in the work pool before building
+  (`Viewer.withOutput`), released afterwards whatever happens. An output larger than the pool
+  is refused (`cannot save to NAME: it needs about N MiB in memory, more than the viewer's
+  192 MiB budget for work in flight`; so a PDF above about 190 MiB cannot be saved with
+  marks); when the renders in flight leave too little, it is refused with "try again when they
+  are done" (Save runs on the GUI thread, so it does not wait).
+* **One decode budget per worker request (12.3b).** `Serve.answer` makes the request's
+  `Filter.Budget` once (`requestBudget`) and threads it through everything the request decodes
+  (`answerDocB`: render, text, selection index). No request covers more than one page, so this
+  is the same as before (`answerDocB_init`, by `rfl`: the worker suite's byte equality with
+  the in-process calls holds unchanged). The budget is deliberately **not** carried across
+  requests: a page's answer would then depend on the requests before it (and no longer equal
+  the in-process render or index, which start fresh), and the protocol would have to carry the
+  remainder. Work across the requests of one user operation is bounded by the search's shared
+  allowance (pages, time), the work pool (memory) and the worker's fences.
+* **Not in a pool:** the open document's bytes and parse (bounded by `maxInputBytes`), the
+  text indexes and links (small, per page), tint photos and icons; the allocator's retention
+  (macOS keeps freed blocks: the RSS after the 75–200 % rounds stays near 550 MiB with
+  ~250 MiB live), which is why the scenario, not the plan alone, is the check.
+* **Worker fences outside Lean's cost model** (`c/worker_sandbox.c`, `Sandbox.fence`, applied
+  before confinement): Linux a watchdog thread on private resident memory (resident − shared
+  from `/proc/self/statm`, read through a descriptor opened before confinement) with a
+  `RLIMIT_DATA`/`RLIMIT_AS` backstop relative to the startup mappings — absolute limits fail
+  because Lean's mimalloc commits ~1 GiB arenas eagerly on Linux (12.c1) — and no core dumps
+  (`RLIMIT_CORE` 0, `PR_SET_DUMPABLE` 0); **macOS 26 rejects `setrlimit(RLIMIT_AS)`
+  and `RLIMIT_DATA` with `EINVAL` for every finite value and refuses `memorystatus_control` to
+  an unprivileged process**, so a watchdog thread reads the task's `phys_footprint` every
+  10 ms and ends the worker with status 6 above the ceiling (a fence against runaway inputs,
+  not against a compromised worker, for which the client's deadline kill remains).
+  `RLIMIT_CPU` works on both (`SIGXCPU`, measured on macOS); its soft limit is re-armed before
+  every request to the CPU used so far + 60 s + 1, so a long session is never ended by earlier
+  requests. The `worker` test suite checks both fences: a 64 MiB worker asked for a 124 MB
+  render ends (exit 6 on macOS) while a 2048 MiB one renders it; a 1 s CPU fence ends a 4 s
+  busy request after 2 s (`SIGXCPU`, exit 152) while four 0.6 s requests pass.
+* **The interleave scenario** (`scripts/interleave.sh`, smoke mode `interleave`,
+  `Viewer.smokeInterleave`; CI job `interleave`): on the Transformer paper (15 pages), 8 rounds
+  of zoom in ×4 (75 % → 200 %), a search for `the` and for a word that is nowhere (every page
+  indexed under one allowance), the thumbnails panel scrolled, two page changes and zoom
+  out ×4, with 250 ms of event loop after each step; the sampler reads `ps` RSS (and VmHWM on
+  Linux) of the viewer and of every worker every 0.2 s. macOS 26 (arm64), 2026-11-23: viewer
+  peak 703 MiB, 10 workers (preemption kills and respawns them), worker peak 129 MiB, pool
+  peak 22 MiB, nothing waited, lowered or refused, pool empty at the end; 34 s.
+  **Task 12.3b** adds the deep zoom phase (600 % and then 800 %, each scrolled top to bottom in
+  12 steps of 400 ms; the viewer logs its own RSS after each step) and checks the photo pool
+  (peak under its ceiling, `photoMismatch` 0: every page photo and thumbnail reserved at its
+  present size, no reservation without a photo), that the deep zoom ran (24 steps) and was
+  limited, and the viewer's own deep-zoom RSS reading against the ceiling too; a process above
+  three times its ceiling is killed and the run fails. macOS 26 (arm64), 2026-11-23 (12.3b): viewer
+  peak 816–931 MiB over five runs (in one, its own reading in the deep phase was 854 MiB against the sampler's 816), 26–40 workers, worker peak 238 MiB,
+  pool peak 156 MiB of 192, 920 waits (a page at the cap takes most of the pool, so the
+  neighbours' renders wait), photo pool peak 315 MiB of 352, nothing evicted or refused; zoom
+  shown at 344 % ("zoom limited to 10 Mpx per page"). Before 12.3b the same phase peaked at
+  2.6 GiB (viewer) and 1.2 GiB (a worker).
 
 ## Highlights and notes (9.4)
 
@@ -1045,7 +1287,15 @@ page copies exactly the page text of the text view.
   blending reads the window back per redraw, and a page can have hundreds of hits; the
   selection is one band per line); switching it is the `State.stipple` flag. User
   highlight marks are not affected (multiplied into the page image, below); unsaved drawings
-  with an opacity below 88 % are stippled on X11 and opaque on Aqua.
+  with an opacity below 88 % are stippled on X11 and opaque on Aqua. **Tk 8.6** (task 10.c1;
+  Ubuntu 24.04's `tk-dev`, the Linux CI) takes no `#RRGGBBAA` in `photo put` ("can't parse
+  color") and has no `get -withalpha`: at start the viewer probes `put` once
+  (`::safepdf::tintRgba`); without it `::safepdf::tintFill` builds a one-pixel 8-bit RGBA PNG in
+  Tcl (`zlib`, `binary`; `::safepdf::rgbaPng`) and tiles it over the photo with
+  `copy -to … -compositingrule set`. Tk 8.6 reads PNG alpha and blends partly transparent
+  photos on X11, so the selection looks the same. The smoke probes read pixels through
+  `::safepdf::pixel` (a one-pixel PNG decoded in Tcl on Tk 8.6). `SAFEPDF_TINT_PNG=1` forces
+  both Tk 8.6 paths, so they can be checked on Aqua.
 * **Ctrl+C** (or the right-button menu: Copy, Select all, Find…) copies the selected text
   (`Select.rangeText`) with `clipboard clear; clipboard append -- TEXT`, the text one word
   quoted by `Tcl.quote`. The selection is per page and cleared when the page changes.
@@ -1441,7 +1691,20 @@ open in Vertical Scrolling, No Spreads (state and both radio variables); then th
 described under *Wheel scrolling across pages* must reach page 5 (or the last page) in every
 view mode without going back, without a run of motionless events longer than the page-turn
 push (none in the continuous modes), and without a step longer than one event plus the
-carried push. About 12 s per file.
+carried push. About 12 s per file. Tk 8.6 (the Linux CI) has no `<TouchpadScroll>`: a
+generated one is dropped and each trackpad burst would run its 3000 events without moving (the
+run timed out at 60 s), so there the five trackpad bursts print `skipped` and only the wheel
+bursts are checked (task 10.c1; `tk:` line of `wheelflow.txt`). Task 10.c2: the second CI run
+still timed out on both files with no output at all, because `wheelflow.txt` was written
+only at the end. Now every line is written when it is known, each burst's trace is appended
+after the burst, and the viewer prints `wheelflow-progress:` lines (ms since start, mode,
+burst summary) on stdout, flushed. Each burst stops after 300 motionless events
+(`stopped=stall`, an event type the platform drops) or 8 s (`stopped=time`), and the run stops
+with an `error:` line after 140 s (script timeout 150 s for this case). A failed run shows the
+lines it wrote and the end of its trace. Each mode also gets a third burst of `<Button-5>`
+presses (with releases): one notch each, the X11 wheel of Tk 8.6. It is checked like the wheel
+burst, with a step of a tenth of the view and at most one motionless event at a page edge. So
+there are 15 bursts per file.
 
 A 9.4 screenshot (`arxiv-1706.03762.pdf`, two abstract lines highlighted in yellow, a note
 with its popup) was taken this way, with `xdotool` driving drag, `h`, right click and the
@@ -1475,7 +1738,19 @@ name with `send -async` and the script creates a file `sent` (10.19). On Aqua th
 tries only `tk`/`viewer`/`safe-pdf` (`winfo interps` lists every Tk interpreter of the user,
 also other runs'), and when the control fails while a baseline `send` between two plain `wish`
 processes fails too (Tk Aqua delivers no AppleEvents in this session, seen with a locked
-screen), the control is skipped, not failed.
+screen), the control is skipped, not failed. On X11 Tk executes a received `send` only when the X
+server is "secure" (access control on and no host-list entries but `SI:localuser`/`localgroup`;
+otherwise "X server insecure", silently for `-async`): the drive run first prints the test
+server's `xhost` list (`xhost:` lines) and removes other entries, and when the file does not
+appear the `wish` tries a synchronous `send` and prints its result (`send-sync`, task 10.c1:
+the first Linux CI run, Tk 8.6, saw the async send accepted and never run). Task 10.c2: the
+second CI run had the synchronous send come back from the viewer (`0 8.6.14 safepdf-lock-PID`)
+while the file still never appeared. Best explanation: on X11 `send -async` is a property
+change that stays in Xlib's output buffer until the client flushes it, and the `wish` only
+polled with `after 50` (which never flushes); it now calls `update` after the send and in its
+wait. On X11 a synchronous send that returns the viewer's Tk version and its application name
+also counts as reaching the viewer (`send-sync-ok`), since the viewer ran the script. The
+lockdown half is unchanged: there every send must fail.
 
 The `keys` case (9.r3, `Viewer.smokeKeys`, case 1o) runs on the text PDF twice: as installed
 (X11: `Ctrl+…` menu and context-menu accelerators, the Control bindings, no `<Command-…>`
@@ -1682,9 +1957,9 @@ so `+` does nothing visible and `+` `-` ends at 100 % (1i's later clicks miss; 1
 second render). **1s opensettings** — a `/PageMode /FullScreen` file's status line lacks
 "full screen (Escape leaves)" until the next status update.
 
-CI: the workflow cannot be pushed from the sandbox; the job that installs `tk-dev`/`xvfb`,
-builds `viewer` and runs the smoke test is in `docs/ci-viewer-step.patch` (it also points the
-cache keys at `lakefile.lean`).
+CI: job `viewer` in `.github/workflows/ci.yml` (since 2026-11-24) installs `tk-dev`/`xvfb`,
+builds `viewer` and runs the smoke test on the pinned corpus subset; the cache keys hash
+`lakefile.lean`.
 
 ## M9 evidence (9.6, 9.10)
 

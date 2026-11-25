@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SafePdf.app's Info.plist (task 11.3b; docs/macos-design.md §2, the bundle row).
+     Copied as is by macos/build.sh. Viewer role for PDF with rank Alternate: SafePDF appears in
+     Open With without taking over the default PDF app. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>SafePDF</string>
+  <key>CFBundleName</key><string>SafePDF</string>
+  <key>CFBundleExecutable</key><string>SafePdf</string>
+  <key>CFBundleIdentifier</key><string>org.safe-pdf.SafePDF</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.11</string>
+  <key>CFBundleVersion</key><string>11.3</string>
+  <key>CFBundleIconFile</key><string>SafePdf</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSHumanReadableCopyright</key><string>safe-pdf contributors</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>PDF document</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.adobe.pdf</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>pdf</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

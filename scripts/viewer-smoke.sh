@@ -113,7 +113,16 @@
 #      items; the selection is one band per line, joined lines touching (10.18); drawing times
 #      printed;
 #   2. a malformed and a non-PDF file: the viewer must exit normally with an error in the
-#      status line.
+#      status line;
+#   12.5. honest UI for hidden content (SAFEPDF_VIEWER_SMOKE_MODE=honest): copy of a `3 Tr`
+#      line announces its invisible characters, the trusted identity line in document full
+#      screen and with hidden chrome, the revision-retention notice after deleting a saved
+#      mark and saving;
+#   12.2c. the document worker (SAFEPDF_VIEWER_SMOKE_MODE=worker): pages rendered by the worker
+#      process, no event blocked while a (test-hook) slow render runs, a stalled render killed
+#      after the deadline with the status saying so, a fresh worker for the same document and
+#      for the next file, render times in-process vs through the worker; (12.2d) the page text
+#      index and links read by the worker equal the in-process ones.
 # Uses $DISPLAY when an X server answers there, else `xvfb-run -a`; on macOS the viewer runs
 # natively on Tk Aqua (task 10.11, docs/viewer.md "Smoke test on macOS"). Ends with a summary of
 # the cases passed / skipped / failed. Exit 0 on success.
@@ -124,9 +133,11 @@ repo="$(dirname "$here")"
 cd "$repo"
 
 if [ "${1:-}" != "--no-build" ]; then
-  lake build viewer
+  # Task 12.2c: the viewer renders through the `worker` executable next to it.
+  lake build viewer worker
 fi
 viewer="$repo/.lake/build/bin/viewer"
+[ -x "$repo/.lake/build/bin/worker" ] || echo "viewer-smoke: WARNING: no worker executable; pages render in the viewer process" >&2
 [ -x "$viewer" ] || { echo "viewer-smoke: $viewer not built" >&2; exit 1; }
 
 # Pick the platform (task 10.11): on macOS (Darwin) the viewer runs natively on Tk Aqua, its
@@ -228,7 +239,7 @@ else
   trap 'rm -rf "$work"' EXIT
 fi
 
-# run_viewer DIR FILE: smoke-mode run with a 60 s timeout. Files open in vertical scrolling
+# run_viewer DIR FILE: smoke-mode run with a 60 s timeout (`viewer_timeout=S` before the call: S s). Files open in vertical scrolling
 # since 9.r1; the cases written for the single-page view keep it through SAFEPDF_VIEWER_VIEW
 # (set it empty for the real default, as case 1o does).
 run_viewer() {
@@ -236,7 +247,7 @@ run_viewer() {
   local o e rc=0
   o="$(mktemp)"; e="$(mktemp)"
   SAFEPDF_VIEWER_VIEW="${SAFEPDF_VIEWER_VIEW-single}" SAFEPDF_VIEWER_SMOKE="$1" \
-    timeout 60 "${wrap[@]}" "$viewer" "$2" >"$o" 2>"$e" || rc=$?
+    timeout "${viewer_timeout:-60}" "${wrap[@]}" "$viewer" "$2" >"$o" 2>"$e" || rc=$?
   cat "$o"; cat "$e" >&2
   grep -h 'Tcl error' "$o" "$e" >> "$tcl_log" || true
   rm -f "$o" "$e"
@@ -1271,7 +1282,8 @@ case_begin "1l lockdown"
 #     Tk interpreter on the same display tries `send` into the viewer. Without the test hook
 #     the viewer has no `send` command, is not in `winfo interps`, every send fails, and the
 #     resources reach no widget; with SAFEPDF_VIEWER_DRIVE=1 the send works (the corpus
-#     driver's path). The other interpreter also checks that it got the hostile resources
+#     driver's path; on X11 a synchronous send answered by the viewer also counts, task
+#     10.c2). The other interpreter also checks that it got the hostile resources
 #     itself (so the guard, not a missing resource file, is what the test sees).
 lockwish=""
 for w in wish9.0 wish8.6 wish; do
@@ -1311,12 +1323,22 @@ if {$vname ne ""} {
   set t1 [clock milliseconds]
   set code [catch {send -async $vname "close \[open $dir/sent w\]; set ::safepdf::lockSent 1"} r]
   puts $f "send-async $vname: $code $r"
-  # X11: an async send stays in Xlib's output buffer until the event loop flushes it, and the
-  # `after 50` poll below never enters it.
-  update idletasks
-  while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50 }
+  # Task 10.c2: on X11 an asynchronous send is a property change that sits in Xlib's output
+  # buffer until the client flushes it; `after 50` alone never does, `update` does.
+  update
+  while {![file exists $dir/sent] && [clock milliseconds] - $t1 < 15000} { after 50; update }
   puts $f "sent-file: [file exists $dir/sent] after [expr {[clock milliseconds] - $t1}] ms"
-  if {[file exists $dir/sent]} { incr ok }
+  if {[file exists $dir/sent]} { incr ok } elseif {$plat ne "aqua"} {
+    # X11 (task 10.c1 diagnostic, 10.c2 control): a synchronous send that comes back from the
+    # viewer with its Tk version and application name also proves that a send reaches the
+    # viewer (it ran the script); otherwise its error says why the viewer refused (Tk ignores
+    # sends when the X server's host list lets other hosts in: "X server insecure"). One the
+    # viewer never services returns once it exits (at most ~20 s).
+    flush $f
+    set code [catch {send $vname {list [package provide Tk] [tk appname]}} r]
+    puts $f "send-sync $vname: $code $r"
+    if {$code == 0 && [lindex $r 1] eq $vname} { incr ok; puts $f "send-sync-ok: 1" }
+  }
 } else {
   set cands [expr {$plat eq "aqua" ? {tk viewer safe-pdf} : [concat [winfo interps] tk viewer safe-pdf]}]
   foreach i [lsort -unique $cands] {
@@ -1346,8 +1368,24 @@ TCL
 *Entry.textVariable: ::safepdf::btn(cmd,.bar.save)
 *Toplevel.container: 1
 XD
+    # X11 (task 10.c1): Tk executes a received send only when the X server is "secure" (access
+    # control on, no host-based entries but SI:localuser/localgroup). The test's own server
+    # gets its host list printed (xhost.txt) and cleared of other entries first; the
+    # lockdown run's expectations do not depend on it (its viewer has no send at all).
     env HOME="$d/home" SAFEPDF_VIEWER_SMOKE="$d" SAFEPDF_VIEWER_SMOKE_MODE=lockdown "$@" \
-      timeout 60 "${wrap[@]}" bash -c '"$1" "$2" & v=$!; "$3" "$4" "$5" "$6"; wait $v' _ \
+      timeout 60 "${wrap[@]}" bash -c '
+        if [ "$6" != aqua ] && command -v xhost >/dev/null 2>&1; then
+          { echo "before:"; xhost; } > "$5/xhost.txt" 2>&1
+          xhost - >/dev/null 2>&1
+          xhost 2>/dev/null | tail -n +2 | while read -r h; do
+            case "$h" in
+              SI:localuser:*|SI:localgroup:*|"") ;;
+              *) xhost "-$(printf %s "${h%%:*}" | tr "[:upper:]" "[:lower:]"):${h#*:}" >/dev/null 2>&1 ;;
+            esac
+          done
+          { echo "after:"; xhost; } >> "$5/xhost.txt" 2>&1
+        fi
+        "$1" "$2" & v=$!; "$3" "$4" "$5" "$6"; wait $v' _ \
       "$viewer" "$work/two.pdf" "$lockwish" "$work/attacker.tcl" "$d" "$platform"
   }
   # aqua_send_works: two plain wish processes, one asynchronous send between them (15 s).
@@ -1412,6 +1450,7 @@ sys.exit(1 if errs else 0)
 ' "$work/out-lock" "$platform" || fail=1
   lock_run "$work/out-drive" SAFEPDF_VIEWER_DRIVE=1 || { echo "FAIL: drive-hook run failed" >&2; fail=1; }
   cat "$work/out-drive/attack.txt" 2>/dev/null || true
+  [ ! -f "$work/out-drive/xhost.txt" ] || sed 's/^/xhost: /' "$work/out-drive/xhost.txt"
   if ! grep -q '^sends-ok: [1-9]' "$work/out-drive/attack.txt" 2>/dev/null; then
     # The control failed. If Tk Aqua cannot deliver a send between two plain wish processes
     # either (task 10.19: AppleEvents are not dispatched in a session with a locked screen),
@@ -1432,7 +1471,9 @@ case_begin "1m async"
 #     While it renders the window shows the placeholder, a 20 ms Tcl timer keeps firing, a
 #     zoom change returns at once, and End shows the light page 2 (page field 2) while page 1
 #     still renders; the render for the old zoom is discarded (stale) and page 1 finally shows
-#     at the new zoom.
+#     at the new zoom. Since task 12.2c the renders go through the document worker, one at a
+#     time: the old zoom's render is cancelled (the worker killed and restarted), so "during"
+#     may count one render instead of two, and page 2 preempts page 1's render.
 python3 -I "$here/viewer-smoke-pdf.py" --slow 3000 "$work/slow.pdf"
 SAFEPDF_VIEWER_SMOKE_MODE=async run_viewer "$work/out-async" "$work/slow.pdf" \
   || { echo "FAIL: async run failed" >&2; fail=1; }
@@ -1457,7 +1498,7 @@ need(0 <= num("zoom-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v
 need(v.get("after-zoom") == "jobs 2 photo false placeholders 1",
      "after zoom: %r (expected the old and the new render running)" % v.get("after-zoom"))
 need(num("ticks", r"(\d+)") >= 5, "the timer did not run while rendering: %r" % v.get("ticks"))
-need(v.get("during") == "jobs 2 photo false placeholders 1", "during: %r" % v.get("during"))
+need(re.match(r"jobs [12] photo false placeholders 1$", v.get("during", "")), "during: %r" % v.get("during"))
 need(0 <= num("end-event-ms", r"(\d+)") < 250, "End blocked: %r" % v.get("end-event-ms"))
 need(re.match(r"page 2 field 2 photo true slow-jobs [1-9]", v.get("page2", "")),
      "page 2 not shown while page 1 renders: %r" % v.get("page2"))
@@ -1679,40 +1720,61 @@ case_begin "1o wheelflow"
 #     (or the last page) without going back; the longest run of events that move nothing is at
 #     most the page-turn push (a quarter view of trackpad travel on a page that fits, a notch
 #     for the wheel) and zero in the vertical modes; no step jumps further than one event plus
-#     the push carried onto a new page.
+#     the push carried onto a new page. Tk 8.6 (Ubuntu's tk-dev, the Linux CI) has no
+#     <TouchpadScroll>: there the trackpad bursts are skipped (task 10.c1). Task 10.c2: a third
+#     burst per mode presses <Button-5> (the X11 wheel of Tk 8.6, one notch each); every burst
+#     stops after 300 events that move nothing or 8 s, the run (150 s timeout) after 140 s with an `error:`
+#     line; the viewer writes wheelflow.txt line by line and prints `wheelflow-progress:`
+#     lines, and a failed run shows what it wrote and the end of its trace.
 wheelflow_case() {  # wheelflow_case NAME PDF
   local d="$work/wheelflow-$1"
-  SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2" \
-    || { echo "FAIL: wheelflow $1: run failed" >&2; fail=1; return; }
+  if ! viewer_timeout=150 SAFEPDF_VIEWER_VIEW= SAFEPDF_VIEWER_SMOKE_MODE=wheelflow run_viewer "$d" "$2"; then
+    echo "FAIL: wheelflow $1: run failed" >&2; fail=1
+    [ ! -f "$d/wheelflow.txt" ] || sed "s/^/wheelflow $1 partial: /" "$d/wheelflow.txt" >&2
+    [ ! -f "$d/wheelflow-trace.txt" ] || tail -n 5 "$d/wheelflow-trace.txt" | sed "s/^/wheelflow $1 trace: /" >&2
+    return
+  fi
   python3 -I -c '
 import math, sys
 name, path = sys.argv[1], sys.argv[2]
 lines = open(path, encoding="utf-8").read().splitlines()
 errs = []
 v = dict(l.split(": ", 1) for l in lines if ": " in l)
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
 if v.get("default") != "scroll=vertical spread=none radio=vertical none continuous=1":
     errs.append("a fresh file is not in Vertical Scrolling: %r" % v.get("default"))
 seen = 0
+tk = v.get("tk", "")
 for l in lines:
     if not l.startswith("flow-"): continue
     seen += 1
     label, rest = l[5:].split(": ", 1)
+    # Task 10.c1: Tk 8.6 (Ubuntu) has no <TouchpadScroll>; only the trackpad bursts may skip.
+    if rest.startswith("skipped"):
+        if not label.endswith("-pad") or "touchpad=false" not in tk:
+            errs.append("%s skipped with %r" % (label, tk))
+        print("wheelflow %s: %s" % (name, l))
+        continue
     f = dict(t.split("=", 1) for t in rest.split())
     view = int(f["view"])
     pad = label.endswith("-pad")
+    button = label.endswith("-button")
     vertical = label.startswith("continuous")
-    step = 12 if pad else math.ceil(view / 30) + 1
-    stall_max = 0 if vertical else (math.ceil(view / 4 / 12) + 1 if pad else 3)
+    # Button-5 (task 10.c2) is one notch: a tenth of the view, and the page-turn push is one
+    # notch, so at most one event at the edge moves nothing.
+    step = 12 if pad else math.ceil(view / (10 if button else 30)) + 1
+    stall_max = 0 if vertical else (math.ceil(view / 4 / 12) + 1 if pad else 1 if button else 3)
     step_max = step if vertical else 2 * step
-    if f["reached"] != "true": errs.append("%s stopped on page %s after %s events" % (label, f["page"], f["events"]))
+    if f["reached"] != "true": errs.append("%s stopped on page %s after %s events in %s ms (stopped=%s)" % (label, f["page"], f["events"], f["ms"], f.get("stopped")))
     if f["back"] != "0": errs.append("%s went backwards %s times" % (label, f["back"]))
     if int(f["max-stall"]) > stall_max: errs.append("%s stalled for %s events (max %d)" % (label, f["max-stall"], stall_max))
     if int(f["max-step"]) > step_max: errs.append("%s jumped %s px (max %d)" % (label, f["max-step"], step_max))
     print("wheelflow %s: %s" % (name, l))
-if seen != 10: errs.append("expected 10 bursts, got %d (%r)" % (seen, lines[:3]))
+if seen != 15: errs.append("expected 15 bursts, got %d (%r)" % (seen, lines[:3]))
+if "touchpad=false" in tk and sys.argv[3] == "aqua": errs.append("Tk Aqua without <TouchpadScroll>: %r" % tk)
 for e in errs: print("FAIL: wheelflow %s: %s" % (name, e), file=sys.stderr)
 sys.exit(1 if errs else 0)
-' "$1" "$d/wheelflow.txt" || fail=1
+' "$1" "$d/wheelflow.txt" "$platform" || fail=1
 }
 wheelflow_case four "$work/m9four.pdf"
 for p in $m9papers; do
@@ -2814,6 +2876,131 @@ if "done" not in lines: errs.append("not done: %r" % lines[-1:])
 for e in errs: print("FAIL: tools: %s" % e, file=sys.stderr)
 sys.exit(1 if errs else 0)
 ' "$work/out-tools/tools.txt" || fail=1
+
+case_begin "12.5 honest"
+# 12.5. Honest UI for hidden content (SAFEPDF_VIEWER_SMOKE_MODE=honest, `Viewer.smokeHonest`)
+#     on generated files: select all + copy on a page with a `3 Tr` line copies it and says
+#     how many copied characters the page does not show; the trusted identity line (.ident,
+#     file name and path, drawn by the viewer outside the page) is packed in document full
+#     screen (/PageMode /FullScreen) and while /HideToolbar hides the toolbar, and gone after
+#     Escape and on a plain file; saving a highlight gives no notice, deleting that saved
+#     highlight and saving again gives the revision-retention notice.
+mkdir -p "$work/honest"
+python3 -I -c '
+import sys
+out = sys.argv[1]
+def pdf(cat, content):
+    objs = {1: "<< /Type /Catalog /Pages 2 0 R " + cat + " >>",
+            2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+            3: "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            4: "<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+            5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
+    body, offs = b"%PDF-1.7\n", {}
+    for n in sorted(objs):
+        offs[n] = len(body)
+        body += ("%d 0 obj\n%s\nendobj\n" % (n, objs[n])).encode("latin-1")
+    x = len(body)
+    body += b"xref\n0 6\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % offs[n] for n in range(1, 6))
+    body += ("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % x).encode()
+    return body
+text = "BT /F1 24 Tf 72 700 Td (Visible line) Tj ET BT /F1 24 Tf 3 Tr 72 650 Td (hidden words) Tj ET"
+open(out + "/ocr.pdf", "wb").write(pdf("", text))
+open(out + "/full.pdf", "wb").write(pdf("/PageMode /FullScreen", text))
+open(out + "/prefs.pdf", "wb").write(pdf("/ViewerPreferences << /HideToolbar true >>", text))
+' "$work/honest"
+SAFEPDF_SUBST_FONTS=0 SAFEPDF_VIEWER_SMOKE_MODE=honest run_viewer "$work/out-honest" "$work/honest/ocr.pdf" || true
+cat "$work/out-honest/honest.txt" 2>/dev/null || true
+python3 -I -c '
+import sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: honest: no honest.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def has(k, *parts):
+    for p in parts:
+        if p not in v.get(k, ""): errs.append("%s lacks %r: %r" % (k, p, v.get(k)))
+def lacks(k, p):
+    if k not in v or p in v[k]: errs.append("%s has %r (or is missing): %r" % (k, p, v.get(k)))
+has("copy", "hidden-in-clipboard=true", "status=copied ", "; the copied text includes 12 characters that are not visible on the page")
+has("plain", "ident= ")
+for f in ["full", "prefs"]:
+    has(f, "ident=pack", "text=SafePDF is showing %s.pdf (" % f, "/%s.pdf) - this line is drawn by SafePDF" % f)
+    has(f + "-escape", "ident= full=false")
+has("full", "full=true", "full screen (Escape leaves)")
+has("prefs", "the document hides parts of the window")
+has("save1", "marks=1 saved=1", "status=saved 1 new, changed or deleted mark(s)")
+lacks("save1", "deleted mark(s) are still")
+has("deleted", "dirty=true deletedSaved=1")
+has("save2", "marks=0", "note: the 1 deleted mark(s) are still in the file" + chr(39) + "s earlier revision (Save only appends an update) and can be recovered from it")
+if "done" not in lines: errs.append("not done: %r" % lines[-1:])
+for e in errs: print("FAIL: honest: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-honest/honest.txt" || fail=1
+
+case_begin "12.2c worker"
+# 12.2c. The document worker (SAFEPDF_VIEWER_SMOKE_MODE=worker, `Viewer.smokeWorker`, deadline
+#     SAFEPDF_WORKER_DEADLINE_MS=4000): the two-page PDF's pages come from the worker; render
+#     times in the viewer process and through the worker are printed (reported only);
+#     (a) no-block: workers that sleep 1.5 s before each render (`Worker.TestHooks`), no event
+#     waiting for renders, a 10 ms Tcl heartbeat: the zoom event returns at once, the largest
+#     heartbeat gap stays under 250 ms, the page arrives; (b) kill/restart: workers that sleep
+#     ten minutes: after the deadline the page and the status line say "rendering stopped: the
+#     document took too long", the worker was killed (timeouts counted); (c) the same document
+#     renders again in a fresh worker; (d) the next file (the corpus paper of
+#     SAFEPDF_SMOKE_WORKER_PAPER when present, else the nav PDF of 1e) opens, renders and has
+#     its outline, read by its own worker.
+wpaper="${SAFEPDF_SMOKE_WORKER_PAPER-corpus/files/arxiv-1706.03762.pdf}"
+mkdir -p "$work/out-worker"
+if [ -n "$wpaper" ] && [ -f "$wpaper" ]; then cp "$wpaper" "$work/out-worker/next.pdf"
+else cp "$work/nav.pdf" "$work/out-worker/next.pdf"; fi
+if [ ! -x "$repo/.lake/build/bin/worker" ]; then
+  echo "FAIL: worker: no worker executable" >&2; fail=1
+else
+  SAFEPDF_VIEWER_SMOKE_MODE=worker SAFEPDF_WORKER_DEADLINE_MS=4000 \
+    run_viewer "$work/out-worker" "$work/two.pdf" || { echo "FAIL: worker run failed" >&2; fail=1; }
+  cat "$work/out-worker/worker.txt" 2>/dev/null || true
+  python3 -I -c '
+import re, sys
+try: lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError: print("FAIL: worker: no worker.txt", file=sys.stderr); sys.exit(1)
+v = dict(l.split(": ", 1) for l in lines if ": " in l)
+errs = []
+def need(cond, msg):
+    if not cond: errs.append(msg)
+def num(k, rx):
+    m = re.search(rx, v.get(k, ""))
+    return int(m.group(1)) if m else -1
+if "error" in v: errs.append("smoke step failed: %s" % v["error"])
+need(re.match(r"page 1 image \d+x\d+ worker-renders [1-9]", v.get("open", "")), "open: %r" % v.get("open"))
+need(num("open", r"spawns (\d+)") == 1, "open: one worker expected: %r" % v.get("open"))
+need("worker" in v.get("measure-a", ""), "measure-a: %r" % v.get("measure-a"))
+# Task 12.2d: the page text index and links came from the worker and equal the in-process ones.
+need(num("text", r"worker-texts (\d+)") >= 1 and "same-text true" in v.get("text", "")
+     and num("text", r"chars (\d+)") >= 0, "text: %r" % v.get("text"))
+need(num("text", r"worker-links (\d+)") >= 1 and "same-links true" in v.get("text", ""),
+     "links: %r" % v.get("text"))
+print("worker: text: %s" % v.get("text"))
+need(0 <= num("a-event-ms", r"(\d+)") < 250, "the zoom event blocked: %r" % v.get("a-event-ms"))
+need(v.get("noblock", "").startswith("image "), "no-block: no page image: %r" % v.get("noblock"))
+need(num("noblock", r"elapsed-ms (\d+)") >= 1500, "no-block: the stall did not happen: %r" % v.get("noblock"))
+need(0 <= num("noblock", r"max-gap-ms (\d+)") < 250, "no-block: the heartbeat stalled: %r" % v.get("noblock"))
+need(0 <= num("b-event-ms", r"(\d+)") < 250, "the zoom event blocked (b): %r" % v.get("b-event-ms"))
+need("error: rendering stopped: the document took too long" in v.get("stalled", ""), "stalled page: %r" % v.get("stalled"))
+need(num("stalled", r"timeouts (\d+)") >= 1, "no timeout counted: %r" % v.get("stalled"))
+need(4000 <= num("stalled", r"elapsed-ms (\d+)") < 30000, "stalled: elapsed: %r" % v.get("stalled"))
+need(0 <= num("stalled", r"max-gap-ms (\d+)") < 250, "stalled: the heartbeat stalled: %r" % v.get("stalled"))
+need("cannot render: rendering stopped: the document took too long" in v.get("stalled-status", ""), "status: %r" % v.get("stalled-status"))
+need(v.get("respawn", "").startswith("image ") and num("respawn", r"spawns (\d+)") > num("stalled", r"spawns (\d+)"),
+     "same document in a fresh worker: %r" % v.get("respawn"))
+need(re.match(r"page 1/\d+ image \d+x\d+ outline [1-9]", v.get("next", "")), "next file: %r" % v.get("next"))
+need(num("next", r"spawns (\d+)") > num("respawn", r"spawns (\d+)"), "next file: no new worker: %r" % v.get("next"))
+need("rendered in" in v.get("next-status", ""), "next status: %r" % v.get("next-status"))
+need("done" in lines, "the run did not finish")
+for k in ["measure-a", "measure-b"]: print("worker: %s: %s" % (k, v.get(k)))
+for e in errs: print("FAIL: worker: " + e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+' "$work/out-worker/worker.txt" || fail=1
+fi
 
 # Summary (task 10.11): cases passed / skipped (with the reason) / failed on this platform.
 case_end
