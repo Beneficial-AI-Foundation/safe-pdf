@@ -51,17 +51,50 @@ the opened file in place; annotations are saved as an incremental update.
 
 ## Status
 
-Phases 0–10 of the roadmap (lexer and objects through the rasterizer, the viewer with
-annotations, and viewer polish) are complete and merged. Work in progress on PR #16: a native
-macOS shell (Phase 11; the Tk viewer stays on Linux) and hardening from an independent
-security review (Phase 12: a confined document worker, capped reads, per-operation memory
-budgets). See [progress.md](progress.md) for the per-task record.
+All twelve phases of the roadmap are complete and merged (milestones M0–M12; per-task record
+in [progress.md](progress.md)):
+
+* **Core (Phases 0–7):** lexer and object model, cross-reference tables and incremental
+  updates, filters, document structure, encryption, the content-stream interpreter, fonts and
+  text extraction, and the rasterizer, with the strict/repair parser pair and the proofs above.
+* **Viewers (Phases 8–11):**
+  * **macOS:** a native app, **SafePDF** (Swift/AppKit, macOS 15 or later), on top of the
+    verified core through a C API.
+  * **Linux (and macOS):** a Tcl/Tk viewer.
+  * **What they do:** viewing, selection and search, links (external addresses are shown,
+    never opened), outline, thumbnails, attachments (saved, never opened), layers,
+    highlights, notes, free text and ink, saving marks into the PDF as an incremental
+    update, and XFDF import/export.
+* **Hardening (Phase 12),** from an independent security review:
+  * every file read is capped, and a strict mode makes no repair attempts;
+  * document processing runs in a sandboxed worker process that the GUI can kill and restart;
+  * memory is budgeted per user operation;
+  * every encrypted save gets fresh random IVs;
+  * the viewer shows when a file was repaired or encrypted, and flags text that is hidden on
+    the page;
+  * CI re-checks every proof with an independent kernel (lean4lean) and runs a native macOS job.
+* **Measured on the 81-file corpus:** every page of every file displays, 0 render errors.
+  * Tk viewer: median 73 ms per page.
+  * macOS app: median 103 ms, 95th percentile 401 ms; peak memory 308 MiB.
+
+Known gaps:
+
+* JBIG2 and JPEG 2000 images render as placeholder boxes (JPEG and CCITT fax are decoded, in
+  Lean).
+* `Separation`, `DeviceN` and `Lab` colours are approximated.
+* VoiceOver can't read the page content in the macOS app (only its controls).
+* The macOS app is ad-hoc signed, not notarised.
+* The external security review is deferred.
+
+The remaining items of the plan are in [Plan.md §6, "Tier 2 / later"](Plan.md).
 
 ## Requirements
 
 * [elan](https://github.com/leanprover/elan); the toolchain is pinned in `lean-toolchain`
   (`leanprover/lean4:v4.36.0`). There are no Lake dependencies (no Mathlib, no Batteries).
-* For the GUI viewer only: Tcl/Tk development files (Debian/Ubuntu `tk-dev`, Tk 8.6 or 9.0;
+* For the macOS app only: macOS 15 or later with the Xcode command line tools (Swift 6, the
+  macOS 26 SDK to build).
+* For the Tk viewer only: Tcl/Tk development files (Debian/Ubuntu `tk-dev`, Tk 8.6 or 9.0;
   macOS `brew install tcl-tk`).
 * Python 3 (standard library only) for the corpus and differential scripts.
 
@@ -76,16 +109,23 @@ lake exe inspect FILE.pdf           # inspector CLI (lake exe inspect --help)
 lake exe extract FILE.pdf [PAGE]    # example client of the library API (text)
 lake exe extract --render FILE.pdf [PAGE]
 
-lake build viewer                   # GUI viewer (not a default target; needs Tk)
+lake build macosApp                 # macOS: the native app -> macos/build/SafePdf.app
+open macos/build/SafePdf.app        # (or: open -a macos/build/SafePdf.app FILE.pdf)
+
+lake build viewer worker            # Tk viewer (Linux or macOS; needs Tk)
 lake exe viewer FILE.pdf
+
+lake build app                      # the platform's viewer: macosApp on macOS, Tk elsewhere
 ```
+
+None of the viewer targets is a default target: `lake build` and the tests never compile Tk or
+Swift.
 
 The inspector prints views of a file (summary, objects, xref, revisions, repair, streams,
 pages, outline, ops, svg, text, raster; `--list-views`), with `--json` for machine-readable
-output. The viewer is described in [docs/viewer.md](docs/viewer.md):
-continuous and spread view modes, zoom, rotation, outline and thumbnails, selection, search,
-links, highlights, notes, free text and ink, saving marks into the PDF, and XFDF
-import/export.
+output. The Tk viewer is described in [docs/viewer.md](docs/viewer.md); the macOS app,
+its C API and its tests in [macos/README.md](macos/README.md), its design in
+[docs/macos-design.md](docs/macos-design.md).
 
 ## Using the core as a library
 
@@ -109,9 +149,12 @@ limits.
 | `SafePdf/Spec/` | Denotational specifications and the theorems |
 | `SafePdf/Repair.lean` | The lenient path for damaged files (total, bounded, conservative) |
 | `SafePdf/Api.lean` | The library API (`safe-pdf-core`) |
-| `SafePdf/Shell/` | Unverified shell: inspector CLI and the Tk viewer |
+| `SafePdf/Quarantine/` | Image decoders (JPEG, CCITT fax) whose output is re-validated |
+| `SafePdf/Shell/` | Unverified shell: inspector CLI, the Tk viewer, the sandboxed document worker, the C API exports |
+| `macos/` | The native macOS app (Swift), its C API headers and C tests |
+| `c/` | Small C shims (Tk, worker sandbox) |
 | `Tests/` | Unit and property suites, golden files, fuzzing, adversarial inputs |
-| `scripts/` | Guards, benchmarks, corpus and differential tooling, viewer smoke tests |
+| `scripts/` | Guards, benchmarks, corpus and differential tooling, viewer smoke tests (Tk and macOS) |
 | `docs/` | API, viewer, safety account, comparisons, proof patterns, deviations from the spec |
 | `corpus/` | Manifest of the evaluation corpus (the PDFs themselves are downloaded, not committed) |
 
@@ -119,6 +162,7 @@ limits.
 
 * [Plan.md](Plan.md) — vision, architecture, properties, roadmap
 * [docs/safety.md](docs/safety.md) — threat model and what the proofs do and do not cover
+* [docs/viewer.md](docs/viewer.md), [macos/README.md](macos/README.md), [docs/macos-design.md](docs/macos-design.md) — the viewers
 * [docs/comparison.md](docs/comparison.md), [docs/safedocs-comparison.md](docs/safedocs-comparison.md) — comparison with other projects
 * [docs/proof-patterns.md](docs/proof-patterns.md) — reusable proof techniques
 * [docs/deviations-from-spec.md](docs/deviations-from-spec.md) — where the implementation knowingly differs from ISO 32000
