@@ -1,6 +1,6 @@
 # One-bit JPX render fixtures
 
-Both PDFs are original single-page fixtures. Each draws three 16 × 8 images at
+The three PDFs are original single-page fixtures. Each draws three 16 × 8 images at
 one point per pixel on a 48 × 8 white page. Every input row consists of eight
 zero samples and eight one samples.
 
@@ -16,3 +16,9 @@ unsigned one-bit component, zero decomposition levels and no component transform
 `plain-polarity.pdf` stores the same rows directly as `00 ff` pairs and uses the
 default DeviceGray mapping. The worker test checks every output byte against the
 six expected bands. MuPDF 1.25.1 agrees on every pixel of the unfiltered control.
+
+`inline-polarity.pdf` places the same JP2 bytes inside three inline images using
+`BI`, `ID` and `EI` in the page content. It uses terminal `/JPXDecode` for the
+grayscale image, a Flate prefix for the first stencil, and an ASCIIHex prefix
+for the second. The page has an empty resource dictionary. It exercises the
+content parser and the page's inline image cache through the worker.

@@ -17,8 +17,8 @@ executable (`.lake/build/bin/worker`, a default build target) through
   `Api.pageText` with annotations); outline and links of `Tests/golden/pages/outline.pdf`
   equal `Api.outline`; strict mode refuses a file that needs repair; requests before any
   open get `noDocument`; a bad page index and a bad rotation get `pageFailed`.
-* **JPX stencil polarity**: the reference-encoded JP2 and its unfiltered counterpart
-  must each paint the same six colour bands. The worker opens both PDFs in strict mode.
+* **JPX stencil polarity**: the worker opens three PDFs in strict mode. JP2 image
+  XObjects, inline JP2 images and their unfiltered control must paint the same six bands.
 * **Malformed frames** (tag 0, unknown tag, truncated field, trailing byte, zero
   denominator): each gets an `error .malformed` response and the worker keeps serving.
 * **Oversized message**: a header above `requestCap` gets `error .tooLong` before any payload
@@ -193,7 +193,7 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
     f := f + (← check "links equal Api.pageLinks"
       (ls == expect.map fun l => { rect := l.rect, target := Serve.target l.target }))
   | r, _ => f := f + (← check s!"links ({describe r})" false)
-  for fixture in ["plain-polarity", "polarity"] do
+  for fixture in ["plain-polarity", "polarity", "inline-polarity"] do
     f := f + (← checkImagePolarity c fixture)
   -- Strict mode.
   f := f + (← check "strict open of a damaged file is openFailed"

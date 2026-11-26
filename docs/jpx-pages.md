@@ -225,4 +225,20 @@ rm -r "$tmp"
 
 The built-in self-check rejects a 36-pixel placeholder on a 10,000-pixel white page and
 accepts the correct placement when a pixel elsewhere changes. Both controls exercise the
-comparator. Production JPX integration still needs a new full worker run.
+comparator.
+
+## Confined worker results
+
+At safe-pdf `8e6983b`, the full 22-page run measured all 45 painted image and mask
+rows across 20 PDFs. Of those, 33 passed, ten exceeded the 1% placement tolerance,
+and two produced a gray placeholder. Two additional objects were unpainted thumbnails.
+The direct and Flate-prefixed pikepdf placements both passed at 0.404%, the PDF
+Indexed palette at 0.380%, and the reduced map at 0%. The recorded-plane page
+and all four embedded-opacity placements matched their reference bytes exactly.
+
+| Source | Remaining objects | Observed difference |
+| --- | --- | --- |
+| `jpx_numcomps` | 10–15 | Objects 11 and 12 produced placeholders. The other four missed the colour or opacity reference. |
+| `jpx_subsampling` | 11, 13 | Odd-origin RGB differed on 5.03% of the region. DeviceN differed on 91.85%. |
+| `S2` | 35 | The narrow external mask on image 24 differed on 23.40% of its composite. |
+| PDFBox `JPXTestCMYK`, `JPXTestGrey`, `JPXTestRGB` | 12, 84, 12 | Their masked image placements differed on 1.676%, 1.667% and 1.695%, respectively. |

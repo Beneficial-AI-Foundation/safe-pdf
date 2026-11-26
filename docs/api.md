@@ -140,10 +140,13 @@ viewer's selection), pixel accuracy of `renderPage` (compared with MuPDF in CI),
   cache results yourself if you call twice.
 * `renderPage` crops an image side above `Limits.maxPageSide` (16384) pixels; at that size an
   image is up to 1 GiB. Choose the zoom from `PageInfo.size`.
-* Not supported yet (see the ledger and `docs/deviations-from-spec.md`): images compressed
-  with an image codec — JPEG (`/DCTDecode`), JPEG 2000, JBIG2, CCITT — are drawn as a grey
-  placeholder (the codecs belong to the planned quarantine zone, Plan.md §6 Phase 3);
-  OpenType (`OTTO`) font programs; documents with a non-empty user password; Separation /
+* `renderPage` decodes JPEG, CCITT fax and JPEG 2000 image streams. The JPEG 2000 path
+  handles image XObjects, inline images and soft masks under the document's decoded-byte
+  and image-area limits. A malformed or unsupported JPEG 2000 image can produce a gray
+  placeholder. [JPEG 2000 coverage and limitations](jpx-pages.md#confined-worker-results)
+* Remaining limitations listed in the ledger and `docs/deviations-from-spec.md` include
+  JBIG2 images (gray placeholders), OpenType (`OTTO`) font programs; documents with a
+  non-empty user password; Separation /
   DeviceN colour (approximated); optional-content visibility of page content; scripting and
   actions (never). Unsupported parts degrade (placeholder image, substitute font); they do
   not fail the page.
