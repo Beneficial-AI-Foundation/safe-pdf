@@ -447,9 +447,67 @@ contained — and the documents say which.
   or per point; (6) *statements* — the documents above are updated to what (1)–(4) now
   establish.
 
+### Phase 14 — Signature verification
+
+(Added 2026-11-26 at the human's request, full scope. Verification only — signing needs key
+custody and is a different threat model.)
+
+Why it fits this project: the famous signature-checking failures (signature wrapping, the
+incremental-save attacks, the shadow attacks) are **structure attacks, not crypto attacks** —
+readers verified the math correctly but misreported *what the signature covers*. That
+question is exactly what our revision model and unambiguity proofs reason about, so a
+verified viewer can prove the claim every other reader only asserts. Verification is also a
+perfect fit for the core: read-only, no secrets, no constant-time requirements (all inputs
+public), and pure — trust anchors and the current time enter as data, never through `IO`
+(S4 holds; the file's crypto groundwork exists: SHA-256/384/512 with NIST-vector `#guard`s,
+signature-dictionary handling in the decrypt and save paths).
+
+- **ASN.1/DER layer** (spec-first, §5.1): denotational spec, efficient implementation,
+  equivalence and round-trip theorems; definite lengths only, bounded depth and size from
+  `Limits`, total.
+- **Crypto verify primitives**: SHA-1 added for legacy signatures (SHA-2 exists); RSA
+  verification (`Nat` modexp, PKCS#1 v1.5 and PSS encoding checks) with RFC 8017 / CAVP
+  vectors — provable as algebra where cheap; ECDSA over P-256/P-384 (prime-field and curve
+  arithmetic) with CAVP vectors.
+- **X.509**: certificate parsing, chain building to a caller-supplied anchor set, validity
+  against a caller-supplied time, basicConstraints/keyUsage/EKU checks, bounded chain
+  length. Name constraints and policy processing recorded as out of scope (Decisions).
+- **CMS `SignedData`**: `adbe.pkcs7.detached` and `ETSI.CAdES.detached` (signed attributes:
+  contentType, messageDigest, signing time, ESS signing-certificate where present), plus
+  the legacy `adbe.pkcs7.sha1` and `adbe.x509.rsa_sha1`.
+- **ByteRange + the coverage theorem** (the payoff): well-formedness (exactly the file
+  minus the `/Contents` hole), the covered bytes are a byte prefix; theorem tying that
+  prefix to the revision model — the signature covers revisions 0..i, and the object-level
+  differences between revision i and the displayed document are **enumerated** (the
+  anti-shadow-attack property, on `Spec/Unambiguous`'s machinery).
+- **Pure verdict in `Api`**: per signature — ByteRange ok, digest ok, signature ok, chain
+  trusted/untrusted/expired/incomplete, coverage with the changes-after-signing list,
+  revocation `notChecked`. Runs in the confined worker; the shells show it honestly
+  (12.5's spirit): "signed — valid, covers the whole document", "signed — N objects
+  changed after signing", "signature invalid", "signer not trusted", always with
+  "revocation not checked".
+- **Trust model**: anchors are bytes supplied by the shell (a user-set directory and/or an
+  export of the platform store); whether to bundle the AATL/EUTL lists is the human's
+  decision, recorded before the UI task. No network anywhere — revocation and timestamp
+  fetching stay out (Tier 2), reported honestly.
+- **Tests**: differential against poppler's `pdfsig` and OpenSSL CMS (skip cleanly when
+  absent); a signed corpus (existing government files plus generated signed fixtures:
+  RSA/ECDSA × v1.5/PSS × SHA-2, CAdES and legacy); an adversarial suite — signature
+  wrapping, shadow attacks (hide / replace / hide-and-replace), incremental tampering,
+  ByteRange tricks, certificate tricks (expired, wrong keyUsage, self-signed, algorithm
+  confusion) — each flagged with the recorded reason within a time budget.
+- **M14**: (1) on the signed corpus every verdict agrees with `pdfsig`/OpenSSL (recorded
+  trust-set differences aside); (2) every adversarial file is flagged invalid or
+  changed-after-signing with the right reason, within its budget; (3) the coverage theorem
+  and the DER equivalence are axiom-clean, and the verify primitives pass their vector
+  suites; (4) both shells show the verdicts with the honest statuses, including
+  "revocation not checked"; (5) the hygiene and environment scans stay clean.
+
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
-optional content groups, tagged-PDF reading order, accessibility export.
+optional content groups, tagged-PDF reading order, accessibility export; signatures:
+RFC 3161 timestamps, long-term validation (`/DSS`), revocation (OCSP/CRL) fetched through
+the GUI broker, PAdES levels beyond B.
 
 ---
 
@@ -558,3 +616,5 @@ safe-pdf/
 2. Phase 13, design before code: the render work allowance (13.4) and the inventory of
    document work still done in the GUI processes (13.12) are recorded in Decisions first.
 3. The external review (12.9) stays deferred by the human.
+4. Phase 14 (signature verification) queues behind Phase 13; its two early solo decisions
+   (trust anchors, out-of-scope X.509 features) go to Decisions first.
