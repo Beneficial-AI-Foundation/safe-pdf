@@ -91,7 +91,7 @@ The remaining items of the plan are in [Plan.md §6, "Tier 2 / later"](Plan.md).
 ## Requirements
 
 * [elan](https://github.com/leanprover/elan); the toolchain is pinned in `lean-toolchain`
-  (`leanprover/lean4:v4.36.0`). There are no Lake dependencies (no Mathlib, no Batteries).
+  (`leanprover/lean4:v4.36.0`). Lake fetches the pure Lean JPEG 2000 decoder at the revision in `lake-manifest.json`.
 * For the macOS app only: macOS 15 or later with the Xcode command line tools (Swift 6, the
   macOS 26 SDK to build).
 * For the Tk viewer only: Tcl/Tk development files (Debian/Ubuntu `tk-dev`, Tk 8.6 or 9.0;

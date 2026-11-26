@@ -584,6 +584,15 @@ Tasks the human has deferred; the loop does not select them and they do not keep
 * macOS smoke (11.5): ⌘H is the application menu's Hide — the table's Highlight is ⌃⌘H; ⌘G is Find next, Go to page is ⌥⌘G; overlapping page links: the topmost wins, so pick a point only the target link covers; Add note while a highlight is selected makes a comment (mutool lists a Popup); headless NSScrollView does not scroll without a window — the session moves the clip view; `NSWindow.close()` is a no-op on a window never ordered in (post `willClose` yourself); never edit a bash script while it runs; `script` is a Lake keyword (11.4).
 
 ## Decisions and deviations from the design document
+
+* 2026-11-26 — For JPXDecode rendering, allow one Lake dependency, the pure Lean
+  `jpeg2000` package at `9a8880a8604dbebf93b99253e7965d54673dc534`.
+  This M7-based revision adds a Lake-only packaging switch. Set `libraryOnly=true`
+  so safe-pdf's `Tests.*` modules resolve locally. The package uses the same
+  Lean 4.36.0 toolchain, has zero Lake dependencies, and provides
+  typed decode errors and explicit size budgets. The PDF dictionary, compositing
+  rules and worker boundary stay with safe-pdf. Review pin changes together with
+  the PDF rendering fixtures.
 * 2026-11-23 (9.r11a) — **Annotations with `/OC` follow ISO 32000-2 §8.11 and PDF.js, not MuPDF**: `AllOn` over groups including an OFF one hides, `/VE` is evaluated, the default configuration is `/D` even when `/Configs` exists. MuPDF differs in these cases, so pixel comparisons against MuPDF may disagree on such files.
 * 2026-11-23 (Phase 9, human) — **The viewer honours every document open setting** (`/PageLayout`, `/PageMode`, `/OpenAction` as a destination/GoTo only, `/ViewerPreferences`) on every open; without them it opens in Vertical Scrolling at page 1. A mode the user picks lasts until the next open. **User defaults via a preferences page are planned later by the human** (not in scope yet). Never executed from `/OpenAction`: JavaScript, Launch, URI or any non-GoTo action (S-rules: no scripting, no network, no launching).
 * 2026-11-23 (Phase 9, human) — **Save overwrites the opened file after a confirmation** (supersedes "to a new file, never in place" for the viewer's Save; Plan.md S8 amended with the human's agreement). The core is unchanged: it still returns `bytes ++ update` (C7); the shell writes that to a temporary file in the same directory, re-parses it with the strict parser, then renames it over the original, so the original bytes remain a prefix of the file and a crash leaves either the old or the new file. Save As… still writes a new file.

@@ -9,8 +9,8 @@ the inspector use, and its docstring names the guarantees it inherits.
 
 ## Using it from another Lake project
 
-The project has no Lake dependencies (no Mathlib, no Batteries) and pins
-`leanprover/lean4:v4.36.0`; your project must use the same toolchain.
+The project pins `leanprover/lean4:v4.36.0` and the pure Lean `jpeg2000` package.
+Use the same toolchain in your project. Lake resolves the decoder from the manifest.
 
 `lakefile.lean`:
 
