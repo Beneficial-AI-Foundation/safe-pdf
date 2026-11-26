@@ -451,6 +451,14 @@ def iccDevice (d : Dict) : Option DeviceSpace :=
     | none => some s
   | _, b => b
 
+/-- Device alternate for an ICC profile, including indirect N and Alternate entries. -/
+private def profileDevice {σ : Type} (src : Source σ) (s : σ) (profile : PdfObject) :
+    Option DeviceSpace × σ :=
+  let (d, s) := dictOf src s profile
+  let (n, s) := resolve src s ((Dict.get? d (nm "N")).getD .null)
+  let (alt, s) := resolve src s ((Dict.get? d (nm "Alternate")).getD .null)
+  (iccDevice [(nm "N", n), (nm "Alternate", alt)], s)
+
 /-- A base or alternate space that must be a device space after fallback (`ICCBased`,
 `CalGray`, `CalRGB`, device names, one-element arrays). -/
 def baseDevice {σ : Type} (src : Source σ) (s : σ) (o : PdfObject) : Option DeviceSpace × σ :=
@@ -459,8 +467,7 @@ def baseDevice {σ : Type} (src : Source σ) (s : σ) (o : PdfObject) : Option D
   | (.array [.name n], s) => (deviceOfName n, s)
   | (.array [.name f, a], s) =>
     if f = nm "ICCBased" then
-      let (d, s) := dictOf src s a
-      (iccDevice d, s)
+      profileDevice src s a
     else if f = nm "CalGray" then (some .gray, s)
     else if f = nm "CalRGB" then (some .rgb, s)
     else (none, s)
@@ -540,8 +547,8 @@ def csInfo {σ : Type} (src : Source σ) (s : σ) (o : PdfObject) : Option CSInf
     else if f = nm "ICCBased" then
       match args with
       | [a] =>
-        let (d, s) := dictOf src s a
-        match iccDevice d with
+        let (space, s) := profileDevice src s a
+        match space with
         | some .cmyk => (some (.dev .cmyk (.cmyk Comp.zero Comp.zero Comp.zero Comp.zero)), s)
         | some t => (some (.dev t t.initialColor), s)
         | none => (none, s)
