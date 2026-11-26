@@ -10,7 +10,8 @@ the inspector use, and its docstring names the guarantees it inherits.
 ## Using it from another Lake project
 
 The project pins `leanprover/lean4:v4.36.0` and the pure Lean `jpeg2000` package.
-Use the same toolchain in your project. Lake resolves the decoder from the manifest.
+Use the same toolchain in your project. The Git identity used by Lake needs read access to
+`Beneficial-AI-Foundation/jpeg2000-lean` to fetch the pinned revision on a clean checkout.
 
 `lakefile.lean`:
 
