@@ -1484,10 +1484,14 @@ private def jpxSource (l : Limits) (p : ImgDict) (j : JPXDict) (info : Option CS
   -- filter. For continuous colour retain one level of detail for its area average.
   let reduce := if p.mask || colour == .indexed || !j.key.isEmpty || j.mode != 0 then 0
     else ext.elim 0 fun e => l2Factor p.w p.h e.q.1 e.q.2 - 1
+  let renderSpace : Quarantine.JPX.RenderSpace := match info with
+    | some (.deviceN ..) => .deviceN
+    | some (.dev ..) => .device
+    | _ => .other
   let i ← Quarantine.JPX.decode l p.w p.h bytes
-    { colour, smaskInData := if p.mask || soft then 0 else j.mode, reduce, fit := true, key := j.key }
-  if !p.mask && !soft && j.mode != 0 && i.alpha.isNone then
-    throw (.malformed 0 "JPX: SMaskInData requires whole-image opacity")
+    { colour, smaskInData := if p.mask || soft then 0 else j.mode, reduce, fit := true,
+      key := if j.mode == 0 then j.key else [],
+      renderSpace := some renderSpace }
   let p := { p with w := i.w, h := i.h, key := none, decode := if p.mask then p.decode else none }
   let (nc, cv, n) ← if p.mask then pure (1, Conv.stencil, Norm.unit) else
     match (info <|> embeddedSpace i).bind planOf with

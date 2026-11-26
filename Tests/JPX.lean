@@ -187,6 +187,42 @@ private def params (extras : Dict := []) : Dict :=
 private def component (p : Core.Raster.Image.Pixmap) (n : Nat) :=
   (List.range (p.w * p.h)).map fun i => Core.Raster.Image.rd p.data (4 * i + n)
 
+private def bareChannelRecovery : Except Error Unit := do
+  let pair := stream 4 false [indices, coverage]
+  let triple := stream 4 false [indices, coverage, indices]
+  let undeclared ← decodeInline {} [] (params []) pair
+  require "undeclared pair paints first channel as opaque gray" (undeclared.solid &&
+    undeclared.data.toList == [0,0,0,255, 17,17,17,255, 34,34,34,255, 51,51,51,255])
+  let withOpacity := fun space => params [(nm "ColorSpace", .name (nm space)), (nm "SMaskInData", .int 1)]
+  let straight ← decodeInline {} [] (withOpacity "DeviceGray") pair
+  require "declared gray with straight opacity keeps both planes" (straight.data.toList ==
+    [0,0,0,255, 17,17,17,136, 34,34,34,0, 51,51,51,119])
+  let rgb ← decodeInline {} [] (withOpacity "DeviceRGB") triple
+  require "bare RGB with missing straight opacity paints opaque RGB" (rgb.solid &&
+    rgb.data.toList == [0,255,0,255, 17,136,17,255, 34,0,34,255, 51,119,51,255])
+  let opts := fun n => ({ colour := .pdf n, renderSpace := some .deviceN } : Options)
+  let declared ← decode {} 4 1 pair (opts 2)
+  let padded ← decode {} 4 1 pair (opts 4)
+  require "all DeviceN tints stay in order with zeroes for absent inputs" (declared.data.toList ==
+    [0,255, 17,136, 34,0, 51,119] && padded.data.toList ==
+    [0,255,0,0, 17,136,0,0, 34,0,0,0, 51,119,0,0])
+  let _ ← decode { maxDecodedTotalBytes := 128 } 4 1 pair (opts 32)
+  require "padded output counts toward document budget" (match
+      decode { maxDecodedTotalBytes := 127 } 4 1 pair (opts 32) with
+    | .error (.limitExceeded .decodedTotalBytes) => true | _ => false)
+  require "raster channel bound includes padded tints" (match decode {} 4 1 pair (opts 33) with
+    | .error (.unsupported _) => true | _ => false)
+  let malformed := fun {α : Type} (r : Except Error α) => match r with
+    | .error (.malformed ..) => true | _ => false
+  let raw ← read pair .embedded
+  require "strict callers retain native arity and reject a mismatch" (raw.nc == 2 &&
+    malformed (read pair (.pdf 4)) && malformed (read pair (.pdf 1) 1))
+  require "missing device colours are not padded" (malformed
+    (decode {} 4 1 pair { colour := .pdf 3, renderSpace := some .device }))
+  require "JP2 layout still governs opacity and tints" (malformed
+    (decodeInline {} [] (withOpacity "DeviceRGB") (jp2 [indices, coverage, indices] (colr 16))) &&
+    malformed (decode {} 4 1 (jp2 [indices, coverage] (colr 17)) (opts 4)))
+
 private def rasterColours : Except Error Unit := do
   let rev : PdfObject := .array [.int 1, .int 0]
   let ordinary ← decodeInline {} [] (params [(nm "BitsPerComponent", .int 1),
@@ -320,7 +356,7 @@ private def rasterPlacement : Except Error Unit := do
 def run : IO Nat := do
   let mut failures := 0
   for (label, result) in [("native and colour", nativeAndSpaces), ("Indexed", indexed),
-      ("opacity", opacity), ("geometry and errors", geometryAndErrors),
+      ("opacity", opacity), ("geometry and errors", geometryAndErrors), ("bare channel recovery", bareChannelRecovery),
       ("raster colour", rasterColours), ("raster masks", rasterMasks), ("raster bounds", rasterBounds),
       ("raster placement", rasterPlacement)] do
     if let .error err := result then
