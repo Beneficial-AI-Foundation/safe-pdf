@@ -78,7 +78,8 @@ invalidates the page.
 | `issue19326`, `issue19517` | Image 8 has an external RunLength soft mask in each document. Their 1 × 1 JPX objects 11 and 13, respectively, are page `/Thumb` entries. The gate checks those links and lists both as unpainted. |
 | `jpx_smaskindata`, `jpx_subsampling`, PDFBox and remaining PDFs | Each direct paint has its own rectangle. The JSON includes `SMaskInData`, `Matte`, `ColorSpace`, and external `/SMask` references when present. |
 
-The worker receives the document bytes with the production client, default decoder limits,
+The worker receives the document bytes with the production client, the viewer’s configured
+memory and CPU ceilings, default decoder limits,
 default layers, zero additional rotation and font substitution disabled. Both sides render
 the CropBox on opaque white at 72 dpi, except the stamp at 36 dpi and the large map at
 4.5 dpi. Width and height must agree exactly before any crop. Every placement must meet
@@ -199,6 +200,15 @@ that pattern. The gate replaces only the target stream with the derived RGB samp
 and requires MuPDF to paint the same region. The original direct result remains
 visible for comparison. [Sample values, component grids and measured clip coverage](../Tests/differential/jpx/sampling.md)
 
+On the same page, object 13 declares two DeviceN tints. Its PDF function
+`{ 0 }` appends zero to the red and green input values. The 32 × 32 first plane
+has value floor(255x/31); the 16 × 32 second plane has value floor(255y/31) at
+every horizontal index. PDF.js paints (R,G,0) at all 1,024 native sample centres.
+Its 100 × 100 crop also has the same digest as the independent two-tint placement
+in `jpx_numcomps` object 10. The gate requires both checks and the original image
+paint. At native (8,8), the expected RGB is (65,65,0); direct MuPDF 1.25.1 paints
+(191,191,127). The report retains the direct MuPDF score for the entire rectangle.
+
 ### Embedded opacity and matte
 
 The four images on `jpx_smaskindata` each contain two native RGBA samples. Page 1
@@ -245,6 +255,23 @@ comparator.
 
 ## Confined worker results
 
+The full gate passed **45 of 45 painted image and mask comparisons** across 39
+placements on 22 pages in 20 original PDFs. It accounted for 46 JPX objects and
+42 distinct streams. Two additional objects were verified page thumbnails. The
+worker used the viewer’s default 2,048 MiB memory and 60 CPU-second request limits.
+The measured Linux worker SHA-256 was
+`77be4bf08d9623493f9baca1915eade8bae01929b7fcc7537625a8023c995095`.
+
+All six colour-channel grid crops and all four subsampling crops passed. The
+recorded-plane page and four embedded-opacity crops matched exactly. The direct
+and Flate-prefixed pikepdf placements each differed on 0.404%, below the 1%
+limit. The reduced map passed against the reviewed PDFium reference. The report
+keeps the direct MuPDF scores for the six placements using additional geometric
+or native-sample evidence. The S2 clipped soft mask differed on one of 235
+pixels under the reviewed comparison. All percentages use the original metric.
+
+### Earlier renderer
+
 At safe-pdf `8e6983b`, the full 22-page run measured all 45 painted image and mask
 rows across 20 PDFs. Of those, 33 passed, ten exceeded the 1% placement tolerance,
 and two produced a gray placeholder. Two additional objects were unpainted thumbnails.
@@ -252,7 +279,7 @@ The direct and Flate-prefixed pikepdf placements both passed at 0.404%, the PDF
 Indexed palette at 0.380%, and the reduced map at 0%. The recorded-plane page
 and all four embedded-opacity placements matched their reference bytes exactly.
 
-| Source | Remaining objects | Observed difference |
+| Source | Objects outside tolerance at `8e6983b` | Observed difference |
 | --- | --- | --- |
 | `jpx_numcomps` | 10–15 | Objects 11 and 12 produced placeholders. The other four missed the colour or opacity reference. |
 | `jpx_subsampling` | 11, 13 | Odd-origin RGB differed on 5.03% of the region. DeviceN differed on 91.85%. |

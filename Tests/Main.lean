@@ -37,6 +37,7 @@ import Tests.RasterTxFast
 import Tests.Annot
 import Tests.DCT
 import Tests.JPX
+import Tests.JPXTint
 import Tests.OpenSettings
 import Tests.OptionalContent
 import Tests.Attachments
@@ -101,6 +102,7 @@ def suites : List Suite :=
     { name := "annot", run := SafePdf.Tests.Annot.run },
     { name := "dct", run := SafePdf.Tests.DCT.run },
     { name := "jpx", run := SafePdf.Tests.JPX.run },
+    { name := "jpx-tint", run := SafePdf.Tests.JPXTint.run },
     { name := "open-settings", run := SafePdf.Tests.OpenSettings.run },
     { name := "optional-content", run := SafePdf.Tests.OptionalContent.run },
     { name := "attachments", run := SafePdf.Tests.Attachments.run },

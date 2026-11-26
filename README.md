@@ -80,8 +80,7 @@ in [progress.md](progress.md)):
 Known gaps:
 
 * JBIG2 images render as placeholder boxes. The viewer decodes JPEG, CCITT fax and JPEG 2000
-  in Lean. Some JPEG 2000 placements still differ from the reference, including images with
-  nonstandard channel counts. [JPEG 2000 corpus results](docs/jpx-pages.md#confined-worker-results)
+  in Lean. All 45 painted JPEG 2000 image and mask comparisons in the pinned corpus pass. [JPEG 2000 corpus results](docs/jpx-pages.md#confined-worker-results)
 * `Separation`, `DeviceN` and `Lab` colours are approximated.
 * VoiceOver can't read the page content in the macOS app (only its controls).
 * The macOS app is ad-hoc signed, not notarised.

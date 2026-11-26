@@ -1,4 +1,5 @@
 import SafePdf.Shell.Worker.Client
+import SafePdf.Shell.App.Budget
 
 /-!
 # Source-PDF page comparison (jpeg2000 Plan §9)
@@ -16,12 +17,15 @@ def main (args : List String) : IO Unit := do
   let some page := pageArg.toNat? | throw <| IO.userError "invalid page"
   let some denom := scaleArg.toNat? | throw <| IO.userError "invalid scale"
   if page == 0 || denom == 0 then throw <| IO.userError "page and scale must be positive"
-  let client ← spawn worker {} #[] { noSubst := true }
+  let ceilings := SafePdf.Shell.App.Budget.ceilings
+  let client ← spawn worker {} #[] { noSubst := true, memLimitMiB := ceilings.workerMemMiB,
+                                     cpuLimitS := ceilings.workerCpuS }
   try
     let bytes ← IO.FS.readBinFile pdf
     let pages ← match ← client.request (.openDoc bytes false) (some 60000) with
       | .ok (.docInfo n ..) => pure n
       | .ok (.error _ msg) => throw <| IO.userError msg
+      | .error (.exited detail) => throw <| IO.userError s!"worker exited {← client.waitExit}: {detail}"
       | .error e => throw <| IO.userError (toString e)
       | _ => throw <| IO.userError "unexpected openDoc response"
     if page > pages then throw <| IO.userError s!"page {page} exceeds worker page count {pages}"
@@ -32,6 +36,7 @@ def main (args : List String) : IO Unit := do
       IO.FS.writeBinFile output rgba
       IO.println s!"{pages} {w} {h}"
     | .ok (.error _ msg) => throw <| IO.userError msg
+    | .error (.exited detail) => throw <| IO.userError s!"worker exited {← client.waitExit}: {detail}"
     | .error e => throw <| IO.userError (toString e)
     | _ => throw <| IO.userError "unexpected render response"
   finally

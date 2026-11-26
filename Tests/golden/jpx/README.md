@@ -1,6 +1,6 @@
 # One-bit JPX render fixtures
 
-The three PDFs are original single-page fixtures. Each draws three 16 × 8 images at
+The three polarity PDFs are original single-page fixtures. Each draws three 16 × 8 images at
 one point per pixel on a 48 × 8 white page. Every input row consists of eight
 zero samples and eight one samples.
 
@@ -22,3 +22,9 @@ six expected bands. MuPDF 1.25.1 agrees on every pixel of the unfiltered control
 grayscale image, a Flate prefix for the first stencil, and an ASCIIHex prefix
 for the second. The page has an empty resource dictionary. It exercises the
 content parser and the page's inline image cache through the worker.
+
+`named-tints.pdf` draws that one-bit JP2 twice on a 32 × 8 page. The XObject
+references the DeviceN colour-space array. The inline image names the same array
+through its page resources. The type 4 tint function maps x to (1, 1−x, 1−x),
+so each image paints eight white pixels followed by eight red pixels on every
+row. An uncompressed version of the same page matched these 256 pixels in MuPDF.

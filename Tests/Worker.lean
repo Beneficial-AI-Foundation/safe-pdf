@@ -19,6 +19,8 @@ executable (`.lake/build/bin/worker`, a default build target) through
   open get `noDocument`; a bad page index and a bad rotation get `pageFailed`.
 * **JPX stencil polarity**: the worker opens three PDFs in strict mode. JP2 image
   XObjects, inline JP2 images and their unfiltered control must paint the same six bands.
+* **JPX DeviceN tints**: an XObject and an inline image use the same indirect tint
+  function and must both paint white and red.
 * **Malformed frames** (tag 0, unknown tag, truncated field, trailing byte, zero
   denominator): each gets an `error .malformed` response and the worker keeps serving.
 * **Oversized message**: a header above `requestCap` gets `error .tooLong` before any payload
@@ -93,24 +95,19 @@ def needsRepair : ByteArray :=
   ("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" ++
     "2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n").toUTF8
 
-private def checkImagePolarity (c : Client) (fixture : String) : IO Nat := do
+private def checkImageBands (c : Client) (fixture : String) (bands : Array ByteArray) : IO Nat := do
   let bytes ← IO.FS.readBinFile s!"Tests/golden/jpx/{fixture}.pdf"
   let opened ← c.request (.openDoc bytes false)
   unless isDoc 1 opened do return ← check s!"{fixture} open ({describe opened})" false
   let rendered ← c.request (.render 0 1 0 none)
-  let .ok (.image 48 8 pixels) := rendered
+  let .ok (.image width 8 pixels) := rendered
     | return ← check s!"{fixture} render ({describe rendered})" false
-  -- Each image has eight zero samples followed by eight ones in every row.
-  -- The last two placements paint a red stencil with opposite polarities.
-  let black := ByteArray.mk #[0, 0, 0, 255]
-  let white := ByteArray.mk #[255, 255, 255, 255]
-  let red := ByteArray.mk #[255, 0, 0, 255]
   let mut row := ByteArray.empty
-  for colour in #[black, white, red, white, white, red] do
+  for colour in bands do
     for _ in [0:8] do row := row ++ colour
   let mut expected := ByteArray.empty
   for _ in [0:8] do expected := expected ++ row
-  check s!"{fixture} grayscale and red stencil bands with opposite polarities" (pixels == expected)
+  check s!"{fixture} expected eight-pixel colour bands" (width == bands.size * 8 && pixels == expected)
 
 /-- End-to-end checks against the in-process API. -/
 def endToEnd (exe : System.FilePath) : IO Nat := do
@@ -193,8 +190,12 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
     f := f + (← check "links equal Api.pageLinks"
       (ls == expect.map fun l => { rect := l.rect, target := Serve.target l.target }))
   | r, _ => f := f + (← check s!"links ({describe r})" false)
+  let black := ByteArray.mk #[0, 0, 0, 255]
+  let white := ByteArray.mk #[255, 255, 255, 255]
+  let red := ByteArray.mk #[255, 0, 0, 255]
   for fixture in ["plain-polarity", "polarity", "inline-polarity"] do
-    f := f + (← checkImagePolarity c fixture)
+    f := f + (← checkImageBands c fixture #[black, white, red, white, white, red])
+  f := f + (← checkImageBands c "named-tints" #[white, red, white, red])
   -- Strict mode.
   f := f + (← check "strict open of a damaged file is openFailed"
     (isErr .openFailed (← c.request (.openDoc needsRepair false))))

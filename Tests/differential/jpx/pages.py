@@ -331,6 +331,31 @@ def reference_page(pdf, page, denominator, reference, args, tmp, rows, expected_
     return pixels.read_image(image), log
 
 
+def subsampled_tint_result(pdf, page, denominator, plan, rows, args, tmp, ours, ref, rect, direct):
+    """Verify the two-tint DeviceN ramp, preserving the original MuPDF placement score."""
+    result = dict(direct_mupdf=direct)
+    try:
+        recipe = plan["pdfjs_tint"]
+        check(recipe["object"] == 13 and page == denominator == 1 and rect == (110, 110, 210, 210),
+              "unexpected subsampled DeviceN placement")
+        evidence = {}
+        other, log = reference_page(pdf, page, denominator, "pdfjs", args, tmp, rows, 4, evidence)
+        check((other.w, other.h) == (ref.w, ref.h) == (220, 220), "subsampling reference view changed")
+        paints = evidence["reference_paints"]
+        check(len(paints) == 4, "expected four subsampling image paints")
+        target = crop(other, rect)
+        for y in range(32):
+            row = target.row((2*y + 1)*100//64)
+            for x in range(32):
+                i = 3*((2*x + 1)*100//64)
+                check(row[i:i+3] == bytes((x*255//31, y*255//31, 0)), "DeviceN tint sample changed")
+        result.update(pdfjs_log=log, pdfjs_paints=paints, tint_sample_centres=1024)
+        result.update(compare_reviewed_crop(ours, other, rect, recipe["crop"], paints, [32, 32]))
+    except (OSError, ValueError, KeyError, pixels.Bad, subprocess.TimeoutExpired) as exc:
+        result.update(status="reference gap", detail=str(exc))
+    return result
+
+
 def measure_page(pdf, source, manifest, page, plan, rows, args, page_report):
     denominator = plan.get("scale_denominator", 1)
     page_report.update(dpi=72 / denominator, reference=plan.get("reference", "mupdf"))
@@ -385,6 +410,9 @@ def measure_page(pdf, source, manifest, page, plan, rows, args, page_report):
                     measured[rect] = sampling_result(pdf, tmp, sampling_case, ours, ref, direct)
                 except ValueError as exc:
                     measured[rect] = dict(status="sampling reference gap", detail=str(exc), direct_mupdf=direct)
+            if pdf.stem == "jpx_subsampling" and row["object"] == 13:
+                measured[rect] = subsampled_tint_result(
+                    pdf, page, denominator, plan, rows, args, tmp, ours, ref, rect, measured[rect])
             row.update(rect=rect, **measured[rect])
         page_report["outside_rgb_changed"] = outside_changed(ours, ref, measured)
         del page_report["stage"]

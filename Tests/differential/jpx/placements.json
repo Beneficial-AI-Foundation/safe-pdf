@@ -35,7 +35,7 @@
       "8": "3efdbfbe14608f9a1e6b271bf290055d9f9c5097005231aba80dbb291d5c0f9b"
     }
   },
-  "jpx_subsampling": {"sampling_object": 11, "pages": [[[10,[10,10,110,110]], [11,[110,10,210,110]], [12,[10,110,110,210]], [13,[110,110,210,210]]]]},
+  "jpx_subsampling": {"sampling_object": 11, "pdfjs_tint": {"object":13,"crop":"5c9c9f8d1f37627f1a97433640918110e3b76c11da56611beea2caab238662dc"}, "pages": [[[10,[10,10,110,110]], [11,[110,10,210,110]], [12,[10,110,110,210]], [13,[110,110,210,210]]]]},
   "perf_codecs_jpx": {"pages": [[[2,"page"]]]},
   "red_stamp": {"pages": [[[18,"page"]]], "annotation_path": [14,16,17,18], "scale_denominator": 2},
   "JPXTestCMYK": {"sampling_object": 12, "pages": [[[12,[91,80,422,188]]]]},

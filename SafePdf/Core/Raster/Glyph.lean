@@ -1383,9 +1383,10 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     let view := viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)
     let exts := Image.imageExtents limits.maxXObjectDepth view items
       (tls.cellItems ++ type3Items srcs)
-    let (imgs, b) := Image.loadImages limits (Text.docSource limits doc) b (page.resources.getD []) all exts .document
-    let (imgs, b) := imgs.loadInlineJPX b (some view) items
-    let (imgs, b) := imgs.loadInlineJPX b none (tls.cellItems ++ type3Items srcs)
+    let imageSource := Text.docSource limits doc
+    let (imgs, b) := Image.loadImages limits imageSource b (page.resources.getD []) all exts .document
+    let (imgs, b) := imgs.loadInlineJPXFrom imageSource b (some view) items
+    let (imgs, b) := imgs.loadInlineJPXFrom imageSource b none (tls.cellItems ++ type3Items srcs)
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
     (.ok (renderPage page zoom rot
       { fonts := tabulateWidths ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls
