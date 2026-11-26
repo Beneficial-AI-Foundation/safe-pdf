@@ -1,15 +1,30 @@
 {
   "S2": {"pages": [[[17,[36,243,228,464]], [18,[341,243,537,480]], [19,[36,9,227,231]], [20,[345,15,540,251]], [21,[36,482,228,709]], [22,[339,482,537,705]], [24,[307,606,312,653]]]], "other_fills": 2},
-  "bug_jpx": {"pages": [[[15,[269,200,398,265]]]], "gap": "Known native reference crash case. Obtain an independently vetted page reference before including this placement."},
+  "bug_jpx": {"pages": [[[15,[269,200,398,265]]]], "reference": "recorded-plane-jpx-free"},
   "issue12213": {"pages": [[[16,[107,25,341,52]]]]},
   "issue19326": {"pages": [[[8,"page"]]], "thumbnails": [[1,11]]},
-  "issue19517": {"pages": [[[8,"page"]]], "thumbnails": [[1,13]], "scale_denominator": 16},
+  "issue19517": {
+    "pages": [[[8,"page"]]], "thumbnails": [[1,13]], "scale_denominator": 16,
+    "reference": "pdfium", "view_size": [788,1051],
+    "reference_crops": {"8": "685a011f41bdbbb15f28d60ff95ee989ee5937b98327879a491684648cf8ac1c"}
+  },
   "issue5475": {"pages": [[[8,"page"]]]},
   "issue5481": {"pages": [[[43,"page"]], [[43,"page"]], [[5,"page"]]]},
   "issue5549": {"pages": [[[11,"page"]]]},
   "issue5567": {"pages": [[[11,"page"]]]},
   "jp2k-resetprob": {"pages": [[[6,"page"]]]},
-  "jpx_numcomps": {"reference": "pdfjs", "pages": [[[10,[10,10,110,110]], [11,[110,10,210,110]], [12,[10,110,110,210]], [13,[110,110,210,210]], [14,[210,10,310,110]], [15,[210,110,310,210]]]]},
+  "jpx_numcomps": {
+    "reference": "pdfjs", "view_size": [320,220],
+    "pages": [[[10,[10,10,110,110]], [11,[110,10,210,110]], [12,[10,110,110,210]], [13,[110,110,210,210]], [14,[210,10,310,110]], [15,[210,110,310,210]]]],
+    "reference_crops": {
+      "10": "5c9c9f8d1f37627f1a97433640918110e3b76c11da56611beea2caab238662dc",
+      "11": "2170ca508926cc47ab3ae7eced0e495c3028e6420b58d32be1221870968ac1bb",
+      "12": "7322b1f08a042941ecc255a6e3e81dae90fbf4b2a932939187d187ecaa42bccb",
+      "13": "cc68f8695278fb102fcc9df880f2345c814b535fa7f9b19399c3b7cbd4fdd411",
+      "14": "aa4262465689b8dd6a6861a986b2b2ce33dc95725abf9c4845e4dd89ef52b488",
+      "15": "7a3a33639f7ef829db6cf3b7a360fb113355fe1a048b8f630ba7b3f4f0feaaa1"
+    }
+  },
   "jpx_smaskindata": {"pages": [[[5,[5,5,35,35]], [6,[40,5,70,35]], [7,[75,5,105,35]], [8,[110,5,140,35]]]]},
   "jpx_subsampling": {"pages": [[[10,[10,10,110,110]], [11,[110,10,210,110]], [12,[10,110,110,210]], [13,[110,110,210,210]]]]},
   "perf_codecs_jpx": {"pages": [[[2,"page"]]]},

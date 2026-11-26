@@ -6,15 +6,16 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-PACKAGE = REPO / ".lake/packages/jpeg2000"
 
 
 def load_module(name, path):
@@ -25,6 +26,7 @@ def load_module(name, path):
 
 
 pixels = load_module("pixels", HERE.parent / "pixels.py")
+recorded = load_module("bug_jpx_recorded_plane", HERE / "bug_jpx_recorded_plane.py")
 
 
 def check(ok, message):
@@ -36,9 +38,8 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def run(args, **kwargs):
-    result = subprocess.run(args, cwd=REPO, capture_output=True, text=True,
-                            timeout=210, **kwargs)
+def run(args, cwd=REPO, env=None):
+    result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=210)
     log = (result.stdout + result.stderr).strip()
     check(result.returncode == 0, f"{Path(args[0]).name} exit {result.returncode}: {log[:1500]}")
     return result.stdout.strip(), log
@@ -84,6 +85,20 @@ def compare_region(ours, ref, rect):
                 identical=result["identical"], worker_colors=ac, reference_colors=bc,
                 worker_flat_rgb=list(a.rgb[:3]) if ac == 1 else None,
                 reference_flat_rgb=list(b.rgb[:3]) if bc == 1 else None)
+
+
+def compare_reviewed_crop(ours, ref, rect, expected_digest, paints, native_size):
+    """Require the approved raster and, for the PDF.js grid, its live paint at this site."""
+    digest = sha(crop(ref, rect).rgb)
+    evidence = dict(reference_crop_sha256=digest)
+    if digest != expected_digest:
+        return dict(evidence, status="reference gap", detail="reference crop differs from reviewed RGB")
+    if paints is not None and paints.count(dict(rect=list(rect), size=native_size)) != 1:
+        return dict(evidence, status="reference gap", detail="expected one image paint at this placement")
+    evidence.update(compare_region(ours, ref, rect))
+    if evidence["worker_colors"] == 1 and evidence["reference_colors"] != 1 and evidence["status"] == "within":
+        evidence["status"] = "flat worker in nonuniform placement"
+    return evidence
 
 
 def outside_changed(ours, ref, rects):
@@ -177,10 +192,10 @@ def inventory(pdf, source, expected, plan, upstream):
     return rows
 
 
-def worker_page(pdf, page, denominator, worker, tmp, pages):
+def worker_page(pdf, page, denominator, worker, tmp, pages, build_root):
     rgba = tmp / "worker.rgba"
     out, _ = run(["lake", "env", "lean", "--run", REPO / "scripts/corpus/JpxWorkerPage.lean",
-                  worker, pdf, str(page), str(denominator), rgba])
+                  worker, pdf, str(page), str(denominator), rgba], cwd=build_root)
     count, w, h = map(int, out.split())
     check(count == pages, f"worker page count {count}, reference count {pages}")
     data = rgba.read_bytes()
@@ -215,35 +230,59 @@ def audit_trace(trace, rows, image, expected_fills):
             check(len(matches) == 1, f"obj {row['object']} expected one {tag} at {rect}, got {matches}")
 
 
-def reference_page(pdf, page, denominator, reference, args, tmp, rows, expected_fills):
+def map_reference(pdf, args, tmp, page_report):
+    import resource
+    target = tmp / "map.ppm"
+    budget = args.map_reference_mib * 1024**2
+
+    def limit():
+        for key, cap in [(resource.RLIMIT_AS, budget), (resource.RLIMIT_CPU, 45),
+                         (resource.RLIMIT_FSIZE, 8 * 1024**2)]:
+            _, hard = resource.getrlimit(key)
+            cap = cap if hard == resource.RLIM_INFINITY else min(cap, hard)
+            resource.setrlimit(key, (cap, cap))
+
+    evidence = dict(address_space_mib=args.map_reference_mib, cpu_seconds=45,
+                    timeout_seconds=60, output_limit_mib=8)
+    page_report["reference_process"] = evidence
+    started = time.monotonic()
+    try:
+        result = subprocess.run([sys.executable, "-I", HERE / "pdfium-map.py", pdf, target],
+                                capture_output=True, text=True, timeout=60, preexec_fn=limit)
+    except subprocess.TimeoutExpired:
+        evidence["timed_out"] = True
+        raise
+    finally:
+        evidence["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    evidence.update(returncode=result.returncode, stdout=result.stdout.strip(), stderr=result.stderr.strip())
+    check(result.returncode == 0 and not result.stderr and len(result.stdout.splitlines()) == 1
+          and result.stdout.startswith("pypdfium2 "),
+          f"PDFium map exit {result.returncode}: {result.stderr.strip()}")
+    return pixels.read_image(target), result.stdout.strip()
+
+
+def reference_page(pdf, page, denominator, reference, args, tmp, rows, expected_fills, page_report):
+    if reference == "pdfium":
+        return map_reference(pdf, args, tmp, page_report)
     if reference == "pdfjs":
         check(args.pdfjs_dir, "supply --pdfjs-dir for the DeviceN page")
         image = tmp / "reference.png"
-        _, log = run(["node", "--no-warnings", HERE / "pdfjs-page.mjs", args.pdfjs_dir.resolve(), pdf,
-                      str(page), str(denominator), image, str(expected_fills)])
+        audit = tmp / "grid.json"
+        _, log = run(["node", HERE / "pdfjs-page.mjs", args.pdfjs_dir.resolve(), pdf,
+                      str(page), str(denominator), image, str(expected_fills), audit],
+                     env={**os.environ, "NODE_USE_ENV_PROXY": "0"})
         check(len(log.splitlines()) == 1 and log.startswith("PDF.js "),
               f"PDF.js reference diagnostic: {log[:1500]}")
+        page_report["reference_paints"] = json.loads(audit.read_text())
     else:
         image = tmp / "reference.ppm"
         cmd = ["mutool", "draw", "-q", "-b", "CropBox", "-r", str(72 / denominator), "-c", "rgb"]
-        options = {}
-        if pdf.stem == "issue19517":
-            # The reduced map view is small, but some MuPDF builds expand the full image.
-            # An unavailable reference is preferable to exhausting the shared host.
-            import resource
-            def limit_reference():
-                limit = args.map_reference_mib * 1024**2
-                _, hard = resource.getrlimit(resource.RLIMIT_AS)
-                if hard != resource.RLIM_INFINITY:
-                    limit = min(limit, hard)
-                resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
-            options["preexec_fn"] = limit_reference
         trace = tmp / "trace.xml"
         logs = []
         # Some builds report decoder errors and still write a partial/white page.
         allowed = {"warning: ICC support is not available", "warning: invalid marked content and clip nesting"}
         for fmt, target in [("pnm", image), ("trace", trace)]:
-            _, log = run(cmd + ["-F", fmt, "-o", target, pdf, str(page)], **options)
+            _, log = run(cmd + ["-F", fmt, "-o", target, pdf, str(page)])
             check(all(s in allowed for s in log.splitlines()), f"MuPDF reference diagnostic: {log}")
             logs.extend(log.splitlines())
         ref = pixels.read_image(image)
@@ -252,7 +291,7 @@ def reference_page(pdf, page, denominator, reference, args, tmp, rows, expected_
     return pixels.read_image(image), log
 
 
-def measure_page(pdf, page, plan, rows, args, page_report):
+def measure_page(pdf, source, manifest, page, plan, rows, args, page_report):
     denominator = plan.get("scale_denominator", 1)
     page_report.update(dpi=72 / denominator, reference=plan.get("reference", "mupdf"))
     if plan.get("gap"):
@@ -261,19 +300,38 @@ def measure_page(pdf, page, plan, rows, args, page_report):
     with tempfile.TemporaryDirectory(prefix="safe-pdf-jpx-") as work:
         tmp = Path(work)
         page_report["stage"] = "worker"
-        ours = worker_page(pdf, page, denominator, args.worker.resolve(), tmp, len(plan["pages"]))
+        ours = worker_page(pdf, page, denominator, args.worker.resolve(), tmp, len(plan["pages"]), args.build_root)
         page_report.update(worker_size=[ours.w, ours.h], worker_rgb_sha256=sha(ours.rgb))
         page_report["stage"] = "reference"
         fills = len(plan["pages"][page-1]) + plan.get("other_fills", 0)
-        ref, log = reference_page(pdf, page, denominator, page_report["reference"], args, tmp, rows, fills)
+        recorded_page = source["sha256"] == recorded.SOURCE_SHA
+        if recorded_page:
+            check(page == denominator == fills == len(rows) == 1 and
+                  rows[0]["owner"] == rows[0]["object"] == 15 and rows[0]["role"] == "image" and
+                  page_report["reference"] == "recorded-plane-jpx-free", "recorded page contract changed")
+            ref, log, page_report["reference_provenance"] = recorded.reference(
+                pdf, manifest, tmp, rows[0]["region"],
+                lambda vetted: reference_page(vetted, page, denominator, "mupdf", args, tmp, rows, fills, page_report))
+        else:
+            check(page_report["reference"] in ("pdfium", "pdfjs", "mupdf"), "unknown page reference")
+            ref, log = reference_page(pdf, page, denominator, page_report["reference"], args, tmp, rows, fills, page_report)
         page_report.update(reference_log=log, reference_size=[ref.w, ref.h], reference_rgb_sha256=sha(ref.rgb))
         page_report["stage"] = "view"
         check((ref.w, ref.h) == (ours.w, ours.h), f"view dimensions differ: {ref.w}x{ref.h} vs {ours.w}x{ours.h}")
+        if "view_size" in plan:
+            check([ref.w, ref.h] == plan["view_size"], "reference dimensions disagree with audited view")
         measured = {}
         for row in rows:
             rect = box(row["region"], ours.w, ours.h)
-            if rect not in measured:
+            if "reference_crops" in plan:
+                native_size = [row["dictionary"][k] for k in ("Width", "Height")]
+                measured[rect] = compare_reviewed_crop(
+                    ours, ref, rect, plan["reference_crops"][str(row["owner"])],
+                    page_report.get("reference_paints"), native_size)
+            elif rect not in measured:
                 measured[rect] = compare_region(ours, ref, rect)
+            if recorded_page:
+                measured[rect] = recorded.worker_result(ours, ref, measured[rect])
             row.update(rect=rect, **measured[rect])
         page_report["outside_rgb_changed"] = outside_changed(ours, ref, measured)
         del page_report["stage"]
@@ -297,16 +355,26 @@ def selftest():
     other = pixels.Image(w, h, base)
     check(compare_region(other, ref, rect)["status"] == "within" and outside_changed(other, ref, [rect]),
           "misclassified unrelated change")
-    print("PASS: 36-pixel placeholder rejected on a 10,000-pixel page; matching placement passes with unrelated change outside.")
+    native_size = [6, 6]
+    digest = sha(crop(ref, rect).rgb)
+    paints = [dict(rect=list(rect), size=native_size)]
+    check(compare_reviewed_crop(other, ref, rect, digest, paints, native_size)["status"] == "within",
+          "complete site rejected")
+    check(compare_reviewed_crop(other, ref, rect, digest, [], native_size)["status"] == "reference gap",
+          "accepted missing paint")
+    check(compare_reviewed_crop(other, holder, rect, digest, paints, native_size)["status"] == "reference gap",
+          "accepted placeholder reference")
+    print("PASS: placeholder rejected, matching placement accepted, missing paint and incomplete reference rejected.")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache", type=Path, default=PACKAGE / "corpus/files")
-    parser.add_argument("--worker", type=Path, default=REPO / ".lake/build/bin/worker")
+    parser.add_argument("--build-root", type=Path, default=REPO, help="existing safe-pdf Lean build at the same decoder pin")
+    parser.add_argument("--cache", type=Path)
+    parser.add_argument("--worker", type=Path)
     parser.add_argument("--pdfjs-dir", type=Path, help="installed pdfjs-dist directory for jpx_numcomps")
     parser.add_argument("--map-reference-mib", type=int, default=1024,
-                        help="address space for MuPDF on the 212 MP map (default 1024 MiB)")
+                        help="address space for PDFium on the 212 MP map (default 1024 MiB)")
     parser.add_argument("--only", action="append", help="exact PDF stem; repeatable focused comparison")
     parser.add_argument("--json", type=Path, help="write full page and occurrence evidence")
     parser.add_argument("--selftest", action="store_true")
@@ -315,16 +383,22 @@ def main():
         selftest()
         return 0
     check(args.map_reference_mib > 0, "--map-reference-mib must be positive")
+    check((args.build_root / "lake-manifest.json").read_bytes() == (REPO / "lake-manifest.json").read_bytes(),
+          "Lean build uses a different package manifest")
+    package = args.build_root / ".lake/packages/jpeg2000"
+    args.cache = args.cache or package / "corpus/files"
+    args.worker = args.worker or args.build_root / ".lake/build/bin/worker"
     plans = json.loads((HERE / "placements.json").read_text())
-    sources, expected = catalog(json.loads((PACKAGE / "corpus/manifest.json").read_text()), plans)
+    manifest = json.loads((package / "corpus/manifest.json").read_text())
+    sources, expected = catalog(manifest, plans)
     selected = set(args.only or plans)
     check(selected <= plans.keys(), f"unknown --only: {selected - plans.keys()}")
-    upstream = load_module("pdf_extract", PACKAGE / "scripts/extract-pdf-jpx.py")
+    upstream = load_module("pdf_extract", package / "scripts/extract-pdf-jpx.py")
     _, version = run(["mutool", "-v"])
     report = dict(scope="focused" if args.only else "full", mupdf=version,
                   map_reference_mib=args.map_reference_mib,
                   worker_sha256=sha(args.worker.read_bytes()),
-                  corpus_manifest_sha256=sha((PACKAGE / "corpus/manifest.json").read_bytes()),
+                  corpus_manifest_sha256=sha((package / "corpus/manifest.json").read_bytes()),
                   channel_tolerance=pixels.TOL, max_percent=pixels.TAU, documents=[])
     counts = Counter()
     for path, source in sources.items():
@@ -347,7 +421,7 @@ def main():
             evidence = dict(page=page)
             doc["pages"].append(evidence)
             try:
-                measure_page(pdf, page, plan, active, args, evidence)
+                measure_page(pdf, source, manifest, page, plan, active, args, evidence)
                 if evidence["outside_rgb_changed"]:
                     print(f"{name} p{page}: additional RGB differences outside the measured placements")
             except (OSError, ValueError, pixels.Bad, ET.ParseError, subprocess.TimeoutExpired) as e:
