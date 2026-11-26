@@ -39,6 +39,17 @@ inductive Colour where
   | opacity
   deriving BEq, Inhabited
 
+/-- Resolved PDF space for interpreting bare codestreams during page rendering.
+See the PDF.js channel-grid comparisons in docs/jpx-pages.md. -/
+inductive RenderSpace where
+  /-- Device colour, with the arity given by `Colour.pdf`. -/
+  | device
+  /-- DeviceN tint inputs, before the PDF tint transform. -/
+  | deviceN
+  /-- Other PDF spaces, or no PDF colour declaration. -/
+  | other
+  deriving BEq, Inhabited
+
 /-- PDF colour precedence, embedded soft-mask selection and wavelet reduction. -/
 structure Options where
   colour : Colour := .embedded
@@ -49,6 +60,9 @@ structure Options where
   fit : Bool := false
   /-- PDF colour-key ranges in native component units, before display scaling. -/
   key : List (Int × Int) := []
+  /-- Page rendering interprets bare channel counts in the PDF space and checks
+  requested opacity. The standalone API defaults to strict JPX channel selection. -/
+  renderSpace : Option RenderSpace := none
   deriving Inhabited
 
 /-- Reduced image geometry and colour metadata. Embedded space ranges refer to the input.
@@ -109,6 +123,7 @@ private structure Selection where
   mapping : JPEG2000.Color.Mapping
   nc : Nat
   alphaAssociated : Option Bool
+  missingTints : Nat := 0
 
 private def componentOf : JPEG2000.Color.Source → Nat
   | .direct c | .palette c _ => c
@@ -166,7 +181,22 @@ private def channelSelection (l : Limits) (L : JPEG2000.Limits) (opts : Options)
   let layout ← (JPEG2000.Color.channelLayout count mapping.sources.size defs).mapError (translate l)
   if opts.colour == .embedded && known.any (· != layout.colours.size) then
     throw (.malformed 0 "JPX: too few channels for embedded colour space")
-  select opts mapping layout
+  -- On the PDF.js channel grid, the same raw A,B samples are two declared tints,
+  -- undeclared gray, or gray with straight opacity, depending on the dictionary.
+  match hdr, opts.renderSpace, opts.colour, opts.smaskInData, n with
+  | none, some _, .embedded, 0, 2 => return ← select opts mapping { colours := #[0] }
+  | none, some .device, .pdf 1, 1, 2 => return ← select opts mapping { colours := #[0], alpha := some 1 }
+  | none, some .device, .pdf 3, 1, 3 => return ← select opts mapping layout  -- opaque RGB
+  | none, some .deviceN, .pdf k, 0, _ =>
+    if n < k then
+      if k > 32 then throw (.unsupported "JPX: raster supports at most 32 colour channels")
+      let s ← select { opts with colour := .pdf n } mapping layout
+      return { s with missingTints := k - n }
+  | _, _, _, _, _ => pure ()
+  let s ← select opts mapping layout
+  if opts.renderSpace.isSome && opts.smaskInData != 0 && s.alphaAssociated.isNone then
+    throw (.malformed 0 "JPX: SMaskInData requires whole-image opacity")
+  return s
 
 private def channelsFromHeader (l : Limits) (L : JPEG2000.Limits) (header : JPEG2000.Header.Header)
     (bytes : ByteArray) (opts : Options) : Except Error Channels := do
@@ -183,8 +213,9 @@ private def channelsFromHeader (l : Limits) (L : JPEG2000.Limits) (header : JPEG
   let profile := match opts.colour, space with
     | .embedded, .icc range => some range
     | _, _ => none
-  let keyPlane := selection.alphaAssociated.isNone && !opts.key.isEmpty && opts.key.length == selection.nc
-  let packedChannels := selection.mapping.sources.size + (if keyPlane then 1 else 0)
+  let keyPlane := selection.alphaAssociated.isNone && !opts.key.isEmpty &&
+    opts.key.length == selection.nc + selection.missingTints
+  let packedChannels := selection.mapping.sources.size + selection.missingTints + (if keyPlane then 1 else 0)
   checkBytes l (area * packedChannels + (profile.map (·.len)).getD 0)
   let decoded ← (JPEG2000.Decode.nativeFromHeader L header bytes opts.reduce).mapError err
   let comps : Array JPEG2000.Color.Channel := decoded.comps.map fun c =>
@@ -197,20 +228,27 @@ private def channelsFromHeader (l : Limits) (L : JPEG2000.Limits) (header : JPEG
     if opts.colour == .embedded && sycc then
       (JPEG2000.Image.convertSycc L rect.x0 rect.y0 (Array.range selection.nc) mapped).mapError err
     else pure (space, mapped)
+  -- Missing tints share one unsigned zero plane. Charge each interleaved output tint.
   let fresh := mapped.foldl (fun cells c =>
-    if JPEG2000.Image.atFullRes rect.width rect.height c then cells else cells + area) 0
+    if JPEG2000.Image.atFullRes rect.width rect.height c then cells else cells + area)
+    (if selection.missingTints > 0 then area else 0)
   (L.check JPEG2000.Image.loc .workSamples fresh).mapError err
-  checkBytes l (mapped.foldl (fun size c => size + area * JPEG2000.Header.bytesPerSample c.format.depth) 0)
+  checkBytes l (mapped.foldl (fun size c => size + area * JPEG2000.Header.bytesPerSample c.format.depth)
+    (area * selection.missingTints))
   let full ← mapped.mapM fun c => do
     let plane ← (JPEG2000.Image.upsample rect.x0 rect.y0 rect.width rect.height c).mapError err
     pure ({ plane, depth := c.format.depth, signed := c.format.signed } : JPEG2000.Channel)
   let alpha ← selection.alphaAssociated.mapM fun premultiplied => do
     let channel ← (JPEG2000.Image.pick full selection.nc).mapError err
     pure ({ channel, premultiplied } : JPEG2000.SoftMask)
+  let mut colours := full.extract 0 selection.nc
+  if selection.missingTints > 0 then
+    let zero := JPEG2000.Bytes.Plane.zero rect.width rect.height
+    colours := colours ++ Array.replicate selection.missingTints { plane := zero, depth := 8, signed := false }
   return { w := rect.width, h := rect.height, x0 := rect.x0, y0 := rect.y0,
            space := if opts.colour == .embedded then some space else none,
            iccProfile := profile.map fun r => bytes.extract r.start (r.start + r.len),
-           colours := full.extract 0 selection.nc, alpha, indexed := opts.colour == .indexed }
+           colours, alpha, indexed := opts.colour == .indexed }
 
 /-- Decode selected channels at native precision. Both input forms use SIZ geometry.
 Work-plane groups are bounded in cells using four bytes for compact samples and eight
