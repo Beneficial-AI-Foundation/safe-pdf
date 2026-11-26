@@ -265,7 +265,7 @@ def reference_page(pdf, page, denominator, reference, args, tmp, rows, expected_
     if reference == "pdfium":
         return map_reference(pdf, args, tmp, page_report)
     if reference == "pdfjs":
-        check(args.pdfjs_dir, "supply --pdfjs-dir for the DeviceN page")
+        check(args.pdfjs_dir, "supply --pdfjs-dir for this PDF.js reference")
         image = tmp / "reference.png"
         audit = tmp / "grid.json"
         _, log = run(["node", HERE / "pdfjs-page.mjs", args.pdfjs_dir.resolve(), pdf,

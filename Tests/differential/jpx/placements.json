@@ -25,7 +25,16 @@
       "15": "7a3a33639f7ef829db6cf3b7a360fb113355fe1a048b8f630ba7b3f4f0feaaa1"
     }
   },
-  "jpx_smaskindata": {"pages": [[[5,[5,5,35,35]], [6,[40,5,70,35]], [7,[75,5,105,35]], [8,[110,5,140,35]]]]},
+  "jpx_smaskindata": {
+    "reference": "pdfjs", "view_size": [140,40],
+    "pages": [[[5,[5,5,35,35]], [6,[40,5,70,35]], [7,[75,5,105,35]], [8,[110,5,140,35]]]],
+    "reference_crops": {
+      "5": "f760edaacff6f8f44363725b678a2960bc6c532fd457fa445fdb39627d1210a4",
+      "6": "5c5cf8314cff285a227285ba9b556ba0d46074ceb53388ffc37f7289fe3a6170",
+      "7": "f760edaacff6f8f44363725b678a2960bc6c532fd457fa445fdb39627d1210a4",
+      "8": "3efdbfbe14608f9a1e6b271bf290055d9f9c5097005231aba80dbb291d5c0f9b"
+    }
+  },
   "jpx_subsampling": {"pages": [[[10,[10,10,110,110]], [11,[110,10,210,110]], [12,[10,110,110,210]], [13,[110,110,210,210]]]]},
   "perf_codecs_jpx": {"pages": [[[2,"page"]]]},
   "red_stamp": {"pages": [[[18,"page"]]], "annotation_path": [14,16,17,18], "scale_denominator": 2},

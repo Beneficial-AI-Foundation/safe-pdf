@@ -28,7 +28,7 @@ PDFJS_DIST="$JPX_TOOLS/node_modules/pdfjs-dist"
 
 Install qpdf with JSON v2 support and MuPDF with `mutool draw` PNM and trace output.
 Only the map reference subprocess imports pypdfium2. PDF.js and its canvas backend
-render the colour-channel grid (tested on Node 22.23.5). Each renderer's
+render the colour-channel grid and embedded-opacity page (tested on Node 22.23.5). Each renderer's
 version is recorded with its evidence. A missing tool, PDF, placement or usable reference
 keeps the full gate red. The two thumbnail streams have no page-content pixels to compare.
 
@@ -62,7 +62,7 @@ fills the view. Coordinates were derived from the hashed sources' image `Do` ope
 resource dictionaries, clipping and CropBox transforms. MuPDF's live trace checks the
 paint count, source dimensions, device-space extent and external mask clips. One pixel
 of rounding at a fractional clip edge is allowed in the trace check. The actual raster
-comparison always uses the audited rectangle. For the grid, PDF.js reports each image
+comparison always uses the audited rectangle. For the grid and embedded-opacity page, PDF.js reports each image
 paint's native dimensions and device rectangle. The gate requires one matching paint
 and the reviewed RGB digest separately for each crop. A missing paint or changed crop
 leaves its own mandatory reference gap. A page-wide diagnostic or dimension mismatch
@@ -182,6 +182,28 @@ images. Ghostscript 10.05.1 emitted component warnings, left object 11 white,
 and left objects 14 and 15 backdrop blue. Poppler 25.03.0 emitted JP2-header warnings
 and produced colours inconsistent with the native-channel check. None supplied a
 complete, warning-free grid reference.
+
+### Embedded opacity and matte
+
+The four images on `jpx_smaskindata` each contain two native RGBA samples. Page 1
+paints them over a 50% gray background, enlarging each sample to a 15 × 30 rectangle.
+The source omits `/Interpolate`. For mode 2, remove the PDF matte contribution from
+the stored colour before compositing with the background. The default matte is black.
+Mode 1 supplies straight colour. [PDF.js fixture and decoder change](https://github.com/mozilla/pdf.js/commit/f554d0c9c89b8e4bb837f2193c767f63ea8869a0)
+
+| Object | Stored RGBA, left and right | Mode and matte | Expected RGB over gray, left and right |
+| --- | --- | --- | --- |
+| 5 | (128,255,128,128), (0,255,0,0) | 2, green | (192,192,192), (128,128,128) |
+| 6 | (128,0,0,128), (0,0,200,255) | 2, black | (192,64,64), (0,0,200) |
+| 7 | (128,128,255,128), (0,0,255,0) | 2, blue | (192,192,192), (128,128,128) |
+| 8 | (255,0,0,128), (0,255,0,255) | 1 | (192,64,64), (0,255,0) |
+
+Each recorded crop digest is the SHA-256 of 30 identical RGB rows, with each of the
+two expected colours repeated 15 times. The pinned PDF.js renderer matches these
+four digests and reports four 2 × 1 image paints. MuPDF 1.25.1 interpolates between
+the samples and retains a visible matte tint on objects 5 and 7. It differs from the
+analytic placements on 50%, 63.33%, 50% and 33.33% of pixels respectively under
+the placement metric.
 
 ### Pikepdf control
 
