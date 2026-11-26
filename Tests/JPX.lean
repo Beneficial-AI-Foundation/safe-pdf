@@ -23,11 +23,11 @@ private def segment (tag : UInt8) (body : Bytes) : Bytes :=
   [255, tag] ++ be 2 (2 + body.length) ++ body
 
 private def stream (depth : Nat) (signed : Bool) (packets : List Bytes)
-    (odd : Bool := false) : ByteArray :=
+    (odd : Bool := false) (size : Nat × Nat := (4, 1)) : ByteArray :=
   let origin := if odd then 1 else 0
-  let yEnd := if odd then 4 else 1
+  let yEnd := if odd then 4 else size.2
   let fmt := (depth - 1 + (if signed then 128 else 0)).toUInt8
-  let siz := segment 0x51 ([0, 0] ++ ([4, yEnd, origin, origin, 4, yEnd, 0, 0] : List Nat).flatMap
+  let siz := segment 0x51 ([0, 0] ++ ([size.1, yEnd, origin, origin, size.1, yEnd, 0, 0] : List Nat).flatMap
     (be 4) ++ be 2 packets.length ++ packets.flatMap fun _ => [fmt, 1, 1])
   let cod := segment 0x52 [0, 0, 0, 1, 0, (if odd then 1 else 0), 4, 4, 0, 1]
   let qcd := segment 0x5c ([0x40, (depth * 8).toUInt8] ++ (if odd then [72, 72, 80] else []))
@@ -177,11 +177,152 @@ private def geometryAndErrors : Except Error Unit := do
   require "decoder unsupported reduction stays typed" (match decode {} 4 1 raw opts with
     | .error (.unsupported _) => true | _ => false)
 
+open Core.Raster.Image (decodeInline loadXObject)
+open Core.Content.Run (nm)
+
+private def params (extras : Dict := []) : Dict :=
+  let defaults : Dict := [(nm "Filter", .name (nm "JPXDecode")), (nm "Width", .int 4), (nm "Height", .int 1)]
+  extras ++ defaults.filter fun kv => (Dict.get? extras kv.1).isNone
+
+private def component (p : Core.Raster.Image.Pixmap) (n : Nat) :=
+  (List.range (p.w * p.h)).map fun i => Core.Raster.Image.rd p.data (4 * i + n)
+
+private def rasterColours : Except Error Unit := do
+  let rev : PdfObject := .array [.int 1, .int 0]
+  let ordinary ← decodeInline {} [] (params [(nm "BitsPerComponent", .int 1),
+    (nm "Decode", rev), (nm "Interpolate", .bool true)]) (stream 4 false [indices])
+  require "ordinary JPX ignores BPC and Decode" (ordinary.interpolate &&
+    component ordinary 0 == [0,17,34,51] && ordinary.solid)
+  let idx : PdfObject := .array [.name (nm "Indexed"), .name (nm "DeviceRGB"), .int 3,
+    .string [1,2,3,4,5,6,7,8,9,10,11,12]]
+  let pdf ← decodeInline {} [] (params [(nm "ColorSpace", idx)]) palette
+  require "PDF Indexed overrides the JP2 palette" (component pdf 0 == [1,4,7,10])
+  let embedded ← decodeInline {} [] (params [(nm "SMaskInData", .int 1)]) palette
+  require "embedded palette and mapped opacity" (component embedded 0 == [10,11,12,13] &&
+    component embedded 3 == [255,127,0,63])
+  let keyed ← decodeInline {} [] (params [(nm "Mask", .array [.int (-1), .int 0])])
+    (stream 12 true [signedRamp])
+  require "key uses signed 12-bit units before scaling" (component keyed 3 == [255,0,0,255])
+  let cmyk := jp2 [indices, coverage, indices, indices] (colr 12)
+  let c ← decodeInline {} [] (params []) cmyk
+  require "embedded enum 12 follows device CMYK" (component c 0 == [255,221,187,153] &&
+    component c 1 == [0,102,221,85])
+  let profile := List.replicate 16 (0 : UInt8) ++ "CMYK".toUTF8.toList ++ List.replicate 108 0
+  let icc := jp2 [indices, coverage, indices, indices] (box "colr" ([2,0,0] ++ profile))
+  let ci ← decodeInline {} [] (params []) icc
+  require "embedded ICC CMYK device alternate" (ci.data == c.data)
+  let dn : PdfObject := .array [.name (nm "DeviceN"), .array [.name (nm "A"), .name (nm "B")],
+    .name (nm "DeviceGray"), .null]
+  let d ← decodeInline {} [] (params [(nm "ColorSpace", dn)]) (jp2 [indices, coverage] (colr 16))
+  require "DeviceN uses ordinary tint conversion" (component d 0 == [128,179,238,170])
+  let mono := stream 1 false [[0]]
+  let stencil := fun (ds : PdfObject) => params [(nm "ImageMask", .bool true), (nm "Decode", ds)]
+  let normal ← decodeInline {} [] (stencil (.array [.int 0, .int 1])) mono
+  let inverted ← decodeInline {} [] (stencil rev) mono
+  require "stencil decode polarity once" (normal.stencil && inverted.stencil &&
+    component normal 3 == [0,0,0,0] && component inverted 3 == [255,255,255,255])
+  require "stencil rejects 4-bit data" (match decodeInline {} [] (stencil rev) (stream 4 false [indices]) with
+    | .error (.malformed ..) => true | _ => false)
+
+private def budgetSource (objs : List (Nat × IndirectBody)) : Core.Content.Source Core.Filter.Budget :=
+  ⟨fun s n _ => ((objs.lookup n).elim (Except.error (.malformed 0 "missing object")) Except.ok, s),
+   fun b _ st =>
+     let (r, b) := Core.Filter.decodeStreamB {} b st.dict st.data
+     (r.bind (fun | .data bytes => pure bytes | _ => throw (.malformed 0 "codec prefix")), b)⟩
+
+private def rasterMasks : Except Error Unit := do
+  let file := jp2 [coverage, indices] (colr 17 ++ cdef [(0,1,0), (1,0,1)])
+  let sm := stream 4 false [indices]
+  let reversed : PdfObject := .array [.int 1, .int 0]
+  let mask : IndirectBody := .stream ⟨params [(nm "Decode", reversed)], sm⟩
+  let main := fun (extra : Dict) => .stream ⟨params (extra ++ [(nm "Width", .ref 3 0),
+      (nm "ColorSpace", .ref 4 0), (nm "Filter", .ref 5 0)]), file⟩
+  let run := fun extra mode =>
+    let src := budgetSource [(1, main extra), (2, mask), (3, .obj (.int 4)),
+      (4, .obj (.name (nm "DeviceGray"))), (5, .obj (.name (nm "JPXDecode"))),
+      (6, .obj (.int mode)), (7, .obj (.array [.ref 8 0])), (8, .obj (.int 1))]
+    loadXObject {} src ⟨4096⟩ [] 1 0 none .document
+  let smRef := (nm "SMask", PdfObject.ref 2 0)
+  let ext ← (run [smRef] 0).1
+  require "external JPX SMask omits BPC and ignores ordinary Decode"
+    (component ext 3 == [0,17,34,51] && component ext 0 == [0,17,34,51])
+  let prof : PdfObject := .array [.name (nm "ICCBased"), .ref 11 0]
+  let iccSrc := budgetSource [(1, .stream ⟨params [(nm "ColorSpace", .ref 10 0)], file⟩),
+    (10, .obj prof), (11, .stream ⟨[(nm "N", .ref 12 0), (nm "Alternate", .ref 4 0)], {}⟩),
+    (12, .obj (.int 1)), (4, .obj (.name (nm "DeviceGray")))]
+  let icc ← (loadXObject {} iccSrc ⟨4096⟩ [] 1 0 none .document).1
+  require "indirect ICCBased /N and alternate" (icc.solid && component icc 0 == [0,17,34,51])
+  let embedded := fun mode => run [smRef, (nm "SMaskInData", .ref 6 0), (nm "Matte", .ref 7 0)] mode
+  let (r, remaining) := embedded 1
+  let one ← r
+  require "external stream skipped; prefix, planes and RGBA charged exactly once"
+    (remaining.remaining == 4096 - file.size - 8 - 16 && component one 0 == component ext 0 &&
+      component one 3 == [255,136,0,119])
+  let two ← (embedded 2).1
+  require "associated samples unblended once against indirect white matte"
+    (component two 0 == [0,0,34,0] && component two 3 == [255,136,0,119])
+  let black ← decodeInline {} [] (params [(nm "SMaskInData", .int 2)]) file
+  require "associated samples without matte" (component black 0 == [0,31,34,109])
+  let base := stream 4 false [indices]
+  let ref := (nm "Mask", PdfObject.ref 2 0)
+  let stencil : IndirectBody := .stream ⟨params [(nm "ImageMask", .bool true)], stream 1 false [[0]]⟩
+  let st ← (loadXObject {} (budgetSource [(1, .stream ⟨params [ref], base⟩), (2, stencil)])
+    ⟨4096⟩ [] 1 0 none .document).1
+  require "external explicit JPX stencil reads coverage" (component st 3 == [0,0,0,0])
+
+private def rasterBounds : Except Error Unit := do
+  let raw := stream 4 false [indices]
+  let limited := fun (r : Except Error Core.Raster.Image.Pixmap) k => match r with
+    | .error (.limitExceeded actual) => actual == k | _ => false
+  let source := budgetSource [(1, .stream ⟨params [], raw⟩)]
+  require "document allowance after prefix" (limited
+    (loadXObject {} source ⟨raw.size + 15⟩ [] 1 0 none .document).1 .decodedTotalBytes)
+  require "inline prefix consumes document allowance" (limited
+    (decodeInline { maxDecodedTotalBytes := raw.size + 15 } [] (params []) raw) .decodedTotalBytes)
+  require "inline original image area" (limited (decodeInline { maxImagePixels := 3 } [] (params []) raw) .imagePixels)
+  require "original dimensions checked" (match decodeInline {} [] (params [(nm "Width", .int 3)]) raw with
+    | .error (.malformed ..) => true | _ => false)
+  let odd := stream 8 false [[128,128]] true
+  let small ← decode { maxDecodedStreamBytes := 4 } 3 3 odd { reduce := 5, fit := true }
+  require "requested scale clamps to actual shared level and nonempty grid" (small.w == 1 && small.h == 1)
+  let fallback ← decode { maxDecodedStreamBytes := 4 } 3 3 odd { fit := true }
+  require "byte limit retries at an available coarser level" (fallback.data == small.data)
+  let full ← decode {} 4 1 raw { reduce := 6, fit := true }
+  require "wavelet-free stream still drawable" (full.w == 4 && full.data.toList == [0,17,34,51])
+
+private def rasterPlacement : Except Error Unit := do
+  -- One literal RunLength packet delivers a zero-decomposition codestream.
+  let raw := stream 4 false [[0]] false (64, 64)
+  let encoded := (ByteArray.mk #[(raw.size - 1).toUInt8] ++ raw).push 128
+  let d := params [(nm "Width", .int 64), (nm "Height", .int 64),
+    (nm "Filter", .array [.name (nm "RunLengthDecode"), .name (nm "JPXDecode")])]
+  let src := budgetSource [(1, .stream ⟨d, encoded⟩)]
+  let lim : Limits := {}
+  let ext := Core.Raster.Image.Extent.ofDev Core.Raster.Geom.Aff.id
+  let (xo, b) := loadXObject lim src ⟨100000⟩ [] 1 0 (some ext) .document
+  let pm ← xo
+  require "small projected XObject with no wavelet levels" (pm.w == 1 && pm.h == 1 &&
+    pm.data.toList == [136,136,136,255] && b.remaining == 100000 - raw.size - 4096 - 4)
+  let isrc := Core.Content.ImageSource.inline d encoded
+  let item := Core.Content.DisplayItem.image isrc Core.Content.Matrix.identity
+    { color := .gray Core.Content.Comp.zero, alpha := Core.Content.Comp.one } []
+  let table : Core.Raster.Image.ImageTable := {}
+  let (tab, b) := table.loadInlineJPX ⟨100000⟩ (some Core.Raster.Geom.Aff.id) #[item,item]
+  let some cached := tab.pixmap isrc (some ext) | throw (.malformed 0 "missing inline JPX")
+  require "inline JPX prefix, page charge and reuse" (cached.data == pm.data && tab.pixels == 1 &&
+    tab.inlineJPX.length == 1 && b.remaining == 100000 - raw.size - 4096 - 4)
+  let tight := { table with pixels := Core.Raster.Image.maxPageImagePixels - 1 }
+  let (tight, _) := tight.loadInlineJPX ⟨100000⟩ (some Core.Raster.Geom.Aff.id) #[item]
+  require "inline page quota survives cache lookup" ((tight.pixmap isrc (some ext)).isNone &&
+    tight.pixels == Core.Raster.Image.maxPageImagePixels - 1)
+
 /-- Run the deterministic JPX adapter tests and return the number of failed groups. -/
 def run : IO Nat := do
   let mut failures := 0
   for (label, result) in [("native and colour", nativeAndSpaces), ("Indexed", indexed),
-      ("opacity", opacity), ("geometry and errors", geometryAndErrors)] do
+      ("opacity", opacity), ("geometry and errors", geometryAndErrors),
+      ("raster colour", rasterColours), ("raster masks", rasterMasks), ("raster bounds", rasterBounds),
+      ("raster placement", rasterPlacement)] do
     if let .error err := result then
       IO.eprintln s!"  FAIL JPX {label}: {repr err}"
       failures := failures + 1

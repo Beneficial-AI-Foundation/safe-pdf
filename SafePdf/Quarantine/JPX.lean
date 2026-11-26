@@ -44,6 +44,11 @@ structure Options where
   colour : Colour := .embedded
   smaskInData : Nat := 0
   reduce : Nat := 0
+  /-- Rendering requests a preferred scale. Clamp it to the available, nonempty
+  resolutions and try coarser resolutions when the reconstruction byte budget binds. -/
+  fit : Bool := false
+  /-- PDF colour-key ranges in native component units, before display scaling. -/
+  key : List (Int × Int) := []
   deriving Inhabited
 
 /-- Reduced image geometry and colour metadata. Embedded space ranges refer to the input.
@@ -74,6 +79,8 @@ structure Image extends Geometry where
   nc : Nat
   data : ByteArray
   alpha : Option Alpha
+  /-- Coverage from the PDF colour key, when it applies instead of a soft mask. -/
+  keyMask : Option ByteArray := none
 
 private def byteCap (l : Limits) := min l.maxDecodedStreamBytes l.maxDecodedTotalBytes
 
@@ -124,7 +131,8 @@ private def select (opts : Options) (mapping : JPEG2000.Color.Mapping)
         throw (.malformed 0 "JPX: Indexed colour channels use different codestream components")
       pure #[.direct index]
     | .stencil =>
-      if colours.size != 1 then throw (.malformed 0 "JPX: stencil needs one colour channel")
+      if mapping.sources.size != 1 || colours.size != 1 then
+        throw (.malformed 0 "JPX: stencil needs one colour channel")
       pure colours
     | .mask =>
       if colours.size == 1 then pure colours
@@ -160,23 +168,10 @@ private def channelSelection (l : Limits) (L : JPEG2000.Limits) (opts : Options)
     throw (.malformed 0 "JPX: too few channels for embedded colour space")
   select opts mapping layout
 
-/-- Decode selected channels at native precision. Both input forms use SIZ geometry.
-Work-plane groups are bounded in cells using four bytes for compact samples and eight
-when any native component needs wide storage. These and the decoder's logical byte
-checks are per allocation group. The caller can pass the remaining document allowance
-in `maxDecodedTotalBytes`; page and pixmap allocations are accounted for by raster. -/
-def decodeChannels (l : Limits) (width height : Nat) (bytes : ByteArray) (opts : Options := {}) :
-    Except Error Channels := do
-  if width == 0 || height == 0 then throw (.malformed 0 "JPX: empty PDF image dimensions")
-  if width * height > l.maxImagePixels then throw (.limitExceeded .imagePixels)
-  if opts.smaskInData > 2 then throw (.malformed 0 "JPX: invalid /SMaskInData")
-  let L := decoderLimits l
+private def channelsFromHeader (l : Limits) (L : JPEG2000.Limits) (header : JPEG2000.Header.Header)
+    (bytes : ByteArray) (opts : Options) : Except Error Channels := do
   let err := translate l
-  (L.check JPEG2000.Decode.loc .decompLevels opts.reduce).mapError err
-  let header ← (JPEG2000.Header.parse L bytes).mapError err
   let orig := JPEG2000.Header.imageRect header.siz
-  if orig.width != width || orig.height != height then
-    throw (.malformed 0 s!"JPX: SIZ {orig.width}×{orig.height} differs from PDF {width}×{height}")
   let rect := JPEG2000.Assemble.reduceRect orig opts.reduce
   if rect.width == 0 || rect.height == 0 then throw (.unsupported "JPX: empty reduced image grid")
   let area := rect.width * rect.height
@@ -188,7 +183,9 @@ def decodeChannels (l : Limits) (width height : Nat) (bytes : ByteArray) (opts :
   let profile := match opts.colour, space with
     | .embedded, .icc range => some range
     | _, _ => none
-  checkBytes l (area * selection.mapping.sources.size + (profile.map (·.len)).getD 0)
+  let keyPlane := selection.alphaAssociated.isNone && !opts.key.isEmpty && opts.key.length == selection.nc
+  let packedChannels := selection.mapping.sources.size + (if keyPlane then 1 else 0)
+  checkBytes l (area * packedChannels + (profile.map (·.len)).getD 0)
   let decoded ← (JPEG2000.Decode.nativeFromHeader L header bytes opts.reduce).mapError err
   let comps : Array JPEG2000.Color.Channel := decoded.comps.map fun c =>
     { plane := c.samples, format := { depth := c.depth, signed := c.signed, dx := c.dx, dy := c.dy } }
@@ -215,6 +212,47 @@ def decodeChannels (l : Limits) (width height : Nat) (bytes : ByteArray) (opts :
            iccProfile := profile.map fun r => bytes.extract r.start (r.start + r.len),
            colours := full.extract 0 selection.nc, alpha, indexed := opts.colour == .indexed }
 
+/-- Decode selected channels at native precision. Both input forms use SIZ geometry.
+Work-plane groups are bounded in cells using four bytes for compact samples and eight
+when any native component needs wide storage. These and the decoder's logical byte
+checks are per allocation group. The caller can pass the remaining document allowance
+in `maxDecodedTotalBytes`; page and pixmap allocations are accounted for by raster. -/
+def decodeChannels (l : Limits) (width height : Nat) (bytes : ByteArray) (opts : Options := {}) :
+    Except Error Channels := do
+  if width == 0 || height == 0 then throw (.malformed 0 "JPX: empty PDF image dimensions")
+  if width * height > l.maxImagePixels then throw (.limitExceeded .imagePixels)
+  if opts.smaskInData > 2 then throw (.malformed 0 "JPX: invalid /SMaskInData")
+  let L := decoderLimits l
+  let err := translate l
+  (L.check JPEG2000.Decode.loc .decompLevels opts.reduce).mapError err
+  let header ← (JPEG2000.Header.parse L bytes).mapError err
+  let orig := JPEG2000.Header.imageRect header.siz
+  if orig.width != width || orig.height != height then
+    throw (.malformed 0 s!"JPX: SIZ {orig.width}×{orig.height} differs from PDF {width}×{height}")
+  let decodeAt := fun reduce => channelsFromHeader l L header bytes { opts with reduce }
+  if !opts.fit then return ← decodeAt opts.reduce
+  -- Only the actual tile-component coding parameters determine the available levels.
+  let maxLevel := header.tiles.foldl (fun k t =>
+    t.coding.comps.foldl (fun k c => min k c.levels) k) L.maxDecompLevels
+  let mut last := Error.unsupported "JPX: no usable resolution"
+  -- Wavelet reduction of palette indices can produce new index values before lookup.
+  let palette := (header.container.bind (·.header)).any (·.pclr.isSome)
+  let start := if palette then 0 else min opts.reduce maxLevel
+  -- Odd origins can leave a coarsened reference grid empty. Its finer levels are usable.
+  let start := (List.range (start + 1)).foldl (fun k j =>
+    let r := JPEG2000.Assemble.reduceRect orig j
+    if r.width > 0 && r.height > 0 then j else k) 0
+  for j in [start:maxLevel + 1] do
+    let r := JPEG2000.Assemble.reduceRect orig j
+    if r.width == 0 || r.height == 0 then break
+    match decodeAt j with
+    | .ok img => return img
+    | .error (.limitExceeded k) =>
+      unless k == .decodedStreamBytes || k == .decodedTotalBytes do throw (.limitExceeded k)
+      last := .limitExceeded k
+    | .error e => throw e
+  throw last
+
 private def indexBytes (c : JPEG2000.Channel) (area : Nat) : Except Error ByteArray := do
   let mut out := ByteArray.emptyWithCapacity area
   for i in [0:area] do
@@ -229,6 +267,16 @@ and when the file has none. Mode 2 or an associated CDEF channel sets `premultip
 def decode (l : Limits) (width height : Nat) (bytes : ByteArray) (opts : Options := {}) :
     Except Error Image := do
   let c ← decodeChannels l width height bytes opts
+  let useKey := c.alpha.isNone && !opts.key.isEmpty && opts.key.length == c.colours.size
+  let keyMask ← if useKey then do
+      let pairs := c.colours.zip opts.key.toArray
+      let mut mask := ByteArray.emptyWithCapacity (c.w * c.h)
+      for i in [0:c.w * c.h] do
+        let inside := pairs.all fun (ch, lo, hi) =>
+          (ch.get? i).any fun v => lo ≤ v && v ≤ hi
+        mask := mask.push (if inside then 0 else 255)
+      pure (some mask)
+    else pure none
   let pack := fun cs => (JPEG2000.interleave (decoderLimits l) c.w c.h cs false).mapError (translate l)
   let data ← if c.indexed then do
       let some index := c.colours[0]? | throw (.malformed 0 "JPX: missing index channel")
@@ -237,6 +285,6 @@ def decode (l : Limits) (width height : Nat) (bytes : ByteArray) (opts : Options
   let alpha ← c.alpha.mapM fun m => do
     let data ← pack #[m.channel]
     pure ({ data, premultiplied := m.premultiplied } : Alpha)
-  return { toGeometry := c.toGeometry, nc := c.colours.size, data, alpha }
+  return { toGeometry := c.toGeometry, nc := c.colours.size, data, alpha, keyMask }
 
 end SafePdf.Quarantine.JPX
