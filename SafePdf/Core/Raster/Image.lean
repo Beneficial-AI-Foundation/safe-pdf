@@ -1,4 +1,4 @@
-import SafePdf.Core.Raster.Clip
+import SafePdf.Core.Raster.Shading
 import SafePdf.Core.Content.Run
 import SafePdf.Quarantine.DCT
 import SafePdf.Quarantine.CCITT
@@ -99,9 +99,12 @@ top-left corner). Rendering choices follow MuPDF 1.25.1 (`source/fitz/draw-devic
    `/Alternate`) as device spaces; `Indexed` (lookup string or stream; indices clamp to
    `hival`, and to 255); `Separation` (type 2 tint transform, else the interpreter's darkness
    placeholder); `DeviceN` (the interpreter's average-darkness placeholder); `Lab` (`L*` as
-   grey). An inline image's resource-name colour space has been replaced by the runner with
+   grey). For JPX images a resolved Separation or DeviceN tint function maps the source
+   components into its alternate device space before RGB conversion (decoder Plan §9, M10.2t).
+   An inline image's resource-name colour space has been replaced by the runner with
    the definition from the resources of the content that shows it (page or form; task 7.3f,
-   `Run.annotInline`), as a direct object; a name left unresolved is looked up in the page's
+   `Run.annotInline`). Inline JPX tint definitions retain their function references until
+   the page image loader decodes them. A name left unresolved is looked up in the page's
    `/ColorSpace` resources (`ImageTable.named`). A missing or unknown space (and
    `Pattern`) yields the placeholder. Colour conversion to RGB is the same as
    `Clip.deviceRGB` (naive CMYK).
@@ -393,6 +396,8 @@ inductive Conv where
   /-- A 256-entry RGB palette (768 bytes), indexed by the first component, or by the average
   of all components when `avg` (`DeviceN`). -/
   | pal (avg : Bool) (tbl : ByteArray)
+  /-- A parsed PDF tint function and its alternate device, as used for shadings. -/
+  | tint (space : Shading.ShadeCS)
   /-- Stencil mask: coverage `255 − component`. -/
   | stencil
 
@@ -448,6 +453,10 @@ def pushPixel (smp : ByteArray) (nc : Nat) (cv : Conv) (b : Nat) (acc : ByteArra
     (((acc.push (u8 (rd tbl (3 * i)))).push
       (u8 (rd tbl (3 * i + 1)))).push
       (u8 (rd tbl (3 * i + 2)))).push 255
+  | .tint space =>
+    let xs := (List.range nc).map fun j => (rd smp (b + j) : Rat) / 255
+    let (r, g, blue) := space.rgb xs
+    (((acc.push (u8 r)).push (u8 g)).push (u8 blue)).push 255
   | .stencil => (((acc.push 0).push 0).push 0).push (u8 (255 - c0))
 
 /-- `pushPixel` pushes four bytes. -/
@@ -1417,17 +1426,59 @@ private structure JPXDict where
   mode : Nat := 0
   matte : Option (List Fixed) := none
   key : List (Int × Int) := []
+  tint : Option Shading.ShadeCS := none
+
+/-- Match the tint and alternate component counts, including every single-input
+subfunction of a stitching function, before evaluating the function per pixel. -/
+private def tintArity : Nat → Nat → Nat → Shading.Fn → Bool
+  | 0, _, _, _ => false
+  | depth + 1, inputs, outputs, f =>
+    match f with
+    | .ps domain range _ | .sampled domain range .. =>
+      domain.length == inputs && range.length == outputs
+    | .exp _ range c0 _ _ =>
+      inputs == 1 && c0.length == outputs && range.all (fun r => r.length == outputs)
+    | .stitch _ range fns _ _ =>
+      inputs == 1 && range.all (fun r => r.length == outputs) &&
+        fns.all (tintArity depth 1 outputs)
+    | .arr _ => false
+
+/-- Recover the original function object while the document source can still decode its
+stream. A named space may live in an indirect page resource dictionary. An unavailable
+transform retains the ordinary image conversion. -/
+private def imageTint {σ : Type} (src : Source σ) (s : σ) (resources : Dict)
+    (space : Option PdfObject) (info : Option CSInfo) : Option Shading.ShadeCS × σ := Id.run do
+  let some i := info | return (none, s)
+  let n := match i with
+    | .deviceN n _ => n
+    | .separation .. => 1
+    | _ => 0
+  unless 0 < n && n ≤ maxComps do return (none, s)
+  let (space, s) := match space with
+    | some (.name name) => Content.Run.resEntry src s resources "ColorSpace" name
+    | o => (o, s)
+  let some o := space | return (none, s)
+  let (raw, s) := Content.Run.resolve src s o
+  let .array (_ :: _ :: alternate :: transform :: _) := raw | return (none, s)
+  let (alternate, s) := Content.Run.baseDevice src s alternate
+  let some alt := alternate | return (none, s)
+  let (f, s) := Shading.loadFn src s transform
+  let some f := f | return (none, s)
+  unless tintArity (Shading.maxFnDepth + 1) n alt.nComps f do return (none, s)
+  return (some { info := i, n, tint := some (f, alt) }, s)
 
 private def nativeRanges : List PdfObject → Option (List (Int × Int))
   | [] => some []
   | .int lo :: .int hi :: rest => ((lo, hi) :: ·) <$> nativeRanges rest
   | _ => none
 
-private def jpxDict {σ : Type} (src : Source σ) (s : σ) (d : Dict) : JPXDict × σ :=
+private def jpxDict {σ : Type} (src : Source σ) (s : σ) (d resources : Dict)
+    (space : Option PdfObject) (info : Option CSInfo) : JPXDict × σ :=
   let (mode, s) := entry src s d "SMaskInData"
   let (mt, s) := arrayEntry src s d "Matte"
   let (key, s) := arrayEntry src s d "Mask"
-  ({ mode := if mode.isNone then 0 else (natOf mode).getD 3,
+  let (tint, s) := imageTint src s resources space info
+  ({ tint, mode := if mode.isNone then 0 else (natOf mode).getD 3,
      matte := mt.bind (·.mapM Content.Interp.num?), key := (key.bind nativeRanges).getD [] }, s)
 
 /-- Restricted ICC profiles use the ordinary PDF device alternate for their input signature.
@@ -1473,10 +1524,15 @@ private def unblend (img : Src) (n : Norm) (mask : Src) (matte : List Fixed) : S
 
 private def jpxSource (l : Limits) (p : ImgDict) (j : JPXDict) (info : Option CSInfo)
     (bytes : ByteArray) (ext : Option Extent) (soft := false) : Except Error JPXSource := do
+  let plan := info.bind fun cs =>
+    if maxComps < Shading.csComps cs then none else
+    match j.tint with
+    | some resolved => some (resolved.n, Conv.tint resolved, Norm.unit)
+    | none => planOf cs
   let colour ← if p.mask then pure .stencil else if soft then pure .mask else
     match info with
     | some (.indexed ..) => pure .indexed
-    | some i => match planOf i with
+    | some _ => match plan with
       | some (nc, _, _) => pure (.pdf nc)
       | none => throw (.unsupported "JPX: PDF colour space")
     | none => if p.cs.isNone then pure .embedded else throw (.unsupported "JPX: unresolved PDF colour space")
@@ -1490,7 +1546,7 @@ private def jpxSource (l : Limits) (p : ImgDict) (j : JPXDict) (info : Option CS
     throw (.malformed 0 "JPX: SMaskInData requires whole-image opacity")
   let p := { p with w := i.w, h := i.h, key := none, decode := if p.mask then p.decode else none }
   let (nc, cv, n) ← if p.mask then pure (1, Conv.stencil, Norm.unit) else
-    match (info <|> embeddedSpace i).bind planOf with
+    match plan <|> (embeddedSpace i).bind planOf with
     | some plan => pure plan
     | none => throw (.unsupported "JPX: embedded colour space or ICC profile")
   unless nc == i.nc do throw (.malformed 0 "JPX: colour component count")
@@ -1615,26 +1671,15 @@ private def renderJPX {σ : Type} (limits : Limits) (budget : CodecBudget σ) (s
     | .ok pm => (.ok pm, budget.spend s pm.data.size)
     | .error e => (.error e, s)
 
-/-- **Decode an image XObject** `num gen` through the source (its filters, the session
-budget); `/DCTDecode` through `dctSrc`, `/CCITTFaxDecode` through `ccittSrc` (their errors,
-and unsupported image codecs, yield the grey placeholder), JPX through `renderJPX`, other data through `srcOf`. Its
-`/SMask` (else its `/Mask` stream) is loaded (`loadMask`) and applied (`maskedPixmap`); a soft
-mask disables colour-key masking (§8.9.6.4); `/Matte` un-premultiplies the colours (converted
-through the image's colour space).
-`ext` (tasks 7.10, 8.6): how the image is drawn on the page (`imageExtents`). A JPEG is decoded
-at `1 / 2^k` of its size, `k = scaleFor …` (MuPDF's `l2factor`, one step less), except when its
-soft mask has a `/Matte` (MuPDF decodes those at full size); then **every image** is converted
-row by row and box-filtered to its placement target while decoding (`fused`), the pixels the
-placement would have produced from the full pixmap. A decode over `maxDecodedStreamBytes` is
-retried smaller (`dctSrc`, `fitTarget`). -/
-def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named : List (Name × CSInfo))
-    (num gen : Nat) (ext : Option Extent := none) (budget : CodecBudget σ := {}) : Except Error Pixmap × σ :=
+private def loadXObjectIn {σ : Type} (limits : Limits) (src : Source σ) (s : σ)
+    (named : List (Name × CSInfo)) (resources : Dict) (num gen : Nat) (ext : Option Extent)
+    (budget : CodecBudget σ) : Except Error Pixmap × σ :=
   match src.fetch s num gen with
   | (.ok (.stream st), s) =>
     let (p, s) := imgDictOf src s st.dict
     let (jpx, s) := jpxPrefix limits src s st.dict
     let (info, s) := if jpx.isSome && p.mask then (none, s) else csOf src s named p.cs
-    let (j, s) := if jpx.isSome then jpxDict src s st.dict else ({}, s)
+    let (j, s) := if jpx.isSome then jpxDict src s st.dict resources p.cs info else ({}, s)
     let embedded := jpx.isSome && j.mode != 0
     let (sm, s) := if p.mask || embedded then (.ok none, s)
       else loadMaskB limits src s true (Dict.get? st.dict (Content.Run.nm "SMask")) ext budget
@@ -1690,28 +1735,46 @@ def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named 
   | (.ok (.obj _), s) => (.error (.malformed 0 "image XObject is not a stream"), s)
   | (.error e, s) => (.error e, s)
 
-private def decodeInlineJPXB (limits : Limits) (named : List (Name × CSInfo)) (params : Dict)
-    (raw : ByteArray) (ext : Option Extent) (b : Filter.Budget) : Except Error Pixmap × Filter.Budget :=
+/-- **Decode an image XObject** `num gen` through the source (its filters, the session
+budget); `/DCTDecode` through `dctSrc`, `/CCITTFaxDecode` through `ccittSrc` (their errors,
+and unsupported image codecs, yield the grey placeholder), JPX through `renderJPX`, other data through `srcOf`. Its
+`/SMask` (else its `/Mask` stream) is loaded (`loadMask`) and applied (`maskedPixmap`); a soft
+mask disables colour-key masking (§8.9.6.4); `/Matte` un-premultiplies the colours (converted
+through the image's colour space).
+`ext` (tasks 7.10, 8.6): how the image is drawn on the page (`imageExtents`). A JPEG is decoded
+at `1 / 2^k` of its size, `k = scaleFor …` (MuPDF's `l2factor`, one step less), except when its
+soft mask has a `/Matte` (MuPDF decodes those at full size); then **every image** is converted
+row by row and box-filtered to its placement target while decoding (`fused`), the pixels the
+placement would have produced from the full pixmap. A decode over `maxDecodedStreamBytes` is
+retried smaller (`dctSrc`, `fitTarget`). -/
+def loadXObject {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (named : List (Name × CSInfo))
+    (num gen : Nat) (ext : Option Extent := none) (budget : CodecBudget σ := {}) : Except Error Pixmap × σ :=
+  loadXObjectIn limits src s named [] num gen ext budget
+
+private def decodeInlineJPXB (src : Source Filter.Budget) (limits : Limits)
+    (named : List (Name × CSInfo)) (params : Dict) (raw : ByteArray) (ext : Option Extent)
+    (b : Filter.Budget) : Except Error Pixmap × Filter.Budget :=
   let (r, b) := Filter.decodeStreamB limits b params raw
   match r with
   | .ok (.image .jpx _ bytes) =>
-    let p := (imgDictOf Source.empty () params).1
-    let info := (csOf Source.empty () named p.cs).1
-    let j := (jpxDict Source.empty () params).1
+    let (p, b) := imgDictOf src b params
+    let (info, b) := if p.mask then (none, b) else csOf src b named p.cs
+    let (j, b) := jpxDict src b params [] p.cs info
     renderJPX limits .document b p (if p.mask then { j with key := [] } else j) info bytes none none ext
   | .error e => (.error e, b)
   | _ => (.error (.malformed 0 "JPX: expected terminal codec"), b)
 
 /-- **Decode an inline image** (`BI … ID … EI`): parameters already abbreviation-expanded
 (5.2b), raw data decoded with `Filter.decodeStream` (bounded by
-`Limits.maxDecodedStreamBytes`); named colour spaces from `named`. Pure: inline images hold
-no references. `ext` (task 8.6): how this use draws it (an inline image is drawn once,
+`Limits.maxDecodedStreamBytes`); named colour spaces from `named`. This standalone decoder
+accepts self-contained parameters. The document loader resolves indirect JPX tint functions.
+`ext` (task 8.6): how this use draws it (an inline image is drawn once,
 `inlineExt`): a JPEG at its `scaleFor` reduction, every image box-filtered to its placement
 target while decoding. -/
 def decodeInline (limits : Limits) (named : List (Name × CSInfo)) (params : Dict)
     (raw : ByteArray) (ext : Option Extent := none) : Except Error Pixmap :=
   if (codecSplit .jpx limits params).isSome then
-    (decodeInlineJPXB limits named params raw ext (.init limits)).1
+    (decodeInlineJPXB .emptyState limits named params raw ext (.init limits)).1
   else if hasCodec limits params ∧ (dctSplit limits params).isNone ∧ (ccittSplit limits params).isNone
   then .ok placeholder else
   let p := (imgDictOf Source.empty () params).1
@@ -1759,19 +1822,15 @@ def namedSpaces {σ : Type} (src : Source σ) (s : σ) (res : Dict) : List (Name
       | (some i, s) => ((kv.1, i) :: acc.1, s)
       | (none, s) => (acc.1, s)) ([], s)
 
-/-- Add image XObject `num gen` to the table (once); `exts` as in `loadImages`. The image is
-decoded with `maxDecodedStreamBytes` lowered to the RGBA bytes left of the page's
-`maxPageImagePixels` (task 8.6), so it is reduced to fit rather than replaced; with nothing
-left it is the placeholder. -/
-def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num gen : Nat)
-    (exts : List ((Nat × Nat) × Extent) := []) (budget : CodecBudget σ := {}) : ImageTable × σ :=
+private def addImageIn {σ : Type} (src : Source σ) (acc : ImageTable × σ) (resources : Dict)
+    (num gen : Nat) (exts : List ((Nat × Nat) × Extent)) (budget : CodecBudget σ) : ImageTable × σ :=
   let t := acc.1
   if t.xobjs.any (·.1 == (num, gen)) then acc else
   if maxPageImagePixels ≤ t.pixels then
     ({ t with xobjs := ((num, gen), some placeholder) :: t.xobjs }, acc.2) else
   let lim := { t.limits with
     maxDecodedStreamBytes := min t.limits.maxDecodedStreamBytes (4 * (maxPageImagePixels - t.pixels)) }
-  let (r, s) := loadXObject lim src acc.2 t.named num gen
+  let (r, s) := loadXObjectIn lim src acc.2 t.named resources num gen
     ((exts.find? (·.1 == (num, gen))).map (·.2)) budget
   match r with
   | .ok pm =>
@@ -1780,6 +1839,14 @@ def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num g
       ({ t with xobjs := ((num, gen), some placeholder) :: t.xobjs }, s)
     else ({ t with xobjs := ((num, gen), some pm) :: t.xobjs, pixels := t.pixels + n }, s)
   | .error _ => ({ t with xobjs := ((num, gen), none) :: t.xobjs }, s)
+
+/-- Add image XObject `num gen` to the table (once); `exts` as in `loadImages`. The image is
+decoded with `maxDecodedStreamBytes` lowered to the RGBA bytes left of the page's
+`maxPageImagePixels` (task 8.6), so it is reduced to fit rather than replaced; with nothing
+left it is the placeholder. -/
+def ImageTable.add {σ : Type} (src : Source σ) (acc : ImageTable × σ) (num gen : Nat)
+    (exts : List ((Nat × Nat) × Extent) := []) (budget : CodecBudget σ := {}) : ImageTable × σ :=
+  addImageIn src acc [] num gen exts budget
 
 /-- **Load the images of a display list**: every distinct image XObject decoded once (in
 first-use order), including images inside soft-mask groups (`DisplayList.foldDeep`, task
@@ -1791,13 +1858,13 @@ def loadImages {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : D
   let (named, s) := namedSpaces src s res
   Content.DisplayList.foldDeep (fun acc it =>
     match it with
-    | .image (.xobject _ n g) _ _ _ => ImageTable.add src acc n g exts budget
+    | .image (.xobject _ n g) _ _ _ => addImageIn src acc res n g exts budget
     | _ => acc) limits.maxXObjectDepth ({ limits, named }, s) items
 
-/-- Decode inline JPX during document preparation, while the live document and page
-allowances are available. Fixed pattern/glyph uses receive their full-size target. -/
-def ImageTable.loadInlineJPX (t : ImageTable) (b : Filter.Budget) (view : Option Aff)
-    (items : DisplayList) : ImageTable × Filter.Budget :=
+/-- Decode inline JPX during document preparation under the document and page allowances.
+The source decodes tint functions retained from the page or form that emitted the image. -/
+def ImageTable.loadInlineJPXFrom (t : ImageTable) (src : Source Filter.Budget)
+    (b : Filter.Budget) (view : Option Aff) (items : DisplayList) : ImageTable × Filter.Budget :=
   Content.DisplayList.foldDeep (fun (acc : ImageTable × Filter.Budget) it => Id.run do
     let .image (.inline d raw) ctm _ _ := it | return acc
     unless (codecSplit .jpx t.limits d).isSome do return acc
@@ -1807,11 +1874,17 @@ def ImageTable.loadInlineJPX (t : ImageTable) (b : Filter.Budget) (view : Option
       return acc
     let cap := 4 * (maxPageImagePixels - tbl.pixels)
     let limits := { t.limits with maxDecodedStreamBytes := min cap t.limits.maxDecodedStreamBytes }
-    let (r, b) := decodeInlineJPXB limits t.named d raw ext b
+    let (r, b) := decodeInlineJPXB src limits t.named d raw ext b
     let pm := r.toOption
     return ({ tbl with
       inlineJPX := (d, raw, ext, pm) :: tbl.inlineJPX,
       pixels := tbl.pixels + pm.elim 0 (fun i => i.w * i.h) }, b)) t.limits.maxXObjectDepth (t, b) items
+
+/-- Decode inline JPX with self-contained parameters under the document and page allowances.
+Fixed pattern/glyph uses receive their full-size target. -/
+def ImageTable.loadInlineJPX (t : ImageTable) (b : Filter.Budget) (view : Option Aff)
+    (items : DisplayList) : ImageTable × Filter.Budget :=
+  t.loadInlineJPXFrom .emptyState b view items
 
 /-- The pixmap of an image source (`none`: nothing to draw). Inline images are decoded here,
 reduced for the squared device extents `ext` of this use (task 8.6). -/

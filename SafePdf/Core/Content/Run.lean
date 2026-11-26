@@ -144,10 +144,13 @@ structure Source (σ : Type) where
   /-- Decode stream object `num` (already fetched). -/
   decode : σ → Nat → Stream → (Except Error ByteArray) × σ
 
-/-- A source with no objects (resource-free runs and tests). -/
-def Source.empty : Source Unit :=
+/-- A source with no objects that leaves its caller's state untouched. -/
+def Source.emptyState {σ : Type} : Source σ :=
   ⟨fun s _ _ => (.error (.malformed 0 "no document"), s),
    fun s _ _ => (.error (.malformed 0 "no document"), s)⟩
+
+/-- A source with no objects (resource-free runs and tests). -/
+def Source.empty : Source Unit := Source.emptyState
 
 /-- A form's content (task 7.9b): stream object `num` decoded through the source and
 tokenized with `Ops.tokenize lim`. The runner's default way to read a form or soft-mask group
@@ -725,16 +728,31 @@ def CSInfo.toObj : CSInfo → PdfObject
       .null]
   | .lab => .array [.name (nm "Lab"), .dict []]
 
-/-- An inline image's parameters with a resource-name `/ColorSpace` (not a device name, not
-`Pattern`) replaced by the definition of that name in the current frame (`CSInfo.toObj`;
-§8.9.7: the name is looked up in the current resource dictionary). Unresolvable names are kept. -/
+private def inlineTint (d : Dict) : PdfObject → Bool
+  | .array (.name family :: _) =>
+    let jpx := PdfObject.name (nm "JPXDecode")
+    (family == nm "DeviceN" || family == nm "Separation") &&
+      match Dict.get? d (nm "Filter") with
+      | some (.array fs) => fs.getLast? == some jpx
+      | f => f == some jpx
+  | _ => false
+
+/-- Replace an inline image's named colour space by its definition in the current frame
+(§8.9.7). For JPX tints retain the original function reference for the document image
+loader. Other spaces use the self-contained `CSInfo.toObj` rendering parameters. -/
 def annotInline {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (d : Dict) : Dict × σ :=
   match Dict.get? d (nm "ColorSpace") with
   | some (.name n) =>
     if (deviceOfName n).isSome || n = nm "Pattern" then (d, s) else
-    match namedCS src s fr.res n with
-    | (some info, s) =>
-      ((nm "ColorSpace", info.toObj) :: d.filter (fun kv => kv.1 != nm "ColorSpace"), s)
+    match resEntry src s fr.res "ColorSpace" n with
+    | (some entry, s) =>
+      let (raw, s) := resolve src s entry
+      let (space, s) := if inlineTint d raw then (some raw, s) else
+        let (info, s) := csInfo src s raw
+        (info.map CSInfo.toObj, s)
+      match space with
+      | some o => ((nm "ColorSpace", o) :: d.filter (fun kv => kv.1 != nm "ColorSpace"), s)
+      | none => (d, s)
     | (none, s) => (d, s)
   | _ => (d, s)
 
