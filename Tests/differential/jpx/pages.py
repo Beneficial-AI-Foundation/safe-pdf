@@ -27,6 +27,7 @@ def load_module(name, path):
 
 pixels = load_module("pixels", HERE.parent / "pixels.py")
 recorded = load_module("bug_jpx_recorded_plane", HERE / "bug_jpx_recorded_plane.py")
+sampling = load_module("sampling", HERE / "sampling.py")
 
 
 def check(ok, message):
@@ -109,6 +110,45 @@ def outside_changed(ours, ref, rects):
             a, b = 3 * (ours.w*y+x0), 3 * (ours.w*y+x1)
             other[a:b] = ours.rgb[a:b]
     return other != ours.rgb
+
+
+def sampling_result(pdf, tmp, case, ours, ref, direct):
+    """Keep the direct measurement even if a required placement control fails."""
+    rect = case.rect
+    result = dict(direct_mupdf=direct)
+    try:
+        rgb, control, evidence = sampling.reference(pdf, tmp, case, crop(ref, rect).rgb)
+        w, h = rect[2] - rect[0], rect[3] - rect[1]
+        local = (0, 0, w, h)
+        target = pixels.Image(w, h, rgb)
+        result.update(sampling_evidence=evidence)
+        equiv = compare_region(pixels.Image(w, h, control), target, local)
+        result["flate_control_vs_reference"] = equiv
+        check(equiv["status"] == "within", "equivalent Flate control disagrees with reference")
+        result.update(compare_region(crop(ours, rect), target, local))
+        if case.mask_probe:
+            x, y = case.mask_probe
+            observed = ours.row(y)[3*x:3*x+3]
+            i = 3*((y-rect[1])*w + x-rect[0])
+            check(rgb[i:i+3] == b"\xff"*3, "reference painted a fully transparent footprint")
+            result["masked_worker_rgb"] = list(observed)
+            if min(observed) < 255 - pixels.TOL:
+                result["status"] = "external mask sample mismatch"
+        if case.clip:
+            x, y, r, b = rect
+            interior = compare_region(ours, ref, (x+1, y+1, r-1, b-1))
+            result["direct_interior"] = interior
+            if interior["status"] != "within":
+                result["status"] = "placement interior mismatch"
+        if rect == sampling.PDFBOX:
+            white = pixels.Image(ours.w, ours.h, b"\xff" * (3*ours.w*ours.h))
+            check(not outside_changed(ref, white, [rect]), "paint outside reviewed reference clip")
+            result["worker_outside_clip_white"] = not outside_changed(ours, white, [rect])
+            if not result["worker_outside_clip_white"]:
+                result["status"] = "paint outside placement"
+    except (OSError, ValueError, KeyError, ET.ParseError, subprocess.TimeoutExpired) as exc:
+        result.update(status="sampling reference gap", detail=str(exc))
+    return result
 
 
 def catalog(manifest, plans):
@@ -321,6 +361,11 @@ def measure_page(pdf, source, manifest, page, plan, rows, args, page_report):
         if "view_size" in plan:
             check([ref.w, ref.h] == plan["view_size"], "reference dimensions disagree with audited view")
         measured = {}
+        sampling_case = sampling.CASES.get(pdf.stem)
+        if sampling_case is None:
+            check("sampling_object" not in plan, "unexpected sampling recipe")
+        else:
+            check(any(row["object"] == sampling_case.obj for row in rows), "missing reviewed sampling occurrence")
         for row in rows:
             rect = box(row["region"], ours.w, ours.h)
             if "reference_crops" in plan:
@@ -332,6 +377,14 @@ def measure_page(pdf, source, manifest, page, plan, rows, args, page_report):
                 measured[rect] = compare_region(ours, ref, rect)
             if recorded_page:
                 measured[rect] = recorded.worker_result(ours, ref, measured[rect])
+            if sampling_case and row["object"] == sampling_case.obj:
+                direct = measured[rect]
+                try:
+                    sampling.select(pdf, source["sha256"], page, denominator, page_report["reference"],
+                                    rows, plan.get("sampling_object"))
+                    measured[rect] = sampling_result(pdf, tmp, sampling_case, ours, ref, direct)
+                except ValueError as exc:
+                    measured[rect] = dict(status="sampling reference gap", detail=str(exc), direct_mupdf=direct)
             row.update(rect=rect, **measured[rect])
         page_report["outside_rgb_changed"] = outside_changed(ours, ref, measured)
         del page_report["stage"]
@@ -431,9 +484,10 @@ def main():
                     row.update(status=evidence["stage"] + " gap")
         for row in rows:
             counts[row["status"]] += 1
+            primary = f"direct MuPDF {row['direct_mupdf']['percent']:.3f}%" if "direct_mupdf" in row else ""
             print(f"{name} p{row.get('page', '?')} obj {row['object']} {row.get('role','')}: {row['status']}",
                   f"{row['percent']:.3f}% ({row['worker_colors']} vs {row['reference_colors']} colors)"
-                  if "percent" in row else row.get("detail", ""), flush=True)
+                  if "percent" in row else row.get("detail", ""), primary, flush=True)
     paths = [p for p in sources if Path(p).stem in selected]
     report["coverage"] = dict(pdfs=len(paths), pages=sum(len(plans[n]["pages"]) for n in selected),
                               objects=sum(len(expected[p]) for p in paths),
