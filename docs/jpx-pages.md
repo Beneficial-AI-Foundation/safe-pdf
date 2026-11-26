@@ -183,6 +183,22 @@ and left objects 14 and 15 backdrop blue. Poppler 25.03.0 emitted JP2-header war
 and produced colours inconsistent with the native-channel check. None supplied a
 complete, warning-free grid reference.
 
+### Fractional clips and odd-origin RGB
+
+The direct 72 dpi MuPDF render and its paint trace remain in the report for all five
+reviewed placements. On the three PDFBox images and S2 mask 35, the measured
+differences are confined to the fractional clip boundary. The gate integrates an
+8× MuPDF raster over each 72 dpi output pixel, then verifies the same placement
+with an equivalent full-resolution Flate image. It also checks the direct-render
+interior. The PDFBox colour pages have independent tests for the transparent mask
+footprint and paint outside the clip.
+
+For `jpx_subsampling` object 11, the source's even-origin companion and the SIZ
+grid determine the expected odd-origin RGB ramp and checker pattern. PDF.js reproduces
+that pattern. The gate replaces only the target stream with the derived RGB samples
+and requires MuPDF to paint the same region. The original direct result remains
+visible for comparison. [Sample values, component grids and measured clip coverage](../Tests/differential/jpx/sampling.md)
+
 ### Embedded opacity and matte
 
 The four images on `jpx_smaskindata` each contain two native RGBA samples. Page 1
