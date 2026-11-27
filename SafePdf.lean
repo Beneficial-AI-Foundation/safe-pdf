@@ -74,6 +74,7 @@ import SafePdf.Core.Raster.Type3
 import SafePdf.Core.Raster.Subst
 import SafePdf.Quarantine.DCT
 import SafePdf.Quarantine.CCITT
+import SafePdf.Quarantine.JPX
 import SafePdf.Core.Write.Serialize
 import SafePdf.Core.Write.Incremental
 import SafePdf.Core.Write.Encrypt

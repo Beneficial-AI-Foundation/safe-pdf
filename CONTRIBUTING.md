@@ -20,7 +20,8 @@ uses, so you don't install Lean by hand:
 curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 ```
 
-There are no Lake dependencies (no Mathlib, no Batteries). Python 3 (standard library
+The one Lake dependency is the pinned pure Lean JPEG 2000 decoder, fetched by Lake (no
+Mathlib, no Batteries). Python 3 (standard library
 only) is used by the corpus and differential scripts. The core and the inspector CLI
 build on **macOS and Linux**. The viewers are optional and need extra tools: the Tk
 viewer needs Tcl/Tk development files (`tk-dev` on Debian/Ubuntu, `brew install
