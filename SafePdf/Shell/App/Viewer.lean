@@ -6183,8 +6183,8 @@ def selectToolOn (st : IO.Ref State) : IO Unit := do
   setStatus "Select text: drag over the text to select it; click a link to follow it, a mark \
     to select it"
 
-/-- Handles `tool NAME` (an annotation tool, Print or Save): Select text (task 10.8), Highlight (task 9.4), Add comment
-(a note, `addNote`), Add text and Draw (task 9.9); Add image and Print are not available yet. -/
+/-- Handles `tool NAME` (an annotation tool or Save): Select text (task 10.8), Highlight (task 9.4), Add comment
+(a note, `addNote`), Add text and Draw (task 9.9); Add image is not available yet (Print has no button for now). -/
 def tool (st : IO.Ref State) (name : String) : IO Unit := do
   match Toolbar.toolOf name with
   | some .select => selectToolOn st
@@ -6614,7 +6614,7 @@ def smokeToolbar (st : IO.Ref State) (dir : String) : IO Unit := do
     for w in ws do v := v.push s!"{w}={← run ["::safepdf::btnState", w]}"
     return ",".intercalate v.toList
   out := out.push s!"states0: {← btnStates [".bar.prev", ".bar.next", ".bar.zout", ".bar.zin", ".bar.more"]}"
-  out := out.push s!"tools: {← btnStates [".bar.highlight", ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.print", ".bar.save"]}"
+  out := out.push s!"tools: {← btnStates [".bar.highlight", ".bar.comment", ".bar.text", ".bar.draw", ".bar.image", ".bar.save"]}"
   -- A disabled tool ignores clicks.
   let click (w : String) : IO Unit := do
     sendEvent w "<ButtonPress-1>" ["-x", "16", "-y", "16"]

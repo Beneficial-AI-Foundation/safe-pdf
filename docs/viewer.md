@@ -218,9 +218,10 @@ icon file is copied** — the icons are drawn with Tk canvas lines and polygons
     without a selection it turns the Highlight tool on and opens its pop-over, or off (9.8);
     see *Selection bubble and Highlight pop-over*), Add comment (9.9: Add note… on the
     selection, else at the window centre), Add text and Draw (9.9, see *Add text and Draw*),
-    Add image, then Print and Save — Save (PDF.js's download icon) is the command File →
-    Save since 9.5c, enabled while there are unsaved marks; Add image and Print are
-    **disabled placeholders** (after M9) — and the `»` overflow menu: Open…, Import annotations…, Export annotations… (9.11), Find…, Go to page…, First page, Last
+    Add image, then Save — Save (PDF.js's download icon) is the command File →
+    Save since 9.5c, enabled while there are unsaved marks; Add image is a
+    **disabled placeholder** (after M9); there is no Print button for now (removed
+    2026-11-27, it was a disabled placeholder) — and the `»` overflow menu: Open…, Import annotations…, Export annotations… (9.11), Find…, Go to page…, First page, Last
     page, Rotate right, Rotate left (`Toolbar.overflow`; the commands that lost their toolbar
     buttons), then, as in PDF.js's secondary toolbar, the scroll modes (Page Scrolling, Vertical
     Scrolling) and the spread modes (No Spreads, Odd Spreads, Even Spreads) as radio entries on
@@ -324,7 +325,7 @@ the menubar stays above the
 toolbar; the status line stays at the bottom; fonts are Tk's default (DejaVu Sans on Linux)
 instead of the system UI font; canvas drawing on X11 is not antialiased, so icons and rounded
 corners are slightly jagged; the zoom menu is a plain Tk menu, not a native select pop-up;
-Add image (stamp) and Print come after M9.
+Add image (stamp) comes after M9; printing is not offered (no Print button for now).
 
 ## Document open settings (9.r8)
 

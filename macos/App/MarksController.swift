@@ -272,7 +272,7 @@ struct MarkClip {
     }
 
     /// The toolbar's tool buttons (Toolbar.Tool): Select text, Highlight, Add comment, Add text,
-    /// Draw (Viewer.tool); Add image and Print are not available.
+    /// Draw (Viewer.tool); Add image is not available; there is no Print button.
     func tool(_ t: Int32) {
         guard model != nil else { return }
         switch t {
