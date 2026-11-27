@@ -111,7 +111,8 @@ lake exe extract FILE.pdf [PAGE]    # example client of the library API (text)
 lake exe extract --render FILE.pdf [PAGE]
 
 lake build macosApp                 # macOS: the native app -> macos/build/SafePdf.app
-open macos/build/SafePdf.app        # (or: open -a macos/build/SafePdf.app FILE.pdf)
+open macos/build/SafePdf.app        # or, with a file: open -a "$PWD/macos/build/SafePdf.app" FILE.pdf
+                                    # (open -a needs an absolute path to the .app)
 
 lake build viewer worker            # Tk viewer (Linux or macOS; needs Tk)
 lake exe viewer FILE.pdf
