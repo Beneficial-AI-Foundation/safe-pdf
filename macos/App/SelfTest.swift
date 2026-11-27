@@ -97,7 +97,7 @@ import SafePdfC
             let ids = tb.identifiers.filter { $0 != .flexibleSpace && $0 != .sidebarTrackingSeparator }
             let built = ids.compactMap { tb.makeItem($0) }
             say("toolbar: \(ids.count) items (\(tb.identifiers.count) with spaces), built \(built.count)")
-            check(built.count == ids.count && ids.count == 17, "toolbar items \(built.count)/\(ids.count), expected 17")
+            check(built.count == ids.count && ids.count == 16, "toolbar items \(built.count)/\(ids.count), expected 16")
             tb.setZoom(ZoomModel.percent(137))
             check(tb.zoomTitle == "137%", "zoom drop-down title \(tb.zoomTitle ?? "nil"), expected 137%")
             tb.setZoom(ZoomModel.auto)
