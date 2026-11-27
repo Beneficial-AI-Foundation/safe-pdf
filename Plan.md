@@ -503,6 +503,37 @@ signature-dictionary handling in the decrypt and save paths).
   suites; (4) both shells show the verdicts with the honest statuses, including
   "revocation not checked"; (5) the hygiene and environment scans stay clean.
 
+### Phase 15 — Printing
+
+(Added 2026-11-27 at the human's request; issue #21, from the feature list of #19.)
+
+**The rule: print the rendered pixels, never the input file.** Handing the document to the
+OS print service would have CUPS's filter chain (Ghostscript/poppler) parse the hostile
+file — a second, unverified parser outside our sandbox. What is spooled is the output of
+our verified rasterizer (marks included), packaged by us — Dangerzone's reconstruction idea
+applied to printing — and the UI says so ("printed from SafePDF's rendering at N dpi").
+
+- Print-resolution renders through the confined worker, 300 dpi default (Letter/A4 ≈
+  8.4–8.7 Mpx — inside the 10 Mpx per-page cap; 600 dpi needs banded rendering, deferred
+  until the human wants it); one print is one user operation under the budget pool
+  (reserved before dispatch, progress shown, cancellable).
+- A small pure **image-only PDF writer**: one Flate image XObject per page over the
+  existing DEFLATE encoder (`Core/Filter/Deflate.lean`; its stored-block decode already
+  carries theorems); the output parses under our own strict parser and each stream decodes
+  back to the exact raster. The same artifact is **Print to PDF**.
+- Linux (Tk has no print dialog): a small dialog of ours — printers from `lpstat -a`, page
+  range, copies, dpi — and the generated PDF spooled with `lp`; a fake `lp` on PATH makes
+  the whole path smoke-testable.
+- macOS: `NSPrintOperation` drawing the worker renders — the native panel (preview,
+  ranges, duplex, paper sizes, Save as PDF) comes free.
+- `Toolbar.Tool.print` becomes a real command: File → Print…, Ctrl+P / ⌘P in
+  `Menu.keyTable` (its `#guard`s keep the platforms consistent).
+- **M15**: a multi-page document prints on both platforms from the same pixels — the Linux
+  smoke captures a spool that strict-parses and pixel-matches the source rasters in MuPDF,
+  and the macOS smoke prints to a PDF destination headlessly with the same checks; the
+  input file's bytes never reach the print stack; a long print stays within the published
+  ceilings and cancel works mid-job; the status line states the dpi.
+
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
 optional content groups, tagged-PDF reading order, accessibility export; signatures:
@@ -618,3 +649,5 @@ safe-pdf/
 3. The external review (12.9) stays deferred by the human.
 4. Phase 14 (signature verification) queues behind Phase 13; its two early solo decisions
    (trust anchors, out-of-scope X.509 features) go to Decisions first.
+5. Phase 15 (printing) queues behind Phase 14; issues #21 (printing), #22 (signatures) and
+   #23 (password-protected PDFs, unscheduled) track #19's feature list.
