@@ -299,12 +299,12 @@ static void test_chrome(void) {
     CHECK(find_next == 1 && goto_mac == 1 && goto_x11 == 1);
     safepdf_free_key_table(&kt);
 
-    /* Toolbar (Toolbar.lean #guards: 14 buttons; enabled sets). */
+    /* Toolbar (Toolbar.lean #guards: 13 buttons; enabled sets). */
     safepdf_toolbar tb;
     CHECK(safepdf_view_toolbar(&tb) == 0);
     size_t buttons = 0;
     for (size_t i = 0; i < tb.count; i++) if (tb.items[i].kind == SAFEPDF_ITEM_BUTTON) buttons++;
-    CHECK(buttons == 14 && tb.count > 0 && strcmp(tb.items[0].id, "sidebar") == 0 &&
+    CHECK(buttons == 13 && tb.count > 0 && strcmp(tb.items[0].id, "sidebar") == 0 &&
           tb.items[0].cmd == SAFEPDF_CMD_OUTLINE && strcmp(tb.items[tb.count - 1].id, "more") == 0 &&
           tb.items[tb.count - 1].action == SAFEPDF_ACT_MORE);
     for (size_t i = 0; i < tb.count; i++)
