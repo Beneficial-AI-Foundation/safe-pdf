@@ -450,11 +450,11 @@ def bigXfdf : Xfdf.Limits :=
 open SafePdf.Shell.App in
 /-- Probes of the shell's own code over a store or an XFDF text. -/
 def shellProbes : List Probe := [
-  { name := "xfdf-export", entry := "Xfdf.toXfdf", n0 := 200, maxN := 100000, known := some "13.28",
+  { name := "xfdf-export", entry := "Xfdf.toXfdf", n0 := 200, maxN := 100000,
     setup := fun n => prep (storeOf n) fun s =>
       let x := Xfdf.toXfdf s (fun _ => none) "D:20260101000000Z"
       (x.length > n, x.length) },
-  { name := "xfdf-import", entry := "Xfdf.readXfdf", n0 := 200, maxN := 100000, known := some "13.28",
+  { name := "xfdf-import", entry := "Xfdf.readXfdf", n0 := 200, maxN := 100000,
     setup := fun n => prep (Xfdf.toXfdf (storeOf n) (fun _ => none) "D:20260101000000Z").toUTF8
       fun b => match Xfdf.readXfdf bigXfdf b with
         | .ok rep =>
