@@ -1045,14 +1045,15 @@ def Limits.toList (l : Limits) : List Nat :=
    l.maxRevisions, l.maxRepairFailures, l.maxFilters, l.maxFontGlyphs, l.maxFontSubrs,
    l.glyphFuel, l.maxFormsPerPage, l.maxCFFGlyphs, l.fontFuel, l.maxFontDicts, l.curveSegCap,
    l.coordLimit, l.maxDashSteps, l.arcSegCap, l.maxPageSide, l.clipCacheSize, l.maxMarkedDepth,
-   l.maxFormCacheEntries, l.maxFormCacheBytes, l.maxOCGroups, l.maxOCDepth]
+   l.maxFormCacheEntries, l.maxFormCacheBytes, l.maxOCGroups, l.maxOCDepth, l.renderStepFactor,
+   l.renderStepFloor]
 
-/-- `Limits` from its fields (`none` unless there are exactly 30). -/
+/-- `Limits` from its fields (`none` unless there are exactly 32). -/
 def Limits.ofList? : List Nat → Option Limits
   | [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20,
-     a21, a22, a23, a24, a25, a26, a27, a28, a29, a30] =>
+     a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32] =>
     some ⟨a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19,
-      a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30⟩
+      a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32⟩
   | _ => none
 
 /-- **`Limits`** (task 12.2d: the viewer's limits, passed to the worker at startup). -/

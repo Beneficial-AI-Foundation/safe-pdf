@@ -469,7 +469,9 @@ def renderPage (d : Document) (i : Nat) (zoom : Rat) (rot : Rotation := .r0)
       | .error e => .error (.pdf e)
 
 /-- **RGBA shape**: a rendered page has exactly `4 · w · h` bytes
-(`Core.Raster.Glyph.renderPage_size`). -/
+(`Core.Raster.Glyph.renderPage_size`). A page `renderPage` returns is complete: one whose render
+work allowance (`Limits.renderStepFactor`) was spent is the error `limitExceeded .renderWork`
+(`renderPagePartial` returns its pixels). -/
 theorem renderPage_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation}
     {oc : Option Doc.OptionalContent.State} {img : Image}
     (h : renderPage d i zoom rot oc = .ok img) : img.data.size = 4 * img.w * img.h := by
@@ -479,17 +481,65 @@ theorem renderPage_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation}
   · rename_i p _
     split at h
     · cases h
-    · unfold Raster.Glyph.renderDocPage at h
-      generalize Text.ocStateFor d.limits d.doc (Filter.Budget.init d.limits) oc = q at h
-      obtain ⟨ocs, b0⟩ := q
-      cases hx : Text.extractDocPage d.limits d.doc p b0 {} (some ocs) with
+    · cases hr : Raster.Glyph.renderDocPage d.limits d.doc p zoom rot (Filter.Budget.init d.limits)
+          (oc := oc) with
       | mk r b =>
+        rw [hr] at h
         cases r with
-        | error e => simp [hx] at h
-        | ok pt =>
-          simp only [hx, Except.ok.injEq] at h
+        | error e => simp at h
+        | ok img' =>
+          simp only [Except.ok.injEq] at h
           subst h
-          exact Raster.Glyph.renderPage_size ..
+          exact Raster.Glyph.renderDocPage_size _ _ _ _ _ _ _ _ _ _ _ hr
+
+/-- A page rendered under the render work allowance: the pixels and whether the render ran to
+the end (task 13.4b). -/
+structure PartialRender where
+  /-- The rendered pixels. When `complete` is false: what was painted before the allowance
+  ran out (the groups open at that point composited), the rest of the page white. -/
+  image : Image
+  /-- `true`: the whole page was rendered (`renderPage` returns this image). `false`: the render
+  work allowance (`Limits.renderStepFactor`, `Limits.renderStepFloor`) was spent, the image is
+  incomplete (the stop reason is `limitExceeded .renderWork`). -/
+  complete : Bool
+
+/-- **Render page `i`, keeping the partial image** (task 13.4b): as `renderPage`, but a page
+whose render work allowance was spent is returned with the pixels drawn so far, marked
+incomplete (`PartialRender.complete = false`), instead of the error `limitExceeded .renderWork`.
+Every other failure is the same error as `renderPage`'s. -/
+def renderPagePartial (d : Document) (i : Nat) (zoom : Rat) (rot : Rotation := .r0)
+    (oc : Option Doc.OptionalContent.State := none) : Except Error PartialRender :=
+  match d.page i with
+  | .error e => .error e
+  | .ok p =>
+    if zoom ≤ 0 then .error (.badZoom zoom)
+    else
+      match (Raster.Glyph.renderDocPagePartial d.limits d.doc p zoom rot (Filter.Budget.init d.limits)
+          (oc := oc)).1 with
+      | .ok r => .ok ⟨r.image, !r.exceeded⟩
+      | .error e => .error (.pdf e)
+
+/-- **RGBA shape of a partial render**: `4 · w · h` bytes, complete or not. -/
+theorem renderPagePartial_size {d : Document} {i : Nat} {zoom : Rat} {rot : Rotation}
+    {oc : Option Doc.OptionalContent.State} {r : PartialRender}
+    (h : renderPagePartial d i zoom rot oc = .ok r) :
+    r.image.data.size = 4 * r.image.w * r.image.h := by
+  unfold renderPagePartial at h
+  split at h
+  · cases h
+  · rename_i p _
+    split at h
+    · cases h
+    · cases hr : Raster.Glyph.renderDocPagePartial d.limits d.doc p zoom rot
+          (Filter.Budget.init d.limits) (oc := oc) with
+      | mk r' b =>
+        rw [hr] at h
+        cases r' with
+        | error e => simp at h
+        | ok r'' =>
+          simp only [Except.ok.injEq] at h
+          subst h
+          exact Raster.Glyph.renderDocPagePartial_size _ _ _ _ _ _ _ _ _ _ _ hr
 
 /-! ## Optional content -/
 
@@ -757,6 +807,24 @@ private def tinyDoc (_ : Unit) : Except Error Document := openBytes (tiny ())
   | .ok d => match renderPage d 0 0 with
     | .error (.badZoom _) => true
     | _ => false
+  | .error _ => false
+-- Render work allowance (task 13.4b): with an allowance of 0 steps the page stops after its
+-- first painting item: `renderPage` is the error, `renderPagePartial` the incomplete image.
+#guard match openBytes (tiny ()) { limits := { renderStepFloor := 0, renderStepFactor := 0 } } with
+  | .ok d =>
+    (match renderPage d 0 1 with
+      | .error (.pdf (.limitExceeded .renderWork)) => true
+      | _ => false) &&
+    (match renderPagePartial d 0 1 with
+      | .ok r => !r.complete && r.image.w == 200 && r.image.h == 100 &&
+          r.image.data.size == 80000
+      | .error _ => false)
+  | .error _ => false
+-- With the default allowance the partial render is the complete one.
+#guard match tinyDoc () with
+  | .ok d => match renderPage d 0 1, renderPagePartial d 0 1 with
+    | .ok a, .ok r => r.complete && r.image.data == a.data
+    | _, _ => false
   | .error _ => false
 -- C2 on the API types: the page point (20, 50) is pixel (20, 50) at zoom 1, and back.
 #guard match tinyDoc () with

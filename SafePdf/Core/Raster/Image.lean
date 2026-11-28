@@ -2349,10 +2349,10 @@ def renderImage (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTable) (st : Cl
   match tbl.pixmap src (inlineExt src (Aff.ofMatrix ctm * m)) with
   | none => st
   | some pm =>
-    let c := Clip.clipMaskC cfg m W H st.cache clip
+    let c := Clip.clipMaskC cfg m W H st.room st.cache clip
     let p := place tbl.limits.maxImagePixels W H pm (Aff.ofMatrix ctm * m) c.1
       (Clip.deviceRGB fill.color) (Clip.compByte fill.alpha) st.buf
-    { buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2 }
+    { st with buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2, smemo := none }
 
 /-- Painting an image preserves the buffer size. -/
 theorem renderImage_size (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTable)
@@ -2373,9 +2373,9 @@ theorem renderImage_steps_le (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTa
   unfold renderImage; split
   · omega
   · rename_i pm _
-    have h0 := Clip.clipMaskC_steps_le cfg m W H st.cache clip
+    have h0 := Clip.clipMaskC_steps_le cfg m W H st.room st.cache clip
     have h1 := place_steps_le tbl.limits.maxImagePixels W H pm (Aff.ofMatrix ctm * m)
-      (Clip.clipMaskC cfg m W H st.cache clip).1
+      (Clip.clipMaskC cfg m W H st.room st.cache clip).1
       (Clip.deviceRGB fill.color) (Clip.compByte fill.alpha) st.buf true
     simp only
     omega

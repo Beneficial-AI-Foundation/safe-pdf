@@ -1,5 +1,6 @@
 import SafePdf.Core.Raster.Clip
 import SafePdf.Core.Content.Interp
+import SafePdf.Core.Raster.Glyph
 
 /-!
 # Clipping and path rendering suite (task 7.2c)
@@ -17,7 +18,13 @@ The coverage bounds, buffer shape and work bound are theorems in
 * a content stream run through the interpreter (`Content.interpBytes`) renders to the expected
   small image (y flip of the view transform; hairline placeholder stroke);
 * `renderPaths` on a page with `/Rotate 90` swaps width and height;
-* timing of 1000 filled rectangles under one shared clip on a 612 × 792 page (printed).
+* timing of 1000 filled rectangles under one shared clip on a 612 × 792 page (printed);
+* the render work allowance (task 13.4b): 2,000 stacked clips stop inside the clip-mask
+  recursion within the allowance plus one clip level and paint nothing; full-page fills stop
+  after the item that spends the allowance and the later items are not painted; an allowance
+  that covers the work changes nothing (same pixels, same steps as no limit); a stopped page of
+  `Glyph.renderPageR` is marked `exceeded` and keeps its `4 · w · h` bytes, its open group
+  composited.
 
 Set `SAFEPDF_PPM_DIR=<dir>` to also write the rendered test pages as PPM files there.
 -/
@@ -191,6 +198,63 @@ def run : IO Nat := do
   dumps := dumps.push ("rects1000", ⟨612, 792, st9.buf⟩)
   if st9.cache.hits != 999 then
     failures := failures + 1; report s!"timing page: cache hits {st9.cache.hits}"
+  -- 10. Render work allowance (task 13.4b). 2,000 stacked identical clips on a 100 × 100 page,
+  -- default allowance `max 2²⁰ (128 · 100 · 100)` = 1,280,000 steps: the clip-mask recursion stops inside the clip (work at most the
+  -- allowance plus one clip level, `clipMaskC_steps_le_room`), the fill is not painted.
+  let rc : Clip := (List.range 2000).map fun _ => ⟨rectP 0 0 100 100, .nonzero⟩
+  let item10 := fillI (rectP 0 0 100 100) black rc
+  let cfg10 : Config := {}
+  let L10 := cfg10.renderAllowance 100 100
+  let U10 := pathCost cfg10 100 100 (rectP 0 0 100 100)
+  let st10 := renderItemsCounted cfg10 idm 100 100 #[item10]
+  if L10 != 1280000 || !st10.over || st10.steps > L10 + U10 || st10.steps ≤ L10 ||
+      st10.buf != (whiteBuf 100 100) then
+    failures := failures + 1
+    report s!"clip stack: steps {st10.steps}, allowance {L10}, unit {U10}, over {st10.over}"
+  -- The same 2,000 clips under an allowance that covers them: painted, not over.
+  let cost10 := (itemCost cfg10 100 100 item10)
+  let st10b := renderItemsCountedAt (cost10 + 5) cfg10 idm 100 100 #[item10]
+  let st10c := renderItemsCountedAt noLimit cfg10 idm 100 100 #[item10]
+  if st10b.over || st10b.buf == whiteBuf 100 100 || st10b.buf != st10c.buf ||
+      st10b.steps != st10c.steps then
+    failures := failures + 1
+    report s!"clip stack under a covering allowance: steps {st10b.steps} vs {st10c.steps}"
+  -- 10 full-page fills of 50 × 50 (gray 1, …, 10): each costs `F` steps. With allowance `3 F + 1`
+  -- the loop paints items 1-4 (the fourth starts at `3 F ≤ L` and ends at `4 F > L`), stops
+  -- there: the page shows the fourth gray, steps ≤ L + F.
+  let fills10 : DisplayList := (Array.range 10).map fun k =>
+    fillI (rectP 0 0 50 50) (.gray (comp (10 * (k + 1)))) []
+  let F10 := (renderItemsCountedAt noLimit cfg10 idm 50 50 #[fills10[0]!]).steps
+  let stF := renderItemsCountedAt (3 * F10 + 1) cfg10 idm 50 50 fills10
+  let stFall := renderItemsCountedAt noLimit cfg10 idm 50 50 fills10
+  let imgF : Image := ⟨50, 50, stF.buf⟩
+  let imgAll : Image := ⟨50, 50, stFall.buf⟩
+  if !stF.over || stF.steps != 4 * F10 || px imgF 10 10 != (compByte (comp 40), compByte (comp 40), compByte (comp 40)) ||
+      px imgAll 10 10 != (compByte (comp 100), compByte (comp 100), compByte (comp 100)) ||
+      stFall.over || imgF.data.size != 4 * 50 * 50 then
+    failures := failures + 1
+    report s!"full-page fills: steps {stF.steps} (unit {F10}), over {stF.over}, px {px imgF 10 10}"
+  -- 11. `Glyph.renderPageR` on a tiny page: an allowance of 0 stops after the first item; the
+  -- open group is composited (the image keeps `4 · w · h` bytes) and the page is `exceeded`;
+  -- the default allowance renders the same items completely.
+  let items11 : DisplayList := #[.groupBegin {}, fillI (rectP 0 0 8 8) black [], fillI (rectP 0 0 8 8) black [],
+    .groupEnd]
+  let pf11 : Raster.Glyph.PageFonts := { fonts := [], sources := [] }
+  let r11a := Raster.Glyph.renderPageR (mkPage 8 8 .r0) 1 .r0 pf11 items11
+  let r11b := Raster.Glyph.renderPageR (mkPage 8 8 .r0) 1 .r0 pf11 items11 { renderStepFloor := 0, renderStepFactor := 0 }
+  if r11a.exceeded || r11b.exceeded != true || r11b.image.data.size != 4 * 8 * 8 ||
+      px r11a.image 3 3 != (0, 0, 0) || px r11b.image 3 3 != (0, 0, 0) then
+    failures := failures + 1
+    report s!"renderPageR: exceeded {r11a.exceeded}/{r11b.exceeded}, px {px r11a.image 3 3}/{px r11b.image 3 3}"
+  -- The work of a soft mask's items is charged to the page (task 13.4b): 2,000 stacked clips
+  -- inside a soft mask spend the allowance (they are drawn into scratch buffers and discarded).
+  let items12 : DisplayList := #[.softMask 0 { kind := .alpha } #[item10], fillI (rectP 0 0 100 100) black []]
+  let r12 := Raster.Glyph.renderPageR (mkPage 100 100 .r0) 1 .r0 pf11 items12
+  let r12b := Raster.Glyph.renderPageR (mkPage 100 100 .r0) 1 .r0 pf11
+    (#[.softMask 0 { kind := .alpha } #[fillI (rectP 0 0 10 10) black []]])
+  if r12.exceeded != true || r12b.exceeded || r12.image.data.size != 4 * 100 * 100 then
+    failures := failures + 1
+    report s!"soft mask work: exceeded {r12.exceeded} (stacked), {r12b.exceeded} (small)"
   if let some dir ← IO.getEnv "SAFEPDF_PPM_DIR" then
     IO.FS.createDirAll dir
     for (name, img) in dumps do

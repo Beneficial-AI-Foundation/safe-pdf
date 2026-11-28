@@ -2026,10 +2026,10 @@ def renderShading (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable) (st 
   match tbl.shading? r name with
   | none => st
   | some sh =>
-    let c := Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)
+    let c := Clip.clipMaskC cfg m W H st.room st.cache (withBBox sh ctm clip)
     let p := paint W H sh (Aff.ofMatrix ctm * m) c.1 (Clip.itemWindow W H c.1)
       (Clip.compByte alpha) st.buf
-    { buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2 }
+    { st with buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2, smemo := none }
 
 /-- Painting an `sh` item preserves the buffer size. -/
 theorem renderShading_size (cfg : Config) (m : Aff) (W H : Nat) (tbl : ShadingTable)
@@ -2049,11 +2049,11 @@ theorem renderShading_steps_le (cfg : Config) (m : Aff) (W H : Nat) (tbl : Shadi
   unfold renderShading; split
   · omega
   · rename_i sh _
-    have h0 := Clip.clipMaskC_steps_le cfg m W H st.cache (withBBox sh ctm clip)
+    have h0 := Clip.clipMaskC_steps_le cfg m W H st.room st.cache (withBBox sh ctm clip)
     have h1 := withBBox_cost cfg W H sh ctm clip
     have h2 := paint_steps_le W H sh (Aff.ofMatrix ctm * m)
-      (Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)).1
-      (Clip.itemWindow W H (Clip.clipMaskC cfg m W H st.cache (withBBox sh ctm clip)).1)
+      (Clip.clipMaskC cfg m W H st.room st.cache (withBBox sh ctm clip)).1
+      (Clip.itemWindow W H (Clip.clipMaskC cfg m W H st.room st.cache (withBBox sh ctm clip)).1)
       (Clip.compByte alpha) st.buf
     simp only
     omega
@@ -2078,7 +2078,7 @@ def paintPattern (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : 
     | some rgb => Clip.composite st.buf W mk none win rgb a
     | none => st.buf
   let pr := paint W H pat.shade (Aff.ofMatrix mat * m) (some mk) win a buf
-  { buf := pr.1, cache := cc, steps := st.steps + s + bb.2 + mk.area + pr.2 }
+  { st with buf := pr.1, cache := cc, steps := st.steps + s + bb.2 + mk.area + pr.2, smemo := none }
 
 /-- Painting a pattern through a mask preserves the buffer size. -/
 theorem paintPattern_size (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Pattern)
@@ -2094,7 +2094,7 @@ theorem paintPattern_size (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState
 /-- **Paint a path filled with a shading pattern**: fill mask ∩ clip, then `paintPattern`. -/
 def renderPatternFill (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.RState) (pat : Pattern)
     (base : Matrix) (p : Path) (rule : FillRule) (alpha : Comp) (clip : Clip) : Clip.RState :=
-  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let c := Clip.clipMaskC cfg m W H st.room st.cache clip
   let f := Clip.fillCounted cfg m p rule (Clip.itemWindow W H c.1)
   paintPattern cfg m W H st pat base (Clip.combine f.1 c.1) alpha c.2.1 (c.2.2 + f.2)
 
@@ -2109,7 +2109,7 @@ theorem renderPatternFill_size (cfg : Config) (m : Aff) (W H : Nat) (st : Clip.R
 def renderPatternStroke (cfg : Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
     (st : Clip.RState) (pat : Pattern) (base : Matrix) (p : Path) (style : Content.StrokeStyle)
     (clip : Clip) : Clip.RState :=
-  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let c := Clip.clipMaskC cfg m W H st.room st.cache clip
   let fm := stroke cfg m (Clip.itemWindow W H c.1) p style
   paintPattern cfg m W H st pat base (Clip.combine fm c.1) style.alpha c.2.1 c.2.2
 

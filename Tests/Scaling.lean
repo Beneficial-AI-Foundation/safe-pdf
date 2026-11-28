@@ -285,9 +285,9 @@ def textP (name : String) (n0 maxN : Nat) (mk : Nat → ByteArray) (expect : Nat
     | .error _ => (false, 0)
 
 /-- Rendering at zoom 1. -/
-def renderP (name : String) (n0 maxN : Nat) (mk : Nat → ByteArray) (known : Option String := none) :
-    Probe :=
-  onDoc name "Api.renderPage" n0 maxN mk (known := known) fun _ d =>
+def renderP (name : String) (n0 maxN : Nat) (mk : Nat → ByteArray) (known : Option String := none)
+    (lim : Limits := {}) : Probe :=
+  onDoc name "Api.renderPage" n0 maxN mk (known := known) (lim := lim) fun _ d =>
     match Api.renderPage d 0 1 with
     | .ok img => (img.data.size == 4 * img.w * img.h, img.data.size + 1)
     | .error _ => (false, 0)
@@ -358,10 +358,16 @@ def baseline : List Probe := [
     paintPage (gen n fun i => s!"{gx i} {gy i} m {gx i + 5} {gy i + 5} l S ")),
   renderP "bezier-strokes" 500 1000000 (fun n =>
     paintPage (gen n fun i => s!"{gx i} {gy i} m {gx i + 2} {gy i + 5} {gx i + 5} {gy i + 5} {gx i + 6} {gy i} c S ")),
+  -- 13.4b: these two probes exceed the render work allowance at the larger sizes (that is what
+  -- the allowance is for: `Api.renderPage` then answers `limitExceeded .renderWork` in bounded
+  -- time); the allowance is raised here so that the probes still measure the scaling of the
+  -- renderer itself.
   renderP "clipped-fills" 500 1000000 (fun n =>
-    paintPage (gen n fun i => s!"q {gx i} {gy i} 10 10 re W n 0 0 200 200 re f Q ")),
+    paintPage (gen n fun i => s!"q {gx i} {gy i} 10 10 re W n 0 0 200 200 re f Q "))
+    (lim := { renderStepFactor := 1000000 }),
   renderP "stacked-clips" 200 1000000 (fun n =>
-    paintPage (s!"q " ++ gen n (fun i => s!"{i % 50} 0 200 200 re W n ") ++ "0 0 200 200 re f Q")),
+    paintPage (s!"q " ++ gen n (fun i => s!"{i % 50} 0 200 200 re W n ") ++ "0 0 200 200 re f Q"))
+    (lim := { renderStepFactor := 1000000 }),
   -- 13.1: one path of n segments (quadratic before wave 1)
   renderP "one-path-segments" 500 60000 (fun n =>
     paintPage (s!"0 0 m " ++ gen n (fun i => s!"{gx i} {gy i} l ") ++ "S")),

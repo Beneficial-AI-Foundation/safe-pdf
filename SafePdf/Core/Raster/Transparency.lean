@@ -1033,6 +1033,31 @@ theorem maskFrom_size (info : SoftMaskInfo) (W H : Nat) (draw : ByteArray → By
   · rw [lumLoop_size]; show 0 + W * H = W * H; omega
   · rw [alphaLoop_size]; show 0 + W * H = W * H; omega
 
+/-- `maskFrom` with the work of its draws (task 13.4b): `draw` returns the buffer and the counted
+work of one render of the mask group; the work of every render made (two for an alpha mask) is
+added. The mask is that of `maskFrom` (`maskFromW_fst`). -/
+def maskFromW (info : SoftMaskInfo) (W H : Nat) (draw : ByteArray → ByteArray × Nat) :
+    ByteArray × Nat :=
+  match info.kind with
+  | .luminosity =>
+    let d := draw (solidBuf W H (deviceRGB info.backdrop))
+    (lumLoop d.1 (W * H) 0 .empty, d.2)
+  | .alpha =>
+    let d0 := draw (fillBuf W H 0)
+    let d1 := draw (fillBuf W H 255)
+    (alphaLoop d0.1 d1.1 (W * H) 0 .empty, d0.2 + d1.2)
+
+/-- The mask of `maskFromW` is that of `maskFrom` on the same buffers. -/
+theorem maskFromW_fst (info : SoftMaskInfo) (W H : Nat) (draw : ByteArray → ByteArray × Nat) :
+    (maskFromW info W H draw).1 = maskFrom info W H (fun b => (draw b).1) := by
+  unfold maskFromW maskFrom
+  cases info.kind <;> rfl
+
+/-- A soft mask has one byte per pixel (with its work). -/
+theorem maskFromW_size (info : SoftMaskInfo) (W H : Nat) (draw : ByteArray → ByteArray × Nat) :
+    (maskFromW info W H draw).1.size = W * H := by
+  rw [maskFromW_fst]; exact maskFrom_size ..
+
 /-- The 7.3c soft mask (reference of `maskFrom`). -/
 def maskFromSpec (info : SoftMaskInfo) (W H : Nat) (draw : ByteArray → ByteArray) : ByteArray :=
   match info.kind with
@@ -1066,6 +1091,15 @@ structure Painter (S : Type) where
   are unchanged) is not part of `Lawful`: a painter breaking it loses the paint outside the
   bound inside layers, nothing else. -/
   bound : DisplayItem → Option IRect := fun _ => none
+  /-- The counted work of a state (task 13.4b; e.g. `RState.steps`), `0` by default. -/
+  work : S → Nat := fun _ => 0
+  /-- Add `n` to the counted work (task 13.4b): the driver charges the work of the items of a
+  soft mask, which it paints into scratch states and discards, to the state it started from.
+  The identity by default. -/
+  charge : S → Nat → S := fun s _ => s
+  /-- The render work allowance of the state is spent (task 13.4b): the driver paints no more
+  items of a soft mask once it is. `false` by default. -/
+  stop : S → Bool := fun _ => false
 
 /-- The laws `renderTx_inv` needs: lenses behave, painting keeps the buffer size and the
 transparency state. -/
@@ -1082,6 +1116,10 @@ structure Painter.Lawful {S : Type} (P : Painter S) : Prop where
   paint_size : ∀ s it, (P.buf (P.paint s it)).size = (P.buf s).size
   /-- Painting keeps the transparency state. -/
   paint_tx : ∀ s it, P.tx (P.paint s it) = P.tx s
+  /-- Charging work keeps the buffer. -/
+  buf_charge : ∀ s n, P.buf (P.charge s n) = P.buf s := by intros; rfl
+  /-- Charging work keeps the transparency state. -/
+  tx_charge : ∀ s n, P.tx (P.charge s n) = P.tx s := by intros; rfl
 
 /-- Paint one item, inside a layer when it has a blend mode or a soft mask (`itemFx`); grow
 the enclosing layer's dirty rectangle by the item's bound. The transparency state is taken out
@@ -1607,9 +1645,12 @@ def renderTx {S : Type} (P : Painter S) (W H : Nat) : Nat → S → DisplayItem 
     P.setBuf (P.setTx s0 r.1) r.2
   | 0, s, .softMask .. => s
   | f + 1, s, .softMask id info items =>
-    let draw : ByteArray → ByteArray := fun base =>
-      P.buf (items.foldl (renderTx P W H f) (P.setBuf (P.setTx s { masks := (P.tx s).masks }) base))
-    P.setTx s ((P.tx s).addMask id (maskFrom info W H draw))
+    let draw : ByteArray → ByteArray × Nat := fun base =>
+      let si := items.foldl (fun s' it => if P.stop s' then s' else renderTx P W H f s' it)
+        (P.setBuf (P.setTx s { masks := (P.tx s).masks }) base)
+      (P.buf si, P.work si - P.work s)
+    let mk := maskFromW info W H draw
+    P.setTx (P.charge s mk.2) ((P.tx s).addMask id mk.1)
   | _, s, it => paintKTL P W H (paintFx P W H) s it
 
 /-- `addMask` keeps the layer stack. -/
@@ -1666,7 +1707,7 @@ theorem renderTx_inv {S : Type} (P : Painter S) (hP : P.Lawful) (W H : Nat) :
     | zero => simp only [renderTx]; exact h
     | succ f =>
       simp only [renderTx]
-      refine ⟨by rw [hP.buf_setTx]; exact h.1, ?_⟩
+      refine ⟨by rw [hP.buf_setTx, hP.buf_charge]; exact h.1, ?_⟩
       rw [hP.tx_setTx]
       intro l hl
       exact h.2 l hl
