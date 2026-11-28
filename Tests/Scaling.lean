@@ -561,7 +561,7 @@ def newProbes : List Probe := [
     | .ok ls => (ls.length == n, ls.length + 1)
     | .error _ => (false, 0),
   openP "xref-stream-entries" 500 2000000 xrefStmDoc,
-  onDoc "outline-items" "Api.outline" 500 100000 outlineDoc (known := some "13.26") fun n d =>
+  onDoc "outline-items" "Api.outline" 500 100000 outlineDoc fun n d =>
     let o := Api.outline d
     (o.length == n, o.length + 1),
   onDoc "dests-names" "Api.pageLinks" 256 2048

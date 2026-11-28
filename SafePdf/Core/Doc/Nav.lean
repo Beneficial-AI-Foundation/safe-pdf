@@ -75,6 +75,9 @@ page count.
 
 * Totality: by construction (structural recursion on fuel, lists, and pairs).
 * `popFresh_fresh`, `popOutline_fresh`: a popped reference was not visited.
+  The outline walk tests visited references in a `VSet` that mirrors `visited ++ root`
+  (`O(log n)`; task 13.26: a list scan made a flat outline of n items quadratic); the list
+  stays the specification.
 * `treeLoop_inv`, `treeLoop_nil`: the loop keeps the visited list duplicate-free and adds at
   most one node per unit of fuel; `visitTree_visited`; `treeWalk_visited_le` (**nodes visited ≤ objectCount**), `treeWalk_nodup`
   (**no node visited twice**); `treeLookup` and `treeEntries` are projections of `treeWalk`.
@@ -509,11 +512,14 @@ structure OutlineItem (n : Nat) where
   deriving Repr
 
 /-- The outline walk state. -/
-structure OutlineState (n : Nat) where
+structure OutlineState (n : Nat) (root : List Nat) where
   /-- Item references to visit with their depths, next first. -/
   stack : List (PdfObject × Nat)
   /-- Object numbers of visited items, newest first. -/
   visited : List Nat
+  /-- An ordered set mirroring `visited ++ root` (the visited test in `O(log n)`; task 13.26:
+  a list scan made a flat outline of n items quadratic). -/
+  seen : VSet (visited ++ root)
   /-- Items, newest first. -/
   items : List (OutlineItem n)
   /-- Cut branches and malformed items (rule N6). -/
@@ -521,12 +527,12 @@ structure OutlineState (n : Nat) where
 
 /-- Pop the next fresh item reference: seen references and non-references are cut and
 counted. -/
-def popOutline (seen : List Nat) :
+def popOutline (l : List Nat) (seen : VSet l) :
     List (PdfObject × Nat) → Nat → Option (Nat × Nat × Nat × List (PdfObject × Nat)) × Nat
   | [], w => (none, w)
   | (.ref n g, dp) :: rest, w =>
-    if n ∈ seen then popOutline seen rest (w + 1) else (some (n, g, dp, rest), w)
-  | _ :: rest, w => popOutline seen rest (w + 1)
+    if seen.has n then popOutline l seen rest (w + 1) else (some (n, g, dp, rest), w)
+  | _ :: rest, w => popOutline l seen rest (w + 1)
 
 /-- The item of a visited node. -/
 def outlineItem (doc : Doc) (limits : Limits) (n g dp : Nat) (nd : Dict) :
@@ -548,20 +554,22 @@ def outlineKids (nd : Dict) (dp : Nat) : List (PdfObject × Nat) :=
 
 /-- The outline loop (rule N6): `root` lists the outline root's object number (never an item). -/
 def outlineLoop (doc : Doc) (limits : Limits) (root : List Nat) :
-    Nat → OutlineState doc.pages.size → OutlineState doc.pages.size
+    Nat → OutlineState doc.pages.size root → OutlineState doc.pages.size root
   | 0, st => if st.stack.isEmpty then st else { st with warnings := st.warnings + 1 }
   | f + 1, st =>
-    match popOutline (root ++ st.visited) st.stack st.warnings with
+    match popOutline _ st.seen st.stack st.warnings with
     | (none, w) => { st with stack := [], warnings := w }
     | (some (n, g, dp, rest), w) =>
       match fetchDict doc limits n g with
       | some nd =>
         outlineLoop doc limits root f
           { stack := outlineKids nd dp ++ rest, visited := n :: st.visited,
+            seen := st.seen.insert n,
             items := outlineItem doc limits n g dp nd :: st.items, warnings := w }
       | none =>
         outlineLoop doc limits root f
-          { st with stack := rest, visited := n :: st.visited, warnings := w + 1 }
+          { stack := rest, visited := n :: st.visited, seen := st.seen.insert n,
+            items := st.items, warnings := w + 1 }
 
 /-- The document outline. -/
 structure Outline (n : Nat) where
@@ -573,13 +581,40 @@ structure Outline (n : Nat) where
   visited : List Nat
 
 /-- The outline of a run of the loop. -/
-def Outline.ofState {n : Nat} (st : OutlineState n) : Outline n :=
+def Outline.ofState {n : Nat} {root : List Nat} (st : OutlineState n root) : Outline n :=
   ⟨st.items.reverse, st.warnings, st.visited⟩
 
 /-- The object number of the outline root, if it is a reference (it is never an item). -/
 def rootNums : PdfObject → List Nat
   | .ref n _ => [n]
   | _ => []
+
+/-- Folding inserts into a set adds exactly the folded elements. -/
+theorem foldl_insert_contains (l : List Nat) :
+    ∀ (init : NumSet) (x : Nat),
+      (l.foldl (fun (v : NumSet) y => v.insert y) init).contains x = true ↔
+        init.contains x = true ∨ x ∈ l := by
+  induction l with
+  | nil => intro init x; simp
+  | cons y t ih =>
+    intro init x
+    have h1 : (compare y x == Ordering.eq) = true ↔ y = x := by simp
+    rw [List.foldl_cons, ih, Std.TreeSet.contains_insert, List.mem_cons, Bool.or_eq_true, h1]
+    constructor
+    · rintro ((h | h) | h)
+      · exact Or.inr (Or.inl h.symm)
+      · exact Or.inl h
+      · exact Or.inr (Or.inr h)
+    · rintro (h | h | h)
+      · exact Or.inl (Or.inr h)
+      · exact Or.inl (Or.inl h.symm)
+      · exact Or.inr h
+
+/-- The seen-set of the empty visited list: just the root. -/
+def rootSeen (root : List Nat) : VSet ([] ++ root) :=
+  ⟨root.foldl (fun (v : NumSet) y => v.insert y) ∅, fun x => by
+    rw [foldl_insert_contains]
+    simp⟩
 
 /-- **The document outline** (rule N6); empty if there is none. -/
 def outline (doc : Doc) (limits : Limits) : Outline doc.pages.size :=
@@ -591,7 +626,7 @@ def outline (doc : Doc) (limits : Limits) : Outline doc.pages.size :=
       match raw od "First" with
       | some f =>
         Outline.ofState
-          (outlineLoop doc limits (rootNums o) doc.file.objectCount ⟨[(f, 0)], [], [], 0⟩)
+          (outlineLoop doc limits (rootNums o) doc.file.objectCount ⟨[(f, 0)], [], rootSeen (rootNums o), [], 0⟩)
       | none => ⟨[], 0, []⟩
     | .null => ⟨[], 0, []⟩
     | _ => ⟨[], 1, []⟩
@@ -873,15 +908,17 @@ theorem destsTree_visited_le (doc : Doc) (limits : Limits) (s : List UInt8) :
   treeWalk_visited_le doc limits nameTree (some s) _
 
 /-- A reference popped by `popOutline` was not seen. -/
-theorem popOutline_fresh {seen : List Nat} :
+theorem popOutline_fresh {l : List Nat} {seen : VSet l} :
     ∀ {s : List (PdfObject × Nat)} {w w' n g dp : Nat} {rest : List (PdfObject × Nat)},
-      popOutline seen s w = (some (n, g, dp, rest), w') → n ∉ seen
+      popOutline l seen s w = (some (n, g, dp, rest), w') → n ∉ l
   | [], _, _, _, _, _, _, h => by simp [popOutline] at h
   | (.ref m k, d) :: s, w, w', n, g, dp, rest, h => by
     unfold popOutline at h
     split at h
     · exact popOutline_fresh h
-    · next hm => cases h; exact hm
+    · next hm =>
+      cases h
+      exact fun hmem => hm ((seen.has_iff _).2 hmem)
   | (.null, _) :: s, _, _, _, _, _, _, h | (.bool _, _) :: s, _, _, _, _, _, _, h
   | (.int _, _) :: s, _, _, _, _, _, _, h | (.real _, _) :: s, _, _, _, _, _, _, h
   | (.string _, _) :: s, _, _, _, _, _, _, h | (.name _, _) :: s, _, _, _, _, _, _, h
@@ -892,7 +929,7 @@ theorem popOutline_fresh {seen : List Nat} :
 at most one item is visited per unit of fuel, and there are no more items than visited
 nodes. -/
 theorem outlineLoop_inv (doc : Doc) (limits : Limits) (root : List Nat) :
-    ∀ (f : Nat) (st : OutlineState doc.pages.size),
+    ∀ (f : Nat) (st : OutlineState doc.pages.size root),
       st.visited.Nodup → st.items.length ≤ st.visited.length →
       (outlineLoop doc limits root f st).visited.Nodup ∧
       (outlineLoop doc limits root f st).visited.length ≤ st.visited.length + f ∧
@@ -906,18 +943,21 @@ theorem outlineLoop_inv (doc : Doc) (limits : Limits) (root : List Nat) :
     split
     · exact ⟨h, by simp, hi⟩
     · next n g dp rest w hp =>
-      have hf : n ∉ st.visited := fun hm => popOutline_fresh hp (List.mem_append_right _ hm)
+      have hf : n ∉ st.visited := fun hm =>
+        popOutline_fresh hp (List.mem_append_left _ hm)
       have hnd : (n :: st.visited).Nodup := List.nodup_cons.2 ⟨hf, h⟩
       split
       · next nd _ =>
         have := outlineLoop_inv doc limits root f
           { stack := outlineKids nd dp ++ rest, visited := n :: st.visited,
+            seen := st.seen.insert n,
             items := outlineItem doc limits n g dp nd :: st.items, warnings := w } hnd
           (by simp only [List.length_cons]; omega)
         simp only [List.length_cons] at this
         exact ⟨this.1, by omega, this.2.2⟩
       · have := outlineLoop_inv doc limits root f
-          { st with stack := rest, visited := n :: st.visited, warnings := w + 1 } hnd
+          { stack := rest, visited := n :: st.visited, seen := st.seen.insert n,
+            items := st.items, warnings := w + 1 } hnd
           (by simp only [List.length_cons]; omega)
         simp only [List.length_cons] at this
         exact ⟨this.1, by omega, this.2.2⟩
@@ -925,11 +965,11 @@ theorem outlineLoop_inv (doc : Doc) (limits : Limits) (root : List Nat) :
 /-- The outline of a loop run from one root item. -/
 theorem outline_ofState_inv (doc : Doc) (limits : Limits) (root : List Nat) (f : PdfObject) :
     let o := Outline.ofState
-      (outlineLoop doc limits root doc.file.objectCount ⟨[(f, 0)], [], [], 0⟩)
+      (outlineLoop doc limits root doc.file.objectCount ⟨[(f, 0)], [], rootSeen root, [], 0⟩)
     o.visited.Nodup ∧ o.visited.length ≤ doc.file.objectCount ∧
     o.items.length ≤ o.visited.length := by
   have := outlineLoop_inv doc limits root doc.file.objectCount
-    ⟨[(f, 0)], [], [], 0⟩ List.nodup_nil (by simp)
+    ⟨[(f, 0)], [], rootSeen root, [], 0⟩ List.nodup_nil (by simp)
   simp only [Outline.ofState, List.length_reverse, List.length_nil, Nat.zero_add] at this ⊢
   exact this
 
