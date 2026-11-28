@@ -539,6 +539,76 @@ structure DestsIdx (file : OpenDoc) (cat : Dict) where
 def DestsIdx.of (limits : Limits) (file : OpenDoc) (cat : Dict) : DestsIdx file cat :=
   ⟨limits, Thunk.mk fun _ => (destsDictOf file limits cat).map Dict.index, thunk_get_mk _⟩
 
+open SafePdf.Core.Xref (XrefEntry)
+
+/-- The container stage of fetching an object-stream member (rule O6) for container `c` of
+`file`: parse and decode the container whose entry is `inUse off _`. (Any other entry gives a
+placeholder error; fetches never ask for it.) The result carries the constant-time header
+(`ObjStmIx`). -/
+def containerOf (file : OpenDoc) (limits : Limits) (c : Nat) :
+    Except Error Xref.ObjStm.ObjStmIx :=
+  match file.lookup c with
+  | some (.inUse off _) =>
+    (Xref.ObjStm.containerDecode file.pre file.lookup limits file.bytes file.objectCount off
+      c).map Xref.ObjStm.ObjStmIx.of
+  | _ => .error (.malformed 0 "no object stream container")
+
+/-- The lazily decoded containers: for each container number named by a compressed entry, a
+`Thunk` of its decode. The table only holds thunks (nothing is decoded when it is built); a
+container is decoded the first time one of its members is fetched and then reused by every
+later fetch (task 13.25: each fetch used to inflate the whole container again, which made `n`
+members quadratic). -/
+def objStmTable (file : OpenDoc) (limits : Limits) :
+    Std.TreeMap Nat (Thunk (Except Error Xref.ObjStm.ObjStmIx)) compare :=
+  file.xref.entries.foldl (fun m e =>
+    match e.2 with
+    | .compressed c _ => m.insertIfNew c (Thunk.mk fun _ => containerOf file limits c)
+    | _ => m) ∅
+
+private theorem objStmTable_inv (file : OpenDoc) (limits : Limits) :
+    ∀ (es : List (Nat × XrefEntry))
+      (m : Std.TreeMap Nat (Thunk (Except Error Xref.ObjStm.ObjStmIx)) compare),
+      (∀ c t, m[c]? = some t → t.get = containerOf file limits c) →
+      ∀ c t, (es.foldl (fun m e =>
+        match e.2 with
+        | .compressed c _ => m.insertIfNew c (Thunk.mk fun _ => containerOf file limits c)
+        | _ => m) m)[c]? = some t → t.get = containerOf file limits c
+  | [], m, hm => hm
+  | e :: rest, m, hm => by
+    simp only [List.foldl_cons]
+    refine objStmTable_inv file limits rest _ ?_
+    rcases e with ⟨k, v⟩
+    cases v with
+    | compressed c0 i0 =>
+      intro c t ht
+      simp only [Std.TreeMap.getElem?_insertIfNew] at ht
+      split at ht
+      · cases ht
+        rename_i hc
+        have : c0 = c := by simpa using hc.1
+        subst this
+        rw [thunk_get_mk]
+      · exact hm c t ht
+    | _ => exact hm
+
+/-- The decoded containers of a document, for the limits it was opened with. `h` ties every
+stored decode to `containerOf` (the uncached container stage). -/
+structure ObjStmIdx (file : OpenDoc) where
+  /-- The limits the table was built under (the decode depends on them). -/
+  limits : Limits
+  /-- The lazily decoded containers. -/
+  tbl : Thunk (Std.TreeMap Nat (Thunk (Except Error Xref.ObjStm.ObjStmIx)) compare)
+  /-- Every stored decode is the container stage. -/
+  h : ∀ c t, tbl.get[c]? = some t → t.get = containerOf file limits c
+
+/-- The container table of a file, built on the first compressed fetch. -/
+def ObjStmIdx.of (limits : Limits) (file : OpenDoc) : ObjStmIdx file :=
+  ⟨limits, Thunk.mk fun _ => objStmTable file limits, by
+    intro c t ht
+    rw [thunk_get_mk] at ht
+    exact objStmTable_inv file limits file.xref.entries ∅
+      (fun c t ht => by simp at ht) c t ht⟩
+
 /-- An opened document with its page tree flattened. -/
 structure Doc where
   /-- The opened file. -/
@@ -547,6 +617,8 @@ structure Doc where
   catalog : Dict
   /-- The ordered index of the catalog's `/Dests` dictionary (task 13.24). -/
   dests : DestsIdx file catalog
+  /-- The decoded object streams (task 13.25). -/
+  objs : ObjStmIdx file
   /-- The root `/Pages` reference. -/
   pagesRef : Nat × Nat
   /-- The pages, in document order. -/
@@ -555,6 +627,73 @@ structure Doc where
   declaredCount : Option Int
   /-- Dangling `/Kids` references skipped (rule W3). -/
   skippedKids : Nat
+
+/-- The decoder of container `c` for fetches under `limits`: the stored decode when `limits`
+are the limits of the index, else the container stage itself. -/
+def Doc.containerDec (doc : Doc) (limits : Limits) (c : Nat) (_off : Nat) :
+    Except Error Xref.ObjStm.ObjStmIx :=
+  match doc.objs.tbl.get[c]? with
+  | some t => if limits = doc.objs.limits then t.get else containerOf doc.file limits c
+  | none => containerOf doc.file limits c
+
+/-- **Cached object fetch** (task 13.25): `OpenDoc.getObject` on the document's file, where a
+member of an object stream reuses the container's decode, made once per container
+(`Doc.getObjectC_eq`). Everything else is `getObject`. -/
+def Doc.getObjectC (doc : Doc) (limits : Limits) (num gen : Nat) :
+    Except Error IndirectBody :=
+  match doc.file.lookup num with
+  | some (.compressed _ _) =>
+    if gen = 0 then
+      (Xref.ObjStm.fetchCompressedVia doc.file.lookup limits (doc.containerDec limits) num).map
+        IndirectBody.obj
+    else .ok Core.Open.nullBody
+  | _ => doc.file.getObject limits num gen
+
+/-- **The cached fetch is the uncached one**, for every document, limits, object and
+generation. -/
+theorem Doc.getObjectC_eq (doc : Doc) (limits : Limits) (num gen : Nat) :
+    doc.getObjectC limits num gen = doc.file.getObject limits num gen := by
+  unfold Doc.getObjectC
+  rcases hl : doc.file.lookup num with _ | (⟨_, _⟩ | ⟨_, _⟩ | ⟨c, idx⟩)
+  all_goals simp only
+  by_cases hg : gen = 0
+  · simp only [hg, ↓reduceIte]
+    unfold OpenDoc.getObject OpenDoc.getObjectTrace
+    rw [hl]
+    simp only [↓reduceIte]
+    refine congrArg (Except.map IndirectBody.obj)
+      (Xref.ObjStm.fetchCompressedVia_eq doc.file.pre doc.file.lookup limits doc.file.bytes
+        doc.file.objectCount num (doc.containerDec limits) ?_)
+    intro c off g hc
+    unfold Doc.containerDec
+    cases ht : doc.objs.tbl.get[c]? with
+    | none => simp only [containerOf, hc]
+    | some t =>
+      simp only
+      split
+      · rename_i hlim
+        subst hlim
+        rw [doc.objs.h c t ht]
+        simp only [containerOf, hc]
+      · simp only [containerOf, hc]
+  · simp only [hg, ↓reduceIte]
+    unfold OpenDoc.getObject OpenDoc.getObjectTrace
+    rw [hl]
+    simp only [hg, ↓reduceIte]
+
+/-- `resolve` on the document's file with the cached fetch `Doc.getObjectC`. -/
+def Doc.resolveC (doc : Doc) (limits : Limits) : PdfObject → Except Error PdfObject
+  | .ref n g =>
+    match doc.getObjectC limits n g with
+    | .error e => .error e
+    | .ok (.obj o) => .ok o
+    | .ok (.stream _) => .ok .null
+  | o => .ok o
+
+/-- `resolveC` is `resolve` on the file. -/
+theorem Doc.resolveC_eq (doc : Doc) (limits : Limits) (o : PdfObject) :
+    doc.resolveC limits o = resolve doc.file limits o := by
+  cases o <;> simp only [Doc.resolveC, resolve, Doc.getObjectC_eq]
 
 /-- Number of pages. -/
 def Doc.pageCount (doc : Doc) : Nat := doc.pages.size
@@ -590,7 +729,8 @@ def ofOpen (limits : Limits) (d : OpenDoc) : Except Error Doc :=
         match walk d limits pn pg with
         | .error e => .error e
         | .ok st =>
-          .ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat, pagesRef := (pn, pg),
+          .ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat,
+                objs := ObjStmIdx.of limits d, pagesRef := (pn, pg),
                 pages := st.pages.reverse.toArray,
                 declaredCount := declaredCountOf d limits pn pg, skippedKids := st.skipped }
       | _ => .error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference")
@@ -1520,7 +1660,8 @@ def ofOpenB (limits : Limits) (d : OpenDoc) (bc : BC) : (Except Error Doc) × BC
       | some (.ref pn pg) =>
         bindB (walkB d limits pn pg r.2) fun st b1 =>
           let c := declaredCountOfB d limits pn pg b1
-          (.ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat, pagesRef := (pn, pg),
+          (.ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat,
+                 objs := ObjStmIdx.of limits d, pagesRef := (pn, pg),
                  pages := st.pages.reverse.toArray,
                  declaredCount := c.1, skippedKids := st.skipped }, c.2)
       | _ => (.error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference"),
