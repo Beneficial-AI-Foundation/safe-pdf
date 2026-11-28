@@ -320,7 +320,7 @@ def runGlyph {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Tiling.
                    maxForms := bud.forms }
       let t := Content.Ops.tokenize { lim with maxOpsPerPage := cap } bytes
       let (colored, d1) := kindOf (fun o => (Content.Run.resolve src s o).1) t.ops
-      let r := Content.Run.runOps env' lim.maxXObjectDepth ⟨res, [n], owner, 0, Matrix.identity⟩
+      let r := Content.Run.runOps env' lim.maxXObjectDepth (Content.Frame.mk' res [n] owner 0 Matrix.identity)
         (St.init s obs) t.ops
       (some { items := r.items, colored, bbox := glyphBox r.items d1 fbb,
               images := imageGlyph lim colored r.items }, r.s, r.obs,
@@ -1032,7 +1032,7 @@ def renderRun (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : 
     (fi : FontInfo) (f : T3Font) (st : Clip.RState) (gc : GlyphCache) (r : GlyphRun)
     (clip : Content.Clip) : Clip.RState × GlyphCache :=
   if !r.renderMode.paints then (st, gc) else
-  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let c := Clip.clipMaskC cfg m W H st.room st.cache clip
   let win := Clip.itemWindow W H c.1
   let fi' : FontInfo := { fi with width := fun code => truncWidth (fi.width code) }
   let entries := Text.layoutParts fi' (Text.runTextState r) r.font.size Fixed.zero r.parts
@@ -1040,7 +1040,7 @@ def renderRun (cfg : Fill.Config) (paint : Tiling.CellPainter) (m : Aff) (W H : 
   let q := (passes r).foldl (fun (acc : ByteArray × Nat × GlyphCache) (pc : Color × Comp) =>
     entries.foldl (glyphStep paint W H win c.1 (Clip.compByte pc.2) (Clip.deviceRGB pc.1) f r rm)
       acc) (st.buf, 0, gc)
-  ({ buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2.1 }, q.2.2)
+  ({ st with buf := q.1, cache := c.2.1, steps := st.steps + c.2.2 + q.2.1, smemo := none }, q.2.2)
 
 private theorem foldl_passes_size (paint : Tiling.CellPainter) (W H : Nat) (win : IRect)
     (cm : Option Mask) (f : T3Font) (r : GlyphRun) (rm : Aff)

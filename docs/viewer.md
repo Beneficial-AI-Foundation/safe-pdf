@@ -690,6 +690,18 @@ process: the `worker` executable (`SafePdf/Shell/Worker/`, task 12.2a; OS confin
   request spawns a fresh worker and sends the bytes again, and another file opens normally.
   20 s is far above the slowest corpus page (about 3 s) and the slowest decompression bomb
   under the default limits (about 3.3 s).
+* **Stopped pages (13.4d).** Rendering has a work allowance (`Limits.renderStepFactor` = 128
+  steps per page pixel, floor `renderStepFloor` = 2^20; the viewer's `Limits` reach the worker
+  with `--limits=`). A page that spends it is **not an error**: the worker answers `image W H
+  RGBA complete` with `complete = false` and the pixels painted before the stop (`4·w·h` bytes
+  as always; the worker calls `Glyph.renderDocPagePartial`). The viewer caches it like any page
+  (`State.partialKeys` remembers which keys are partial), shows the raster, writes `page drawn
+  partly: render work limit reached` (`Viewer.partialText`) into the status line and as a small
+  note in the page's top-left corner (canvas tags `ppart eN`), and does **not** render that
+  zoom and rotation again. Zoom, rotation or layers changes are new renders with their own
+  allowance; thumbnails show the partial raster without a note; the text index, links and search
+  do not depend on the raster. The in-process fallback (no worker) behaves the same way
+  (`Viewer.renderPageP`).
 * **Images are checked** before Tk sees them: `4·w·h` bytes or the page shows an error
   (`Viewer.outOfReply`). Worker errors show their own text (`Viewer.workerErr`, `pageErr`).
 * **Outline**: asked for right after the `openDoc` and waited for during the open (after

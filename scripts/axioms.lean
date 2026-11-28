@@ -800,6 +800,12 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Core.Raster.Clip.ClipCache.insert_length_le
 #print axioms SafePdf.Core.Raster.Clip.clipMaskC_steps_le
 #print axioms SafePdf.Core.Raster.Clip.renderItemsCounted_steps_le
+#print axioms SafePdf.Core.Raster.Clip.clipMaskC_steps_le_room
+#print axioms SafePdf.Core.Raster.Clip.clipMaskC_empty_of_over
+#print axioms SafePdf.Core.Raster.Clip.clipMaskC_room_eq
+#print axioms SafePdf.Core.Raster.Clip.renderItem_steps_le_room
+#print axioms SafePdf.Core.Raster.Clip.renderItemsCountedAt_steps_le_limit
+#print axioms SafePdf.Core.Raster.Clip.renderItemsCountedAt_eq_of_le
 #print axioms SafePdf.Core.Raster.Clip.renderItems_size
 #print axioms SafePdf.Core.Raster.Clip.renderPaths_size
 #print axioms SafePdf.Core.Raster.Clip.pageSize_le
@@ -839,6 +845,9 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Core.Raster.Glyph.paintAll_size
 #print axioms SafePdf.Core.Raster.Glyph.renderItemG_size
 #print axioms SafePdf.Core.Raster.Glyph.renderPage_size
+#print axioms SafePdf.Core.Raster.Glyph.renderPageR_size
+#print axioms SafePdf.Core.Raster.Glyph.renderDocPagePartial_size
+#print axioms SafePdf.Core.Raster.Glyph.renderDocPage_size
 
 -- Phase 7, task 7.2e: fast compositor (SafePdf/Core/Raster/Clip.lean)
 #print axioms SafePdf.Core.Raster.Clip.composite_size
@@ -1032,6 +1041,7 @@ import SafePdf.Shell.Worker.Protocol
 #print axioms SafePdf.Api.glyph_provenance
 #print axioms SafePdf.Api.glyph_codes
 #print axioms SafePdf.Api.renderPage_size
+#print axioms SafePdf.Api.renderPagePartial_size
 #print axioms SafePdf.Api.outline_bounded
 
 -- Phase 8, task 8.3d: NoRotate

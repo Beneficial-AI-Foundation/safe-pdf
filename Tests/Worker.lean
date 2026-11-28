@@ -49,6 +49,12 @@ executable (`.lake/build/bin/worker`, a default build target) through
   the 64 MiB case, and every fence check that fails, is run once more with the worker's
   stderr piped (`diagnose`) and its lines printed (`worker stderr: …`): the fences installed
   and the step that ended it.
+* **Task 13.4d, partial pages**: a page of 600 full-page fills spends the default render work
+  allowance; the worker answers with an `image` of the pixels painted so far (equal to the
+  in-process `renderDocPagePartial`) and `complete = false`; a normal page, and the same page
+  under a larger allowance, answer `complete = true`; a tiny allowance (passed with `--limits`)
+  stops `latin.pdf`; the flag round-trips through the framing, a corrupted flag byte, a cut frame
+  and an oversized frame are refused (`partialPage`).
 -/
 
 namespace SafePdf.Tests.Worker
@@ -73,7 +79,7 @@ def describe : Except ClientError Response → String
   | .error e => s!"client error {e}"
   | .ok (.error k m) => s!"error {reprStr k}: {m}"
   | .ok (.docInfo n r e) => s!"docInfo {n} {r} {e}"
-  | .ok (.image w h d) => s!"image {w}x{h} ({d.size} bytes)"
+  | .ok (.image w h d c) => s!"image {w}x{h} ({d.size} bytes, complete {c})"
   | .ok (.text s gs) => s!"text {s.length} chars, {gs.length} glyphs"
   | .ok _ => "other response"
 
@@ -100,7 +106,7 @@ private def checkImageBands (c : Client) (fixture : String) (bands : Array ByteA
   let opened ← c.request (.openDoc bytes false)
   unless isDoc 1 opened do return ← check s!"{fixture} open ({describe opened})" false
   let rendered ← c.request (.render 0 1 0 none)
-  let .ok (.image width 8 pixels) := rendered
+  let .ok (.image width 8 pixels _) := rendered
     | return ← check s!"{fixture} render ({describe rendered})" false
   let mut row := ByteArray.empty
   for colour in bands do
@@ -134,7 +140,7 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
   let local_ := (Raster.Glyph.renderDocPage limits d.doc page (3 / 2) .r0
     (Filter.Budget.init limits) (subst := subst)).1
   match ← c.request (.render 0 (3 / 2) 0 none), local_ with
-  | .ok (.image w h data), .ok img =>
+  | .ok (.image w h data _), .ok img =>
     f := f + (← check s!"render size {w}x{h} vs {img.w}x{img.h}" (w == img.w && h == img.h))
     f := f + (← check "render bytes equal the in-process render" (data == img.data))
     -- Without substitute fonts (e.g. CI without fonts-urw-base35 in the worker's font
@@ -148,7 +154,7 @@ def endToEnd (exe : System.FilePath) : IO Nat := do
   let localR := (Raster.Glyph.renderDocPage limits d.doc page 1 .r90
     (Filter.Budget.init limits) (subst := subst)).1
   match ← c.request (.render 0 1 1 none), localR with
-  | .ok (.image w h data), .ok img =>
+  | .ok (.image w h data _), .ok img =>
     f := f + (← check "rotated render equals the in-process render"
       (w == img.w && h == img.h && data == img.data))
   | r, _ => f := f + (← check s!"rotated render ({describe r})" false)
@@ -263,7 +269,7 @@ def killAndRestart (exe : System.FilePath) : IO Nat := do
   | .ok (.docInfo n _ _) =>
     f := f + (← check "a fresh worker opens the next file" (n > 0))
     match ← c2.request (.render 0 1 0 none) (some 10000) with
-    | .ok (.image w h d) => f := f + (← check "a fresh worker renders" (d.size == 4 * w * h && w > 0))
+    | .ok (.image w h d _) => f := f + (← check "a fresh worker renders" (d.size == 4 * w * h && w > 0))
     | r => f := f + (← check s!"fresh render ({describe r})" false)
   | r => f := f + (← check s!"fresh open ({describe r})" false)
   c2.close
@@ -292,7 +298,7 @@ def overhead (exe : System.FilePath) : IO Nat := do
   let mut wsz := 0
   for _ in [0:n] do
     match ← c.request (.render 0 1 0 none) with
-    | .ok (.image _ _ data) => wsz := wsz + data.size
+    | .ok (.image _ _ data _) => wsz := wsz + data.size
     | _ => pure ()
   let t2 ← IO.monoNanosNow
   c.close
@@ -394,7 +400,7 @@ def textLinksLayers (exe : System.FilePath) : IO Nat := do
     let here := (Raster.Glyph.renderDocPage limits od.doc page 1 .r0 (Filter.Budget.init limits)
       (subst := subst) (oc := oc)).1
     match ← c.request (.render 0 1 0 oc), here with
-    | .ok (.image w h data), .ok img =>
+    | .ok (.image w h data _), .ok img =>
       f := f + (← check s!"layered render {reprStr oc} equals the in-process render"
         (w == img.w && h == img.h && data == img.data))
       imgs := imgs ++ [data]
@@ -462,7 +468,7 @@ def startupFlags (exe : System.FilePath) : IO Nat := do
     let c ← spawn exe limits #[] start
     discard <| c.request (.openDoc bytes true) (some 10000)
     match ← c.request (.render 0 1 0 none) (some 20000), renderWith sf with
-    | .ok (.image w h data), .ok img =>
+    | .ok (.image w h data _), .ok img =>
       f := f + (← check s!"worker started with {what} renders as in process"
         (w == img.w && h == img.h && data == img.data))
       if what == "--no-subst" && !subst.faces.isEmpty then
@@ -478,7 +484,7 @@ def startupFlags (exe : System.FilePath) : IO Nat := do
   discard <| c.request (.openDoc bytes true) (some 10000)
   let r ← c.request (.render 0 1 0 none) (some 20000)
   f := f + (← check s!"--limits reaches the worker ({describe r})"
-    (match r with | .ok (.image w h _) => w ≤ 10 && h ≤ 10 | .ok (.error ..) => true | _ => false))
+    (match r with | .ok (.image w h _ _) => w ≤ 10 && h ≤ 10 | .ok (.error ..) => true | _ => false))
   c.close
   -- An unknown flag.
   let child ← IO.Process.spawn
@@ -550,7 +556,7 @@ def fences (exe : System.FilePath) : IO Nat := do
   discard <| c.request (.openDoc bytes true) (some 10000)
   let r ← c.request (.render 0 8 0 none) (some 60000)
   let k ← check s!"a 2048 MiB worker renders the same page ({describe r})"
-    (match r with | .ok (.image w h _) => w == 4896 && h == 6336 | _ => false)
+    (match r with | .ok (.image w h _ _) => w == 4896 && h == 6336 | _ => false)
   c.close
   if k > 0 then diagnose exe big [.openDoc bytes true, .render 0 8 0 none, .quit] 60000
   f := f + k
@@ -585,6 +591,113 @@ def fences (exe : System.FilePath) : IO Nat := do
   f := f + k
   return f
 
+/-- A one-page Letter PDF (with an xref table) whose content stream paints `n` full-page
+red rectangles: `n` fills of about 0.5 M counted steps each, so enough of them spend the default
+render work allowance (62 M steps at 72 dpi) while the page stays a few KiB. -/
+def manyFills (n : Nat) : ByteArray :=
+  let content := String.join (List.replicate n "1 0 0 rg 0 0 612 792 re f\n")
+  let objs : List String :=
+    ["<< /Type /Catalog /Pages 2 0 R >>",
+     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+     s!"<< /Length {content.utf8ByteSize} >>\nstream\n{content}endstream"]
+  let head := "%PDF-1.4\n"
+  let (body, offs) := objs.zipIdx.foldl (fun (acc : String × List Nat) (o, i) =>
+    (acc.1 ++ s!"{i + 1} 0 obj\n{o}\nendobj\n", acc.2 ++ [acc.1.utf8ByteSize])) (head, [])
+  let xref := String.join (offs.map fun o =>
+    let t := toString o
+    "".pushn '0' (10 - t.length) ++ t ++ " 00000 n \n")
+  (body ++ s!"xref\n0 {objs.length + 1}\n0000000000 65535 f \n{xref}" ++
+    s!"trailer\n<< /Size {objs.length + 1} /Root 1 0 R >>\nstartxref\n{body.utf8ByteSize}\n%%EOF\n").toUTF8
+
+/-- Task 13.4d: the render work allowance reaches the worker and the stopped-page state comes
+back with the image. A page of 600 full-page fills spends the default allowance: the worker
+answers with an image (`4 · w · h` bytes, the pixels painted before the stop, equal to the
+in-process `renderDocPagePartial`) and `complete = false`; a normal page (`latin.pdf`) answers
+`complete = true`; a worker started with a larger allowance completes the stopped page, one with
+a tiny allowance stops `latin.pdf` (the `Limits` fields travel on the command line). The
+response carries the flag through the framing (round trip, a corrupted flag byte is refused, a
+cut frame is incomplete, an oversized header is refused); the in-process `Serve.answer` gives the
+same answers. -/
+def partialPage (exe : System.FilePath) : IO Nat := do
+  let mut f := 0
+  let limits := Limits.default
+  let fills := manyFills 600
+  let some d := (Api.openBytes fills).toOption | return (← check "many-fill page opens in process" false)
+  let some page := d.doc.pages[0]? | return (← check "many-fill page exists" false)
+  let subst ← workerFonts limits
+  -- In process: the stop reason and the pixels.
+  let local_ := (Raster.Glyph.renderDocPagePartial limits d.doc page 1 .r0
+    (Filter.Budget.init limits) (subst := subst)).1
+  let some pr := local_.toOption | return (← check "many-fill page renders in process" false)
+  f := f + (← check "the in-process render of 600 full-page fills is partial" pr.exceeded)
+  let c ← spawn exe limits
+  let r0 ← c.request (.openDoc fills false) (some 10000)
+  f := f + (← check s!"many-fill page opens in the worker ({describe r0})" (isDoc 1 r0))
+  let r ← c.request (.render 0 1 0 none) (some 30000)
+  match r with
+  | .ok (.image w h data complete) =>
+    f := f + (← check s!"stopped page: image of {4 * w * h} bytes ({data.size})" (data.size == 4 * w * h && w == 612 && h == 792))
+    f := f + (← check "stopped page: complete = false" (!complete))
+    f := f + (← check "stopped page: the pixels equal the in-process partial render"
+      (w == pr.image.w && h == pr.image.h && data == pr.image.data))
+    f := f + (← check "stopped page: the first fills are painted (red)"
+      (data.size ≥ 4 && data.get! 0 == 255 && data.get! 1 == 0 && data.get! 2 == 0))
+  | _ => f := f + (← check s!"stopped page: render ({describe r})" false)
+  -- The worker still serves after a stopped page (it is not an error).
+  f := f + (← check "the worker serves after a stopped page" (isDoc 1 (← c.request .info (some 5000))))
+  c.close
+  -- A larger allowance completes the same page.
+  let c ← spawn exe { limits with renderStepFactor := 1000000 }
+  discard <| c.request (.openDoc fills false) (some 10000)
+  match ← c.request (.render 0 1 0 none) (some 60000) with
+  | .ok (.image w h _ complete) =>
+    f := f + (← check s!"a larger allowance completes the page ({w}x{h})" complete)
+  | r => f := f + (← check s!"larger allowance render ({describe r})" false)
+  c.close
+  -- A normal page is complete; a tiny allowance stops it.
+  let latin ← IO.FS.readBinFile "Tests/golden/text/latin.pdf"
+  let c ← spawn exe limits
+  discard <| c.request (.openDoc latin true) (some 10000)
+  match ← c.request (.render 0 1 0 none) (some 20000) with
+  | .ok (.image _ _ _ complete) => f := f + (← check "a normal page is complete" complete)
+  | r => f := f + (← check s!"normal page render ({describe r})" false)
+  c.close
+  let c ← spawn exe { limits with renderStepFactor := 0, renderStepFloor := 1 }
+  discard <| c.request (.openDoc latin true) (some 10000)
+  match ← c.request (.render 0 1 0 none) (some 20000) with
+  | .ok (.image w h data complete) =>
+    f := f + (← check "a tiny allowance stops latin.pdf (complete = false, full-size image)"
+      (!complete && data.size == 4 * w * h && w > 0))
+  | r => f := f + (← check s!"tiny allowance render ({describe r})" false)
+  c.close
+  -- The in-process answer (the worker loop's pure core) agrees.
+  let (st, _) := Serve.answer { subst } (.openDoc fills false) limits
+  match (Serve.answer st (.render 0 1 0 none) limits).2 with
+  | .image w h data complete =>
+    f := f + (← check "Serve.answer: stopped page has complete = false and the same pixels"
+      (!complete && w == pr.image.w && h == pr.image.h && data == pr.image.data))
+  | _ => f := f + (← check "Serve.answer render" false)
+  -- Framing: the flag survives, a corrupted flag byte and a cut frame are refused, an oversized
+  -- frame is refused.
+  for complete in [true, false] do
+    let m : Response := .image 1 1 ⟨#[1, 2, 3, 4]⟩ complete
+    match Protocol.decodeFrame Protocol.response (Protocol.responseCap limits)
+        (Protocol.encodeFrame Protocol.response m) 0 with
+    | .ok m' _ => f := f + (← check s!"image frame round trip (complete = {complete})" (m' == m))
+    | _ => f := f + (← check s!"image frame decodes (complete = {complete})" false)
+  let enc := Protocol.response.enc (.image 1 1 ⟨#[1, 2, 3, 4]⟩ false)
+  let bad := enc.set! (enc.size - 1) 2
+  f := f + (← check "a corrupted completeness byte is refused"
+    (match Protocol.decodeBody Protocol.response bad with | .error _ => true | .ok _ => false))
+  let frame := Protocol.encodeFrame Protocol.response (.image 1 1 ⟨#[1, 2, 3, 4]⟩ false)
+  f := f + (← check "a frame cut before the flag byte is incomplete"
+    (match Protocol.decodeFrame Protocol.response (Protocol.responseCap limits)
+        (frame.extract 0 (frame.size - 1)) 0 with | .incomplete => true | _ => false))
+  f := f + (← check "an image frame above the cap is refused"
+    (match Protocol.decodeFrame Protocol.response 4 frame 0 with | .error _ => true | _ => false))
+  return f
+
 /-- Run the suite. -/
 def run : IO Nat := do
   let some exe ← workerExe
@@ -597,6 +710,7 @@ def run : IO Nat := do
   f := f + (← textLinksLayers exe)
   f := f + (← startupFlags exe)
   f := f + (← fences exe)
+  f := f + (← partialPage exe)
   return f
 
 end SafePdf.Tests.Worker

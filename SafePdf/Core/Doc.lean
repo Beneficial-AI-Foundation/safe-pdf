@@ -1,4 +1,5 @@
 import SafePdf.Core.Open
+import SafePdf.Core.DictIndex
 
 /-!
 # Document structure: catalog and page tree (task 4.1)
@@ -21,6 +22,8 @@ so `Doc.getPage` is total and trivial.
   is `Error.cycle` (offset: the object's xref offset, else 0). This rejects a `/Kids` cycle
   (an ancestor is visited before its kids are pushed) and also a node reached twice through
   two parents (a DAG): the page list must consist of distinct objects.
+  The visited list is the specification; the test uses an ordered set that mirrors it
+  (`VSet`, `O(log n)`; task 13.22: a list scan made a flat `/Kids` of n pages quadratic).
 * W3. A popped reference that resolves to `null` (free, absent, generation mismatch: D-001) is
   **skipped** and counted in `Doc.skippedKids` (qpdf also ignores dangling kids). It is not
   marked visited.
@@ -364,12 +367,41 @@ structure Entry where
   /-- Attributes inherited from the ancestors. -/
   inh : Attrs
 
+/-- An ordered set of object numbers (a balanced tree: `O(log n)` per operation in the worst
+case; task 13.22: the visited test was a scan of a list, quadratic on a flat `/Kids`). -/
+abbrev NumSet := Std.TreeSet Nat compare
+
+/-- A set of object numbers that mirrors the list `l`: the membership test of `l` in
+`O(log n)`. The list stays the specification (all theorems are about it); the set is the
+index that makes the test fast. -/
+def VSet (l : List Nat) : Type := { s : NumSet // ∀ x : Nat, s.contains x = true ↔ x ∈ l }
+
+/-- The empty set mirrors the empty list. -/
+def VSet.empty : VSet [] := ⟨∅, fun x => by simp⟩
+
+/-- Membership in the set: `O(log n)`. -/
+def VSet.has {l : List Nat} (v : VSet l) (x : Nat) : Bool := v.1.contains x
+
+/-- The set test agrees with list membership. -/
+theorem VSet.has_iff {l : List Nat} (v : VSet l) (x : Nat) : v.has x = true ↔ x ∈ l :=
+  v.2 x
+
+/-- Adding an element to the set mirrors consing it onto the list. -/
+def VSet.insert {l : List Nat} (v : VSet l) (x : Nat) : VSet (x :: l) :=
+  ⟨v.1.insert x, fun y => by
+    rw [Std.TreeSet.contains_insert, List.mem_cons]
+    have h1 : (compare x y == Ordering.eq) = true ↔ x = y := by
+      simp
+    rw [Bool.or_eq_true, h1, v.2 y, eq_comm (a := x)]⟩
+
 /-- The walk state. -/
 structure WalkState where
   /-- Nodes still to visit, next first. -/
   stack : List Entry
   /-- Object numbers of the visited nodes, newest first. -/
   visited : List Nat
+  /-- The visited nodes as an ordered set (the fast membership test; mirrors `visited`). -/
+  seen : VSet visited
   /-- Pages found, newest first. -/
   pages : List Page
   /-- References skipped because they resolve to `null` (rule W3). -/
@@ -408,15 +440,15 @@ def kidsOf : PdfObject → Option (List (Nat × Nat))
 
 /-- Pop the next live entry (rules W2, W3): a visited one is a cycle, a `null` one is
 skipped. Returns the entry, its body, the rest of the stack, and the skip count. -/
-def popLive (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+def popLive (d : OpenDoc) (limits : Limits) (visited : List Nat) (seen : VSet visited) :
     List Entry → Nat → Except Error (Option (Entry × IndirectBody × List Entry) × Nat)
   | [], k => .ok (none, k)
   | e :: rest, k =>
-    if e.num ∈ visited then .error (.cycle (offsetOf d e.num) "page tree /Kids cycle")
+    if seen.has e.num then .error (.cycle (offsetOf d e.num) "page tree /Kids cycle")
     else
       match d.getObject limits e.num e.gen with
       | .error x => .error x
-      | .ok (.obj .null) => popLive d limits visited rest (k + 1)
+      | .ok (.obj .null) => popLive d limits visited seen rest (k + 1)
       | .ok b => .ok (some (e, b, rest), k)
 
 /-- Visit a live node (rules W4–W6): mark it visited, then push its kids or record its
@@ -442,10 +474,11 @@ def visitNode (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
               .ok { st with
                     stack := ks.map (fun r => ⟨r.1, r.2, e.depth + 1, e.inh.merge own⟩) ++
                       st.stack
-                    visited := e.num :: st.visited }
+                    visited := e.num :: st.visited, seen := st.seen.insert e.num }
         | .leaf =>
           .ok { st with
                 visited := e.num :: st.visited
+                seen := st.seen.insert e.num
                 pages := mkPage e.num e.gen (e.inh.merge own)
                   (Dict.get? nd (Name.ofString "Contents")) :: st.pages }
         | .bad => .error (.malformed (offsetOf d e.num)
@@ -456,12 +489,12 @@ def visitNode (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
 /-- The walk loop: at most `fuel` node visits (rule W6). -/
 def loop (d : OpenDoc) (limits : Limits) : Nat → WalkState → Except Error WalkState
   | 0, st =>
-    match popLive d limits st.visited st.stack st.skipped with
+    match popLive d limits st.visited st.seen st.stack st.skipped with
     | .error x => .error x
     | .ok (none, k) => .ok { st with stack := [], skipped := k }
     | .ok (some _, _) => .error (.limitExceeded .objects)
   | f + 1, st =>
-    match popLive d limits st.visited st.stack st.skipped with
+    match popLive d limits st.visited st.seen st.stack st.skipped with
     | .error x => .error x
     | .ok (none, k) => .ok { st with stack := [], skipped := k }
     | .ok (some (e, b, rest), k) =>
@@ -470,7 +503,7 @@ def loop (d : OpenDoc) (limits : Limits) : Nat → WalkState → Except Error Wa
       | .ok st' => loop d limits f st'
 
 /-- The initial state: the root `/Pages` node `n g`, nothing inherited. -/
-def initState (n g : Nat) : WalkState := ⟨[⟨n, g, 0, {}⟩], [], [], 0⟩
+def initState (n g : Nat) : WalkState := ⟨[⟨n, g, 0, {}⟩], [], VSet.empty, [], 0⟩
 
 /-- Walk the page tree rooted at `n g` with fuel `objectCount`. -/
 def walk (d : OpenDoc) (limits : Limits) (n g : Nat) : Except Error WalkState :=
@@ -478,12 +511,114 @@ def walk (d : OpenDoc) (limits : Limits) (n g : Nat) : Except Error WalkState :=
 
 /-! ## The document -/
 
+deriving instance DecidableEq for Limits
+
+/-- The catalog's `/Dests` dictionary (PDF 1.1; the entry resolved one level, leniently: a
+fetch error or a non-dictionary is no dictionary). -/
+def destsDictOf (d : OpenDoc) (limits : Limits) (cat : Dict) : Option Dict :=
+  match Dict.get? cat (Name.ofString "Dests") with
+  | none => none
+  | some o =>
+    match resolve d limits o with
+    | .ok (.dict dd) => some dd
+    | _ => none
+
+/-- The ordered index of the catalog's `/Dests` dictionary (task 13.24), built on the first
+named-destination lookup and reused by every later one, for the limits the document was opened
+with (`limits`). `h` ties it to `destsDictOf`; `Dict.index_get?` ties the index to
+`Dict.lookup` (first entry of a key, duplicates included). -/
+structure DestsIdx (file : OpenDoc) (cat : Dict) where
+  /-- The limits the index was built under (the fetch of an indirect `/Dests` depends on them). -/
+  limits : Limits
+  /-- The index, `none` when there is no `/Dests` dictionary. -/
+  idx : Thunk (Option (Std.TreeMap (List UInt8) PdfObject compare))
+  /-- The index is that of the dictionary. -/
+  h : idx.get = (destsDictOf file limits cat).map Dict.index
+
+/-- The `/Dests` index of a catalog, built lazily. -/
+def DestsIdx.of (limits : Limits) (file : OpenDoc) (cat : Dict) : DestsIdx file cat :=
+  ⟨limits, Thunk.mk fun _ => (destsDictOf file limits cat).map Dict.index, thunk_get_mk _⟩
+
+open SafePdf.Core.Xref (XrefEntry)
+
+/-- The container stage of fetching an object-stream member (rule O6) for container `c` of
+`file`: parse and decode the container whose entry is `inUse off _`. (Any other entry gives a
+placeholder error; fetches never ask for it.) The result carries the constant-time header
+(`ObjStmIx`). -/
+def containerOf (file : OpenDoc) (limits : Limits) (c : Nat) :
+    Except Error Xref.ObjStm.ObjStmIx :=
+  match file.lookup c with
+  | some (.inUse off _) =>
+    (Xref.ObjStm.containerDecode file.pre file.lookup limits file.bytes file.objectCount off
+      c).map Xref.ObjStm.ObjStmIx.of
+  | _ => .error (.malformed 0 "no object stream container")
+
+/-- The lazily decoded containers: for each container number named by a compressed entry, a
+`Thunk` of its decode. The table only holds thunks (nothing is decoded when it is built); a
+container is decoded the first time one of its members is fetched and then reused by every
+later fetch (task 13.25: each fetch used to inflate the whole container again, which made `n`
+members quadratic). -/
+def objStmTable (file : OpenDoc) (limits : Limits) :
+    Std.TreeMap Nat (Thunk (Except Error Xref.ObjStm.ObjStmIx)) compare :=
+  file.xref.entries.foldl (fun m e =>
+    match e.2 with
+    | .compressed c _ => m.insertIfNew c (Thunk.mk fun _ => containerOf file limits c)
+    | _ => m) ∅
+
+private theorem objStmTable_inv (file : OpenDoc) (limits : Limits) :
+    ∀ (es : List (Nat × XrefEntry))
+      (m : Std.TreeMap Nat (Thunk (Except Error Xref.ObjStm.ObjStmIx)) compare),
+      (∀ c t, m[c]? = some t → t.get = containerOf file limits c) →
+      ∀ c t, (es.foldl (fun m e =>
+        match e.2 with
+        | .compressed c _ => m.insertIfNew c (Thunk.mk fun _ => containerOf file limits c)
+        | _ => m) m)[c]? = some t → t.get = containerOf file limits c
+  | [], m, hm => hm
+  | e :: rest, m, hm => by
+    simp only [List.foldl_cons]
+    refine objStmTable_inv file limits rest _ ?_
+    rcases e with ⟨k, v⟩
+    cases v with
+    | compressed c0 i0 =>
+      intro c t ht
+      simp only [Std.TreeMap.getElem?_insertIfNew] at ht
+      split at ht
+      · cases ht
+        rename_i hc
+        have : c0 = c := by simpa using hc.1
+        subst this
+        rw [thunk_get_mk]
+      · exact hm c t ht
+    | _ => exact hm
+
+/-- The decoded containers of a document, for the limits it was opened with. `h` ties every
+stored decode to `containerOf` (the uncached container stage). -/
+structure ObjStmIdx (file : OpenDoc) where
+  /-- The limits the table was built under (the decode depends on them). -/
+  limits : Limits
+  /-- The lazily decoded containers. -/
+  tbl : Thunk (Std.TreeMap Nat (Thunk (Except Error Xref.ObjStm.ObjStmIx)) compare)
+  /-- Every stored decode is the container stage. -/
+  h : ∀ c t, tbl.get[c]? = some t → t.get = containerOf file limits c
+
+/-- The container table of a file, built on the first compressed fetch. -/
+def ObjStmIdx.of (limits : Limits) (file : OpenDoc) : ObjStmIdx file :=
+  ⟨limits, Thunk.mk fun _ => objStmTable file limits, by
+    intro c t ht
+    rw [thunk_get_mk] at ht
+    exact objStmTable_inv file limits file.xref.entries ∅
+      (fun c t ht => by simp at ht) c t ht⟩
+
 /-- An opened document with its page tree flattened. -/
 structure Doc where
   /-- The opened file. -/
   file : OpenDoc
   /-- The catalog dictionary (§7.7.2). -/
   catalog : Dict
+  /-- The ordered index of the catalog's `/Dests` dictionary (task 13.24). -/
+  dests : DestsIdx file catalog
+  /-- The decoded object streams (task 13.25). -/
+  objs : ObjStmIdx file
   /-- The root `/Pages` reference. -/
   pagesRef : Nat × Nat
   /-- The pages, in document order. -/
@@ -492,6 +627,73 @@ structure Doc where
   declaredCount : Option Int
   /-- Dangling `/Kids` references skipped (rule W3). -/
   skippedKids : Nat
+
+/-- The decoder of container `c` for fetches under `limits`: the stored decode when `limits`
+are the limits of the index, else the container stage itself. -/
+def Doc.containerDec (doc : Doc) (limits : Limits) (c : Nat) (_off : Nat) :
+    Except Error Xref.ObjStm.ObjStmIx :=
+  match doc.objs.tbl.get[c]? with
+  | some t => if limits = doc.objs.limits then t.get else containerOf doc.file limits c
+  | none => containerOf doc.file limits c
+
+/-- **Cached object fetch** (task 13.25): `OpenDoc.getObject` on the document's file, where a
+member of an object stream reuses the container's decode, made once per container
+(`Doc.getObjectC_eq`). Everything else is `getObject`. -/
+def Doc.getObjectC (doc : Doc) (limits : Limits) (num gen : Nat) :
+    Except Error IndirectBody :=
+  match doc.file.lookup num with
+  | some (.compressed _ _) =>
+    if gen = 0 then
+      (Xref.ObjStm.fetchCompressedVia doc.file.lookup limits (doc.containerDec limits) num).map
+        IndirectBody.obj
+    else .ok Core.Open.nullBody
+  | _ => doc.file.getObject limits num gen
+
+/-- **The cached fetch is the uncached one**, for every document, limits, object and
+generation. -/
+theorem Doc.getObjectC_eq (doc : Doc) (limits : Limits) (num gen : Nat) :
+    doc.getObjectC limits num gen = doc.file.getObject limits num gen := by
+  unfold Doc.getObjectC
+  rcases hl : doc.file.lookup num with _ | (⟨_, _⟩ | ⟨_, _⟩ | ⟨c, idx⟩)
+  all_goals simp only
+  by_cases hg : gen = 0
+  · simp only [hg, ↓reduceIte]
+    unfold OpenDoc.getObject OpenDoc.getObjectTrace
+    rw [hl]
+    simp only [↓reduceIte]
+    refine congrArg (Except.map IndirectBody.obj)
+      (Xref.ObjStm.fetchCompressedVia_eq doc.file.pre doc.file.lookup limits doc.file.bytes
+        doc.file.objectCount num (doc.containerDec limits) ?_)
+    intro c off g hc
+    unfold Doc.containerDec
+    cases ht : doc.objs.tbl.get[c]? with
+    | none => simp only [containerOf, hc]
+    | some t =>
+      simp only
+      split
+      · rename_i hlim
+        subst hlim
+        rw [doc.objs.h c t ht]
+        simp only [containerOf, hc]
+      · simp only [containerOf, hc]
+  · simp only [hg, ↓reduceIte]
+    unfold OpenDoc.getObject OpenDoc.getObjectTrace
+    rw [hl]
+    simp only [hg, ↓reduceIte]
+
+/-- `resolve` on the document's file with the cached fetch `Doc.getObjectC`. -/
+def Doc.resolveC (doc : Doc) (limits : Limits) : PdfObject → Except Error PdfObject
+  | .ref n g =>
+    match doc.getObjectC limits n g with
+    | .error e => .error e
+    | .ok (.obj o) => .ok o
+    | .ok (.stream _) => .ok .null
+  | o => .ok o
+
+/-- `resolveC` is `resolve` on the file. -/
+theorem Doc.resolveC_eq (doc : Doc) (limits : Limits) (o : PdfObject) :
+    doc.resolveC limits o = resolve doc.file limits o := by
+  cases o <;> simp only [Doc.resolveC, resolve, Doc.getObjectC_eq]
 
 /-- Number of pages. -/
 def Doc.pageCount (doc : Doc) : Nat := doc.pages.size
@@ -527,7 +729,8 @@ def ofOpen (limits : Limits) (d : OpenDoc) : Except Error Doc :=
         match walk d limits pn pg with
         | .error e => .error e
         | .ok st =>
-          .ok { file := d, catalog := cat, pagesRef := (pn, pg),
+          .ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat,
+                objs := ObjStmIdx.of limits d, pagesRef := (pn, pg),
                 pages := st.pages.reverse.toArray,
                 declaredCount := declaredCountOf d limits pn pg, skippedKids := st.skipped }
       | _ => .error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference")
@@ -837,9 +1040,9 @@ theorem foldl_merge_rotate (path : List Attrs) (init : Attrs) :
     cases h1 : as.reverse.findSome? (·.rotate) <;> cases h2 : a.rotate <;> simp [h2]
 
 /-- A live entry popped by `popLive` is not visited. -/
-theorem popLive_fresh {d : OpenDoc} {limits : Limits} {visited : List Nat} :
+theorem popLive_fresh {d : OpenDoc} {limits : Limits} {visited : List Nat} {seen : VSet visited} :
     ∀ {s : List Entry} {k k' : Nat} {e : Entry} {b : IndirectBody} {rest : List Entry},
-      popLive d limits visited s k = .ok (some (e, b, rest), k') → e.num ∉ visited
+      popLive d limits visited seen s k = .ok (some (e, b, rest), k') → e.num ∉ visited
   | [], _, _, _, _, _, h => by simp [popLive] at h
   | e0 :: s, k, k', e, b, rest, h => by
     unfold popLive at h
@@ -849,14 +1052,15 @@ theorem popLive_fresh {d : OpenDoc} {limits : Limits} {visited : List Nat} :
       split at h
       · cases h
       · exact popLive_fresh h
-      · cases h; exact hn
+      · cases h; exact fun hm => hn ((seen.has_iff _).2 hm)
 
 /-- **Cycle ⇒ error.** Popping an entry that is already visited is `Error.cycle`. -/
-theorem popLive_cycle {d : OpenDoc} {limits : Limits} {visited : List Nat} {e : Entry}
+theorem popLive_cycle {d : OpenDoc} {limits : Limits} {visited : List Nat} {seen : VSet visited} {e : Entry}
     {rest : List Entry} {k : Nat} (h : e.num ∈ visited) :
-    popLive d limits visited (e :: rest) k =
+    popLive d limits visited seen (e :: rest) k =
       .error (.cycle (offsetOf d e.num) "page tree /Kids cycle") := by
-  simp [popLive, h]
+  have h' : seen.has e.num = true := (seen.has_iff _).2 h
+  simp [popLive, h']
 
 /-- **Cycle ⇒ error** for the walk: if the next entry is already visited, the walk fails
 with `Error.cycle`, whatever the fuel. -/
@@ -864,7 +1068,7 @@ theorem loop_cycle {d : OpenDoc} {limits : Limits} {f : Nat} {st : WalkState} {e
     {rest : List Entry} (hs : st.stack = e :: rest) (h : e.num ∈ st.visited) :
     (loop d limits f st).isOk = false ∧
       loop d limits f st = .error (.cycle (offsetOf d e.num) "page tree /Kids cycle") := by
-  have hp := popLive_cycle (d := d) (limits := limits) (rest := rest) (k := st.skipped) h
+  have hp := popLive_cycle (d := d) (limits := limits) (seen := st.seen) (rest := rest) (k := st.skipped) h
   cases f <;> simp [loop, hs, hp, Except.isOk, Except.toBool]
 
 /-- What a node visit does to the visited set and the pages: the node becomes visited, and
@@ -1182,29 +1386,29 @@ theorem attrsOfB_sim (d : OpenDoc) (limits : Limits) (bc : BC) (nd : Dict) :
   exact sim_pure _
 
 /-- `popLive` with budgeted fetches (rules W2, W3). -/
-def popLiveB (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+def popLiveB (d : OpenDoc) (limits : Limits) (visited : List Nat) (seen : VSet visited) :
     List Entry → Nat → BC → (Except Error (Option (Entry × IndirectBody × List Entry) × Nat)) × BC
   | [], k, bc => (.ok (none, k), bc)
   | e :: rest, k, bc =>
-    if e.num ∈ visited then (.error (.cycle (offsetOf d e.num) "page tree /Kids cycle"), bc)
+    if seen.has e.num then (.error (.cycle (offsetOf d e.num) "page tree /Kids cycle"), bc)
     else
       let r := fetchB d limits bc e.num e.gen
       match r.1 with
       | .error x => (.error x, r.2)
-      | .ok (.obj .null) => popLiveB d limits visited rest (k + 1) r.2
+      | .ok (.obj .null) => popLiveB d limits visited seen rest (k + 1) r.2
       | .ok b => (.ok (some (e, b, rest), k), r.2)
 
 /-- `popLiveB` simulates `popLive`. -/
-theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) (seen : VSet visited) :
     (stack : List Entry) → (k : Nat) → (bc : BC) →
-    Sim d limits bc (popLiveB d limits visited stack k bc) (popLive d limits visited stack k)
+    Sim d limits bc (popLiveB d limits visited seen stack k bc) (popLive d limits visited seen stack k)
   | [], k, bc => sim_pure _
   | e :: rest, k, bc => by
     unfold popLiveB popLive
-    by_cases hv : e.num ∈ visited
+    by_cases hv : seen.has e.num = true
     · simp only [hv, ↓reduceIte]
       exact sim_pure _
-    · simp only [hv, ↓reduceIte]
+    · simp only [hv]
       obtain ⟨fle, feq⟩ := fetchB_sim d limits bc e.num e.gen
       generalize fetchB d limits bc e.num e.gen = R at fle feq ⊢
       rcases R with ⟨r1, b1⟩
@@ -1212,7 +1416,7 @@ theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
           Sim d limits bc ((Except.ok (some (e, b, rest), k)), b1)
             (match d.getObject limits e.num e.gen with
              | .error x => .error x
-             | .ok (.obj .null) => popLive d limits visited rest (k + 1)
+             | .ok (.obj .null) => popLive d limits visited seen rest (k + 1)
              | .ok b => .ok (some (e, b, rest), k)) := by
         intro b hb hn
         refine ⟨fle, fun hx hA => ?_⟩
@@ -1231,7 +1435,7 @@ theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
         exact ⟨by first | rfl | trivial, h2⟩
       · cases o
         case null =>
-          obtain ⟨ple, peq⟩ := popLiveB_sim d limits visited rest (k + 1) b1
+          obtain ⟨ple, peq⟩ := popLiveB_sim d limits visited seen rest (k + 1) b1
           refine ⟨Nat.le_trans ple fle, fun hx hA => ?_⟩
           obtain ⟨h1, h2⟩ := feq hx (Nat.le_trans hA ple)
           simp only at h1
@@ -1258,10 +1462,11 @@ def visitNodeB (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
               (.ok { st with
                      stack := ks.map (fun r => ⟨r.1, r.2, e.depth + 1, e.inh.merge own⟩) ++
                        st.stack
-                     visited := e.num :: st.visited }, b2)
+                     visited := e.num :: st.visited, seen := st.seen.insert e.num }, b2)
         | .leaf =>
           (.ok { st with
                  visited := e.num :: st.visited
+                 seen := st.seen.insert e.num
                  pages := mkPage e.num e.gen (e.inh.merge own)
                    (Dict.get? nd (Name.ofString "Contents")) :: st.pages }, b1)
         | .bad => (.error (.malformed (offsetOf d e.num)
@@ -1341,13 +1546,13 @@ theorem visitNodeB_sim (d : OpenDoc) (limits : Limits) (e : Entry) (b : Indirect
 /-- `loop` with budgeted fetches (rule W6). -/
 def loopB (d : OpenDoc) (limits : Limits) : Nat → WalkState → BC → (Except Error WalkState) × BC
   | 0, st, bc =>
-    let r := popLiveB d limits st.visited st.stack st.skipped bc
+    let r := popLiveB d limits st.visited st.seen st.stack st.skipped bc
     (match r.1 with
      | .error x => .error x
      | .ok (none, k) => .ok { st with stack := [], skipped := k }
      | .ok (some _, _) => .error (.limitExceeded .objects), r.2)
   | f + 1, st, bc =>
-    let r := popLiveB d limits st.visited st.stack st.skipped bc
+    let r := popLiveB d limits st.visited st.seen st.stack st.skipped bc
     match r.1 with
     | .error x => (.error x, r.2)
     | .ok (none, k) => (.ok { st with stack := [], skipped := k }, r.2)
@@ -1361,16 +1566,16 @@ theorem loopB_sim (d : OpenDoc) (limits : Limits) :
     Sim d limits bc (loopB d limits fuel st bc) (loop d limits fuel st)
   | 0, st, bc => by
     unfold loopB loop
-    have hp := popLiveB_sim d limits st.visited st.stack st.skipped bc
-    generalize popLiveB d limits st.visited st.stack st.skipped bc = R at hp ⊢
+    have hp := popLiveB_sim d limits st.visited st.seen st.stack st.skipped bc
+    generalize popLiveB d limits st.visited st.seen st.stack st.skipped bc = R at hp ⊢
     refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_
     refine ⟨?_, h2⟩
     rw [← h1]
     all_goals (rcases R.1 with x | ⟨_ | _, k⟩ <;> rfl)
   | f + 1, st, bc => by
     unfold loopB loop
-    have hp := popLiveB_sim d limits st.visited st.stack st.skipped bc
-    generalize popLiveB d limits st.visited st.stack st.skipped bc = R at hp ⊢
+    have hp := popLiveB_sim d limits st.visited st.seen st.stack st.skipped bc
+    generalize popLiveB d limits st.visited st.seen st.stack st.skipped bc = R at hp ⊢
     rcases R with ⟨r1, b1⟩
     rcases r1 with x | ⟨_ | ⟨e, b, rest⟩, k⟩
     · refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_
@@ -1455,7 +1660,8 @@ def ofOpenB (limits : Limits) (d : OpenDoc) (bc : BC) : (Except Error Doc) × BC
       | some (.ref pn pg) =>
         bindB (walkB d limits pn pg r.2) fun st b1 =>
           let c := declaredCountOfB d limits pn pg b1
-          (.ok { file := d, catalog := cat, pagesRef := (pn, pg),
+          (.ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat,
+                 objs := ObjStmIdx.of limits d, pagesRef := (pn, pg),
                  pages := st.pages.reverse.toArray,
                  declaredCount := c.1, skippedKids := st.skipped }, c.2)
       | _ => (.error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference"),

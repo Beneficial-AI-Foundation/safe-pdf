@@ -185,16 +185,18 @@ def expandCS : PdfObject → PdfObject
 the values of `/Filter` (Table 93) and `/ColorSpace` (Table 92). An abbreviated key whose
 full form is already present is dropped (the first occurrence wins, as for `Dict.get?`). -/
 def expandInline (d : Dict) : Dict :=
-  let step (acc : Dict) (kv : Name × PdfObject) : Dict :=
+  -- `seen` mirrors the keys of the accumulator, so the membership test is `O(log n)` (an
+  -- `acc.find?` scan made a dictionary of `n` keys quadratic).
+  let step (st : Dict × ObjParse.KeySet) (kv : Name × PdfObject) : Dict × ObjParse.KeySet :=
     let k := expandName keyAbbrevs kv.1
-    if (acc.find? (·.1 == k)).isSome then acc
+    if st.2.contains k.bytes then st
     else
       let v :=
         if k == Name.ofString "Filter" then expandFilter kv.2
         else if k == Name.ofString "ColorSpace" then expandCS kv.2
         else kv.2
-      (k, v) :: acc
-  (d.foldl step []).reverse
+      ((k, v) :: st.1, st.2.insert k.bytes)
+  ((d.foldl step ([], ∅)).1).reverse
 
 /-- Components per sample of an (expanded) inline image colour space, when known without
 resources: device spaces and `Indexed`. -/
@@ -263,19 +265,21 @@ def imageEnd (bytes : ByteArray) (d : Dict) (start : Nat) : Option (Nat × Nat) 
     | none => none
 
 /-- The inline image dictionary from `pos` up to and including the keyword `ID`, onto the
-reversed accumulator `acc`; `none` if malformed (non-name key, duplicate key, bad value,
+reversed accumulator `acc` (`seen` mirrors its keys, so the duplicate test is `O(log n)`;
+`ObjParse.hasKey` is the specification); `none` if malformed (non-name key, duplicate key, bad value,
 lexer error, end of input). -/
-def inlineDict (fuel : Nat) (bytes : ByteArray) (pos : Nat) (acc : Dict) :
+def inlineDict (fuel : Nat) (bytes : ByteArray) (pos : Nat) (acc : Dict)
+    (seen : ObjParse.KeySet) :
     Option (Dict × Nat) :=
   match _h : Lex.next bytes pos with
   | .ok (some (.keyword kw, q)) => if kw = kwID then some (acc.reverse, q) else none
   | .ok (some (.name k, q)) =>
-    if ObjParse.hasKey acc k then none
+    if seen.contains k.bytes then none
     else
       match Lex.next bytes q with
       | .ok (some (t2, q2)) =>
         match ObjParse.parseObjTok fuel bytes q t2 q2 with
-        | .ok (v, r) => if _hr : pos < r then inlineDict fuel bytes r ((k, v) :: acc) else none
+        | .ok (v, r) => if _hr : pos < r then inlineDict fuel bytes r ((k, v) :: acc) (seen.insert k.bytes) else none
         | .error _ => none
       | _ => none
   | _ => none
@@ -299,7 +303,7 @@ def inlineImage (limits : Limits) (bytes : ByteArray) (pos q : Nat) (stk : List 
     StepOut :=
   let off := ObjParse.tokStart bytes pos
   let w0 := if stk.isEmpty then 0 else 1
-  match inlineDict limits.maxObjectDepth bytes q [] with
+  match inlineDict limits.maxObjectDepth bytes q [] ∅ with
   | some (d0, r) =>
     let d := expandInline d0
     let start := match bytes[r]? with

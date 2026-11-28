@@ -90,6 +90,14 @@ CMYK → RGB conversion), §11.3.7.2 (constant alpha `CA`/`ca`).
   bounds flattening + scanline + compositing of one path on a `W × H` page). The stroker's own
   work is 7.2b's theorem; here a stroke counts only its compositing (`≤ W · H`). The derived
   `DecidableEq` key comparison of the cache and the crossing sort of 7.2a are not counted.
+* **Render work allowance** (task 13.4b, `Limits.renderStepFactor`/`renderStepFloor`): the
+  page's counted steps are limited to `RState.limit`; `clipMaskC` is given the remaining `room`
+  and stops building a clip whose work exceeds it (empty mask: nothing is painted through it),
+  `renderItemL` skips the remaining items once `steps > limit`. `clipMaskC_steps_le_room`,
+  `renderItem_steps_le_room`, `renderItemsCountedAt_steps_le_limit`: the counted work is at most
+  the allowance plus **one inner unit** (one clip level or one fill's `pathCost`), not one
+  item's; `clipMaskC_room_eq`, `renderItemsCountedAt_eq_of_le`: when the work stays within the
+  allowance the render is the unbounded one (same pixels, same steps).
 -/
 
 namespace SafePdf.Core.Raster.Clip
@@ -405,53 +413,163 @@ theorem combine_area_le (hm : Mask) (t : Option Mask) : (combine hm t).area ≤ 
     have : hm.rect.height = hm.h := by simp only [Mask.rect, IRect.height]; omega
     exact Nat.mul_le_mul (by omega) (by omega)
 
+/-- **No render work allowance** (task 13.4b): the limit of a state that charges work but never
+stops (the default of `RState.limit`: tiling cells, tests). A named constant: a literal
+`≥ 2³²` in a function body would compile to `lean_cstr_to_nat` (ledger gotcha 13.18). -/
+@[noinline] def noLimit : Nat := 4611686018427387904
+
+/-- The empty clip mask (task 13.4b): what `clipMaskC` returns when the render work allowance
+is spent. A zero-area rectangle, so everything painted through it paints nothing and costs
+nothing (`emptyMask_window_height`). -/
+def emptyMask : Mask := {}
+
+/-- The window of an item clipped by `emptyMask` is empty: height 0. -/
+theorem emptyMask_window_height (W H : Nat) : (clipWindow W H (some emptyMask)).height = 0 := by
+  have := IRect.inter_height_le_left emptyMask.rect (pageRect W H)
+  simp only [clipWindow]
+  have h0 : emptyMask.rect.height = 0 := by simp [emptyMask, Mask.rect, IRect.height]
+  omega
+
+/-- The window of an item clipped by `emptyMask` is empty: width 0. -/
+theorem emptyMask_window_width (W H : Nat) : (clipWindow W H (some emptyMask)).width = 0 := by
+  have := IRect.inter_width_le_left emptyMask.rect (pageRect W H)
+  simp only [clipWindow]
+  have h0 : emptyMask.rect.width = 0 := by simp [emptyMask, Mask.rect, IRect.width]
+  omega
+
 /-- **Clip mask** of a clip list on a `W × H` page through the page → device matrix `m`
-(`none` = unclipped), with the updated cache and the counted work. -/
-def clipMaskC (cfg : Config) (m : Aff) (W H : Nat) (cc : ClipCache) :
+(`none` = unclipped), with the updated cache and the counted work.
+
+**Render work allowance** (task 13.4b): `room` is what is left of the page's allowance when the
+clip is asked for (`RState.room`). The recursion builds the levels innermost first and stops as
+soon as the work of the clip exceeds `room`: a level whose inner levels already cost more than
+`room` does nothing (no fill), and a level that pushes the total over `room` is not kept (not
+cached). Either way the result is `some emptyMask` (everything painted through it paints
+nothing) and the returned work, which the caller charges, exceeds `room`
+(`clipMaskC_empty_of_over`): the page is over its allowance. The work is at most `room` plus one
+level's `pathCost` (`clipMaskC_steps_le_room`); with `clipCost ≤ room` nothing is ever cut
+(`clipMaskC_room_eq`). -/
+def clipMaskC (cfg : Config) (m : Aff) (W H : Nat) (room : Nat) (cc : ClipCache) :
     Clip → Option Mask × ClipCache × Nat
   | [] => (none, cc, 0)
   | cp :: rest =>
     match cc.find? (cp :: rest) with
     | some mk => (some mk, cc.touch (cp :: rest) mk, 0)
     | none =>
-      let r1 := clipMaskC cfg m W H cc rest
+      let r1 := clipMaskC cfg m W H room cc rest
+      if room < r1.2.2 then (some emptyMask, r1.2.1, r1.2.2) else
       let win := clipWindow W H r1.1
       let f := fillCounted cfg m cp.path cp.rule win
       let res := combine f.1 r1.1
-      (some res, r1.2.1.insert cfg.clipCacheSize (cp :: rest) res, r1.2.2 + f.2 + res.area)
+      let tot := r1.2.2 + f.2 + res.area
+      if room < tot then (some emptyMask, r1.2.1, tot) else
+      (some res, r1.2.1.insert cfg.clipCacheSize (cp :: rest) res, tot)
+
+/-- One clip level costs at most `pathCost`: the rasterizer's work plus the combined mask. -/
+theorem level_cost_le (cfg : Config) (m : Aff) (W H : Nat) (p : Path) (rule : FillRule)
+    (t : Option Mask) :
+    (fillCounted cfg m p rule (clipWindow W H t)).2 +
+      (combine (fillCounted cfg m p rule (clipWindow W H t)).1 t).area ≤ pathCost cfg W H p := by
+  simp only [pathCost]
+  have h1 := fillCounted_steps_le cfg m p rule (clipWindow W H t)
+  have hw := clipWindow_width_le W H t
+  have hh := clipWindow_height_le W H t
+  have h2 := combine_area_le (fillCounted cfg m p rule (clipWindow W H t)).1 t
+  have h3 := fillCounted_w_le cfg m p rule (clipWindow W H t)
+  have h4 := fillCounted_h_le cfg m p rule (clipWindow W H t)
+  generalize (fillCounted cfg m p rule (clipWindow W H t)) = f at *
+  generalize hcw : (clipWindow W H t).width = cw at *
+  generalize hch : (clipWindow W H t).height = ch at *
+  have e1 : ch * (cfg.samples * (cfg.segCap * p.segs.size + 1) + cw + 1) ≤
+      H * (cfg.samples * (cfg.segCap * p.segs.size + 1) + W + 1) :=
+    Nat.mul_le_mul hh (by omega)
+  have e2 : f.1.w * f.1.h ≤ W * H := Nat.mul_le_mul (by omega) (by omega)
+  omega
 
 /-- **S3 for clips.** Computing a clip list's mask costs at most `clipCost` (cache hits cost
-nothing). -/
-theorem clipMaskC_steps_le (cfg : Config) (m : Aff) (W H : Nat) (cc : ClipCache) (c : Clip) :
-    (clipMaskC cfg m W H cc c).2.2 ≤ clipCost cfg W H c := by
+nothing), whatever the allowance `room`. -/
+theorem clipMaskC_steps_le (cfg : Config) (m : Aff) (W H : Nat) (room : Nat) (cc : ClipCache)
+    (c : Clip) : (clipMaskC cfg m W H room cc c).2.2 ≤ clipCost cfg W H c := by
   induction c generalizing cc with
   | nil => simp [clipMaskC]
   | cons cp rest ih =>
     simp only [clipMaskC]
     split
     · exact Nat.zero_le _
-    · simp only [clipCost, pathCost]
+    · simp only [clipCost]
       have h0 := ih cc
-      have h1 := fillCounted_steps_le cfg m cp.path cp.rule
-        (clipWindow W H (clipMaskC cfg m W H cc rest).1)
-      have hw := clipWindow_width_le W H (clipMaskC cfg m W H cc rest).1
-      have hh := clipWindow_height_le W H (clipMaskC cfg m W H cc rest).1
-      have h2 := combine_area_le
-        (fillCounted cfg m cp.path cp.rule (clipWindow W H (clipMaskC cfg m W H cc rest).1)).1
-        (clipMaskC cfg m W H cc rest).1
-      have h3 := fillCounted_w_le cfg m cp.path cp.rule
-        (clipWindow W H (clipMaskC cfg m W H cc rest).1)
-      have h4 := fillCounted_h_le cfg m cp.path cp.rule
-        (clipWindow W H (clipMaskC cfg m W H cc rest).1)
-      generalize (clipMaskC cfg m W H cc rest) = r1 at *
-      generalize (fillCounted cfg m cp.path cp.rule (clipWindow W H r1.1)) = f at *
-      generalize hcw : (clipWindow W H r1.1).width = cw at *
-      generalize hch : (clipWindow W H r1.1).height = ch at *
-      have e1 : ch * (cfg.samples * (cfg.segCap * cp.path.segs.size + 1) + cw + 1) ≤
-          H * (cfg.samples * (cfg.segCap * cp.path.segs.size + 1) + W + 1) :=
-        Nat.mul_le_mul hh (by omega)
-      have e2 : f.1.w * f.1.h ≤ W * H := Nat.mul_le_mul (by omega) (by omega)
-      omega
+      have h1 := level_cost_le cfg m W H cp.path cp.rule (clipMaskC cfg m W H room cc rest).1
+      generalize (clipMaskC cfg m W H room cc rest) = r1 at *
+      split
+      · simp only; omega
+      · split
+        · simp only; omega
+        · simp only; omega
+
+/-- **The allowance bound for clips** (task 13.4b). If every path of the clip costs at most
+`U` (`pathCost`), the clip's work is at most `room + U`: the levels are built innermost first and
+a level is only built while the work so far is within `room`, so the last level built adds at
+most `U` to at most `room`. -/
+theorem clipMaskC_steps_le_room (cfg : Config) (m : Aff) (W H : Nat) (room U : Nat)
+    (cc : ClipCache) (c : Clip) (hU : ∀ cp ∈ c, pathCost cfg W H cp.path ≤ U) :
+    (clipMaskC cfg m W H room cc c).2.2 ≤ room + U := by
+  induction c generalizing cc with
+  | nil => simp [clipMaskC]
+  | cons cp rest ih =>
+    have hcp : pathCost cfg W H cp.path ≤ U := hU cp (by simp)
+    have h0 := ih cc (fun x hx => hU x (by simp [hx]))
+    simp only [clipMaskC]
+    split
+    · exact Nat.zero_le _
+    · have h1 := level_cost_le cfg m W H cp.path cp.rule (clipMaskC cfg m W H room cc rest).1
+      generalize (clipMaskC cfg m W H room cc rest) = r1 at *
+      split
+      · simp only; omega
+      · split
+        · simp only; omega
+        · simp only; omega
+
+/-- A clip whose work exceeds the allowance is the empty mask (the converse of the allowance
+check: `emptyMask` is only returned when the clip's work is over `room`). -/
+theorem clipMaskC_empty_of_over (cfg : Config) (m : Aff) (W H : Nat) (room : Nat)
+    (cc : ClipCache) (c : Clip) (h : room < (clipMaskC cfg m W H room cc c).2.2) :
+    (clipMaskC cfg m W H room cc c).1 = some emptyMask := by
+  cases c with
+  | nil => simp [clipMaskC] at h
+  | cons cp rest =>
+    rcases hf : cc.find? (cp :: rest) with _ | mk
+    · simp only [clipMaskC, hf] at h ⊢
+      generalize (clipMaskC cfg m W H room cc rest) = r1 at h ⊢
+      by_cases h1 : room < r1.2.2
+      · simp only [h1, ite_true]
+      · simp only [h1, ite_false] at h ⊢
+        by_cases h2 : room < r1.2.2 + (fillCounted cfg m cp.path cp.rule (clipWindow W H r1.1)).2 +
+            (combine (fillCounted cfg m cp.path cp.rule (clipWindow W H r1.1)).1 r1.1).area
+        · simp only [h2, ite_true]
+        · (simp only [h2, ite_false] at h) <;> omega
+    · simp [clipMaskC, hf] at h
+
+/-- **No behaviour change when the allowance is not exceeded** (clips): if the allowance covers
+`clipCost`, `clipMaskC` is the same function whatever the allowance. -/
+theorem clipMaskC_room_eq (cfg : Config) (m : Aff) (W H : Nat) (room1 room2 : Nat)
+    (cc : ClipCache) (c : Clip) (h1 : clipCost cfg W H c ≤ room1)
+    (h2 : clipCost cfg W H c ≤ room2) :
+    clipMaskC cfg m W H room1 cc c = clipMaskC cfg m W H room2 cc c := by
+  induction c generalizing cc with
+  | nil => simp [clipMaskC]
+  | cons cp rest ih =>
+    simp only [clipCost] at h1 h2
+    have e := ih cc (by omega) (by omega)
+    have b1 := clipMaskC_steps_le cfg m W H room2 cc rest
+    have lv := level_cost_le cfg m W H cp.path cp.rule (clipMaskC cfg m W H room2 cc rest).1
+    rcases hf : cc.find? (cp :: rest) with _ | mk
+    · simp only [clipMaskC, hf, e]
+      generalize (clipMaskC cfg m W H room2 cc rest) = r1 at *
+      have c1 : ¬ room1 < r1.2.2 := by omega
+      have c2 : ¬ room2 < r1.2.2 := by omega
+      simp only [c1, c2, ite_false]
+      split <;> split <;> first | rfl | omega
+    · simp [clipMaskC, hf]
 
 /-! ## 5. Colours and compositing -/
 
@@ -755,6 +873,19 @@ structure RState where
   stroker's mask depends only on the view, the window, the path and the style's line and CTM
   (`StrokeFn` contract), so the repeats reuse it. -/
   smemo : Option ((Aff × IRect × Path × Content.LineStyle × Content.Matrix) × Mask) := none
+  /-- **Render work allowance** (task 13.4b): the counted steps this render may spend. Default
+  `noLimit` (charge but never stop). `clipMaskC` is given `room` and stops building a clip
+  whose work exceeds it; the page loops skip the remaining items once `steps > limit`
+  (`RState.over`). Every painter keeps it (`{ st with … }`). -/
+  limit : Nat := noLimit
+
+/-- What is left of the allowance (task 13.4b): `limit − steps` (0 when over). Passed to
+`clipMaskC` by every painter. -/
+def RState.room (st : RState) : Nat := st.limit - st.steps
+
+/-- The render work allowance is spent: more steps were counted than the limit (task 13.4b).
+The page loops stop and mark the page incomplete. -/
+def RState.over (st : RState) : Bool := decide (st.limit < st.steps)
 
 /-- Device window of an item: its clip's rectangle (or the page). -/
 def itemWindow (W H : Nat) (c : Option Mask) : IRect := clipWindow W H c
@@ -763,18 +894,18 @@ def itemWindow (W H : Nat) (c : Option Mask) : IRect := clipWindow W H c
 def paintMask (W H : Nat) (st : RState) (cm : Option Mask) (fm : Mask) (color : Color)
     (alpha : Comp) (cc : ClipCache) (s : Nat) : RState :=
   let r := fm.rect.inter (itemWindow W H cm)
-  { buf := composite st.buf W fm cm r (deviceRGB color) (compByte alpha),
-    cache := cc, steps := st.steps + s + r.width * r.height }
+  let nb := composite st.buf W fm cm r (deviceRGB color) (compByte alpha)
+  { st with buf := nb, cache := cc, steps := st.steps + s + r.width * r.height, smemo := none }
 
 /-- Render one display item (fills and strokes; everything else is skipped). -/
 def renderItem (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RState) :
     DisplayItem → RState
   | .fillPath p rule style clip =>
-    let c := clipMaskC cfg m W H st.cache clip
+    let c := clipMaskC cfg m W H st.room st.cache clip
     let f := fillCounted cfg m p rule (itemWindow W H c.1)
     paintMask W H st c.1 f.1 style.color style.alpha c.2.1 (c.2.2 + f.2)
   | .strokePath p style clip =>
-    let c := clipMaskC cfg m W H st.cache clip
+    let c := clipMaskC cfg m W H st.room st.cache clip
     let win := itemWindow W H c.1
     let key := (m, win, p, style.line, style.ctm)
     let fm := match st.smemo with
@@ -934,12 +1065,29 @@ theorem whiteBuf_size (W H : Nat) : (whiteBuf W H).size = 4 * W * H := filledBuf
 #guard filledBuf 3 2 7 == ⟨#[7, 7, 7, 7, 7, 7]⟩ && filledBuf 0 5 1 == .empty &&
   filledBuf 4 0 1 == .empty && whiteBuf 2 3 == ⟨Array.replicate 24 255⟩
 
-/-- Render path items onto a white `W × H` page through `m`, with the final state. -/
+/-- Render one item unless the render work allowance is spent (task 13.4b: `st.over`, the
+state's steps exceed its `limit`): then the state is returned unchanged. -/
+def renderItemL (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RState)
+    (it : DisplayItem) : RState :=
+  if st.limit < st.steps then st else renderItem cfg m W H stroke st it
+
+/-- Render path items onto a white `W × H` page through `m` with the render work allowance `L`
+(counted steps), with the final state (task 13.4b). The loop stops painting once `steps > L`
+(`RState.over`); each item gets `room = L − steps` for its clip masks (`clipMaskC`), which stop
+as soon as they exceed it. -/
+def renderItemsCountedAt (L : Nat) (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
+    (stroke : StrokeFn := defaultStroke) : RState :=
+  items.foldl (renderItemL cfg m W H stroke) { buf := whiteBuf W H, limit := L }
+
+/-- Render path items onto a white `W × H` page through `m`, with the final state, under the
+configuration's render work allowance (`Config.renderAllowance`: `max renderStepFloor
+(renderStepFactor · W · H)` steps). -/
 def renderItemsCounted (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
     (stroke : StrokeFn := defaultStroke) : RState :=
-  items.foldl (renderItem cfg m W H stroke) { buf := whiteBuf W H }
+  renderItemsCountedAt (cfg.renderAllowance W H) cfg m W H items stroke
 
-/-- Render path items onto a white `W × H` page through `m`. -/
+/-- Render path items onto a white `W × H` page through `m`. The page is **incomplete** when
+`(renderItemsCounted …).over` (the allowance was spent: the pixels so far). -/
 def renderItems (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
     (stroke : StrokeFn := defaultStroke) : Image :=
   ⟨W, H, (renderItemsCounted cfg m W H items stroke).buf⟩
@@ -957,13 +1105,28 @@ theorem foldl_renderItem_size (cfg : Config) (m : Aff) (W H : Nat) (stroke : Str
   | nil => rfl
   | cons it rest ih => simp only [List.foldl, ih, renderItem_size]
 
+/-- `renderItemL` preserves the buffer size. -/
+theorem renderItemL_size (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RState)
+    (it : DisplayItem) : (renderItemL cfg m W H stroke st it).buf.size = st.buf.size := by
+  unfold renderItemL; split
+  · rfl
+  · exact renderItem_size ..
+
+/-- Folding `renderItemL` preserves the buffer size. -/
+theorem foldl_renderItemL_size (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
+    (l : List DisplayItem) (st : RState) :
+    (l.foldl (renderItemL cfg m W H stroke) st).buf.size = st.buf.size := by
+  induction l generalizing st with
+  | nil => rfl
+  | cons it rest ih => simp only [List.foldl, ih, renderItemL_size]
+
 /-- **Buffer shape.** The rendered image has exactly `4 · w · h` bytes. -/
 theorem renderItems_size (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
     (stroke : StrokeFn) :
     (renderItems cfg m W H items stroke).data.size =
       4 * (renderItems cfg m W H items stroke).w * (renderItems cfg m W H items stroke).h := by
-  simp only [renderItems, renderItemsCounted]
-  rw [← Array.foldl_toList, foldl_renderItem_size]
+  simp only [renderItems, renderItemsCounted, renderItemsCountedAt]
+  rw [← Array.foldl_toList, foldl_renderItemL_size]
   exact whiteBuf_size W H
 
 /-- Cost bound of one item on a `W × H` page: its clip, its path (fills), and the compositing
@@ -991,16 +1154,16 @@ theorem renderItem_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : Strok
   cases it with
   | fillPath p rule style clip =>
     simp only [renderItem, paintMask, itemCost, pathCost]
-    have h0 := clipMaskC_steps_le cfg m W H st.cache clip
+    have h0 := clipMaskC_steps_le cfg m W H st.room st.cache clip
     have h1 := fillCounted_steps_le cfg m p rule
-      (itemWindow W H (clipMaskC cfg m W H st.cache clip).1)
-    have hw := clipWindow_width_le W H (clipMaskC cfg m W H st.cache clip).1
-    have hh := clipWindow_height_le W H (clipMaskC cfg m W H st.cache clip).1
+      (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1)
+    have hw := clipWindow_width_le W H (clipMaskC cfg m W H st.room st.cache clip).1
+    have hh := clipWindow_height_le W H (clipMaskC cfg m W H st.room st.cache clip).1
     have ha := paint_area_le W H
-      (fillCounted cfg m p rule (itemWindow W H (clipMaskC cfg m W H st.cache clip).1)).1
-      (clipMaskC cfg m W H st.cache clip).1
+      (fillCounted cfg m p rule (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1)).1
+      (clipMaskC cfg m W H st.room st.cache clip).1
     simp only [itemWindow] at h1 ha ⊢
-    generalize (clipMaskC cfg m W H st.cache clip) = c at *
+    generalize (clipMaskC cfg m W H st.room st.cache clip) = c at *
     generalize (fillCounted cfg m p rule (clipWindow W H c.1)) = f at *
     generalize (clipWindow W H c.1).width = cw at *
     generalize (clipWindow W H c.1).height = ch at *
@@ -1010,41 +1173,251 @@ theorem renderItem_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : Strok
     omega
   | strokePath p style clip =>
     simp only [renderItem, paintMask, itemCost]
-    have h0 := clipMaskC_steps_le cfg m W H st.cache clip
+    have h0 := clipMaskC_steps_le cfg m W H st.room st.cache clip
     generalize (match st.smemo with
       | some (k, mk) =>
-        if k = (m, itemWindow W H (clipMaskC cfg m W H st.cache clip).1, p, style.line, style.ctm)
-        then mk else stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style
-      | none => stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.cache clip).1) p style) = fm
-    have ha := paint_area_le W H fm (clipMaskC cfg m W H st.cache clip).1
+        if k = (m, itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1, p, style.line, style.ctm)
+        then mk else stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1) p style
+      | none => stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1) p style) = fm
+    have ha := paint_area_le W H fm (clipMaskC cfg m W H st.room st.cache clip).1
     omega
   | _ => simp [renderItem, itemCost]
 
+/-- `renderItemL`: at most `itemCost` more work (nothing when over). -/
+theorem renderItemL_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
+    (st : RState) (it : DisplayItem) :
+    (renderItemL cfg m W H stroke st it).steps ≤ st.steps + itemCost cfg W H it := by
+  unfold renderItemL; split
+  · omega
+  · exact renderItem_steps_le ..
+
 /-- Folding items: the work is at most the sum of the item costs. -/
-theorem foldl_renderItem_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
+theorem foldl_renderItemL_steps_le (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
     (l : List DisplayItem) (st : RState) :
-    (l.foldl (renderItem cfg m W H stroke) st).steps ≤
+    (l.foldl (renderItemL cfg m W H stroke) st).steps ≤
       st.steps + (l.map (itemCost cfg W H)).sum := by
   induction l generalizing st with
   | nil => simp
   | cons it rest ih =>
     simp only [List.foldl, List.map, List.sum_cons]
-    have := ih (renderItem cfg m W H stroke st it)
-    have := renderItem_steps_le cfg m W H stroke st it
+    have := ih (renderItemL cfg m W H stroke st it)
+    have := renderItemL_steps_le cfg m W H stroke st it
     omega
 
 /-- **S3 for a page of path items.** The counted work (clip masks, fills, compositing) is at
 most the sum over the items of `itemCost`, i.e. `O(#items × (#clip paths + 1) × (W·H +
 H · (S · segCap · #segments)))`, with `segCap = max 1 cfg.curveSegCap` (`Limits.curveSegCap`)
-and `W, H ≤ cfg.maxPageSide` for a page (`pageSize_le`). -/
+and `W, H ≤ cfg.maxPageSide` for a page (`pageSize_le`), whatever the allowance `L`. -/
+theorem renderItemsCountedAt_steps_le (L : Nat) (cfg : Config) (m : Aff) (W H : Nat)
+    (items : DisplayList) (stroke : StrokeFn) :
+    (renderItemsCountedAt L cfg m W H items stroke).steps ≤
+      (items.toList.map (itemCost cfg W H)).sum := by
+  simp only [renderItemsCountedAt]
+  rw [← Array.foldl_toList]
+  have := foldl_renderItemL_steps_le cfg m W H stroke items.toList
+    { buf := whiteBuf W H, limit := L }
+  simpa using this
+
+/-- `renderItemsCounted_steps_le` for the configuration's allowance. -/
 theorem renderItemsCounted_steps_le (cfg : Config) (m : Aff) (W H : Nat) (items : DisplayList)
     (stroke : StrokeFn) :
     (renderItemsCounted cfg m W H items stroke).steps ≤
-      (items.toList.map (itemCost cfg W H)).sum := by
-  simp only [renderItemsCounted]
+      (items.toList.map (itemCost cfg W H)).sum :=
+  renderItemsCountedAt_steps_le _ cfg m W H items stroke
+
+/-! ### The render work allowance (task 13.4b)
+
+**One inner unit.** `ItemUnit cfg W H U it` says every inner unit of `it` costs at most `U`: one
+clip level (`pathCost` of a clip path), the item's own path (a fill: `pathCost`, i.e. the fill's
+bound `h · (S · E + w + 1)` plus the compositing) or its compositing (a stroke: `W · H`; the
+stroker's own work is 7.2b's bound). `renderItemsCountedAt_steps_le_limit`: the counted work of a
+render with allowance `L` is at most `L + U`; `renderItemsCountedAt_eq_of_le`: when `Σ itemCost`
+is within the allowance the render is the unbounded one, whatever the allowance. -/
+
+/-- Every inner unit of the item costs at most `U` (see above). -/
+def ItemUnit (cfg : Config) (W H U : Nat) : DisplayItem → Prop
+  | .fillPath p _ _ clip => pathCost cfg W H p ≤ U ∧ ∀ cp ∈ clip, pathCost cfg W H cp.path ≤ U
+  | .strokePath _ _ clip => W * H ≤ U ∧ ∀ cp ∈ clip, pathCost cfg W H cp.path ≤ U
+  | _ => True
+
+/-- **The allowance bound for one item**: the work is at most `room` plus one inner unit. The
+clip stops at `room + (one level)` and, when it stops, paints nothing (its mask is empty:
+`clipMaskC_empty_of_over`); when it does not, the item's own fill adds at most one unit. -/
+theorem renderItem_steps_le_room (cfg : Config) (m : Aff) (W H U : Nat) (stroke : StrokeFn)
+    (st : RState) (it : DisplayItem) (hU : ItemUnit cfg W H U it) :
+    (renderItem cfg m W H stroke st it).steps ≤ st.steps + st.room + U := by
+  cases it with
+  | fillPath p rule style clip =>
+    obtain ⟨hp, hc⟩ := hU
+    simp only [renderItem, paintMask]
+    have h0 := clipMaskC_steps_le_room cfg m W H st.room U st.cache clip hc
+    have h1 := fillCounted_steps_le cfg m p rule
+      (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1)
+    have ha := paint_area_le W H
+      (fillCounted cfg m p rule (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1)).1
+      (clipMaskC cfg m W H st.room st.cache clip).1
+    have hcut := clipMaskC_empty_of_over cfg m W H st.room st.cache clip
+    have hw := clipWindow_width_le W H (clipMaskC cfg m W H st.room st.cache clip).1
+    have hh := clipWindow_height_le W H (clipMaskC cfg m W H st.room st.cache clip).1
+    simp only [itemWindow] at h1 ha ⊢
+    generalize (clipMaskC cfg m W H st.room st.cache clip) = c at *
+    generalize (fillCounted cfg m p rule (clipWindow W H c.1)) = f at *
+    by_cases hov : st.room < c.2.2
+    · have he := hcut hov
+      have hh0 : (clipWindow W H c.1).height = 0 := by rw [he]; exact emptyMask_window_height W H
+      have hw0 : (clipWindow W H c.1).width = 0 := by rw [he]; exact emptyMask_window_width W H
+      have hr := IRect.inter_width_le_right f.1.rect (clipWindow W H c.1)
+      have hw' : (f.1.rect.inter (clipWindow W H c.1)).width = 0 := by omega
+      rw [hh0, Nat.zero_mul] at h1
+      rw [hw', Nat.zero_mul]
+      omega
+    · generalize (clipWindow W H c.1).width = cw at *
+      generalize (clipWindow W H c.1).height = ch at *
+      have e1 : ch * (cfg.samples * (cfg.segCap * p.segs.size + 1) + cw + 1) ≤
+          H * (cfg.samples * (cfg.segCap * p.segs.size + 1) + W + 1) :=
+        Nat.mul_le_mul hh (by omega)
+      simp only [pathCost] at hp
+      omega
+  | strokePath p style clip =>
+    obtain ⟨hp, hc⟩ := hU
+    simp only [renderItem, paintMask]
+    have h0 := clipMaskC_steps_le_room cfg m W H st.room U st.cache clip hc
+    have hcut := clipMaskC_empty_of_over cfg m W H st.room st.cache clip
+    generalize (match st.smemo with
+      | some (k, mk) =>
+        if k = (m, itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1, p, style.line, style.ctm)
+        then mk else stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1) p style
+      | none => stroke cfg m (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1) p style) = fm
+    have ha := paint_area_le W H fm (clipMaskC cfg m W H st.room st.cache clip).1
+    have hr := IRect.inter_width_le_right fm.rect
+      (itemWindow W H (clipMaskC cfg m W H st.room st.cache clip).1)
+    generalize (clipMaskC cfg m W H st.room st.cache clip) = c at *
+    by_cases hov : st.room < c.2.2
+    · have he := hcut hov
+      have hw0 : (itemWindow W H c.1).width = 0 := by
+        simp only [itemWindow]; rw [he]; exact emptyMask_window_width W H
+      have hw' : (fm.rect.inter (itemWindow W H c.1)).width = 0 := by omega
+      rw [hw', Nat.zero_mul]
+      omega
+    · omega
+  | _ => simp only [renderItem]; omega
+
+/-- Painting an item keeps the render work allowance. -/
+theorem renderItem_limit (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn) (st : RState)
+    (it : DisplayItem) : (renderItem cfg m W H stroke st it).limit = st.limit := by
+  cases it <;> simp [renderItem, paintMask]
+
+/-- `renderItemL` keeps the render work allowance. -/
+theorem renderItemL_limit (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
+    (st : RState) (it : DisplayItem) : (renderItemL cfg m W H stroke st it).limit = st.limit := by
+  unfold renderItemL; split
+  · rfl
+  · exact renderItem_limit ..
+
+/-- Folding `renderItemL` keeps the allowance, and the work stays within `limit + U`: the work
+of one item started within the allowance is at most `room + U` (`renderItem_steps_le_room`), an
+item started beyond it is not painted. -/
+theorem foldl_renderItemL_steps_le_limit (cfg : Config) (m : Aff) (W H U : Nat)
+    (stroke : StrokeFn) (l : List DisplayItem) (hl : ∀ it ∈ l, ItemUnit cfg W H U it) :
+    ∀ (st : RState), st.steps ≤ st.limit + U →
+      (l.foldl (renderItemL cfg m W H stroke) st).steps ≤ st.limit + U ∧
+        (l.foldl (renderItemL cfg m W H stroke) st).limit = st.limit := by
+  induction l with
+  | nil => intro st h; exact ⟨h, rfl⟩
+  | cons it rest ih =>
+    intro st h
+    simp only [List.foldl]
+    have hit : ItemUnit cfg W H U it := hl it (by simp)
+    have hrest : ∀ x ∈ rest, ItemUnit cfg W H U x := fun x hx => hl x (by simp [hx])
+    have hlim := renderItemL_limit cfg m W H stroke st it
+    have hstep : (renderItemL cfg m W H stroke st it).steps ≤ st.limit + U := by
+      unfold renderItemL
+      split
+      · exact h
+      · rename_i hn
+        have := renderItem_steps_le_room cfg m W H U stroke st it hit
+        simp only [RState.room] at this
+        omega
+    have := ih hrest (renderItemL cfg m W H stroke st it) (by omega)
+    exact ⟨Nat.le_trans this.1 (by omega), by rw [this.2, hlim]⟩
+
+/-- **The render work allowance (task 13.4b).** A render of path items with allowance `L` counts
+at most `L + U` steps, `U` bounding one inner unit of every item (`ItemUnit`: a clip level, a
+fill's `pathCost`, a stroke's compositing): the work is at most the allowance plus one inner
+unit, not one item's. -/
+theorem renderItemsCountedAt_steps_le_limit (L : Nat) (cfg : Config) (m : Aff) (W H U : Nat)
+    (items : DisplayList) (stroke : StrokeFn)
+    (hU : ∀ it ∈ items.toList, ItemUnit cfg W H U it) :
+    (renderItemsCountedAt L cfg m W H items stroke).steps ≤ L + U := by
+  simp only [renderItemsCountedAt]
   rw [← Array.foldl_toList]
-  have := foldl_renderItem_steps_le cfg m W H stroke items.toList { buf := whiteBuf W H }
-  simpa using this
+  exact (foldl_renderItemL_steps_le_limit cfg m W H U stroke items.toList hU
+    { buf := whiteBuf W H, limit := L } (by simp)).1
+
+/-- One item started within both allowances is painted identically under either (the allowance
+only enters through `room`, and `clipMaskC` ignores it when it covers `clipCost`). -/
+theorem renderItem_with_limit (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
+    (st : RState) (it : DisplayItem) (L2 : Nat)
+    (h1 : st.steps + itemCost cfg W H it ≤ st.limit) (h2 : st.steps + itemCost cfg W H it ≤ L2) :
+    renderItem cfg m W H stroke { st with limit := L2 } it =
+      { renderItem cfg m W H stroke st it with limit := L2 } := by
+  cases it with
+  | fillPath p rule style clip =>
+    simp only [itemCost] at h1 h2
+    have := clipMaskC_room_eq cfg m W H (st.limit - st.steps) (L2 - st.steps) st.cache clip
+      (by omega) (by omega)
+    simp only [renderItem, paintMask, RState.room, this]
+    done
+  | strokePath p style clip =>
+    simp only [itemCost] at h1 h2
+    have := clipMaskC_room_eq cfg m W H (st.limit - st.steps) (L2 - st.steps) st.cache clip
+      (by omega) (by omega)
+    simp only [renderItem, paintMask, RState.room, this]
+    rfl
+  | _ => simp [renderItem]
+
+/-- Folding `renderItemL` from states that differ only in the allowance, both covering the
+whole list's cost: the same final state, up to the allowance. -/
+theorem foldl_renderItemL_with_limit (cfg : Config) (m : Aff) (W H : Nat) (stroke : StrokeFn)
+    (l : List DisplayItem) :
+    ∀ (st : RState) (L2 : Nat), st.steps + (l.map (itemCost cfg W H)).sum ≤ st.limit →
+      st.steps + (l.map (itemCost cfg W H)).sum ≤ L2 →
+      l.foldl (renderItemL cfg m W H stroke) { st with limit := L2 } =
+        { l.foldl (renderItemL cfg m W H stroke) st with limit := L2 } := by
+  induction l with
+  | nil => intro st L2 _ _; rfl
+  | cons it rest ih =>
+    intro st L2 h1 h2
+    simp only [List.map, List.sum_cons] at h1 h2
+    simp only [List.foldl]
+    have n1 : ¬ (st.limit < st.steps) := by omega
+    have n2 : ¬ (({ st with limit := L2 } : RState).limit < ({ st with limit := L2 } : RState).steps) := by
+      simp only; omega
+    have e1 : renderItemL cfg m W H stroke st it = renderItem cfg m W H stroke st it := by
+      unfold renderItemL; simp only [n1, ite_false]
+    have e2 : renderItemL cfg m W H stroke { st with limit := L2 } it =
+        renderItem cfg m W H stroke { st with limit := L2 } it := by
+      unfold renderItemL; simp only [n2, ite_false]
+    rw [e2, e1, renderItem_with_limit cfg m W H stroke st it L2 (by omega) (by omega)]
+    have hs := renderItem_steps_le cfg m W H stroke st it
+    have hl := renderItem_limit cfg m W H stroke st it
+    exact ih (renderItem cfg m W H stroke st it) L2 (by omega) (by omega)
+
+/-- **No behaviour change when the allowance is not exceeded (task 13.4b).** If the sum of the
+item costs is within both allowances `L1` and `L2`, the renders with allowance `L1` and `L2` are
+the same, up to the allowance field: in particular `renderItemsCountedAt L1` is the unbounded
+render (`L2 = noLimit`) whenever `Σ itemCost ≤ L1`, and a page whose counted work stays within
+its allowance (`renderItemsCounted_steps_le`) is never cut. -/
+theorem renderItemsCountedAt_eq_of_le (L1 L2 : Nat) (cfg : Config) (m : Aff) (W H : Nat)
+    (items : DisplayList) (stroke : StrokeFn)
+    (h1 : (items.toList.map (itemCost cfg W H)).sum ≤ L1)
+    (h2 : (items.toList.map (itemCost cfg W H)).sum ≤ L2) :
+    { renderItemsCountedAt L1 cfg m W H items stroke with limit := L2 } =
+      renderItemsCountedAt L2 cfg m W H items stroke := by
+  simp only [renderItemsCountedAt, ← Array.foldl_toList]
+  have := foldl_renderItemL_with_limit cfg m W H stroke items.toList
+    { buf := whiteBuf W H, limit := L1 } L2 (by simpa using h1) (by simpa using h2)
+  exact this.symm
 
 /-! ## 8. Pages -/
 

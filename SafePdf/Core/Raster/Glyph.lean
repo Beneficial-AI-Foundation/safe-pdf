@@ -617,8 +617,8 @@ def gxShift (q : Rat) : Option Nat :=
   let qq := (gxLinCap * q.den) / q.num.natAbs
   if qq = 0 then none else some (min 60 (Nat.log2 qq))
 
-/-- `round(q · 2ᴷ)` (halves up). -/
-def fixK (k : Nat) (q : Rat) : Int := roundDivI (q.num * (2 ^ k : Nat)) (q.den : Int)
+/-- `round(q · 2ᴷ)` (halves up); `2ᴷ` is `Image.pow2` (`Nat.pow` goes through GMP, task 13.18). -/
+def fixK (k : Nat) (q : Rat) : Int := roundDivI (q.num * (Image.pow2 k : Nat)) (q.den : Int)
 
 /-- The fixed-point linear part of `m`, when some `K ≥ 1` keeps every entry within `2²⁴`. -/
 def GXf.ofAff? (m : Aff) : Option GXf :=
@@ -630,7 +630,7 @@ def GXf.ofAff? (m : Aff) : Option GXf :=
   | some ka, some kb, some kc, some kd =>
     let k := min (min ka kb) (min kc kd)
     if k = 0 then none else
-    some { k, one := ((2 ^ k : Nat) : Int).toInt64, half := ((2 ^ (k - 1) : Nat) : Int).toInt64,
+    some { k, one := ((Image.pow2 k : Nat) : Int).toInt64, half := ((Image.pow2 (k - 1) : Nat) : Int).toInt64,
            a := (fixK k la).toInt64, b := (fixK k lb).toInt64, c := (fixK k lc).toInt64,
            d := (fixK k ld).toInt64 }
   | _, _, _, _ => none
@@ -651,7 +651,7 @@ structure GOff where
 
 /-- `⌊q⌋` and `round(frac q · 2ᴷ)` (in `[0, 2ᴷ]`). -/
 def splitK (k : Nat) (q : Rat) : Int × Int64 :=
-  (q.num / (q.den : Int), (roundDivI ((q.num % (q.den : Int)) * (2 ^ k : Nat)) (q.den : Int)).toInt64)
+  (q.num / (q.den : Int), (roundDivI ((q.num % (q.den : Int)) * (Image.pow2 k : Nat)) (q.den : Int)).toInt64)
 
 /-- The fixed-point translation of a glyph whose matrix has translation `(e, f)` (pixels). -/
 def GXf.off (g : GXf) (e f : Rat) : GOff :=
@@ -672,12 +672,20 @@ structure GTx where
   /-- Largest `|T|` handled: `min 2⁴⁰ ⌊2⁶¹ / max(|va|, |vb|, 1)⌋`, so `|va · T|, |vb · T| ≤ 2⁶¹`. -/
   tmax : Int64
 
+/-- `2⁴⁰`, the bound on the slopes of `GTx.make?` and on `tmax`. Out of line (`noinline`): a
+literal of `2³²` or more in a function body is parsed from its decimal string through GMP on
+every call (`scripts/check-codegen.sh`, task 13.18). -/
+@[noinline] def gxSlopeCap : Nat := 1099511627776
+
+/-- `2⁶¹`, the bound on `|va · T|` (out of line, like `gxSlopeCap`). -/
+@[noinline] def gxProdCap : Nat := 2305843009213693952
+
 /-- The `GTx` of `L` and `rm` for `g`, when the slopes are within `2⁴⁰`. -/
 def GTx.make? (g : GXf) (L rm : Aff) : Option GTx :=
   let va := fixK g.k (subPerRaw rm.a)
   let vb := fixK g.k (subPerRaw rm.b)
-  if absLe va 1099511627776 && absLe vb 1099511627776 then
-    let tmax : Nat := min 1099511627776 (2305843009213693952 / max 1 (max va.natAbs vb.natAbs))
+  if absLe va gxSlopeCap && absLe vb gxSlopeCap then
+    let tmax : Nat := min gxSlopeCap (gxProdCap / max 1 (max va.natAbs vb.natAbs))
     some ⟨g.off L.e L.f, va.toInt64, vb.toInt64, (tmax : Int).toInt64⟩
   else none
 
@@ -1016,7 +1024,7 @@ def PageFonts.source (pf : PageFonts) (f : FontRef) : Option GlyphSource :=
 painting order, each with its colour, alpha and counted work: the fill (modes 0, 2, 4, 6) then
 the stroke (modes 1, 2, 5, 6); nothing for modes 3 and 7 or a font without outlines. -/
 def runMasks (cfg : Fill.Config) (view : Aff) (win : IRect) (pf : PageFonts) (cache : Cache)
-    (r : GlyphRun) : List (Mask × Color × Comp × Nat) × Cache :=
+    (r : GlyphRun) (room : Nat := Clip.noLimit) : List (Mask × Color × Comp × Nat) × Cache :=
   if !r.renderMode.paints then ([], cache) else
   match pf.source r.font with
   | .none => ([], cache)
@@ -1029,9 +1037,19 @@ def runMasks (cfg : Fill.Config) (view : Aff) (win : IRect) (pf : PageFonts) (ca
           if (pf.shadings.patternOf r.fill.color r.fill.pattern).isNone &&
               (pf.tilings.tileOf r.fill.color r.fill.pattern).isNone then columnGroups dp
           else #[dp]
-        groups.toList.map fun g =>
+        -- Render work allowance (task 13.4b), checked per fill: no further group is filled once
+        -- the work of those already filled (their counted rows, plus the compositing of a flat
+        -- colour, which `paintAll` charges exactly so) exceeds `room`. Same masks, in the same
+        -- order, when it never does.
+        let flat := (pf.shadings.patternOf r.fill.color r.fill.pattern).isNone &&
+          (pf.tilings.tileOf r.fill.color r.fill.pattern).isNone
+        let acc := groups.foldl (fun (acc : Array (Mask × Color × Comp × Nat) × Nat) g =>
+          if room < acc.2 then acc else
           let f := fillEdgesCounted (flatten cfg win g) .nonzero win cfg
-          (f.1, r.fill.color, r.fill.alpha, f.2)
+          let rr := f.1.rect.inter win
+          (acc.1.push (f.1, r.fill.color, r.fill.alpha, f.2),
+            acc.2 + f.2 + (if flat then rr.width * rr.height else 0))) (#[], 0)
+        acc.1.toList
       else []
     let strokeM : List (Mask × Color × Comp × Nat) :=
       if TextRenderMode.strokes r.renderMode then
@@ -1101,8 +1119,8 @@ def renderItemWith (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.Stro
       let q := Type3.renderRun cfg paint m W H (pf.fonts.get r.font) f st.rs st.t3 r clip
       { st with rs := q.1, t3 := q.2 }
     | .none =>
-    let c := Clip.clipMaskC cfg m W H st.rs.cache clip
-    let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r
+    let c := Clip.clipMaskC cfg m W H st.rs.room st.rs.cache clip
+    let (ms, cache) := runMasks cfg m (Clip.itemWindow W H c.1) pf st.cache r (st.rs.room - c.2.2)
     let rs := paintAll cfg m W H (runPattern pf.shadings r) (runTiling pf.tilings r) paint
       c.1 c.2.1 c.2.2 st.rs ms
     { st with rs, cache }
@@ -1205,6 +1223,9 @@ def painterWith (cfg : Fill.Config) (m : Aff) (W H : Nat) (paintItem : TState �
   setTx := fun st t => { st with tx := t }
   paint := paintItem
   bound := fun it => some (Clip.itemBound cfg m W H it)
+  work := fun st => st.rs.steps
+  charge := fun st n => { st with rs := { st.rs with steps := st.rs.steps + n } }
+  stop := fun st => decide (st.rs.limit < st.rs.steps)
 
 /-- **A full cell painter** (task 7.3h2) from an item painter: the cell's items (shadings
 lifted, as on the page) through the transparency driver (`Transparency.renderTx`, a fresh
@@ -1227,22 +1248,28 @@ def cellPainterD (cfg : Fill.Config) (stroke : Clip.StrokeFn) (pf : PageFonts) :
   | k + 1 => cellRender cfg fun Tc w h => renderItemWith cfg Tc w h stroke pf (cellPainterD cfg stroke pf k)
 
 /-- Render one display item (`renderItemWith`, tiling cells painted at depth
-`Tiling.maxTileDepth`). -/
+`Tiling.maxTileDepth`), unless the render work allowance is spent (task 13.4b: `rs.steps >
+rs.limit`; the state is returned as it is). -/
 def renderItemG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts)
     (st : TState) (it : DisplayItem) : TState :=
+  if st.rs.limit < st.rs.steps then st else
   renderItemWith cfg m W H stroke pf (cellPainterD cfg stroke pf Tiling.maxTileDepth) st it
 
 /-- One item preserves the buffer size. -/
 theorem renderItemG_size (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
     (pf : PageFonts) (st : TState) (it : DisplayItem) :
-    (renderItemG cfg m W H stroke pf st it).rs.buf.size = st.rs.buf.size :=
-  renderItemWith_size _ _ _ _ _ _ _ _ _
+    (renderItemG cfg m W H stroke pf st it).rs.buf.size = st.rs.buf.size := by
+  unfold renderItemG; split
+  · rfl
+  · exact renderItemWith_size _ _ _ _ _ _ _ _ _
 
 /-- `renderItemG` keeps the transparency state. -/
 theorem renderItemG_tx (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn)
     (pf : PageFonts) (st : TState) (it : DisplayItem) :
-    (renderItemG cfg m W H stroke pf st it).tx = st.tx :=
-  renderItemWith_tx _ _ _ _ _ _ _ _ _
+    (renderItemG cfg m W H stroke pf st it).tx = st.tx := by
+  unfold renderItemG; split
+  · rfl
+  · exact renderItemWith_tx _ _ _ _ _ _ _ _ _
 
 /-- The transparency driver's view of `TState` (task 7.3c). -/
 def painterG (cfg : Fill.Config) (m : Aff) (W H : Nat) (stroke : Clip.StrokeFn) (pf : PageFonts) :
@@ -1277,31 +1304,129 @@ theorem cellPainterD_size (cfg : Fill.Config) (stroke : Clip.StrokeFn) (pf : Pag
         (painterWith cfg Tc w h (renderItemWith cfg Tc w h stroke pf (cellPainterD cfg stroke pf k))).Lawful)
       _ _ _ _ _ (by simp [painterWith]; exact hb) rfl
 
-/-- Render a display list (paths and glyph runs) onto a white `W × H` page through `m`. -/
+/-- **The page loop** (task 13.4b): the items from index `i` on (at most `n` of them) through
+the transparency driver, stopping at the first item whose predecessors left the render work
+allowance spent (`rs.steps > rs.limit`). The remaining items are not even visited, so a stopped
+page costs nothing more. -/
+def loopTx (P : Transparency.Painter TState) (W H f : Nat) (items : Array DisplayItem) :
+    Nat → Nat → TState → TState
+  | 0, _, s => s
+  | n + 1, i, s =>
+    if s.rs.limit < s.rs.steps then s else
+    match items[i]? with
+    | none => s
+    | some it => loopTx P W H f items n (i + 1) (Transparency.renderTx P W H f s it)
+
+/-- Close the open layers of a stopped page (task 13.4b), innermost first (`groupEnd`; at most
+`n` times): the image of an incomplete page is its page buffer with the groups so far composited,
+not the buffer of an open group. -/
+def closeLayers (P : Transparency.Painter TState) (W H : Nat) : Nat → TState → TState
+  | 0, s => s
+  | n + 1, s =>
+    if (P.tx s).stack.isEmpty then s else
+    closeLayers P W H n (Transparency.renderTx P W H 0 s .groupEnd)
+
+/-- Render a display list (paths and glyph runs) onto a white `W × H` page through `m`, under
+the render work allowance `cfg.renderAllowance W H` (task 13.4b): the final state; the page is
+**incomplete** when `rs.steps > rs.limit` (`TState.exceeded`), its open layers then closed. -/
 def renderItems (cfg : Fill.Config) (m : Aff) (W H : Nat) (pf : PageFonts) (items : DisplayList)
     (stroke : Clip.StrokeFn := Clip.defaultStroke) : TState :=
-  (liftSh Transparency.maxMaskDepth items).foldl (Transparency.renderTx (painterG cfg m W H stroke pf) W H Transparency.maxMaskDepth)
-    { rs := { buf := Clip.whiteBuf W H } }
+  let its := liftSh Transparency.maxMaskDepth items
+  let P := painterG cfg m W H stroke pf
+  let s := loopTx P W H Transparency.maxMaskDepth its its.size 0
+    { rs := { buf := Clip.whiteBuf W H, limit := cfg.renderAllowance W H } }
+  if s.rs.limit < s.rs.steps then closeLayers P W H s.tx.stack.length s else s
+
+/-- The render work allowance of the state is spent (task 13.4b): the page is incomplete. -/
+def TState.exceeded (s : TState) : Bool := decide (s.rs.limit < s.rs.steps)
+
+/-- The loop keeps the driver's invariant (page-size buffer and saved backdrops). -/
+theorem loopTx_inv (P : Transparency.Painter TState) (hP : P.Lawful) (W H f : Nat)
+    (items : Array DisplayItem) : ∀ (n i : Nat) (s : TState),
+    Transparency.Inv P W H s → Transparency.Inv P W H (loopTx P W H f items n i s) := by
+  intro n
+  induction n with
+  | zero => intro i s h; exact h
+  | succ n ih =>
+    intro i s h
+    simp only [loopTx]
+    split
+    · exact h
+    · split
+      · exact h
+      · exact ih _ _ (Transparency.renderTx_inv P hP W H f s _ h)
+
+/-- Closing layers keeps the driver's invariant. -/
+theorem closeLayers_inv (P : Transparency.Painter TState) (hP : P.Lawful) (W H : Nat) :
+    ∀ (n : Nat) (s : TState), Transparency.Inv P W H s → Transparency.Inv P W H (closeLayers P W H n s) := by
+  intro n
+  induction n with
+  | zero => intro s h; exact h
+  | succ n ih =>
+    intro s h
+    simp only [closeLayers]
+    split
+    · exact h
+    · exact ih _ (Transparency.renderTx_inv P hP W H 0 s _ h)
+
+/-- A rendered page: the image (`4 · w · h` bytes) and whether the render work allowance was
+spent (task 13.4b). `exceeded` pages are **incomplete**: the pixels painted before the
+allowance ran out, with the open groups composited; nothing after that is drawn. -/
+structure PageRender where
+  /-- The pixels so far (all of them when `exceeded` is false). -/
+  image : Clip.Image
+  /-- The render work allowance was spent: the image is incomplete. -/
+  exceeded : Bool
 
 /-- **Render a page** (paths and text) at zoom `zoom` and user rotation `rot`, onto its
-CropBox (as `Clip.renderPaths`, plus glyph runs). -/
-def renderPage (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf : PageFonts)
+CropBox (as `Clip.renderPaths`, plus glyph runs), with the stop reason (task 13.4b). -/
+def renderPageR (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf : PageFonts)
     (items : DisplayList) (cfg : Fill.Config := {}) (stroke : Clip.StrokeFn := Clip.defaultStroke) :
-    Clip.Image :=
+    PageRender :=
   let r := rotAdd page.rotate rot
   let bx := Box.ofRect page.cropBox
   let sz := Clip.pageSize cfg.maxPageSide zoom r bx
-  ⟨sz.1, sz.2, (renderItems cfg (viewMatrix zoom r bx) sz.1 sz.2 pf items stroke).rs.buf⟩
+  let s := renderItems cfg (viewMatrix zoom r bx) sz.1 sz.2 pf items stroke
+  ⟨⟨sz.1, sz.2, s.rs.buf⟩, s.exceeded⟩
+
+/-- **Render a page** (paths and text): the image of `renderPageR`. **It is incomplete** when
+the render work allowance was spent (`renderPageR … .exceeded`); `renderDocPage` and
+`Api.renderPage` turn that into `limitExceeded .renderWork`. -/
+def renderPage (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf : PageFonts)
+    (items : DisplayList) (cfg : Fill.Config := {}) (stroke : Clip.StrokeFn := Clip.defaultStroke) :
+    Clip.Image :=
+  (renderPageR page zoom rot pf items cfg stroke).image
+
+/-- **Buffer shape** of a rendered page, complete or not: `4 · w · h` bytes. -/
+theorem renderPageR_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf : PageFonts)
+    (items : DisplayList) (cfg : Fill.Config) (stroke : Clip.StrokeFn) :
+    (renderPageR page zoom rot pf items cfg stroke).image.data.size =
+      4 * (renderPageR page zoom rot pf items cfg stroke).image.w *
+        (renderPageR page zoom rot pf items cfg stroke).image.h := by
+  simp only [renderPageR, renderItems]
+  have hP := painterG_lawful cfg (viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox))
+    (Clip.pageSize cfg.maxPageSide zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)).1
+    (Clip.pageSize cfg.maxPageSide zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)).2 stroke pf
+  generalize (Clip.pageSize cfg.maxPageSide zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)) = sz at hP ⊢
+  generalize (viewMatrix zoom (rotAdd page.rotate rot) (Box.ofRect page.cropBox)) = m at hP ⊢
+  have h0 : Transparency.Inv (painterG cfg m sz.1 sz.2 stroke pf) sz.1 sz.2
+      ({ rs := { buf := Clip.whiteBuf sz.1 sz.2, limit := cfg.renderAllowance sz.1 sz.2 } } : TState) :=
+    ⟨by simp only [painterG, painterWith]; exact Clip.whiteBuf_size _ _,
+      by intro l hl; exact absurd hl (by simp [painterG, painterWith])⟩
+  have h1 := loopTx_inv _ hP sz.1 sz.2 Transparency.maxMaskDepth (liftSh Transparency.maxMaskDepth items)
+    (liftSh Transparency.maxMaskDepth items).size 0 _ h0
+  generalize loopTx _ _ _ _ _ _ _ _ = s at h1 ⊢
+  split
+  · exact (closeLayers_inv _ hP _ _ _ _ h1).1
+  · exact h1.1
 
 /-- **Buffer shape** of a rendered page: `4 · w · h` bytes. -/
 theorem renderPage_size (page : Doc.Page) (zoom : Rat) (rot : Doc.Rotation) (pf : PageFonts)
     (items : DisplayList) (cfg : Fill.Config) (stroke : Clip.StrokeFn) :
     (renderPage page zoom rot pf items cfg stroke).data.size =
       4 * (renderPage page zoom rot pf items cfg stroke).w *
-        (renderPage page zoom rot pf items cfg stroke).h := by
-  simp only [renderPage, renderItems]
-  exact Transparency.renderTx_items_size _ (painterG_lawful ..) _ _ _ (liftSh Transparency.maxMaskDepth items) _
-    (Clip.whiteBuf_size _ _) rfl
+        (renderPage page zoom rot pf items cfg stroke).h :=
+  renderPageR_size ..
 
 /-- The 256 one-byte advances of a font, tabulated (`tabulateWidths`). -/
 def widthTable (fi : FontInfo) : Array Fixed :=
@@ -1330,15 +1455,16 @@ def pageGeoTable (cfg : Fill.Config) (view : Aff) (items : DisplayList) : Stroke
       | .strokePath _ s _ => t.add s
       | _ => t) Transparency.maxMaskDepth { view, cfg } items
 
-/-- **Render a page of an opened document**: decode its content, build the display list with
-the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total; charges
-`budget` for every decoded stream. Content hidden by optional content (task 9.r11a; marked
+/-- **Render a page of an opened document**, keeping the pixels of a page whose render work
+allowance was spent (task 13.4b: `PageRender.exceeded`): decode its content, build the display
+list with the fonts' advances (`Text.extractDocPage`), load the glyph programs, render. Total;
+charges `budget` for every decoded stream. Content hidden by optional content (task 9.r11a; marked
 content, XObjects and annotations with `/OC`) is not painted: under `oc` when given (a layers
 panel's state), else under the document's default configuration (`Text.docOCState`). -/
-def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
+def renderDocPagePartial (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
     (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config := Fill.Config.ofLimits limits)
     (subst : Subst.SubstFonts := {}) (oc : Option Doc.OptionalContent.State := none) :
-    (Except Error Clip.Image) × Filter.Budget :=
+    (Except Error PageRender) × Filter.Budget :=
   -- Optional content (task 9.r11a): the given visibility state, else the document's default
   -- configuration; the same state for the page content, the annotations, the tiling cells and
   -- the Type 3 glyphs.
@@ -1388,9 +1514,60 @@ def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Ra
     let (imgs, b) := imgs.loadInlineJPXFrom imageSource b (some view) items
     let (imgs, b) := imgs.loadInlineJPXFrom imageSource b none (tls.cellItems ++ type3Items srcs)
     let (shs, b) := Shading.loadShadings limits (Text.docSource limits doc) b (page.resources.getD []) all
-    (.ok (renderPage page zoom rot
+    (.ok (renderPageR page zoom rot
       { fonts := tabulateWidths ft.1, sources := srcs, images := imgs, shadings := shs, tilings := tls
         fallback := hailMarySource subst } items cfg (Clip.tableStroke (pageGeoTable cfg view items))), b)
+
+/-- **Render a page of an opened document** (as `renderDocPagePartial`), complete or an error:
+a page whose render work allowance was spent (task 13.4b) is `limitExceeded .renderWork`, the
+pixels so far being left to `renderDocPagePartial`. A page that returns `ok` is complete. -/
+def renderDocPage (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
+    (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config := Fill.Config.ofLimits limits)
+    (subst : Subst.SubstFonts := {}) (oc : Option Doc.OptionalContent.State := none) :
+    (Except Error Clip.Image) × Filter.Budget :=
+  match renderDocPagePartial limits doc page zoom rot budget cfg subst oc with
+  | (.ok r, b) => if r.exceeded then (.error (.limitExceeded .renderWork), b) else (.ok r.image, b)
+  | (.error e, b) => (.error e, b)
+
+/-- **Buffer shape** of a page of an opened document, complete or incomplete: `4 · w · h` bytes. -/
+theorem renderDocPagePartial_size (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
+    (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config)
+    (subst : Subst.SubstFonts) (oc : Option Doc.OptionalContent.State) (r : PageRender)
+    (b : Filter.Budget)
+    (h : renderDocPagePartial limits doc page zoom rot budget cfg subst oc = (.ok r, b)) :
+    r.image.data.size = 4 * r.image.w * r.image.h := by
+  unfold renderDocPagePartial at h
+  generalize Text.ocStateFor limits doc budget oc = q at h
+  obtain ⟨ocs, b0⟩ := q
+  cases hx : Text.extractDocPage limits doc page b0 {} (some ocs) with
+  | mk r0 b1 =>
+    cases r0 with
+    | error e => simp [hx] at h
+    | ok pt =>
+      simp only [hx, Prod.mk.injEq, Except.ok.injEq] at h
+      rw [← h.1]
+      exact renderPageR_size ..
+
+/-- **A page that `renderDocPage` returns has `4 · w · h` bytes** (and is complete). -/
+theorem renderDocPage_size (limits : Limits) (doc : Doc.Doc) (page : Doc.Page) (zoom : Rat)
+    (rot : Doc.Rotation) (budget : Filter.Budget) (cfg : Fill.Config)
+    (subst : Subst.SubstFonts) (oc : Option Doc.OptionalContent.State) (img : Clip.Image)
+    (b : Filter.Budget)
+    (h : renderDocPage limits doc page zoom rot budget cfg subst oc = (.ok img, b)) :
+    img.data.size = 4 * img.w * img.h := by
+  unfold renderDocPage at h
+  cases hr : renderDocPagePartial limits doc page zoom rot budget cfg subst oc with
+  | mk r b1 =>
+    rw [hr] at h
+    cases r with
+    | error e => simp at h
+    | ok r =>
+      simp only at h
+      split at h
+      · simp at h
+      · simp only [Prod.mk.injEq, Except.ok.injEq] at h
+        rw [← h.1]
+        exact renderDocPagePartial_size _ _ _ _ _ _ _ _ _ _ _ hr
 
 /-! ## 6. Checks -/
 

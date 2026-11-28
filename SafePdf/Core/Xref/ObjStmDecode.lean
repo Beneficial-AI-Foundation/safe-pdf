@@ -249,6 +249,33 @@ def getObject (os : ObjStm) (limits : Limits) (k : Nat) : Except Error PdfObject
         else .error (.malformed r "object stream: data after the object (not a direct object)")
       else .error (.malformed r "object stream: object runs past the next object's offset")
 
+/-- `getObject` with the `k`-th header entry `cur` and the next one `next` given instead of
+looked up in the list (task 13.25: a document keeps the entries as an array, so the lookup is
+constant time; `getObject_eq_with`). -/
+def getObjectWith (os : ObjStm) (limits : Limits) (k : Nat) (cur next : Option (Nat × Nat)) :
+    Except Error PdfObject :=
+  match cur with
+  | none => .error (.malformed 0 s!"object stream: index {k} out of range")
+  | some (_, off) =>
+    match ObjParse.parseObject limits os.data (os.first + off) with
+    | .error e => .error e
+    | .ok (o, r) =>
+      let se := match next with
+        | some (_, off') => os.first + off'
+        | none => os.data.size
+      if r ≤ se then
+        if se ≤ Lex.skipWs os.data r false then .ok o
+        else .error (.malformed r "object stream: data after the object (not a direct object)")
+      else .error (.malformed r "object stream: object runs past the next object's offset")
+
+/-- `getObject` is `getObjectWith` on the entries it looks up. -/
+theorem getObject_eq_with (os : ObjStm) (limits : Limits) (k : Nat) :
+    getObject os limits k = getObjectWith os limits k os.entries[k]? os.entries[k + 1]? := by
+  unfold getObject getObjectWith sliceEnd
+  rcases os.entries[k]? with _ | ⟨_, off⟩
+  · rfl
+  · simp only
+
 /-- The index of object number `num` in the header, if present (unique, by `os.distinct`). -/
 def findObject (os : ObjStm) (num : Nat) : Option Nat :=
   os.entries.findIdx? (fun e => e.1 == num)

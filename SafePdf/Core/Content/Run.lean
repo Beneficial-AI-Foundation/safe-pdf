@@ -1,3 +1,4 @@
+import SafePdf.Core.DictIndex
 import SafePdf.Core.Content.Interp
 import SafePdf.Core.Doc.OptionalContent
 
@@ -203,6 +204,15 @@ structure Frame where
   default coordinate space → page space (the identity for the page; a form's `/Matrix` × the
   CTM at its `Do`). Pattern colours record it (`PatternUse.base`, §8.7.3). -/
   base : Matrix
+  /-- The ordered index of `res` (task 13.24): built on the first lookup and reused by every
+  later lookup in this frame, so `n` resource lookups into an `n`-entry dictionary cost
+  `O(n log n)` in all, not `O(n²)`. `ResIdx` carries the proof that lookups through it equal
+  `Dict.lookup res`; frames are built with `Frame.mk'`. -/
+  idx : ResIdx res
+
+/-- A frame with the index of its resources. -/
+def Frame.mk' (res : Dict) (visited : List Nat) (owner ownerGen : Nat) (base : Matrix) : Frame :=
+  ⟨res, visited, owner, ownerGen, base, ResIdx.of res⟩
 
 /-- Runner state. -/
 structure St (σ ω : Type) where
@@ -257,6 +267,43 @@ def resEntry {σ : Type} (src : Source σ) (s : σ) (res : Dict) (cat : String) 
     let (sub, s) := dictOf src s o
     (Dict.get? sub name, s)
 
+/-- `resEntry` through the ordered index of `res` (task 13.24): the top level and a direct
+category dictionary are looked up in `O(log n)`; a category given by reference is resolved
+through the source and scanned, as in `resEntry`. -/
+def resEntryI {σ : Type} (src : Source σ) (s : σ) (res : Dict) (ix : ResIdx res) (cat : String)
+    (name : Name) : Option PdfObject × σ :=
+  match ix.top.get[(nm cat).bytes]? with
+  | none => (none, s)
+  | some e =>
+    match e.val with
+    | .null => (none, s)
+    | .dict _ => (Dict.getIdx e.sub.get name, s)
+    | o =>
+      let (sub, s) := dictOf src s o
+      (Dict.get? sub name, s)
+
+/-- **`resEntryI` is `resEntry`**, for every resource dictionary (duplicate keys included:
+both take the first entry). -/
+theorem resEntryI_eq {σ : Type} (src : Source σ) (s : σ) (res : Dict) (ix : ResIdx res)
+    (cat : String) (name : Name) :
+    resEntryI src s res ix cat name = resEntry src s res cat name := by
+  have h := ix.htop (nm cat)
+  unfold resEntryI resEntry Dict.get?
+  cases he : ix.top.get[(nm cat).bytes]? with
+  | none => rw [he] at h; simp at h; rw [← h]
+  | some e =>
+    rw [he] at h
+    simp only [Option.map_some] at h
+    rw [← h]
+    obtain ⟨v, sub, hs⟩ := e
+    simp only
+    cases v with
+    | dict d =>
+      simp only [dictOf, resolve]
+      rw [hs d rfl, Dict.getIdx_index]
+      rfl
+    | _ => simp [dictOf, resolve]
+
 /-- A number. -/
 def numOf (o : PdfObject) : Option Fixed := num? o
 
@@ -279,8 +326,9 @@ inductive XObj where
   | missing
 
 /-- Look up and classify XObject `name`. -/
-def xobjectOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (name : Name) : XObj × σ :=
-  match resEntry src s res "XObject" name with
+def xobjectOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (ix : ResIdx res) (name : Name) :
+    XObj × σ :=
+  match resEntryI src s res ix "XObject" name with
   | (some (.ref n g), s) =>
     match src.fetch s n g with
     | (.ok (.stream st), s) =>
@@ -631,9 +679,9 @@ def CSInfo.initial (info : CSInfo) : Color :=
   | .lab => info.color [Fixed.zero, Fixed.zero, Fixed.zero]
 
 /-- Resolve colour-space resource `name`. -/
-def namedCS {σ : Type} (src : Source σ) (s : σ) (res : Dict) (name : Name) :
+def namedCS {σ : Type} (src : Source σ) (s : σ) (res : Dict) (ix : ResIdx res) (name : Name) :
     Option CSInfo × σ :=
-  match resEntry src s res "ColorSpace" name with
+  match resEntryI src s res ix "ColorSpace" name with
   | (some o, s) => csInfo src s o
   | (none, s) => (none, s)
 
@@ -648,7 +696,7 @@ none at all) the resources of the frame's owner (`.page` for the page, `.form` f
 with its own `/Resources`). -/
 def resRefOf {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (cat : String) (name : Name) :
     ResRef × σ :=
-  match resEntry src s fr.res cat name with
+  match resEntryI src s fr.res fr.idx cat name with
   | (some (.ref n g), s) => (.ref n g, s)
   | (_, s) => (if fr.owner = 0 then .page else .form fr.owner fr.ownerGen, s)
 
@@ -744,7 +792,7 @@ def annotInline {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (d : Dict) :
   match Dict.get? d (nm "ColorSpace") with
   | some (.name n) =>
     if (deviceOfName n).isSome || n = nm "Pattern" then (d, s) else
-    match resEntry src s fr.res "ColorSpace" n with
+    match resEntryI src s fr.res fr.idx "ColorSpace" n with
     | (some entry, s) =>
       let (raw, s) := resolve src s entry
       let (space, s) := if inlineTint d raw then (some raw, s) else
@@ -818,7 +866,7 @@ def gsStep {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op
   match lastName? op.operands with
   | none => (m, [], 1, 0, s)
   | some n =>
-    match resEntry src s fr.res "ExtGState" n with
+    match resEntryI src s fr.res fr.idx "ExtGState" n with
     | (some o, s) =>
       match resolve src s o with
       | (.dict d, s) =>
@@ -831,7 +879,7 @@ def gsStep {σ : Type} (src : Source σ) (fr : Frame) (m : Machine) (s : σ) (op
 referenced object when the `/Font` entry is a reference, else the entry of that name in the
 frame owner's resources. -/
 def fontIdOf {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (name : Name) : FontId × σ :=
-  match resEntry src s fr.res "Font" name with
+  match resEntryI src s fr.res fr.idx "Font" name with
   | (some (.ref n g), s) => (.ref n g, s)
   | (_, s) => (.res fr.owner, s)
 
@@ -866,7 +914,7 @@ def csStep {σ ω : Type} (env : Env σ ω) (fr : Frame) (stroke : Bool) (m : Ma
   | some n =>
     match spaceOfName n with
     | .other .. =>
-      match namedCS env.src s fr.res n with
+      match namedCS env.src s fr.res fr.idx n with
       | (some info, s) =>
         ({ m with core := setColor m.core stroke (info.space n) info.initial }, [], 0, 0, s)
       | (none, s) =>
@@ -883,7 +931,7 @@ def scStepIn {σ ω : Type} (env : Env σ ω) (fr : Frame) (stroke : Bool) (sp :
   | .other key k _ =>
     if k = 0 then viaExec env.cfg m s op
     else
-      match namedCS env.src s fr.res key with
+      match namedCS env.src s fr.res fr.idx key with
       | (some info, s) =>
         if info.space key = sp then
           match nums k op.operands with
@@ -913,7 +961,7 @@ def bdcProps {σ : Type} (src : Source σ) (s : σ) (fr : Frame) (o : List PdfOb
   match lastN 2 o with
   | some [.name tag, .dict d] => withText tag d s
   | some [.name tag, .name p] =>
-    match resEntry src s fr.res "Properties" p with
+    match resEntryI src s fr.res fr.idx "Properties" p with
     | (some e, s) =>
       match resolve src s e with
       | (.dict d, s) => withText tag d s
@@ -989,7 +1037,7 @@ def FormJob.post (j : FormJob) : List DisplayItem :=
 /-- The frame a form job runs in, nested in `fr`: the form's resources and owner, the form
 on the nesting path, the form's start CTM as base matrix. -/
 def FormJob.frame (j : FormJob) (fr : Frame) : Frame :=
-  ⟨j.res, j.num :: fr.visited, j.owner, j.ownerGen, j.gs.ctm⟩
+  Frame.mk' j.res (j.num :: fr.visited) j.owner j.ownerGen j.gs.ctm
 
 /-- A form adds at most two items of its own (`Paint.maxItems`, charged to its `Do`). -/
 theorem FormJob.pre_post_le (j : FormJob) : j.pre.length + j.post.length ≤ 2 := by
@@ -1048,7 +1096,7 @@ def bdcVisible {σ ω : Type} (env : Env σ ω) (fr : Frame) (s : σ) (o : List 
   match lastN 2 o with
   | some [.name tag, .name p] =>
     if tag = nm "OC" then
-      match resEntry env.src s fr.res "Properties" p with
+      match resEntryI env.src s fr.res fr.idx "Properties" p with
       | (some e, s) => ocVisible env s e
       | (none, s) => (true, s)
     else (true, s)
@@ -1161,7 +1209,7 @@ def doStep {σ ω : Type} (env : Env σ ω) (nest : Bool) (fr : Frame) (m : Mach
   match lastName? op.operands with
   | none => .done none 1 s
   | some name =>
-    match xobjectOf env.src s fr.res name with
+    match xobjectOf env.src s fr.res fr.idx name with
     | (.missing, s) => .done none 1 s
     | (.ignored, s) => .done none 0 s
     | (.image n g d, s) =>
@@ -1206,7 +1254,7 @@ def gsDict? {σ : Type} (src : Source σ) (fr : Frame) (s : σ) (op : Op) : Opti
   match lastName? op.operands with
   | none => (none, s)
   | some n =>
-    match resEntry src s fr.res "ExtGState" n with
+    match resEntryI src s fr.res fr.idx "ExtGState" n with
     | (some o, s) =>
       match resolve src s o with
       | (.dict d, s) => (some d, s)
@@ -1294,8 +1342,9 @@ def csBook (sp : ColorSpace) (op : Op) : PatState :=
   | _, _ => {}
 
 /-- The underlying space of pattern colour space resource `key` (`[/Pattern base]`). -/
-def underOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (key : Name) : Option CSInfo × σ :=
-  match resEntry src s res "ColorSpace" key with
+def underOf {σ : Type} (src : Source σ) (s : σ) (res : Dict) (ix : ResIdx res) (key : Name) :
+    Option CSInfo × σ :=
+  match resEntryI src s res ix "ColorSpace" key with
   | (some o, s) =>
     match resolve src s o with
     | (.array [.name p, b], s) => if p = nm "Pattern" then csInfo src s b else (none, s)
@@ -1313,7 +1362,7 @@ def scnBook {σ : Type} (src : Source σ) (fr : Frame) (p : PatState) (sp : Colo
     let xs := op.operands.filterMap num?
     if xs.isEmpty then ({ p with under := none }, s) else
     let (info, s) := match p.space with
-      | some key => underOf src s fr.res key
+      | some key => underOf src s fr.res fr.idx key
       | none => (none, s)
     let col := match info with
       | some i => i.color xs
@@ -1366,11 +1415,14 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
     else if op.op = [103, 115] then -- gs
       gsR env inner fr m items warnings unsupported ops forms truncated s obs op
     else
+      -- `m.oc` is bound BEFORE the call (task 13.1): reading `m` after `localStep` keeps the
+      -- machine shared across the call, so every `addSegs` push copies the whole path.
+      let moc := m.oc
       match localStep env fr m s op with
       | (m', its, w, u, s') =>
-        let t := ocTrack env fr m.oc s' op
+        let t := ocTrack env fr moc s' op
         let pb := patBook env.src fr m' t.2 op
-        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 (ocKeep m.oc t.1 its)
+        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 (ocKeep moc t.1 its)
         ⟨{ m' with patFill := pb.1, patStroke := pb.2.1, oc := t.1 }, pushAll items a.1,
           warnings + w, unsupported + u, ops + 1, forms, truncated, a.2, env.observe obs op w u⟩
 
@@ -1920,7 +1972,7 @@ def St.init {σ ω : Type} (s : σ) (obs : ω) : St σ ω :=
 from the initial machine. Total; never fails. The reference for `runPage`. -/
 def runPageUncached {σ ω : Type} (env : Env σ ω) (res : Dict) (ops : Array Op) (s : σ)
     (obs : ω) : St σ ω :=
-  Run.runOps env env.cfg.limits.maxXObjectDepth ⟨res, [], 0, 0, Matrix.identity⟩ (St.init s obs) ops
+  Run.runOps env env.cfg.limits.maxXObjectDepth (Frame.mk' res [] 0 0 Matrix.identity) (St.init s obs) ops
 
 /-- Forget the second component of the source state. -/
 def St.fstState {σ κ ω : Type} (st : St (σ × κ) ω) : St σ ω :=
@@ -1955,7 +2007,7 @@ theorem runPageUncached_items_le {σ ω : Type} (env : Env σ ω) (res : Dict) (
     (s : σ) (obs : ω) :
     (runPageUncached env res ops s obs).items.size ≤
       Paint.maxItems * (runPageUncached env res ops s obs).ops := by
-  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 ⟨res, [], 0, 0, Matrix.identity⟩
+  have := (runOps_good env env.cfg.limits.maxXObjectDepth 0 (Frame.mk' res [] 0 0 Matrix.identity)
     (St.init s obs) ops (St.init_good _ s obs)).1
   unfold runPageUncached
   omega

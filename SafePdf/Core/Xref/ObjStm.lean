@@ -1,3 +1,4 @@
+import Std.Data.TreeMap
 import SafePdf.Core.Xref
 import SafePdf.Core.Xref.ObjStmDecode
 import SafePdf.Core.Xref.Length
@@ -264,6 +265,170 @@ def selectMember (os : ObjStm) (limits : Limits) (off c num idx : Nat) :
     Except Error PdfObject :=
   if findObject os num = some idx then getObject os limits idx
   else .error (.malformed off s!"object {num} is not at index {idx} of object stream {c}")
+
+/-- The ordered index of the header: object number to the index of its first entry. -/
+def indexEntries (es : List (Nat × Nat)) : Std.TreeMap Nat Nat compare :=
+  (es.zipIdx).foldl (fun m e => m.insertIfNew e.1.1 e.2) ∅
+
+private theorem indexEntries_go (num : Nat) :
+    ∀ (es : List (Nat × Nat)) (i : Nat) (m : Std.TreeMap Nat Nat compare),
+      ((es.zipIdx i).foldl (fun m e => m.insertIfNew e.1.1 e.2) m)[num]? =
+        (match m[num]? with
+         | some v => some v
+         | none => (es.findIdx? (fun e => e.1 == num)).map (· + i))
+  | [], i, m => by
+    cases h : m[num]? <;> simp [h]
+  | e :: rest, i, m => by
+    rw [List.zipIdx_cons, List.foldl_cons, indexEntries_go num rest (i + 1), List.findIdx?_cons]
+    rw [Std.TreeMap.getElem?_insertIfNew]
+    by_cases hk : e.1 = num
+    · subst hk
+      by_cases hm : e.1 ∈ m
+      · have h1 : (m[e.1]?).isSome = true := by
+          rw [Std.TreeMap.isSome_getElem?_eq_contains]; exact Std.TreeMap.contains_iff_mem.mpr hm
+        cases h : m[e.1]? with
+        | none => simp [h] at h1
+        | some v => simp [hm]
+      · have h1 : m[e.1]? = none := by
+          cases h : m[e.1]? with
+          | none => rfl
+          | some v =>
+            exfalso; apply hm
+            have : (m[e.1]?).isSome = true := by simp [h]
+            rw [Std.TreeMap.isSome_getElem?_eq_contains] at this
+            exact Std.TreeMap.contains_iff_mem.mp this
+        simp [hm]
+    · have hc : ¬ compare e.1 num = Ordering.eq := fun h => hk (by simpa using h)
+      have hb : (e.1 == num) = false := by simpa using hk
+      simp only [hc, false_and, ↓reduceIte, hb, Bool.false_eq_true]
+      cases h : m[num]? with
+      | some v => simp
+      | none =>
+        cases h2 : rest.findIdx? (fun e => e.1 == num) with
+        | none => simp
+        | some j => simp; omega
+
+/-- **The index of a header** is `findObject`: for every object number. -/
+theorem indexEntries_get? (os : ObjStm) (num : Nat) :
+    (indexEntries os.entries)[num]? = findObject os num := by
+  unfold indexEntries findObject
+  rw [indexEntries_go num os.entries 0 ∅]
+  simp
+
+/-- A decoded object stream with constant-time header access (task 13.25): the entries as an
+array and the object numbers in an ordered map. Both are tied to the list by proof. -/
+structure ObjStmIx where
+  /-- The decoded object stream. -/
+  os : ObjStm
+  /-- The header entries, as an array. -/
+  arr : Array (Nat × Nat)
+  /-- The object numbers of the header, with their index. -/
+  ix : Std.TreeMap Nat Nat compare
+  /-- `arr` is the entry list. -/
+  arr_eq : arr = os.entries.toArray
+  /-- `ix` is `findObject`. -/
+  ix_eq : ∀ num, ix[num]? = findObject os num
+
+/-- Index a decoded object stream. -/
+def ObjStmIx.of (os : ObjStm) : ObjStmIx :=
+  ⟨os, os.entries.toArray, indexEntries os.entries, rfl, indexEntries_get? os⟩
+
+/-- `selectMember` through the constant-time header. -/
+def selectMemberIx (x : ObjStmIx) (limits : Limits) (off c num idx : Nat) :
+    Except Error PdfObject :=
+  if x.ix[num]? = some idx then getObjectWith x.os limits idx x.arr[idx]? x.arr[idx + 1]?
+  else .error (.malformed off s!"object {num} is not at index {idx} of object stream {c}")
+
+/-- **Constant-time selection is `selectMember`.** -/
+theorem selectMemberIx_eq (x : ObjStmIx) (limits : Limits) (off c num idx : Nat) :
+    selectMemberIx x limits off c num idx = selectMember x.os limits off c num idx := by
+  unfold selectMemberIx selectMember
+  rw [x.ix_eq num, x.arr_eq, List.getElem?_toArray, List.getElem?_toArray,
+    getObject_eq_with]
+
+/-- **The container stage of rule O6**: parse the container at `off` (its `/Length` resolved
+with `fuel`), check its header against the entry, apply `pre`, decode it. The result depends
+on the container only, not on which member is fetched, which is what lets a document keep it
+(`fetchCompressedVia_eq`). -/
+def containerDecode (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel off c : Nat) : Except Error ObjStm :=
+  match Length.parseIndirectResolved lookup limits bytes fuel off pre with
+  | .error e => .error e
+  | .ok (io, _) =>
+    if io.num = c ∧ io.gen = 0 then
+      match io.body with
+      | .obj _ => .error (.malformed off "object stream container is not a stream")
+      | .stream st0 =>
+        match pre.f c st0 with
+        | .error e => .error e
+        | .ok st => decodeObjStm limits st
+    else .error (.malformed off "object header does not match the cross-reference entry")
+
+/-- **Fetch with a given container decoder** (task 13.25): `fetchCompressed` where the decode
+of container `c` (entry `inUse off 0`) is `dec c off` instead of being recomputed. -/
+def fetchCompressedVia (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (dec : Nat → Nat → Except Error ObjStmIx) (num : Nat) : Except Error PdfObject :=
+  match lookup num with
+  | some (.compressed c idx) =>
+    if c = num then .error (.cycle 0 s!"object {num} is its own object stream")
+    else
+      match lookup c with
+      | some (.inUse off g) =>
+        if g = 0 then
+          match dec c off with
+          | .error e => .error e
+          | .ok x => selectMemberIx x limits off c num idx
+        else .error (.malformed off s!"object stream {c} has a non-zero generation")
+      | some (.compressed c' _) =>
+        .error (if c' = num then
+          .cycle 0 s!"object streams {num} and {c} contain each other"
+          else .malformed 0 s!"object stream {c} is itself in an object stream")
+      | some (.free _ _) => .error (.malformed 0 (containerMissingMsg c))
+      | none => .error (.malformed 0 (containerMissingMsg c))
+  | _ => .error (.malformed 0 s!"object {num} is not in an object stream")
+
+/-- **A stored decoder gives the same fetch** (task 13.25): if `dec c off` is the container
+stage `containerDecode` for every container entry, `fetchCompressedVia` is `fetchCompressed`
+(same values, same errors). -/
+theorem fetchCompressedVia_eq (pre : Pre) (lookup : Nat → Option XrefEntry) (limits : Limits)
+    (bytes : ByteArray) (fuel num : Nat) (dec : Nat → Nat → Except Error ObjStmIx)
+    (hdec : ∀ c off g, lookup c = some (.inUse off g) →
+      dec c off = (containerDecode pre lookup limits bytes fuel off c).map ObjStmIx.of) :
+    fetchCompressedVia lookup limits dec num =
+      fetchCompressed pre lookup limits bytes fuel num := by
+  unfold fetchCompressed fetchCompressedTrace fetchCompressedVia
+  rcases hn : lookup num with _ | (⟨_, _⟩ | ⟨_, _⟩ | ⟨c, idx⟩)
+  all_goals simp only
+  by_cases hcn : c = num
+  · simp only [hcn, ↓reduceIte]
+  · simp only [hcn, ↓reduceIte]
+    rcases hcl : lookup c with _ | (⟨_, _⟩ | ⟨off, g⟩ | ⟨_, _⟩)
+    all_goals simp only
+    by_cases hg : g = 0
+    · simp only [hg, ↓reduceIte]
+      rw [hdec c off g hcl]
+      unfold containerDecode
+      rcases Length.parseIndirectResolved lookup limits bytes fuel off pre with e | ⟨io, _⟩
+      · rfl
+      · simp only
+        by_cases hio : io.num = c ∧ io.gen = 0
+        · simp only [hio, and_self, ↓reduceIte]
+          rcases io.body with _ | st0
+          · rfl
+          · simp only
+            rcases pre.f c st0 with e | st
+            · rfl
+            · simp only
+              rcases decodeObjStm limits st with e | os
+              · rfl
+              · have hs := selectMemberIx_eq (ObjStmIx.of os) limits off c num idx
+                simp only [Except.map]
+                rw [hs]
+                simp only [ObjStmIx.of, selectMember]
+                by_cases hf : findObject os num = some idx <;> simp [hf]
+        · simp only [hio, ↓reduceIte]
+          rfl
+    · simp only [hg, ↓reduceIte]
 
 /-- **Budgeted, cached fetch** (tasks 3.13, 4.5): `fetchCompressedTrace` (rule O6) with the
 container parsed by `Length.parseIndirectResolvedB` (its `/Length` resolution charged) and its

@@ -48,6 +48,11 @@ jobs:
       - name: Build library and inspector
         run: lake build
 
+      # Task 13.18: no bignum literal parsed per call (lean_cstr_to_nat outside _init_ in the
+      # generated C of Core/Raster and Core/Content). Reads the C the build above left.
+      - name: Codegen guard
+        run: scripts/check-codegen.sh
+
       - name: Build the C API's Lean modules (runs their #guards)
         # Non-default target (task 11.3a5): SafePdf/Shell/Ffi*.lean and Ffi/Flat.lean hold
         # #guards that only run when this builds. Lean code only (no macOS code).
@@ -62,11 +67,20 @@ jobs:
       - name: Proof hygiene guard
         run: scripts/check-hygiene.sh
 
+      - name: Hygiene guard self-test (planted violations)
+        run: scripts/test-hygiene.sh
+
       - name: Adversarial corpus is up to date
         run: python3 -I Tests/adversarial/generate.py --check
 
       - name: Fuzz smoke
         run: scripts/fuzz.sh
+
+      # Task 13.6: repetition inputs up to 4 MiB, every call held to a linear budget; a call
+      # over its budget fails the step. Bounded to 240 s plus the last iteration.
+      - name: Fuzz long inputs
+        run: scripts/fuzz.sh long
+        timeout-minutes: 10
 
   # Task 8.2a: the native viewer (Tcl/Tk shim, `lake build viewer`) builds and
   # passes its headless smoke test (scripts/viewer-smoke.sh under xvfb-run).
@@ -507,5 +521,62 @@ jobs:
             differential-positions.log
             differential-pixels.json
             differential-pixels.log
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Task 13.10 (M13 part 3): the assertions build. Lake's release build passes -DNDEBUG, which
+  # compiles out the assert(i < lean_array_size(o)) behind every proof-carrying index. This job
+  # builds tests, fuzz, inspect and worker without NDEBUG in a separate workspace and runs the
+  # suites, the fuzz smoke and (capped) long profiles, the adversarial files and the pinned
+  # corpus through text and raster; the rig self-test must abort. The job's summary
+  # (summary.txt, also in the step summary) is the evidence. Only generated C and lean.h inline
+  # functions are covered (the prebuilt runtime stays a release build). A cold build of
+  # everything is the bulk of the time.
+  asserts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FUZZ_LONG_SECONDS: 90
+      # Pinned: leanprover/elan tag v4.4.0 (commit 3cc76985a1becb3c03cd65c1c5007e6f186ae474).
+      ELAN_INIT_REF: 3cc76985a1becb3c03cd65c1c5007e6f186ae474
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/cache v4.2.0
+      - name: Cache the Lean toolchain
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
+
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/leanprover/elan/${ELAN_INIT_REF}/elan-init.sh" -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat lean-toolchain)"
+
+      # actions/cache v4.2.0
+      - name: Cache pinned corpus files
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: corpus/files
+          key: corpus-pinned-${{ hashFiles('corpus/manifest.json', 'scripts/corpus/pinned.txt') }}
+
+      - name: Assertions build, suites, fuzz, adversarial files and pinned corpus
+        run: scripts/asserts.sh --work "$RUNNER_TEMP/asserts-ws"
+
+      # actions/upload-artifact v4.6.2
+      - name: Upload the summary and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: asserts
+          path: |
+            ${{ runner.temp }}/asserts-ws/summary.txt
+            ${{ runner.temp }}/asserts-ws/logs/rig-*.log
+            ${{ runner.temp }}/asserts-ws/logs/tests.log
+            ${{ runner.temp }}/asserts-ws/logs/fuzz-*.log
           if-no-files-found: warn
           retention-days: 30

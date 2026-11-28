@@ -89,13 +89,29 @@ def tkLinkArgs : Array String := run_io do
   let dirs ← systemLibDirs
   return libs ++ dirs.map (s!"-Wl,-L{·}") ++ #["-Wl,--allow-shlib-undefined"]
 
+/-- Assertions build (task 13.10): `lake -R -Kasserts=1 build …` compiles this package's generated
+C without `NDEBUG`. Lake's release build passes `-O3 -DNDEBUG`, which compiles out the
+`assert(i < lean_array_size(o))` of `lean.h`'s `lean_array_get_core` and its siblings, the check
+behind every proof-carrying index (`a[i]'h`). The flag reaches only the generated C and the
+inline functions of `lean.h`; the prebuilt runtime library stays a release build.
+
+**Never run this in the release workspace.** Lake caches the elaborated lakefile together with
+the `-K` options and reuses it on later calls without `-K` (only `-R` reconfigures), so a plain
+`lake build` afterwards would keep building with assertions. `scripts/asserts.sh` runs it in a
+separate copy of the sources (its own `.lake`), which is also where the `jpeg2000` dependency,
+whose flags this file cannot set, gets `-UNDEBUG` (through clang's `CCC_OVERRIDE_OPTIONS`). -/
+def assertsBuild : Bool := (get_config? asserts) == some "1"
+
 package «safe-pdf» where
   version := v!"0.1.0"
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
   -- macOS: compile Lean's C output for the app's minimum, macOS 15 (decided 2026-11-24, task
   -- 11.6a), so `libsafepdfffi.a` links into `SafePdf.app` without "built for newer macOS"
-  -- warnings; no effect elsewhere.
-  moreLeancArgs := if System.Platform.isOSX then #["-mmacosx-version-min=15.0"] else #[]
+  -- warnings; no effect elsewhere. `-UNDEBUG` (task 13.10) comes after the build type's
+  -- `-DNDEBUG`, so it wins.
+  moreLeancArgs :=
+    (if System.Platform.isOSX then #["-mmacosx-version-min=15.0"] else #[]) ++
+    (if assertsBuild then #["-UNDEBUG"] else #[])
 
 require jpeg2000 from git
   "https://github.com/Beneficial-AI-Foundation/jpeg2000-lean.git" @
@@ -171,6 +187,11 @@ lean_exe tests where
 /-- The fuzz driver. -/
 lean_exe fuzz where
   root := `Tests.Fuzz.Main
+
+/-- Self-test of the assertions build (task 13.10; not a default target): performs a deliberate
+out-of-range proof-carrying read, which must abort under `-Kasserts=1` (`scripts/asserts.sh`). -/
+lean_exe «assert-rig» where
+  root := `Tests.AssertRig
 
 /-! ## Native viewer (task 8.2a; not a default target) -/
 

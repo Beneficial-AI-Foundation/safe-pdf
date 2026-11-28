@@ -178,7 +178,7 @@ def runCell {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) 
     { env with cfg := { env.cfg with limits := { lim with maxOpsPerPage := bud.ops } },
                maxForms := bud.forms }
   let t := Content.Ops.tokenize lim bytes
-  let r := Content.Run.runOps env' lim.maxXObjectDepth ⟨res, [num], num, 0, Matrix.identity⟩ (St.init s obs) t.ops
+  let r := Content.Run.runOps env' lim.maxXObjectDepth (Content.Frame.mk' res [num] num 0 Matrix.identity) (St.init s obs) t.ops
   (r.items, r.s, r.obs, { ops := bud.ops - r.ops, forms := bud.forms - r.forms })
 
 /-- **Load a tiling pattern** with a growing context (task 7.3h2): as `loadTiling`, but
@@ -673,7 +673,7 @@ with `style.color = .pattern _`): fill mask ∩ clip, then `renderTiling` with t
 def renderTilingFill (cfg : Config) (paint : CellPainter) (m : Aff) (W H : Nat)
     (st : Clip.RState) (pat : Tiling) (pm : Aff) (color : Color) (p : Path) (rule : FillRule)
     (alpha : Comp) (clip : Clip) : Clip.RState :=
-  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let c := Clip.clipMaskC cfg m W H st.room st.cache clip
   let f := Clip.fillCounted cfg m p rule (Clip.itemWindow W H c.1)
   let mk := Clip.combine f.1 c.1
   renderTiling paint m W H
@@ -695,7 +695,7 @@ clip, then `renderTiling` with the stroke alpha. -/
 def renderTilingStroke (cfg : Config) (paint : CellPainter) (stroke : Clip.StrokeFn) (m : Aff)
     (W H : Nat) (st : Clip.RState) (pat : Tiling) (pm : Aff) (color : Color) (p : Path)
     (style : Content.StrokeStyle) (clip : Clip) : Clip.RState :=
-  let c := Clip.clipMaskC cfg m W H st.cache clip
+  let c := Clip.clipMaskC cfg m W H st.room st.cache clip
   let fm := stroke cfg m (Clip.itemWindow W H c.1) p style
   let mk := Clip.combine fm c.1
   renderTiling paint m W H { st with cache := c.2.1, steps := st.steps + c.2.2 + mk.area } pat pm

@@ -41,6 +41,7 @@ import SafePdf.Core.Xref.ObjStm
 import SafePdf.Spec.Unambiguous
 import SafePdf.Spec.PrefixStable
 import SafePdf.Core.Open
+import SafePdf.Core.DictIndex
 import SafePdf.Core.Doc
 import SafePdf.Core.Doc.Nav
 import SafePdf.Core.Doc.OpenSettings

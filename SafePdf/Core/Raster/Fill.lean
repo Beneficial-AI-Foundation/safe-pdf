@@ -382,13 +382,27 @@ structure Config where
   maxPageSide : Nat := Limits.default.maxPageSide
   /-- `Limits.clipCacheSize`: cached clip masks per page. -/
   clipCacheSize : Nat := Limits.default.clipCacheSize
+  /-- `Limits.renderStepFactor`: render work allowance per page pixel (task 13.4b). -/
+  renderStepFactor : Nat := Limits.default.renderStepFactor
+  /-- `Limits.renderStepFloor`: floor of the render work allowance (task 13.4b). -/
+  renderStepFloor : Nat := Limits.default.renderStepFloor
   deriving Repr, Inhabited
 
 /-- The raster configuration with the caps of `l` (tolerance and sampling from `base`). -/
 def Config.ofLimits (l : Limits) (base : Config := {}) : Config :=
   { base with curveSegCap := l.curveSegCap, coordLimit := l.coordLimit,
               arcSegCap := l.arcSegCap, maxDashSteps := l.maxDashSteps,
-              maxPageSide := l.maxPageSide, clipCacheSize := l.clipCacheSize }
+              maxPageSide := l.maxPageSide, clipCacheSize := l.clipCacheSize,
+              renderStepFactor := l.renderStepFactor, renderStepFloor := l.renderStepFloor }
+
+/-- The render work allowance in counted steps of a `W × H` pixel page (task 13.4b), as
+`Limits.renderAllowance`: `max renderStepFloor (renderStepFactor · W · H)`. -/
+def Config.renderAllowance (cfg : Config) (W H : Nat) : Nat :=
+  max cfg.renderStepFloor (cfg.renderStepFactor * (W * H))
+
+/-- `Config.ofLimits` computes the allowance of `Limits.renderAllowance`. -/
+theorem Config.ofLimits_renderAllowance (l : Limits) (base : Config) (W H : Nat) :
+    (Config.ofLimits l base).renderAllowance W H = l.renderAllowance W H := rfl
 
 /-- The effective chord cap per cubic: `max 1 curveSegCap`. -/
 def Config.segCap (cfg : Config) : Nat := max 1 cfg.curveSegCap
@@ -456,6 +470,11 @@ def IAff.ofAff? (m : Aff) : Option IAff :=
   let r := n - q * den
   256 * q + (512 * r + den) / (2 * den)
 
+/-- `2³⁶`, the bound on raw point coordinates of the 64-bit path of `FPt.ofPoint`. Out of line
+(`noinline`): a literal of `2³²` or more in a function body is parsed from its decimal string
+through GMP on every call (`scripts/check-codegen.sh`, task 13.18). -/
+@[noinline] def ptCap36 : Nat := 68719476736
+
 /-- A page point through `m` in subpixel units clamped to `±lim`: the 64-bit path when `im`
 is available and `|X|, |Y| ≤ 2³⁶` (then `|N| ≤ 2⁵⁸`), else the exact `Rat` path
 (`FPt.ofPt`). Both compute `toSub` of the same rational, so they agree (tested,
@@ -463,7 +482,7 @@ suite `raster-fill-spec`). -/
 def FPt.ofPoint (lim : Int) (m : Aff) (im : Option IAff) (p : Content.Point) : FPt :=
   match im with
   | some i =>
-    if absLe p.x.raw 68719476736 && absLe p.y.raw 68719476736 then
+    if absLe p.x.raw ptCap36 && absLe p.y.raw ptCap36 then
       let X := p.x.raw.toInt64
       let Y := p.y.raw.toInt64
       ⟨clampCoord (IAff.sub (i.a * X + i.c * Y + i.e) i.den).toInt lim,

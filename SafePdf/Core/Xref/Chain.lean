@@ -1,6 +1,7 @@
 import SafePdf.Core.Xref
 import SafePdf.Core.Xref.Stream
 import SafePdf.Core.Filter.Structural
+import Std.Data.TreeSet
 
 /-!
 # The `/Prev` chain of incremental updates
@@ -13,7 +14,8 @@ revision; the trailer of each points with `/Prev` at the byte offset of the prev
 `loadChain` starts at the `startxref` offset (`Core.Xref.findStartxref`), parses the section
 there (`parseSection`: a classic table, `Core.Xref.parseXrefTable`, if the bytes are `xref`,
 otherwise an xref stream, `Core.Xref.Stream.parseXrefStream`) and follows `/Prev` until a
-trailer has none, newest revision first. `mergeChain` folds the revisions into one section in
+trailer has none, newest revision first. `mergeChain` merges the revisions (in `⌈log₂ n⌉`
+linear passes, `mergeRounds`) into one section in
 which the newest entry wins per object number (S6 preview; the full unambiguity theorem is
 task 2.5).
 
@@ -34,7 +36,9 @@ within the revision budget.
 ## Termination by the visited set (Plan.md §5.2)
 
 The loop `walk` carries the list `visited` of offsets already parsed, together with the
-proofs that it is duplicate-free and that every element is `< bytes.size`. Each round runs
+proofs that it is duplicate-free and that every element is `< bytes.size`, and (task 13.23)
+an ordered set mirroring it (`Seen`, `Std.TreeSet`), so that the membership test and the
+length test of every round are `O(log n)` instead of a scan of the list. Each round runs
 `step`, which checks `off < bytes.size` (else `Error.malformed`, `/Prev` offsets are not
 range-checked by 2.1) and `off ∉ visited` (else `Error.cycle off "xref /Prev cycle"`):
 **a revisited offset is an error, not a loop**; for a hybrid table it checks the `/XRefStm`
@@ -95,6 +99,64 @@ theorem length_lt_of_fresh {visited : List Nat} {n off : Nat} (hnd : visited.Nod
   simp at h
   omega
 
+/-! ## The visited set as an ordered set (task 13.23)
+
+The walk used to keep `visited` as a list and test `off ∈ visited` and `visited.length` in
+every round: `O(n)` per round, `O(n²)` for a chain of `n` revisions. `Seen visited` carries,
+next to the list (the specification and the termination measure), an ordered set
+`Std.TreeSet Nat compare` (a balanced tree, `O(log n)` per operation in the worst case, not a
+hash set) that contains exactly the elements of `visited`, and its length. The walk tests
+the set; the list is only ever consed onto (`O(1)`). -/
+
+/-- An ordered set and a length mirroring the list `visited`: the set contains `x` iff `x` is
+in the list, and `len` is the list's length. -/
+structure Seen (visited : List Nat) where
+  /-- The offsets visited so far. -/
+  set : Std.TreeSet Nat compare
+  /-- The number of visited offsets. -/
+  len : Nat
+  /-- Set membership is list membership. -/
+  mem : ∀ x, set.contains x = true ↔ x ∈ visited
+  /-- The stored length is the list length. -/
+  len_eq : len = visited.length
+
+/-- The empty set mirrors the empty list. -/
+def Seen.empty : Seen [] where
+  set := ∅
+  len := 0
+  mem := fun x => by simp
+  len_eq := rfl
+
+/-- Adding an offset to the list and the set. -/
+def Seen.insert {visited : List Nat} (sn : Seen visited) (x : Nat) : Seen (x :: visited) where
+  set := sn.set.insert x
+  len := sn.len + 1
+  mem := fun y => by
+    have := sn.mem y
+    simp only [Std.TreeSet.contains_insert, List.mem_cons]
+    constructor
+    · intro h
+      simp only [Bool.or_eq_true, beq_iff_eq, Nat.compare_eq_eq] at h
+      rcases h with h | h
+      · exact Or.inl h.symm
+      · exact Or.inr (this.1 h)
+    · intro h
+      simp only [Bool.or_eq_true, beq_iff_eq, Nat.compare_eq_eq]
+      rcases h with h | h
+      · exact Or.inl h.symm
+      · exact Or.inr (this.2 h)
+  len_eq := by rw [sn.len_eq]; rfl
+
+/-- Adding several offsets (the new ones in front of the old ones). -/
+def Seen.append {visited : List Nat} (sn : Seen visited) :
+    (l : List Nat) → Seen (l ++ visited)
+  | [] => sn
+  | x :: l => (sn.append l).insert x
+
+/-- Membership in a mirrored list is decidable by the set: `O(log n)`. -/
+def Seen.dec {visited : List Nat} (sn : Seen visited) (x : Nat) : Decidable (x ∈ visited) :=
+  decidable_of_iff (sn.set.contains x = true) (sn.mem x)
+
 /-! ## Loading the chain -/
 
 /-- One revision of the file: its cross-reference section, its trailer, and the byte offset
@@ -140,11 +202,12 @@ stream (under the same checks, `off` counting as visited). Returns the step resu
 number of section parses made (0, 1 or 2). The stream's own `/Prev` is not followed: the
 chain continues with the table's `/Prev`. -/
 def step (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) :
+    (hnd : visited.Nodup) (sn : Seen visited) :
     Except Error (StepOk bytes visited) × Nat :=
   if hoff : off < bytes.size then
-    if hmem : off ∈ visited then (.error (.cycle off "xref /Prev cycle"), 0)
-    else if limits.maxRevisions ≤ visited.length then (.error (.limitExceeded .revisions), 0)
+    @dite _ (off ∈ visited) (sn.dec off) (fun _ => (.error (.cycle off "xref /Prev cycle"), 0))
+    fun hmem =>
+    if limits.maxRevisions ≤ sn.len then (.error (.limitExceeded .revisions), 0)
     else
       match parseSection limits bytes off with
       | .error e => (.error e, 1)
@@ -159,8 +222,10 @@ def step (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
             by simp⟩, 1)
         | some s =>
           if hs : s < bytes.size then
-            if hsm : s = off ∨ s ∈ visited then (.error (.cycle s "xref /XRefStm cycle"), 1)
-            else if limits.maxRevisions ≤ visited.length + 1 then
+            @dite _ (s = off ∨ s ∈ visited) (@instDecidableOr _ _ inferInstance (sn.dec s))
+              (fun _ => (.error (.cycle s "xref /XRefStm cycle"), 1))
+            fun hsm =>
+            if limits.maxRevisions ≤ sn.len + 1 then
               (.error (.limitExceeded .revisions), 1)
             else
               match Stream.parseXrefStream limits bytes s with
@@ -191,15 +256,16 @@ Errors: an offset `≥ bytes.size` (malformed), an offset already visited (`Erro
 `"xref /Prev cycle"` resp. `"xref /XRefStm cycle"`), more than `limits.maxRevisions`
 revisions (`limitExceeded .revisions`), or a parse error. -/
 def walk (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size) :
     Except Error (List Revision) × Nat :=
-  match step limits bytes off visited hnd with
+  match step limits bytes off visited hnd sn with
   | (.error e, k) => (.error e, k)
   | (.ok so, k) =>
     match so.prev? with
     | none => (.ok so.revs, k)
     | some p =>
       match walk limits bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
           (fun x hx => by
             rcases List.mem_append.mp hx with hx | hx
             · exact so.lt x hx
@@ -221,7 +287,7 @@ def loadChainCounted (limits : Limits) (bytes : ByteArray) :
     Except Error (List Revision) × Nat :=
   match findStartxref bytes with
   | .error e => (.error e, 0)
-  | .ok off => walk limits bytes off [] List.nodup_nil (fun _ hx => absurd hx List.not_mem_nil)
+  | .ok off => walk limits bytes off [] List.nodup_nil Seen.empty (fun _ hx => absurd hx List.not_mem_nil)
 
 /-- **Entry point.** All revisions of a classic-xref file, newest first: the section at the
 `startxref` offset, then the one its `/Prev` points at, and so on (ISO 32000-2 §7.5.6).
@@ -518,11 +584,12 @@ theorem parseSectionB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
 /-- `step` with the budget threaded through (same checks, same order; the section parses
 are `parseSectionB` and `parseXrefStreamB`). -/
 def stepB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) :
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) :
     (Except Error (StepOk bytes visited) × Nat) × Budget :=
   if hoff : off < bytes.size then
-    if hmem : off ∈ visited then ((.error (.cycle off "xref /Prev cycle"), 0), budget)
-    else if limits.maxRevisions ≤ visited.length then
+    @dite _ (off ∈ visited) (sn.dec off) (fun _ => ((.error (.cycle off "xref /Prev cycle"), 0), budget))
+    fun hmem =>
+    if limits.maxRevisions ≤ sn.len then
       ((.error (.limitExceeded .revisions), 0), budget)
     else
       match parseSectionB limits budget bytes off with
@@ -538,8 +605,10 @@ def stepB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
             by simp⟩, 1), b1)
         | some s =>
           if hs : s < bytes.size then
-            if hsm : s = off ∨ s ∈ visited then ((.error (.cycle s "xref /XRefStm cycle"), 1), b1)
-            else if limits.maxRevisions ≤ visited.length + 1 then
+            @dite _ (s = off ∨ s ∈ visited) (@instDecidableOr _ _ inferInstance (sn.dec s))
+              (fun _ => ((.error (.cycle s "xref /XRefStm cycle"), 1), b1))
+            fun hsm =>
+            if limits.maxRevisions ≤ sn.len + 1 then
               ((.error (.limitExceeded .revisions), 1), b1)
             else
               match parseXrefStreamB limits b1 bytes s with
@@ -561,9 +630,10 @@ def stepB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
 
 /-- `stepB` never increases the budget. -/
 theorem stepB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) :
-    (stepB limits budget bytes off visited hnd).2.remaining ≤ budget.remaining := by
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) :
+    (stepB limits budget bytes off visited hnd sn).2.remaining ≤ budget.remaining := by
   unfold stepB
+  simp only [sn.len_eq]
   have h1 := parseSectionB_le limits budget bytes off
   split
   · split
@@ -607,18 +677,19 @@ least `(maxRevisions - visited.length) · decodeAllowance` left, `stepB` returns
 returns, and after a successful step at least
 `(maxRevisions - (visited.length + revs.length)) · decodeAllowance` is left. -/
 theorem stepB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup)
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited)
     (h : (limits.maxRevisions - visited.length) * decodeAllowance limits bytes ≤ budget.remaining) :
-    (stepB limits budget bytes off visited hnd).1 = step limits bytes off visited hnd ∧
-    ∀ so k, (stepB limits budget bytes off visited hnd).1 = (.ok so, k) →
+    (stepB limits budget bytes off visited hnd sn).1 = step limits bytes off visited hnd sn ∧
+    ∀ so k, (stepB limits budget bytes off visited hnd sn).1 = (.ok so, k) →
       (limits.maxRevisions - (visited.length + so.revs.length)) * decodeAllowance limits bytes ≤
-        (stepB limits budget bytes off visited hnd).2.remaining := by
+        (stepB limits budget bytes off visited hnd sn).2.remaining := by
   have hK0 : ∀ a, 1 ≤ a → a * decodeAllowance limits bytes ≤ budget.remaining →
       decodeAllowance limits bytes ≤ budget.remaining := fun a ha h' => by
     have : 1 * decodeAllowance limits bytes ≤ a * decodeAllowance limits bytes :=
       Nat.mul_le_mul_right _ ha
     omega
   unfold stepB step
+  simp only [sn.len_eq]
   by_cases hoff : off < bytes.size
   · simp only [hoff, dite_true]
     by_cases hmem : off ∈ visited
@@ -690,15 +761,16 @@ theorem stepB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : 
 
 /-- `walk` with the budget threaded through (`stepB`; same recursion, same measure). -/
 def walkB (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size) :
     (Except Error (List Revision) × Nat) × Budget :=
-  match stepB limits budget bytes off visited hnd with
+  match stepB limits budget bytes off visited hnd sn with
   | ((.error e, k), b1) => ((.error e, k), b1)
   | ((.ok so, k), b1) =>
     match so.prev? with
     | none => ((.ok so.revs, k), b1)
     | some p =>
       match walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
           (fun x hx => by
             rcases List.mem_append.mp hx with hx | hx
             · exact so.lt x hx
@@ -717,11 +789,11 @@ decreasing_by
 
 /-- `walkB` never increases the budget. -/
 theorem walkB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
-    (walkB limits budget bytes off visited hnd hlt).2.remaining ≤ budget.remaining := by
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (walkB limits budget bytes off visited hnd sn hlt).2.remaining ≤ budget.remaining := by
   rw [walkB]
-  have h1 := stepB_le limits budget bytes off visited hnd
-  rcases hs : stepB limits budget bytes off visited hnd with ⟨⟨r1, k⟩, b1⟩
+  have h1 := stepB_le limits budget bytes off visited hnd sn
+  rcases hs : stepB limits budget bytes off visited hnd sn with ⟨⟨r1, k⟩, b1⟩
   rw [hs] at h1
   simp only at h1
   rcases r1 with e | so
@@ -731,11 +803,13 @@ theorem walkB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : 
     · exact h1
     · simp only
       have h2 := walkB_le limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact so.lt x hx
           · exact hlt x hx)
       rcases hw : walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact so.lt x hx
@@ -759,12 +833,12 @@ decreasing_by
 `(maxRevisions - visited.length) · decodeAllowance` left, `walkB` returns what `walk`
 returns. -/
 theorem walkB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size)
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size)
     (h : (limits.maxRevisions - visited.length) * decodeAllowance limits bytes ≤ budget.remaining) :
-    (walkB limits budget bytes off visited hnd hlt).1 = walk limits bytes off visited hnd hlt := by
+    (walkB limits budget bytes off visited hnd sn hlt).1 = walk limits bytes off visited hnd sn hlt := by
   rw [walkB, walk]
-  obtain ⟨he, hinv⟩ := stepB_eq limits budget bytes off visited hnd h
-  rcases hs : stepB limits budget bytes off visited hnd with ⟨⟨r1, k⟩, b1⟩
+  obtain ⟨he, hinv⟩ := stepB_eq limits budget bytes off visited hnd sn h
+  rcases hs : stepB limits budget bytes off visited hnd sn with ⟨⟨r1, k⟩, b1⟩
   rw [hs] at he hinv
   simp only at he hinv
   rw [← he]
@@ -776,6 +850,7 @@ theorem walkB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : 
     · rfl
     · simp only
       have ih := walkB_eq limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact so.lt x hx
@@ -783,6 +858,7 @@ theorem walkB_eq (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : 
         (by simp only [List.length_append, List.length_map]; rw [Nat.add_comm]; exact hb)
       rw [← ih]
       rcases walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact so.lt x hx
@@ -805,7 +881,7 @@ def loadChainB (limits : Limits) (budget : Budget) (bytes : ByteArray) :
   match findStartxref bytes with
   | .error e => (.error e, budget)
   | .ok off =>
-    let p := walkB limits budget bytes off [] List.nodup_nil
+    let p := walkB limits budget bytes off [] List.nodup_nil Seen.empty
       (fun _ hx => absurd hx List.not_mem_nil)
     (p.1.1, p.2)
 
@@ -815,7 +891,7 @@ theorem loadChainB_le (limits : Limits) (budget : Budget) (bytes : ByteArray) :
   unfold loadChainB
   split
   · exact Nat.le_refl _
-  · exact walkB_le _ _ _ _ _ _ _
+  · exact walkB_le _ _ _ _ _ _ _ _
 
 /-- **Budget large enough ⇒ same chain** (task 3.13): with at least
 `maxRevisions · decodeAllowance limits bytes` left, `loadChainB` returns exactly what
@@ -829,21 +905,22 @@ theorem loadChainB_eq {limits : Limits} {budget : Budget} {bytes : ByteArray}
   | error e => rfl
   | ok off =>
     simp only
-    rw [walkB_eq _ _ _ _ _ _ _ (by simpa using h)]
+    rw [walkB_eq _ _ _ _ _ _ _ _ (by simpa using h)]
 
 /-- **Cost of one step**: at most `decodeAllowance` per section parsed; a failed step costs at
 most `(maxRevisions - visited.length) · decodeAllowance`, a successful one at most
 `revs.length · decodeAllowance`, with `visited.length + revs.length ≤ maxRevisions`. -/
 theorem stepB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) :
-    budget.remaining ≤ (stepB limits budget bytes off visited hnd).2.remaining +
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) :
+    budget.remaining ≤ (stepB limits budget bytes off visited hnd sn).2.remaining +
       (limits.maxRevisions - visited.length) * decodeAllowance limits bytes ∧
-    ∀ so k, (stepB limits budget bytes off visited hnd).1 = (.ok so, k) →
-      budget.remaining ≤ (stepB limits budget bytes off visited hnd).2.remaining +
+    ∀ so k, (stepB limits budget bytes off visited hnd sn).1 = (.ok so, k) →
+      budget.remaining ≤ (stepB limits budget bytes off visited hnd sn).2.remaining +
         so.revs.length * decodeAllowance limits bytes ∧
       visited.length + so.revs.length ≤ limits.maxRevisions := by
   have hmulle : ∀ a b K : Nat, a ≤ b → a * K ≤ b * K := fun a b K h => Nat.mul_le_mul_right K h
   unfold stepB
+  simp only [sn.len_eq]
   by_cases hoff : off < bytes.size
   · simp only [hoff, dite_true]
     by_cases hmem : off ∈ visited
@@ -908,12 +985,12 @@ theorem stepB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (off 
 
 /-- **Cost of the walk**: at most `(maxRevisions - visited.length) · decodeAllowance`. -/
 theorem walkB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (off : Nat)
-    (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
-    budget.remaining ≤ (walkB limits budget bytes off visited hnd hlt).2.remaining +
+    (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    budget.remaining ≤ (walkB limits budget bytes off visited hnd sn hlt).2.remaining +
       (limits.maxRevisions - visited.length) * decodeAllowance limits bytes := by
   rw [walkB]
-  obtain ⟨hc, hok⟩ := stepB_cost limits budget bytes off visited hnd
-  rcases hs : stepB limits budget bytes off visited hnd with ⟨⟨r1, k⟩, b1⟩
+  obtain ⟨hc, hok⟩ := stepB_cost limits budget bytes off visited hnd sn
+  rcases hs : stepB limits budget bytes off visited hnd sn with ⟨⟨r1, k⟩, b1⟩
   rw [hs] at hc hok
   simp only at hc hok
   rcases r1 with e | so
@@ -931,12 +1008,14 @@ theorem walkB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) (off 
     · simp only; omega
     · simp only
       have ih := walkB_cost limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact so.lt x hx
           · exact hlt x hx)
       simp only [List.length_append, List.length_map] at ih
       rcases hw : walkB limits b1 bytes p (so.revs.map Revision.offset ++ visited) so.nodup
+          (sn.append (so.revs.map Revision.offset))
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact so.lt x hx
@@ -962,7 +1041,7 @@ theorem loadChainB_cost (limits : Limits) (budget : Budget) (bytes : ByteArray) 
   split
   · exact Nat.le_add_right _ _
   · rename_i off _
-    have := walkB_cost limits budget bytes off [] List.nodup_nil
+    have := walkB_cost limits budget bytes off [] List.nodup_nil Seen.empty
       (fun _ hx => absurd hx List.not_mem_nil)
     simpa using this
 
@@ -1044,17 +1123,68 @@ theorem mergeTwo_sorted {xs ys : List (Nat × XrefEntry)}
     · exact hx'.1 z hz
     · rw [heq]; exact hy'.1 z hz
 
-/-- The merged entries of a chain, newest revision first in the input. -/
-def mergeEntries : List Revision → List (Nat × XrefEntry)
+/-- Merge neighbouring entry lists in pairs, the earlier (newer) list of a pair winning:
+`[a, b, c, d, e] ↦ [a ⊕ b, c ⊕ d, e]`. One pass is linear in the total number of entries. -/
+def mergePairs : List (List (Nat × XrefEntry)) → List (List (Nat × XrefEntry))
+  | a :: b :: rest => mergeTwo a b :: mergePairs rest
+  | l => l
+
+/-- A pass of `mergePairs` halves the number of lists (rounding up). -/
+theorem mergePairs_length : ∀ l : List (List (Nat × XrefEntry)),
+    (mergePairs l).length = (l.length + 1) / 2
+  | [] => by simp [mergePairs]
+  | [_] => by simp [mergePairs]
+  | a :: b :: rest => by
+    have := mergePairs_length rest
+    simp only [mergePairs, List.length_cons]
+    omega
+
+/-- Every list of a pass is the merge of neighbouring input lists, hence strictly ascending
+if the inputs are. -/
+theorem mergePairs_sorted : ∀ l : List (List (Nat × XrefEntry)),
+    (∀ x ∈ l, x.Pairwise (fun a b => a.1 < b.1)) →
+    ∀ x ∈ mergePairs l, x.Pairwise (fun a b => a.1 < b.1)
+  | [], _, x, hx => by simp [mergePairs] at hx
+  | [a], h, x, hx => by simp only [mergePairs, List.mem_singleton] at hx; subst hx; exact h _ (by simp)
+  | a :: b :: rest, h, x, hx => by
+    simp only [mergePairs, List.mem_cons] at hx
+    rcases hx with rfl | hx
+    · exact mergeTwo_sorted (h a (by simp)) (h b (by simp))
+    · exact mergePairs_sorted rest (fun y hy => h y (by simp [hy])) x hx
+
+/-- Merge a list of entry lists (newest first; the earlier list wins) by rounds of
+`mergePairs`: `⌈log₂ n⌉` linear passes, `O(N log n)` for `N` entries in `n` lists. A right fold
+of `mergeTwo` costs `O(n · N)` when each revision lists new objects. -/
+def mergeRounds (l : List (List (Nat × XrefEntry))) : List (Nat × XrefEntry) :=
+  match l with
   | [] => []
-  | r :: rest => mergeTwo r.1.entries (mergeEntries rest)
+  | [a] => a
+  | a :: b :: rest => mergeRounds (mergePairs (a :: b :: rest))
+termination_by l.length
+decreasing_by
+  rw [mergePairs_length]
+  simp only [List.length_cons]
+  omega
+
+/-- The result of `mergeRounds` is strictly ascending if every input list is. -/
+theorem mergeRounds_sorted (l : List (List (Nat × XrefEntry)))
+    (h : ∀ x ∈ l, x.Pairwise (fun a b => a.1 < b.1)) :
+    (mergeRounds l).Pairwise (fun a b => a.1 < b.1) := by
+  fun_induction mergeRounds l with
+  | case1 => exact List.Pairwise.nil
+  | case2 a => exact h a (by simp)
+  | case3 a b rest ih => exact ih (mergePairs_sorted _ h)
+
+/-- The merged entries of a chain, newest revision first in the input. -/
+def mergeEntries (revs : List Revision) : List (Nat × XrefEntry) :=
+  mergeRounds (revs.map fun r => r.1.entries)
 
 /-- The merged entries are strictly ascending by object number. -/
 theorem mergeEntries_sorted (revs : List Revision) :
-    (mergeEntries revs).Pairwise (fun a b => a.1 < b.1) := by
-  induction revs with
-  | nil => exact List.Pairwise.nil
-  | cons r rest ih => exact mergeTwo_sorted r.1.sorted ih
+    (mergeEntries revs).Pairwise (fun a b => a.1 < b.1) :=
+  mergeRounds_sorted _ (fun x hx => by
+    obtain ⟨r, -, rfl⟩ := List.mem_map.mp hx
+    exact r.1.sorted)
 
 /-- **Merge.** One section for the whole chain (newest first): per object number, the entry
 of the newest revision that has one (ISO 32000-2 §7.5.6). The result carries the

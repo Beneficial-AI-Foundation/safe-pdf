@@ -793,24 +793,213 @@ def scanFonts {σ : Type} (src : Source σ) :
       if acc.2.contains n then acc else (acc.1 ++ [(n, d)], n :: acc.2)) ([], seen)
     scanFonts src f (rest ++ new) seen (acc ++ es) s
 
+/-- One step of the font table construction (the specification, a list scan per key): the font
+entry `e` is added under every key not yet in the table; its font object is built once
+(`buildFont`) the first time its key is seen, at most `maxFonts` objects. -/
+def loadStep {σ : Type} (limits : Limits) (src : Source σ) (acc : FontTable × Nat × σ)
+    (e : FontEntry) : FontTable × Nat × σ :=
+  let (t, k, s) := acc
+  let (key, keys, o) := e
+  let add (fi : FontInfo) : FontTable :=
+    t ++ (keys.filter fun k' => (t.lookup k').isNone).map fun k' => (k', fi)
+  match t.lookup key with
+  | some fi => (add fi, k, s)
+  | none =>
+    if maxFonts ≤ k then acc
+    else
+      let (fi, s') := buildFont limits src s o
+      (add fi, k + 1, s')
+
+/-- **Specification of the font table of a page** (a list scan per key, quadratic in the number
+of entries): `loadStep` over the entries `scanFonts` collects. `loadFonts` computes the same
+table with an ordered index (`loadFonts_eq`). -/
+def loadFontsSpec {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict) :
+    FontTable × σ :=
+  let (es, s) := scanFonts src (maxFormFonts + 1) [(0, res)] [] [] s
+  let (t, _, s) := es.foldl (loadStep limits src) (([] : FontTable), 0, s)
+  (t, s)
+
+/-- An injective encoding of a font key as a list of numbers (the key of the ordered index). -/
+def FontKey.enc : FontKey → List Nat
+  | .obj n g => [0, n, g]
+  | .res o nm => 1 :: o :: nm.bytes.map UInt8.toNat
+
+private theorem map_toNat_inj : ∀ (l l' : List UInt8), l.map UInt8.toNat = l'.map UInt8.toNat → l = l'
+  | [], [], _ => rfl
+  | [], _ :: _, h => by simp at h
+  | _ :: _, [], h => by simp at h
+  | a :: l, b :: l', h => by
+      simp only [List.map_cons, List.cons.injEq] at h
+      rw [UInt8.toNat_inj.mp h.1, map_toNat_inj l l' h.2]
+
+/-- The encoding is injective. -/
+theorem FontKey.enc_inj {a b : FontKey} (h : a.enc = b.enc) : a = b := by
+  cases a with
+  | obj n g =>
+    cases b with
+    | obj n' g' => simp only [FontKey.enc, List.cons.injEq, and_true, true_and] at h; obtain ⟨h1, h2⟩ := h; subst h1; subst h2; rfl
+    | res o nm => simp [FontKey.enc] at h
+  | res o nm =>
+    cases b with
+    | obj n' g' => simp [FontKey.enc] at h
+    | res o' nm' =>
+      simp only [FontKey.enc, List.cons.injEq, true_and] at h
+      obtain ⟨h1, h2⟩ := h
+      subst h1
+      have : nm.bytes = nm'.bytes := by
+        exact map_toNat_inj _ _ h2
+      cases nm; cases nm'; simp_all
+
+/-- The font table under construction, with an ordered index mirroring it: `rev` is the table
+reversed (so adding entries is a cons), `idx` maps the encoded key to the font of the first
+entry of that key, `k` counts the font objects built. -/
+structure FontAcc (σ : Type) where
+  /-- The table so far, reversed. -/
+  rev : List (FontKey × FontInfo)
+  /-- First font of each key, by encoded key. -/
+  idx : Std.TreeMap (List Nat) FontInfo compare
+  /-- Font objects built. -/
+  k : Nat
+  /-- Source state. -/
+  s : σ
+
+/-- `loadStep` with the ordered index: `O(log n)` per key instead of a scan of the table. -/
+def loadStepFast {σ : Type} (limits : Limits) (src : Source σ) (a : FontAcc σ) (e : FontEntry) :
+    FontAcc σ :=
+  let (key, keys, o) := e
+  let add (fi : FontInfo) : List (FontKey × FontInfo) × Std.TreeMap (List Nat) FontInfo compare :=
+    let new := (keys.filter fun k' => (a.idx[k'.enc]?).isNone).map fun k' => (k', fi)
+    (new.reverse ++ a.rev, new.foldl (fun m kv => m.insertIfNew kv.1.enc kv.2) a.idx)
+  match a.idx[key.enc]? with
+  | some fi => let r := add fi; ⟨r.1, r.2, a.k, a.s⟩
+  | none =>
+    if maxFonts ≤ a.k then a
+    else
+      let (fi, s') := buildFont limits src a.s o
+      let r := add fi
+      ⟨r.1, r.2, a.k + 1, s'⟩
+
 /-- **Font table of a page**: every font collected by `scanFonts` from the page's resources
-(owner 0), each font object built once (`buildFont`); at most `maxFonts` objects. -/
+(owner 0), each font object built once (`buildFont`); at most `maxFonts` objects. Built with
+an ordered index (`Std.TreeMap`), `O(n log n)` for `n` entries; equal to the list-scan
+specification `loadFontsSpec` (`loadFonts_eq`). -/
 def loadFonts {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict) :
     FontTable × σ :=
   let (es, s) := scanFonts src (maxFormFonts + 1) [(0, res)] [] [] s
-  let (t, _, s) := es.foldl (fun (acc : FontTable × Nat × σ) (e : FontEntry) =>
-    let (t, k, s) := acc
-    let (key, keys, o) := e
-    let add (fi : FontInfo) : FontTable :=
-      t ++ (keys.filter fun k' => (t.lookup k').isNone).map fun k' => (k', fi)
-    match t.lookup key with
-    | some fi => (add fi, k, s)
-    | none =>
-      if maxFonts ≤ k then acc
-      else
-        let (fi, s') := buildFont limits src s o
-        (add fi, k + 1, s')) (([] : FontTable), 0, s)
-  (t, s)
+  let a := es.foldl (loadStepFast limits src) (⟨[], ∅, 0, s⟩ : FontAcc σ)
+  (a.rev.reverse, a.s)
+
+/-- The index mirrors the table: `rev` is the table reversed and `idx` finds the first entry of
+each key, as `List.lookup` does. -/
+def FontAcc.Rel {σ : Type} (a : FontAcc σ) (t : FontTable) : Prop :=
+  a.rev.reverse = t ∧ ∀ key : FontKey, a.idx[key.enc]? = t.lookup key
+
+private theorem lookup_append (t u : FontTable) (key : FontKey) :
+    (t ++ u).lookup key = (match t.lookup key with | some v => some v | none => u.lookup key) := by
+  induction t with
+  | nil => simp [List.lookup]
+  | cons e rest ih =>
+    obtain ⟨k', v'⟩ := e
+    simp only [List.cons_append, List.lookup]
+    cases key == k' <;> simp [ih]
+
+private theorem fold_insert_get (key : FontKey) :
+    ∀ (new : List (FontKey × FontInfo)) (m : Std.TreeMap (List Nat) FontInfo compare),
+      (new.foldl (fun m kv => m.insertIfNew kv.1.enc kv.2) m)[key.enc]? =
+        (match m[key.enc]? with | some v => some v | none => new.lookup key)
+  | [], m => by cases h : m[key.enc]? <;> simp [List.lookup, h]
+  | (k', v) :: rest, m => by
+      simp only [List.foldl_cons]
+      rw [fold_insert_get key rest, Std.TreeMap.getElem?_insertIfNew]
+      by_cases hk : k' = key
+      · subst hk
+        cases hm : m[k'.enc]? with
+        | some v0 =>
+          have hmem : k'.enc ∈ m := by
+            have h1 : (m[k'.enc]?).isSome = true := by simp [hm]
+            rw [Std.TreeMap.isSome_getElem?_eq_contains] at h1
+            exact Std.TreeMap.contains_iff_mem.mp h1
+          simp [hmem]
+        | none =>
+          have hmem : ¬ k'.enc ∈ m := by
+            intro hin
+            have h1 := Std.TreeMap.contains_iff_mem.mpr hin
+            rw [← Std.TreeMap.isSome_getElem?_eq_contains] at h1
+            simp [hm] at h1
+          simp [hmem, List.lookup]
+      · have hc : ¬ compare k'.enc key.enc = Ordering.eq := fun h => hk (FontKey.enc_inj (by simpa using h))
+        have hb : (key == k') = false := by simpa [beq_iff_eq] using Ne.symm hk
+        simp [hc, List.lookup, hb]
+
+/-- Adding entries to the table and to the index keeps the mirror. -/
+private theorem rel_add {σ : Type} (a : FontAcc σ) (t : FontTable) (h : a.Rel t)
+    (keys : List FontKey) (fi : FontInfo) :
+    let new := (keys.filter fun k' => (a.idx[k'.enc]?).isNone).map fun k' => (k', fi)
+    (new.reverse ++ a.rev).reverse = t ++ (keys.filter fun k' => (t.lookup k').isNone).map (fun k' => (k', fi)) ∧
+    ∀ key : FontKey, (new.foldl (fun m kv => m.insertIfNew kv.1.enc kv.2) a.idx)[key.enc]? =
+      (t ++ (keys.filter fun k' => (t.lookup k').isNone).map (fun k' => (k', fi))).lookup key := by
+  intro new
+  obtain ⟨h1, h2⟩ := h
+  have hf : (keys.filter fun k' => (a.idx[k'.enc]?).isNone) = (keys.filter fun k' => (t.lookup k').isNone) := by
+    apply List.filter_congr
+    intro k' _
+    rw [h2 k']
+  have hnew : new = (keys.filter fun k' => (t.lookup k').isNone).map (fun k' => (k', fi)) := by
+    simp only [new, hf]
+  refine ⟨?_, ?_⟩
+  · rw [List.reverse_append, List.reverse_reverse, h1, ← hnew]
+  · intro key
+    rw [fold_insert_get, lookup_append, h2 key, ← hnew]
+
+/-- A step keeps the mirror between the fast and the specification state. -/
+private theorem loadStep_rel {σ : Type} (limits : Limits) (src : Source σ) (a : FontAcc σ)
+    (t : FontTable) (h : a.Rel t) (e : FontEntry) :
+    (loadStepFast limits src a e).Rel (loadStep limits src (t, a.k, a.s) e).1 ∧
+    (loadStepFast limits src a e).k = (loadStep limits src (t, a.k, a.s) e).2.1 ∧
+    (loadStepFast limits src a e).s = (loadStep limits src (t, a.k, a.s) e).2.2 := by
+  obtain ⟨key, keys, o⟩ := e
+  have h2 := h.2 key
+  have ha := rel_add a t h keys
+  unfold loadStepFast loadStep
+  simp only []
+  cases hl : t.lookup key with
+  | some fi =>
+    rw [hl] at h2
+    simp only [h2]
+    exact ⟨⟨(ha fi).1, (ha fi).2⟩, trivial, trivial⟩
+  | none =>
+    rw [hl] at h2
+    simp only [h2]
+    by_cases hm : maxFonts ≤ a.k
+    · simp only [hm, ↓reduceIte]
+      exact ⟨h, trivial, trivial⟩
+    · simp only [hm, ↓reduceIte]
+      exact ⟨⟨(ha (buildFont limits src a.s o).1).1, (ha (buildFont limits src a.s o).1).2⟩, trivial, trivial⟩
+
+private theorem foldl_rel {σ : Type} (limits : Limits) (src : Source σ) :
+    ∀ (es : List FontEntry) (a : FontAcc σ) (t : FontTable), a.Rel t →
+      (es.foldl (loadStepFast limits src) a).rev.reverse =
+          (es.foldl (loadStep limits src) (t, a.k, a.s)).1 ∧
+      (es.foldl (loadStepFast limits src) a).s =
+          (es.foldl (loadStep limits src) (t, a.k, a.s)).2.2
+  | [], a, t, h => ⟨h.1, rfl⟩
+  | e :: rest, a, t, h => by
+      simp only [List.foldl_cons]
+      obtain ⟨h1, h2, h3⟩ := loadStep_rel limits src a t h e
+      have ih := foldl_rel limits src rest (loadStepFast limits src a e) _ h1
+      rw [h2, h3] at ih
+      exact ih
+
+/-- **`loadFonts` is `loadFontsSpec`**: the ordered index changes the cost, not the table (same
+entries, same order, first entry of a key wins, same source state). -/
+theorem loadFonts_eq {σ : Type} (limits : Limits) (src : Source σ) (s : σ) (res : Dict) :
+    loadFonts limits src s res = loadFontsSpec limits src s res := by
+  unfold loadFonts loadFontsSpec
+  obtain ⟨es, s1⟩ := scanFonts src (maxFormFonts + 1) [(0, res)] [] [] s
+  simp only []
+  have := foldl_rel limits src es ⟨[], ∅, 0, s1⟩ [] ⟨by simp, by intro key; simp [List.lookup]⟩
+  simp only [] at this
+  rw [this.1, this.2]
 
 /-! ## Glyphs -/
 

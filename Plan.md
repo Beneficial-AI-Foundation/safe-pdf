@@ -365,9 +365,183 @@ even if every current theorem is correct.
   killing a stalled worker leaves the GUI able to open the next file; an interleaved
   zoom/search/thumbnail CI scenario stays within published memory ceilings.
 
+### Phase 13 — Hardening II (the binary matches the claims)
+
+(Added 2026-11-25 at the human's request, from a check of the S1 and S3 arguments against the
+compiled binary. Phase 12 closed the review's boundary items; this phase closes what that
+check found and what Phase 12 recorded as still in-process.)
+
+What the check found (measured with `inspect` on the Linux sandbox; the modules involved are
+unchanged since): the proofs hold, and the binary does more than they say.
+- A single path of `n` segments costs `n²`: 100,000 `l` operators take 7.1 s, from a 1.4 KB
+  compressed file — a regression from the optional-content change (the runner keeps the
+  machine shared across a call, so every append copies the path).
+- A dictionary of `n` distinct keys parses in `n²` (40,000 keys: 15 s); no limit applies.
+- One operator is one unit of `maxOpsPerPage`, yet a stacked clip costs 5 ms and a full-page
+  fill 2 ms: a page inside the default limits can cost hours. The worker's 20 s deadline
+  stops a render; nothing stops the library, the inspector, or the **parse that both GUI
+  processes still run themselves** on open and on save.
+- The hygiene guard reads source text and a hand-kept theorem list. It has no rule for
+  `@[extern]`, `@[implemented_by]`, `axiom` or `native_decide`, never looks at the bounds
+  proofs inside compiled definitions, and misses two `partial` functions that
+  `deriving Repr` generates in the core.
+- Fuzzing stops at 4,096-byte inputs and drives parser entry points only; release builds
+  compile out the runtime's bounds assertions (`-DNDEBUG`).
+- On the two profiled documents, 38% and 52% of stack samples are inside bignum arithmetic,
+  part of it on constants rebuilt on every call.
+
+The rule for this phase: a property is called *proven* for what a theorem states and
+*enforced* for what CI checks on every build; what the binary does beyond the model
+(wall-clock time, the Lean→C toolchain, the process the code runs in) is tested or
+contained — and the documents say which.
+
+- **Time bounds that hold in the binary (S3)**: linear path building again; a duplicate-key
+  check that is not quadratic; a **render work allowance** — the counted work behind the
+  rasterizer's S3 theorems is charged against one allowance per page render and ends in
+  `limitExceeded`, so the bound is deterministic and also protects library users. A
+  **scaling suite** times every accumulating structure at `n` and `2n` and fails on
+  super-linear growth; the adversarial suite gains long-structure files with time budgets;
+  fuzzing gains long inputs under a linear time budget and targets beyond the parser.
+- **CI enforces the premises of S1, S2 and S4**: the guard scans the *built environment* of
+  the strict modules — every definition (their bounds proofs stand in for run-time bounds
+  checks) and theorem depends only on `propext`, `Classical.choice`, `Quot.sound`; no
+  `@[extern]`, `@[implemented_by]`, `unsafe`, `axiom` or `partial`, derived ones included;
+  no `IO` in a core type. Source rules are added for the constructs the grep misses, the
+  two derived `partial` instances are replaced, and the guard is tested against planted
+  violations.
+- **Exercise what the proofs cannot see**: tests, fuzz, adversarial and the pinned corpus
+  run on a build with the runtime's assertions on; the C around the core (Tk shim, worker
+  sandbox, macOS C API) is built and tested under sanitizers. (The proof re-check and the
+  compiled-vs-interpreted differential exist since Phase 12.)
+- **The GUI processes stop parsing documents**: Phase 12 moved rendering, text and links
+  into the confined worker; opening (layout, labels, settings, attachments, layers, saved
+  marks) and saving (the incremental-update writer and its strict re-parse) still run in
+  the Tk viewer and in the macOS app. They move behind the worker protocol, so every
+  document-derived computation has a deadline and runs without the GUI's authority; a scan
+  of the built environment shows the GUI roots no longer reach the parser, interpreter,
+  rasterizer or writer. The save keeps C7 by construction: the GUI appends the worker's
+  update to the bytes it read.
+- **Cheap performance** (the ℚ reference model and every theorem statement stay as they
+  are): constants rebuilt through bignum arithmetic on every call (`2 ^ bpc` per image
+  sample; literals ≥ 2³² re-parsed from decimal strings in seven hot functions); 64-bit
+  paths with equality theorems for fixed-point multiply and round-divide, where Lean's
+  32-bit unboxed `Int` sends every product through GMP; a profiling script so the numbers
+  can be reproduced.
+- **Statements truth-up**: §4 here, [docs/safety.md](docs/safety.md) and the comparison
+  tables say for S1, S2, S3 and S5 what is proven, what is enforced and what is measured —
+  and drop what Phase 12 made untrue (S5 "everything runs in the viewer process",
+  deterministic IVs, the untested Linux filter).
+- **M13**: (1) *time* — the scaling suite passes on every probe (time at `2n` at most 3×
+  time at `n`); the long-structure adversarial files finish or end in `limitExceeded`
+  within their recorded budgets in the library and the inspector; the long-input fuzz run
+  reports no case over its linear budget; (2) *premises* — the environment scan of the
+  strict modules reports only the three axioms and no `partial`, `unsafe`, `@[extern]` or
+  `@[implemented_by]` beyond compiler-generated ones, and the guard fails on each planted
+  violation; (3) *toolchain* — tests, fuzz, adversarial and the pinned corpus pass on the
+  assertions build, and the C test binaries pass under sanitizers; (4) *boundary* — the
+  scan shows the GUI roots of both shells do not reach the parser, interpreter, rasterizer
+  or writer beyond the exceptions recorded in Decisions; opening or saving a document that
+  stalls ends at the deadline with a message, the window stays responsive and the next
+  file opens; (5) *speed* — corpus page-time median and p95 are no worse than the
+  phase-start baseline on the same machine, and no bignum constant is rebuilt per sample
+  or per point; (6) *statements* — the documents above are updated to what (1)–(4) now
+  establish.
+
+### Phase 14 — Signature verification
+
+(Added 2026-11-26 at the human's request, full scope. Verification only — signing needs key
+custody and is a different threat model.)
+
+Why it fits this project: the famous signature-checking failures (signature wrapping, the
+incremental-save attacks, the shadow attacks) are **structure attacks, not crypto attacks** —
+readers verified the math correctly but misreported *what the signature covers*. That
+question is exactly what our revision model and unambiguity proofs reason about, so a
+verified viewer can prove the claim every other reader only asserts. Verification is also a
+perfect fit for the core: read-only, no secrets, no constant-time requirements (all inputs
+public), and pure — trust anchors and the current time enter as data, never through `IO`
+(S4 holds; the file's crypto groundwork exists: SHA-256/384/512 with NIST-vector `#guard`s,
+signature-dictionary handling in the decrypt and save paths).
+
+- **ASN.1/DER layer** (spec-first, §5.1): denotational spec, efficient implementation,
+  equivalence and round-trip theorems; definite lengths only, bounded depth and size from
+  `Limits`, total.
+- **Crypto verify primitives**: SHA-1 added for legacy signatures (SHA-2 exists); RSA
+  verification (`Nat` modexp, PKCS#1 v1.5 and PSS encoding checks) with RFC 8017 / CAVP
+  vectors — provable as algebra where cheap; ECDSA over P-256/P-384 (prime-field and curve
+  arithmetic) with CAVP vectors.
+- **X.509**: certificate parsing, chain building to a caller-supplied anchor set, validity
+  against a caller-supplied time, basicConstraints/keyUsage/EKU checks, bounded chain
+  length. Name constraints and policy processing recorded as out of scope (Decisions).
+- **CMS `SignedData`**: `adbe.pkcs7.detached` and `ETSI.CAdES.detached` (signed attributes:
+  contentType, messageDigest, signing time, ESS signing-certificate where present), plus
+  the legacy `adbe.pkcs7.sha1` and `adbe.x509.rsa_sha1`.
+- **ByteRange + the coverage theorem** (the payoff): well-formedness (exactly the file
+  minus the `/Contents` hole), the covered bytes are a byte prefix; theorem tying that
+  prefix to the revision model — the signature covers revisions 0..i, and the object-level
+  differences between revision i and the displayed document are **enumerated** (the
+  anti-shadow-attack property, on `Spec/Unambiguous`'s machinery).
+- **Pure verdict in `Api`**: per signature — ByteRange ok, digest ok, signature ok, chain
+  trusted/untrusted/expired/incomplete, coverage with the changes-after-signing list,
+  revocation `notChecked`. Runs in the confined worker; the shells show it honestly
+  (12.5's spirit): "signed — valid, covers the whole document", "signed — N objects
+  changed after signing", "signature invalid", "signer not trusted", always with
+  "revocation not checked".
+- **Trust model**: anchors are bytes supplied by the shell (a user-set directory and/or an
+  export of the platform store); whether to bundle the AATL/EUTL lists is the human's
+  decision, recorded before the UI task. No network anywhere — revocation and timestamp
+  fetching stay out (Tier 2), reported honestly.
+- **Tests**: differential against poppler's `pdfsig` and OpenSSL CMS (skip cleanly when
+  absent); a signed corpus (existing government files plus generated signed fixtures:
+  RSA/ECDSA × v1.5/PSS × SHA-2, CAdES and legacy); an adversarial suite — signature
+  wrapping, shadow attacks (hide / replace / hide-and-replace), incremental tampering,
+  ByteRange tricks, certificate tricks (expired, wrong keyUsage, self-signed, algorithm
+  confusion) — each flagged with the recorded reason within a time budget.
+- **M14**: (1) on the signed corpus every verdict agrees with `pdfsig`/OpenSSL (recorded
+  trust-set differences aside); (2) every adversarial file is flagged invalid or
+  changed-after-signing with the right reason, within its budget; (3) the coverage theorem
+  and the DER equivalence are axiom-clean, and the verify primitives pass their vector
+  suites; (4) both shells show the verdicts with the honest statuses, including
+  "revocation not checked"; (5) the hygiene and environment scans stay clean.
+
 ### Tier 2 / later
 CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
-optional content groups, tagged-PDF reading order, accessibility export.
+optional content groups, tagged-PDF reading order, accessibility export; signatures:
+RFC 3161 timestamps, long-term validation (`/DSS`), revocation (OCSP/CRL) fetched through
+the GUI broker, PAdES levels beyond B.
+
+#### Printing (deferred)
+
+(Planned 2026-11-27 as Phase 15 at the human's request, issue #21 from the feature list of
+#19; **moved to later work on 2026-11-28 at the human's request** — not scheduled. The design
+below and the ledger tasks 15.1–15.7, now under "Deferred by the human", are kept for when
+it returns.)
+
+**The rule: print the rendered pixels, never the input file.** Handing the document to the
+OS print service would have CUPS's filter chain (Ghostscript/poppler) parse the hostile
+file — a second, unverified parser outside our sandbox. What is spooled is the output of
+our verified rasterizer (marks included), packaged by us — Dangerzone's reconstruction idea
+applied to printing — and the UI says so ("printed from SafePDF's rendering at N dpi").
+
+- Print-resolution renders through the confined worker, 300 dpi default (Letter/A4 ≈
+  8.4–8.7 Mpx — inside the 10 Mpx per-page cap; 600 dpi needs banded rendering, deferred
+  until the human wants it); one print is one user operation under the budget pool
+  (reserved before dispatch, progress shown, cancellable).
+- A small pure **image-only PDF writer**: one Flate image XObject per page over the
+  existing DEFLATE encoder (`Core/Filter/Deflate.lean`; its stored-block decode already
+  carries theorems); the output parses under our own strict parser and each stream decodes
+  back to the exact raster. The same artifact is **Print to PDF**.
+- Linux (Tk has no print dialog): a small dialog of ours — printers from `lpstat -a`, page
+  range, copies, dpi — and the generated PDF spooled with `lp`; a fake `lp` on PATH makes
+  the whole path smoke-testable.
+- macOS: `NSPrintOperation` drawing the worker renders — the native panel (preview,
+  ranges, duplex, paper sizes, Save as PDF) comes free.
+- `Toolbar.Tool.print` becomes a real command: File → Print…, Ctrl+P / ⌘P in
+  `Menu.keyTable` (its `#guard`s keep the platforms consistent).
+- **Exit criterion when scheduled (was M15)**: a multi-page document prints on both platforms from the same pixels — the Linux
+  smoke captures a spool that strict-parses and pixel-matches the source rasters in MuPDF,
+  and the macOS smoke prints to a PDF destination headlessly with the same checks; the
+  input file's bytes never reach the print stack; a long print stays within the published
+  ceilings and cancel works mid-job; the status line states the dpi.
 
 ---
 
@@ -471,7 +645,13 @@ safe-pdf/
 
 ## 11. Immediate next steps
 
-1. Phase 11 port (11.3a–11.6): the native macOS shell per
-   [docs/macos-design.md](docs/macos-design.md); the Linux Tk build stays green.
-2. Phase 12 remainder: the open C4 follow-ups (12.7g, 12.7h); the external review (12.9)
-   is deferred by the human.
+1. Phase 13, first wave: the path-building regression (13.1), the duplicate-key check
+   (13.2), the derived `partial` instances (13.8) and the profiling baseline (13.17).
+2. Phase 13, design before code: the render work allowance (13.4) and the inventory of
+   document work still done in the GUI processes (13.12) are recorded in Decisions first.
+3. The external review (12.9) stays deferred by the human.
+4. Phase 14 (signature verification) queues behind Phase 13; its two early solo decisions
+   (trust anchors, out-of-scope X.509 features) go to Decisions first.
+5. Printing (issue #21) is deferred to later work (§6, "Tier 2 / later"); issues #22
+   (signatures) and #23 (password-protected PDFs, unscheduled) track the rest of #19's
+   feature list.

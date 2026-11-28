@@ -247,12 +247,42 @@ def rowBytes (w nc bpc : Nat) : Nat := (w * nc * bpc + 7) / 8
 byte. -/
 def byteOff (k bpc : Nat) : Nat := k * bpc / 8
 
+/-- `2 ^ n` without the big-number library. `Nat.pow` with a run-time exponent calls
+`lean_nat_pow` and `Nat.shiftLeft` calls `lean_nat_shiftl`; both go through GMP even for a
+small result, which showed up as 10 % of an image-heavy page (task 13.18). A 64-bit shift is
+a single instruction (`pow2_eq`). -/
+def pow2 (n : Nat) : Nat := if n < 62 then ((1 : UInt64) <<< n.toUInt64).toNat else 2 ^ n
+
+/-- `pow2` is `2 ^ n`. -/
+theorem pow2_eq (n : Nat) : pow2 n = 2 ^ n := by
+  unfold pow2
+  split
+  · rename_i h
+    rw [UInt64.toNat_shiftLeft]
+    simp only [Nat.toUInt64]
+    have h1 : n % 18446744073709551616 = n := Nat.mod_eq_of_lt (by omega)
+    have h2 : n % 64 = n := Nat.mod_eq_of_lt (by omega)
+    simp [h1, h2, Nat.one_shiftLeft]
+    exact Nat.lt_of_lt_of_le (Nat.pow_lt_pow_right (by decide : 1 < 2) h) (by decide : 2 ^ 62 ≤ 2 ^ 64)
+  · rfl
+
 /-- Sample `k` of the row starting at byte `row`, at most 8 significant bits (16-bit samples:
-the high byte). Short data reads as 0. -/
+the high byte). Short data reads as 0. The low `bpc` bits are masked
+(`x % 2 ^ bpc = x &&& (2 ^ bpc - 1)`, `sampleAt_eq`; `pow2` avoids `lean_nat_pow`, task 13.18). -/
 def sampleAt (data : ByteArray) (row k bpc : Nat) : Nat :=
   let byte := rd data (row + byteOff k bpc)
   if 8 ≤ bpc then byte
-  else (byte >>> (8 - bpc - (k * bpc) % 8)) % (2 ^ bpc)
+  else (byte >>> (8 - bpc - (k * bpc) % 8)) &&& (pow2 bpc - 1)
+
+/-- `sampleAt` with the modulus `2 ^ bpc` written out. -/
+theorem sampleAt_eq (data : ByteArray) (row k bpc : Nat) :
+    sampleAt data row k bpc =
+      if 8 ≤ bpc then rd data (row + byteOff k bpc)
+      else (rd data (row + byteOff k bpc) >>> (8 - bpc - (k * bpc) % 8)) % (2 ^ bpc) := by
+  unfold sampleAt
+  split
+  · rfl
+  · rw [pow2_eq, Nat.and_two_pow_sub_one_eq_mod]
 
 /-- **Reads stay in the image's data range.** For row `r < h` and sample `k < w · nc` of a row,
 the byte read lies before `h · rowBytes w nc bpc`, the size the data must have (shorter data
@@ -373,7 +403,8 @@ theorem samplesRows_size (data lut : ByteArray) (wn bpc nv tot stride : Nat) :
 lookup tables `lut` (`2^bits` entries per component): one normalised byte per sample, row
 by row (sample `k` of a row is component `k % nc`). -/
 def samples (data lut : ByteArray) (w h nc bpc bits : Nat) : ByteArray :=
-  samplesRows data lut (w * nc) bpc (2 ^ bits) (nc * 2 ^ bits) (rowBytes w nc bpc) h 0
+  let nv := pow2 bits
+  samplesRows data lut (w * nc) bpc nv (nc * nv) (rowBytes w nc bpc) h 0
     (ByteArray.emptyWithCapacity (w * h * nc))
 
 /-- **The sample buffer has exactly `w · h · ncomp` bytes.** -/
@@ -833,7 +864,8 @@ def Src.grey : Src :=
 /-- Append source row `y` of the sample data as RGBA (`4 · w` bytes) to `acc`. -/
 def rowRGBA (data lut : ByteArray) (w nc bpc bits : Nat) (cv : Conv) (y : Nat)
     (acc : ByteArray) : ByteArray :=
-  let smp := samplesLoop data lut bpc (2 ^ bits) (nc * 2 ^ bits) (y * rowBytes w nc bpc) (w * nc)
+  let nv := pow2 bits
+  let smp := samplesLoop data lut bpc nv (nc * nv) (y * rowBytes w nc bpc) (w * nc)
     0 0 (ByteArray.emptyWithCapacity (w * nc))
   rgbaLoop smp nc cv w 0 acc
 
@@ -1986,10 +2018,15 @@ one unit per 2³² steps of error each way), clamped to `±lim`. -/
 def toFixR (q : Rat) (lim : Int) : Int64 :=
   Int64.ofInt (max (-lim) (min lim (roundRat (q * (fone : Rat)))))
 
+/-- `2⁴⁴`, the upper clamp of `fixLen`. Out of line (`noinline`): a literal of `2³²` or more
+in a function body is parsed from its decimal string through GMP on every call
+(`scripts/check-codegen.sh`, task 13.18). -/
+@[noinline] def fixLenCap : Nat := 1 <<< 44
+
 /-- `√len2` in fixed point, clamped to `[2, 2⁴⁴]` (one device pixel in image units). -/
 def fixLen (len2 : Rat) : Int64 :=
   let s := Nat.sqrt (len2 * (fone : Rat) * (fone : Rat)).floor.toNat
-  Int64.ofNat (max 2 (min s (1 <<< 44)))
+  Int64.ofNat (max 2 (min s fixLenCap))
 
 /-! ### Per-pixel sampling -/
 
@@ -2312,10 +2349,10 @@ def renderImage (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTable) (st : Cl
   match tbl.pixmap src (inlineExt src (Aff.ofMatrix ctm * m)) with
   | none => st
   | some pm =>
-    let c := Clip.clipMaskC cfg m W H st.cache clip
+    let c := Clip.clipMaskC cfg m W H st.room st.cache clip
     let p := place tbl.limits.maxImagePixels W H pm (Aff.ofMatrix ctm * m) c.1
       (Clip.deviceRGB fill.color) (Clip.compByte fill.alpha) st.buf
-    { buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2 }
+    { st with buf := p.1, cache := c.2.1, steps := st.steps + c.2.2 + p.2, smemo := none }
 
 /-- Painting an image preserves the buffer size. -/
 theorem renderImage_size (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTable)
@@ -2336,9 +2373,9 @@ theorem renderImage_steps_le (cfg : Config) (m : Aff) (W H : Nat) (tbl : ImageTa
   unfold renderImage; split
   · omega
   · rename_i pm _
-    have h0 := Clip.clipMaskC_steps_le cfg m W H st.cache clip
+    have h0 := Clip.clipMaskC_steps_le cfg m W H st.room st.cache clip
     have h1 := place_steps_le tbl.limits.maxImagePixels W H pm (Aff.ofMatrix ctm * m)
-      (Clip.clipMaskC cfg m W H st.cache clip).1
+      (Clip.clipMaskC cfg m W H st.room st.cache clip).1
       (Clip.deviceRGB fill.color) (Clip.compByte fill.alpha) st.buf true
     simp only
     omega

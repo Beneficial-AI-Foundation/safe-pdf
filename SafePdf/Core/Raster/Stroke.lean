@@ -144,9 +144,18 @@ def sqrtBits : Nat := 20
 /-- The denominator `q.den · 2^sqrtBits` of `sqrtQ q`. -/
 def sqrtDen (q : Rat) : Nat := q.den * 2 ^ sqrtBits
 
+/-- `4^sqrtBits` (`2⁴⁰`). Kept out of line so that the constant is built once at start-up: a
+literal of `2³²` or more in a function body is parsed from its decimal string through GMP
+on every call (`scripts/check-codegen.sh`, task 13.18). -/
+@[noinline] def sqrtScale : Nat := 4 ^ sqrtBits
+
 /-- Lower approximation of `√q` (`0` for `q ≤ 0`): `⌊√(num · den · 4^K)⌋ / (den · 2^K)`. -/
 def sqrtQ (q : Rat) : Rat :=
-  ((q.num.toNat * q.den * 4 ^ sqrtBits).sqrt : Rat) / (sqrtDen q : Rat)
+  ((q.num.toNat * q.den * sqrtScale).sqrt : Rat) / (sqrtDen q : Rat)
+
+/-- `sqrtQ` with the scale `4^sqrtBits` written out (`sqrtScale` is `4 ^ sqrtBits`). -/
+theorem sqrtQ_eq (q : Rat) :
+    sqrtQ q = ((q.num.toNat * q.den * 4 ^ sqrtBits).sqrt : Rat) / (sqrtDen q : Rat) := rfl
 
 /-- A non-negative rational is its numerator (as a `Nat`) over its denominator. -/
 private theorem rat_eq_div (q : Rat) (hq : 0 ≤ q) : q = (q.num.toNat : Rat) / (q.den : Rat) := by
@@ -207,7 +216,7 @@ theorem sqrtQ_spec (q : Rat) (hq : 0 ≤ q) :
   have hs1 := Nat.sqrt_le (q.num.toNat * q.den * 4 ^ sqrtBits)
   have hs2 := Nat.lt_succ_sqrt (q.num.toNat * q.den * 4 ^ sqrtBits)
   refine ⟨?_, ?_, ?_⟩
-  · simp only [sqrtQ]
+  · simp only [sqrtQ_eq]
     exact Rat.mul_nonneg (Rat.natCast_nonneg) (Rat.le_of_lt (Rat.inv_pos.mpr hD'))
   · have h := sq_div_le hD hs1
     have e' : ((q.num.toNat * q.den * 4 ^ sqrtBits : Nat) : Rat) /
@@ -246,7 +255,7 @@ theorem sqrtQ_rel (q : Rat) (hq : 0 < q) :
     Rat.natCast_lt_natCast.mpr (Nat.two_pow_pos _)
   have hr' : ((2 ^ sqrtBits : Nat) : Rat) ≤ ((q.num.toNat * q.den * 4 ^ sqrtBits).sqrt : Rat) :=
     Rat.natCast_le_natCast.mpr hr
-  simp only [sqrtQ]
+  simp only [sqrtQ_eq]
   generalize ((q.num.toNat * q.den * 4 ^ sqrtBits).sqrt : Rat) = R at hr'
   generalize ((2 ^ sqrtBits : Nat) : Rat) = P at hP' hr'
   generalize (sqrtDen q : Rat) = D at hD'
@@ -1149,8 +1158,12 @@ structure SegG where
   f : Frame64
   deriving Inhabited
 
-/-- `2⁴⁴`, the 64-bit bound on frame offsets. -/
-def bound44 : Nat := 17592186044416
+/-- `2⁴⁴`, the 64-bit bound on frame offsets. Out of line (`noinline`): a function that
+used the inlined literal parsed `"17592186044416"` through GMP on every call (task 13.18). -/
+@[noinline] def bound44 : Nat := 17592186044416
+
+/-- `2⁴⁰`, the 64-bit bound on the miter quantity `dm` (out of line, like `bound44`). -/
+@[noinline] def bound40 : Nat := 1099511627776
 
 /-- **Reference** geometry of the chord `p → q` (plain `Rat` arithmetic): with `L` the pen map, `u = L⁻¹·d`, `ℓ = sqrtQ |u|²`,
 `A = (r/ℓ)·d`, `B = (r/ℓ)·L·J·u`, all exact, then rounded to the frame grid. -/
@@ -1478,7 +1491,7 @@ def crossSign (g1 g2 : SegG) : Int :=
 
 /-- `dm ≤ 2³² + t₁·t₂` (the miter test, see `dminOf`). -/
 def miterOK (dm : Int) (g1 g2 : SegG) : Bool :=
-  if g1.small && g2.small && absLe dm 1099511627776 then
+  if g1.small && g2.small && absLe dm bound40 then
     dm.toInt64 ≤ 4294967296 + g1.f.tx * g2.f.tx + g1.f.ty * g2.f.ty
   else dm ≤ fone * fone + g1.tx * g2.tx + g1.ty * g2.ty
 

@@ -41,7 +41,11 @@ structurally bounded by the frame: malformed input gives a `DecodeError`, never 
   directions; hidden flags) and `viewLinks` (the viewer's links, `Action`), and their
   responses, are covered by the same round-trip and framing theorems (their codecs carry
   `rt`); the startup configuration (`StartConfig`, command-line flags) carries the limits as
-  hexadecimal `limitsC` bytes: `hexDec_hexEnc`, `limitsOfHex_limitsHex` (round trip).
+  hexadecimal `limitsC` bytes: `hexDec_hexEnc`, `limitsOfHex_limitsHex` (round trip);
+* task 13.4d: the `image` response carries a `complete` flag (false: the render work allowance
+  was spent and the bytes are a partial page); it is one more `bool` field of the same codec, so
+  the same round-trip, framing and cap theorems cover it (`image_roundtrip`,
+  `image_frame_roundtrip`).
 
 The proofs track one invariant, `At bs p e` (the bytes `e` occur in `bs` at `p`); every
 combinator (`pair`, `iso`, `sigma`, `list`, …) carries its round trip, so a message type's
@@ -1045,14 +1049,15 @@ def Limits.toList (l : Limits) : List Nat :=
    l.maxRevisions, l.maxRepairFailures, l.maxFilters, l.maxFontGlyphs, l.maxFontSubrs,
    l.glyphFuel, l.maxFormsPerPage, l.maxCFFGlyphs, l.fontFuel, l.maxFontDicts, l.curveSegCap,
    l.coordLimit, l.maxDashSteps, l.arcSegCap, l.maxPageSide, l.clipCacheSize, l.maxMarkedDepth,
-   l.maxFormCacheEntries, l.maxFormCacheBytes, l.maxOCGroups, l.maxOCDepth]
+   l.maxFormCacheEntries, l.maxFormCacheBytes, l.maxOCGroups, l.maxOCDepth, l.renderStepFactor,
+   l.renderStepFloor]
 
-/-- `Limits` from its fields (`none` unless there are exactly 30). -/
+/-- `Limits` from its fields (`none` unless there are exactly 32). -/
 def Limits.ofList? : List Nat → Option Limits
   | [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20,
-     a21, a22, a23, a24, a25, a26, a27, a28, a29, a30] =>
+     a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32] =>
     some ⟨a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19,
-      a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30⟩
+      a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32⟩
   | _ => none
 
 /-- **`Limits`** (task 12.2d: the viewer's limits, passed to the worker at startup). -/
@@ -1329,8 +1334,12 @@ inductive Response where
   /-- A page's label and displayed size in points (CropBox, `/Rotate` applied) and its
   `/Rotate` in quarter turns. -/
   | pageInfo (label : String) (width height : Rat) (rotation : Nat)
-  /-- A rendered page: `4 · width · height` RGBA bytes, rows from the top. -/
-  | image (width height : Nat) (rgba : ByteArray)
+  /-- A rendered page: `4 · width · height` RGBA bytes, rows from the top, and whether the page
+  is **complete** (task 13.4d). `false`: the render work allowance (`Limits.renderStepFactor`,
+  `renderStepFloor`) was spent, the bytes are the pixels painted until then (a partial page, still
+  `4 · width · height` bytes) and the client shows them with the stopped-page message and does not
+  render the page again. -/
+  | image (width height : Nat) (rgba : ByteArray) (complete : Bool)
   /-- A page's text in reading order and its glyphs in content order. -/
   | text (text : String) (glyphs : List Glyph)
   /-- The outline in preorder. -/
@@ -1352,7 +1361,7 @@ inductive Response where
 def ResponseP : Nat → Type
   | 1 => Nat × Bool × Bool
   | 2 => String × Rat × Rat × Nat
-  | 3 => Nat × Nat × ByteArray
+  | 3 => Nat × Nat × ByteArray × Bool
   | 4 => String × List Glyph
   | 5 => List OutlineItem
   | 6 => List Link
@@ -1367,7 +1376,7 @@ def responseCs : (t : Nat) → Codec (ResponseP t)
   | 0 => reject 0
   | 1 => pair nat (pair bool bool)
   | 2 => pair string (pair rat (pair rat nat))
-  | 3 => pair nat (pair nat bytes)
+  | 3 => pair nat (pair nat (pair bytes bool))
   | 4 => pair string (list glyph glyph_ne)
   | 5 => list outlineItem outlineItem_ne
   | 6 => list link link_ne
@@ -1381,7 +1390,7 @@ def responseCs : (t : Nat) → Codec (ResponseP t)
 def Response.toSig : Response → (t : Nat) × ResponseP t
   | .docInfo n r e => ⟨1, (n, r, e)⟩
   | .pageInfo l w h r => ⟨2, (l, w, h, r)⟩
-  | .image w h d => ⟨3, (w, h, d)⟩
+  | .image w h d c => ⟨3, (w, h, d, c)⟩
   | .text s gs => ⟨4, (s, gs)⟩
   | .outline is => ⟨5, is⟩
   | .links ls => ⟨6, ls⟩
@@ -1395,7 +1404,7 @@ def Response.ofSig : (t : Nat) × ResponseP t → Response
   | ⟨0, e⟩ => e.elim
   | ⟨1, (n, r, e)⟩ => .docInfo n r e
   | ⟨2, (l, w, h, r)⟩ => .pageInfo l w h r
-  | ⟨3, (w, h, d)⟩ => .image w h d
+  | ⟨3, (w, h, d, c)⟩ => .image w h d c
   | ⟨4, (s, gs)⟩ => .text s gs
   | ⟨5, is⟩ => .outline is
   | ⟨6, ls⟩ => .links ls
@@ -1436,6 +1445,21 @@ theorem response_frame_roundtrip (l : Limits) (m : Response) (hv : response.vali
     decodeFrame response (responseCap l) (encodeFrame response m) 0 =
       .ok m (encodeFrame response m).size :=
   decodeFrame_encodeFrame response hv hs (responseCap_lt l)
+
+/-- **Round trip of a rendered page with its completeness flag** (task 13.4d): the flag, the size
+and the pixels come back as sent, whether the page is complete or a partial one. -/
+theorem image_roundtrip (w h : Nat) (d : ByteArray) (c : Bool)
+    (hv : response.valid (.image w h d c) = true) :
+    decodeBody response (response.enc (.image w h d c)) = .ok (.image w h d c) :=
+  response_roundtrip _ hv
+
+/-- **Framed round trip of a rendered page with its flag** (task 13.4d), within the response cap. -/
+theorem image_frame_roundtrip (l : Limits) (w h : Nat) (d : ByteArray) (c : Bool)
+    (hv : response.valid (.image w h d c) = true)
+    (hs : (response.enc (.image w h d c)).size ≤ responseCap l) :
+    decodeFrame response (responseCap l) (encodeFrame response (.image w h d c)) 0 =
+      .ok (.image w h d c) (encodeFrame response (.image w h d c)).size :=
+  response_frame_roundtrip l _ hv hs
 
 /-- **Framing (requests)**: a stream of encoded requests decodes back to the list. -/
 theorem request_stream (l : Limits) (ms : List Request)
@@ -1507,7 +1531,8 @@ private def sampleGlyph : Glyph :=
     visible := false, item := 3, seq := 70000 }
 
 private def sampleResponses : List Response :=
-  [.docInfo 12 true false, .pageInfo "iv" (612) (792/7) 3, .image 2 1 ⟨#[1, 2, 3, 4, 5, 6, 7, 8]⟩,
+  [.docInfo 12 true false, .pageInfo "iv" (612) (792/7) 3, .image 2 1 ⟨#[1, 2, 3, 4, 5, 6, 7, 8]⟩ true,
+   .image 1 1 ⟨#[9, 8, 7, 6]⟩ false,
    .text "Hello\nworld" [sampleGlyph, { sampleGlyph with text := "é", visible := true }],
    .outline [⟨"Intro", 0, .page 0 .fit, some (-3)⟩,
      ⟨"Sec", 1, .page 4 (.xyz (some ⟨-125, 1⟩) none (some ⟨15, 1⟩)), none⟩,
@@ -1532,8 +1557,13 @@ private def sampleRequests : List Request :=
 -- A stream of frames decodes back to the list.
 #guard streamIs (decodeStream request (requestCap {}) (encodeFrames request sampleRequests)) sampleRequests
 #guard streamIs (decodeStream response (responseCap {}) (encodeFrames response sampleResponses)) sampleResponses
+-- Task 13.4d: the completeness flag survives a round trip, and a partial image is another message.
+#guard roundTrip response (responseCap {}) (.image 1 1 ⟨#[9, 8, 7, 6]⟩ false) ==
+  some (.image 1 1 ⟨#[9, 8, 7, 6]⟩ false)
+#guard roundTrip response (responseCap {}) (.image 1 1 ⟨#[9, 8, 7, 6]⟩ false) !=
+  some (.image 1 1 ⟨#[9, 8, 7, 6]⟩ true)
 -- Every strict prefix of a frame is incomplete.
-#guard let f := encodeFrame response (sampleResponses[3]?.getD .bye)
+#guard let f := encodeFrame response (sampleResponses[4]?.getD .bye)
   (List.range f.size).all fun k => match decodeFrame response (responseCap {}) (f.extract 0 k) 0 with
     | .incomplete => true
     | _ => false

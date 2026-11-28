@@ -43,8 +43,10 @@ import Tests.OptionalContent
 import Tests.Attachments
 import Tests.WriteConfidentiality
 import Tests.CappedRead
+import Tests.DictKeys
 import Tests.Worker
 import Tests.WorkerConfinement
+import Tests.Scaling
 
 /-!
 # Test runner
@@ -108,8 +110,10 @@ def suites : List Suite :=
     { name := "attachments", run := SafePdf.Tests.Attachments.run },
     { name := "write-confidentiality", run := SafePdf.Tests.WriteConfidentiality.run },
     { name := "capped-read", run := SafePdf.Tests.CappedRead.run },
+    { name := "dict-keys", run := SafePdf.Tests.DictKeys.run },
     { name := "worker", run := SafePdf.Tests.Worker.run },
-    { name := "worker-confinement", run := SafePdf.Tests.WorkerConfinement.run } ]
+    { name := "worker-confinement", run := SafePdf.Tests.WorkerConfinement.run },
+    { name := "scaling", run := SafePdf.Tests.Scaling.run } ]
 
 end SafePdf.Tests
 
