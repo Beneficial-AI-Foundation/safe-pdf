@@ -2412,7 +2412,7 @@ def budgetEnv {σ ω : Type} (env : Env σ ω) (bud : Budget) : Env σ ω :=
              maxForms := bud.forms }
 
 /-- The page frame: the page's resources, nothing visited, owner 0, identity base. -/
-def pageFrame (pageRes : Dict) : Frame := ⟨pageRes, [], 0, 0, Matrix.identity⟩
+def pageFrame (pageRes : Dict) : Frame := Frame.mk' pageRes [] 0 0 Matrix.identity
 
 /-- **Run the appearances** `ds` in order from a fresh runner state, all under the shared
 budget `bud`, appearances without own `/Resources` resolving in `pageRes`. The items are in

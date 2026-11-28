@@ -377,6 +377,50 @@ def destsDict (doc : Doc) (limits : Limits) : Option Dict :=
   | .dict dd => some dd
   | _ => none
 
+/-- `destsDict` is `destsDictOf` on the document's file and catalog. -/
+theorem destsDict_eq (doc : Doc) (limits : Limits) :
+    destsDict doc limits = destsDictOf doc.file limits doc.catalog := by
+  unfold destsDict getL destsDictOf res
+  cases Dict.get? doc.catalog (Name.ofString "Dests") with
+  | none => rfl
+  | some o =>
+    simp only
+    cases resolve doc.file limits o with
+    | error e => rfl
+    | ok v => cases v <;> rfl
+
+/-- The entry `k` of the catalog's `/Dests` dictionary (`Dict.get?`), through the document's
+ordered index when `limits` are those it was built under (`O(log n)`), else by scanning
+`destsDict` (task 13.24). -/
+def destsLookup (doc : Doc) (limits : Limits) (k : Name) : Option PdfObject :=
+  if limits = doc.dests.limits then
+    match doc.dests.idx.get with
+    | some m => Dict.getIdx m k
+    | none => none
+  else
+    match destsDict doc limits with
+    | some dd => Dict.get? dd k
+    | none => none
+
+/-- **`destsLookup` is the list scan** `Dict.get?` on `destsDict`, for every document and every
+`limits` (duplicate keys included: both take the first entry). -/
+theorem destsLookup_eq (doc : Doc) (limits : Limits) (k : Name) :
+    destsLookup doc limits k =
+      (match destsDict doc limits with
+        | some dd => Dict.get? dd k
+        | none => none) := by
+  unfold destsLookup
+  split
+  · rename_i hl
+    have h := doc.dests.h
+    rw [← hl] at h
+    rw [destsDict_eq]
+    rw [h]
+    cases destsDictOf doc.file limits doc.catalog with
+    | none => rfl
+    | some dd => exact Dict.getIdx_index dd k
+  · rfl
+
 /-- The root of the `/Names /Dests` name tree, unresolved (`null` if absent). -/
 def destsRoot (doc : Doc) (limits : Limits) : PdfObject :=
   match getL doc limits doc.catalog "Names" with
@@ -387,10 +431,7 @@ def destsRoot (doc : Doc) (limits : Limits) : PdfObject :=
 tree first. -/
 def namedValue (doc : Doc) (limits : Limits) (isName : Bool) (s : List UInt8) :
     Option PdfObject :=
-  let viaDict : Unit → Option PdfObject := fun _ =>
-    match destsDict doc limits with
-    | some dd => Dict.get? dd ⟨s⟩
-    | none => none
+  let viaDict : Unit → Option PdfObject := fun _ => destsLookup doc limits ⟨s⟩
   let viaTree : Unit → Option PdfObject := fun _ =>
     treeLookup doc limits nameTree (destsRoot doc limits) s
   if isName then (viaDict ()).orElse viaTree else (viaTree ()).orElse viaDict

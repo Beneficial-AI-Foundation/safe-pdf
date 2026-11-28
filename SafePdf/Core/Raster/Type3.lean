@@ -320,7 +320,7 @@ def runGlyph {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Tiling.
                    maxForms := bud.forms }
       let t := Content.Ops.tokenize { lim with maxOpsPerPage := cap } bytes
       let (colored, d1) := kindOf (fun o => (Content.Run.resolve src s o).1) t.ops
-      let r := Content.Run.runOps env' lim.maxXObjectDepth ⟨res, [n], owner, 0, Matrix.identity⟩
+      let r := Content.Run.runOps env' lim.maxXObjectDepth (Content.Frame.mk' res [n] owner 0 Matrix.identity)
         (St.init s obs) t.ops
       (some { items := r.items, colored, bbox := glyphBox r.items d1 fbb,
               images := imageGlyph lim colored r.items }, r.s, r.obs,

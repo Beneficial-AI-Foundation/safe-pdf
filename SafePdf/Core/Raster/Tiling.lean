@@ -178,7 +178,7 @@ def runCell {σ ω : Type} (env : Env σ ω) (s : σ) (obs : ω) (bud : Budget) 
     { env with cfg := { env.cfg with limits := { lim with maxOpsPerPage := bud.ops } },
                maxForms := bud.forms }
   let t := Content.Ops.tokenize lim bytes
-  let r := Content.Run.runOps env' lim.maxXObjectDepth ⟨res, [num], num, 0, Matrix.identity⟩ (St.init s obs) t.ops
+  let r := Content.Run.runOps env' lim.maxXObjectDepth (Content.Frame.mk' res [num] num 0 Matrix.identity) (St.init s obs) t.ops
   (r.items, r.s, r.obs, { ops := bud.ops - r.ops, forms := bud.forms - r.forms })
 
 /-- **Load a tiling pattern** with a growing context (task 7.3h2): as `loadTiling`, but
