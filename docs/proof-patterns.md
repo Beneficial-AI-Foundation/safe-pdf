@@ -429,6 +429,17 @@ mutual `theorem` block by structural recursion on the derivation
 (`(∀ k ∈ Dict.keys es, k ∉ seen)`) for the accumulator-like parameter, exactly as
 `readRun_eq` does for `acc`.
 
+### 4.x Performance: a value read after a call keeps it shared (task 13.1)
+
+`Array` updates are in place only when the array is uniquely referenced. A projection of a
+structure read **after** a call that consumes the structure keeps the structure alive across
+the call, so the callee sees a shared value and every push copies. Instance: `Run.stepR` read
+`m.oc` after `localStep env fr m s op`; `addSegs` then copied the whole path array per segment
+(quadratic; 100k `l` operators took 7 s). Fix: `let moc := m.oc` before the call and use `moc`
+afterwards; the result is `rfl`-equal, so no proof changes. Check: scaling run of 100k / 200k /
+500k / 1M segments (time at 2n <= 2.5 x time at n) or the IR (`set_option trace.compiler.ir.result true`):
+no `inc` of the machine before the call. Applies to any state-threading step function.
+
 ## 5. Lean v4.36 pitfalls
 
 Collected from `progress.md` Gotchas; one line each. When you hit a new one, append it there.

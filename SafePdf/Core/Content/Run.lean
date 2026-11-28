@@ -1366,11 +1366,14 @@ def stepR {σ ω : Type} (env : Env σ ω) (inner : Option (Frame → St σ ω �
     else if op.op = [103, 115] then -- gs
       gsR env inner fr m items warnings unsupported ops forms truncated s obs op
     else
+      -- `m.oc` is bound BEFORE the call (task 13.1): reading `m` after `localStep` keeps the
+      -- machine shared across the call, so every `addSegs` push copies the whole path.
+      let moc := m.oc
       match localStep env fr m s op with
       | (m', its, w, u, s') =>
-        let t := ocTrack env fr m.oc s' op
+        let t := ocTrack env fr moc s' op
         let pb := patBook env.src fr m' t.2 op
-        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 (ocKeep m.oc t.1 its)
+        let a := annotAll env.src fr pb.1 pb.2.1 pb.2.2 (ocKeep moc t.1 its)
         ⟨{ m' with patFill := pb.1, patStroke := pb.2.1, oc := t.1 }, pushAll items a.1,
           warnings + w, unsupported + u, ops + 1, forms, truncated, a.2, env.observe obs op w u⟩
 
