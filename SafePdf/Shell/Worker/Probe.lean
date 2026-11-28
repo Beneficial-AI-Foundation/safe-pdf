@@ -132,7 +132,7 @@ def child (start : Protocol.StartConfig := {}) : IO UInt32 := do
   let (st, r1) := Serve.answer st (.openDoc pdfBytes true)
   let (_, r2) := Serve.answer st (.render 0 1 0 none)
   let rendered := match r1, r2 with
-    | .docInfo n _ _, .image w h data => some s!"{n} pages; page 1 {w}x{h}, {data.size} bytes"
+    | .docInfo n _ _, .image w h data _ => some s!"{n} pages; page 1 {w}x{h}, {data.size} bytes"
     | _, _ => none
   ok := (← report "render page 1" true (rendered.isSome, rendered.getD "render failed")) && ok
   say s!"verdict: {if ok then "ok" else "FAIL"}"

@@ -27,7 +27,13 @@ so that the GUI can stop it (kill) at any time and, in task 12.2b, run it in a s
   and the loop goes on (the frame boundary is intact). A header above the cap gets an
   `error .tooLong` answer and the worker exits with status 2 (the stream cannot be
   resynchronised without reading the oversized payload). End of input or `quit` ends it.
-* **The same calls as the viewer.** Rendering is `Core.Raster.Glyph.renderDocPage` with the
+* **Partial pages** (task 13.4d). A render whose work allowance (`Limits.renderStepFactor`,
+  `renderStepFloor`; the worker's limits are the startup configuration's) is spent is answered
+  with `image … (complete := false)`: the pixels painted until the allowance ran out
+  (`Glyph.renderDocPagePartial`, `PageRender.exceeded`), `4 · w · h` bytes as for any page. It
+  is a successful answer, not an error; the client shows it with a message and does not ask
+  again. A complete page has `complete := true`.
+* **The same calls as the viewer.** Rendering is `Core.Raster.Glyph.renderDocPagePartial` with the
   substitute fonts (as `App.Viewer.renderPage` and the FFI's test-only `Shell.Ffi.V2.testRender`); text is
   `SafePdf.Api.pageText` (with or without annotation text); page info, outline and links are
   `SafePdf.Api.pageInfo`, `outline`, `pageLinks`. Limits are the startup configuration's
@@ -154,9 +160,9 @@ def answerDocB (d : Api.Document) (subst : Raster.Subst.SubstFonts) (b : Filter.
       | .ok p =>
         if zoom ≤ 0 then pageError (.badZoom zoom)
         else
-          match (Raster.Glyph.renderDocPage d.limits d.doc p zoom r b (subst := subst)
+          match (Raster.Glyph.renderDocPagePartial d.limits d.doc p zoom r b (subst := subst)
               (oc := oc)).1 with
-          | .ok img => .image img.w img.h img.data
+          | .ok r => .image r.image.w r.image.h r.image.data (!r.exceeded)
           | .error e => pageError (.pdf e)
   | .text i withAnnots =>
     match (pageTextB d i { withAnnots } b).map (Api.PageText.ofCore {}) with
@@ -199,9 +205,9 @@ def answerDoc (d : Api.Document) (subst : Raster.Subst.SubstFonts) : Request →
       | .ok p =>
         if zoom ≤ 0 then pageError (.badZoom zoom)
         else
-          match (Raster.Glyph.renderDocPage d.limits d.doc p zoom r
+          match (Raster.Glyph.renderDocPagePartial d.limits d.doc p zoom r
               (Filter.Budget.init d.limits) (subst := subst) (oc := oc)).1 with
-          | .ok img => .image img.w img.h img.data
+          | .ok r => .image r.image.w r.image.h r.image.data (!r.exceeded)
           | .error e => pageError (.pdf e)
   | .text i withAnnots =>
     match Api.pageText d i { withAnnots } with
