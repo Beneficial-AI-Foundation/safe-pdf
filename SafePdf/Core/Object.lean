@@ -53,8 +53,9 @@ ISO 32000-2 §7.3 defines nine basic object types plus the indirect reference `n
 * **Equality.** `deriving DecidableEq` fails on this nested inductive in Lean v4.36 (even
   through `List` alone), so `PdfObject.instDecidableEq` is built from a structural Boolean
   `PdfObject.beq` with proofs `eq_of_beq` and `beq_self`. It reduces in the kernel, so
-  `decide` works on closed objects. `Repr` and `Inhabited` are derived; `Stream` has a
-  hand-written `Repr` (core has none for `ByteArray`) that prints only the data length.
+  `decide` works on closed objects. `Inhabited` is derived; `Repr` of `PdfObject` is hand-written
+  (the derived one is `partial`); `Stream` has a hand-written `Repr` (core has none for
+  `ByteArray`) that prints only the data length.
 
 Everything is pure and total.
 -/
@@ -183,9 +184,66 @@ inductive PdfObject where
   | dict (entries : List (Name × PdfObject))
   /-- An indirect reference `num gen R` (§7.3.10). -/
   | ref (num : Nat) (gen : Nat)
-  deriving Repr, Inhabited
+  deriving Inhabited
 
 namespace PdfObject
+
+/-! ### Representation
+
+`deriving Repr` on this nested inductive would generate a `partial` definition (an opaque
+constant, invisible to a grep for the keyword), so `Repr` is written by hand as a structural
+(mutual, nested) recursion, reproducing the derived format exactly. -/
+
+/-- Layout of a list from its elements' formats, as `List.repr`. -/
+def reprListFmt : List Std.Format → Std.Format
+  | [] => "[]"
+  | fs => Std.Format.bracket "[" (Std.Format.joinSep fs ("," ++ Std.Format.line)) "]"
+
+mutual
+/-- `Repr` of an object at precedence `prec`, in the format `deriving Repr` produces. -/
+def reprAux : PdfObject → Nat → Std.Format
+  | .null, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest 2 "SafePdf.PdfObject.null")) prec
+  | .bool b, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.bool" ++ Std.Format.line ++ reprArg b))) prec
+  | .int i, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.int" ++ Std.Format.line ++ reprArg i))) prec
+  | .real r, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.real" ++ Std.Format.line ++ reprArg r))) prec
+  | .string s, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.string" ++ Std.Format.line ++ reprArg s))) prec
+  | .name n, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.name" ++ Std.Format.line ++ reprArg n))) prec
+  | .array xs, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.array" ++ Std.Format.line ++ reprListFmt (reprList xs)))) prec
+  | .dict d, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.dict" ++ Std.Format.line ++ reprListFmt (reprDict d)))) prec
+  | .ref n g, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.PdfObject.ref" ++ Std.Format.line ++ reprArg n ++ Std.Format.line ++
+        reprArg g))) prec
+
+/-- The `Repr` of each element of a list of objects. -/
+def reprList : List PdfObject → List Std.Format
+  | [] => []
+  | x :: xs => reprAux x 0 :: reprList xs
+
+/-- The `Repr` of each entry (a pair) of a dictionary. -/
+def reprDict : List (Name × PdfObject) → List Std.Format
+  | [] => []
+  | (k, v) :: rest =>
+    Std.Format.bracket "(" (repr k ++ "," ++ Std.Format.line ++ reprAux v 0) ")" ::
+      reprDict rest
+end
+
+instance : Repr PdfObject := ⟨reprAux⟩
 
 /-! ### Decidable equality
 
