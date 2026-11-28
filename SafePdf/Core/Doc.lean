@@ -21,6 +21,8 @@ so `Doc.getPage` is total and trivial.
   is `Error.cycle` (offset: the object's xref offset, else 0). This rejects a `/Kids` cycle
   (an ancestor is visited before its kids are pushed) and also a node reached twice through
   two parents (a DAG): the page list must consist of distinct objects.
+  The visited list is the specification; the test uses an ordered set that mirrors it
+  (`VSet`, `O(log n)`; task 13.22: a list scan made a flat `/Kids` of n pages quadratic).
 * W3. A popped reference that resolves to `null` (free, absent, generation mismatch: D-001) is
   **skipped** and counted in `Doc.skippedKids` (qpdf also ignores dangling kids). It is not
   marked visited.
@@ -364,12 +366,41 @@ structure Entry where
   /-- Attributes inherited from the ancestors. -/
   inh : Attrs
 
+/-- An ordered set of object numbers (a balanced tree: `O(log n)` per operation in the worst
+case; task 13.22: the visited test was a scan of a list, quadratic on a flat `/Kids`). -/
+abbrev NumSet := Std.TreeSet Nat compare
+
+/-- A set of object numbers that mirrors the list `l`: the membership test of `l` in
+`O(log n)`. The list stays the specification (all theorems are about it); the set is the
+index that makes the test fast. -/
+def VSet (l : List Nat) : Type := { s : NumSet // ∀ x : Nat, s.contains x = true ↔ x ∈ l }
+
+/-- The empty set mirrors the empty list. -/
+def VSet.empty : VSet [] := ⟨∅, fun x => by simp⟩
+
+/-- Membership in the set: `O(log n)`. -/
+def VSet.has {l : List Nat} (v : VSet l) (x : Nat) : Bool := v.1.contains x
+
+/-- The set test agrees with list membership. -/
+theorem VSet.has_iff {l : List Nat} (v : VSet l) (x : Nat) : v.has x = true ↔ x ∈ l :=
+  v.2 x
+
+/-- Adding an element to the set mirrors consing it onto the list. -/
+def VSet.insert {l : List Nat} (v : VSet l) (x : Nat) : VSet (x :: l) :=
+  ⟨v.1.insert x, fun y => by
+    rw [Std.TreeSet.contains_insert, List.mem_cons]
+    have h1 : (compare x y == Ordering.eq) = true ↔ x = y := by
+      simp
+    rw [Bool.or_eq_true, h1, v.2 y, eq_comm (a := x)]⟩
+
 /-- The walk state. -/
 structure WalkState where
   /-- Nodes still to visit, next first. -/
   stack : List Entry
   /-- Object numbers of the visited nodes, newest first. -/
   visited : List Nat
+  /-- The visited nodes as an ordered set (the fast membership test; mirrors `visited`). -/
+  seen : VSet visited
   /-- Pages found, newest first. -/
   pages : List Page
   /-- References skipped because they resolve to `null` (rule W3). -/
@@ -408,15 +439,15 @@ def kidsOf : PdfObject → Option (List (Nat × Nat))
 
 /-- Pop the next live entry (rules W2, W3): a visited one is a cycle, a `null` one is
 skipped. Returns the entry, its body, the rest of the stack, and the skip count. -/
-def popLive (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+def popLive (d : OpenDoc) (limits : Limits) (visited : List Nat) (seen : VSet visited) :
     List Entry → Nat → Except Error (Option (Entry × IndirectBody × List Entry) × Nat)
   | [], k => .ok (none, k)
   | e :: rest, k =>
-    if e.num ∈ visited then .error (.cycle (offsetOf d e.num) "page tree /Kids cycle")
+    if seen.has e.num then .error (.cycle (offsetOf d e.num) "page tree /Kids cycle")
     else
       match d.getObject limits e.num e.gen with
       | .error x => .error x
-      | .ok (.obj .null) => popLive d limits visited rest (k + 1)
+      | .ok (.obj .null) => popLive d limits visited seen rest (k + 1)
       | .ok b => .ok (some (e, b, rest), k)
 
 /-- Visit a live node (rules W4–W6): mark it visited, then push its kids or record its
@@ -442,10 +473,11 @@ def visitNode (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
               .ok { st with
                     stack := ks.map (fun r => ⟨r.1, r.2, e.depth + 1, e.inh.merge own⟩) ++
                       st.stack
-                    visited := e.num :: st.visited }
+                    visited := e.num :: st.visited, seen := st.seen.insert e.num }
         | .leaf =>
           .ok { st with
                 visited := e.num :: st.visited
+                seen := st.seen.insert e.num
                 pages := mkPage e.num e.gen (e.inh.merge own)
                   (Dict.get? nd (Name.ofString "Contents")) :: st.pages }
         | .bad => .error (.malformed (offsetOf d e.num)
@@ -456,12 +488,12 @@ def visitNode (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
 /-- The walk loop: at most `fuel` node visits (rule W6). -/
 def loop (d : OpenDoc) (limits : Limits) : Nat → WalkState → Except Error WalkState
   | 0, st =>
-    match popLive d limits st.visited st.stack st.skipped with
+    match popLive d limits st.visited st.seen st.stack st.skipped with
     | .error x => .error x
     | .ok (none, k) => .ok { st with stack := [], skipped := k }
     | .ok (some _, _) => .error (.limitExceeded .objects)
   | f + 1, st =>
-    match popLive d limits st.visited st.stack st.skipped with
+    match popLive d limits st.visited st.seen st.stack st.skipped with
     | .error x => .error x
     | .ok (none, k) => .ok { st with stack := [], skipped := k }
     | .ok (some (e, b, rest), k) =>
@@ -470,7 +502,7 @@ def loop (d : OpenDoc) (limits : Limits) : Nat → WalkState → Except Error Wa
       | .ok st' => loop d limits f st'
 
 /-- The initial state: the root `/Pages` node `n g`, nothing inherited. -/
-def initState (n g : Nat) : WalkState := ⟨[⟨n, g, 0, {}⟩], [], [], 0⟩
+def initState (n g : Nat) : WalkState := ⟨[⟨n, g, 0, {}⟩], [], VSet.empty, [], 0⟩
 
 /-- Walk the page tree rooted at `n g` with fuel `objectCount`. -/
 def walk (d : OpenDoc) (limits : Limits) (n g : Nat) : Except Error WalkState :=
@@ -837,9 +869,9 @@ theorem foldl_merge_rotate (path : List Attrs) (init : Attrs) :
     cases h1 : as.reverse.findSome? (·.rotate) <;> cases h2 : a.rotate <;> simp [h2]
 
 /-- A live entry popped by `popLive` is not visited. -/
-theorem popLive_fresh {d : OpenDoc} {limits : Limits} {visited : List Nat} :
+theorem popLive_fresh {d : OpenDoc} {limits : Limits} {visited : List Nat} {seen : VSet visited} :
     ∀ {s : List Entry} {k k' : Nat} {e : Entry} {b : IndirectBody} {rest : List Entry},
-      popLive d limits visited s k = .ok (some (e, b, rest), k') → e.num ∉ visited
+      popLive d limits visited seen s k = .ok (some (e, b, rest), k') → e.num ∉ visited
   | [], _, _, _, _, _, h => by simp [popLive] at h
   | e0 :: s, k, k', e, b, rest, h => by
     unfold popLive at h
@@ -849,14 +881,15 @@ theorem popLive_fresh {d : OpenDoc} {limits : Limits} {visited : List Nat} :
       split at h
       · cases h
       · exact popLive_fresh h
-      · cases h; exact hn
+      · cases h; exact fun hm => hn ((seen.has_iff _).2 hm)
 
 /-- **Cycle ⇒ error.** Popping an entry that is already visited is `Error.cycle`. -/
-theorem popLive_cycle {d : OpenDoc} {limits : Limits} {visited : List Nat} {e : Entry}
+theorem popLive_cycle {d : OpenDoc} {limits : Limits} {visited : List Nat} {seen : VSet visited} {e : Entry}
     {rest : List Entry} {k : Nat} (h : e.num ∈ visited) :
-    popLive d limits visited (e :: rest) k =
+    popLive d limits visited seen (e :: rest) k =
       .error (.cycle (offsetOf d e.num) "page tree /Kids cycle") := by
-  simp [popLive, h]
+  have h' : seen.has e.num = true := (seen.has_iff _).2 h
+  simp [popLive, h']
 
 /-- **Cycle ⇒ error** for the walk: if the next entry is already visited, the walk fails
 with `Error.cycle`, whatever the fuel. -/
@@ -864,7 +897,7 @@ theorem loop_cycle {d : OpenDoc} {limits : Limits} {f : Nat} {st : WalkState} {e
     {rest : List Entry} (hs : st.stack = e :: rest) (h : e.num ∈ st.visited) :
     (loop d limits f st).isOk = false ∧
       loop d limits f st = .error (.cycle (offsetOf d e.num) "page tree /Kids cycle") := by
-  have hp := popLive_cycle (d := d) (limits := limits) (rest := rest) (k := st.skipped) h
+  have hp := popLive_cycle (d := d) (limits := limits) (seen := st.seen) (rest := rest) (k := st.skipped) h
   cases f <;> simp [loop, hs, hp, Except.isOk, Except.toBool]
 
 /-- What a node visit does to the visited set and the pages: the node becomes visited, and
@@ -1182,29 +1215,29 @@ theorem attrsOfB_sim (d : OpenDoc) (limits : Limits) (bc : BC) (nd : Dict) :
   exact sim_pure _
 
 /-- `popLive` with budgeted fetches (rules W2, W3). -/
-def popLiveB (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+def popLiveB (d : OpenDoc) (limits : Limits) (visited : List Nat) (seen : VSet visited) :
     List Entry → Nat → BC → (Except Error (Option (Entry × IndirectBody × List Entry) × Nat)) × BC
   | [], k, bc => (.ok (none, k), bc)
   | e :: rest, k, bc =>
-    if e.num ∈ visited then (.error (.cycle (offsetOf d e.num) "page tree /Kids cycle"), bc)
+    if seen.has e.num then (.error (.cycle (offsetOf d e.num) "page tree /Kids cycle"), bc)
     else
       let r := fetchB d limits bc e.num e.gen
       match r.1 with
       | .error x => (.error x, r.2)
-      | .ok (.obj .null) => popLiveB d limits visited rest (k + 1) r.2
+      | .ok (.obj .null) => popLiveB d limits visited seen rest (k + 1) r.2
       | .ok b => (.ok (some (e, b, rest), k), r.2)
 
 /-- `popLiveB` simulates `popLive`. -/
-theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
+theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) (seen : VSet visited) :
     (stack : List Entry) → (k : Nat) → (bc : BC) →
-    Sim d limits bc (popLiveB d limits visited stack k bc) (popLive d limits visited stack k)
+    Sim d limits bc (popLiveB d limits visited seen stack k bc) (popLive d limits visited seen stack k)
   | [], k, bc => sim_pure _
   | e :: rest, k, bc => by
     unfold popLiveB popLive
-    by_cases hv : e.num ∈ visited
+    by_cases hv : seen.has e.num = true
     · simp only [hv, ↓reduceIte]
       exact sim_pure _
-    · simp only [hv, ↓reduceIte]
+    · simp only [hv]
       obtain ⟨fle, feq⟩ := fetchB_sim d limits bc e.num e.gen
       generalize fetchB d limits bc e.num e.gen = R at fle feq ⊢
       rcases R with ⟨r1, b1⟩
@@ -1212,7 +1245,7 @@ theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
           Sim d limits bc ((Except.ok (some (e, b, rest), k)), b1)
             (match d.getObject limits e.num e.gen with
              | .error x => .error x
-             | .ok (.obj .null) => popLive d limits visited rest (k + 1)
+             | .ok (.obj .null) => popLive d limits visited seen rest (k + 1)
              | .ok b => .ok (some (e, b, rest), k)) := by
         intro b hb hn
         refine ⟨fle, fun hx hA => ?_⟩
@@ -1231,7 +1264,7 @@ theorem popLiveB_sim (d : OpenDoc) (limits : Limits) (visited : List Nat) :
         exact ⟨by first | rfl | trivial, h2⟩
       · cases o
         case null =>
-          obtain ⟨ple, peq⟩ := popLiveB_sim d limits visited rest (k + 1) b1
+          obtain ⟨ple, peq⟩ := popLiveB_sim d limits visited seen rest (k + 1) b1
           refine ⟨Nat.le_trans ple fle, fun hx hA => ?_⟩
           obtain ⟨h1, h2⟩ := feq hx (Nat.le_trans hA ple)
           simp only at h1
@@ -1258,10 +1291,11 @@ def visitNodeB (d : OpenDoc) (limits : Limits) (e : Entry) (b : IndirectBody)
               (.ok { st with
                      stack := ks.map (fun r => ⟨r.1, r.2, e.depth + 1, e.inh.merge own⟩) ++
                        st.stack
-                     visited := e.num :: st.visited }, b2)
+                     visited := e.num :: st.visited, seen := st.seen.insert e.num }, b2)
         | .leaf =>
           (.ok { st with
                  visited := e.num :: st.visited
+                 seen := st.seen.insert e.num
                  pages := mkPage e.num e.gen (e.inh.merge own)
                    (Dict.get? nd (Name.ofString "Contents")) :: st.pages }, b1)
         | .bad => (.error (.malformed (offsetOf d e.num)
@@ -1341,13 +1375,13 @@ theorem visitNodeB_sim (d : OpenDoc) (limits : Limits) (e : Entry) (b : Indirect
 /-- `loop` with budgeted fetches (rule W6). -/
 def loopB (d : OpenDoc) (limits : Limits) : Nat → WalkState → BC → (Except Error WalkState) × BC
   | 0, st, bc =>
-    let r := popLiveB d limits st.visited st.stack st.skipped bc
+    let r := popLiveB d limits st.visited st.seen st.stack st.skipped bc
     (match r.1 with
      | .error x => .error x
      | .ok (none, k) => .ok { st with stack := [], skipped := k }
      | .ok (some _, _) => .error (.limitExceeded .objects), r.2)
   | f + 1, st, bc =>
-    let r := popLiveB d limits st.visited st.stack st.skipped bc
+    let r := popLiveB d limits st.visited st.seen st.stack st.skipped bc
     match r.1 with
     | .error x => (.error x, r.2)
     | .ok (none, k) => (.ok { st with stack := [], skipped := k }, r.2)
@@ -1361,16 +1395,16 @@ theorem loopB_sim (d : OpenDoc) (limits : Limits) :
     Sim d limits bc (loopB d limits fuel st bc) (loop d limits fuel st)
   | 0, st, bc => by
     unfold loopB loop
-    have hp := popLiveB_sim d limits st.visited st.stack st.skipped bc
-    generalize popLiveB d limits st.visited st.stack st.skipped bc = R at hp ⊢
+    have hp := popLiveB_sim d limits st.visited st.seen st.stack st.skipped bc
+    generalize popLiveB d limits st.visited st.seen st.stack st.skipped bc = R at hp ⊢
     refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_
     refine ⟨?_, h2⟩
     rw [← h1]
     all_goals (rcases R.1 with x | ⟨_ | _, k⟩ <;> rfl)
   | f + 1, st, bc => by
     unfold loopB loop
-    have hp := popLiveB_sim d limits st.visited st.stack st.skipped bc
-    generalize popLiveB d limits st.visited st.stack st.skipped bc = R at hp ⊢
+    have hp := popLiveB_sim d limits st.visited st.seen st.stack st.skipped bc
+    generalize popLiveB d limits st.visited st.seen st.stack st.skipped bc = R at hp ⊢
     rcases R with ⟨r1, b1⟩
     rcases r1 with x | ⟨_ | ⟨e, b, rest⟩, k⟩
     · refine sim_of_eq hp (Nat.le_refl _) fun h1 h2 _ => ?_

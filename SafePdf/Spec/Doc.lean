@@ -135,9 +135,9 @@ theorem foldl_merge_cropBox (path : List Attrs) (init : Attrs) :
 
 /-- A live pop: the stack splits into skipped `null` entries, the popped entry, and the
 rest; nothing popped is visited. -/
-theorem popLive_some {d : OpenDoc} {limits : Limits} {vis : List Nat} :
+theorem popLive_some {d : OpenDoc} {limits : Limits} {vis : List Nat} {seen : VSet vis} :
     ∀ {s : List Entry} {k k' : Nat} {e : Entry} {b : IndirectBody} {rest : List Entry},
-      popLive d limits vis s k = .ok (some (e, b, rest), k') →
+      popLive d limits vis seen s k = .ok (some (e, b, rest), k') →
       ∃ pre, s = pre ++ e :: rest ∧
         (∀ x ∈ pre, x.num ∉ vis ∧ d.getObject limits x.num x.gen = .ok (.obj .null)) ∧
         e.num ∉ vis ∧ d.getObject limits e.num e.gen = .ok b ∧ b ≠ .obj .null
@@ -146,7 +146,8 @@ theorem popLive_some {d : OpenDoc} {limits : Limits} {vis : List Nat} :
     unfold popLive at h
     split at h
     · cases h
-    · rename_i hn
+    · rename_i hn0
+      have hn : e0.num ∉ vis := fun hm => hn0 ((seen.has_iff _).2 hm)
       split at h
       · cases h
       · rename_i hg
@@ -161,15 +162,16 @@ theorem popLive_some {d : OpenDoc} {limits : Limits} {vis : List Nat} :
         exact ⟨[], rfl, by simp, hn, hg, fun hb => hnn hb⟩
 
 /-- An empty pop: every entry was skipped, `null` and not visited. -/
-theorem popLive_none {d : OpenDoc} {limits : Limits} {vis : List Nat} :
-    ∀ {s : List Entry} {k k' : Nat}, popLive d limits vis s k = .ok (none, k') →
+theorem popLive_none {d : OpenDoc} {limits : Limits} {vis : List Nat} {seen : VSet vis} :
+    ∀ {s : List Entry} {k k' : Nat}, popLive d limits vis seen s k = .ok (none, k') →
       ∀ x ∈ s, x.num ∉ vis ∧ d.getObject limits x.num x.gen = .ok (.obj .null)
   | [], _, _, _ => by simp
   | e0 :: s, k, k', h => by
     unfold popLive at h
     split at h
     · cases h
-    · rename_i hn
+    · rename_i hn0
+      have hn : e0.num ∉ vis := fun hm => hn0 ((seen.has_iff _).2 hm)
       split at h
       · cases h
       · rename_i hg
@@ -218,10 +220,10 @@ theorem visitNode_cases {d : OpenDoc} {limits : Limits} {e : Entry} {b : Indirec
 preserve is preserved by the loop. -/
 theorem loop_preserves {d : OpenDoc} {limits : Limits} (P : WalkState → Prop)
     (hstep : ∀ (st st' : WalkState) (e : Entry) (b : IndirectBody) (rest : List Entry) (k : Nat),
-      P st → popLive d limits st.visited st.stack st.skipped = .ok (some (e, b, rest), k) →
+      P st → popLive d limits st.visited st.seen st.stack st.skipped = .ok (some (e, b, rest), k) →
       visitNode d limits e b { st with stack := rest, skipped := k } = .ok st' → P st')
     (hend : ∀ (st : WalkState) (k : Nat), P st →
-      popLive d limits st.visited st.stack st.skipped = .ok (none, k) →
+      popLive d limits st.visited st.seen st.stack st.skipped = .ok (none, k) →
       P { st with stack := [], skipped := k }) :
     ∀ {f : Nat} {st st' : WalkState}, P st → loop d limits f st = .ok st' → P st'
   | 0, st, st', hP, h => by
@@ -537,7 +539,7 @@ theorem popLive_exhausted {d : OpenDoc} {limits : Limits} {st : WalkState}
     (hnd : st.visited.Nodup) (hk : ∀ v ∈ st.visited, v ∈ d.index.toList.map Prod.fst)
     (hlen : d.objectCount ≤ st.visited.length) {k : Nat} {e : Entry} {b : IndirectBody}
     {rest : List Entry} :
-    popLive d limits st.visited st.stack st.skipped ≠ .ok (some (e, b, rest), k) := by
+    popLive d limits st.visited st.seen st.stack st.skipped ≠ .ok (some (e, b, rest), k) := by
   intro hp
   obtain ⟨-, -, -, hn, hg, hb⟩ := popLive_some hp
   have := fresh_bound hnd hk hn (getObject_ne_null_key hg hb)
@@ -554,7 +556,7 @@ theorem loop_fuel_irrelevant {d : OpenDoc} {limits : Limits} :
   | 0, k + 1, st, hnd, hk, hlen => by
     rw [Nat.zero_add]
     simp only [loop]
-    cases hp : popLive d limits st.visited st.stack st.skipped with
+    cases hp : popLive d limits st.visited st.seen st.stack st.skipped with
     | error x => rfl
     | ok r =>
       rcases r with ⟨_ | ⟨e, b, rest⟩, kk⟩
@@ -563,7 +565,7 @@ theorem loop_fuel_irrelevant {d : OpenDoc} {limits : Limits} :
   | f + 1, k, st, hnd, hk, hlen => by
     rw [show f + 1 + k = (f + k) + 1 by omega]
     simp only [loop]
-    cases hp : popLive d limits st.visited st.stack st.skipped with
+    cases hp : popLive d limits st.visited st.seen st.stack st.skipped with
     | error x => rfl
     | ok r =>
       rcases r with ⟨_ | ⟨e, b, rest⟩, kk⟩
@@ -1116,18 +1118,19 @@ theorem nodup_snoc {a : Nat} : ∀ {l : List Nat}, l.Nodup → a ∉ l → (l ++
       exact ha (List.mem_cons_self ..)
 
 /-- `popLive` fails only with `Error.cycle` when every unvisited entry can be fetched. -/
-theorem popLive_ok_or_cycle {d : OpenDoc} {limits : Limits} {vis : List Nat} :
+theorem popLive_ok_or_cycle {d : OpenDoc} {limits : Limits} {vis : List Nat} {seen : VSet vis} :
     ∀ {s : List Entry} {k : Nat},
       (∀ x ∈ s, x.num ∉ vis → ∃ b, d.getObject limits x.num x.gen = .ok b) →
-      (∃ r, popLive d limits vis s k = .ok r) ∨
-        ∃ o m, popLive d limits vis s k = .error (.cycle o m)
+      (∃ r, popLive d limits vis seen s k = .ok r) ∨
+        ∃ o m, popLive d limits vis seen s k = .error (.cycle o m)
   | [], _, _ => Or.inl ⟨_, rfl⟩
   | e :: s, k, h => by
     unfold popLive
-    by_cases hv : e.num ∈ vis
-    · exact Or.inr ⟨offsetOf d e.num, "page tree /Kids cycle", by simp only [hv, ↓reduceIte]⟩
-    · obtain ⟨b, hb⟩ := h e (List.mem_cons_self ..) hv
-      simp only [hv, ↓reduceIte, hb]
+    by_cases hv0 : seen.has e.num = true
+    · exact Or.inr ⟨offsetOf d e.num, "page tree /Kids cycle", by simp only [hv0, ↓reduceIte]⟩
+    · have hv : e.num ∉ vis := fun hm => hv0 ((seen.has_iff _).2 hm)
+      obtain ⟨b, hb⟩ := h e (List.mem_cons_self ..) hv
+      simp only [hv0, Bool.false_eq_true, ↓reduceIte, hb]
       split
       · rename_i x hx; cases hx
       · exact popLive_ok_or_cycle (fun x hx => h x (List.mem_cons_of_mem _ hx))
