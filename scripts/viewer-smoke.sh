@@ -630,7 +630,7 @@ case_begin "1g toolbar"
 # the field reverts it; End/Home update the field; the zoom drop-down lists the twelve PDF.js
 # choices, shows the chosen one, and shows custom zooms reached with -/+ as a percentage; the
 # overflow menu pages; Highlight (9.4), Add comment, Add text and Draw (9.9) are enabled,
-# Add image and Print are disabled and ignore clicks; a disclosure triangle
+# Add image is disabled and ignores clicks (there is no Print button); a disclosure triangle
 # collapses and expands its subtree; the toggle button hides and shows the sidebar.
 mkdir -p "$work/out-tb-nav" "$work/out-tb-two"
 SAFEPDF_VIEWER_SMOKE_MODE=toolbar run_viewer "$work/out-tb-nav" "$work/nav.pdf"
@@ -641,7 +641,7 @@ import sys
 def load(path):
     return dict(l.split(": ", 1) for l in open(path, encoding="utf-8").read().splitlines() if ": " in l)
 nav, two = load(sys.argv[1]), load(sys.argv[2])
-layout_r = ".bar.r=.bar.select,.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.print,.bar.save,.bar.s4,.bar.more"
+layout_r = ".bar.r=.bar.select,.bar.highlight,.bar.comment,.bar.text,.bar.draw,.bar.image,.bar.s3,.bar.save,.bar.s4,.bar.more"
 layout_m = ".bar.m=.bar.zout,.bar.s2,.bar.zin,.bar.zoom"
 common = {
     "zoom-label0": "Automatic Zoom",
@@ -651,7 +651,7 @@ common = {
                  "Page Scrolling|Vertical Scrolling|No Spreads|Odd Spreads|Even Spreads",
     "states0": ".bar.prev=disabled,.bar.next=normal,.bar.zout=normal,.bar.zin=normal,.bar.more=normal",
     "tools": ".bar.highlight=normal,.bar.comment=normal,.bar.text=normal,.bar.draw=normal," +
-        ",".join(w + "=disabled" for w in [".bar.image", ".bar.print", ".bar.save"]),  # Save: no unsaved marks
+        ",".join(w + "=disabled" for w in [".bar.image", ".bar.save"]),  # Save: no unsaved marks
     "status-unchanged-after-tool": "true",
     "history-after-entry": "2",
 }

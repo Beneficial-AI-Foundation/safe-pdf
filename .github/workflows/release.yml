@@ -1,0 +1,81 @@
+name: Release
+
+# Build the inspector CLI (`inspect`) for each supported platform and attach it to
+# the GitHub Release. Triggered by pushing a version tag (e.g. `v0.1.0`), or manually.
+#
+# Only the command-line inspector is packaged. The GUI viewers are not: the Tcl/Tk
+# viewer needs Tk at run time (`brew install tcl-tk` / `apt-get install tk`), and the
+# native macOS app is a Swift/AppKit bundle built by `macos/build.sh`. Both are out of
+# scope for a single self-contained binary.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The verified core and the inspector CLI build on Linux and macOS (no
+          # Windows). macOS binaries declare a macOS 15 minimum (lakefile
+          # moreLeancArgs: -mmacosx-version-min=15.0).
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-14          # Apple silicon
+            target: macos-arm64
+          - os: macos-13          # Intel
+            target: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the inspector CLI
+        uses: leanprover/lean-action@v1
+        with:
+          auto-config: false
+          build: true
+          build-args: "inspect"
+          use-github-cache: true
+
+      - name: Package
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME:-dev}"
+          name="safe-pdf-inspect-${ver}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp .lake/build/bin/inspect "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "${name}.tar.gz" "${name}"
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            safe-pdf-inspect-*.tar.gz
+            safe-pdf-inspect-*.tar.gz.sha256
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach binaries to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/safe-pdf-inspect-*.tar.gz
+            dist/safe-pdf-inspect-*.tar.gz.sha256
+          generate_release_notes: true

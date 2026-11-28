@@ -21,7 +21,7 @@ colours and behaviour are re-created in Tk by `Viewer`; no PDF.js code or icon f
   one it turns the Highlight tool and its pop-over on or off, task 9.8 `Bubble.Ui.toolClick`;
   Add comment: a note on the selection or at the window centre, `Menu.Cmd.addNote`; Add text
   and Draw: the FreeText and Ink editors with their pop-over, task 9.9 `Bubble.Ui.selectEditor`;
-  Add image: disabled, after M9), Print (disabled, after M9), Save
+  Add image: disabled, after M9), Save (Print has no button for now)
   (task 9.5c: the command `Menu.Cmd.save`, PDF.js's download icon, enabled with unsaved marks)
   and the `»` overflow menu (`overflow`: first/last page, rotate, Find, Go to,
   Open, Import / Export annotations (XFDF, task 9.11), and the scroll and spread modes of
@@ -430,7 +430,6 @@ def layout : List (String × List Item) :=
        .button ⟨".bar.draw", "draw", Tool.tip .draw, .tool .draw⟩,
        .button ⟨".bar.image", "image", Tool.tip .image, .tool .image⟩,
        .sep ".bar.s3",
-       .button ⟨".bar.print", "print", Tool.tip .print, .tool .print⟩,
        .button ⟨".bar.save", "save", "Save (Ctrl+S)", .cmd .save⟩,
        .sep ".bar.s4",
        .button ⟨".bar.more", "more", "Tools", .more⟩]) ]
@@ -488,16 +487,18 @@ def states (c : Ctx) : List Bool :=
 
 -- Paths are unique; the tool names map back to their tools.
 #guard (buttons.map (·.path)).eraseDups.length == buttons.length
-#guard buttons.length == 14
-#guard [Tool.select, .highlight, .comment, .text, .draw, .image, .print].all fun t =>
+#guard buttons.length == 13
+#guard [Tool.select, .highlight, .comment, .text, .draw, .image].all fun t =>
   buttons.any fun b => b.act == .tool t && toolOf b.icon == some t
+-- Print has no button for now (removed 2026-11-27); the tool stays in `Tool` for its return.
+#guard !buttons.any fun b => b.act == .tool .print
 #guard targets.length == (states {}).length
 #guard targets.eraseDups.length == targets.length
 -- Without a document only Open, Quit and the overflow button work; the sidebar toggle hides.
 #guard (buttons.filter (·.enabled {})).map (·.path) == [".bar.more"]
 #guard (buttons.filter (·.visible {})).length == buttons.length - 1
 -- First page of three with an outline: prev disabled, next enabled, of the tools Select text,
--- Highlight, Add comment, Add text and Draw (Add image and Print after M9).
+-- Highlight, Add comment, Add text and Draw (Add image after M9).
 #guard let c : Ctx := { hasDoc := true, page := 0, pages := 3, hasOutline := true }
   (buttons.filter (·.enabled c)).map (·.path) ==
     [".bar.sidebar", ".bar.next", ".bar.zout", ".bar.zin", ".bar.select", ".bar.highlight", ".bar.comment",

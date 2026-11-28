@@ -1,5 +1,8 @@
 # Test corpus
 
+The JPX source-PDF placement gate uses the decoder dependency's pinned PDF collection.
+For fetch, worker comparisons and per-object coverage, see [JPX page comparisons](jpx-pages.md).
+
 ## Purpose
 
 Plan.md §1 ("Target corpus") names academic and office PDFs: LaTeX output (pdfTeX, LuaTeX,

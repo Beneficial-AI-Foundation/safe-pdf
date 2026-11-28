@@ -97,6 +97,11 @@ package «safe-pdf» where
   -- warnings; no effect elsewhere.
   moreLeancArgs := if System.Platform.isOSX then #["-mmacosx-version-min=15.0"] else #[]
 
+require jpeg2000 from git
+  "https://github.com/Beneficial-AI-Foundation/jpeg2000-lean.git" @
+  "9a8880a8604dbebf93b99253e7965d54673dc534"
+  with NameMap.empty.insert `libraryOnly "true"
+
 /-- The verified core and the unverified shell modules it umbrella-imports (`SafePdf.lean`). -/
 @[default_target] lean_lib SafePdf
 

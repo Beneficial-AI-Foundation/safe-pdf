@@ -28,8 +28,7 @@ checkout; a new file importing another new, unbuilt file must say so in its repo
 **Concurrent builds in one checkout are NOT safe.** Only the orchestrator runs `lake build`,
 `lake exe …` or any executable in the main checkout. A subagent in the shared checkout uses
 only the single-file check. A subagent in its own git worktree may build and test freely
-there; the project has no Lake dependencies, so a fresh worktree builds from scratch in
-well under a minute and needs no cache sharing.
+there. A fresh worktree resolves the pinned decoder from the Lake manifest.
 
 **Lean MCP server (`lean-lsp`, configured in `.mcp.json`).** It runs `lake serve` in the main
 checkout and can build on demand. Use its read-only tools (`lean_goal`,
@@ -84,8 +83,8 @@ session start, so start Claude Code from the main checkout after adding it.
 
 ## Conventions
 
-* Toolchain `leanprover/lean4:v4.36.0`, no Lake dependencies (no Mathlib, no Batteries);
-  adding one needs a ledger Decisions entry. `autoImplicit = false`.
+* Toolchain `leanprover/lean4:v4.36.0`. The sole Lake dependency is the pinned pure Lean
+  `jpeg2000` decoder. Adding a dependency needs a ledger Decisions entry. `autoImplicit = false`.
 * Every recursive structure in the format carries a fuel/measure argument or a visited set,
   justified by a proof (Plan.md §3 rule 2, §5.2). Prefer structural recursion or
   `termination_by` with an explicit measure; never `partial def`.

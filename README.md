@@ -79,8 +79,8 @@ in [progress.md](progress.md)):
 
 Known gaps:
 
-* JBIG2 and JPEG 2000 images render as placeholder boxes (JPEG and CCITT fax are decoded, in
-  Lean).
+* JBIG2 images render as placeholder boxes. The viewer decodes JPEG, CCITT fax and JPEG 2000
+  in Lean. All 45 painted JPEG 2000 image and mask comparisons in the pinned corpus pass. [JPEG 2000 corpus results](docs/jpx-pages.md#confined-worker-results)
 * `Separation`, `DeviceN` and `Lab` colours are approximated.
 * VoiceOver can't read the page content in the macOS app (only its controls).
 * The macOS app is ad-hoc signed, not notarised.
@@ -91,7 +91,9 @@ The remaining items of the plan are in [Plan.md §6, "Tier 2 / later"](Plan.md).
 ## Requirements
 
 * [elan](https://github.com/leanprover/elan); the toolchain is pinned in `lean-toolchain`
-  (`leanprover/lean4:v4.36.0`). There are no Lake dependencies (no Mathlib, no Batteries).
+  (`leanprover/lean4:v4.36.0`). Lake fetches the one dependency, the pure Lean JPEG 2000
+  decoder [`jpeg2000-lean`](https://github.com/Beneficial-AI-Foundation/jpeg2000-lean), at the
+  revision in `lake-manifest.json`.
 * For the macOS app only: macOS 15 or later with the Xcode command line tools (Swift 6, the
   macOS 26 SDK to build).
 * For the Tk viewer only: Tcl/Tk development files (Debian/Ubuntu `tk-dev`, Tk 8.6 or 9.0;
@@ -110,7 +112,8 @@ lake exe extract FILE.pdf [PAGE]    # example client of the library API (text)
 lake exe extract --render FILE.pdf [PAGE]
 
 lake build macosApp                 # macOS: the native app -> macos/build/SafePdf.app
-open macos/build/SafePdf.app        # (or: open -a macos/build/SafePdf.app FILE.pdf)
+open macos/build/SafePdf.app        # or, with a file: open -a "$PWD/macos/build/SafePdf.app" FILE.pdf
+                                    # (open -a needs an absolute path to the .app)
 
 lake build viewer worker            # Tk viewer (Linux or macOS; needs Tk)
 lake exe viewer FILE.pdf

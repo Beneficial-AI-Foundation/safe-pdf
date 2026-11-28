@@ -24,16 +24,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       # actions/cache v4.2.0
-      - name: Cache elan toolchains and Lake build
+      - name: Cache the Lean toolchain
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
-          path: |
-            ~/.elan
-            .lake
-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
-          restore-keys: |
-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
-            lean-${{ runner.os }}-
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Install elan and the pinned toolchain
         run: |
@@ -88,16 +83,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       # actions/cache v4.2.0
-      - name: Cache elan toolchains and Lake build
+      - name: Cache the Lean toolchain
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
-          path: |
-            ~/.elan
-            .lake
-          key: viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
-          restore-keys: |
-            viewer-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
-            viewer-${{ runner.os }}-
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Install elan and the pinned toolchain
         run: |
@@ -188,16 +178,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       # actions/cache v4.2.0
-      - name: Cache elan toolchains and Lake build
+      - name: Cache the Lean toolchain
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
-          path: |
-            ~/.elan
-            .lake
-          key: macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', 'c/**', '!.lake/**') }}
-          restore-keys: |
-            macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
-            macos-${{ runner.os }}-${{ runner.arch }}-
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Install elan and the pinned toolchain
         run: |
@@ -265,16 +250,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       # actions/cache v4.2.0
-      - name: Cache elan toolchains and Lake build
+      - name: Cache the Lean toolchain
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
-          path: |
-            ~/.elan
-            .lake
-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
-          restore-keys: |
-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
-            lean-${{ runner.os }}-
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Install elan and the pinned toolchain
         run: |
@@ -325,16 +305,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       # actions/cache v4.2.0
-      - name: Cache elan toolchains and Lake build
+      - name: Cache the Lean toolchain
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
-          path: |
-            ~/.elan
-            .lake
-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
-          restore-keys: |
-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
-            lean-${{ runner.os }}-
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Install elan and the pinned toolchain
         run: |
@@ -388,16 +363,11 @@ jobs:
           fi
 
       # actions/cache v4.2.0
-      - name: Cache elan toolchains and Lake build
+      - name: Cache the Lean toolchain
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
-          path: |
-            ~/.elan
-            .lake
-          key: lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-${{ hashFiles('**/*.lean', '!.lake/**') }}
-          restore-keys: |
-            lean-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lakefile.lean') }}-
-            lean-${{ runner.os }}-
+          path: ~/.elan/toolchains
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Install elan and the pinned toolchain
         run: |
