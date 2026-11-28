@@ -307,8 +307,8 @@ def SameAt (limits : Limits) (bytes bytes' : ByteArray) (o : Nat) : Prop :=
 /-- The shape of a successful step: the section at `off` parses, and either it is not
 hybrid and is the only revision, or its `/XRefStm` stream parses too and follows it. -/
 theorem step_ok_shape {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
-    {hnd : visited.Nodup} {so : StepOk bytes visited} {k : Nat}
-    (h : step limits bytes off visited hnd = (.ok so, k)) :
+    {hnd : visited.Nodup} {sn : Seen visited} {so : StepOk bytes visited} {k : Nat}
+    (h : step limits bytes off visited hnd sn = (.ok so, k)) :
     ∃ sec tr, parseSection limits bytes off = .ok (sec, tr) ∧ so.prev? = tr.prev? ∧
       ((hybridStm bytes off tr = none ∧ so.revs = [(sec, tr, off)]) ∨
         (∃ s sec2 tr2, hybridStm bytes off tr = some s ∧
@@ -346,11 +346,13 @@ theorem step_ok_shape {limits : Limits} {bytes : ByteArray} {off : Nat} {visited
 /-- A step succeeds on a non-hybrid section that parses at a fresh in-range offset within
 the revision budget. -/
 theorem step_of_plain {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
-    (hnd : visited.Nodup) {sec : XrefSection} {tr : Trailer} (hoff : off < bytes.size)
+    (hnd : visited.Nodup) (sn : Seen visited) {sec : XrefSection} {tr : Trailer}
+    (hoff : off < bytes.size)
     (hmem : off ∉ visited) (hbud : visited.length < limits.maxRevisions)
     (hp : parseSection limits bytes off = .ok (sec, tr)) (hh : hybridStm bytes off tr = none) :
-    ∃ so k, step limits bytes off visited hnd = (.ok so, k) ∧ so.revs = [(sec, tr, off)] ∧
+    ∃ so k, step limits bytes off visited hnd sn = (.ok so, k) ∧ so.revs = [(sec, tr, off)] ∧
       so.prev? = tr.prev? := by
+  have hl := sn.len_eq
   unfold step
   rw [dite_eq_left_of_eq_true (eq_true hoff), dite_eq_right_of_eq_false (eq_false hmem),
     ite_eq_right_of_eq_false _ _ (eq_false (by omega))]
@@ -371,13 +373,15 @@ theorem step_of_plain {limits : Limits} {bytes : ByteArray} {off : Nat} {visited
 /-- A step succeeds on a hybrid section when the section and its `/XRefStm` stream parse at
 fresh, distinct, in-range offsets within the revision budget. -/
 theorem step_of_hybrid {limits : Limits} {bytes : ByteArray} {off s : Nat}
-    {visited : List Nat} (hnd : visited.Nodup) {sec sec2 : XrefSection} {tr tr2 : Trailer}
+    {visited : List Nat} (hnd : visited.Nodup) (sn : Seen visited) {sec sec2 : XrefSection}
+    {tr tr2 : Trailer}
     (hoff : off < bytes.size) (hmem : off ∉ visited) (hs : s < bytes.size) (hso : s ≠ off)
     (hsm : s ∉ visited) (hbud : visited.length + 2 ≤ limits.maxRevisions)
     (hp : parseSection limits bytes off = .ok (sec, tr)) (hh : hybridStm bytes off tr = some s)
     (hp2 : Stream.parseXrefStream limits bytes s = .ok (sec2, tr2)) :
-    ∃ so k, step limits bytes off visited hnd = (.ok so, k) ∧
+    ∃ so k, step limits bytes off visited hnd sn = (.ok so, k) ∧
       so.revs = [(sec, tr, off), (sec2, tr2, s)] ∧ so.prev? = tr.prev? := by
+  have hl := sn.len_eq
   unfold step
   rw [dite_eq_left_of_eq_true (eq_true hoff), dite_eq_right_of_eq_false (eq_false hmem),
     ite_eq_right_of_eq_false _ _ (eq_false (by omega))]
@@ -414,13 +418,14 @@ theorem step_of_hybrid {limits : Limits} {bytes : ByteArray} {off s : Nat}
 (at least as long) from a visited list `visited'` that avoids its offsets and leaves room in
 the revision budget, provided its sections read the same in `bytes'`. -/
 theorem step_frame {limits : Limits} {bytes bytes' : ByteArray} (hsz : bytes.size ≤ bytes'.size)
-    {off : Nat} {visited : List Nat} {hnd : visited.Nodup} {so : StepOk bytes visited} {k : Nat}
-    (h : step limits bytes off visited hnd = (.ok so, k))
-    {visited' : List Nat} (hnd' : visited'.Nodup)
+    {off : Nat} {visited : List Nat} {hnd : visited.Nodup} {sn : Seen visited}
+    {so : StepOk bytes visited} {k : Nat}
+    (h : step limits bytes off visited hnd sn = (.ok so, k))
+    {visited' : List Nat} (hnd' : visited'.Nodup) (sn' : Seen visited')
     (hfresh : ∀ o ∈ so.revs.map Revision.offset, o ∉ visited')
     (hbud : so.revs.length + visited'.length ≤ limits.maxRevisions)
     (hsame : ∀ o ∈ so.revs.map Revision.offset, SameAt limits bytes bytes' o) :
-    ∃ so' k', step limits bytes' off visited' hnd' = (.ok so', k') ∧ so'.revs = so.revs ∧
+    ∃ so' k', step limits bytes' off visited' hnd' sn' = (.ok so', k') ∧ so'.revs = so.revs ∧
       so'.prev? = so.prev? := by
   obtain ⟨sec, tr, hp, hprev, hcase⟩ := step_ok_shape h
   have hlt := so.lt
@@ -433,7 +438,7 @@ theorem step_frame {limits : Limits} {bytes bytes' : ByteArray} (hsz : bytes.siz
     have hh' : hybridStm bytes' off tr = none := by
       unfold hybridStm at hh ⊢
       rw [hs2]; exact hh
-    obtain ⟨so', k', hst, hr', hp'⟩ := step_of_plain hnd' (Nat.lt_of_lt_of_le hlt hsz) hfresh
+    obtain ⟨so', k', hst, hr', hp'⟩ := step_of_plain hnd' sn' (Nat.lt_of_lt_of_le hlt hsz) hfresh
       (by simp at hbud; omega) (hs1.trans hp) hh'
     exact ⟨so', k', hst, hr'.trans hrevs.symm, hp'.trans hprev.symm⟩
   · rw [hrevs] at hfresh hbud hsame hlt hndo
@@ -445,7 +450,7 @@ theorem step_frame {limits : Limits} {bytes bytes' : ByteArray} (hsz : bytes.siz
     have hh' : hybridStm bytes' off tr = some s := by
       unfold hybridStm at hh ⊢
       rw [hs2]; exact hh
-    obtain ⟨so', k', hst, hr', hp'⟩ := step_of_hybrid hnd' (Nat.lt_of_lt_of_le hlt.1 hsz)
+    obtain ⟨so', k', hst, hr', hp'⟩ := step_of_hybrid hnd' sn' (Nat.lt_of_lt_of_le hlt.1 hsz)
       hfresh.1 (Nat.lt_of_lt_of_le hlt.2 hsz) (fun he => hndo.1 he.symm) hfresh.2
       (by simp at hbud; omega) (hs1.trans hp) hh' (hs3.trans hp2)
     exact ⟨so', k', hst, hr'.trans hrevs.symm, hp'.trans hprev.symm⟩
@@ -454,40 +459,42 @@ theorem step_frame {limits : Limits} {bytes bytes' : ByteArray} (hsz : bytes.siz
 `bytes'` (at least as long) from any visited list `visited'` that avoids its offsets and leaves
 room in the revision budget, provided its sections read the same in `bytes'` (`SameAt`). -/
 theorem walk_frame {limits : Limits} {bytes bytes' : ByteArray} (hsz : bytes.size ≤ bytes'.size)
-    (off : Nat) (visited : List Nat) (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size)
-    {revs : List Revision} (h : (walk limits bytes off visited hnd hlt).1 = .ok revs)
-    (visited' : List Nat) (hnd' : visited'.Nodup) (hlt' : ∀ x ∈ visited', x < bytes'.size)
+    (off : Nat) (visited : List Nat) (hnd : visited.Nodup) (sn : Seen visited)
+    (hlt : ∀ x ∈ visited, x < bytes.size)
+    {revs : List Revision} (h : (walk limits bytes off visited hnd sn hlt).1 = .ok revs)
+    (visited' : List Nat) (hnd' : visited'.Nodup) (sn' : Seen visited')
+    (hlt' : ∀ x ∈ visited', x < bytes'.size)
     (hfresh : ∀ o ∈ revs.map Revision.offset, o ∉ visited')
     (hbud : revs.length + visited'.length ≤ limits.maxRevisions)
     (hsame : ∀ o ∈ revs.map Revision.offset, SameAt limits bytes bytes' o) :
-    (walk limits bytes' off visited' hnd' hlt').1 = .ok revs := by
-  revert revs visited' hnd' hlt'
-  fun_induction walk limits bytes off visited hnd hlt with
+    (walk limits bytes' off visited' hnd' sn' hlt').1 = .ok revs := by
+  revert revs visited' hnd' sn' hlt'
+  fun_induction walk limits bytes off visited hnd sn hlt with
   | case1 => simp
   | case3 => simp
-  | case2 off visited hnd hlt so k hs hp =>
-    intro revs h visited' hnd' hlt' hfresh hbud hsame
+  | case2 off visited hnd sn hlt so k hs hp =>
+    intro revs h visited' hnd' sn' hlt' hfresh hbud hsame
     simp only [Except.ok.injEq] at h
     subst h
-    obtain ⟨so', k', hst, hr', hp'⟩ := step_frame hsz hs hnd' hfresh hbud hsame
+    obtain ⟨so', k', hst, hr', hp'⟩ := step_frame hsz hs hnd' sn' hfresh hbud hsame
     rw [walk, hst]
     simp only
     rw [hp', hp]
     simp only [hr']
-  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
-    intro revs h visited' hnd' hlt' hfresh hbud hsame
+  | case4 off visited hnd sn hlt so k hs p hp rest k' hw ih =>
+    intro revs h visited' hnd' sn' hlt' hfresh hbud hsame
     simp only [Except.ok.injEq] at h
     subst h
-    have hwo := walk_ok limits bytes p _ so.nodup _ (by rw [hw])
+    have hwo := walk_ok limits bytes p _ so.nodup (sn.append (so.revs.map Revision.offset)) _ (by rw [hw])
     simp only [List.map_append, List.mem_append, List.length_append] at hfresh hbud hsame
-    obtain ⟨so', k'', hst, hr', hp'⟩ := step_frame hsz hs hnd' (fun o ho => hfresh o (Or.inl ho))
+    obtain ⟨so', k'', hst, hr', hp'⟩ := step_frame hsz hs hnd' sn' (fun o ho => hfresh o (Or.inl ho))
       (by omega) (fun o ho => hsame o (Or.inl ho))
     rw [walk, hst]
     simp only
     rw [hp', hp]
     simp only
     have hih := ih (revs := rest) (by rw [hw]) (so'.revs.map Revision.offset ++ visited')
-      so'.nodup (fun x hx => by
+      so'.nodup (sn'.append (so'.revs.map Revision.offset)) (fun x hx => by
         rcases List.mem_append.mp hx with hx | hx
         · exact so'.lt x hx
         · exact hlt' x hx)
@@ -527,14 +534,14 @@ theorem loadChain_update {limits : Limits} {bytes bytes' : ByteArray} {start off
   have hold' := hold
   rw [loadChain_eq hstart] at hold'
   rw [loadChain_eq hnew]
-  obtain ⟨so, k, hst, hr, hp⟩ := step_of_plain (visited := []) List.nodup_nil hlt'
+  obtain ⟨so, k, hst, hr, hp⟩ := step_of_plain (visited := []) List.nodup_nil Seen.empty hlt'
     List.not_mem_nil (by simp; omega) hsec hnohyb
   rw [walk, hst]
   simp only
   rw [hp, hprev]
   simp only
-  have hih := walk_frame hsz start [] _ _ hold' (so.revs.map Revision.offset ++ [])
-    so.nodup (fun x hx => by
+  have hih := walk_frame hsz start [] _ Seen.empty _ hold' (so.revs.map Revision.offset ++ [])
+    so.nodup (Seen.empty.append (so.revs.map Revision.offset)) (fun x hx => by
       rcases List.mem_append.mp hx with hx | hx
       · exact so.lt x hx
       · cases hx)
@@ -581,8 +588,8 @@ def ParsesAt (limits : Limits) (bytes : ByteArray) (o : Nat) : Prop :=
 
 /-- The offsets of a successful step parse. -/
 theorem step_parses {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
-    {hnd : visited.Nodup} {so : StepOk bytes visited} {k : Nat}
-    (h : step limits bytes off visited hnd = (.ok so, k)) :
+    {hnd : visited.Nodup} {sn : Seen visited} {so : StepOk bytes visited} {k : Nat}
+    (h : step limits bytes off visited hnd sn = (.ok so, k)) :
     ∀ o ∈ so.revs.map Revision.offset, ParsesAt limits bytes o := by
   obtain ⟨sec, tr, hp, -, hcase⟩ := step_ok_shape h
   rcases hcase with ⟨-, hrevs⟩ | ⟨s, sec2, tr2, -, hp2, hrevs⟩
@@ -596,19 +603,20 @@ theorem step_parses {limits : Limits} {bytes : ByteArray} {off : Nat} {visited :
 
 /-- The offsets of a successful walk parse. -/
 theorem walk_parses {limits : Limits} {bytes : ByteArray} (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) {revs : List Revision}
-    (h : (walk limits bytes off visited hnd hlt).1 = .ok revs) :
+    (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size)
+    {revs : List Revision}
+    (h : (walk limits bytes off visited hnd sn hlt).1 = .ok revs) :
     ∀ o ∈ revs.map Revision.offset, ParsesAt limits bytes o := by
   revert revs
-  fun_induction walk limits bytes off visited hnd hlt with
+  fun_induction walk limits bytes off visited hnd sn hlt with
   | case1 => simp
   | case3 => simp
-  | case2 off visited hnd hlt so k hs hp =>
+  | case2 off visited hnd sn hlt so k hs hp =>
     intro revs h
     simp only [Except.ok.injEq] at h
     subst h
     exact step_parses hs
-  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+  | case4 off visited hnd sn hlt so k hs p hp rest k' hw ih =>
     intro revs h
     simp only [Except.ok.injEq] at h
     subst h
@@ -629,7 +637,7 @@ theorem loadChain_parses {limits : Limits} {bytes : ByteArray} {revs : List Revi
     cases h
   | ok start =>
     rw [loadChain_eq hs] at h
-    exact walk_parses _ _ _ _ h
+    exact walk_parses _ _ _ _ _ h
 
 /-- **`SameAt` holds for appended bytes.** If `bytes'` extends `bytes` (same bytes, possibly
 more after them) and `bytes` has a valid `startxref` (so it ends with `%%EOF` and optional
@@ -726,14 +734,14 @@ theorem loadChain_update_hybrid {limits : Limits} {bytes bytes' : ByteArray} {st
   have hold' := hold
   rw [loadChain_eq hstart] at hold'
   rw [loadChain_eq hnew]
-  obtain ⟨so, k, hst, hr, hp⟩ := step_of_hybrid (visited := []) List.nodup_nil hlt'
+  obtain ⟨so, k, hst, hr, hp⟩ := step_of_hybrid (visited := []) List.nodup_nil Seen.empty hlt'
     List.not_mem_nil hslt hso List.not_mem_nil (by simp; omega) hsec hhyb hstm
   rw [walk, hst]
   simp only
   rw [hp, hprev]
   simp only
-  have hih := walk_frame hsz start [] _ _ hold' (so.revs.map Revision.offset ++ [])
-    so.nodup (fun x hx => by
+  have hih := walk_frame hsz start [] _ Seen.empty _ hold' (so.revs.map Revision.offset ++ [])
+    so.nodup (Seen.empty.append (so.revs.map Revision.offset)) (fun x hx => by
       rcases List.mem_append.mp hx with hx | hx
       · exact so.lt x hx
       · cases hx)

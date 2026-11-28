@@ -152,9 +152,10 @@ theorem not_terminal_of_cycle {limits : Limits} {bytes : ByteArray} {o t : Nat}
 /-- Work bound of one step: its section parses (0, 1 or 2) are at most the number of
 unvisited offsets and at most the remaining revision budget. -/
 theorem step_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
-    (step limits bytes off visited hnd).2 ≤ bytes.size - visited.length ∧
-      (step limits bytes off visited hnd).2 ≤ limits.maxRevisions - visited.length := by
+    (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (step limits bytes off visited hnd sn).2 ≤ bytes.size - visited.length ∧
+      (step limits bytes off visited hnd sn).2 ≤ limits.maxRevisions - visited.length := by
+  have hl := sn.len_eq
   unfold step
   split
   · rename_i hoff
@@ -200,10 +201,11 @@ theorem step_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited
 /-- What a successful step guarantees: one parse per revision, the revision budget is
 respected, and the section at `off` parses with the returned `/Prev`. -/
 theorem step_ok {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
-    {hnd : visited.Nodup} {so : StepOk bytes visited} {k : Nat}
-    (h : step limits bytes off visited hnd = (.ok so, k)) :
+    {hnd : visited.Nodup} {sn : Seen visited} {so : StepOk bytes visited} {k : Nat}
+    (h : step limits bytes off visited hnd sn = (.ok so, k)) :
     k = so.revs.length ∧ so.revs.length + visited.length ≤ limits.maxRevisions ∧
       ∃ sec tr, parseSection limits bytes off = .ok (sec, tr) ∧ so.prev? = tr.prev? := by
+  have hl := sn.len_eq
   unfold step at h
   split at h
   · split at h
@@ -237,19 +239,19 @@ theorem step_ok {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : Lis
 /-- Work bound of the loop: the number of section parses is at most the number of unvisited
 offsets, and at most the remaining revision budget. -/
 theorem walk_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) :
-    (walk limits bytes off visited hnd hlt).2 ≤ bytes.size - visited.length ∧
-      (walk limits bytes off visited hnd hlt).2 ≤ limits.maxRevisions - visited.length := by
-  fun_induction walk limits bytes off visited hnd hlt with
-  | case1 off visited hnd hlt e k hs =>
-    have := step_calls_le limits bytes off visited hnd hlt
+    (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size) :
+    (walk limits bytes off visited hnd sn hlt).2 ≤ bytes.size - visited.length ∧
+      (walk limits bytes off visited hnd sn hlt).2 ≤ limits.maxRevisions - visited.length := by
+  fun_induction walk limits bytes off visited hnd sn hlt with
+  | case1 off visited hnd sn hlt e k hs =>
+    have := step_calls_le limits bytes off visited hnd sn hlt
     rw [hs] at this
     simpa using this
-  | case2 off visited hnd hlt so k hs hp =>
-    have := step_calls_le limits bytes off visited hnd hlt
+  | case2 off visited hnd sn hlt so k hs hp =>
+    have := step_calls_le limits bytes off visited hnd sn hlt
     rw [hs] at this
     simpa using this
-  | case3 off visited hnd hlt so k hs p hp e k' hw ih =>
+  | case3 off visited hnd sn hlt so k hs p hp e k' hw ih =>
     obtain ⟨hk, hlen, -⟩ := step_ok hs
     have hb := length_le_of_nodup_of_lt so.nodup (fun x hx => by
       rcases List.mem_append.mp hx with hx | hx
@@ -259,7 +261,7 @@ theorem walk_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited
     simp only [List.length_append, List.length_map] at ih hb
     simp only
     omega
-  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+  | case4 off visited hnd sn hlt so k hs p hp rest k' hw ih =>
     obtain ⟨hk, hlen, -⟩ := step_ok hs
     have hb := length_le_of_nodup_of_lt so.nodup (fun x hx => by
       rcases List.mem_append.mp hx with hx | hx
@@ -274,17 +276,18 @@ theorem walk_calls_le (limits : Limits) (bytes : ByteArray) (off : Nat) (visited
 distinct, inside the input and not previously visited; the revision budget is respected;
 there is one parse per revision; and the `/Prev` path from `off` ends in a terminal section. -/
 theorem walk_ok (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size) {revs : List Revision}
-    (h : (walk limits bytes off visited hnd hlt).1 = .ok revs) :
+    (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size)
+    {revs : List Revision}
+    (h : (walk limits bytes off visited hnd sn hlt).1 = .ok revs) :
     (revs.map Revision.offset).Nodup ∧
       (∀ o ∈ revs.map Revision.offset, o < bytes.size ∧ o ∉ visited) ∧
       revs.length + visited.length ≤ limits.maxRevisions ∧
-      (walk limits bytes off visited hnd hlt).2 = revs.length ∧
+      (walk limits bytes off visited hnd sn hlt).2 = revs.length ∧
       ∃ t, PrevReach limits bytes off t ∧ Terminal limits bytes t := by
   revert revs
-  fun_induction walk limits bytes off visited hnd hlt with
+  fun_induction walk limits bytes off visited hnd sn hlt with
   | case1 => simp
-  | case2 off visited hnd hlt so k hs hp =>
+  | case2 off visited hnd sn hlt so k hs hp =>
     intro revs h
     simp only [Except.ok.injEq] at h
     subst h
@@ -294,7 +297,7 @@ theorem walk_ok (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : Lis
       off, .refl off, sec, tr, hsec, ?_⟩
     rw [← hprev, hp]
   | case3 => simp
-  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+  | case4 off visited hnd sn hlt so k hs p hp rest k' hw ih =>
     intro revs h
     simp only [Except.ok.injEq] at h
     subst h
@@ -331,7 +334,7 @@ theorem loadChain_terminates : ∀ (limits : Limits) (bytes : ByteArray),
 theorem loadChain_eq {limits : Limits} {bytes : ByteArray} {start : Nat}
     (hs : findStartxref bytes = .ok start) :
     loadChain limits bytes =
-      (walk limits bytes start [] List.nodup_nil (fun _ hx => absurd hx List.not_mem_nil)).1 := by
+      (walk limits bytes start [] List.nodup_nil Seen.empty (fun _ hx => absurd hx List.not_mem_nil)).1 := by
   unfold loadChain loadChainCounted
   rw [hs]
 
@@ -348,7 +351,7 @@ theorem loadChain_ok {limits : Limits} {bytes : ByteArray} {revs : List Revision
   split at h
   · simp at h
   · rename_i start hs
-    have := walk_ok limits bytes start [] List.nodup_nil
+    have := walk_ok limits bytes start [] List.nodup_nil Seen.empty
       (fun _ hx => absurd hx List.not_mem_nil) h
     obtain ⟨h1, h2, h3, h4, h5⟩ := this
     refine ⟨start, hs, h1, fun o ho => (h2 o ho).1, by simpa using h3, ?_, h5⟩
@@ -424,8 +427,8 @@ where
 /-- **A revisited offset is a cycle error.** One step at an offset inside the input that was
 already visited fails with `Error.cycle off "xref /Prev cycle"` and parses nothing. -/
 theorem step_revisited {limits : Limits} {bytes : ByteArray} {off : Nat} {visited : List Nat}
-    (hnd : visited.Nodup) (hoff : off < bytes.size) (hmem : off ∈ visited) :
-    step limits bytes off visited hnd = (.error (.cycle off "xref /Prev cycle"), 0) := by
+    (hnd : visited.Nodup) (sn : Seen visited) (hoff : off < bytes.size) (hmem : off ∈ visited) :
+    step limits bytes off visited hnd sn = (.error (.cycle off "xref /Prev cycle"), 0) := by
   unfold step
   simp only [hoff, hmem, dite_true]
 
@@ -439,12 +442,13 @@ def Endless (limits : Limits) (bytes : ByteArray) (x : Nat) : Prop :=
 the limit is below the input size (the visited offsets are distinct and inside the input, so
 a smaller input cannot exhaust the budget). -/
 theorem step_error_endless {limits : Limits} {bytes : ByteArray} {off : Nat}
-    {visited : List Nat} {hnd : visited.Nodup} (hlt : ∀ x ∈ visited, x < bytes.size)
+    {visited : List Nat} {hnd : visited.Nodup} {sn : Seen visited} (hlt : ∀ x ∈ visited, x < bytes.size)
     {e : Error} {k : Nat}
-    (hend : Endless limits bytes off) (h : step limits bytes off visited hnd = (.error e, k)) :
+    (hend : Endless limits bytes off) (h : step limits bytes off visited hnd sn = (.error e, k)) :
     e.isCycle = true ∨
       (e = .limitExceeded .revisions ∧ limits.maxRevisions < bytes.size) := by
   obtain ⟨hoff, sec, tr, y, hp, hh, -⟩ := hend
+  have hl := sn.len_eq
   unfold step at h
   simp only [hoff, dite_true] at h
   split at h
@@ -469,17 +473,17 @@ steps is `Endless` (no section terminates the chain, none is hybrid), `walk` fai
 cycle error (`Error.cycle`) or, when the cycle is reached only after more than
 `limits.maxRevisions` revisions, with `limitExceeded .revisions`. -/
 theorem walk_endless (limits : Limits) (bytes : ByteArray) (off : Nat) (visited : List Nat)
-    (hnd : visited.Nodup) (hlt : ∀ x ∈ visited, x < bytes.size)
+    (hnd : visited.Nodup) (sn : Seen visited) (hlt : ∀ x ∈ visited, x < bytes.size)
     (hend : ∀ x, PrevReach limits bytes off x → Endless limits bytes x) :
-    ∃ e, (walk limits bytes off visited hnd hlt).1 = .error e ∧
+    ∃ e, (walk limits bytes off visited hnd sn hlt).1 = .error e ∧
       (e.isCycle = true ∨
         (e = .limitExceeded .revisions ∧ limits.maxRevisions < bytes.size)) := by
   revert hend
-  fun_induction walk limits bytes off visited hnd hlt with
-  | case1 off visited hnd hlt e k hs =>
+  fun_induction walk limits bytes off visited hnd sn hlt with
+  | case1 off visited hnd sn hlt e k hs =>
     intro hend
     exact ⟨e, rfl, step_error_endless hlt (hend off (.refl off)) hs⟩
-  | case2 off visited hnd hlt so k hs hp =>
+  | case2 off visited hnd sn hlt so k hs hp =>
     intro hend
     obtain ⟨-, -, sec, tr, hsec, hprev⟩ := step_ok hs
     obtain ⟨-, sec', tr', y, hsec', -, hy⟩ := hend off (.refl off)
@@ -488,7 +492,7 @@ theorem walk_endless (limits : Limits) (bytes : ByteArray) (off : Nat) (visited 
     obtain ⟨-, rfl⟩ := hsec'
     rw [hp, hy] at hprev
     cases hprev
-  | case3 off visited hnd hlt so k hs p hp e k' hw ih =>
+  | case3 off visited hnd sn hlt so k hs p hp e k' hw ih =>
     intro _
     exact ⟨e, rfl, by
       obtain ⟨e', he', hc⟩ := ih (fun x hx => by
@@ -498,7 +502,7 @@ theorem walk_endless (limits : Limits) (bytes : ByteArray) (off : Nat) (visited 
       rw [hw] at he'
       cases he'
       exact hc⟩
-  | case4 off visited hnd hlt so k hs p hp rest k' hw ih =>
+  | case4 off visited hnd sn hlt so k hs p hp rest k' hw ih =>
     intro hend
     obtain ⟨e', he', -⟩ := ih (fun x hx => by
       obtain ⟨-, -, sec, tr, hsec, hprev⟩ := step_ok hs
@@ -521,7 +525,7 @@ theorem loadChain_endless {limits : Limits} {bytes : ByteArray} {start : Nat}
         (e = .limitExceeded .revisions ∧ limits.maxRevisions < bytes.size)) := by
   unfold loadChain loadChainCounted
   rw [hs]
-  exact walk_endless limits bytes start [] List.nodup_nil
+  exact walk_endless limits bytes start [] List.nodup_nil Seen.empty
     (fun _ hx => absurd hx List.not_mem_nil) hend
 
 /-- **Within the revision budget a cycle is `Error.cycle`.** If, moreover, the input has at
@@ -559,7 +563,7 @@ theorem loadChainCounted_calls_le (limits : Limits) (bytes : ByteArray) :
   split
   · simp
   · rename_i start _
-    have := walk_calls_le limits bytes start [] List.nodup_nil
+    have := walk_calls_le limits bytes start [] List.nodup_nil Seen.empty
       (fun _ hx => absurd hx List.not_mem_nil)
     simpa using this
 
@@ -633,18 +637,39 @@ theorem lookupEntry_mergeTwo (n : Nat) {xs ys : List (Nat × XrefEntry)}
     · simp only [hk, ↓reduceIte]
       exact ih (List.pairwise_cons.mp hx).2 (List.pairwise_cons.mp hy).2
 
+/-- A pass of `mergePairs` keeps the first list that has an entry for `n`. -/
+theorem findSome?_mergePairs (n : Nat) : ∀ l : List (List (Nat × XrefEntry)),
+    (∀ x ∈ l, x.Pairwise (fun a b => a.1 < b.1)) →
+    (mergePairs l).findSome? (lookupEntry n) = l.findSome? (lookupEntry n)
+  | [], _ => by simp [mergePairs]
+  | [a], _ => by simp [mergePairs]
+  | a :: b :: rest, h => by
+    simp only [mergePairs, List.findSome?_cons]
+    rw [lookupEntry_mergeTwo n (h a (by simp)) (h b (by simp)),
+      findSome?_mergePairs n rest (fun y hy => h y (by simp [hy]))]
+    cases lookupEntry n a <;> cases lookupEntry n b <;> rfl
+
+/-- Lookup in `mergeRounds`: the first list that has an entry for `n` wins. -/
+theorem lookupEntry_mergeRounds (n : Nat) (l : List (List (Nat × XrefEntry)))
+    (h : ∀ x ∈ l, x.Pairwise (fun a b => a.1 < b.1)) :
+    lookupEntry n (mergeRounds l) = l.findSome? (lookupEntry n) := by
+  fun_induction mergeRounds l with
+  | case1 => rfl
+  | case2 a => simp [List.findSome?_cons]; cases lookupEntry n a <;> rfl
+  | case3 a b rest ih =>
+    rw [ih (mergePairs_sorted _ h), findSome?_mergePairs n _ h]
+
 /-- **S6 preview.** In the merged chain (revisions newest first), object `n` maps to the
 entry of the first, i.e. newest, revision that has one. -/
 theorem mergeChain_lookup (n : Nat) (revs : List Revision) :
     lookupEntry n (mergeChain revs).entries =
       revs.findSome? (fun r => lookupEntry n r.1.entries) := by
+  show lookupEntry n (mergeRounds (revs.map fun r => r.1.entries)) = _
+  rw [lookupEntry_mergeRounds n _ (fun x hx => by
+    obtain ⟨r, -, rfl⟩ := List.mem_map.mp hx
+    exact r.1.sorted)]
   induction revs with
   | nil => rfl
-  | cons r rest ih =>
-    show lookupEntry n (mergeTwo r.1.entries (mergeEntries rest)) = _
-    rw [lookupEntry_mergeTwo n r.1.sorted (mergeEntries_sorted rest)]
-    have ih' : lookupEntry n (mergeEntries rest) = _ := ih
-    rw [ih', List.findSome?_cons]
-    cases lookupEntry n r.1.entries <;> rfl
+  | cons r rest ih => simp only [List.map_cons, List.findSome?_cons, ih]
 
 end SafePdf.Spec.XrefTerm
