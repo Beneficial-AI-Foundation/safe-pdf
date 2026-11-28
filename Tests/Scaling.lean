@@ -337,12 +337,12 @@ def revisionsDoc (n : Nat) : ByteArray := Id.run do
 def baseline : List Probe := [
   openP "objects" 2000 1000000 (fun n =>
     page1 smallBox "" (extra := (Array.range n).map fun i => s!"<< /N {i} >>".toUTF8)),
-  openP "page-tree-kids" 500 100000 kidsDoc (pages := id) (known := some "13.3a"),
+  openP "page-tree-kids" 500 100000 kidsDoc (pages := id) (known := some "13.22"),
   textP "tj-ops" 1000 1000000 (fun n => textPage (gen n fun _ => "(a) Tj ")),
   textP "tj-array" 1000 1000000 (fun n => textPage s!"[{gen n fun _ => "(a) -1 "}] TJ"),
   textP "long-string" 1000 4000000 (fun n => textPage s!"({String.ofList (List.replicate n 'a')}) Tj"),
   textP "bdc-emc" 1000 1000000 (fun n => textPage (gen n fun _ => "/Span <</MCID 0>> BDC (a) Tj EMC ")),
-  openP "revisions" 100 100000 revisionsDoc (lim := { maxRevisions := 1000000 }) (known := some "13.3b"),
+  openP "revisions" 100 100000 revisionsDoc (lim := { maxRevisions := 1000000 }) (known := some "13.23"),
   onDoc "link-annots" "Api.pageLinks" 256 2048
     (fun n => page1 smallBox "" (pageExtra := s!"/Annots [{gen n fun i => s!"{i + 6} 0 R "}]")
       (extra := (Array.range n).map fun _ =>
@@ -450,11 +450,11 @@ def bigXfdf : Xfdf.Limits :=
 open SafePdf.Shell.App in
 /-- Probes of the shell's own code over a store or an XFDF text. -/
 def shellProbes : List Probe := [
-  { name := "xfdf-export", entry := "Xfdf.toXfdf", n0 := 200, maxN := 100000, known := some "13.3g",
+  { name := "xfdf-export", entry := "Xfdf.toXfdf", n0 := 200, maxN := 100000, known := some "13.28",
     setup := fun n => prep (storeOf n) fun s =>
       let x := Xfdf.toXfdf s (fun _ => none) "D:20260101000000Z"
       (x.length > n, x.length) },
-  { name := "xfdf-import", entry := "Xfdf.readXfdf", n0 := 200, maxN := 100000, known := some "13.3h",
+  { name := "xfdf-import", entry := "Xfdf.readXfdf", n0 := 200, maxN := 100000, known := some "13.28",
     setup := fun n => prep (Xfdf.toXfdf (storeOf n) (fun _ => none) "D:20260101000000Z").toUTF8
       fun b => match Xfdf.readXfdf bigXfdf b with
         | .ok rep =>
@@ -534,34 +534,34 @@ def workerP : Probe where
 def newProbes : List Probe := [
   textP "font-lookups" 200 100000 (fun n =>
     textPage (gen n fun i => s!"/R{i} 10 Tf (a) Tj ") (resources := resDict "Font" n fun _ => "5 0 R"))
-    (expect := id) (known := some "13.3c"),
+    (expect := id) (known := some "13.24"),
   renderP "xobject-lookups" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"/R{i} Do ")
       (resources := resDict "XObject" n fun _ => "6 0 R")
       (extra := #[streamBody "/Type /XObject /Subtype /Form /BBox [0 0 1 1]" "0 0 1 1 re f".toUTF8]))
-    (known := some "13.3c"),
+    (known := some "13.24"),
   renderP "extgstate-lookups" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"/R{i} gs 0 0 5 5 re f ")
       (resources := resDict "ExtGState" n fun _ => "<< /CA 0.5 >>"))
-    (known := some "13.3c"),
+    (known := some "13.24"),
   renderP "colorspace-lookups" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"/R{i} cs 0.5 sc 0 0 5 5 re f ")
       (resources := resDict "ColorSpace" n fun _ => "[/CalGray << /WhitePoint [0.95 1 1.09] >>]"))
-    (known := some "13.3c"),
+    (known := some "13.24"),
   textP "distinct-fonts" 100 20000 (fun n =>
     textPage (gen n fun i => s!"/R{i} 10 Tf (a) Tj ")
       (resources := resDict "Font" n fun i => s!"{i + 6} 0 R") (extra := fontObjs n))
-    (expect := id) (known := some "13.3c"),
+    (expect := id) (known := some "13.24"),
   openP "objstm-members" 200 1000000 objStmDoc,
-  onDoc "objstm-fetch" "Api.pageLinks" 256 2048 objStmLinksDoc (known := some "13.3d") fun n d =>
+  onDoc "objstm-fetch" "Api.pageLinks" 256 2048 objStmLinksDoc (known := some "13.25") fun n d =>
     match Api.pageLinks d 0 with
     | .ok ls => (ls.length == n, ls.length + 1)
     | .error _ => (false, 0),
   openP "xref-stream-entries" 500 2000000 xrefStmDoc,
-  onDoc "outline-items" "Api.outline" 500 100000 outlineDoc (known := some "13.3e") fun n d =>
+  onDoc "outline-items" "Api.outline" 500 100000 outlineDoc (known := some "13.26") fun n d =>
     let o := Api.outline d
     (o.length == n, o.length + 1),
-  onDoc "dests-names" "Api.pageLinks" 256 2048 (known := some "13.3c")
+  onDoc "dests-names" "Api.pageLinks" 256 2048 (known := some "13.24")
     (fun n => page1 smallBox "" (pageExtra := s!"/Annots [{gen n fun i => s!"{i + 6} 0 R "}]")
       (catalogExtra := s!"/Dests << {gen n fun i => s!"/N{i} [3 0 R /Fit] "}>>")
       (extra := (Array.range n).map fun i =>
@@ -569,7 +569,7 @@ def newProbes : List Probe := [
     (fun n d => match Api.pageLinks d 0 with
       | .ok ls => (ls.length == n, ls.length + 1)
       | .error _ => (false, 0)),
-  searchCellsP, searchNormP (known := some "13.3f"), searchHitsP,
+  searchCellsP, searchNormP (known := some "13.27"), searchHitsP,
   renderP "inline-images" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"q 5 0 0 5 {gx i} {gy i} cm BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI Q ")),
   renderP "path-under-full-q-stack" 500 60000 (fun n =>
