@@ -21,6 +21,11 @@
 #            suite (it has no selection); only the chosen suites' blocks are compared.
 #            With `all`, suites that assert wall-clock bounds (TIMED_SUITES) are compared but
 #            their differences are reported, not failures: the interpreter is far slower.
+#            The `scaling` suite (task 13.3: wall-clock ratios t(2n)/t(n) of every public
+#            entry point) is never run interpreted (SKIPPED_SUITES): its sizes are calibrated
+#            to the compiled speed, so neither its numbers nor its verdict mean anything in
+#            the interpreter, and it is left out of the comparison like a missing suite
+#            (`--suites scaling` is refused). The compiled runner still runs it.
 # --no-build skip `lake build tests` (CI runs it in an earlier step).
 # --out DIR  keep compiled.out, interpreted.out and diff.txt in DIR (default: a temp dir,
 #            removed at the end).
@@ -36,6 +41,7 @@ set -euo pipefail
 
 DEFAULT_SUITES=smoke,golden,xref-views,streams-view,pages-view,crypt,svg-view,text-view,font-identity,cff-text,text-layout,text-unicode,write-incremental,write-annots,annot,open-settings,optional-content,attachments,write-confidentiality,raster-geom,raster-subst
 TIMED_SUITES=adversarial
+SKIPPED_SUITES=scaling
 
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,13 +54,26 @@ while [ $# -gt 0 ]; do
     --no-build) build=0 ;;
     --suites) suites="${2:?--suites needs a comma-separated list}"; shift ;;
     --out) outdir="${2:?--out needs a directory}"; shift ;;
-    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "usage: $0 [--no-build] [--suites a,b,c] [--out DIR]" >&2; exit 2 ;;
   esac
   shift
 done
 case "$suites" in *" "*) echo "compiled-vs-interpreted: --suites takes no spaces" >&2; exit 2 ;; esac
 [ "$suites" = all ] && suites=""
+for sk in ${SKIPPED_SUITES//,/ }; do
+  case ",$suites," in
+    *",$sk,"*) echo "compiled-vs-interpreted: suite '$sk' is excluded (wall-clock; see SKIPPED_SUITES)" >&2; exit 2 ;;
+  esac
+done
+# The interpreted runner's selection: the chosen suites, or (for `all`) every registered
+# suite except SKIPPED_SUITES.
+interp_suites="$suites"
+if [ -z "$interp_suites" ]; then
+  interp_suites=$(grep -o '{ name := "[^"]*"' Tests/Main.lean | cut -d'"' -f2 \
+    | grep -vxF -e "${SKIPPED_SUITES//,/$'\n'}" | paste -sd, -) || true
+  [ -n "$interp_suites" ] || { echo "compiled-vs-interpreted: no suites found in Tests/Main.lean" >&2; exit 2; }
+fi
 
 if [ -z "$outdir" ]; then
   outdir="$(mktemp -d)"
@@ -77,7 +96,7 @@ t1=$(date +%s)
 echo "compiled-vs-interpreted: compiled run exit $crc in $((t1 - t0)) s"
 
 set +e
-SAFEPDF_INTERP_OUT="$outdir/interpreted.out" SAFEPDF_SUITES="$suites" \
+SAFEPDF_INTERP_OUT="$outdir/interpreted.out" SAFEPDF_SUITES="$interp_suites" \
   lake env lean scripts/interp-suites.lean >"$outdir/interpreted.err" 2>&1
 irc=$?
 set -e
