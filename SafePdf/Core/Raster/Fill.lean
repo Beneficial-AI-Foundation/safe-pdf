@@ -382,13 +382,27 @@ structure Config where
   maxPageSide : Nat := Limits.default.maxPageSide
   /-- `Limits.clipCacheSize`: cached clip masks per page. -/
   clipCacheSize : Nat := Limits.default.clipCacheSize
+  /-- `Limits.renderStepFactor`: render work allowance per page pixel (task 13.4b). -/
+  renderStepFactor : Nat := Limits.default.renderStepFactor
+  /-- `Limits.renderStepFloor`: floor of the render work allowance (task 13.4b). -/
+  renderStepFloor : Nat := Limits.default.renderStepFloor
   deriving Repr, Inhabited
 
 /-- The raster configuration with the caps of `l` (tolerance and sampling from `base`). -/
 def Config.ofLimits (l : Limits) (base : Config := {}) : Config :=
   { base with curveSegCap := l.curveSegCap, coordLimit := l.coordLimit,
               arcSegCap := l.arcSegCap, maxDashSteps := l.maxDashSteps,
-              maxPageSide := l.maxPageSide, clipCacheSize := l.clipCacheSize }
+              maxPageSide := l.maxPageSide, clipCacheSize := l.clipCacheSize,
+              renderStepFactor := l.renderStepFactor, renderStepFloor := l.renderStepFloor }
+
+/-- The render work allowance in counted steps of a `W × H` pixel page (task 13.4b), as
+`Limits.renderAllowance`: `max renderStepFloor (renderStepFactor · W · H)`. -/
+def Config.renderAllowance (cfg : Config) (W H : Nat) : Nat :=
+  max cfg.renderStepFloor (cfg.renderStepFactor * (W * H))
+
+/-- `Config.ofLimits` computes the allowance of `Limits.renderAllowance`. -/
+theorem Config.ofLimits_renderAllowance (l : Limits) (base : Config) (W H : Nat) :
+    (Config.ofLimits l base).renderAllowance W H = l.renderAllowance W H := rfl
 
 /-- The effective chord cap per cubic: `max 1 curveSegCap`. -/
 def Config.segCap (cfg : Config) : Nat := max 1 cfg.curveSegCap

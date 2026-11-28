@@ -142,12 +142,31 @@ structure Limits where
   the nesting depth of visibility expressions (`/VE`, §8.11.2.2) and references followed, and
   of nested `/Order` arrays. Exhausted fuel means visible. Never an error, no `LimitKind`. -/
   maxOCDepth : Nat := 32
+  /-- **Render work allowance, per page pixel** (task 13.4b, `Core.Raster.Clip.RState.limit`):
+  the counted steps (`RState.steps`, the quantity `Clip.renderItemsCounted_steps_le` and
+  `Fill.fillEdgesCounted_steps_le` bound) one page render may spend are
+  `max renderStepFloor (renderStepFactor · W · H)` for a page of `W × H` pixels at the
+  requested zoom (`Limits.renderAllowance`). Default 128: Letter at 72 dpi gets 62,042,112,
+  4.06 times the heaviest corpus page (`docs/render-work-calibration.md`); the allowance is per
+  pixel because a page's work grows with its area. Once the allowance is spent the render
+  stops after the current inner unit (one clip-mask level or one fill, `Clip.clipMaskC`): the
+  pixels so far are returned marked incomplete (`Glyph.renderDocPagePartial`), and
+  `Api.renderPage` answers `limitExceeded .renderWork`. -/
+  renderStepFactor : Nat := 128
+  /-- **Floor of the render work allowance** in counted steps (task 13.4b; default 2²⁰, one
+  Letter full-page fill), so that tiny pages stay workable. See `renderStepFactor`. -/
+  renderStepFloor : Nat := 1 <<< 20
   deriving Repr, Inhabited
 
 namespace Limits
 
 /-- The default limits. -/
 def default : Limits := {}
+
+/-- The render work allowance in counted steps of a `W × H` pixel page (task 13.4b):
+`max renderStepFloor (renderStepFactor · W · H)`. -/
+def renderAllowance (l : Limits) (W H : Nat) : Nat :=
+  max l.renderStepFloor (l.renderStepFactor * (W * H))
 
 end Limits
 

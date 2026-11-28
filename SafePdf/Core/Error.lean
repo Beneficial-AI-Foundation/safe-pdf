@@ -29,6 +29,9 @@ inductive LimitKind where
   | fontSubrs
   /-- Number of Font DICTs in a CID-keyed CFF font's `FDArray` (`Limits.maxFontDicts`). -/
   | fontDicts
+  /-- The render work allowance of one page render (`Limits.renderStepFactor`,
+  `Limits.renderStepFloor`; task 13.4b): the render stopped and the image is incomplete. -/
+  | renderWork
   deriving Repr, DecidableEq, Inhabited
 
 /-- Errors produced by the verified core. -/
