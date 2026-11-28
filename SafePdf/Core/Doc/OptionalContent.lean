@@ -124,7 +124,27 @@ inductive Order where
   | group (k : Key)
   /-- A nested list (an array; its first element, when a string, is its label). -/
   | node (label : Option (List UInt8)) (kids : List Order)
-  deriving Repr, Inhabited
+  deriving Inhabited
+
+mutual
+/-- `Repr` of an entry at precedence `prec`, in the format `deriving Repr` produces. It is
+written by hand because the derived instance for this nested inductive is `partial`. -/
+def Order.reprAux : Order → Nat → Std.Format
+  | .group k, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.Core.Doc.OptionalContent.Order.group" ++ Std.Format.line ++ reprArg k))) prec
+  | .node label kids, prec =>
+    Repr.addAppParen (Std.Format.group (Std.Format.nest (if prec >= 1024 then 1 else 2)
+      ("SafePdf.Core.Doc.OptionalContent.Order.node" ++ Std.Format.line ++ reprArg label ++
+        Std.Format.line ++ PdfObject.reprListFmt (Order.reprList kids)))) prec
+
+/-- The `Repr` of each entry of a list of entries. -/
+def Order.reprList : List Order → List Std.Format
+  | [] => []
+  | x :: xs => Order.reprAux x 0 :: Order.reprList xs
+end
+
+instance : Repr Order := ⟨Order.reprAux⟩
 
 /-- One optional content group of `/OCGs`. -/
 structure Group where
