@@ -392,9 +392,11 @@ def pushNorm (out : Array (Char × Nat)) (i : Nat) (c : Char) : Array (Char × N
 
 /-- The page text normalised for search, each character tagged with its cell. -/
 def normChars (cs : Array Cell) : Array (Char × Nat) :=
-  let (out, _) := cs.foldl (fun (acc : Array (Char × Nat) × Nat) c =>
-    let o := (c.sep.toList ++ c.text.toList).foldl (fun o ch => pushNorm o acc.2 ch) acc.1
-    (o, acc.2 + 1)) (#[], 0)
+  -- Destructure the accumulator pair (do not project `acc.1` while `acc.2` is still used): the
+  -- array must stay unshared across the pushes (task 13.27, `docs/proof-patterns.md` §4.12).
+  let (out, _) := cs.foldl (fun (out, i) c =>
+    let o := (c.sep.toList ++ c.text.toList).foldl (fun o ch => pushNorm o i ch) out
+    (o, i + 1)) ((#[] : Array (Char × Nat)), 0)
   out
 
 /-- A query normalised as `normChars` (lower case, whitespace runs to one space) and trimmed. -/
