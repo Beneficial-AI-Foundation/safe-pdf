@@ -342,7 +342,7 @@ def baseline : List Probe := [
   textP "tj-array" 1000 1000000 (fun n => textPage s!"[{gen n fun _ => "(a) -1 "}] TJ"),
   textP "long-string" 1000 4000000 (fun n => textPage s!"({String.ofList (List.replicate n 'a')}) Tj"),
   textP "bdc-emc" 1000 1000000 (fun n => textPage (gen n fun _ => "/Span <</MCID 0>> BDC (a) Tj EMC ")),
-  openP "revisions" 100 100000 revisionsDoc (lim := { maxRevisions := 1000000 }) (known := some "13.23"),
+  openP "revisions" 100 100000 revisionsDoc (lim := { maxRevisions := 1000000 }),
   onDoc "link-annots" "Api.pageLinks" 256 2048
     (fun n => page1 smallBox "" (pageExtra := s!"/Annots [{gen n fun i => s!"{i + 6} 0 R "}]")
       (extra := (Array.range n).map fun _ =>
