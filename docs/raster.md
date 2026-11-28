@@ -560,3 +560,69 @@ magnifies it. `PartialNormLe K` states that hypothesis; no unconditional linear 
 | Image resampling | `bil_near`: 12-bit bilinear within (E−2, E] of the exact bilinear value at the 12-bit weights (`lerpU_toNat`: no wrap) | 12-bit fraction truncation, 32-bit stepping, `boxDown` (tested only) |
 | Stroke pen / arcs | — | outline vs exact offset curve and pen chord error: needs a rational cos/sin bound model (core `Rat` has no cos) |
 
+
+## Phase 13 start baseline and profiling (task 13.17)
+
+**Baseline commit `abfb5b97c004`** (`lake build inspect`, aarch64 sandbox, 8 cores).
+**Noisy: re-run on a quiet machine before M13's speed comparison.** Three other agents were
+building Lean in parallel; load average (`uptime`) was 12.6-14.1 at the profiling runs and
+5.8-8.3 around the corpus timing run. Corpus timing ran as `taskset -c 6 nice -n 10`, one
+process at a time (`--jobs 1`).
+
+    python3 -I scripts/corpus/timing.py --corpus <corpus/files> --json OUT   # 72 dpi
+
+| figure | value | load |
+|---|---|---|
+| corpus, 81 files, 2,450 pages, 72 dpi: median / p95 / p99 / max | **62.1 ms / 241.9 ms / 655.6 ms / 2,880 ms** (36 pages > 500 ms, none > 5 s, 0 errors, 0 timeouts; total 235.6 s) | 5.8-8.3 |
+| `arxiv-2307.09288` p25, 125 dpi | 2,789 ms (one run) | 14.1 |
+| `arxiv-0704.0001`, 37 pages, 72 dpi | 4.5 s whole file (timing.py) | 5.8 |
+
+The M13 part (5) comparison is median and p95 of the first row, on the same machine, quiet.
+The older figures quoted in the 13.17 row (2.7 s, 4.1 s, median 106 ms) came from 031d779
+with 109 and 54 samples; the corpus figures above also supersede the 7.9 table (the tree has
+moved on since).
+
+### Profiling without `perf`
+
+`perf` does not run in the Linux sandbox. `scripts/profile.sh` samples with gdb
+(`gdb -p PID -batch -ex "thread apply all bt 12"`; Lean runs `main` on its own thread, so
+thread 1 is idle and all threads are dumped); `scripts/profile_agg.py` aggregates.
+
+    SAFEPDF_DPI=125 SAFEPDF_PAGE=25 scripts/profile.sh -n 600 -r -o OUT -- \
+        .lake/build/bin/inspect --view raster --json corpus/files/arxiv-2307.09288.pdf
+    python3 -I scripts/profile_agg.py OUT [--top N]
+
+`-r` reruns a short command in a loop and samples whichever run is current (a run of 3 s
+gives about 30 samples otherwise); `-p PID` attaches to a running process. `gdb` is a dev
+tool (`sudo apt-get install -y gdb`), not a project dependency; it was already installed
+here. Each sample stops the process briefly, so wall times while profiling mean nothing; the
+shares do. The aggregator ignores threads whose innermost frame is a wait, picks the active
+thread with a project frame, and reports the share of samples with a bignum frame
+(`lean_int_big_*`, `lean_nat_pow`, `__gmpz_*`, `lean_cstr_to_nat`, `lean_nat_gcd`, ...) or
+an allocator frame (`malloc`/`free`/`realloc`, `lean_alloc*`, `lean_dec_ref_cold`, ...),
+the leaf functions, inclusive `SafePdf.*` functions and the innermost project function above
+a bignum frame. Stacks are cut short where gdb cannot unwind Lean-compiled code (a few
+percent have no project frame within 12 frames).
+
+**Profile 1: `arxiv-2307.09288` p25, 125 dpi**, 600 samples (596 usable):
+bignum frame on the stack **44.0%**; allocator frame on the stack 25.5%, allocator as the
+leaf 17.1%. Leaves: `free` 5.5%, `mi_free` 4.2%, `lean_dec_ref_cold` 3.9%, `Fill.emitB`
+3.0%, `malloc` 2.9%, `lean_alloc_small_object_core` 2.7%, `__gmpz_realloc` 2.3%,
+`__gmpz_set_str` 2.2%. Innermost project caller of a bignum frame: `Stroke.sqrtQ` 8.6%,
+`Fill.roundDivI` 8.1%, `Matrix.apply` 5.0%, `Fill.IAff.ofAff?` 5.0%, `Stroke.mkSegExact`
+4.7%, `Content.roundDiv` 2.7%. Inclusive: `Clip.renderItem` 45.5%, `Stroke.strokePathT`
+39.6%, `Glyph.renderItemWith` 39.4%, `Stroke.mkSegs` 28.4%, `Stroke.mkSegExact` 24.7%.
+
+**Profile 2: `arxiv-0704.0001`, 37 pages, 72 dpi**, 600 samples (599 usable):
+bignum frame **53.6%**; allocator frame 24.7%, allocator as the leaf 19.2%. Leaves: `free`
+6.8%, `malloc` 5.0%, `tcache_free` 4.3%, `__gmpz_add` 4.0%, `lean_dec_ref_cold` 3.8%,
+`__gmpz_realloc` 3.2%. Innermost project caller of a bignum frame: `Image.sampleAt` 10.5%,
+`Geom.Aff.mul` 9.8%, `Content.roundDiv` 9.5%, `Matrix.apply` 3.2%, `Fixed.mul` 2.8%.
+Inclusive: `Type3.glyphStep` 20.9%, `Glyph.renderItemWith` 20.4%, `Image.rowRGBA` 15.5%,
+`Image.decodeCCITTOr` 15.0%.
+
+Compared with the row's earlier few-sample figures the bignum share is similar (44% vs 38%,
+54% vs 52%) and the same functions lead (`roundDiv*`, `sqrtQ`, `mkSegExact`, `ofAff?`,
+`sampleAt`, `Aff.mul`). The allocator share on the stack is 25%, leaf share 17-19% (the
+row had 37% of leaf samples for page 25, with 109 samples). The raw sample files were not
+kept in the repository.
