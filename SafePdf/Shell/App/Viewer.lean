@@ -342,6 +342,9 @@ structure Library where
   everything was sent (Close; `Main.lean` calls it again after the window closed). -/
   flush : IO Bool
 
+/-- How many partial pages `State.partialKeys` remembers (task 13.4d). -/
+def partialKeysMax : Nat := 256
+
 /-- What a render job gives: the result and the render time (ns), or `none` when it was
 cancelled (task 12.2c: superseded before the worker answered; nothing is shown or cached). -/
 abbrev RenderOut := Option (Except Error Clip.Image × Nat)
@@ -360,6 +363,10 @@ structure Job where
   id : Option Nat := none
   /-- Its reservation in `State.pool` (task 12.3), released when the job leaves its list. -/
   ticket : Option Budget.Ticket := none
+  /-- Task 13.4d: finishes with `task`; `true` when the image is a **partial page** (the
+  render work allowance was spent: the document worker answered `image … (complete := false)`,
+  or the in-process render's `PageRender.exceeded`). -/
+  incomplete : Task Bool := .pure false
 
 /-- A text-index or links request queued for the document worker (task 12.2d): the page, the
 document generation it was asked for, the worker request id and the reply. -/
@@ -423,6 +430,11 @@ structure State where
   scaling : Rat := 4 / 3
   /-- Rendered pages (task 12.3b: at most `Budget.ceilings.cacheBytes`). -/
   cache : View.Cache := { budget := Budget.ceilings.cacheBytes }
+  /-- Task 13.4d: the keys of the cached pages that are **partial** (the render work allowance
+  was spent; the image holds the pixels painted until then). They are shown with the
+  stopped-page message and never rendered again for the same key. The newest
+  `partialKeysMax` are kept (a lost entry only loses the message). -/
+  partialKeys : Array View.Key := #[]
   /-- Substitute programs for non-embedded fonts (task 7.7, `Shell.Fonts`), found at start-up
   and parsed on first use. -/
   subst : SafePdf.Core.Raster.Subst.SubstFonts := {}
@@ -2280,7 +2292,7 @@ def timeoutText (deadlineMs : Nat) : String :=
 /-- A render job's outcome from the worker's reply. The image is checked against its size
 before Tk sees it (`Shim.photoPut` reads `4·w·h` bytes). -/
 def outOfReply (deadlineMs : Nat) : Worker.Reply → RenderOut
-  | .response (.image w h data) ns =>
+  | .response (.image w h data _) ns =>
     if data.size == 4 * w * h then some (.ok ⟨w, h, data⟩, ns)
     else some (.error (workerErr
       s!"the document worker sent a malformed image ({w}x{h}, {data.size} bytes)"), ns)
@@ -2289,6 +2301,15 @@ def outOfReply (deadlineMs : Nat) : Worker.Reply → RenderOut
   | .failed .timeout => some (.error (workerErr (timeoutText deadlineMs)), 0)
   | .failed e => some (.error (workerErr s!"the document worker stopped: {failText e}"), 0)
   | .cancelled => none
+
+/-- Task 13.4d: whether a render's reply is a **partial page** (an image the worker marked
+`complete := false` whose size checks out; a malformed image is an error, not a page). -/
+def incompleteOfReply : Worker.Reply → Bool
+  | .response (.image w h data false) _ => data.size == 4 * w * h
+  | _ => false
+
+/-- The status text of a partial page (task 13.4d), also the page's overlay text. -/
+def partialText : String := "page drawn partly: render work limit reached"
 
 /-- The worker session and document id to render `doc`'s pages with (task 12.2c): a session
 exists and the bytes fit the protocol. Since task 12.2d the worker renders under the layers
@@ -2832,16 +2853,23 @@ def drawOverlay (st : IO.Ref State) : IO Unit := do
 /-- Renders page `p` of `doc` at `zoom` and user rotation `rot` with a fresh budget (the
 inspector's `raster` view does the same), under the optional content state `oc` (task 9.r11b;
 `none`: the document's default). -/
+def renderPageP (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotation)
+    (subst : SafePdf.Core.Raster.Subst.SubstFonts := {})
+    (oc : Option Core.Doc.OptionalContent.State := none) :
+    IO (Except Error SafePdf.Core.Raster.Glyph.PageRender) := do
+  match doc.pages[p]? with
+  | some page =>
+    IO.lazyPure fun _ =>
+      (SafePdf.Core.Raster.Glyph.renderDocPagePartial limits doc page zoom rot
+        (SafePdf.Core.Filter.Budget.init limits) (subst := subst) (oc := oc)).1
+  | none => return .error (.malformed 0 "page index out of range")
+
+/-- Task 13.4d: `renderPageP`'s image (task 12.2c's worker-equal call), a partial page included. -/
 def renderPage (doc : Doc) (p : Nat) (zoom : Rat) (rot : SafePdf.Core.Doc.Rotation)
     (subst : SafePdf.Core.Raster.Subst.SubstFonts := {})
     (oc : Option Core.Doc.OptionalContent.State := none) :
     IO (Except Error Clip.Image) := do
-  match doc.pages[p]? with
-  | some page =>
-    IO.lazyPure fun _ =>
-      (SafePdf.Core.Raster.Glyph.renderDocPage limits doc page zoom rot
-        (SafePdf.Core.Filter.Budget.init limits) (subst := subst) (oc := oc)).1
-  | none => return .error (.malformed 0 "page index out of range")
+  return (← renderPageP doc p zoom rot subst oc).map (·.image)
 
 /-- The cache key of the page in slot `sl`. -/
 def keyOf (s : State) (sl : Slot) : View.Key :=
@@ -2859,24 +2887,28 @@ render it (`workerFor`), else on a dedicated thread in this process (task 8.8: t
 runs the pure renderer on the document (`State.view`, else `doc`) and the substitute fonts; it
 never touches Tk or the state). Returns the task and the worker request id. -/
 def renderTask (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat) :
-    IO (Task RenderOut × Option Nat) := do
+    IO (Task RenderOut × Task Bool × Option Nat) := do
   if let some (ses, src) ← workerFor st doc then
     let (id, t) ← ses.submit src
       (.render key.page key.zoom (Worker.rotationToNat key.rot) (← st.get).oc) prio
-    return (t.map (sync := true) (outOfReply ses.cfg.deadlineMs), some id)
+    return (t.map (sync := true) (outOfReply ses.cfg.deadlineMs),
+      t.map (sync := true) incompleteOfReply, some id)
   let s ← st.get
   let d := s.view.getD doc
   let subst := s.subst
   let oc := s.oc
   let task ← IO.asTask (prio := .dedicated) do
     let t0 ← IO.monoNanosNow
-    let r ← renderPage d key.page key.zoom key.rot subst oc
+    let r ← renderPageP d key.page key.zoom key.rot subst oc
     let t1 ← IO.monoNanosNow
     return (r, t1 - t0)
-  let out : Except IO.Error (Except Error Clip.Image × Nat) → RenderOut
-    | .ok v => some v
+  let out : Except IO.Error (Except Error SafePdf.Core.Raster.Glyph.PageRender × Nat) → RenderOut
+    | .ok (r, ns) => some (r.map (·.image), ns)
     | .error e => some (.error (.malformed 0 s!"render failed: {e}"), 0)
-  return (task.map (sync := true) out, none)
+  let inc : Except IO.Error (Except Error SafePdf.Core.Raster.Glyph.PageRender × Nat) → Bool
+    | .ok (.ok r, _) => r.exceeded
+    | _ => false
+  return (task.map (sync := true) out, task.map (sync := true) inc, none)
 
 /-- Starts rendering `key` (`renderTask`, priority `prio`: 0 for the page that must be shown
 now), unless a render of it is already running. -/
@@ -2895,8 +2927,9 @@ def submit (st : IO.Ref State) (doc : Doc) (key : View.Key) (prio : Nat := 1) : 
       st.modify fun s => { s with cache := s.cache.insert key (.error (.limitExceeded .imagePixels)) }
       return
   let start ← IO.monoNanosNow
-  let (task, id) ← renderTask st doc key prio
-  st.modify fun s => { s with jobs := s.jobs.push ⟨key, start, task, id, some ticket⟩ }
+  let (task, incomplete, id) ← renderTask st doc key prio
+  st.modify fun s => { s with jobs := s.jobs.push { key, start, task, id, ticket := some ticket,
+                                                    incomplete } }
   -- Task 12.2d: with the worker, a page in view also gets its links asked for (after the
   -- renders of its priority), so that pointer motion finds them without waiting; the current
   -- page (priority 0) its text index too.
@@ -2935,6 +2968,14 @@ def finish (st : IO.Ref State) (j : Job) : IO RenderOut := do
   | some (r, ns) =>
     if j.key.gen == (← st.get).gen then
       let w := if j.id.isSome then 1 else 0
+      -- Task 13.4d: a partial page is a successful page with the flag set (no retry).
+      if let .ok _ := r then
+        if j.incomplete.get then
+          st.modify fun s =>
+            let ks := (s.partialKeys.filter (· != j.key)).push j.key
+            { s with partialKeys :=
+                if ks.size > partialKeysMax then ks.extract (ks.size - partialKeysMax) ks.size
+                else ks }
       st.modify fun s => { s with cache := s.cache.insert j.key r, renderNs := s.renderNs + ns,
                                   renders := s.renders + 1, workerRenders := s.workerRenders + w,
                                   workerNs := s.workerNs + w * ns }
@@ -3028,7 +3069,7 @@ def clearPages (st : IO.Ref State) : IO Unit := do
   for (p, _) in (← st.get).photos do
     try discard <| run ["image", "delete", photoOf p] catch _ => pure ()
     discard <| photoUnreserve st (photoOf p)
-  discard <| run [".c", "delete", "pageframe", "pimg", "perr", "pwait"]
+  discard <| run [".c", "delete", "pageframe", "pimg", "perr", "pwait", "ppart"]
   st.modify ({ · with photos := #[], photoDeferred := [] })
 
 /-- Draws the layout on the canvas (task 9.3): a white page frame with a 1 px grey border per
@@ -3095,6 +3136,13 @@ def showPhoto (st : IO.Ref State) (sl : Slot) (res : Except Error Clip.Image) : 
       discard <| run [".c", "lower", "pageframe"]
     Shim.photoPut (photoOf p) img.w.toUInt32 img.h.toUInt32
       (Marks.composite sl.vp.zoom sl.vp.rot sl.vp.box img.w img.h img.data (drawnMarks s p))
+    -- Task 13.4d: a partial page carries a small note in its top-left corner (tags `ppart eN`,
+    -- removed with the photo); the status line says the same (`showStatus`).
+    discard <| run [".c", "delete", s!"e{p}"]
+    if s.partialKeys.contains (keyOf s sl) then
+      discard <| run [".c", "create", "text", toString (sl.place.x + 6), toString (sl.place.y + 4),
+        "-anchor", "nw", "-text", partialText, "-fill", "#9a3412", "-font", "::safepdf::fBar",
+        "-tags", s!"ppart e{p}"]
     st.modify fun s => { s with photos := (s.photos.filter (·.1 != p)).push (p, .ok img) }
   | .error e =>
     dropPhoto st p
@@ -3147,7 +3195,8 @@ def showStatus (st : IO.Ref State) (how : String) : IO Unit := do
     let pct := match s.zoomSel.mode with
       | some (.scale p) => if vp.capped then View.zoomPct vp.zoom s.scaling else p
       | _ => View.zoomPct vp.zoom s.scaling
-    let notes := (if vp.capped then
+    let notes := (if s.partialKeys.contains (keyOf s sl) then s!"; {partialText}" else "") ++
+      (if vp.capped then
         s!"; zoom limited to {Budget.ceilings.pagePixels / 1048576} Mpx per page" else "") ++
       (if vp.cropped then s!"; cropped to {limits.maxPageSide} px per side" else "")
     setStatus s!"{path}: {page}, {pct}% ({modeName s.zoomSel}), \
@@ -3448,8 +3497,8 @@ after every page render). -/
 def thumbSubmit (st : IO.Ref State) (doc : Doc) (key : View.Key)
     (ticket : Option Budget.Ticket := none) : IO Unit := do
   let start ← IO.monoNanosNow
-  let (task, id) ← renderTask st doc key 2
-  st.modify fun s => { s with thJobs := s.thJobs.push ⟨key, start, task, id, ticket⟩ }
+  let (task, incomplete, id) ← renderTask st doc key 2
+  st.modify fun s => { s with thJobs := s.thJobs.push { key, start, task, id, ticket, incomplete } }
 
 /-- **Lazy thumbnail rendering** (task 9.r9): for the visible band of the panel
 (`thumbBand`), the visible thumbnails and `Sidebar.thumbMargin` more on each side

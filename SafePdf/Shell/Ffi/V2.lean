@@ -123,6 +123,11 @@ structure Out where
   w : Nat := 0
   /-- Image height (renders). -/
   h : Nat := 0
+  /-- Renders (task 13.4d): the page is **partial** — the worker spent the render work allowance
+  and the RGBA bytes are the pixels painted until then. **Not yet delivered to C**: `deliver`
+  has no parameter for it (the macOS shim needs one, see progress.md 13.4d); until then the
+  host shows a partial page as a complete one. -/
+  partialPage : Bool := false
 
 /-- An error outcome. -/
 def Out.err (m : String) : Out := { status := 1, msg := m }
@@ -155,8 +160,8 @@ def outOfReply (k : Kind) (deadlineMs : Nat) : Reply → Out
   | .response (.error _ msg) _ => .err msg
   | .response r _ =>
     match k, r with
-    | .render, .image w h data =>
-      if data.size == 4 * w * h then { status := 0, blob := data, w, h }
+    | .render, .image w h data complete =>
+      if data.size == 4 * w * h then { status := 0, blob := data, w, h, partialPage := !complete }
       else .err s!"the document worker sent a malformed image ({w}x{h}, {data.size} bytes)"
     | .pageIndex, .pageIndex cs ds hs => .ok (Flat.pageIndex cs ds hs)
     | .links, .viewLinks ls => .ok (Flat.links ls)
@@ -166,8 +171,12 @@ def outOfReply (k : Kind) (deadlineMs : Nat) : Reply → Out
 #guard (outOfReply .render 20000 .cancelled).status == 2
 #guard (outOfReply .render 20000 (.failed .timeout)).msg ==
   "the document took too long (no answer within 20 s; its worker was stopped)"
-#guard (outOfReply .render 500 (.response (.image 1 1 (ByteArray.mk #[1, 2, 3, 4])) 0)).status == 0
-#guard (outOfReply .render 500 (.response (.image 2 1 (ByteArray.mk #[1, 2, 3, 4])) 0)).status == 1
+#guard (outOfReply .render 500 (.response (.image 1 1 (ByteArray.mk #[1, 2, 3, 4]) true) 0)).status == 0
+#guard (outOfReply .render 500 (.response (.image 2 1 (ByteArray.mk #[1, 2, 3, 4]) true) 0)).status == 1
+-- Task 13.4d: a partial page is a successful render with the flag set.
+#guard (outOfReply .render 500 (.response (.image 1 1 (ByteArray.mk #[1, 2, 3, 4]) false) 0)).status == 0
+#guard (outOfReply .render 500 (.response (.image 1 1 (ByteArray.mk #[1, 2, 3, 4]) false) 0)).partialPage
+#guard !(outOfReply .render 500 (.response (.image 1 1 (ByteArray.mk #[1, 2, 3, 4]) true) 0)).partialPage
 #guard (outOfReply .links 500 (.response (.outline []) 0)).msg ==
   "the document worker answered with another message"
 
@@ -489,7 +498,7 @@ def rotOfQuarters : Nat → Option Doc.Rotation
 
 /-- **TESTS ONLY** (`safepdf_test_render_sync`, `macos/tests/core_test.c`): renders page `i` in
 this process, on the calling thread, with the call the worker answers a render with
-(`Raster.Glyph.renderDocPage` at `num / den` with `rot` extra quarter turns, a fresh decode
+(`Raster.Glyph.renderDocPagePartial` at `num / den` with `rot` extra quarter turns, a fresh decode
 budget, the substitute fonts found on this system, the default layers state). Returns the
 width and height (eight bytes each, `Flat.putU64`) followed by the RGBA bytes; throws an
 `IO.userError` for a bad page, zoom or rotation, or a core error. The C test compares it with
@@ -506,10 +515,10 @@ def testRender (d : Handle) (i : USize) (num den : USize) (rot : UInt8) : IO Byt
     let a := d.api
     let subst ← Fonts.loadSubstFonts a.limits
     let res ← IO.lazyPure fun _ =>
-      (Raster.Glyph.renderDocPage a.limits a.doc p zoom r (Filter.Budget.init a.limits)
+      (Raster.Glyph.renderDocPagePartial a.limits a.doc p zoom r (Filter.Budget.init a.limits)
         (subst := subst)).1
     match res with
-    | .ok img => return Flat.putU64 (Flat.putU64 .empty img.w) img.h ++ img.data
+    | .ok pr => return Flat.putU64 (Flat.putU64 .empty pr.image.w) pr.image.h ++ pr.image.data
     | .error e => throw (IO.userError (Api.Error.pdf e).message)
 
 end SafePdf.Shell.Ffi.V2
