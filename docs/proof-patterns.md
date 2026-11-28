@@ -429,7 +429,7 @@ mutual `theorem` block by structural recursion on the derivation
 (`(∀ k ∈ Dict.keys es, k ∉ seen)`) for the accumulator-like parameter, exactly as
 `readRun_eq` does for `acc`.
 
-### 4.x Performance: a value read after a call keeps it shared (task 13.1)
+### 4.12 Performance: a value read after a call keeps it shared (task 13.1)
 
 `Array` updates are in place only when the array is uniquely referenced. A projection of a
 structure read **after** a call that consumes the structure keeps the structure alive across
