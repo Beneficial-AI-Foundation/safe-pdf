@@ -76,6 +76,12 @@ jobs:
       - name: Fuzz smoke
         run: scripts/fuzz.sh
 
+      # Task 13.6: repetition inputs up to 4 MiB, every call held to a linear budget; a call
+      # over its budget fails the step. Bounded to 240 s plus the last iteration.
+      - name: Fuzz long inputs
+        run: scripts/fuzz.sh long
+        timeout-minutes: 10
+
   # Task 8.2a: the native viewer (Tcl/Tk shim, `lake build viewer`) builds and
   # passes its headless smoke test (scripts/viewer-smoke.sh under xvfb-run).
   # Separate job: the `build` job's default targets do not need Tk.
