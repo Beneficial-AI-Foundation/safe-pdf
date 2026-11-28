@@ -569,7 +569,7 @@ def newProbes : List Probe := [
     (fun n d => match Api.pageLinks d 0 with
       | .ok ls => (ls.length == n, ls.length + 1)
       | .error _ => (false, 0)),
-  searchCellsP, searchNormP (known := some "13.27"), searchHitsP,
+  searchCellsP, searchNormP, searchHitsP,
   renderP "inline-images" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"q 5 0 0 5 {gx i} {gy i} cm BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI Q ")),
   renderP "path-under-full-q-stack" 500 60000 (fun n =>
