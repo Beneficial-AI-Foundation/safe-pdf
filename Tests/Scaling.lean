@@ -556,7 +556,7 @@ def newProbes : List Probe := [
       (resources := resDict "Font" n fun i => s!"{i + 6} 0 R") (extra := fontObjs n))
     (expect := id) (known := some "13.24b"),
   openP "objstm-members" 200 1000000 objStmDoc,
-  onDoc "objstm-fetch" "Api.pageLinks" 256 2048 objStmLinksDoc (known := some "13.25") fun n d =>
+  onDoc "objstm-fetch" "Api.pageLinks" 256 2048 objStmLinksDoc fun n d =>
     match Api.pageLinks d 0 with
     | .ok ls => (ls.length == n, ls.length + 1)
     | .error _ => (false, 0),

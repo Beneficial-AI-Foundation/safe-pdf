@@ -17,6 +17,8 @@ counted in a `warnings` field (where the result has one), never an `Error`.
 
 * N1. **Lenient resolution.** Values are resolved one level (`Doc.resolve`); a fetch error or a
   stream counts as `null` (`res`, `getL`).
+  Fetches go through `Doc.getObjectC` (task 13.25), which is `OpenDoc.getObject` (`Doc.getObjectC_eq`)
+  with each object-stream container decoded once per document instead of once per member.
 * N2. **Trees** (name trees, number trees; `treeWalk`). A worklist in preorder: the root (a
   reference, or a direct dictionary processed before the loop) and then `/Kids` entries, which
   must be indirect references (§7.9.6). Popping a reference whose object number was already
@@ -97,7 +99,7 @@ open SafePdf.Core.Doc
 /-- Resolve one level, leniently: a reference is fetched once; a fetch error or a stream is
 `null` (rule N1). -/
 def res (doc : Doc) (limits : Limits) (o : PdfObject) : PdfObject :=
-  match resolve doc.file limits o with
+  match doc.resolveC limits o with
   | .ok v => v
   | .error _ => .null
 
@@ -112,7 +114,7 @@ def raw (nd : Dict) (k : String) : Option PdfObject := Dict.get? nd (Name.ofStri
 
 /-- Fetch object `n g` as a dictionary; `none` for anything else or a fetch error. -/
 def fetchDict (doc : Doc) (limits : Limits) (n g : Nat) : Option Dict :=
-  match doc.file.getObject limits n g with
+  match doc.getObjectC limits n g with
   | .ok (.obj (.dict nd)) => some nd
   | _ => none
 
@@ -384,7 +386,7 @@ theorem destsDict_eq (doc : Doc) (limits : Limits) :
   cases Dict.get? doc.catalog (Name.ofString "Dests") with
   | none => rfl
   | some o =>
-    simp only
+    simp only [Doc.resolveC_eq]
     cases resolve doc.file limits o with
     | error e => rfl
     | ok v => cases v <;> rfl
