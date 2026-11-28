@@ -456,6 +456,11 @@ def IAff.ofAff? (m : Aff) : Option IAff :=
   let r := n - q * den
   256 * q + (512 * r + den) / (2 * den)
 
+/-- `2³⁶`, the bound on raw point coordinates of the 64-bit path of `FPt.ofPoint`. Out of line
+(`noinline`): a literal of `2³²` or more in a function body is parsed from its decimal string
+through GMP on every call (`scripts/check-codegen.sh`, task 13.18). -/
+@[noinline] def ptCap36 : Nat := 68719476736
+
 /-- A page point through `m` in subpixel units clamped to `±lim`: the 64-bit path when `im`
 is available and `|X|, |Y| ≤ 2³⁶` (then `|N| ≤ 2⁵⁸`), else the exact `Rat` path
 (`FPt.ofPt`). Both compute `toSub` of the same rational, so they agree (tested,
@@ -463,7 +468,7 @@ suite `raster-fill-spec`). -/
 def FPt.ofPoint (lim : Int) (m : Aff) (im : Option IAff) (p : Content.Point) : FPt :=
   match im with
   | some i =>
-    if absLe p.x.raw 68719476736 && absLe p.y.raw 68719476736 then
+    if absLe p.x.raw ptCap36 && absLe p.y.raw ptCap36 then
       let X := p.x.raw.toInt64
       let Y := p.y.raw.toInt64
       ⟨clampCoord (IAff.sub (i.a * X + i.c * Y + i.e) i.den).toInt lim,

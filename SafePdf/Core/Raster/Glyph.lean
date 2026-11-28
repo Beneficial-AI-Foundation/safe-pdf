@@ -617,8 +617,8 @@ def gxShift (q : Rat) : Option Nat :=
   let qq := (gxLinCap * q.den) / q.num.natAbs
   if qq = 0 then none else some (min 60 (Nat.log2 qq))
 
-/-- `round(q · 2ᴷ)` (halves up). -/
-def fixK (k : Nat) (q : Rat) : Int := roundDivI (q.num * (2 ^ k : Nat)) (q.den : Int)
+/-- `round(q · 2ᴷ)` (halves up); `2ᴷ` is `Image.pow2` (`Nat.pow` goes through GMP, task 13.18). -/
+def fixK (k : Nat) (q : Rat) : Int := roundDivI (q.num * (Image.pow2 k : Nat)) (q.den : Int)
 
 /-- The fixed-point linear part of `m`, when some `K ≥ 1` keeps every entry within `2²⁴`. -/
 def GXf.ofAff? (m : Aff) : Option GXf :=
@@ -630,7 +630,7 @@ def GXf.ofAff? (m : Aff) : Option GXf :=
   | some ka, some kb, some kc, some kd =>
     let k := min (min ka kb) (min kc kd)
     if k = 0 then none else
-    some { k, one := ((2 ^ k : Nat) : Int).toInt64, half := ((2 ^ (k - 1) : Nat) : Int).toInt64,
+    some { k, one := ((Image.pow2 k : Nat) : Int).toInt64, half := ((Image.pow2 (k - 1) : Nat) : Int).toInt64,
            a := (fixK k la).toInt64, b := (fixK k lb).toInt64, c := (fixK k lc).toInt64,
            d := (fixK k ld).toInt64 }
   | _, _, _, _ => none
@@ -651,7 +651,7 @@ structure GOff where
 
 /-- `⌊q⌋` and `round(frac q · 2ᴷ)` (in `[0, 2ᴷ]`). -/
 def splitK (k : Nat) (q : Rat) : Int × Int64 :=
-  (q.num / (q.den : Int), (roundDivI ((q.num % (q.den : Int)) * (2 ^ k : Nat)) (q.den : Int)).toInt64)
+  (q.num / (q.den : Int), (roundDivI ((q.num % (q.den : Int)) * (Image.pow2 k : Nat)) (q.den : Int)).toInt64)
 
 /-- The fixed-point translation of a glyph whose matrix has translation `(e, f)` (pixels). -/
 def GXf.off (g : GXf) (e f : Rat) : GOff :=
@@ -672,12 +672,20 @@ structure GTx where
   /-- Largest `|T|` handled: `min 2⁴⁰ ⌊2⁶¹ / max(|va|, |vb|, 1)⌋`, so `|va · T|, |vb · T| ≤ 2⁶¹`. -/
   tmax : Int64
 
+/-- `2⁴⁰`, the bound on the slopes of `GTx.make?` and on `tmax`. Out of line (`noinline`): a
+literal of `2³²` or more in a function body is parsed from its decimal string through GMP on
+every call (`scripts/check-codegen.sh`, task 13.18). -/
+@[noinline] def gxSlopeCap : Nat := 1099511627776
+
+/-- `2⁶¹`, the bound on `|va · T|` (out of line, like `gxSlopeCap`). -/
+@[noinline] def gxProdCap : Nat := 2305843009213693952
+
 /-- The `GTx` of `L` and `rm` for `g`, when the slopes are within `2⁴⁰`. -/
 def GTx.make? (g : GXf) (L rm : Aff) : Option GTx :=
   let va := fixK g.k (subPerRaw rm.a)
   let vb := fixK g.k (subPerRaw rm.b)
-  if absLe va 1099511627776 && absLe vb 1099511627776 then
-    let tmax : Nat := min 1099511627776 (2305843009213693952 / max 1 (max va.natAbs vb.natAbs))
+  if absLe va gxSlopeCap && absLe vb gxSlopeCap then
+    let tmax : Nat := min gxSlopeCap (gxProdCap / max 1 (max va.natAbs vb.natAbs))
     some ⟨g.off L.e L.f, va.toInt64, vb.toInt64, (tmax : Int).toInt64⟩
   else none
 

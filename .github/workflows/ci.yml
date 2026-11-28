@@ -48,6 +48,11 @@ jobs:
       - name: Build library and inspector
         run: lake build
 
+      # Task 13.18: no bignum literal parsed per call (lean_cstr_to_nat outside _init_ in the
+      # generated C of Core/Raster and Core/Content). Reads the C the build above left.
+      - name: Codegen guard
+        run: scripts/check-codegen.sh
+
       - name: Build the C API's Lean modules (runs their #guards)
         # Non-default target (task 11.3a5): SafePdf/Shell/Ffi*.lean and Ffi/Flat.lean hold
         # #guards that only run when this builds. Lean code only (no macOS code).
