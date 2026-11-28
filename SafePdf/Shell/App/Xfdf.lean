@@ -1,3 +1,5 @@
+import Std.Data.TreeSet
+import Std.Data.TreeMap
 import SafePdf.Shell.App.Marks
 import SafePdf.Core.Annot
 import SafePdf.Shell.Read
@@ -759,12 +761,117 @@ def exportEstimate (s : Store) : Nat :=
       | .ink ss _ _ _ => (0, ss.foldl (fun k st => k + st.length) 0)
     n + 2048 + 6 * t + 48 * p) 0
 
+/-! ### Ordered keys (task 13.28)
+
+Export and import look marks up by content (page, colour, kind) and by id. A list scan per
+mark is quadratic, a hash set can be collided by chosen input, so both use ordered trees over
+`List Int` keys (`O(log n)` per operation in the worst case). A key is an injective
+flattening of the value: every list is length-prefixed, every constructor tagged, a rational
+is its numerator and denominator (rationals are stored reduced, so this is exact). -/
+
+/-- An ordered set of keys. -/
+abbrev KeySet := Std.TreeSet (List Int) compare
+
+/-- A rational as numerator and denominator. -/
+def ratKey (q : Rat) : List Int := [q.num, (q.den : Int)]
+
+/-- A box as four rationals. -/
+def boxKey (b : Box) : List Int := ratKey b.llx ++ ratKey b.lly ++ ratKey b.urx ++ ratKey b.ury
+
+/-- A point as two rationals. -/
+def ptKey (p : Pt) : List Int := ratKey p.x ++ ratKey p.y
+
+/-- A list, length first. -/
+def listKey {α : Type} (f : α → List Int) (xs : List α) : List Int :=
+  (xs.length : Int) :: xs.flatMap f
+
+/-- A text as the code points of its characters, length first. -/
+def textKey (t : String) : List Int := listKey (fun c => [(c.toNat : Int)]) t.toList
+
+/-- A palette colour. -/
+def colorKey : Color → Int
+  | .yellow => 0
+  | .green => 1
+  | .blue => 2
+  | .pink => 3
+  | .red => 4
+
+/-- A key of the quads of a highlight or note. -/
+def quadsKey (qs : List Box) : List Int := listKey boxKey qs
+
+/-- The key of a kind: tag and all fields (what `kindEq` compares). -/
+def kindKey : Kind → List Int
+  | .highlight qs => 0 :: quadsKey qs
+  | .note t (.quads qs) => 1 :: 0 :: textKey t ++ quadsKey qs
+  | .note t (.point p) => 1 :: 1 :: textKey t ++ ptKey p
+  | .freeText t p z (r, g, b) => 2 :: textKey t ++ ptKey p ++ [(z : Int), r, g, b]
+  | .ink ss w o (r, g, b) =>
+    3 :: listKey (listKey ptKey) ss ++ [(w : Int), o, r, g, b]
+
+/-- The content key of a mark (page, colour, kind; the id is not part of it): two marks have
+the same key iff `sameContent` holds. -/
+def contentKey (m : Mark) : List Int := (m.page : Int) :: colorKey m.color :: kindKey m.kind
+
+/-- The key of "a note of page `page` anchored to exactly `qs`" (`Store.noteOn`). -/
+def noteOnKey (page : Nat) (qs : List Box) : List Int := (page : Int) :: quadsKey qs
+
+/-- `Store.commentOf` for every highlight at once: the ids of the comment notes. `Store.noteOn`
+takes the newest (last) note on the highlight's page anchored to exactly its quads, then the
+first mark with that id, and `commentOf` drops an empty text. The index maps `noteOnKey` to the
+newest note's id (a later note replaces an earlier one) and an id to its first mark, so the
+lookup of each highlight is `O(log n)` instead of a scan of all marks. -/
+structure CommentIndex where
+  /-- `noteOnKey` of a note's page and quads to the id of the newest such note. -/
+  byAnchor : Std.TreeMap (List Int) Nat compare
+  /-- An id to the first mark with it (`Store.find?`). -/
+  byId : Std.TreeMap Nat Mark compare
+
+/-- Builds the `CommentIndex` of a store in one pass over its marks. -/
+def CommentIndex.ofStore (s : Store) : CommentIndex where
+  byAnchor := s.marks.foldl (fun t m =>
+    match m.kind with
+    | .note _ (.quads qs) => t.insert (noteOnKey m.page qs) m.id
+    | _ => t) ∅
+  byId := s.marks.foldl (fun t m => if t.contains m.id then t else t.insert m.id m) ∅
+
+/-- `Store.commentOf h` from the index. -/
+def CommentIndex.commentOf (ix : CommentIndex) (h : Mark) : Option Mark :=
+  if h.isNote || h.quads.isEmpty then none
+  else
+    match (ix.byAnchor.get? (noteOnKey h.page h.quads)).bind ix.byId.get? with
+    | some n => if n.text.isEmpty then none else some n
+    | none => none
+
+/-- The XFDF document of `ms` (creation order), given the comment lookup `cm` (`commentOf`). -/
+def xfdfOf (cm : Mark → Option Mark) (ms : List Mark) (box : Nat → Option Box) (date : String)
+    (href : Option String) : String :=
+  let head := "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" ++
+    "<xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\">\n" ++
+    (match href with
+     | some h => "<f" ++ attrsXml [("href", h)] ++ "/>\n"
+     | none => "")
+  let commentIds : Std.TreeSet Nat compare :=
+    ms.foldl (fun t m => match cm m with | some c => t.insert c.id | none => t) ∅
+  let annots := ms.filterMap fun m =>
+    if m.isNote && commentIds.contains m.id then none
+    else markXml ((box m.page).getD letter) date m (cm m)
+  head ++ String.join ("<annots>\n" :: (annots.map (· ++ "\n")) ++ ["</annots>\n</xfdf>\n"])
+
 /-- **Export**: the XFDF document of every mark of `s` (creation order; a highlight's comment
 inside the highlight's element, not on its own); `box` gives page boxes for note icons (US
 Letter when `none`), `date` the `date` attribute (omitted when empty), `href` the PDF's file
-name for `<f href=…/>`. -/
+name for `<f href=…/>`. Linear up to the logarithm of the ordered indexes (task 13.28:
+`CommentIndex` replaces a scan of the store per highlight, the pieces are joined once);
+`toXfdfSpec` is the scan-based definition it agrees with. -/
 def toXfdf (s : Store) (box : Nat → Option Box) (date : String) (href : Option String := none) :
     String :=
+  let ix := CommentIndex.ofStore s
+  xfdfOf ix.commentOf s.marks.toList box date href
+
+/-- The specification of `toXfdf` (the original scan-based definition, quadratic): the comment
+of a highlight is `Store.commentOf`. Kept for the equality guards. -/
+def toXfdfSpec (s : Store) (box : Nat → Option Box) (date : String)
+    (href : Option String := none) : String :=
   let head := "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" ++
     "<xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\">\n" ++
     (match href with
@@ -991,8 +1098,43 @@ def sameContent (a b : Mark) : Bool :=
 
 /-- **Into the store** (see the module doc): the store, the ids of the added marks (in item
 order), and the number of items already present. The added marks follow the old ones in id
-order. -/
+order.
+
+Task 13.28: the duplicate test and the id test are `O(log n)` lookups in ordered sets that
+mirror the store as it grows: `seen` holds the `contentKey` of every mark of the store
+(`seen.contains (contentKey m) ↔ s.marks.any (sameContent m)`) and `taken` the ids of every
+mark (`taken.contains id ↔ s.marks.any (·.id == id)`); each added mark is inserted into both.
+Adding a restored mark pushes it directly: `Store.restore` filters the store by id first, which
+removes nothing here because the id is not `taken`. `importItemsSpec` is the scan-based
+definition this agrees with. -/
 def importItems (s : Store) (items : List Item) : Store × List Nat × Nat :=
+  let old := s.marks.size
+  let next0 := s.nextId
+  let seen0 : KeySet := s.marks.foldl (fun t m => t.insert (contentKey m)) ∅
+  let taken0 : Std.TreeSet Nat compare := s.marks.foldl (fun t m => t.insert m.id) ∅
+  let (s, ids, dups, _, _) := items.foldl (fun (s, ids, dups, seen, taken) it =>
+    let m : Mark := ⟨0, it.page, it.color, it.kind⟩
+    let k := contentKey m
+    if seen.contains k then (s, ids, dups + 1, seen, taken)
+    else
+      match it.name.bind Marks.idOfNm with
+      | some id =>
+        if id ≥ next0 && !taken.contains id then
+          ({ s with marks := s.marks.push { m with id }, nextId := max s.nextId (id + 1) },
+            id :: ids, dups, seen.insert k, taken.insert id)
+        else
+          let (s, id) := s.add it.page it.color it.kind
+          (s, id :: ids, dups, seen.insert k, taken.insert id)
+      | none =>
+        let (s, id) := s.add it.page it.color it.kind
+        (s, id :: ids, dups, seen.insert k, taken.insert id))
+    (s, ([] : List Nat), 0, seen0, taken0)
+  let added := (s.marks.extract old s.marks.size).toList.mergeSort (·.id ≤ ·.id)
+  ({ s with marks := s.marks.extract 0 old ++ added.toArray }, ids.reverse, dups)
+
+/-- The specification of `importItems` (the original definition: each test scans the store,
+quadratic). Kept for the equality guards. -/
+def importItemsSpec (s : Store) (items : List Item) : Store × List Nat × Nat :=
   let old := s.marks.size
   let next0 := s.nextId
   let (s, ids, dups) := items.foldl (fun (s, ids, dups) it =>
@@ -1249,5 +1391,51 @@ def importStatus (name : String) (added dups skipped : Nat) (first : Option (Str
 #guard importStatus "a.xfdf" 3 1 0 none == "a.xfdf: 3 imported, 1 already present, 0 skipped"
 #guard importStatus "a.xfdf" 0 0 2 (some ("ink", "no page")) ==
   "a.xfdf: 0 imported, 0 already present, 2 skipped (first skipped: <ink>: no page)"
+
+/-! ### Task 13.28: the ordered-index versions agree with the scan-based definitions -/
+
+/-- Stores that exercise the comment lookup: comments, older notes on the same quads, an empty
+newest note, a comment before its highlight, free text and ink. -/
+private def indexStores : List Store :=
+  let older := ((({} : Store).addNote 0 .yellow "older" (.quads [q1])).1.add 0 .yellow
+    (.highlight [q1])).1.addNote 0 .yellow "newest" (.quads [q1]) |>.1
+  let emptyNewest := older.addNote 0 .yellow "" (.quads [q1]) |>.1
+  let before := ((({} : Store).addNote 0 .yellow "first" (.quads [q1])).1.add 0 .yellow
+    (.highlight [q1])).1
+  [{}, sample, sample.remove 5, sampleEd, older, emptyNewest, before,
+    sample.remove 4, (sample.remove 3).addNote 2 .green "comment" (.quads [q2]) |>.1]
+
+#guard indexStores.all fun s =>
+  toXfdf s (fun _ => some pb) "D:1" (some "a&b.pdf") ==
+    toXfdfSpec s (fun _ => some pb) "D:1" (some "a&b.pdf") &&
+  toXfdf s (fun _ => none) "" none == toXfdfSpec s (fun _ => none) "" none
+
+/-- Whether two results of an import agree: marks (ids, content), next id, added ids, duplicates. -/
+private def sameImport (a b : Store × List Nat × Nat) : Bool :=
+  sameMarks a.1 b.1 && a.1.nextId == b.1.nextId && a.2.1 == b.2.1 && a.2.2 == b.2.2
+
+-- Importing each store's export, twice over, into each store: duplicates, kept ids, taken ids
+-- and fresh ids all come out as with the scans.
+#guard indexStores.all fun src =>
+  match readXfdf {} (toXfdf src (fun _ => some pb) "").toUTF8 with
+  | .ok r => indexStores.all fun base =>
+    sameImport (importItems base r.items) (importItemsSpec base r.items) &&
+    sameImport (importItems base (r.items ++ r.items)) (importItemsSpec base (r.items ++ r.items)) &&
+    sameImport (importItems base (r.items.reverse ++ r.items))
+      (importItemsSpec base (r.items.reverse ++ r.items))
+  | .error _ => false
+
+-- Items that take the same id twice, a name below the store's next id, a point note that
+-- differs only in its position, free text equal but for the colour.
+#guard
+  let it (n : Option String) (pg : Nat) (k : Kind) : Item := { name := n, page := pg, color := .yellow, kind := k }
+  let items := [it (some "safepdf-mark-50") 0 (.highlight [q1]), it (some "safepdf-mark-50") 0 (.highlight [q2]),
+    it (some "safepdf-mark-2") 0 (.highlight [q2]), it none 0 (.note "a" (.point ⟨1, 2⟩)),
+    it none 0 (.note "a" (.point ⟨1, 3⟩)), it none 0 (.note "a" (.point ⟨1, 2⟩)),
+    it (some "safepdf-mark-51") 1 (.freeText "t" ⟨1, 2⟩ 10 (0, 0, 0)),
+    it (some "safepdf-mark-51") 1 (.freeText "t" ⟨1, 2⟩ 10 (0, 0, 1)),
+    it (some "safepdf-mark-9") 1 (.ink [[⟨1, 2⟩]] 1 100 (0, 0, 0)),
+    it (some "safepdf-mark-9") 1 (.ink [[⟨1, 2⟩]] 1 100 (0, 0, 0))]
+  indexStores.all fun base => sameImport (importItems base items) (importItemsSpec base items)
 
 end SafePdf.Shell.App.Xfdf
