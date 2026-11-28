@@ -190,15 +190,16 @@ theorem parseArray_some {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {t : Toke
 open Core.ObjParse in
 /-- `parseDict` at end of input fails. -/
 theorem parseDict_none {fuel : Nat} {bytes : ByteArray} {pos : Nat}
-    {acc : List (Name × PdfObject)} (h : Core.Lex.next bytes pos = .ok none) :
-    ∃ e, parseDict fuel bytes pos acc = .error e := by
+    {acc : List (Name × PdfObject)} {sn : KeySet} (h : Core.Lex.next bytes pos = .ok none) :
+    ∃ e, parseDict fuel bytes pos acc sn = .error e := by
   rw [parseDict]; split <;> simp_all
 
 open Core.ObjParse in
 /-- `parseDict` at `>>`. -/
 theorem parseDict_close {fuel : Nat} {bytes : ByteArray} {pos q : Nat}
-    {acc : List (Name × PdfObject)} (h : Core.Lex.next bytes pos = .ok (some (.dictClose, q))) :
-    parseDict fuel bytes pos acc = .ok (acc.reverse, q) := by
+    {acc : List (Name × PdfObject)} {sn : KeySet}
+    (h : Core.Lex.next bytes pos = .ok (some (.dictClose, q))) :
+    parseDict fuel bytes pos acc sn = .ok (acc.reverse, q) := by
   rw [parseDict]
   split
   · simp_all
@@ -212,9 +213,10 @@ theorem parseDict_close {fuel : Nat} {bytes : ByteArray} {pos q : Nat}
 open Core.ObjParse in
 /-- `parseDict` at a token that is neither `>>` nor a name fails. -/
 theorem parseDict_other {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {t : Token}
-    {acc : List (Name × PdfObject)} (h : Core.Lex.next bytes pos = .ok (some (t, q)))
+    {acc : List (Name × PdfObject)} {sn : KeySet}
+    (h : Core.Lex.next bytes pos = .ok (some (t, q)))
     (h1 : t ≠ .dictClose) (h2 : ∀ k, t ≠ .name k) :
-    ∃ e, parseDict fuel bytes pos acc = .error e := by
+    ∃ e, parseDict fuel bytes pos acc sn = .error e := by
   rw [parseDict]
   split
   · simp
@@ -231,8 +233,9 @@ theorem parseDict_other {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {t : Toke
 open Core.ObjParse in
 /-- `parseDict` at a name key: a duplicate fails. -/
 theorem parseDict_dup {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {k : Name}
-    {acc : List (Name × PdfObject)} (h : Core.Lex.next bytes pos = .ok (some (.name k, q)))
-    (hk : hasKey acc k = true) : ∃ e, parseDict fuel bytes pos acc = .error e := by
+    {acc : List (Name × PdfObject)} {sn : KeySet}
+    (h : Core.Lex.next bytes pos = .ok (some (.name k, q)))
+    (hk : sn.contains k.bytes = true) : ∃ e, parseDict fuel bytes pos acc sn = .error e := by
   rw [parseDict]
   split
   · simp
@@ -246,9 +249,10 @@ theorem parseDict_dup {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {k : Name}
 open Core.ObjParse in
 /-- `parseDict` at a fresh name key followed by end of input fails. -/
 theorem parseDict_key_none {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {k : Name}
-    {acc : List (Name × PdfObject)} (h : Core.Lex.next bytes pos = .ok (some (.name k, q)))
-    (hk : hasKey acc k = false) (h2 : Core.Lex.next bytes q = .ok none) :
-    ∃ e, parseDict fuel bytes pos acc = .error e := by
+    {acc : List (Name × PdfObject)} {sn : KeySet}
+    (h : Core.Lex.next bytes pos = .ok (some (.name k, q)))
+    (hk : sn.contains k.bytes = false) (h2 : Core.Lex.next bytes q = .ok none) :
+    ∃ e, parseDict fuel bytes pos acc sn = .error e := by
   rw [parseDict]
   split
   · simp
@@ -263,14 +267,14 @@ theorem parseDict_key_none {fuel : Nat} {bytes : ByteArray} {pos q : Nat} {k : N
 open Core.ObjParse in
 /-- `parseDict` at a fresh name key followed by the value's first token `t2` ending at `q2`. -/
 theorem parseDict_key_some {fuel : Nat} {bytes : ByteArray} {pos q q2 : Nat} {k : Name}
-    {t2 : Token} {acc : List (Name × PdfObject)}
+    {t2 : Token} {acc : List (Name × PdfObject)} {sn : KeySet}
     (h : Core.Lex.next bytes pos = .ok (some (.name k, q)))
-    (hk : hasKey acc k = false) (h2 : Core.Lex.next bytes q = .ok (some (t2, q2))) :
-    parseDict fuel bytes pos acc =
+    (hk : sn.contains k.bytes = false) (h2 : Core.Lex.next bytes q = .ok (some (t2, q2))) :
+    parseDict fuel bytes pos acc sn =
       match parseObjTok fuel bytes q t2 q2 with
       | .error e => .error e
       | .ok (v, r) =>
-        if pos < r then parseDict fuel bytes r ((k, v) :: acc)
+        if pos < r then parseDict fuel bytes r ((k, v) :: acc) (sn.insert k.bytes)
         else .error (.malformed pos "internal: no progress") := by
   rw [parseDict]
   split
@@ -308,9 +312,9 @@ def ArrAgreeN (bytes : ByteArray) (n : Nat) : Prop :=
 /-- Agreement of `parseDict` with `parseEntries` on streams of at most `n` tokens, when the
 accumulator's keys are the keys seen. -/
 def DictAgreeN (bytes : ByteArray) (n : Nat) : Prop :=
-  ∀ fuel pos ps acc seen, LexFrom bytes pos ps → ps.length ≤ n →
-    (∀ k, hasKey acc k = true ↔ k ∈ seen) →
-    Agree (fun a b => a = acc.reverse ++ b) pos ps (parseDict fuel bytes pos acc)
+  ∀ fuel pos ps acc seen sn, LexFrom bytes pos ps → ps.length ≤ n →
+    (∀ k, hasKey acc k = true ↔ k ∈ seen) → SeenOf sn acc →
+    Agree (fun a b => a = acc.reverse ++ b) pos ps (parseDict fuel bytes pos acc sn)
       (parseEntries fuel seen (ps.map Prod.fst))
 
 /-- Objects agree given that arrays and dictionaries agree on the same streams. -/
@@ -359,8 +363,8 @@ theorem obj_step (bytes : ByteArray) (n : Nat) (hA : ArrAgreeN bytes n)
     | zero => rw [parseObjTok]; simp only [parse]; trivial
     | succ f =>
       rw [parseObjTok]; simp only [parse]
-      have h := hD f q ps [] [] hl hn (by simp [hasKey])
-      cases hX : parseDict f bytes q [] with
+      have h := hD f q ps [] [] ∅ hl hn (by simp [hasKey]) seenOf_nil
+      cases hX : parseDict f bytes q [] ∅ with
       | error e =>
         cases hY : parseEntries f [] (ps.map Prod.fst) with
         | error e' => trivial
@@ -396,7 +400,7 @@ theorem arr_zero (bytes : ByteArray) : ArrAgreeN bytes 0 := by
 
 /-- Dictionaries agree on empty streams. -/
 theorem dict_zero (bytes : ByteArray) : DictAgreeN bytes 0 := by
-  intro fuel pos ps acc seen hl hn _
+  intro fuel pos ps acc seen sn hl hn _ _
   cases hl with
   | nil h => exact agree_err (parseDict_none h) ⟨.unexpectedEnd, by simp [parseEntries]⟩
   | cons _ _ => simp at hn
@@ -470,7 +474,7 @@ theorem hasKey_cons {acc : List (Name × PdfObject)} {seen : List Name}
 `n`. -/
 theorem dict_step (bytes : ByteArray) (n : Nat) (hO : ObjAgreeN bytes n)
     (hD : DictAgreeN bytes n) : DictAgreeN bytes (n + 1) := by
-  intro fuel pos ps acc seen hl hn hk
+  intro fuel pos ps acc seen sn hl hn hk hsn
   cases hl with
   | nil h => exact agree_err (parseDict_none h) ⟨.unexpectedEnd, by simp [parseEntries]⟩
   | @cons _ q t ps1 h1 hl1 =>
@@ -483,17 +487,18 @@ theorem dict_step (bytes : ByteArray) (n : Nat) (hO : ObjAgreeN bytes n)
       exact ⟨by simp, [(.dictClose, q)], ps1, rfl, rfl, rfl⟩
     | name k =>
       by_cases hdup : hasKey acc k = true
-      · exact agree_err (parseDict_dup h1 hdup)
+      · exact agree_err (parseDict_dup h1 (by rw [hsn]; exact hdup))
           ⟨.duplicateKey, by simp [parseEntries, (hk k).1 hdup]⟩
       have hkf : hasKey acc k = false := by simpa using hdup
+      have hkf' : sn.contains k.bytes = false := by rw [hsn]; exact hkf
       have hks : k ∉ seen := fun hm => hdup ((hk k).2 hm)
       cases hl1 with
       | nil h2 =>
-        exact agree_err (parseDict_key_none h1 hkf h2)
+        exact agree_err (parseDict_key_none h1 hkf' h2)
           ⟨.unexpectedEnd, by simp [parseEntries, hks, parse]⟩
       | @cons _ q2 t2 ps2 h2 hl2 =>
         have hq2 := Core.Lex.next_pos _ _ _ _ h2
-        rw [parseDict_key_some h1 hkf h2]
+        rw [parseDict_key_some h1 hkf' h2]
         simp only [List.map_cons, parseEntries, hks, ↓reduceIte]
         have hO' := hO fuel q t2 q2 ps2 hl2 (by simp at hn1; omega) hq2.2
         cases hX : parseObjTok fuel bytes q t2 q2 with
@@ -516,8 +521,9 @@ theorem dict_step (bytes : ByteArray) (n : Nat) (hO : ObjAgreeN bytes n)
               have := parse_length_lt hY; simpa using this
             simp only [hpr, ↓reduceIte, hlt, ↓reduceDIte]
             have hD' := hD fuel (endAfter q2 pre) rs ((k, v) :: acc) (k :: seen)
-              (LexFrom.drop hl2) (by simp at hn1; omega) (hasKey_cons hk k v)
-            cases hX2 : parseDict fuel bytes (endAfter q2 pre) ((k, v) :: acc) with
+              (sn.insert k.bytes) (LexFrom.drop hl2) (by simp at hn1; omega) (hasKey_cons hk k v)
+              (seenOf_cons hsn k v)
+            cases hX2 : parseDict fuel bytes (endAfter q2 pre) ((k, v) :: acc) (sn.insert k.bytes) with
             | error e =>
               cases hY2 : parseEntries fuel (k :: seen) (rs.map Prod.fst) with
               | error e' => trivial

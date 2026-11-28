@@ -1,3 +1,4 @@
+import Std.Data.TreeSet
 import SafePdf.Core.Lex
 import SafePdf.Core.Error
 import SafePdf.Core.Limits
@@ -98,6 +99,37 @@ def errAt (bytes : ByteArray) (pos : Nat) (msg : String) : Error :=
 /-- Whether a key occurs in a (reversed) accumulator of dictionary entries. -/
 def hasKey (acc : List (Name × PdfObject)) (k : Name) : Bool := acc.any (fun e => e.1 == k)
 
+/-- An ordered set of name byte strings (a balanced tree: `O(log n)` per operation in the
+worst case, unlike a hash set whose unseeded hashes can be collided). -/
+abbrev KeySet := Std.TreeSet (List UInt8) compare
+
+/-- The key set `seen` mirrors the accumulator `acc`: `seen.contains k ↔ hasKey acc k`. -/
+def SeenOf (seen : KeySet) (acc : List (Name × PdfObject)) : Prop :=
+  ∀ k : Name, seen.contains k.bytes = hasKey acc k
+
+/-- The empty set mirrors the empty accumulator. -/
+theorem seenOf_nil : SeenOf (∅ : KeySet) [] := by
+  intro k; simp [hasKey]
+
+/-- Adding an entry to both keeps the mirror invariant. -/
+theorem seenOf_cons {seen : KeySet} {acc : List (Name × PdfObject)} (h : SeenOf seen acc)
+    (k : Name) (v : PdfObject) : SeenOf (seen.insert k.bytes) ((k, v) :: acc) := by
+  intro k'
+  rw [Std.TreeSet.contains_insert, h k']
+  simp only [hasKey, List.any_cons]
+  have : (compare k.bytes k'.bytes == Ordering.eq) = (k == k') := by
+    obtain ⟨a⟩ := k
+    obtain ⟨b⟩ := k'
+    show (compare a b == Ordering.eq) = (Name.mk a == Name.mk b)
+    by_cases hab : a = b
+    · subst hab; simp
+    · have : compare a b ≠ .eq := fun hc => hab (Std.LawfulEqOrd.eq_of_compare hc)
+      have hn : ({ bytes := a } : Name) ≠ { bytes := b } := fun hh => hab (by cases hh; rfl)
+      have e1 : (compare a b == Ordering.eq) = false := by simpa using this
+      have e2 : (Name.mk a == Name.mk b) = false := by simpa using hn
+      rw [e1, e2]
+  rw [this]
+
 /-! ## References (G1) -/
 
 /-- After `int n` (lexed from `pos`, ending at `q`): a reference `n g R` if the next two
@@ -146,7 +178,7 @@ def parseObjTok (fuel : Nat) (bytes : ByteArray) (pos : Nat) (t : Token) (q : Na
     match fuel with
     | 0 => .error (.limitExceeded .objectDepth)
     | f + 1 =>
-      match parseDict f bytes q [] with
+      match parseDict f bytes q [] ∅ with
       | .ok (d, r) => .ok (.dict d, r)
       | .error e => .error e
   | .arrayClose => .error (errAt bytes pos "unexpected ]")
@@ -179,8 +211,11 @@ decreasing_by
 
 /-- Dictionary entries from `pos` (values with fuel `fuel`) up to and including `>>`, onto
 the reversed accumulator `acc`. Returns the entries in source order and the position after
-`>>`. A key that is not a name, or that is already in `acc`, is an error. -/
-def parseDict (fuel : Nat) (bytes : ByteArray) (pos : Nat) (acc : List (Name × PdfObject)) :
+`>>`. A key that is not a name, or that is already in `acc`, is an error. The set `seen`
+mirrors the keys of `acc` (`SeenOf`) so the duplicate test is `O(log n)`, not a scan of `acc`
+(`hasKey` is the specification). -/
+def parseDict (fuel : Nat) (bytes : ByteArray) (pos : Nat) (acc : List (Name × PdfObject))
+    (seen : KeySet) :
     Except Error (List (Name × PdfObject) × Nat) :=
   match _h : Lex.next bytes pos with
   | .error e => .error (lexErr e)
@@ -189,7 +224,7 @@ def parseDict (fuel : Nat) (bytes : ByteArray) (pos : Nat) (acc : List (Name × 
     match t with
     | .dictClose => .ok (acc.reverse, q)
     | .name k =>
-      if hasKey acc k then .error (errAt bytes pos "duplicate dictionary key")
+      if seen.contains k.bytes then .error (errAt bytes pos "duplicate dictionary key")
       else
         match _h2 : Lex.next bytes q with
         | .error e => .error (lexErr e)
@@ -198,7 +233,7 @@ def parseDict (fuel : Nat) (bytes : ByteArray) (pos : Nat) (acc : List (Name × 
           match parseObjTok fuel bytes q t2 q2 with
           | .error e => .error e
           | .ok (v, r) =>
-            if _hr : pos < r then parseDict fuel bytes r ((k, v) :: acc)
+            if _hr : pos < r then parseDict fuel bytes r ((k, v) :: acc) (seen.insert k.bytes)
             else .error (.malformed pos "internal: no progress")
     | _ => .error (errAt bytes pos "dictionary key is not a name")
 termination_by (fuel, bytes.size - pos)
@@ -406,8 +441,8 @@ decreasing_by
 
 /-- **Progress** of `parseDict`: it ends after `pos` and within the input. -/
 theorem parseDict_pos (fuel : Nat) (bytes : ByteArray) (pos : Nat)
-    (acc : List (Name × PdfObject)) (d : List (Name × PdfObject)) (r : Nat)
-    (h : parseDict fuel bytes pos acc = .ok (d, r)) : pos < r ∧ r ≤ bytes.size := by
+    (acc : List (Name × PdfObject)) (seen : KeySet) (d : List (Name × PdfObject)) (r : Nat)
+    (h : parseDict fuel bytes pos acc seen = .ok (d, r)) : pos < r ∧ r ≤ bytes.size := by
   unfold parseDict at h
   split at h
   · simp at h
@@ -425,7 +460,7 @@ theorem parseDict_pos (fuel : Nat) (bytes : ByteArray) (pos : Nat)
           · simp at h
           · split at h
             · rename_i hr
-              have := parseDict_pos fuel bytes _ _ d r h
+              have := parseDict_pos fuel bytes _ _ _ d r h
               omega
             · simp at h
     · simp at h
@@ -464,7 +499,7 @@ theorem parseObjTok_pos (fuel : Nat) (bytes : ByteArray) (pos : Nat) (t : Token)
     · rename_i f
       split at h
       · rename_i d r' h1
-        have := parseDict_pos f bytes q [] d r' h1
+        have := parseDict_pos f bytes q [] ∅ d r' h1
         simp only [Except.ok.injEq, Prod.mk.injEq] at h; omega
       · simp at h
 
@@ -708,7 +743,7 @@ theorem parseObjTok_depth (fuel : Nat) (bytes : ByteArray) (pos : Nat) (t : Toke
     · rename_i f
       split at h
       · rename_i d r' h1
-        have := parseDict_depth f bytes q [] d r' (by simp) h1
+        have := parseDict_depth f bytes q [] ∅ d r' (by simp) h1
         simp only [Except.ok.injEq, Prod.mk.injEq] at h; obtain ⟨rfl, -⟩ := h
         have := depthDict_le this
         simp only [PdfObject.depth]; omega
@@ -751,9 +786,9 @@ decreasing_by
 /-- **Depth bound** of `parseDict`: given an accumulator within the bound, every value of the
 result nests at most `fuel` deep. -/
 theorem parseDict_depth (fuel : Nat) (bytes : ByteArray) (pos : Nat)
-    (acc : List (Name × PdfObject)) (d : List (Name × PdfObject)) (r : Nat)
+    (acc : List (Name × PdfObject)) (seen : KeySet) (d : List (Name × PdfObject)) (r : Nat)
     (hacc : ∀ e ∈ acc, e.2.depth ≤ fuel)
-    (h : parseDict fuel bytes pos acc = .ok (d, r)) : ∀ e ∈ d, e.2.depth ≤ fuel := by
+    (h : parseDict fuel bytes pos acc seen = .ok (d, r)) : ∀ e ∈ d, e.2.depth ≤ fuel := by
   unfold parseDict at h
   split at h
   · simp at h
@@ -776,7 +811,7 @@ theorem parseDict_depth (fuel : Nat) (bytes : ByteArray) (pos : Nat)
             split at h
             · rename_i hr
               have hv := parseObjTok_depth fuel bytes q t2 q2 v r' h3
-              refine parseDict_depth fuel bytes r' (_ :: acc) d r ?_ h
+              refine parseDict_depth fuel bytes r' (_ :: acc) _ d r ?_ h
               intro e he
               rcases List.mem_cons.mp he with rfl | he
               · exact hv
@@ -827,9 +862,10 @@ theorem not_mem_keys_of_hasKey {acc : List (Name × PdfObject)} {k : Name}
 /-- `parseDict` keeps keys distinct: from a duplicate-free accumulator, the resulting entries
 have distinct keys. -/
 theorem parseDict_keys_nodup (fuel : Nat) (bytes : ByteArray) (pos : Nat)
-    (acc : List (Name × PdfObject)) (d : List (Name × PdfObject)) (r : Nat)
+    (acc : List (Name × PdfObject)) (seen : KeySet) (hs : SeenOf seen acc)
+    (d : List (Name × PdfObject)) (r : Nat)
     (hacc : (Dict.keys acc).Nodup)
-    (h : parseDict fuel bytes pos acc = .ok (d, r)) : (Dict.keys d).Nodup := by
+    (h : parseDict fuel bytes pos acc seen = .ok (d, r)) : (Dict.keys d).Nodup := by
   unfold parseDict at h
   split at h
   · simp at h
@@ -850,9 +886,9 @@ theorem parseDict_keys_nodup (fuel : Nat) (bytes : ByteArray) (pos : Nat)
           · simp at h
           · split at h
             · rename_i hr
-              refine parseDict_keys_nodup fuel bytes _ (_ :: acc) d r ?_ h
+              refine parseDict_keys_nodup fuel bytes _ (_ :: acc) _ (seenOf_cons hs _ _) d r ?_ h
               simp only [Dict.keys, List.map_cons, List.nodup_cons]
-              exact ⟨not_mem_keys_of_hasKey hk, hacc⟩
+              exact ⟨not_mem_keys_of_hasKey (by rw [← hs]; exact hk), hacc⟩
             · simp at h
     · simp at h
 termination_by bytes.size - pos
@@ -881,7 +917,7 @@ theorem parseObjTok_dict_keys_nodup {fuel : Nat} {bytes : ByteArray} {pos : Nat}
       · rename_i d' r' h1
         simp only [Except.ok.injEq, Prod.mk.injEq, PdfObject.dict.injEq] at h
         obtain ⟨rfl, -⟩ := h
-        exact parseDict_keys_nodup _ _ _ [] d' r' (by simp [Dict.keys]) h1
+        exact parseDict_keys_nodup _ _ _ [] ∅ seenOf_nil d' r' (by simp [Dict.keys]) h1
       · simp at h
 
 /-- A top-level dictionary returned by `parseObject` has distinct keys. (Nested dictionaries

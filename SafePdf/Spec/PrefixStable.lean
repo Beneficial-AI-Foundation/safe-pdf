@@ -522,7 +522,8 @@ theorem parseArray_first {fuel : Nat} {b : ByteArray} {p : Nat} {acc : List PdfO
 
 /-- A successful dictionary body starts with a token ending within it. -/
 theorem parseDict_first {fuel : Nat} {b : ByteArray} {p : Nat} {acc : List (Name × PdfObject)}
-    {d : List (Name × PdfObject)} {r : Nat} (h : ObjParse.parseDict fuel b p acc = .ok (d, r)) :
+    {sn : ObjParse.KeySet} {d : List (Name × PdfObject)} {r : Nat}
+    (h : ObjParse.parseDict fuel b p acc sn = .ok (d, r)) :
     ∃ t q, Lex.next b p = .ok (some (t, q)) ∧ q ≤ r ∧ (∀ g, t ≠ .int g) := by
   unfold ObjParse.parseDict at h
   split at h
@@ -547,7 +548,7 @@ theorem parseDict_first {fuel : Nat} {b : ByteArray} {p : Nat} {acc : List (Name
           · rename_i v r1 h3
             have := ObjParse.parseObjTok_pos fuel b q t2 q2 v r1 h2'.2 h3
             split at h
-            · have := ObjParse.parseDict_pos fuel b _ _ d r h
+            · have := ObjParse.parseDict_pos fuel b _ _ _ d r h
               omega
             · simp at h
     · simp at h
@@ -579,8 +580,8 @@ theorem follow_of_parseArray {fuel : Nat} {b : ByteArray} {p : Nat} {acc : List 
 
 /-- What follows a value inside a dictionary: the rest of a successful dictionary body. -/
 theorem follow_of_parseDict {fuel : Nat} {b : ByteArray} {p : Nat}
-    {acc : List (Name × PdfObject)} {d : List (Name × PdfObject)} {r : Nat}
-    (h : ObjParse.parseDict fuel b p acc = .ok (d, r)) (hr : r < b.size) : Follow b p := by
+    {acc : List (Name × PdfObject)} {sn : ObjParse.KeySet} {d : List (Name × PdfObject)} {r : Nat}
+    (h : ObjParse.parseDict fuel b p acc sn = .ok (d, r)) (hr : r < b.size) : Follow b p := by
   obtain ⟨t, q, h1, hq, hni⟩ := parseDict_first h
   refine ⟨⟨t, q, h1, by omega⟩, fun g q' he => ?_⟩
   rw [h1] at he
@@ -619,7 +620,7 @@ theorem parseObjTok_ext {b b' : ByteArray} (hE : Extends b b') (fuel pos : Nat) 
         simp only [Except.ok.injEq, Prod.mk.injEq] at h
         obtain ⟨rfl, rfl⟩ := h
         have := hf.1.lt
-        rw [parseDict_ext hE f q [] h1 this]
+        rw [parseDict_ext hE f q [] ∅ h1 this]
       · simp at h
 termination_by (fuel, b.size - q)
 decreasing_by all_goals (apply Prod.Lex.left; omega)
@@ -673,9 +674,10 @@ decreasing_by
 
 /-- A dictionary body ending strictly inside `b` parses the same way in `b'`. -/
 theorem parseDict_ext {b b' : ByteArray} (hE : Extends b b') (fuel pos : Nat)
-    (acc : List (Name × PdfObject)) {d : List (Name × PdfObject)} {r : Nat}
-    (h : ObjParse.parseDict fuel b pos acc = .ok (d, r)) (hr : r < b.size) :
-    ObjParse.parseDict fuel b' pos acc = .ok (d, r) := by
+    (acc : List (Name × PdfObject)) (sn : ObjParse.KeySet) {d : List (Name × PdfObject)}
+    {r : Nat}
+    (h : ObjParse.parseDict fuel b pos acc sn = .ok (d, r)) (hr : r < b.size) :
+    ObjParse.parseDict fuel b' pos acc sn = .ok (d, r) := by
   obtain ⟨t0, q0, h10, hq0, -⟩ := parseDict_first h
   have hpos := skipWs_lt_of_next h10
   rw [ObjParse.parseDict, errAt_ext hE hpos]
@@ -717,7 +719,7 @@ theorem parseDict_ext {b b' : ByteArray} (hE : Extends b b') (fuel pos : Nat)
               have := ObjParse.parseObjTok_pos fuel b q0 t2 q2 v r1 h2'.2 h3
               split at h
               · rename_i hr1
-                have := ObjParse.parseDict_pos fuel b _ _ d r h
+                have := ObjParse.parseDict_pos fuel b _ _ _ d r h
                 split
                 · rename_i e he
                   rw [next_ext hE q0 h2 (by omega)] at he
@@ -732,7 +734,7 @@ theorem parseDict_ext {b b' : ByteArray} (hE : Extends b b') (fuel pos : Nat)
                   have hf := follow_of_parseDict h hr
                   rw [parseObjTok_ext hE fuel q0 t2 q2 (skipWs_lt_of_next h2) h3 hf]
                   simp only [hr1, ↓reduceDIte]
-                  exact parseDict_ext hE fuel r1 _ h hr
+                  exact parseDict_ext hE fuel r1 _ _ h hr
               · simp at h
       · simp at h
 termination_by (fuel, b.size - pos)
@@ -792,7 +794,7 @@ theorem parseObj_dict_ext {b b' : ByteArray} (hE : Extends b b') {fuel pos : Nat
         · rename_i d' r' h2
           simp only [Except.ok.injEq, Prod.mk.injEq] at h
           obtain ⟨hd, rfl⟩ := h
-          rw [parseDict_ext hE f q [] h2 hr]
+          rw [parseDict_ext hE f q [] ∅ h2 hr]
           simp only [Except.ok.injEq, Prod.mk.injEq, and_true]
           exact hd
         · simp at h
@@ -1572,8 +1574,8 @@ theorem next_dictClose_last {b : ByteArray} {p q : Nat}
   · simp at h
 
 /-- A dictionary body ends with `>`. -/
-theorem parseDict_last (fuel : Nat) (b : ByteArray) (p : Nat) (acc : List (Name × PdfObject))
-    {d : List (Name × PdfObject)} {r : Nat} (h : ObjParse.parseDict fuel b p acc = .ok (d, r)) :
+theorem parseDict_last (fuel : Nat) (b : ByteArray) (p : Nat) (acc : List (Name × PdfObject)) (sn : ObjParse.KeySet)
+    {d : List (Name × PdfObject)} {r : Nat} (h : ObjParse.parseDict fuel b p acc sn = .ok (d, r)) :
     b[r - 1]? = some 62 := by
   unfold ObjParse.parseDict at h
   split at h
@@ -1593,7 +1595,7 @@ theorem parseDict_last (fuel : Nat) (b : ByteArray) (p : Nat) (acc : List (Name 
         · split at h
           · simp at h
           · split at h
-            · exact parseDict_last fuel b _ _ h
+            · exact parseDict_last fuel b _ _ _ h
             · simp at h
     · simp at h
 termination_by b.size - p
@@ -1649,7 +1651,7 @@ theorem parseXrefTable_last {limits : Limits} {b : ByteArray} {o : Nat} {sec : X
               · rename_i d' r' h2
                 simp only [Except.ok.injEq, Prod.mk.injEq] at h1
                 obtain ⟨-, rfl⟩ := h1
-                exact parseDict_last _ _ _ _ h2
+                exact parseDict_last _ _ _ _ _ h2
               · simp at h1
       · simp at h
   · simp at h
