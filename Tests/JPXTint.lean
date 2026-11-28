@@ -66,7 +66,7 @@ private def render (planes : List Bytes) (alternate : DeviceSpace) (program : St
   let initial : Filter.Budget := ⟨4096⟩
   let (pm, budget) := if inlineImage then
     -- The form owns the resource, and the page image table has no binding for /Inks.
-    let (d, s) := Run.annotInline src initial ⟨resources, [], 99, 0, Matrix.identity⟩ img
+    let (d, s) := Run.annotInline src initial (Frame.mk' resources [] 99 0 Matrix.identity) img
     let image := ImageSource.inline d raw
     let (table, s) := ({} : Raster.Image.ImageTable).loadInlineJPXFrom src s none #[item image, item image]
     (table.pixmap image, s)

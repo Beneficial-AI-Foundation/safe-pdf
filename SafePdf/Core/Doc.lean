@@ -1,4 +1,5 @@
 import SafePdf.Core.Open
+import SafePdf.Core.DictIndex
 
 /-!
 # Document structure: catalog and page tree (task 4.1)
@@ -510,12 +511,42 @@ def walk (d : OpenDoc) (limits : Limits) (n g : Nat) : Except Error WalkState :=
 
 /-! ## The document -/
 
+deriving instance DecidableEq for Limits
+
+/-- The catalog's `/Dests` dictionary (PDF 1.1; the entry resolved one level, leniently: a
+fetch error or a non-dictionary is no dictionary). -/
+def destsDictOf (d : OpenDoc) (limits : Limits) (cat : Dict) : Option Dict :=
+  match Dict.get? cat (Name.ofString "Dests") with
+  | none => none
+  | some o =>
+    match resolve d limits o with
+    | .ok (.dict dd) => some dd
+    | _ => none
+
+/-- The ordered index of the catalog's `/Dests` dictionary (task 13.24), built on the first
+named-destination lookup and reused by every later one, for the limits the document was opened
+with (`limits`). `h` ties it to `destsDictOf`; `Dict.index_get?` ties the index to
+`Dict.lookup` (first entry of a key, duplicates included). -/
+structure DestsIdx (file : OpenDoc) (cat : Dict) where
+  /-- The limits the index was built under (the fetch of an indirect `/Dests` depends on them). -/
+  limits : Limits
+  /-- The index, `none` when there is no `/Dests` dictionary. -/
+  idx : Thunk (Option (Std.TreeMap (List UInt8) PdfObject compare))
+  /-- The index is that of the dictionary. -/
+  h : idx.get = (destsDictOf file limits cat).map Dict.index
+
+/-- The `/Dests` index of a catalog, built lazily. -/
+def DestsIdx.of (limits : Limits) (file : OpenDoc) (cat : Dict) : DestsIdx file cat :=
+  ⟨limits, Thunk.mk fun _ => (destsDictOf file limits cat).map Dict.index, thunk_get_mk _⟩
+
 /-- An opened document with its page tree flattened. -/
 structure Doc where
   /-- The opened file. -/
   file : OpenDoc
   /-- The catalog dictionary (§7.7.2). -/
   catalog : Dict
+  /-- The ordered index of the catalog's `/Dests` dictionary (task 13.24). -/
+  dests : DestsIdx file catalog
   /-- The root `/Pages` reference. -/
   pagesRef : Nat × Nat
   /-- The pages, in document order. -/
@@ -559,7 +590,7 @@ def ofOpen (limits : Limits) (d : OpenDoc) : Except Error Doc :=
         match walk d limits pn pg with
         | .error e => .error e
         | .ok st =>
-          .ok { file := d, catalog := cat, pagesRef := (pn, pg),
+          .ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat, pagesRef := (pn, pg),
                 pages := st.pages.reverse.toArray,
                 declaredCount := declaredCountOf d limits pn pg, skippedKids := st.skipped }
       | _ => .error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference")
@@ -1489,7 +1520,7 @@ def ofOpenB (limits : Limits) (d : OpenDoc) (bc : BC) : (Except Error Doc) × BC
       | some (.ref pn pg) =>
         bindB (walkB d limits pn pg r.2) fun st b1 =>
           let c := declaredCountOfB d limits pn pg b1
-          (.ok { file := d, catalog := cat, pagesRef := (pn, pg),
+          (.ok { file := d, catalog := cat, dests := DestsIdx.of limits d cat, pagesRef := (pn, pg),
                  pages := st.pages.reverse.toArray,
                  declaredCount := c.1, skippedKids := st.skipped }, c.2)
       | _ => (.error (.malformed (offsetOf d rn) "catalog /Pages is not an indirect reference"),

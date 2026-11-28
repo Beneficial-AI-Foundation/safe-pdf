@@ -534,24 +534,21 @@ def workerP : Probe where
 def newProbes : List Probe := [
   textP "font-lookups" 200 100000 (fun n =>
     textPage (gen n fun i => s!"/R{i} 10 Tf (a) Tj ") (resources := resDict "Font" n fun _ => "5 0 R"))
-    (expect := id) (known := some "13.24"),
+    (expect := id),
   renderP "xobject-lookups" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"/R{i} Do ")
       (resources := resDict "XObject" n fun _ => "6 0 R")
-      (extra := #[streamBody "/Type /XObject /Subtype /Form /BBox [0 0 1 1]" "0 0 1 1 re f".toUTF8]))
-    (known := some "13.24"),
+      (extra := #[streamBody "/Type /XObject /Subtype /Form /BBox [0 0 1 1]" "0 0 1 1 re f".toUTF8])),
   renderP "extgstate-lookups" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"/R{i} gs 0 0 5 5 re f ")
-      (resources := resDict "ExtGState" n fun _ => "<< /CA 0.5 >>"))
-    (known := some "13.24"),
+      (resources := resDict "ExtGState" n fun _ => "<< /CA 0.5 >>")),
   renderP "colorspace-lookups" 200 100000 (fun n =>
     paintPage (gen n fun i => s!"/R{i} cs 0.5 sc 0 0 5 5 re f ")
-      (resources := resDict "ColorSpace" n fun _ => "[/CalGray << /WhitePoint [0.95 1 1.09] >>]"))
-    (known := some "13.24"),
+      (resources := resDict "ColorSpace" n fun _ => "[/CalGray << /WhitePoint [0.95 1 1.09] >>]")),
   textP "distinct-fonts" 100 20000 (fun n =>
     textPage (gen n fun i => s!"/R{i} 10 Tf (a) Tj ")
       (resources := resDict "Font" n fun i => s!"{i + 6} 0 R") (extra := fontObjs n))
-    (expect := id) (known := some "13.24"),
+    (expect := id) (known := some "13.24b"),
   openP "objstm-members" 200 1000000 objStmDoc,
   onDoc "objstm-fetch" "Api.pageLinks" 256 2048 objStmLinksDoc (known := some "13.25") fun n d =>
     match Api.pageLinks d 0 with
@@ -561,7 +558,7 @@ def newProbes : List Probe := [
   onDoc "outline-items" "Api.outline" 500 100000 outlineDoc (known := some "13.26") fun n d =>
     let o := Api.outline d
     (o.length == n, o.length + 1),
-  onDoc "dests-names" "Api.pageLinks" 256 2048 (known := some "13.24")
+  onDoc "dests-names" "Api.pageLinks" 256 2048
     (fun n => page1 smallBox "" (pageExtra := s!"/Annots [{gen n fun i => s!"{i + 6} 0 R "}]")
       (catalogExtra := s!"/Dests << {gen n fun i => s!"/N{i} [3 0 R /Fit] "}>>")
       (extra := (Array.range n).map fun i =>
