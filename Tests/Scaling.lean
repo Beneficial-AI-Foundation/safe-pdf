@@ -337,7 +337,7 @@ def revisionsDoc (n : Nat) : ByteArray := Id.run do
 def baseline : List Probe := [
   openP "objects" 2000 1000000 (fun n =>
     page1 smallBox "" (extra := (Array.range n).map fun i => s!"<< /N {i} >>".toUTF8)),
-  openP "page-tree-kids" 500 100000 kidsDoc (pages := id) (known := some "13.22"),
+  openP "page-tree-kids" 500 100000 kidsDoc (pages := id),
   textP "tj-ops" 1000 1000000 (fun n => textPage (gen n fun _ => "(a) Tj ")),
   textP "tj-array" 1000 1000000 (fun n => textPage s!"[{gen n fun _ => "(a) -1 "}] TJ"),
   textP "long-string" 1000 4000000 (fun n => textPage s!"({String.ofList (List.replicate n 'a')}) Tj"),
