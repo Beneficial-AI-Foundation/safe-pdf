@@ -3,10 +3,16 @@
 
   hygiene.py scan [--root DIR]      grep sources for forbidden constructs, ignoring comments/strings
   hygiene.py axioms                 read `#print axioms` output on stdin, fail on non-standard axioms
+  hygiene.py modules [--root DIR]   print the strict modules (dotted names) for scripts/envscan.lean
 
 Strict files (SafePdf/Core/, SafePdf/Spec/, SafePdf/Repair.lean) forbid: partial, unsafe, panic!,
 any `ident!` call (get!, head!, back!, getElem!, ...), `xs[i]!` indexing, and sorry.
 Everything under SafePdf/ and Tests/ forbids sorry.
+Task 13.9 adds source rules for strict files: `extern`, `implemented_by`, `axiom` declarations,
+`native_decide`, `decide +native` and `ofReduceBool`, `skipKernelTC` (also forbidden anywhere
+under SafePdf/ and Tests/).  The strict set also contains SafePdf/Shell/Worker/Protocol.lean
+(pure; the GUI decodes untrusted worker output with it).  The built environment is checked by
+scripts/envscan.lean.
 """
 import os
 import re
@@ -23,8 +29,22 @@ STRICT_RULES = [
      re.compile(r"(?<![\w'.])(?![smf]!)[\w.']*[A-Za-z_][\w']*!(?!=)")),
     ("`[i]!` indexing", re.compile(r"[\]\)]!(?!=)")),
     ("sorry", re.compile(r"\bsorry\b")),
+    ("@[extern]", re.compile(r"\bextern\b")),
+    ("implemented_by", re.compile(r"\bimplemented_by\b")),
+    ("axiom declaration", re.compile(r"(?<![\w.'#])axiom\b")),
+    ("native_decide", re.compile(r"\bnative_decide\b")),
+    ("decide +native", re.compile(r"\bdecide\s*\+\s*native\b")),
+    ("ofReduceBool", re.compile(r"\bofReduceBool\b")),
 ]
-ANY_RULES = [("sorry", re.compile(r"\bsorry\b"))]
+ANY_RULES = [
+    ("sorry", re.compile(r"\bsorry\b")),
+    ("debug.skipKernelTC", re.compile(r"\bskipKernelTC\b")),
+]
+STRICT_RULES.append(("debug.skipKernelTC", re.compile(r"\bskipKernelTC\b")))
+
+# Strict directories and files, relative to the root (shared with scripts/envscan.lean via `modules`).
+STRICT_TARGETS = ("SafePdf/Core", "SafePdf/Spec", "SafePdf/Repair.lean", "SafePdf/Api.lean",
+                  "SafePdf/Quarantine", "SafePdf/Shell/Worker/Protocol.lean")
 
 
 def blank(ch):
@@ -97,12 +117,26 @@ def lean_files(path):
     return found
 
 
-def scan(root):
-    strict_targets = [os.path.join(root, p) for p in ("SafePdf/Core", "SafePdf/Spec", "SafePdf/Repair.lean", "SafePdf/Api.lean", "SafePdf/Quarantine")]
+def strict_files(root):
     strict = set()
-    for t in strict_targets:
+    for p in STRICT_TARGETS:
+        t = os.path.join(root, p)
         if os.path.exists(t):
             strict.update(lean_files(t))
+    return strict
+
+
+def strict_modules(root):
+    """Dotted module names of the strict files under `root`."""
+    mods = []
+    for f in sorted(strict_files(root)):
+        rel = os.path.relpath(f, root)
+        mods.append(rel[:-len(".lean")].replace(os.sep, "."))
+    return mods
+
+
+def scan(root):
+    strict = strict_files(root)
     anyfiles = set()
     for t in ("SafePdf", "Tests"):
         p = os.path.join(root, t)
@@ -146,6 +180,11 @@ def main(argv):
             print("hygiene: %d violation(s)" % len(v), file=sys.stderr)
             return 1
         print("hygiene: source scan OK")
+        return 0
+    if len(argv) >= 2 and argv[1] == "modules":
+        root = argv[argv.index("--root") + 1] if "--root" in argv else "."
+        for m in strict_modules(root):
+            print(m)
         return 0
     if len(argv) >= 2 and argv[1] == "axioms":
         seen, bad = check_axioms(sys.stdin.read())
