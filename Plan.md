@@ -503,9 +503,18 @@ signature-dictionary handling in the decrypt and save paths).
   suites; (4) both shells show the verdicts with the honest statuses, including
   "revocation not checked"; (5) the hygiene and environment scans stay clean.
 
-### Phase 15 — Printing
+### Tier 2 / later
+CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
+optional content groups, tagged-PDF reading order, accessibility export; signatures:
+RFC 3161 timestamps, long-term validation (`/DSS`), revocation (OCSP/CRL) fetched through
+the GUI broker, PAdES levels beyond B.
 
-(Added 2026-11-27 at the human's request; issue #21, from the feature list of #19.)
+#### Printing (deferred)
+
+(Planned 2026-11-27 as Phase 15 at the human's request, issue #21 from the feature list of
+#19; **moved to later work on 2026-11-28 at the human's request** — not scheduled. The design
+below and the ledger tasks 15.1–15.7, now under "Deferred by the human", are kept for when
+it returns.)
 
 **The rule: print the rendered pixels, never the input file.** Handing the document to the
 OS print service would have CUPS's filter chain (Ghostscript/poppler) parse the hostile
@@ -528,17 +537,11 @@ applied to printing — and the UI says so ("printed from SafePDF's rendering at
   ranges, duplex, paper sizes, Save as PDF) comes free.
 - `Toolbar.Tool.print` becomes a real command: File → Print…, Ctrl+P / ⌘P in
   `Menu.keyTable` (its `#guard`s keep the platforms consistent).
-- **M15**: a multi-page document prints on both platforms from the same pixels — the Linux
+- **Exit criterion when scheduled (was M15)**: a multi-page document prints on both platforms from the same pixels — the Linux
   smoke captures a spool that strict-parses and pixel-matches the source rasters in MuPDF,
   and the macOS smoke prints to a PDF destination headlessly with the same checks; the
   input file's bytes never reach the print stack; a long print stays within the published
   ceilings and cancel works mid-job; the status line states the dpi.
-
-### Tier 2 / later
-CCITT fax + JBIG2 (in Lean), JPEG 2000, Type 3 fonts, Separation/DeviceN, blend modes,
-optional content groups, tagged-PDF reading order, accessibility export; signatures:
-RFC 3161 timestamps, long-term validation (`/DSS`), revocation (OCSP/CRL) fetched through
-the GUI broker, PAdES levels beyond B.
 
 ---
 
@@ -649,5 +652,6 @@ safe-pdf/
 3. The external review (12.9) stays deferred by the human.
 4. Phase 14 (signature verification) queues behind Phase 13; its two early solo decisions
    (trust anchors, out-of-scope X.509 features) go to Decisions first.
-5. Phase 15 (printing) queues behind Phase 14; issues #21 (printing), #22 (signatures) and
-   #23 (password-protected PDFs, unscheduled) track #19's feature list.
+5. Printing (issue #21) is deferred to later work (§6, "Tier 2 / later"); issues #22
+   (signatures) and #23 (password-protected PDFs, unscheduled) track the rest of #19's
+   feature list.
